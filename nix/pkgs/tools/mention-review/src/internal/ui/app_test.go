@@ -42,6 +42,12 @@ const (
 	fxViewer      = "a-reviewer"
 	fxMergeMethod = "rebase"
 	fxTitle       = "Refresh the stale context before running"
+
+	// The fixture snapshot's mergeability. ⚠ It is the RESOLVED value, so a test
+	// that wants the recompute window must set UNKNOWN explicitly rather than
+	// inherit it — and the merge-gate assertions use `CONFLICTING`, a third
+	// value this fixture never produces.
+	fxMergeable = "MERGEABLE"
 )
 
 func fixturePR() *ghapi.Snapshot {
@@ -61,7 +67,7 @@ func fixturePR() *ghapi.Snapshot {
 		Additions:        312,
 		Deletions:        40,
 		ChangedFiles:     2,
-		Mergeable:        "MERGEABLE",
+		Mergeable:        fxMergeable,
 		MergeStateStatus: "BLOCKED",
 		ReviewDecision:   "CHANGES_REQUESTED",
 		Commits: []ghapi.Commit{
@@ -122,11 +128,25 @@ func ready(t *testing.T) App {
 
 // --- the fetch sequence ------------------------------------------------------
 
-// 🔴 EXACTLY ONE GRAPHQL READ, AND THE DIFF IS THE SECOND — because GraphQL
-// cannot return patch text. The assertion is on the VALUE of the intent, not
-// on its count, so a mutant that emitted the right number of the wrong thing
-// does not survive.
-func TestLoadingAPullRequestAsksForTheDiffAndNothingElse(t *testing.T) {
+// readPair is the two reads ONE open must emit, spelled LITERALLY.
+//
+// 🔴 IT IS NOT `a.ReadIntents()`. An expectation derived from the function under
+// test is satisfied by whatever that function returns — including an empty
+// slice, which would make every assertion below vacuous while reading as
+// coverage. These are the argv values the fixture was built from, written out.
+func readPair() []Intent {
+	return []Intent{
+		FetchPR{Owner: fxOwner, Name: fxName, Num: fxNum},
+		FetchDiff{Owner: fxOwner, Name: fxName, Num: fxNum},
+	}
+}
+
+// 🔴 `PRLoaded` NO LONGER CHASES THE DIFF, BECAUSE THE DIFF WAS ALREADY ASKED
+// FOR. This is the assertion that goes red if the serialisation grows back: a
+// `FetchDiff` emitted here would be a second, duplicate REST round trip, and the
+// sequential cold open — t_graphql THEN t_rest — is precisely what it used to
+// buy.
+func TestAPanelReplyAsksForNothingFurther(t *testing.T) {
 	a := New(fxOwner, fxName, fxNum)
 	if a.Load != LoadLoading {
 		t.Fatalf("a fresh App is in state %v", a.Load)
@@ -135,9 +155,16 @@ func TestLoadingAPullRequestAsksForTheDiffAndNothingElse(t *testing.T) {
 	if next.Load != LoadReady {
 		t.Errorf("Load = %v, want LoadReady", next.Load)
 	}
-	want := []Intent{FetchDiff{Owner: fxOwner, Name: fxName, Num: fxNum}}
-	if !intentsEqual(intents, want) {
-		t.Errorf("intents = %v, want %v", intents, want)
+	if len(intents) != 0 {
+		t.Errorf("PRLoaded emitted %v — the diff read has been in flight since "+
+			"Init, so anything here is a duplicate round trip", intents)
+	}
+	// 🔴 POSITIVE CONTROL, IN THE SAME TEST. The zero above is a claim about
+	// THIS branch; without a case that produces reads, it is equally satisfied
+	// by an App that never reads anything. The pair is asserted BY VALUE, so a
+	// mutant emitting the right count of the wrong thing does not survive.
+	if got := New(fxOwner, fxName, fxNum).ReadIntents(); !intentsEqual(got, readPair()) {
+		t.Fatalf("ReadIntents() = %v, want %v", got, readPair())
 	}
 }
 
@@ -160,11 +187,18 @@ func TestLoadingAnIssueEmitsZeroIntents(t *testing.T) {
 	if next.Load != LoadReady {
 		t.Errorf("Load = %v, want LoadReady — an issue is a successful load", next.Load)
 	}
-	// The positive control, in the same test.
-	_, prIntents := New(fxOwner, fxName, fxNum).Step(PRLoaded{Snap: fixturePR()})
-	if len(prIntents) == 0 {
-		t.Fatal("the PULL REQUEST path also emitted nothing — the zero above " +
-			"is a claim about Step being wired to nothing, not about issues")
+	// The positive control, in the same test, and it drives the SAME `Step`.
+	//
+	// ⚠ IT IS NO LONGER THE PULL-REQUEST ARM OF `PRLoaded`. That arm now emits
+	// nothing either — the diff read moved to `Init` — so it stopped being a
+	// control and would have made this test vacuous in a way nothing announced.
+	// The retry path is a message-driven read that is still non-empty.
+	failed, _ := New(fxOwner, fxName, fxNum).
+		Step(PRLoaded{Err: &ghapi.APIError{State: ghapi.AuthNotFound}})
+	_, retryIntents := failed.Step(keyPress("r"))
+	if len(retryIntents) == 0 {
+		t.Fatal("the RETRY path also emitted nothing — the zero above is a claim " +
+			"about Step being wired to nothing, not about issues")
 	}
 }
 
@@ -259,13 +293,24 @@ func TestOpenBrowserWorksOnAFailureCard(t *testing.T) {
 	}
 }
 
-// `r` re-fetches ONLY from a failed state, and it is inert otherwise —
-// re-fetching under the operator would move the cursor out from under them.
-func TestRetryOnlyFiresFromAFailedState(t *testing.T) {
+// `r` on a FAILED PAGE re-reads both legs, and it is inert on a screen with
+// nothing wrong with it — re-fetching under the operator would move the cursor
+// out from under them.
+//
+// 🔴 THIS IS NO LONGER THE WHOLE CONTRACT FOR `r`, AND THE NAME USED TO SAY IT
+// WAS. It was `TestRetryOnlyFiresFromAFailedState`, which is the first thing
+// anyone greps when asking "when does `r` fire?" — and since the diff-retry
+// landed, "only from a failed state" is false. The OTHER firing condition is
+// `diffIsRetryable()` (a healthy page whose diff failed), covered by
+// `TestRetryFiresOnADiffFailureOverAHealthyPage` in `coldopen_test.go`. A test
+// name that asserts a contract the payload has broken is worse than no name.
+func TestRetryOnAFailedPageRefetchesBothLegs(t *testing.T) {
 	a := New(fxOwner, fxName, fxNum)
 	a, _ = a.Step(PRLoaded{Err: &ghapi.APIError{State: ghapi.AuthRateLimited}})
 	next, intents := a.Step(keyPress("r"))
-	want := []Intent{FetchPR{Owner: fxOwner, Name: fxName, Num: fxNum}}
+	// 🔴 BOTH READS. A retry that re-read the pull request alone would leave a
+	// recovered screen with a permanently empty Diff panel.
+	want := readPair()
 	if !intentsEqual(intents, want) {
 		t.Fatalf("intents = %v, want %v", intents, want)
 	}
@@ -355,20 +400,29 @@ func TestSelectingAFileMovesTheDiffCursorIntoIt(t *testing.T) {
 	if len(a.Snap.Files) < 2 {
 		t.Fatal("fixture needs at least two files for this to mean anything")
 	}
-	next, _ := a.Step(keyPress("j"))
-	if next.fileCur != 1 {
-		t.Fatalf("fileCur = %d, want 1", next.fileCur)
+	// ⚠ TWO PRESSES, BECAUSE ROW 0 IS THE `pkg/` DIRECTORY. The fixture's two
+	// files share one directory, so the tree is
+	// [0 pkg/, 1 handler.go, 2 widget.go].
+	next, _ := pressAll(a, "j", "j")
+	if next.fileRowCur != 2 {
+		t.Fatalf("fileRowCur = %d, want 2", next.fileRowCur)
+	}
+	if got := next.SelectedFilePath(); got != "pkg/widget.go" {
+		t.Fatalf("selected %q, want pkg/widget.go", got)
 	}
 	wantStart := next.Diff.FileStart(1)
 	if next.diffCur != wantStart {
-		t.Errorf("diffCur = %d, want %d (the start of file 1)", next.diffCur, wantStart)
+		t.Errorf("diffCur = %d, want %d (the start of pkg/widget.go)", next.diffCur, wantStart)
 	}
-	// And the reverse link: moving the diff cursor back into file 0 moves the
-	// Files highlight with it.
+	// And the reverse link: moving the diff cursor back into the first file
+	// moves the Files highlight with it.
 	next.Focus = PanelDiff
 	back, _ := next.Step(keyPress("{"))
-	if back.fileCur != 0 {
-		t.Errorf("after `{`, fileCur = %d, want 0", back.fileCur)
+	if got := back.SelectedFilePath(); got != "pkg/handler.go" {
+		t.Errorf("after `{`, the Files panel has %q selected, want pkg/handler.go", got)
+	}
+	if back.fileRowCur != 1 {
+		t.Errorf("after `{`, fileRowCur = %d, want 1", back.fileRowCur)
 	}
 }
 

@@ -20,34 +20,37 @@ notifications and repo browse are dropped.
   this; Phase 4 (deleting `nvim-octo`) is gated on it by the proposal's own rollback section.
 
 ## State now
-- 🔴 **THE SPEC IS `claudedocs/proposal-pr-review-tui.md`** (#1696, `02b54fe4`), merged.
-  **Authority for Phases 3–4 — read it before continuing.**
-- **Lineage, all merged and verified by content on `origin/main`:** `#1666` `0325668c` (closed
-  the octo legend arc) · `#1686` `c05e4f2d` (octo's OWN diff legend gained vim's `]c`/`[c` +
-  fold motions — still the surface a click opens) · `#1696` `02b54fe4` (the proposal) ·
-  **`#1698` `7b827d13` (Phase 0 + Phase 1 + the Go gate tier)** · `#1723` `e49bbace` (Phase 2).
-- ✅ **PHASE 2 IS MERGED AND DEPLOYED.** `devrc#1723` → squash **`e49bbace`**. Five write verbs
-  (comment · approve · request changes · submit review · merge) behind the §3.7 confirmation
-  ledger. The write-intent ledger #1698 deleted is **reinstated and no longer vacuous**.
-  All four CI legs green at merge.
-- ✅ **THE `gotests` CI LEG IS LIVE — rank 1 of the previous revision is CLOSED by its own
-  mechanical condition.** `ZacxDev/homelab-infra#827` → `a05f355da` on `trunk` (GitOps, so the
-  merge WAS the deploy). Measured on the next devrc PR: `tekton/devrc-gotests pass — TOTAL:
-  pass=119`, and on #1723 itself **pass=231**. The 119 Go tests that had zero PR-time coverage
-  now gate PRs.
-- ✅ **DEPLOYED TO BOTH HOSTS.** `ship.sh` rc=0, 2 hosts compared, both at `e49bbace`,
-  0 dangling / 0 stale. `mention-review` **0.1.0 → 0.2.0** on PATH on workbench AND laptop;
-  argv contract verified live (`64` no-args / `65` bad repo / `66` bad number, read without a
-  pipe). Phase-2 strings confirmed present in the real binary on both.
-- 🔴 **THE CLICK PATH IS STILL `nvim-octo`, DELIBERATELY.** `REVIEW_EXE` unchanged; the
-  Alacritty wrapper still resolves `…-nvim-octo`. This is the first code that can approve and
-  merge on the operator's behalf and it has **never been seen on a screen**, so it is run by
-  hand (`mention-review <owner/repo> <N>`) rather than forced into the daily click. Rollback
-  stays one line either way.
-- **§12.4 IS ANSWERED, not assumed:** **PR-level comments only, no inline diff-line
-  positioning.** Operator decision 2026-09-15. Nothing in the code computes a diff position.
-- **The `pkill -x nvim` incident cost nothing** — operator confirmed no editor was lost. The
-  prohibition stays in every dispatch brief regardless.
+- 🔴 **THE ARC'S CLOSING CONDITION IS MET AND THE ARC IS CLOSED.** The operator used
+  `mention-review` for a real review on a real screen and reported **"done, working"**
+  (2026-09-18). That is the `judgement` line this doc froze at round 1. Everything below is
+  either follow-through on it or a NEW arc.
+- **Three PRs merged today**, all verified by CONTENT on `origin/main` with a positive control
+  (never by ancestry — a squash is never an ancestor):
+  - `#1772` → **`2b131bf2`** — Phase 4, `nvim-octo` retired. 4,897 lines deleted across 3 package
+    files + 2 test suites; `flake.nix`, `run-tests.sh`, `launcher_scan.py`,
+    `test_no_real_launchers.py`, `test_runtime_shebangs.py` edited. Closure proof: 7,441-entry
+    home-manager closure, `nvim-octo`=0, `mention-review`=2 (control fires).
+  - `#1773` → **`97c20d06`** — Phase 3, cold open. `1,212 ms → 735 ms` to a readable diff.
+  - `#1775` → **`66e51d90`** — picker ranking. top-1 `62.6% → 73.0%`, top-3 `→ 96.5%`.
+- 🔴 **MERGED ≠ DEPLOYED, AND THE TWO HALVES DIVERGE HERE.** MEASURED after the merges: the
+  live binary is still `/nix/store/28yc4a0np6d5qf5p242mxvy999alvsk7-mention-review-0.3.0`, and
+  `ReadIntents` greps **0** in it against a positive control of 1 — so **no host has the 735 ms
+  version**. The picker half IS live on the workbench, because `mention-open.py` is reached
+  through the Alacritty wrapper's `mkOutOfStoreSymlink` onto the working tree and went live on
+  the pull. **`scripts/ship.sh` has not run.** See rank 1.
+- **CARRIED FORWARD — durable decisions this replace would otherwise have dropped:**
+  - **§12.4 IS ANSWERED, not assumed:** PR-level comments only, **no inline diff-line
+    positioning**. Operator decision 2026-09-15. Nothing in the code computes a diff position.
+  - ✅ **THE 422 ARC IS CLOSED** (#1761 → `1ff1bd6e`). The operator's `m` on devrc#1760 showed
+    only "unprocessable entity"; root cause was in the RENDERER — `apiMessage` read GitHub's
+    top-level `message` and discarded `errors[]`, which is where every validation failure puts
+    its reason. The shipped renderer surfaces `errors[]`, so the next occurrence names its own
+    reason. The diagnosis block for it is preserved under Open investigations.
+- **The `forcing: none` ratchet:** this doc's previous list carried 2; this one carries 2.
+- **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5** (nothing resolved).
+  Its positive control confirms the board is reachable and the token accepted, but it says
+  explicitly that a wrong session id also answers 200 with an empty array, so this is NOT a
+  clean bill of health: which task, if any, this session belongs to is UNKNOWN.
 
 ## Open investigations — live diagnosis state
 
@@ -121,34 +124,137 @@ notifications and repo browse are dropped.
 - **Next probe:** open a throwaway PR in a scratch repo and drive `c` (comment) then `m`
   (merge) against it. **Operator-only** — an agent must not run a live write verb.
 
+### RESOLVED — `main` was RED for hours; a skill PRUNE cut text that two-way ledgers pin
+- as-of: 2026-09-17
+- **Retracted as live.** Fixed by `#1756` → `61faa675`, shipped to both hosts. History below.
+- **Symptom + exact repro:** `nix build .#checks.x86_64-linux.pytests` → 17 failures; a dev-host
+  run of the three handoff suites → 13. Every PR's `pytests` leg red regardless of its diff.
+- **Observed (with values):** `d2844af6` (#1750) pruned `claude/skills/handoff/SKILL.md`
+  27,419 → 19,421 B and removed **all 8 refusal markers** across rules (j) and (k) —
+  `[no via: field]`, `[no forcing: field]`, `[unknown kind`, `[unparsed`, `[fenced]` — which
+  `scripts/lib/handoff_doc.py` still prints. 17 pinned sentences total. Assertion text:
+  *"the module prints '[no via: field]' for rule (k) and claude/skills/handoff/SKILL.md never
+  mentions it — an executor hits an undocumented marker at the moment it is about to push."*
+  via: measurement
+- **Ruled out:** that PR #1748 (the Files tree) caused it — the sandbox tier reproduced all 17
+  on a tree built BEFORE that merge, and the PR touches zero `.md` and nothing outside
+  `internal/ui`. via: measurement
+- **Ruled out:** that it was a TWO-TIER divergence — **this was MY first diagnosis and it was
+  WRONG.** I tracked the one test CI NAMED (`test_every_red_paragraph_is_a_ledger_rule…`),
+  which genuinely passes on the dev host; the other 16 fail in BOTH tiers. A CI summary names
+  ONE failure, never the failure set. via: measurement
+- **Ruled out:** that restoring the text would breach the byte ceiling and force an eviction —
+  I presented that as a fork needing an operator decision BEFORE measuring it. Budget is
+  `MAX_BYTES 21,200 − MIN_HEADROOM 900 = 20,300`; the file was at 19,421, so there were **879
+  bytes** free. There was no fork. via: measurement
+- **Next probe:** none — closed. ⚠ Residual: the fix lands at **20,088 B, 212 bytes of
+  headroom**. The squeeze that caused this is paid down, not resolved.
+
+### 🔴 The 422's actual cause was never determined — the response body is unrecoverable
+- as-of: 2026-09-18
+- **Symptom + exact repro:** operator pressed `m` on devrc#1760 from the laptop and the screen
+  showed only "unprocessable entity". Not reproducible now — the PR is merged.
+- **Observed (with values):** `~/.config/mention-open/picks.jsonl` on the laptop records two
+  OPENS of `innovation-upstream/devrc#1760`, at `2026-09-18T01:56:05Z` and `01:56:50Z`. PR #1758
+  merged at `01:56:30Z` (moving `main`); #1760 merged at `01:58:42Z`. So both opens bracket a
+  base-branch move by 25 s before / 20 s after.
+- **Ruled out:** a read failure — the GraphQL panel query and `GET /pulls/N/files?per_page=100`
+  both succeeded against devrc at the time. via: measurement
+- **Ruled out:** a merge-method problem — devrc enables squash, merge AND rebase
+  (`gh api /repos/.../devrc`), and the laptop has no `~/.config/mention-review/config.json`, so
+  the declared default `squash` was used. via: measurement
+- **Ruled out:** that the timeline PROVES base-recompute — it does not. `picks.jsonl` is a
+  repo-resolution pick log (`scripts/mention-open.py:138`, one line per repo picked); it records
+  no keypress and no write outcome, so two entries prove two OPENS, not two merge presses.
+  via: code
+- 🔴 **NOT established: which verb produced the text.** A failed merge renders as
+  `FAILED — MergePR: ERROR — <detail>` in the NOTICE bar (`internal/ui/write.go:311-313`), not as
+  a card; the GraphQL `Fetch` path is the one that draws a card. The operator's report names the
+  merge, and that is the only evidence for the verb. via: code
+- **Leading hypothesis:** a merge dispatched into GitHub's post-base-move mergeability recompute.
+  Consistent with the timeline; **not** measured, because the 422 body was never captured.
+- **Next probe:** none available retrospectively — the body is gone. The shipped renderer now
+  surfaces `errors[]`, so **the next occurrence names its own reason**. If it recurs, capture the
+  card verbatim before anything else; that single string settles this block.
+
+### The eight re-anchored mutation rows APPLY but are not known to KILL
+- as-of: 2026-09-18
+- **Symptom + exact repro:** n/a — a coverage gap in merged code, not a defect. Changing
+  `PICKER_SH` and the two `emit_click` call sites in `scripts/mention-open.py` moved the text six
+  (later eight) mutation anchors were anchored on, taking each to **0×**.
+- **Observed (with values):** an anchor at 0× scores as **SURVIVED while executing nothing**, so
+  a fully green battery reported coverage it did not have. `test_every_mutation_anchor_occurs_
+  exactly_once_in_its_target` passes at `66e51d90`, which establishes the anchors **apply** to
+  their targets. Rows: K48/49/50/54/66/67/82/92. via: measurement
+- **Ruled out:** that the CI red on `7d83f5fa` was the ~42% noise — the failing test was
+  `test_every_mutation_anchor_occurs_exactly_once_in_its_target[mutation_battery_mentions.py]`
+  and the diff reached it directly. via: measurement
+- **Ruled out:** that narrow test selection would have caught it — the two-file scoped runs
+  could not see it; only the full suite did. via: measurement
+- **Leading hypothesis:** none needed. The rows are re-anchored; whether each still kills is
+  simply unrun. **"An anchor that applies" and "a mutant that kills" are different claims and
+  only the first is established.** Recorded on the PR before merge rather than left implied.
+- **Next probe:** run the battery with `--only K48,K49,K50,K54,K66,K67,K82,K92` (the filter takes
+  a comma list; bare positional ids are **silently ignored** and start a ~90-row sweep). Closes
+  when each row reports KILLED with its own error, or is honestly recorded SKIPPED/`<did-not-run>`.
+
 ## Next steps (ranked)
-1. 🔴 **USE `mention-review` FOR A REAL REVIEW.** `mention-review <owner/repo> <N>` — it is on
-   PATH on both hosts at 0.2.0. This is the arc's closing condition and nothing headless can
-   substitute. Press `?` for the legend, read a diff, and form a view on whether it beats octo
-   at commits/files/hunks. Repo: devrc.
-   forcing: user — the closing condition names the operator reading real evidence.
-2. **Phase 3 — the speed work**: local-clone probe, PR-ref fetch **RACING** the API, bounded
-   on-disk cache (0600), per-commit diff. 🔴 A RACE, never a preference — see Gotchas. Repo: devrc.
+1. 🔴 **SHIP IT — `scripts/ship.sh`.** Three PRs are on `main` and the 735 ms binary is on
+   neither host; the operator is still clicking into `0.3.0`. Read **every per-host line**, not
+   the final verdict — one skip hides among greens. Then re-verify by CONTENT, not `--version`
+   (it cannot distinguish these builds; see Defects): follow the wrapper to
+   `bin/.mention-review-wrapped` and grep for `ReadIntents` with `usage: mention-review` as the
+   positive control. Repo: devrc.
    forcing: none
-3. **Phase 4 — retirement**, its own PR: delete `nix/pkgs/tools/nvim-octo/` (3 files),
-   `test_nvim_octo.py` (67 tests), `test_nvim_octo_diff_motions.py` (8), the `nvimOctoOverlay`,
-   and `luajit` from `REQUIRED_TOOLS`. 🔴 **GATED ON RANK 1** — ship only after the operator has
-   used the TUI for a real review and said so. Repo: devrc.
+2. **Decide symptoms 1 and 3 of the picker — they are YOURS, not an agent's.** The proposal is
+   `claudedocs/proposal-mention-picker-visibility.md`. **(1)** fzf re-sorts by its own score the
+   moment you type, so the ranking is invisible to anyone who types rather than scrolls — the
+   options are making the class/rank visible in the row text, or fzf flags, each with a
+   trade-off. **(3)** the ordered block starts at row 2–3 because clawgate/pane-guess rows are
+   pinned above it; the original rationale is quoted in the doc. Nothing was implemented for
+   either, deliberately. Repo: devrc.
+   forcing: user — both are look-and-feel calls on the operator's own daily tool.
+3. **Verify the eight mutation rows KILL** (see Open investigations for the exact filter syntax
+   and what "apply" vs "kill" means here). Repo: devrc.
    forcing: none
 
 ## Defects (batched)
-- Two guards still claim more than they check: `scripts/tests/test_mention_review.py:122`
-  (claims it pins the tier set; does not check `main-green-check.sh`) and `:361` (claims a slug
-  check; there is none). The third — `internal/ui/words.go:179-184` — was CLOSED by Phase 2.
-- `keys_test.go`'s structural half compares `Dispatch()` against `FullHelp()`/`ShortHelp()`,
-  both built from the SAME literal — it asserts the keymap agrees with itself.
-- Round 0 on homelab#827 left three deletion candidates, all PRE-EXISTING, none blocking:
-  D1 the 13-site per-leg `*-context` param chain (consolidating it would make a fifth leg
-  nearly free AND structurally kill the status-clobber hazard); D2/D3 per-leg duplication in
-  `test_devrc_notify_empty_context_guard.py` and `test_nix_cache_persistence.py`.
-- The pipeline's `enforce_admins: true` belief survives at ~8 PRE-EXISTING sites in
-  `devrc-ci-pipeline.yaml` and `ci-priority-classes.yaml`. The two lines #827 added were
-  corrected; the rest were deliberately left (widening an untestable prod-pipeline diff).
+- 🔴 **`mention-review --version` CANNOT distinguish builds.** `version.go` stayed `0.3.0`
+  across #1761 AND #1773 while the binary changed completely. Nix rebuilds on source hash so the
+  STORE PATH moves, but the version string answers nothing — verify by content with a positive
+  control (recipe in How to verify).
+- 🔴 **The eight re-anchored mutation rows are unverified for KILL** — see Open investigations.
+  Merged deliberately with that stated on the PR; the rows were in this state *before* the PR
+  too, so nothing regressed, but nothing is proven either.
+- 🔴 **181+ agent worktrees are registered in this clone**, oldest 2026-08-13, several added
+  today. A stale worktree holds its branch repo-globally. `scripts/worktree-prune` exists; not
+  run — removing that many at once is high blast radius and some belong to other sessions.
+- 🔴 **`scripts/lib/handoff_doc.py`'s pins have only 212 B of headroom** in
+  `claude/skills/handoff/SKILL.md` (20,088 of a 20,300 budget). The next addition needs an
+  eviction in the SAME commit; the durable fix is moving narrative into
+  `claude/skills/handoff/reference/*.md`, which costs 0 until loaded.
+- 🔴 **THIS REPO HAS NO `LICENSE` FILE AND THE DERIVATION CLAIMS MIT.**
+  `nix/pkgs/tools/mention-review/default.nix:146` declares `license = licenses.mit;` with nothing
+  in the tree backing it, and the repo is PUBLIC — which defaults to all-rights-reserved. One of
+  those two statements is false today. Found while evaluating an open-source release; it is a
+  defect regardless of whether that ever happens.
+- **Four scanner limits shipped KNOWN**, documented in `detailrouting_test.go`, reported by an
+  audit round and deliberately not fixed: `<ident>.detail(…)` classified as routed rather than
+  `c.detail`; the `len(srcs) < 3` floor against an actual 5; `prFragmentSelections`' `(`-skip
+  taking the first `)`; the transport test's control closing a loopback server then dialling it.
+- `movement_test.go`'s `paging_UP_onto_src` cannot catch a dir-row-moves-the-diff mutant —
+  `src`'s first DIFF-ORDER descendant is the file the cursor was already in. 2 of 3 subtests
+  catch it. Pre-existing.
+- Two guards still claim more than they check: `scripts/tests/test_mention_review.py:122` (claims
+  it pins the tier set; does not check `main-green-check.sh`) and `:361` (claims a slug check;
+  there is none). ⚠ There were THREE — `internal/ui/words.go:179-184` was CLOSED by Phase 2.
+- `internal/ghapi/ghapi_test.go` and `internal/argv/argv_test.go` are not `gofmt`-clean — one
+  hunk each. **CONFIRMED PRE-EXISTING on `main` at `2b131bf2`** by two independent audit rounds;
+  left alone rather than mixing churn into a diff.
+- `coldopen_test.go`'s `TestTabCyclesEveryPanelDuringTheSkeleton` seeds `visited` with the
+  starting focus, so `seen[PanelDiff]` proves nothing there. Mutation-tested: its unseeded
+  sibling catches the case with a precise message, so fixing it changes nothing anyone does.
+- Round 0 on homelab#827 left three deletion candidates, all PRE-EXISTING, none blocking.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **"Local git first (~0ms)" is WRONG on the FIRST read, and that framing came from me.**
@@ -259,30 +365,312 @@ notifications and repo browse are dropped.
   requires the acting identity on screen, so the compose bar carries `as <login>` and that
   string is pinned.
 
+- ✅ **MEASURED 2026-09-16 — TIME-TO-FIRST-PAINT IS ~1.0s, AND THAT VINDICATES THE ARC'S
+  CENTRAL FINDING.** Three runs against the 8-file PR #1726: **2.0s / 1.0s / 1.0s** (100ms poll
+  granularity, so read as ~0.9–2.0s). Against this doc's own earlier measurement of a REST diff
+  at **0.66–0.90s**, first paint is essentially **one API round-trip** — the program adds
+  almost nothing on top of the network. 🔴 **Consequence for Phase 3: the FIRST read is already
+  at the floor and cannot be meaningfully improved.** The race/cache buys the 2nd..Nth read.
+- 🔴 **I MANUFACTURED A 32.5s FALSE MEASUREMENT AND ALMOST REPORTED IT.** A `tmux send-keys 'q'`
+  sent WITHOUT `Enter` left a stray `q` on the shell's command line; the next `send-keys` then
+  ran `qmention-review …` → command not found → my poll loop ran to its 300×0.1s cap and I
+  recorded **32,489 / 32,633 / 32,452 ms** as "time-to-first-paint". **The tell was that all
+  three were identical AND equal to the loop's own ceiling** — a measurement that reproduces
+  perfectly because it is measuring the instrument. **Fix that generalises: make the poll
+  loop carry a `matched=0/1` flag and print it**, so "found it" and "gave up" stop sharing an
+  output. A timing harness with no match flag reports a timeout as a number.
+- 🔴 **`tmux kill-session`/`kill-server` on the DEFAULT socket is blocked by `bash-guard.py`,
+  and correctly** — it takes the operator's live panes and every Claude conversation in them.
+  To drive a TUI headlessly, make your OWN server: `tmux -L <probe> new-session -d …` then
+  `tmux -L <probe> kill-server`. `kill-pane`/`kill-window` are allowed on the shared server;
+  `kill-session` has no permitted spelling there.
+- **Driving this TUI from an agent is practical and worth repeating.** Detached tmux on a
+  private socket + `capture-pane -p` reads the rendered frame; `send-keys` drives it; nothing
+  touches the operator's screen. 🔴 **Read the PANE TITLE (`> 4 Diff <path>`) for state, not a
+  fixed pane line** — a line-number probe conflates the sticky file header with viewport
+  content and will invent findings. I flagged a title/header "disagreement" that was NOT a bug:
+  on a short file the viewport does not need to scroll, so line 2 is still the top of the
+  document while the title correctly names the current file.
+- **What the TUI does better than octo, observed rather than designed:** (a) `?` expands the
+  FOOTER into a 5-column key table instead of opening a modal — the legend never covers the
+  diff, which is the exact complaint the octo legend arc was about; (b) the pane title tracks
+  the current file through `}`/`{`, so you always know where you are without the file panel;
+  (c) `STATE`/`REVIEW`/`MERGE`/`CHECKS`/`THREAD` answer the review questions in one block;
+  (d) `VIEWER as ZacxDev` is on screen AND in the footer — the two-account `hosts.yml` hazard
+  is visibly mitigated, not merely documented.
+- 🔴 **AN AGENT MUST NOT PRESS A WRITE KEY, AND THAT LIMIT IS LOAD-BEARING.** This session drove
+  the TUI read-only — `?`/`j`/`k`/`g`/`G`/`]`/`[`/`}`/`q` only; `c`/`a`/`R`/`v`/`m` never sent.
+  The five write verbs act on real GitHub as the operator.
+- ⚠ **`gh pr view --json mergeable` returned `UNKNOWN` immediately before merging #1728**,
+  because `main` had just moved (#1726 landed). It is a RECOMPUTE, not a conflict: it resolved
+  to `MERGEABLE`/`CLEAN` on the next poll. **Poll it — never merge on a stale `CLEAN`, and
+  never read `UNKNOWN` as a blocker.**
+- ⚠ **#1628 carries a RED `tekton/devrc-pytests` that its own diff cannot reach** — failing
+  test `test_concurrent_sessions_all_emit_their_control_key` (2 failed of 23,096 collected)
+  against a gzip-header fix, on a branch **108 commits behind `main`**. This is the FIFTH
+  instance of the inherited-red pattern already recorded in this doc. The pattern is now so
+  well attested that the cheap move is mechanical: **read the failing test's name and the
+  branch's distance from `main` BEFORE reading the diff.**
+
+- 🔴 **A GUARD EXPRESSED THROUGH ITS OWN CONSTANTS IS INVARIANT UNDER SWAPPING THEM.**
+  `TestTheChevronsAreOnScreenAndSurviveColourRemoval` asserted via `chevronExpanded`/
+  `chevronCollapsed`, so **I swapped their VALUES and the whole package stayed GREEN** — every
+  expanded directory rendering `▸` and every collapsed one `▾`, the open/closed state backwards,
+  suite passing. `rowShape` spells `"dir-open"`/`"dir-closed"`, so the shape tests were blind
+  too. Fix: assert the literal bytes once. **Ask of any text guard: can it pass while the hazard
+  exists in a different spelling?**
+- 🔴 **RESTORING PRUNED PROSE: PUNCTUATION AND PLACEMENT ARE LOAD-BEARING.** `TestSkillAndModule
+  Agree` pins the WHOLE NORMALISED CLAUSE. My restore added a period after `it**` and sat one
+  line above another paragraph with no blank line, so the normaliser JOINED them — it cleared 5
+  failures and INTRODUCED 2. Derive the expected text from the test/module constant
+  (`_FENCED_LEGEND`, `_NO_PROMOTE`), never from memory or composed prose.
+- 🔴 **`nix build … | tail` EXITED 0 WITH NO VERDICT AT ALL**, beside an
+  `error (ignored): SQLite database … is busy`. The build had not reported. Read the runner's
+  own `RESULT:` out of `nix log <drv>` with a positive control (count the `passed` lines) —
+  never the piped status. Both sandbox runs this session had to be read that way.
+- 🔴 **MEASURE BEFORE PRESENTING A FORK.** I offered the operator a choice between "restore the
+  text" and "relax the ledger" on the belief that the byte ceiling made them exclusive. It
+  didn't — 879 bytes were free. A fork presented without measuring costs a decision the operator
+  should never have been asked for.
+- 🔴 **`ship.sh` rc=7 SKIPPED THE WORKBENCH while printing healthy per-host lines.** A working
+  copy of `claude/skills/audit-pr/SKILL.md` blocked the fast-forward. **Byte-identical to a
+  NEWER commit (`origin/main`) proves PRE-APPLIED content, not WIP** — the mirror of RULES.md's
+  stale-orphan rule, and equally safe to discard. Hash before deciding; copy aside anyway.
+  **Read every per-host line, never the final verdict.**
+- 🔴 **FLIPPING `REVIEW_EXE` BROKE 22 TESTS THAT HAD NOTHING TO DO WITH THE TUI.**
+  `tui_available()` is `shutil.which(REVIEW_EXE)`, so every test asserting a click reaches the
+  BROWSER was really asserting *"the review TUI is not installed here"* — an invariant the file's
+  comment CLAIMED and nothing enforced. True by accident while octo was on no PATH; false the
+  moment `mention-review` entered `home.packages`. ⚠ **The two tiers would have DISAGREED** —
+  the dev host has the binary, the `nix build` sandbox does not — so the same commit was RED
+  locally and GREEN in CI. Now pinned by an autouse fixture.
+- 🔴 **THE FIX ROUND'S OWN PROSE IS THE LIKELIEST NEXT FINDING, AND IT HAPPENED TWICE.** A
+  commit whose whole subject was "a comment must not assert what it has not established" asserted
+  `moveIn` is called "in `stepKey`" — MEASURED, `stepKey` ends at line 312 and the call is at 508
+  inside `move()`. It came from MY brief wording it loosely; the fixer checked, found it
+  imprecise, and substituted a DIFFERENT wrong name. **If you cannot state a true reason, write
+  that it has none.**
+- ✅ **MEASURED — time-to-first-paint ~1.0s** (3 runs, 8-file PR, 100ms poll). Against this doc's
+  own 0.66–0.90s REST-diff figure that is essentially ONE round-trip: the program adds almost
+  nothing. Phase 3 cannot improve the first read.
+- 🔴 **I MANUFACTURED A 32.5s FALSE MEASUREMENT.** A `tmux send-keys 'q'` with no `Enter` left a
+  stray `q` on the command line, so the next send ran `qmention-review …`; my poll loop ran to
+  its 300×0.1s cap and I recorded the cap as the number. **The tell was three identical readings
+  equal to the ceiling.** Any bounded wait returns a plausible duration on failure unless success
+  is recorded separately — carry a `matched=0/1` flag and PRINT it.
+- **Driving the TUI from an agent works and is repeatable:** detached tmux on a PRIVATE socket
+  (`tmux -L <probe>`), `capture-pane -p` to read frames, `send-keys` to drive. Read the PANE
+  TITLE (`> 4 Diff <path>`) for state, never a fixed line number — a line probe conflates the
+  sticky file header with viewport content and invents findings. `kill-session`/`kill-server` on
+  the DEFAULT socket is blocked by a hook, correctly.
+- 🔴 **AN AGENT MUST NOT PRESS A WRITE KEY** (`c`/`a`/`R`/`v`/`m`) — they act on real GitHub as
+  the operator. Every dispatch this session carried that, and none was pressed.
+
+- 🔴 **THE #1761 LADDER RAN FIVE ROUNDS (0–4) AND EVERY FINDING WAS CREATED OR MISSED BY THE
+  ROUND BEFORE IT.** Round 0 questioned the requirement and killed a guard that was structurally
+  unable to fire; round 1 found a token leak on a write path round 0's fix had just created;
+  round 2 found a mutant surviving a green suite; round 3 found the same class in an ALIAS shape
+  plus a fifth unbounded path; round 4 found two silent doors in the scanner round 3 built.
+  **None would have been found by reading the diff.** This is the documented shape, not a sign
+  anything went wrong — and it is why the stop condition is a clean round, never a round count.
+- 🔴 **THE LADDER WAS STOPPED ON THE ATTRIBUTION NUMBER, NOT A CLEAN ROUND — say so.** Round 4's
+  fixes changed **0 executable payload lines against 229 test lines**; round 3's changed **1
+  against 635**. The trend across the ladder was `+275 → +150 → +52 → 0` payload. Round 4's
+  findings were defects in the instrument round 3 had built. That is the `#498` shape the
+  attribution gate exists to catch, and the operator chose to fix-and-merge rather than run a
+  round 5 that would have audited test infrastructure for test infrastructure.
+- 🔴 **A GUARD BUILT FROM ITS OWN CONSTANTS SURVIVES A MUTANT THAT CHANGES THEM.** `maxDetailRunes`
+  400→4000 left the suite GREEN because the assertion read `len(runes) != maxDetailRunes` — phrased
+  in terms of the very constant the mutant moved. Fixed with an absolute ceiling (`cardCeiling =
+  600`) not made of that constant. **Ask of every new assertion: is its expectation made of the
+  thing under test?**
+- 🔴 **A FAKE THAT ANSWERS EVERY FIELD CANNOT SEE A QUERY THAT STOPPED ASKING.** Deleting
+  `state merged` from `MergeableQuery` SURVIVED a green suite because the merge fake answered all
+  fields regardless of the selection set. Fixed by having the fake parse the query document. The
+  SAME blindness then turned out to be open on the PANEL query one function away — that mutant
+  also survived, and killed the terminal-PR guard silently. **Ask which surface your fixture does
+  NOT load.**
+- 🔴 **AND THE FIX FOR THAT WAS ITSELF WALKABLE BY AN ALIAS.** With both fakes parsing queries,
+  `prState: state` STILL survived — a real GraphQL server keys an aliased selection by the ALIAS,
+  the fakes keyed by the field NAME. The document already contained an alias (`rollup:
+  commits(last:1)`). Both extractors now return `field → response key`.
+- 🔴 **AN AST SCANNER IS AN INSTRUMENT AND NEEDS ITS OWN CONTROLS.** `detailrouting_test.go`
+  enforces that every `APIError.Detail` is routed through `c.detail` — and shipped seeing ONLY a
+  keyed `Detail:` inside a composite literal. Two ordinary Go shapes walked straight through:
+  `ae.Detail = "…" + err.Error()` after construction, and a POSITIONAL literal (which also still
+  counted toward the anti-degenerate floor, so it RAISED the floor while checking nothing). Both
+  now error. **Verify a scanner by injecting the thing it must catch, in the idioms a maintainer
+  would actually write.**
+- 🔴 **A LEDGER KEYED ON A WORD IS WALKABLE BY CHOOSING THAT WORD.** The scanner's exemption
+  ledger keyed on the rendered expression text, so `name := "…" + err.Error()` in a DIFFERENT
+  file and function was absolved by an entry whose reason was written about `write.go`'s argv.
+  Keys are now `file.go:Recv.Func: expr`. **An excuse must not be able to travel.**
+- 🔴 **THE SAME COMPLETENESS SENTENCE WAS FALSE FOUR TIMES IN ONE FILE, EACH TIME REWRITTEN BY
+  THE ROUND THAT FIXED THE LAST ONE.** `query.go` now records the tally itself. The ending was
+  NOT a fifth rewording: the sentences were replaced with a statement of the MECHANISM — what the
+  scanner parses, what it requires, what it cannot see. **If a guard has lost its reason, write
+  that it has none; reaching for a better one is what regenerates the error.**
+- 🔴 **REDACT BEFORE YOU NORMALISE, NOT JUST BEFORE YOU CLIP.** A brief asked for
+  `clipDetail(c.redact(x))` at the merge refusal; that would have done NOTHING, because
+  `NormalizeMergeable` UPPERCASES the server string first and `redact` matches the exact token —
+  so a lowercase credential shipped whole with its case changed. Only a case-insensitive
+  assertion caught it. Redaction now happens before the uppercase (`query.go:542`).
+- 🔴 **CONSOLIDATION SILENTLY CHANGED A CLASSIFICATION.** Merging two duplicated GraphQL error
+  decoders into one helper removed both callers' own `errors` field, so a non-array `errors`
+  stopped being `unreadable response` and became a confident, FALSE `NOT FOUND` — sending the
+  operator to fix a token permission that was fine. Consolidation is right; **check whether the
+  merged helper collapses a case either original distinguished.**
+- 🔴 **A GENERIC API MESSAGE IS AN EMPTY RESULT.** "Unprocessable Entity" is consistent with
+  several mechanisms and identifies none; GitHub puts the discriminating reason in `errors[]`.
+  The first fix had to be the one that makes the failure self-diagnosing — building the guard
+  first would have been building on an undiagnosed failure.
+- ⚠ **A `gopls` "undefined: X / not in GOROOT" storm from an agent worktree is a WORKSPACE
+  artifact, not a broken tree.** It appeared after every fix round in this arc (the worktree is
+  not in a `go.work`). Each time, `go build ./...` and the full tier were clean. **Do not report
+  it as a compile failure; build the pushed branch and read the runner's own `RESULT:` line.**
+- ⚠ **A subagent's self-reported green is a claim.** Every round's numbers were re-run in this
+  session's own worktree before being repeated, and every decisive mutant was re-applied here
+  rather than relayed. Two agent-reported figures did not reproduce (a 5,117-rune measurement
+  that moves with the ephemeral port; a payload count of +54/−18 that was +52/−16 — the latter
+  was THIS session's error, from reading a `--remerge-diff` log spanning an extra commit).
+- ⚠ **A SIGPIPE from `| head` killed a mutation script before its restore step**, leaving a
+  mutant in the working tree. Caught by the next full run and restored from a `cp` backup, and
+  the pushed commit was verified clean — but it is a silent-commit hazard. **Do not pipe a
+  mutation battery through `head`.**
+- **`--version` is not a deploy check when the version did not move.** The whole arc shipped
+  under `0.3.0`. The store path changes (nix rebuilds on source hash) but the label does not, so
+  a deploy must be verified by grepping the WRAPPED binary for a string only the new code has,
+  with a positive control first.
+
+- 🔴 **RETRACTED — "the FIRST read is already at the floor and cannot be meaningfully improved"
+  and "Phase 3 cannot improve the first read" (both above, in this section) ARE FALSE. MEASURED
+  AND REFUTED 2026-09-18: `1,212 ms → 735 ms`, a 39% cut on the FIRST read.** Those sentences
+  were written from a `~1.0s` time-to-first-paint reading that never distinguished *first frame
+  on screen* from *diff readable*. The cold open was making **two sequential round-trips**:
+  `App.Init()` returned one command, and the REST diff was emitted only inside `case PRLoaded:`.
+  Owner/name/num come from argv and were known at `Init()` time — nothing forced the
+  serialization. 🔴 **The retracted wording had been promoted into the RANKED LIST as an
+  instruction to read it before scoping Phase 3** — i.e. the false claim was actively steering
+  the next session away from the win. Deleted there in this same update.
+- 🔴 **A STORED MEASUREMENT IS NOT A LIVE ONE, AND THAT ERROR COST A REVERSED DECISION.** An
+  audit argued the skeleton-paint half of Phase 3 was worthless by reasoning from the proposal's
+  *recorded* M5/M6 figures (GraphQL 0.54–0.69 s, REST 0.66 s) to conclude REST was the long pole
+  so the early-diff path never fires. I relayed that to the operator as established and they
+  decided on it. Then the legs were **timed live**: `t_rest` **666 ms** vs `t_graphql` **855 ms**
+  — REST first in 5 of 5, so the path fires on *every* open. `922 − 735 = 187` closes against
+  `855 − 666 = 189` to within 2 ms. The decision was reversed on the new data. **Re-take a
+  measurement before inferring a mechanism from it.**
+- ✅ **THE THREE-WAY LATENCY TABLE, interleaved, n=5, private tmux socket, 12–16 ms poll, every
+  reading `matched=1`:** base in series **1,212 ms** · concurrency only **922 ms** ·
+  concurrency + skeleton **735 ms**. `t_first_frame` 277 / 285 / 287 ms is a **null** — no
+  consistent direction, and an earlier "+26 ms in 5 of 5" was run-ordering, not the skeleton.
+  ⚠ **Interleave the conditions; do not run blocks.** Two base blocks minutes apart gave medians
+  of 1,190 ms and 847 ms — the host drifts faster than one block of five.
+- ⚠ **The leg inversion is a fact about THIS HOST AT THIS MOMENT, n=5.** It justifies the
+  skeleton, but it is not a permanent property of GitHub's API: if the REST leg ever becomes the
+  long pole again, the skeleton's 187 ms goes to zero **without anything failing**. Said in
+  `ReadIntents`' comment, repeated here.
+- 🔴 **THE PICKER RANKING HAD LANDED AND WAS RUNNING — IT WAS DEGRADING WITH USE.** The operator
+  reported it "doesn't seem to have landed or be working". It shipped in #1509/#1569 and a click
+  on `#1761` genuinely ranked 4 repos above 391. The real defect was in the sort key
+  `(klass, -score, distance)`: **every repo ever picked earns a non-zero score**, so a warming
+  log let more and more rows outrank Tier A's correct first choice. Causal replay, 115 picks over
+  6.7 days: top-1 **82.5% → 43.1% → 33.3%** across the log. **"Wrong repo on top" was a TREND,
+  not a static bug.** Fix: `(klass, distance, -score)` — Tier B separates only what Tier A
+  cannot. top-1 `62.6% → 73.0%`, top-3 `→ 96.5%`, mean rank `3.18 → 2.75`.
+- ⚠ **DISCLOSED REGRESSION in the picker fix:** on a **cold** log the old key is better
+  (82.5% vs 68.4%). The log only grows so the warm regime is operative — but if `picks.jsonl` is
+  ever wiped, ranking is worse for a while. Do not "reset" that file casually.
+- **No constant was tuned, and the sweep is why.** Confidence floors at 0.5/1.0/2.0/5.0 all give
+  **62.6%**, identical to the shipped key, exactly as the half-life sweep was inert. **A sweep
+  that moves nothing is evidence the STRUCTURE is wrong, not that the tuning needs more range.**
+- 🔴 **THE AUDIT LADDER RAN FIVE ROUNDS (0–4) AND ENDED ON A CLEAN ROUND. Real code defects were
+  found in rounds 1 and 2 ONLY; rounds 3 and 4 were about PROSE.** Executable payload lines per
+  round: **23 / 8 / 0**. Round 2 found four false load-bearing claims in round 1's own fix, three
+  tilted to make the fix look better justified. Round 3 found the round-2 fix had **reintroduced
+  the exact defect it fixed** (a comment crediting a renamed test) in the artifact it edited in
+  the same commit. ⚠ **The attribution gate never fired** — comments in shipped source count as
+  payload under the classification chosen at round 1 and held to, so the count never reached 0.
+  **The clean round is what ended it.**
+- 🔴 **THREE MUTATION-HARNESS DEFECTS, EACH REPORTING SUCCESS WHILE DOING LESS THAN CLAIMED.**
+  (a) a mutant that **stopped compiling** scored SURVIVED off an empty failing-set; (b) a mutant
+  that **panicked** killed the whole test binary so its intended killer never ran; (c) a restore
+  list naming `scripts/collector/session-tailer.py` when the file is
+  `scripts/collector/claude/session-tailer.py` — a safety net with a hole exactly where the
+  failures land, which would have reported CLEAN while skipping the dirty file. Fixes:
+  build-failure and bare panic now record `<did-not-run>` rather than survival; killers run
+  **isolated**; and the restore moved OUT of a `finally` inside the killable process into a
+  **wrapper** that restores by explicit path and then verifies with an **independent
+  `git status`**. Paths taken from the battery's own constants, never retyped.
+- 🔴 **A `finally` CANNOT RESTORE A PROCESS THAT IS KILLED — and this cost a live mutant in a
+  working tree TWICE.** Both times the battery died and left a one-line mutation staged for
+  nothing, a silent-commit hazard. The tell the second time: exactly one dirty path.
+- 🔴 **`pgrep -f <pattern>` MATCHED ITS OWN SHELL AND I READ IT AS EVIDENCE — twice, by two
+  different actors in one session.** `pgrep -c -f 'mutation_battery'` returned a non-zero count
+  with **no battery running**; "it's still running, just slow" was never a measurement. Resolve
+  PIDs and read `/proc/<pid>/cmdline` and `/proc/<pid>/cwd`.
+- 🔴 **THREE OF MY OWN INSTRUMENTS RETURNED CONFIDENT WRONG NUMBERS THIS SESSION**, and the
+  positive control caught every one. (a) `grep 'func readPair'` returned 0 on a **successful**
+  merge — the symbol is `func (a App) ReadIntents()`, a method with a receiver; the negative
+  control beside it was worthless until re-run with a pattern proven to fire. (b) A privacy scan
+  using naive substring containment flagged a 3-character repo name inside the token `tier_b`.
+  (c) A per-file test-count comparison joined nothing because pytest emits rootdir-relative
+  paths and the worktree lives *inside* the repo — every row read `0 -> N`.
+- 🔴 **A COUNT OF DECLARATIONS IS NOT A COUNT OF INSTANCES, AND IT PRODUCED A FALSE ALARM.**
+  Phase 4's collected-test total dropped by **221** while the deletion was described as "67 + 8
+  tests". I read that as 146 tests missing. `test_nvim_octo.py` has 67 `def test_` functions that
+  **parameterize to 213 collected**; 213 + 8 = 221 exactly, and a per-file diff (with a positive
+  control: 235 files joined) showed no other file moved.
+- 🔴 **A FLOOR CANNOT SEE A SHRINK THAT STAYS ABOVE IT, AT ANY VALUE.** `scripts/devhost-tests`
+  held 15 tests against a `TARGET_FLOORS` entry of 6; deleting an 8-test file left 7, so the
+  gate stayed silent. It was **already** silent in the other direction — the entry's comment
+  describes a 7-test target, so the 8 tests had arrived without updating either number. Stated
+  in the entry, **not closed**: closing it needs an exact pin, a different mechanism.
+- 🔴 **A REPO'S OWN INSTRUCTION CAN BE WRONG.** `test_no_real_launchers.py` carried
+  `⚠ DELETE THIS ROW IN PHASE 4`. Deleting it turns the suite **red**: the scan is text over
+  `scripts/`, `mention-open.py` still carries the `nvim-octo` comments (which must NOT be
+  scrubbed — that is the "guard on WORDS walkable by REWORDING" move), so the hit survives
+  retirement and an unacknowledged hit fails. The row stays.
+- ⚠ **Lazy nix overlays mean a dangling PRODUCER does not fail evaluation.** I briefed that
+  deleting `nix/pkgs/tools/nvim-octo/` while leaving `nvimOctoOverlay` would break the flake.
+  **Measured false:** `nix build --dry-run` succeeded with the directory gone and the overlay
+  restored. Forcing the attribute *does* error, which is the positive control. The evaluator
+  catches a dangling **consumer** and is blind to a dangling **producer**.
+- ✅ **OPEN-SOURCE EVALUATION — NOT YET, and the reason is TIMING, not the code.** The Go module
+  is genuinely portable: zero personal paths/hostnames/usernames, XDG-clean config, one optional
+  runtime binary (`xdg-open`, non-fatal), plain `go build` works, 6,208 payload lines against
+  **10,560 test lines (1.70×)**. Against: no LICENSE (see Defects), a `go.mod` that explicitly
+  disclaims being fetchable (rename across 43 imports), a hardcoded gruvbox palette pinned by
+  test to a nix file that would not ship, an argv contract `64/65/66` **inherited from the tool
+  Phase 4 just deleted**, and dependencies resolving via `charm.land/` with one indirect dep on
+  an untagged pseudo-version. **The real argument is that the version worth publishing — one
+  that opens instantly — only existed as of today.** Revisit after a few more real reviews.
+  Estimated 4–6 days to a credible v0.1.0; ~1 day for a portfolio drop.
+- ⚠ **CI capacity is not the standing non-issue this repo's notes claim.** All four legs on one
+  head returned `NO CAPACITY: <leg> — the gate never started (queued past its deadline)` against
+  a recorded baseline of once in 80 heads. Three agents pushing heads in parallel is a plausible
+  cause. It cleared on its own; re-trigger by merging `main` in (which also gates the merged
+  tree) rather than an empty commit.
+
 ## How to verify
 ```bash
-# 🔴 RANK 1 — the closing condition. On PATH on both hosts at 0.2.0:
-mention-review <owner/repo> <N>        # e.g. innovation-upstream/devrc 1723
-#   ? legend · g? in a diff · \C commits · read a diff · form a view vs octo
-
-# Phase 2 is on main — verify by CONTENT, never ancestry (squash breaks ancestry):
-git -C ~/workspace/devrc cat-file -e origin/main:nix/pkgs/tools/mention-review/src/internal/ui/write.go
-
-# 🔴 THE DEPLOYED BINARY — follow the WRAPPER, and run the POSITIVE CONTROL FIRST.
-# `bin/mention-review` is a makeWrapper SCRIPT; grepping it returns 0 on a HEALTHY deploy.
+# 🔴 FIRST — is the merged work actually DEPLOYED? `--version` CANNOT answer this.
+#   Follow the WRAPPER; `bin/mention-review` is a makeWrapper SCRIPT and grepping IT
+#   returns 0 on a HEALTHY deploy. POSITIVE CONTROL FIRST, or the zero is about the instrument.
 B=$(readlink -f "$(command -v mention-review)")
-R=$(grep -oE '/nix/store/[a-z0-9]+-mention-review[^/]*/bin/\.mention-review-wrapped' "$B" | tail -1)
-grep -ac 'usage: mention-review' "$R"    # POSITIVE CONTROL — must be 1, else your probe is wrong
-grep -ac 'cannot be undone' "$R"         # 1 == Phase 2 write verbs present
+R=$(grep -oE '/nix/store/[a-z0-9]+-mention-review[^/]*/bin/\.mention-review-wrapped' "$B"|tail -1)
+grep -ac 'usage: mention-review' "$R"   # POSITIVE CONTROL — must be 1
+grep -ac 'ReadIntents' "$R"             # Phase 3 shipped — 0 means NOT DEPLOYED
 
-# The argv contract — read WITHOUT a pipe, a pipe eats the status:
-out=$(mention-review 2>&1); echo $?      # 64 ; bad repo -> 65 ; bad number -> 66
+# The picker's new sort key on main (Tier B BELOW distance):
+git -C ~/workspace/devrc grep -n 'return (klass, distance' origin/main -- scripts/mention-open.py
+git -C ~/workspace/devrc grep -n 'return (klass, -scores' origin/main -- scripts/mention-open.py  # must be EMPTY
 
-# The network lock (proves no test can reach GitHub): disarm loopbackOnlyTransport in
-# internal/ui/nonet_test.go and the control fires —
-#   "the guard let a request to api.github.com THROUGH"
-# ⚠ a mutant that does not COMPILE is not a result; keep `fmt` used.
+# nvim-octo is gone from the BUILD GRAPH, not just the tree (positive control included):
+nix-store -qR $(nix path-info --derivation ~/workspace/devrc#homeConfigurations.zach.activationPackage) \
+  | grep -c mention-review   # positive control, must be >0
+#   ... same pipeline grepping nvim-octo must be 0
 
-# Is the CI leg still live?
-gh pr checks <any open devrc PR> | grep gotests
+# The Go tier (the leg that gates this code at PR time):
+nix develop ~/workspace/devrc -c bash scripts/run-go-tests.sh .   # TOTAL pass>=386, SCOPE: FULL
 ```

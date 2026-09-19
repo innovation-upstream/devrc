@@ -92,8 +92,68 @@ type App struct {
 
 	// Per-panel cursors. A sub-model owns state only IT reads.
 	commitCur int
-	fileCur   int
 	diffCur   int
+
+	// fileRowCur is the Files panel's cursor, and it indexes `fileRows` — the
+	// VISIBLE TREE ROWS — not `Snap.Files`.
+	//
+	// 🔴 IT REPLACED A `fileCur` THAT INDEXED TWO DIFFERENT LISTS. That one
+	// integer was read as an index into `Snap.Files` (to render) and into
+	// `Diff.Files` (to jump the diff), which worked only while the two were
+	// positionally parallel. A tree interleaves directory rows with file rows
+	// and groups files by directory, so "the Nth row" is no longer "the Nth
+	// file" in either list. Everything downstream derives from this cursor: the
+	// selected ROW (`currentRow`), and from it the selected FILE BY PATH.
+	fileRowCur int
+
+	// fileTree is the built directory tree, and fileRows its flattened visible
+	// rows.
+	//
+	// 🔴 THEY ARE STATE BECAUSE THE CURSOR INDEXES THEM, NOT AS A SPEED
+	// OPTIMISATION. `fileRowCur` above is an index into `fileRows`, and
+	// `moveIn` (called from `move`) reads `len(a.fileRows)` to bound it — not
+	// on a render path, so a list that existed only inside `filesBody` would
+	// leave the cursor indexing nothing between frames. That is a correctness
+	// requirement, and it holds however cheap the rebuild is.
+	//
+	// ⚠ `moveIn` IS THE ONLY LIVE BOUND ON THIS CURSOR. This comment named
+	// `clampCursors` as a second one and that was FALSE: `clampCursors` has a
+	// single call site, in `Step`'s `PRLoaded`, immediately after
+	// `rebuildFileTree` has already put the cursor on a row that exists — so
+	// its `fileRowCur` line cannot move it, and deleting that line leaves the
+	// package green. The line is kept as a bound on a state nothing currently
+	// produces; it is not evidence that this cursor is checked anywhere else.
+	//
+	// ⚠ `panels.go`'s per-frame-styling measurement is about 10,000 DIFF LINES;
+	// it is prior art here, not this field's reason.
+	fileTree *treeNode
+	fileRows []FileRow
+
+	// collapsedDirs holds the paths of the directories the operator has closed.
+	//
+	// 🔴 EMPTY MEANS FULLY EXPANDED, AND THAT IS THE STATE A FRESHLY BUILT App
+	// IS IN. No PR may get a worse first screen than it had before the tree
+	// existed: every changed file is visible the moment the panel appears.
+	//
+	// 🔴 "ON EVERY OPEN" IS WHAT THIS USED TO SAY AND IT WAS TOO WIDE.
+	// `PRLoaded` also arrives mid-session — a successful write re-reads the PR
+	// — and resetting this set there discarded the operator's collapse state on
+	// the most common write flow there is. `rebuildFileTree` carries it across
+	// a re-read instead, pruned to the directories the new tree still has; see
+	// its header. The first open is still fully expanded because an App that
+	// has never loaded one has nothing in here.
+	//
+	// 🔴 COPY-ON-WRITE. `App` travels BY VALUE through `Step`, so a map mutated
+	// in place would also change the App the caller is still holding — and every
+	// test in this package compares a `next` against the `a` it came from.
+	// `setCollapsed` and `revealFile` replace the map; nothing writes through it.
+	collapsedDirs map[string]bool
+
+	// 🔴 THERE IS DELIBERATELY NO PATH -> `Diff.Files` INDEX HERE. One existed,
+	// and it was a cache of `Diff` that nothing kept honest: every assignment to
+	// `Diff` owed it a rebuild, two branches of `Step` paid that by hand, and no
+	// test or type could see a third that did not. `selectRow` reads `Diff`
+	// directly instead — see its header.
 
 	vp       viewport.Model
 	body     viewport.Model // the issue card / error card body
@@ -201,6 +261,9 @@ func (a App) Step(msg tea.Msg) (App, []Intent) {
 		}
 		a.Load = LoadReady
 		a.Snap = m.Snap
+		// 🔴 THE TREE IS BUILT HERE, WHERE THE FILE LIST CHANGES — not in
+		// `filesBody`, which runs every frame. See tree.go's header.
+		a.rebuildFileTree()
 		a.clampCursors()
 		if m.Snap.Kind == ghapi.KindIssue {
 			// 🔴 THE ISSUE CARD IS TERMINAL. No comment posting, no labels, no
@@ -209,15 +272,34 @@ func (a App) Step(msg tea.Msg) (App, []Intent) {
 			// structurally cannot know whether `#N` is an issue or a PR — it
 			// builds `/pull/{id}` for everything and lets github.com redirect.
 			// There is nothing to fetch a diff for.
+			//
+			// 🔴 AND THE SPECULATIVE DIFF READ IS DISCARDED HERE, BECAUSE THE
+			// OTHER ARRIVAL ORDER EXISTS. `ReadIntents` asks for the diff before
+			// anything knows this is an issue, so that read's 404 can land
+			// BEFORE this message — in which case `diffResultIsMoot` never saw
+			// it and `a.Err` already holds it. Clearing both fields here is what
+			// makes "opening an issue shows no diff error" true in EITHER order
+			// rather than in the one a test happened to script.
+			a.Diff = nil
+			a.Err = nil
 			a.setBody(m.Snap.Body)
 			return a, nil
 		}
 		a.relayout()
-		// The three metadata panels are usable NOW; the diff is a second read
-		// because GraphQL cannot return patch text.
-		return a, []Intent{FetchDiff{Owner: a.Owner, Name: a.Name, Num: a.Num}}
+		// 🔴 NO `FetchDiff` HERE ANY MORE — IT WAS ALREADY ASKED FOR. This arm
+		// used to emit it, which is what serialised a cold open into
+		// t_graphql + t_rest. `ReadIntents` emits the pair together; re-emitting
+		// it here would buy a second, duplicate REST read and nothing else.
+		return a, nil
 
 	case DiffLoaded:
+		// 🔴 THE DIFF READ IS SPECULATIVE NOW, SO ITS RESULT CAN BE MOOT.
+		// See `diffResultIsMoot` for which two screens have nowhere to put an
+		// answer, and why the in-flight request is DISCARDED rather than
+		// cancelled.
+		if a.diffResultIsMoot() {
+			return a, nil
+		}
 		if m.Err != nil {
 			// 🔴 A DIFF FAILURE IS NOT A PAGE FAILURE. The metadata panels are
 			// already on screen and still true; replacing them with an error
@@ -240,6 +322,46 @@ func (a App) Step(msg tea.Msg) (App, []Intent) {
 		return a.stepKey(m)
 	}
 	return a, nil
+}
+
+// diffResultIsMoot reports whether a `DiffLoaded` may be dropped on the floor.
+//
+// 🔴 IT IS A STATE TEST, NOT A "DID WE SPECULATE" FLAG. A boolean would have to
+// be set correctly on every path that starts a read and cleared on every path
+// that consumes one; this asks the only question that matters — is there a Diff
+// panel on screen for an answer to go into.
+//
+// ⚠ IT ONLY EVER FIRES PANEL-FIRST, AND SAYING OTHERWISE IS WRONG. An earlier
+// wording claimed both arms were reachable "in EITHER arrival order"; they are
+// not. In a DIFF-FIRST cold open this runs with `Load == LoadLoading` and
+// `Snap == nil`, so neither arm returns true and the result is KEPT — that order
+// is handled downstream by the `PRLoaded` issue arm, which clears what the
+// speculative read left behind. Both mechanisms are needed and they are
+// different code; `TestOpeningAnIssueNeverShowsADiffError` drives both orders
+// and the mutation battery kills each one separately (M2 panel-first, M3
+// diff-first).
+//
+// ⚠ DISCARDED, NOT CANCELLED, AND THE REASON IS NOT "CANCELLATION IS HARD".
+// Cancelling would mean a `context.CancelFunc` living on `App`, and `App`
+// travels BY VALUE through a pure `Step` that every test in this package
+// compares against the value it came from. The saving it would buy is the
+// remainder of one small in-flight response — by the time `PRLoaded` says ISSUE
+// the request has already been sent. That trade is not worth a live handle in a
+// value-typed model, so the result is read and dropped. `run.go` stays the only
+// place a context exists.
+func (a App) diffResultIsMoot() bool {
+	// The PAGE failed, so the error card owns the screen and `a.Err` is the
+	// page's own error. A diff result here would overwrite that: `errorCardTitle`
+	// reads `a.Err` while the card BODY was built from the `PRLoaded` error, so
+	// the operator would read a title about the diff over a body about the pull
+	// request.
+	if a.Load == LoadFailed {
+		return true
+	}
+	// An ISSUE has no diff, and §4's card is terminal. The speculative read
+	// against `/pulls/{n}` 404s for one, and that 404 is an EXPECTED result, not
+	// something the operator did or can act on.
+	return a.Snap != nil && a.Snap.Kind != ghapi.KindPullRequest
 }
 
 // stepKey walks the dispatch table FOR THE CURRENT MODE.
@@ -289,14 +411,38 @@ func (a App) act(act Action) (App, []Intent) {
 		return a, []Intent{OpenBrowser{URL: url}}
 
 	case ActRetry:
-		if a.Load != LoadFailed {
-			// ⚠ `r` IS INERT ON A HEALTHY SCREEN, DELIBERATELY. Re-fetching
-			// under the operator would move the cursor out from under them.
-			return a, nil
+		if a.Load == LoadFailed {
+			a.Load = LoadLoading
+			a.Err = nil
+			return a, a.ReadIntents()
 		}
-		a.Load = LoadLoading
-		a.Err = nil
-		return a, []Intent{FetchPR{Owner: a.Owner, Name: a.Name, Num: a.Num}}
+		// 🔴 A FAILED DIFF OVER A HEALTHY PAGE IS RETRYABLE, AND IT IS THE ONE
+		// SCREEN THAT ADVERTISES THIS KEY. `diffBody`'s failure arm prints
+		// "`r` retries · `o` opens it in the browser", and `r` there returned
+		// nothing at all — a legend that lies, which is the exact defect the
+		// generated footer exists to prevent one pane over.
+		//
+		// ⚠ THAT SCREEN IS A PRE-EXISTING `main` DEFECT, NOT ONE THIS PR CREATED,
+		// AND AN EARLIER WORDING HERE CLAIMED OTHERWISE. It said the state "could
+		// not be reached before the reads were paired"; MEASURED on `main` at
+		// 2b131bf2, driving WriteDone{ok} -> PRLoaded{ok} -> FetchDiff ->
+		// DiffLoaded{Err} reaches DIFF UNAVAILABLE with the legend up, the success
+		// notice still on the bar, and `r` emitting nothing. Pairing the reads
+		// changed WHICH MESSAGE emits the diff read, not whether this screen
+		// exists. The fix is still right; the justification was not.
+		//
+		// ⚠ ONLY THE DIFF, AND THE SNAPSHOT IS LEFT ALONE. Re-reading the panels
+		// would rebuild the file tree and clamp the cursors under the operator,
+		// which is what the "inert on a healthy screen" rule below is protecting.
+		// Nothing is being scrolled out from under anyone here: `Diff == nil` is
+		// precisely the state in which there is no diff cursor to move.
+		if a.diffIsRetryable() {
+			return a, []Intent{FetchDiff{Owner: a.Owner, Name: a.Name, Num: a.Num}}
+		}
+		// ⚠ `r` IS INERT ON AN OTHERWISE HEALTHY SCREEN, DELIBERATELY.
+		// Re-fetching under the operator would move the cursor out from under
+		// them.
+		return a, nil
 
 	// --- the diff viewport pan (§ `J`/`K`) -----------------------------------
 	//
@@ -307,6 +453,19 @@ func (a App) act(act Action) (App, []Intent) {
 		return a.scrollDiff(+diffScrollStep), nil
 	case ActScrollDiffUp:
 		return a.scrollDiff(-diffScrollStep), nil
+
+	// --- the Files tree ------------------------------------------------------
+	//
+	// 🔴 BROWSE MODE ONLY, AND THE FILES PANEL ONLY. `enter`, `left` and `right`
+	// are all bound in COMPOSE mode; the tables are disjoint, so there is no
+	// collision — but a handler that acted regardless of focus would make `←`
+	// jump the Files cursor while the operator is reading the diff.
+	case ActTreeExpand:
+		return a.treeExpand(), nil
+	case ActTreeCollapse:
+		return a.treeCollapse(), nil
+	case ActTreeToggle:
+		return a.treeToggle(), nil
 
 	case ActNextPanel:
 		a.Focus = a.nextFocusable(+1)
@@ -350,20 +509,85 @@ func (a App) act(act Action) (App, []Intent) {
 	return a.move(act), nil
 }
 
+// panelsAreOnScreen reports whether THIS frame draws the four panels.
+//
+// 🔴 ONE PREDICATE, TWO READERS, AND THAT IS THE WHOLE POINT. `render` picks the
+// frame and `nextFocusable` decides where `tab` may land; when those were two
+// separate conditions they disagreed, and the disagreement was invisible because
+// each was individually correct. `TestTabReachesEveryPanelTheFrameActuallyDraws`
+// is what holds them together: it presses `tab` and compares where focus lands
+// against the four panel titles found in the RENDERED FRAME, so neither reader
+// is checked against a second copy of the condition.
+func (a App) panelsAreOnScreen() bool {
+	// A failed page is one full-width error card. No panels, and `tab` must
+	// leave focus on Overview so `j`/`k` scroll the card's body.
+	if a.Load == LoadFailed {
+		return false
+	}
+	// An issue is one full-width card too. Everything else — including the
+	// LOADING skeleton, where `Snap` is still nil — draws all four.
+	return a.Snap == nil || a.Snap.Kind == ghapi.KindPullRequest
+}
+
 // nextFocusable cycles focus, skipping panels that do not exist in the current
 // state. 🔴 An issue has no commits, files or diff, so `tab` on an issue card
 // must not park the cursor on three empty boxes — it stays on Overview, which
-// is the only panel an issue HAS.
+// is the only panel an issue HAS. Same for the error card, whose body is the
+// only thing there is to scroll.
+//
+// 🔴 IT ASKS WHAT IS ON SCREEN, NOT WHETHER A PULL REQUEST HAS LOADED. Those
+// came apart the moment the skeleton started drawing panels before `Snap`
+// existed: the old predicate was false for the WHOLE loading window, so `tab`
+// collapsed focus to Overview and stayed there for as long as the panel query
+// was out — `j`/`k` scrolling an empty Overview body while a readable diff sat
+// one pane to the right. The skeleton is what made that reachable: before it, a
+// loading App drew a card, so there were no panels to navigate and no focus
+// marker inviting anyone to try.
+//
+// ⚠ IT WAS A DEAD WINDOW, NOT A DEAD SESSION, AND AN EARLIER WORDING HERE SAID
+// "never came back, not on DiffLoaded and not on PRLoaded". That is FALSE.
+// MEASURED at e2154173, focus went `4 Diff` → tab → `1 Overview` → tab →
+// `1 Overview` → DiffLoaded+tab → `1 Overview` → PRLoaded+tab → `2 Commits` →
+// tab → `3 Files`: it recovers on the FIRST press after `PRLoaded`. The window
+// is the panel query's own latency — a measured median 855 ms on this host —
+// which is long enough to matter and is the whole of it.
 func (a App) nextFocusable(dir int) Panel {
-	if !a.isPullRequest() {
+	if !a.panelsAreOnScreen() {
 		return PanelOverview
 	}
 	n := int(panelCount)
 	return Panel(((int(a.Focus)+dir)%n + n) % n)
 }
 
-func (a App) isPullRequest() bool {
-	return a.Snap != nil && a.Snap.Kind == ghapi.KindPullRequest
+// diffIsRetryable reports whether `r` re-reads the DIFF ALONE — and it is the
+// same predicate that decides whether the Diff panel PRINTS that offer.
+//
+// 🔴 ONE PREDICATE, TWO READERS, FOR THE SECOND TIME IN THIS FILE. `act`'s
+// `ActRetry` arm fires the key and `panels.go`'s `diffBody` draws the legend that
+// names it. Spelled separately — which is how they shipped one round ago — they
+// agreed only by coincidence, and any drift reproduces exactly the bug that round
+// fixed: a legend offering a key that does nothing, or a key firing on a screen
+// that never advertised it. The lesson was already written down for
+// `panelsAreOnScreen` above and simply was not applied twice.
+//
+// 🔴 ALL THREE CONJUNCTS ARE LOAD-BEARING, AND EACH IS PINNED BY ITS OWN CASE
+// INSIDE `TestRetryIsStillInertOnEveryScreenThatDoesNotOfferIt` — three cases in
+// one test, not three tests. All three survived mutation when this was an inline
+// condition and no case distinguished them:
+//
+//   - `Load == LoadReady` — not `!= LoadFailed`. During the skeleton the Diff
+//     panel says LOADING DIFF and advertises nothing, so a press there would be
+//     invisible work.
+//   - `Diff == nil` — a successful retry leaves `Err` set (nothing clears it, and
+//     nothing reads it once `Diff` is non-nil), so without this the key stays
+//     live on a healthy screen and `r` re-fetches a diff that is already there.
+//   - `Err != nil` — THE ONE THAT MATTERS. An ISSUE sits at `LoadReady` with
+//     `Diff == nil` and `Err == nil`, so dropping this makes every `r` press on
+//     an issue card emit a `FetchDiff` against `/pulls/{issue}/files` — a
+//     guaranteed 404, swallowed by `diffResultIsMoot`, invisible to the operator,
+//     for as long as they keep pressing.
+func (a App) diffIsRetryable() bool {
+	return a.Load == LoadReady && a.Diff == nil && a.Err != nil
 }
 
 // diffScrollStep is how far ONE `J`/`K` press pans the diff viewport.
@@ -442,17 +666,13 @@ func (a App) move(act Action) App {
 		}
 	case PanelFiles:
 		if a.Snap != nil {
-			n := len(a.Snap.Files)
-			before := a.fileCur
-			a.moveIn(act, &a.fileCur, n)
-			if a.fileCur != before && a.Diff != nil {
-				// 🔴 CROSS-PANEL EFFECTS GO THROUGH THE ROOT, NOT THROUGH A
-				// POINTER BETWEEN SUB-MODELS (§3.2). Selecting a file moves the
-				// diff cursor; the Files panel does not hold the Diff panel.
-				if start := a.Diff.FileStart(a.fileCur); start >= 0 {
-					a.diffCur = start
-					a.syncDiffViewport()
-				}
+			// 🔴 THE CURSOR WALKS ROWS, NOT FILES. Directory rows are part of
+			// the sequence `j`/`k` steps through, which is what makes a
+			// collapsed tree navigable at all.
+			before := a.fileRowCur
+			a.moveIn(act, &a.fileRowCur, len(a.fileRows))
+			if a.fileRowCur != before {
+				a.selectRow()
 			}
 		}
 	case PanelDiff:
@@ -502,13 +722,26 @@ func (a App) move(act Action) App {
 
 // syncFileCursorFromDiff keeps the Files panel's highlight on whatever file the
 // diff cursor is inside — the other half of the one-way cross-panel link.
+//
+// 🔴 IT REVEALS, IT DOES NOT ONLY HIGHLIGHT. If the diff cursor moves into a
+// file inside a COLLAPSED directory, highlighting a row that is not on screen
+// would leave the operator reading a diff the Files panel silently disagrees
+// with. So the panel opens whatever it has to and the highlighted file is
+// ALWAYS visible.
+//
+// ⚠ THIS IS ALSO WHAT `}`/`{` AND `]`/`[` REACH. Those four stay DIFF-ordered —
+// they are Diff-panel keys and "the next file" means the next file in the
+// review, not the next row of the tree — but every one of them ends here, so
+// each of them now opens the directory it lands in.
 func (a *App) syncFileCursorFromDiff() {
 	if a.Diff == nil {
 		return
 	}
-	if f := a.Diff.FileAt(a.diffCur); f >= 0 {
-		a.fileCur = f
+	f := a.Diff.FileAt(a.diffCur)
+	if f < 0 || f >= len(a.Diff.Files) {
+		return
 	}
+	a.revealFile(a.Diff.Files[f].Path)
 }
 
 func (a *App) clampCursors() {
@@ -516,7 +749,7 @@ func (a *App) clampCursors() {
 		return
 	}
 	a.commitCur = clamp(a.commitCur, 0, max(0, len(a.Snap.Commits)-1))
-	a.fileCur = clamp(a.fileCur, 0, max(0, len(a.Snap.Files)-1))
+	a.fileRowCur = clamp(a.fileRowCur, 0, max(0, len(a.fileRows)-1))
 }
 
 func (a App) browserURL() string {
@@ -533,7 +766,66 @@ func (a App) browserURL() string {
 
 // --- the impure half --------------------------------------------------------
 
-// Init fires the one GraphQL read.
+// ReadIntents is the pair of reads ONE open of a reference needs, and it is the
+// only place that pair is spelled.
+//
+// 🔴 THE TWO READS ARE CONCURRENT, AND NOTHING EVER FORCED THEM TO BE
+// OTHERWISE. `FetchDiff` needs `Owner`, `Name` and `Num`; all three come from
+// argv and are known before a byte has left this machine. The diff request used
+// to be emitted from `Step`'s `PRLoaded` arm instead, so a cold open paid
+// t_graphql THEN t_rest in series — the project handoff recorded that first
+// read as "already at the API floor", and it was not.
+//
+// MEASURED on this host, one public 4-file / 1,395-line pull request, five
+// rounds run INTERLEAVED (the host moves faster than one block of five — two
+// blocked BASE runs minutes apart gave medians of 1,190 ms and 847 ms), each
+// open driven headlessly in its own tmux socket, poll granularity 12–16 ms,
+// every reading recorded with its own matched flag:
+//
+//	                   in series   concurrent   + skeleton
+//	diff readable       1,212 ms      922 ms       735 ms
+//	first frame           277 ms      285 ms       287 ms
+//
+// Medians. Concurrent beat series in 5 of 5 rounds, and +skeleton beat
+// concurrent-alone in 5 of 5.
+//
+// ⚠ THE SECOND ROW IS A NULL, NOT A COST. It is inside the run-to-run spread
+// with no consistent direction across rounds. The first frame was already
+// painted before any network call, so there was never anything there to win.
+//
+// 🔴 922 ms IS `max(t_graphql, t_rest)` AND 735 ms IS `t_rest` — WHICH IS ONLY A
+// WIN BECAUSE THE GRAPHQL LEG IS THE SLOWER ONE HERE. Timed separately over five
+// rounds, the REST diff landed FIRST every time: t_rest median 666 ms against
+// t_graphql 855 ms. The two differences close to 2 ms (922-735=187,
+// 855-666=189), which is what identifies the skeleton's early-diff paint as the
+// mechanism rather than leaving it a correlation.
+//
+// 🔴 THE PROPOSAL'S M5/M6 FIGURES READ THE OTHER WAY ROUND (0.54–0.69 s GraphQL,
+// 0.66 s REST) AND REASONING FROM THEM IS HOW THE SKELETON GOT REMOVED FROM THIS
+// PR ONCE, BEFORE THE LEGS WERE RE-TIMED AND IT CAME BACK. A stored measurement
+// is a claim about the day it was taken. Re-take it before building on it.
+//
+// 🔴 ONE RULE, ONE PLACE. Three sites want "read this reference": `Init`, the
+// `r` retry, and the re-read after a successful write. Spelled separately, the
+// pair is one forgetful edit away from regrowing the serialisation at a site
+// nobody re-measures — so `TestEveryFetchPRTravelsWithAFetchDiff` walks the
+// keyboard AND the messages and asserts the two always travel together.
+//
+// ⚠ IT IS PURE AND RETURNS DATA, like every other intent producer here. `Init`
+// below is the only impure part, and all it does is hand these to the runner.
+func (a App) ReadIntents() []Intent {
+	return []Intent{
+		FetchPR{Owner: a.Owner, Name: a.Name, Num: a.Num},
+		FetchDiff{Owner: a.Owner, Name: a.Name, Num: a.Num},
+	}
+}
+
+// Init fires BOTH reads at once.
+//
+// 🔴 `tea.Batch`, WHOSE CONTRACT IS "concurrently with no ordering guarantees".
+// That is the whole change: `tea.Sequence` would run them one after the other
+// and buy nothing. The consequence is a new reachable state — `DiffLoaded` can
+// now arrive BEFORE `PRLoaded` — which `Step` handles in both orders.
 //
 // ✅ `Init() tea.Cmd` IS UNCHANGED IN v2. It churned during the beta and
 // reverted; several secondary sources still say otherwise and they are wrong.
@@ -541,7 +833,7 @@ func (a App) Init() tea.Cmd {
 	if a.runner == nil {
 		return nil
 	}
-	return Run(FetchPR{Owner: a.Owner, Name: a.Name, Num: a.Num}, a.runner)
+	return tea.Batch(RunAll(a.ReadIntents(), a.runner)...)
 }
 
 // SetRunner installs the effect surface. Called once, at startup, by main —

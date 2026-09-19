@@ -17,23 +17,33 @@ Trace the handoff and resume skills end-to-end: their flows, cross-references,
 shared infrastructure, and usage patterns. No code changes — pure analysis.
 
 ## State now
-- Base clone on `main`; all work landed via PRs from worktrees. `origin/main` is moving very
-  fast (it advanced ~10 times during one session) — **re-fetch and re-measure before trusting
-  any number in this doc**, including the ones written minutes ago.
-- ✅ **All three of the reds this arc was opened against are CLOSED and verified on `main`.**
-  Measured at `f9ef66e4` in a detached worktree, by content and not by ancestry:
-  - `test_no_handoff_doc_exceeds_its_budget` — **GREEN** (`#1650` `d4c7d5b7`)
-  - `test_NO_TRACKED_FILE_ASSERTS_the_RETRACTED_two_entry_boundary` — **GREEN** (`#1655`
-    `18a95e23`)
-  - `test_every_mutation_anchor_occurs_exactly_once_in_its_target` — **GREEN** (`#1665`
-    `c1600c93`)
-- **Five PRs merged this arc:** `#1655` `18a95e23` · `#1650` `d4c7d5b7` (I added the `refs/`
-  marker commit) · `#1651` `22ae0817` (rebase only, no diff change) · `#1665` `c1600c93` ·
-  `#1663` `f9ef66e4` (this doc).
-- 🔴 **`main` IS STILL RED, on a fourth test that is NOT this arc's work and has no owner
-  here** — see rank 1. It was found the same way the other two unnamed reds were: by running
-  the control on `main` instead of trusting a PR's colour.
-- 🔴 NO `clawgate-task:` field. `clawgate_handoff.sh resolve` exited **5** — 0 tasks, its
+- Base clone on `main`; all work lands via PRs from worktrees. `origin/main` moves ~30 commits
+  a day — **re-fetch and re-measure before trusting any number in this doc, including one
+  written minutes ago.** Four of this doc's ranked lists have gone stale within hours.
+- ✅ **BOTH HOSTS CONVERGED AND DEPLOYED at `c9e9867f`** (`ship.sh` rc 0): workbench 616
+  managed artifacts resolve / 0 dangling / 0 stale, laptop 575 / 0 / 0, cross-host agreement
+  COMPARED. ⚠ The laptop's LAN address did not answer; it converged over nebula
+  (`zach@10.42.0.100`). That is the documented fallback, not a failure.
+- ✅ **The `resume` skill prune is SHIPPED AND LIVE, verified on the DEPLOYED artifact** —
+  not merely merged. `readlink -f ~/.claude/skills/resume/SKILL.md` resolves into
+  `/nix/store/r6rbi9r1…-devrc-claude-skills/` on **both** hosts at **20,731 B** (from
+  51,356 B, −59.6%), with all six `reference/` sidecars present. ~30 KB / ~8k tokens no
+  longer loads on every `/resume`.
+- ✅ **All FOUR reds are closed.** The three this arc targeted (doc-ceiling `#1650`, needle
+  `#1655`, battery anchors `#1665`) plus the runtime-shebang guard, which was closed by
+  **`#1692`** — somebody else, while this doc still listed it as rank 1.
+- ✅ **A FIFTH red, found and closed after those:** `test_audit_rule_firing_sweep.py` went red
+  the moment `#1739` landed, and `#1746` (`c9e9867f`) closed it. All three of its 🔴
+  paragraphs were **registered as rules, none exempted**.
+- **Merged this arc:** `#1655` `18a95e23` · `#1650` `d4c7d5b7` · `#1651` `22ae0817` ·
+  `#1665` `c1600c93` · `#1663` `f9ef66e4` · `#1675` `70c4a006` · `#1745` `2d462bd6` ·
+  `#1746` `c9e9867f`.
+- ⚠ **One thing is NOT settled:** `tekton/devrc-pytests` was red on `#1746` for
+  `test_REAL_INTERACTIVE_fzf_puts_the_eponymous_repo_under_the_cursor`, and it was merged
+  through deliberately. That test **passes on the dev-host tier** at `c9e9867f` — but CI
+  failed it in the **`nix build` sandbox tier**, which is blind to different things. Those
+  are different claims and only the sandbox tier settles it.
+- 🔴 NO `clawgate-task:` field: `clawgate_handoff.sh resolve` exited **5** — 0 tasks, its
   positive control confirming the board is reachable. A REAL reading, but it does NOT prove
   the session id is right, so it is not a statement that the board is fine.
 
@@ -275,42 +285,54 @@ that produced the wrong number. Kept below as originally written, not silently r
   adding the guard, to establish which side arrived second. Then convert the 12 sites to
   `testlib.mockbin.write_exec`, which is what the assertion names.
 
+### Is the `resume` body's 8 KB above target reachable, or do the prose pins floor it?
+- as-of: 2026-09-17
+- **Symptom + exact repro:** the prune stopped at 20,731 B against a 12,038 B enforced
+  target. Reproduce the floor:
+  ```bash
+  nix develop ~/workspace/devrc -c python3 -m pytest ~/workspace/devrc/scripts/tests -q \
+    -p no:cacheprovider -k "pin or RESUME"
+  ```
+- **Observed (with values):** **35 prose pins across 10 test modules** assert literal
+  sentences of this skill's body, most scraping the expected set FROM the tool (two-way
+  ledgers). A 15,179 B draft went **13 tests red**. 20,731 B sits ~2 KB above the floor those
+  pins impose; the new ceiling is `MAX_BYTES = 22_400` with 800 B headroom, i.e. 869 B of
+  slack ≈ two mean 🔴 rules.
+- **Ruled out:** that the pins can simply be moved — ONE pin was split
+  (`RESUME_SENTENCES` → `RESUME_SENTENCES_REFERENCE`) and it cost a full mutation battery to
+  do safely. The remaining ~50 pins span three more modules. via: measurement (the split
+  landed in `#1745`)
+- **Ruled out:** that the split weakened its guard — verified by CONTENT mutation in BOTH
+  directions: rewording a pinned sentence in the sidecar goes red, and in the body goes red;
+  the split is set-identical (35 → 15 + 20, AST-compared, 0 lost). via: measurement
+- **Leading hypothesis:** the pins are in `the-algorithm`'s named delete-class ("tests that
+  pin PROSE (doc claims)") and are the real lever, not the ceiling. They survive step 1 on a
+  measured incident (their class docstring cites "six commands never invoked once"), so they
+  were flagged rather than deleted.
+- **Next probe:** decide, do not measure further. Either accept 20,731 B as the floor and
+  leave the ceiling where it is, or run `the-algorithm` over the 35 pins as a batch — 🔴 as
+  ONE decision, not pin-by-pin, because a pin removed in isolation reads as a coverage loss
+  while the class question goes unasked.
+- **Carried forward, the measurement that motivated the prune** (its rank is now closed, the
+  number is still the reason the cut worked): MEASURED 2026-09-12, step 4 — the two recall
+  surfaces — was **19,536 of 47,684 bytes, 41%** of what was then the largest skill body in
+  the repo, which had **no `reference/` dir** (19 other skills did) and **no ceiling**. All
+  three of those facts are now false, which is the point.
+
 ## Next steps (ranked)
-<!-- Renumbered 2026-09-14 (second time this day): the previous rank 1 (the battery
-     re-anchor) MERGED as #1665 c1600c93, so every rank below it shifted up by one. The
-     previous list went stale within hours of being written, which is this doc's own
-     recurring failure — see the Gotchas entry about re-measuring a rank before acting. -->
-1. **Unbreak `main`: the runtime-shebang guard.** 12 sites in
-   `scripts/claude-hooks/tests/test_guard_core.py` write their own `#!/usr/bin/env …` instead
-   of using `testlib.mockbin.write_exec`. Not this arc's work and it has no owner — see the
-   investigation block above for the exact lines and the probe that establishes which side
-   arrived second. 🔴 Establish the direction BEFORE converting: if the guard is the newer
-   side, converting 12 call sites is right; if the sites are, the guard may have shipped
-   already-red, which is the "permanently-red gate" case `claude/RULES.md` forbids.
-   forcing: gate — `main` is red on it right now, and the 4-hourly main-green deadman
-   reproduces and toasts on it
-2. **Demote `resume/SKILL.md` step 4 to `reference/`, and give the body a ceiling.**
-   MEASURED 2026-09-12: step 4 (the two recall surfaces) is **19,536 of 47,684 bytes — 41%**
-   of the largest skill body in the repo, which has **no `reference/` dir** (19 other skills
-   do) and **no size ceiling**. 🔴 Do NOT merge the two commands into one wrapper:
-   `cairn recall` is per-repo and `handoff_search` sweeps all four repos including two client
-   ones, and much of that prose exists because getting that wrong leaks client content into a
-   PUBLIC repo. 🔴 Do NOT retire `handoff_search`: its measured yield was ~0 and the "1 of 20"
-   figure was retracted as an instrument artifact, but the 2026-09-12 session is a genuine
-   yield instance — a `skill-usage-telemetry` hit ("`find-session`'s 'both hosts' claim was
-   HALF FALSE") is what prompted the instrument-validation control that cracked that
-   investigation.
-   forcing: none
-3. **Build the `source='tool'` emission watcher** designed in the block below — per-session
+<!-- Renumbered 2026-09-17: the previous ranks 1 (shebang guard, closed by #1692) and 2
+     (resume prune, shipped as #1745 and DEPLOYED) are both done. This is the FOURTH
+     renumbering of this list, each stale within hours — see the Gotchas entry. -->
+1. **Build the `source='tool'` emission watcher** designed in the block below — per-session
    cross-source consistency (`scripts/collector/tool_emission_watch.py`), sibling to
    `deadman.py`, verdicts `ok`/`gap`/`cannot-tell`. Positive control is the confirmed
    2026-09-05 laptop/`obs-read` case, a REAL fixture rather than a synthetic one.
    forcing: none
-4. **Port the boundary sweep to the two remaining `CROSS JOIN` sites** —
+2. **Port the boundary sweep to the two remaining `CROSS JOIN` sites** —
    `derived_attention_consistent` in `scripts/validation/invariants.py`, and the hand-run
    query in `claude/skills/activity/reference/queries.md`.
    forcing: none
-5. **Retract the expired Tekton-capacity claim in `CLAUDE.md`.** It records capacity as "not
+3. **Retract the expired Tekton-capacity claim in `CLAUDE.md`.** It records capacity as "not
    the constraint" (measured 2026-09-10, node at 14% CPU requests). MEASURED 2026-09-12: the
    scheduler refused to place `devrc-ci-gxsd6-gate-pod` for 16 minutes — `0/5 nodes are
    available: 1 Insufficient cpu, …`, `tekton-ci-1` at 98% CPU, 8 concurrent `devrc-ci` runs.
@@ -574,34 +596,87 @@ that produced the wrong number. Kept below as originally written, not silently r
   `grep -n` showed ONE hit where the normalising scanner saw TWO. **Use the repo's own scanner
   behind a positive control**; a raw grep understates the count and reads as precise.
 
+- 🔴 **I MADE THE SAME SCOPED-RUN ERROR THREE TIMES IN ONE ARC, INCLUDING AFTER WRITING IT
+  INTO THIS DOC AS A GOTCHA.** The third instance is the instructive one: I test-merged
+  `#1745` with `#1738`, ran THREE named modules, got `1423 passed`, and reported it as though
+  it gated the merge. `test_cairn_skill_verb_ledger.py` was not among them, and that is
+  precisely where the merge broke. **A run over modules you chose cannot support a claim
+  about a tree.** Writing the lesson down demonstrably did not prevent the repeat — what
+  would is naming, in the claim itself, which modules ran and which did not.
+- 🔴 **`gh pr list --state open` CAUGHT A DUPLICATE TWICE IN ONE ARC; `claim-work` CAUGHT
+  NEITHER.** `claim-work` derives its slug from `<doc>-<rank>`, so two sessions naming the
+  same work differently never collide and BOTH claims are granted. (1) rank 1 was already
+  `#1650`, claimed under `handoff-doc-oversize-claims-accuracy`. (2) the `main`-red fix was
+  already `#1746`, opened ~3 h earlier; the agent had written its own before sweeping and
+  discarded it. **Sweep open PRs even when your claim succeeds** — it is the only thing that
+  sees an unclaimed duplicate.
+- 🔴 **A GUARD'S CONTROL CAN CERTIFY NOTHING WHILE READING AS RIGOROUS.** `#1745` shipped a
+  "positive control" whose docstring claimed rewording "must make the SAME predicate the real
+  test uses go red" — it never invoked that predicate. MEASURED: gutting the real pin test's
+  assertion to `assert True` left the control green and all 55 tests green; the identical
+  mutation on its HANDOFF twin failed correctly. Found by an audit MUTATING it, never by
+  reading it. **A control is a claim; mutate it.**
+- 🔴 **PREFER REGISTERING OVER EXEMPTING WHEN A TWO-WAY LEDGER GOES RED.** `#1739` added three
+  🔴 paragraphs to `audit-pr/SKILL.md` with neither a `RULES` probe nor a `NOT_A_RULE` anchor.
+  The cheap fix was to anchor all three as not-rules; all three were instead REGISTERED,
+  because each ends in an imperative an audit round performs or fails to. Precedent:
+  `NOT_TABLE_DRIVEN` in `test_mutation_battery_anchors.py`, where exempting "with a reason
+  true only as a naming accident" was the wrong call and registering bought real protection.
+- 🔴 **WIDENING A LEDGER'S SCAN CAN BE THE FIX, AND IT MAKES THE GUARD WIDER NOT WEAKER.**
+  `#1738`'s ledger scanned `SKILL.md` files only; `#1745` moved a mandated sentence into a
+  `reference/` sidecar, so the SHRINK arm fired with zero shared files. Fixed by teaching the
+  scan that a skill's body includes its `reference/`+`flows/` sidecars — which closes a REAL
+  blind spot (a skill could teach the WRONG form in a sidecar, invisibly). Deliberately not
+  every `*.md` under a skill dir: `scripts/browser-bridge/` holds `README.md` and test
+  fixtures, and a fixture tripping a guard about what a skill TEACHES is a false red with no
+  correct fix.
+- 🔴 **A CENSUS QUOTED FROM ONE GREP IS A CLAIM, AND `CLAUDE.md`'s CEILING BULLET HAS NOW BEEN
+  WRONG FOUR TIMES.** Re-derived 2026-09-17 by TWO independent methods: the union grep returns
+  12 paths → 8 real gates + 4 over-matches; a second sweep for module-level `MAX_*BYTES`
+  constants found a **ninth the union grep structurally cannot see**
+  (`test_validation_prompt.py`'s `MAX_DOC_BYTES`, over a skill SIDECAR). **Nine ceilings, six
+  on skill bodies.** Two methods, two different misses — which is the actual lesson, not the
+  number.
+- 🔴 **TWO STANDING CONSTRAINTS ON THE `resume` SKILL SURVIVE ITS PRUNE — carried here because
+  the rank that held them is now closed and they would otherwise vanish with it.** (1) **Do
+  NOT merge the two recall commands into one wrapper**: `cairn recall` is per-repo while
+  `handoff_search` sweeps all four repos including two client ones, and much of that prose
+  exists because getting it wrong leaks client content into a PUBLIC repo. (2) **Do NOT
+  retire `handoff_search`** — its measured yield was ~0 and the "1 of 20" figure was retracted
+  as an instrument artifact, but the 2026-09-12 session is a genuine yield instance: a
+  `skill-usage-telemetry` hit ("`find-session`'s 'both hosts' claim was HALF FALSE") is what
+  prompted the instrument-validation control that cracked that investigation. Both
+  constraints now live in `~/.claude/skills/resume/reference/handoff-search.md`.
+- ⚠ **`ship.sh` falls back from LAN to nebula silently-but-visibly.** 2026-09-17 the laptop's
+  `192.168.50.155` did not answer and it converged over `10.42.0.100`, printing both lines.
+  That is the designed behaviour; do not read the "unreachable" line as a failed ship — read
+  the per-host VERIFIED lines and the final cross-host comparison.
+
 ## How to verify
-- The three gates this arc closed, at whatever `origin/main` is now (re-fetch first — it moves
-  constantly):
+- Both hosts are converged AND the prune is actually DEPLOYED (merged ≠ deployed; `readlink`
+  is the arbiter, never a diff):
+  ```bash
+  readlink -f ~/.claude/skills/resume/SKILL.md     # → /nix/store/…-devrc-claude-skills/…
+  wc -c ~/.claude/skills/resume/SKILL.md           # 20,731  (was 51,356)
+  ls ~/.claude/skills/resume/reference/ | wc -l    # 6
+  ssh zach@10.42.0.100 'wc -c < ~/.claude/skills/resume/SKILL.md'   # 20,731
+  ```
+- All five reds, at whatever `origin/main` is now (re-fetch first — it moves constantly):
   ```bash
   git -C ~/workspace/devrc fetch origin -q
   git -C ~/workspace/devrc worktree add -f /tmp/mchk --detach origin/main
   nix develop ~/workspace/devrc -c python3 -m pytest \
     /tmp/mchk/scripts/tests/test_handoff_doc_size.py \
-    /tmp/mchk/scripts/tests/test_mutation_battery_anchors.py -q     # expect 38 passed, 2 skipped
+    /tmp/mchk/scripts/tests/test_mutation_battery_anchors.py \
+    /tmp/mchk/scripts/tests/test_runtime_shebangs.py \
+    /tmp/mchk/scripts/tests/test_audit_rule_firing_sweep.py \
+    /tmp/mchk/scripts/tests/test_resume_skill_size.py -q -p no:cacheprovider
   nix develop ~/workspace/devrc -c python3 -m pytest \
     /tmp/mchk/scripts/tests/test_subsystem_store_api.py -q -k RETRACTED_two_entry_boundary
-  nix develop ~/workspace/devrc -c python3 -m pytest \
-    /tmp/mchk/scripts/tests/test_runtime_shebangs.py -q             # 🔴 STILL RED — rank 1
   git -C ~/workspace/devrc worktree remove /tmp/mchk --force
   ```
-- The five PRs, by CONTENT not ancestry (a squash merge never makes the branch head an
-  ancestor):
+- 🔴 **The unsettled one** — the fzf test failed in the SANDBOX tier and passes on the
+  dev-host tier. Only the sandbox tier answers it:
   ```bash
-  git -C ~/workspace/devrc show origin/main:claudedocs/handoff-index-store-claims-accuracy.md | grep -c "both spellings retracted"           # 1  (#1655)
-  git -C ~/workspace/devrc cat-file -e origin/main:claudedocs/refs/index-store-claims-accuracy.md                                            # 0  (#1650)
-  git -C ~/workspace/devrc show origin/main:scripts/tests/mutation_battery_handoff_archive_and_cap.py | grep -c "SH, CAP, IDX, BUD"          # 1  (#1665)
-  git -C ~/workspace/devrc show origin/main:scripts/tests/mutation_battery_handoff_archive_and_cap.py | grep -c 'nix-disk-cleanup.md": 114_688'  # 1  (#1665)
-  ```
-- The battery's kill claim — and it must be RE-RUN, never quoted from this doc, because the
-  number is identical across tables:
-  ```bash
-  cd <a worktree>; nix develop ~/workspace/devrc -c python3 \
-    scripts/tests/mutation_battery_handoff_archive_and_cap.py      # >10 min; run it DETACHED
-  # expect: both CONTROL lines green, then `21/21 killed for the named reason`
-  git status --porcelain                                           # MUST be empty afterwards
+  gh api /repos/innovation-upstream/devrc/commits/<sha>/statuses --jq '.[]|"\(.context) \(.state)"'
   ```

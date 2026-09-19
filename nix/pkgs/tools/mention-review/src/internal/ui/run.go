@@ -31,6 +31,10 @@ type Runner interface {
 	// package-level client anywhere in this program.
 	PostComment(ctx context.Context, owner, name string, num int, body string) error
 	SubmitReview(ctx context.Context, owner, name string, num int, event, body string) error
+	// ⚠ NO `mergeable` PARAMETER. The client reads it itself, immediately
+	// before dispatching — see `ghapi.Merge`. Threading the snapshot's value
+	// through this interface would hand the gate the stale answer it exists to
+	// replace.
 	Merge(ctx context.Context, owner, name string, num int, method string) error
 }
 

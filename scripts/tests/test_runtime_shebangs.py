@@ -115,24 +115,15 @@ ALLOWLIST = [
     ("scripts/tests/test_cairn_split.py", "assert first.startswith(",
      "ASSERTS the cairn-who launcher's shebang shape to justify its executable "
      "bit; writes no stub and execs nothing"),
-    # Shape (b), and the INVERSE of the three entries above: they assert a
-    # shebang is PRESENT, this asserts one is ABSENT. `nvim-octo.sh` is the body
-    # of a `writeShellApplication`, which prepends the shebang and the `set -o`
-    # lines itself; a second copy in the source would be harmless in production
-    # but would make the test harness's `bash -euo pipefail` a claim about a
-    # file that sets its own options — i.e. the harness would silently stop
-    # reproducing the deployed preamble. The test READS the repo file off disk
-    # and checks its first two characters; it writes no stub and execs nothing
-    # through this line, so `testlib.mockbin.write_exec` has nothing to own
-    # here. (The same file's stub-writing site DOES use `write_exec`, and its
-    # subprocess execs a `shutil.which("bash")` absolute path — this pin covers
-    # the assertion only.)
-    # 🔴 The needle deliberately does not spell the two-character prefix, or
-    # `test_this_guards_source_does_not_match_itself` would flag this entry —
-    # the same trap the three entries above record.
-    ("scripts/tests/test_nvim_octo.py", "assert not text.startswith(",
-     "ASSERTS the wrapper body carries NO shebang (writeShellApplication owns "
-     "it); writes no stub and execs nothing"),
+    # ⚠ AN ENTRY FOR `scripts/tests/test_nvim_octo.py` USED TO BE HERE and is
+    # REMOVED (Phase 4, the review-TUI retirement). It was the INVERSE of the
+    # three entries above — they pin an assertion that a shebang is PRESENT, it
+    # pinned one that a shebang is ABSENT, because the retired wrapper's body
+    # was a `writeShellApplication` text that must NOT carry its own preamble.
+    # That suite is deleted, so the pin is removed in the SAME commit:
+    # `test_every_allowlist_entry_still_matches_something` fails on an entry
+    # that matches nothing, precisely so a stale pin cannot sit there
+    # pre-approving whatever file appears at that path next.
     ("scripts/tests/test_playwright_nixos.py", "/bin/sh",
      "writes /bin/sh directly — absolute, present in the sandbox"),
     ("scripts/tests/test_notify_failure.py", "_bash",

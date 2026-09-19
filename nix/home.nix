@@ -428,7 +428,7 @@ in
           # re-broke on every snippet edit. NOTHING enforces this coupling now —
           # if attribution matters for a term, check it by hand.
           { trigger = ":dacq"; replace = "do light recon and ask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "clarifying" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
-          { trigger = ":acq"; replace = "ask clarifying questions and recommend improvements and anything useful to include"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
+          { trigger = ":acq"; replace = "ask clarifying questions"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
           { trigger = ":alo"; replace = "anything left outstanding from this arc? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated, and if any related clawgate tasks are addresssed and up-to-date"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
           { trigger = ":kickoff"; replace = "give the kickoff message for next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
@@ -1595,8 +1595,10 @@ in
   # table. `scripts/lib/cairn_routes.py` carries the documentation the JSON
   # cannot (see below) and `scripts/tests/test_cairn_routes.py` grades it.
   #
-  # 🔴 NOTHING GRADES THIS FILE AGAINST THE LIVE STORE, AND THAT IS DELIBERATE
-  # AS OF THIS COMMIT. A `drift-check.sh` arm running `cairn routes --check`
+  # 🔴 NOTHING GRADES THIS FILE AGAINST THE LIVE STORE. That was DELIBERATE while
+  # one instance existed; as of phase E (2026-09-18) both hosts are
+  # multi-instance and the withdrawn arm below is REACHABLE — it is owed work,
+  # not a settled decision. The history that follows is why it was withdrawn. A `drift-check.sh` arm running `cairn routes --check`
   # was written and then withdrawn: at ONE configured instance, over a table
   # whose every value is the default alias, `Routing.check` cannot produce a
   # PROBLEM at all — an unnamed live scope resolves to the sole instance rather
@@ -1726,6 +1728,38 @@ in
   # alongside the three pre-existing Stop hooks it must never clobber.
   home.file.".claude/hooks/next-step-nudge.py" = {
     source = ../scripts/claude-hooks/next-step-nudge.py;
+  };
+  # 🔴 THE STOP-HOOK DECISION EMITTER — the shared library behind next-step-nudge.py
+  # and handoff-write-guard.py, and the reason both of them are now measurable.
+  #
+  # Seven Stop hooks fire ~20,700 times per six weeks on this host and NONE of them
+  # reaches activity.events: the `claude` source tails the same transcripts but keeps
+  # only prompt/command/session-summary. Every question about what a hook decided had
+  # to be answered by inferring it from transcript prose, and in one session that cost
+  # three wrong answers — a bogus 100.0% compliance rate (each guard's own re-fired
+  # message contains the strings that define compliance), a lift figure wrong by 4.8pp
+  # (the detector matched ANY task id, because no per-entity key was recorded), and a
+  # hypothesis that could not be tested at all (85 of 92 comment bodies went via
+  # --body-file and never reached the transcript). This makes them a query.
+  #
+  # One `source=hook kind=stop-decision` row per Stop, carrying the decision
+  # (armed/fired/suppressed/could-not-measure), the ENTITY it was reasoning about, the
+  # satisfying act it looked for and whether the live read succeeded. It appends ONE
+  # line to the local activity spool — no network, no subprocess, no argv payload —
+  # and every failure path is a silent no-op, because a Stop hook that raises is felt
+  # at the exact moment a session is trying to end.
+  #
+  # 🔴 It ships HERE, beside the hooks, for the guard_core.py reason: a hook is
+  # invoked with its ~/.claude/hooks/ copy as the script argument, so Python puts THAT
+  # directory on sys.path and a library the hook imports must sit in it. It reaches
+  # `spool_emit` at ~/.config/activity-collector/keylog/ — deployed below — and is a
+  # silent no-op on a host where that is absent.
+  #
+  # 🔴 A NEW file, so it must be `git add`ed or the flake silently omits it and the
+  # switch succeeds with the two hooks deployed and the module missing — the #452
+  # shape, where every component is tested and the seam is owned by nobody.
+  home.file.".claude/hooks/hook_telemetry.py" = {
+    source = ../scripts/claude-hooks/hook_telemetry.py;
   };
   # 🔴 THE AGENT ACTIVITY LEDGER — writer 1 (Claude Code), plus the shared module
   # it and `scripts/session-manager` BOTH read the record shape from.

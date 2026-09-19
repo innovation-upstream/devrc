@@ -73,9 +73,15 @@ HOW EACH NAME IS PINNED HERE
       the constant, which a `MODULE.STATE_WORK == "work"` assertion would not.
 
   Fixture values are pairwise distinct and distinct from every constant the code
-  names — task ids 307 and 911 against `MAX_TASKS=5` / `MAX_FIRES=3` /
-  `MAX_BLOCKS=2`, and session/agent ids that no module defines — so a mutant that
-  hardcodes a literal cannot satisfy an assertion by accident.
+  names — task ids 307 and 911 against the `MAX_TASKS` / `MAX_FIRES` / `MAX_BLOCKS`
+  ladder caps, and session/agent ids that no module defines — so a mutant that
+  hardcodes a literal cannot satisfy an assertion by accident. ⚠ Their VALUES are
+  deliberately NOT restated here. This line read `MAX_BLOCKS=2` while a concurrent
+  change was taking one module's copy of it to 1; a literal quoted in prose is a
+  claim that goes stale with nothing going red, and the distinctness argument never
+  needed the numbers — only that no cap equals 307 or 911. ⚠ Nothing enforces that;
+  it is a property of the fixtures chosen here, re-checked by reading the modules,
+  not a guard. Name the constants, not their values.
 
   ONE of the fifteen is deliberately NOT pinned as a literal: `agent_ledger`'s
   `.ledger.` temp prefix. What is load-bearing there is that a temp file cannot be
@@ -632,6 +638,23 @@ OWNS_NO_ON_DISK_STATE = {
                                  # docstring names. The enumeration, not the scan, is
                                  # what covers this entry.
     "guard_core.py",             # pure predicate library
+    "hook_telemetry.py",         # 🔴 IT DOES WRITE TO DISK — one appended line per
+                                 # Stop-hook decision — but NOT to a hook cache, and
+                                 # this registry is the ledger of `~/.cache/…` names
+                                 # that a `home-manager switch` can orphan under a
+                                 # live session. The one path it writes is the
+                                 # activity spool, whose name is resolved by
+                                 # `spool_emit.default_spool_dir()` — a COLLECTOR
+                                 # constant, pinned by the collector's own suite and
+                                 # by `scripts/tests/test_activity_spool_isolation.py`
+                                 # — and it holds no session-scoped anchor that a
+                                 # rename could strand: an orphaned spool line is one
+                                 # unshipped telemetry row, not a guard going quiet.
+                                 # CACHE_LITERAL cannot match it (the spool lives
+                                 # under `.local/state`, which that pattern does not
+                                 # name), so the ENUMERATION is what covers this
+                                 # entry, not the scan — the same blind spot
+                                 # `bg-command-capture.py` above records.
     "register-nudge-hook.py",    # writes ~/.claude/settings.json; the deployed-path
                                  # seam is pinned by test_registrar_activation.py
     "session-stamp.py",          # delegates every path to lib/session_trailer.py,

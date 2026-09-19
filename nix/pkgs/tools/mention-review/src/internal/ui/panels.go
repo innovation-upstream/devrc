@@ -4,9 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-
-	"charm.land/lipgloss/v2"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/innovation-upstream/devrc/mention-review/internal/ghapi"
 	"github.com/innovation-upstream/devrc/mention-review/internal/udiff"
@@ -50,11 +49,37 @@ func (a App) render() string {
 	switch {
 	case a.Load == LoadFailed:
 		body = a.renderCard(bodyH, a.errorCardTitle(), a.body.View())
-	case a.Load == LoadLoading:
-		body = a.renderCard(bodyH, "LOADING — "+a.Repo()+"#"+itoa(a.Num), "")
-	case a.Snap != nil && a.Snap.Kind == ghapi.KindIssue:
+	case !a.panelsAreOnScreen():
+		// 🔴 THE SAME PREDICATE `nextFocusable` READS. Spelled as its own
+		// condition here, this arm and the focus rule drifted apart the moment
+		// the skeleton arrived. With `LoadFailed` already taken above, this is
+		// exactly "a snapshot that is not a pull request" — i.e. the issue card —
+		// so `a.Snap` is non-nil whenever this runs.
 		body = a.renderIssueCard(bodyH)
 	default:
+		// 🔴 THE SKELETON AND THE LOADED SCREEN ARE THE SAME FRAME. `LoadLoading`
+		// used to get its own full-width card reading "LOADING — owner/repo#N",
+		// so a cold open drew a card, threw it away, and drew a four-panel layout
+		// in its place. The panel bodies each say what they are waiting for
+		// instead — chrome, borders, titles and footer are on screen from the
+		// first frame and nothing under the operator's eye moves when the reads
+		// land.
+		//
+		// 🔴 AND IT IS WORTH 187 ms ON THE HEADLINE NUMBER, WHICH IS NOT OBVIOUS
+		// AND WAS NEARLY LOST. Without this arm the diff cannot be drawn until
+		// `PRLoaded` lands, so a cold open reaches a readable diff at
+		// max(t_graphql, t_rest); with it, the diff paints the moment it
+		// arrives, so the cost is t_rest alone. That only pays if the REST leg
+		// is the FASTER one — and on this host it is, by 189 ms. MEASURED, five
+		// interleaved rounds: t_rest median 666 ms against t_graphql 855 ms,
+		// REST first in 5 of 5. See `ReadIntents` for the full table.
+		//
+		// ⚠ THIS DOES NOT MOVE t_first_frame AND IS NOT CLAIMED TO. The card was
+		// already painted before any network call, so there was never anything
+		// there to win: 277 ms in series, 285 ms concurrent, 287 ms with this
+		// arm — no consistent direction across rounds, i.e. a null, not a cost.
+		// What it changes is WHAT the first frame shows and that the layout no
+		// longer reflows.
 		body = a.renderPanels(bodyH)
 	}
 	if bar != "" {
@@ -235,14 +260,25 @@ func (a App) currentFilePath() string {
 
 // --- panel bodies -----------------------------------------------------------
 
+// overviewBody is the top-left box.
+//
+// 🔴 WITH NO SNAPSHOT IT NAMES WHAT IS BEING WAITED FOR, IT DOES NOT GO BLANK.
+// This is the skeleton's only identifying text: the reference the process was
+// launched with, which comes from argv and is therefore known before any read
+// returns. An empty box reads as a broken panel; the card this replaced at least
+// said which pull request it was loading, and that must not be lost.
 func (a App) overviewBody(w, h int) string {
 	if a.Snap == nil {
-		return ""
+		return strings.Join(clip([]string{
+			styTitle.Render("#" + itoa(a.Num) + "  " + truncate(a.Repo(), max(1, w-8))),
+			"",
+			kv("STATE ", a.Load.Word()),
+		}, h), "\n")
 	}
 	s := a.Snap
 	rows := []string{
 		styTitle.Render("#" + itoa(s.Num) + "  " + truncate(s.Title, w-8)),
-		styDim.Render(s.Author + "  ") + styGood.Render("+"+itoa(s.Additions)) +
+		styDim.Render(s.Author+"  ") + styGood.Render("+"+itoa(s.Additions)) +
 			styDim.Render(" / ") + styBad.Render("-"+itoa(s.Deletions)),
 		"",
 		kv("STATE ", PRStateWord(s.State, s.IsDraft)),
@@ -265,7 +301,26 @@ func (a App) overviewBody(w, h int) string {
 // to show, so it is the pane that explains why.
 func (a App) diffBody() string {
 	if a.Diff == nil {
-		if a.Err != nil {
+		// 🔴 A DIFF FAILURE IS NOT REPORTABLE UNTIL THE PANEL QUERY HAS
+		// ANSWERED, AND `LoadReady` IS THAT ANSWER. The diff read is speculative
+		// — `ReadIntents` fires it before anything knows whether `#N` is a pull
+		// request at all, because `mention-open.py` builds `/pull/{id}` for
+		// every reference and lets github.com redirect. While the panel query is
+		// still out, a 404 from the diff leg is indistinguishable from "this is
+		// an ISSUE", so reporting it would flash DIFF UNAVAILABLE across the
+		// skeleton of every issue the operator opens, one frame before the issue
+		// card replaces it.
+		//
+		// 🔴 THE PREDICATE IS `diffIsRetryable`, NOT A SECOND SPELLING OF IT.
+		// This arm prints "`r` retries" and `act`'s `ActRetry` arm is what makes
+		// `r` do something; they were two inline conditions that happened to
+		// agree, and nothing bound them. See `diffIsRetryable`'s header for why
+		// each of its three terms is load-bearing.
+		//
+		// ⚠ `LoadFailed` CANNOT REACH HERE — `render` takes the error-card arm
+		// first — so the states that can are LOADING (say nothing yet) and READY
+		// (this really is a pull request whose diff failed).
+		if a.diffIsRetryable() {
 			return lipgloss.JoinVertical(lipgloss.Left,
 				styBad.Render("DIFF UNAVAILABLE"),
 				"",
@@ -287,8 +342,17 @@ func kv(label string, w StateWord) string {
 	return styDim.Render(label+": ") + w.Render()
 }
 
+// 🔴 "NO COMMITS" AND "LOADING COMMITS" ARE DIFFERENT CLAIMS AND THE SKELETON
+// MADE THE DIFFERENCE VISIBLE. While `Snap` is nil nothing knows how many
+// commits this pull request has, so printing the empty-case word would be the
+// panel asserting a fact it does not have — the same defect as a file list that
+// is quietly short. Before the skeleton this arm was unreachable on screen,
+// because a loading App drew a card instead of panels.
 func (a App) commitsBody(w, h int) string {
-	if a.Snap == nil || len(a.Snap.Commits) == 0 {
+	if a.Snap == nil {
+		return styDim.Render("LOADING COMMITS")
+	}
+	if len(a.Snap.Commits) == 0 {
 		return styDim.Render("NO COMMITS")
 	}
 	var rows []string
@@ -306,25 +370,70 @@ func (a App) commitsBody(w, h int) string {
 	return strings.Join(window(rows, a.commitCur, h), "\n")
 }
 
+// filesBody renders the DIRECTORY TREE.
+//
+// 🔴 IT BUILDS NOTHING. `a.fileRows` was flattened when the snapshot arrived or
+// when a directory was opened or closed; this function formats the rows it was
+// handed and windows them. See tree.go's header for why: this runs on every
+// frame, and the diff viewport one pane to the right is the measured example of
+// what per-frame work in a renderer costs.
 func (a App) filesBody(w, h int) string {
-	if a.Snap == nil || len(a.Snap.Files) == 0 {
+	// 🔴 SAME DISTINCTION AS `commitsBody`: with no snapshot the file list is
+	// UNKNOWN, not empty.
+	if a.Snap == nil {
+		return styDim.Render("LOADING FILES")
+	}
+	if len(a.Snap.Files) == 0 {
 		return styDim.Render("NO FILES")
 	}
-	var rows []string
-	for i, f := range a.Snap.Files {
-		mark := FileWord(f.ChangeType)
-		count := fmt.Sprintf("+%d -%d", f.Additions, f.Deletions)
-		name := truncate(f.Path, max(1, w-len(count)-3))
-		line := mark.Render() + " " + name + " " + styDim.Render(count)
-		if i == a.fileCur && a.Focus == PanelFiles {
-			line = styCursor.Render(mark.Word + " " + name + " " + count)
-		}
-		rows = append(rows, line)
+	rows := make([]string, 0, len(a.fileRows)+1)
+	for i, r := range a.fileRows {
+		rows = append(rows, a.renderFileRow(r, i, w))
 	}
 	if a.Snap.FilesTruncated {
 		rows = append(rows, styWarn.Render("TRUNCATED — more files than one page"))
 	}
-	return strings.Join(window(rows, a.fileCur, h), "\n")
+	// 🔴 WINDOWED ON THE ROW CURSOR, which is the only cursor that indexes
+	// `rows`. Windowing on a FILE index would scroll to the wrong row the
+	// moment a directory row appeared above it.
+	return strings.Join(window(rows, a.fileRowCur, h), "\n")
+}
+
+// renderFileRow formats ONE tree row into `w` columns.
+//
+// 🔴 A DIRECTORY ROW TRUNCATES FROM THE LEFT AND A FILE ROW FROM THE RIGHT, AND
+// THAT ASYMMETRY IS THE POINT. A compacted chain's informative half is its TAIL
+// — `nix/pkgs/tools/mention…` says nothing, `…/internal/ui` says everything —
+// while a file row shows a BASENAME, whose head is what identifies it. Note the
+// tree is a width WIN for files: dropping the directory prefix frees far more
+// columns than the indent costs.
+func (a App) renderFileRow(r FileRow, i, w int) string {
+	indent := strings.Repeat("  ", r.Depth)
+	count := fmt.Sprintf("+%d -%d", r.Additions, r.Deletions)
+	// indent + one marker column + a space either side of the name.
+	avail := max(1, w-len(indent)-len(count)-3)
+
+	mark := FileWord(r.ChangeType)
+	name := truncate(r.Name, avail)
+	if r.IsDir {
+		// ⚠ The chevron is a SHAPE, not a colour — it survives colour removal
+		// the way the `M`/`A`/`D` letters on a file row do.
+		glyph := chevronCollapsed
+		if r.Expanded {
+			glyph = chevronExpanded
+		}
+		mark = StateWord{glyph, styDim}
+		name = truncateLeft(r.Name, avail)
+	}
+
+	if i == a.fileRowCur && a.Focus == PanelFiles {
+		return indent + styCursor.Render(mark.Word+" "+name+" "+count)
+	}
+	body := name
+	if r.IsDir {
+		body = styTitle.Render(name)
+	}
+	return indent + mark.Render() + " " + body + " " + styDim.Render(count)
 }
 
 // --- the diff viewport ------------------------------------------------------
@@ -515,6 +624,26 @@ func truncate(s string, w int) string {
 		return string(r[:w])
 	}
 	return string(r[:w-1]) + "…"
+}
+
+// truncateLeft keeps the TAIL and puts the ellipsis at the FRONT.
+//
+// 🔴 IT EXISTS FOR COMPACTED DIRECTORY ROWS. `truncate` cuts the tail, which on
+// a joined path is the half that carries the meaning: in a 30-column panel
+// `nix/pkgs/tools/mention…` identifies nothing, while `…/internal/ui` names the
+// directory exactly.
+func truncateLeft(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= w {
+		return s
+	}
+	if w <= 1 {
+		return string(r[len(r)-w:])
+	}
+	return "…" + string(r[len(r)-(w-1):])
 }
 
 // clip takes the first h rows.

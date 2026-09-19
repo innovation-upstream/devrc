@@ -1024,12 +1024,30 @@ SELF_GENERATED_NOTE = (
 )
 
 
-def self_generated_report(items: typing.Sequence[RankedItem]) -> str:
+def declared_forcing_none_report(items: typing.Sequence[RankedItem]) -> str:
     """Rule (j)'s advisory block for `forcing: none` items, or "".
 
     Silent when there are none, for `dropped_durable_report`'s stated reason: a
-    reassuring "0 self-generated items" on every run is a line that gets skimmed
-    and then read as a guarantee.
+    reassuring "0 declared `forcing: none` items" on every run is a line that
+    gets skimmed and then read as a guarantee.
+
+    🔴 THE NAME IS THE FIX, AND IT IS THE WHOLE CHANGE. This was
+    `self_generated_report` while its body tested `kind == "none"` — a function
+    named after `is_self_generated`'s predicate (`kind not in
+    EXTERNAL_FORCING_KINDS`) while implementing a DIFFERENT one. The two
+    disagree on exactly one population and it is the populous one: an UNTAGGED
+    legacy item has `kind is None`, so it IS self-generated and is NOT a
+    declared `forcing: none`.
+
+    🔴 THEY MUST STAY DIFFERENT — see `is_self_generated`, where counting only
+    the literal `none` was MEASURED to make an honest re-tagging of a legacy
+    queue read as pure GROWTH and be refused by rule (n). So this is NOT a
+    duplicate to consolidate; it is two predicates that needed two names.
+    The consolidation is already caught by
+    `test_an_UNTAGGED_legacy_base_item_counts_as_SELF_GENERATED`, which
+    asserts the behavioural half end-to-end — no new guard was added here,
+    deliberately: a second test for a mutant an existing test already kills is
+    the duplicate-guard pattern `claude/RULES.md` warns about.
     """
     none_items = [i for i in items if i.kind == "none"]
     if not none_items:
@@ -1363,7 +1381,7 @@ def unevidenced_report(bullets: typing.Sequence[EliminationBullet]) -> str:
 def assumed_report(bullets: typing.Sequence[EliminationBullet]) -> str:
     """Rule (k)'s advisory for `via: assumed` bullets, or "".
 
-    Silent when there are none, for `self_generated_report`'s stated reason: a
+    Silent when there are none, for `declared_forcing_none_report`'s stated reason: a
     reassuring "0 assumed eliminations" on every run gets skimmed and then read
     as a guarantee.
     """
@@ -1902,7 +1920,7 @@ def legacy_dod_report(
 
     Silent when the field is there, and silent on a NEW doc — that case is a
     refusal, and printing an advisory beside it would read as a second, softer
-    verdict on the same fact. Silent-when-clean for `self_generated_report`'s
+    verdict on the same fact. Silent-when-clean for `declared_forcing_none_report`'s
     stated reason: a reassuring line on every run gets skimmed and then read as
     a guarantee.
     """
@@ -2042,7 +2060,7 @@ def rank_growth_report(
     oversight. Round 1 legitimately opens with self-generated work — the finding
     is about what happens AFTER round 1 ("ranks may only be added by operator
     opt-in"), and a new document has no round 1 to have grown since.
-    `self_generated_report` still counts them, on every run, new doc included.
+    `declared_forcing_none_report` still counts them, on every run, new doc included.
     """
     if is_new_doc:
         return ""
@@ -4247,9 +4265,9 @@ def main(argv: list[str] | None = None) -> int:
         print(warning)
     # Rule (j)'s advisory half, beside the other two and for the same reason:
     # above the diff, because it is a statement about what the diff is adding.
-    self_generated = self_generated_report(items)
-    if self_generated:
-        print(self_generated)
+    declared_none = declared_forcing_none_report(items)
+    if declared_none:
+        print(declared_none)
     # Rule (n)'s SKIP disclosure, beside the advisories and for their reason:
     # it is a statement about what this run did NOT check on the text below.
     skipped = rank_ratchet_skipped_report(items, ratchet_skip) if ratchet_skip else ""

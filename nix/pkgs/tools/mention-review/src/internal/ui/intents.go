@@ -141,6 +141,14 @@ func (SubmitReview) Write() bool        { return true }
 // confirmation prompt names the method, and the prompt and the request must be
 // provably the same value — a runner that re-read the config could merge with a
 // method the operator never saw.
+//
+// 🔴 MERGEABILITY IS DELIBERATELY *NOT* ON THIS INTENT, AND THAT IS THE OPPOSITE
+// OF THE RULE ABOVE FOR A REASON. `Method` is carried because the prompt and the
+// request must be the same value the operator saw. Mergeability is the one thing
+// that must NOT be the value the operator saw: the base branch can move between
+// the snapshot and the keypress, and the whole point of `ghapi.Merge`'s gate is
+// to read it again at the moment of the write. A field here would be a stale
+// answer offered to a function whose job is to distrust exactly that.
 type MergePR struct {
 	Owner  string
 	Name   string

@@ -87,6 +87,12 @@ type KeyMap struct {
 	NextFile key.Binding
 	PrevFile key.Binding
 
+	// TreeExpand/TreeCollapse/TreeToggle drive the Files panel's directory
+	// tree. See `App.treeExpand` for what each does on a file row.
+	TreeExpand   key.Binding
+	TreeCollapse key.Binding
+	TreeToggle   key.Binding
+
 	Browser        key.Binding
 	Retry          key.Binding
 	FullHelpToggle key.Binding
@@ -140,6 +146,15 @@ var Keys = KeyMap{
 	PrevHunk: key.NewBinding(key.WithKeys("["), key.WithHelp("[", "prev hunk")),
 	NextFile: key.NewBinding(key.WithKeys("}"), key.WithHelp("}", "next file")),
 	PrevFile: key.NewBinding(key.WithKeys("{"), key.WithHelp("{", "prev file")),
+
+	// 🔴 BROWSE MODE ONLY, AND THAT IS WHAT MAKES THEM FREE. `h` and `l` are
+	// unbound everywhere in this program; `enter`, `left` and `right` ARE bound
+	// — in COMPOSE mode, whose table this one never falls through to. The modes
+	// are disjoint, so a browse binding cannot disturb a compose one, and
+	// `keys_test.go` asserts no key is claimed twice WITHIN a mode.
+	TreeExpand:   key.NewBinding(key.WithKeys("l", "right"), key.WithHelp("l/→", "expand dir / open file")),
+	TreeCollapse: key.NewBinding(key.WithKeys("h", "left"), key.WithHelp("h/←", "collapse dir / go to parent")),
+	TreeToggle:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "toggle dir")),
 
 	Browser:        key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "browser")),
 	Retry:          key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "retry")),
@@ -203,6 +218,11 @@ const (
 	ActPrevHunk Action = "PrevHunk"
 	ActNextFile Action = "NextFile"
 	ActPrevFile Action = "PrevFile"
+
+	ActTreeExpand   Action = "TreeExpand"
+	ActTreeCollapse Action = "TreeCollapse"
+	ActTreeToggle   Action = "TreeToggle"
+
 	ActBrowser  Action = "Browser"
 	ActRetry    Action = "Retry"
 	ActFullHelp Action = "FullHelp"
@@ -256,6 +276,9 @@ func Dispatch() []Bound {
 		{ModeBrowse, ActPrevHunk, Keys.PrevHunk},
 		{ModeBrowse, ActNextFile, Keys.NextFile},
 		{ModeBrowse, ActPrevFile, Keys.PrevFile},
+		{ModeBrowse, ActTreeExpand, Keys.TreeExpand},
+		{ModeBrowse, ActTreeCollapse, Keys.TreeCollapse},
+		{ModeBrowse, ActTreeToggle, Keys.TreeToggle},
 		{ModeBrowse, ActBrowser, Keys.Browser},
 		{ModeBrowse, ActRetry, Keys.Retry},
 		{ModeBrowse, ActFullHelp, Keys.FullHelpToggle},
@@ -334,6 +357,11 @@ func (k KeyMap) FullHelpFor(m Mode) [][]key.Binding {
 		{k.NextPanel, k.PrevPanel},
 		{k.Up, k.Down, k.PageUp, k.PageDown, k.Top, k.Bottom},
 		{k.ScrollDiffDown, k.ScrollDiffUp, k.NextHunk, k.PrevHunk, k.NextFile, k.PrevFile},
+		// ⚠ FULL HELP ONLY, FOLLOWING `J`/`K`'s PRECEDENT AND FOR THE SAME
+		// MEASURED REASON: the persistent browse row already renders 146
+		// columns, i.e. it overflows a 140-column terminal before anything is
+		// added. `?` is where the operator already looks for this class of key.
+		{k.TreeExpand, k.TreeCollapse, k.TreeToggle},
 		{k.Comment, k.Approve, k.RequestChanges, k.SubmitReview, k.Merge},
 		{k.Browser, k.Retry, k.FullHelpToggle, k.Quit},
 	}
