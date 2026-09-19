@@ -48,7 +48,37 @@ KIND = "invocation"
 
 # Defence-in-depth caps. Safe dims are short NAMES/versions/booleans; anything
 # larger is almost certainly a mistake (a leaked query/body), so we bound it.
-_MAX_DIMS = 12
+#
+# 🔴 THE COUNT CAP USED TO TRUNCATE SILENTLY, AND THAT WAS A MEASURED HAZARD
+# RATHER THAN A THEORETICAL ONE. `sanitize_dims` slices
+# `list(dims.items())[:_MAX_DIMS]`, so a caller that grows past the cap loses its
+# LAST-INSERTED dims — the newest fields, which are exactly the ones a new
+# measurement depends on — and the row still parses. MEASURED at the old cap of
+# 12: a 14-dim ledger kept 12, with no error and no log line, and the instrument
+# would have been read as evidence.
+#
+# 🔴 THE FIX IS THE `dropped` COUNTER BELOW, NOT THIS NUMBER. Raising the cap
+# only moves the cliff: the next caller to cross it gets the identical failure,
+# and by construction no suite sees it. `scripts/claude-hooks/hook_telemetry.py`
+# already solved this the other way in this same repo — it counts its own
+# `[:_MAX_EXTRA]` truncation into a `dropped` payload field, with a comment
+# recording that the silent version "contradicted the only promise it makes".
+# Two emitters, one rule, two answers was the actual defect; RULES.md calls
+# consolidation a bug-finding instrument, and this is that.
+#
+# So the cap stays a bound on ACCIDENT (a leaked body arriving as a dict) rather
+# than a budget a deliberate caller must fit inside — and a drop is now visible
+# whatever it is set to.
+#
+# 🔴 WHICH IS WHY IT IS 16 AND NOT HIGHER. The cap is this module's ceiling on
+# how much an ACCIDENT can carry — `_MAX_DIMS` x `_MAX_VALUE_LEN` — and it
+# applies to EVERY caller, including ones that gained nothing from the raise.
+# An earlier version of this change took it to 24 for headroom; that doubled the
+# leak ceiling for a second, uninvolved caller to buy room nobody had asked for.
+# 16 clears the widest current ledger (14) with room for two more fields, and
+# the next caller to need more raises it deliberately — now against a `dropped`
+# counter that makes the old silent failure impossible either way.
+_MAX_DIMS = 16
 _MAX_KEY_LEN = 64
 _MAX_VALUE_LEN = 120
 _MAX_LIST_ITEMS = 12
@@ -61,12 +91,44 @@ def sanitize_dims(dims) -> dict:
     lists of truncated strings; everything else is stringified+truncated. This
     caps cardinality/size but is NOT a content scrubber — the call site must only
     pass safe values in the first place (see the module PRIVACY note).
+
+    🔴 A DIM THAT VANISHES IS REPORTED, NEVER SILENT. When a whole column is
+    removed, a `dropped: <n>` key is added saying how many — so a caller that
+    outgrew a bound produces a row that SAYS SO, instead of one that parses
+    cleanly and is missing its newest field. Same contract, same spelling, as
+    `scripts/claude-hooks/hook_telemetry.py`'s `dropped`.
+
+    🔴 THE KEY IS OWNED BY THIS FUNCTION, NOT BY THE CALLER. Any caller-supplied
+    `dropped` is discarded — it cannot MASK a real count and it cannot FORGE one
+    on a row that lost nothing. An earlier version only overwrote it when a
+    truncation had happened, which left the forge direction open
+    (`{"a": 1, "dropped": 7}` came back claiming a loss that never occurred).
+    So: absent ⇒ nothing was lost, present ⇒ this function lost exactly that
+    many, and neither reading depends on trusting the caller.
+
+    ⚠ TWO BOUNDS REMOVE A COLUMN AND BOTH ARE COUNTED: `_MAX_DIMS` (the extra
+    items past the cap) and `_MAX_KEY_LEN` (two long keys that truncate to the
+    SAME prefix — the later one overwrites the earlier, so a dim disappears).
+    The key-collision arm is the one an earlier draft of this docstring missed
+    while promising "what must not happen is a whole dim vanishing unannounced".
+
+    ⚠ AND TWO BOUNDS ARE DELIBERATELY *NOT* COUNTED: `_MAX_VALUE_LEN` and
+    `_MAX_LIST_ITEMS`. Those SHORTEN a value the consumer still receives, which
+    is a different fact from losing the column. Widening `dropped` to cover them
+    would be a deliberate change with its own argument.
     """
     out: dict = {}
     if not isinstance(dims, dict):
         return out
-    for k, v in list(dims.items())[:_MAX_DIMS]:
+    items = [(k, v) for k, v in dims.items() if str(k)[:_MAX_KEY_LEN] != "dropped"]
+    dropped = max(0, len(items) - _MAX_DIMS)
+    for k, v in items[:_MAX_DIMS]:
         key = str(k)[:_MAX_KEY_LEN]
+        # A key that collides with one already written removes that column. It
+        # is counted here rather than at the end because only the loop can see
+        # it — `len(items)` cannot.
+        if key in out:
+            dropped += 1
         if isinstance(v, bool) or v is None:
             out[key] = v
         elif isinstance(v, (int, float)):
@@ -75,6 +137,10 @@ def sanitize_dims(dims) -> dict:
             out[key] = [str(x)[:_MAX_VALUE_LEN] for x in list(v)[:_MAX_LIST_ITEMS]]
         else:
             out[key] = str(v)[:_MAX_VALUE_LEN]
+    # LAST, so it describes the whole pass. The caller's own `dropped` was
+    # filtered out above, so this is never a claim by the code that lost data.
+    if dropped:
+        out["dropped"] = dropped
     return out
 
 
