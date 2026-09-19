@@ -992,11 +992,6 @@ def order_universe(universe: list[str], num: str, ranges: dict[str, int],
     construction rather than by a branch.
     """
     scores = scores or {}
-    try:
-        target = int(num)
-    except (TypeError, ValueError):
-        target = None
-
     def key(full: str):
         # 🔴 THE MEASURED HALF COMES FROM `measured_rank_key`, NOT A SECOND
         # COPY. The promotion gate reads the same function, so the sort and the
@@ -3864,8 +3859,14 @@ def main(argv: list[str] | None = None) -> int:
         #
         # 🔴 SO THE CLAIM IS GATED ON WHAT MAKES IT TRUE: the top row must be
         # PLAUSIBLE (class 0 — this repository demonstrably has references that
-        # high) AND the ordering must have separated it from every other row on
-        # offer. Operator decision 2026-09-19, choosing the narrower of two
+        # high) AND the ordering must have separated it from every other row IT
+        # RANKED — `ordered_rows[1:]`, the universe. ⚠ That is NOT "every row on
+        # offer", which an earlier draft of this comment said: the compared set
+        # INCLUDES rows deduped out of the offer (the pane repo's own universe
+        # row) and EXCLUDES offered rows the ordering never saw (the clawgate
+        # row, and the guess when it is absent from the universe). The ranked
+        # set is the right one — the claim being gated is about the RANKING —
+        # but a reader reproducing the old sentence would not find it. Operator decision 2026-09-19, choosing the narrower of two
         # options: it fires less often, and every time it fires "best-ranked" is
         # unambiguously true.
         #
@@ -3926,6 +3927,25 @@ def main(argv: list[str] | None = None) -> int:
             # sentence that contradicts itself in its own second clause, pinned
             # as correct. The entire justification for this change is ranking
             # quality; where there is no ranking there is no justification.
+            # 🔴 `order_state == ORDER_APPLIED` IS REDUNDANT TODAY — MEASURED,
+            # AND KEPT DELIBERATELY RATHER THAN QUIETLY. Deleting it leaves the
+            # whole suite green (484 passed), because `_ordered_universe`
+            # returns `ranges={}` in EVERY degraded state, so every
+            # `measured_rank_key` is `(CLASS_UNKNOWN, 0)`, so `top_is_separated`
+            # is already False. Reported by `/audit-pr` round 2.
+            #
+            # It stays as defence in depth, and the reason is nameable rather
+            # than vague: the PLAUSIBLE requirement below it is the NARROWER of
+            # two options the operator chose between, so a later widening (allow
+            # `BELOW`, or test `top_key is not None`) re-arms the need for this
+            # clause — and a widening made after someone deleted it as dead
+            # weight would silently restore round 0's defect, with a green suite
+            # in both directions.
+            #
+            # ⚠ SO DO NOT LOOK FOR A TEST THAT PINS THIS CLAUSE ALONE: there
+            # cannot be one while it is redundant. The guard that matters is
+            # the OBSERVABLE property — a degraded table promotes nothing and
+            # claims nothing — and that is what the tests assert.
             if (order_state == ORDER_APPLIED and not top_is_the_guess
                     and top_is_separated):
                 # `guess_rank` is 1-BASED (`enumerate(candidates, 1)` above)

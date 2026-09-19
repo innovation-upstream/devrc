@@ -9100,8 +9100,16 @@ def test_a_STUBBED_picker_OMITS_queried_rather_than_claiming_the_operator_scroll
 # suite green, which is exactly the operator's third complaint.
 # --------------------------------------------------------------------------- #
 _PINNED_SHAPES = [
-    # (shape, pane repo, rows NEVER RANKED, their kinds, index of the FIRST
-    #  ordered row)
+    # (shape, pane repo, rows NEVER RANKED, the kinds of the TOP-OF-SCREEN
+    #  prefix of that length, index of the FIRST ordered row)
+    #
+    # ⚠ THE FOURTH COLUMN IS NOT "THE KINDS OF THE NEVER-RANKED ROWS" ANY MORE.
+    # On shape 2 the prefix is [clawgate, PROMOTED universe row] and the pane
+    # guess sits BELOW it, so the column describes what the operator sees at the
+    # top — nothing more. It passes only because a promoted universe row and the
+    # pane guess are both `github`; that is a coincidence, not coverage. The
+    # pane guess's never-ranked status is pinned by
+    # `test_a_PINNED_row_is_NOT_reported_as_one_the_ORDERING_ranked`.
     #
     # 🔴 THE LAST TWO COLUMNS CAME APART ON 2026-09-19 AND THAT IS THE POINT.
     # Before the promotion the never-ranked rows were a PREFIX, so the count of
@@ -9164,8 +9172,11 @@ def test_the_rows_ABOVE_the_ordered_block_are_pinned_BY_KIND_and_COUNTED(
     # the promoted row. The old message called that slice "the rows above the
     # ordered block", which is false once the block is interleaved, and the
     # assertion silently stopped pinning that the pane guess is never-ranked.
-    # Assert the SCREEN PREFIX by kind (what the operator sees at the top) and
-    # pin the pane guess's never-ranked status separately, below.
+    # Assert the SCREEN PREFIX by kind (what the operator sees at the top). The
+    # pane guess's never-ranked status is pinned by
+    # `test_a_PINNED_row_is_NOT_reported_as_one_the_ORDERING_ranked`, NOT by
+    # anything below in this test — an earlier draft of this comment said
+    # "separately, below" and there was nothing below to find.
     assert tuple(seen["platforms"][:expect_pinned]) == kinds, (
         f"{shape}: the top {expect_pinned} row kind(s) are "
         f"{seen['platforms'][:expect_pinned]}, expected {list(kinds)}")
@@ -9778,6 +9789,19 @@ def test_a_guessed_picker_with_ONE_universe_row_still_EXPLAINS(
         f"guess: {seen['mesg']}")
     assert "Row 3" in seen["mesg"], seen["mesg"]
     assert "the only one it knows" in seen["mesg"], seen["mesg"]
+    # 🔴 ROUND 2's F3: THE `below == 0` WORDING WAS THE HALF THIS DOCSTRING
+    # CLAIMED AND DID NOT PIN. Measured: deleting the whole "row N is this
+    # host's best-ranked repository" clause from that branch left 484/484
+    # green, because only the fragments "Row 3" and "the only one it knows"
+    # were asserted — precisely the walkable guard round 1 reported. Pinned
+    # WHOLE here, so both promoted shapes are covered and the docstring above
+    # is true.
+    assert seen["mesg"] == (
+        "#1291 names no repository. Row 3 is a guess from the tmux pane, which "
+        "may not be the pane you clicked in — row 2 is this host's best-ranked "
+        "repository, and the only one it knows. Type to search, or dismiss. · "
+        "ordered by plausibility for #1291: 1 could have it, 0 have no "
+        "references at all"), seen["mesg"]
 
 
 # --------------------------------------------------------------------------- #
@@ -9828,7 +9852,17 @@ def test_the_promotion_is_GATED_on_the_ordering_having_actually_RUN(
 
     Same click, same universe, ONLY the table's presence differs: with it, the
     ranked row is promoted; without it, the pre-promotion layout, and the note
-    must never claim a best-ranked row."""
+    must never claim a best-ranked row.
+
+    ⚠ THIS DOES NOT PIN THE `order_state == ORDER_APPLIED` CLAUSE, AND SAYING
+    SO IS THE POINT. Round 2 measured that deleting that clause leaves the
+    suite green: `_ordered_universe` returns `ranges={}` in every degraded
+    state, so the PLAUSIBLE/separated gate already refuses. This test asserts
+    the OBSERVABLE property — a degraded table promotes nothing and claims
+    nothing — which is what a reader actually depends on, and which stays true
+    whichever clause enforces it. A test naming a specific redundant clause
+    would be vacuous and would read as coverage; this one is honest about which
+    claim it carries."""
     ordered = _guessed_picker(monkeypatch, text="#1291",
                               universe=[UNIVERSE_ONLY, ALPHA_FIRST],
                               ranges=DISCRIMINATING_RANGES, tmp_path=tmp_path)
@@ -9996,3 +10030,37 @@ def test_the_PROMOTED_note_passes_the_DISCLOSURE_guards(monkeypatch, tmp_path):
     assert "the only one it knows" in lone["mesg"], lone["mesg"]
     _no_universe_token_anywhere(lone["mesg"], "PROMOTED LONE-ROW DISCLOSURE")
     _no_guessed_repo_token_anywhere(lone["mesg"], "PROMOTED LONE-ROW GUESS")
+
+
+def test_a_CASE_DIFFERING_pane_repo_is_still_DEDUPED_and_never_promoted_over(
+        monkeypatch, tmp_path):
+    """🔴 ROUND 2's F2: THE CASE-INSENSITIVITY FIX SHIPPED WITH NO TEST. Round 2
+    measured that reverting all three `.lower()` sites left 742 tests green —
+    round 1 found the bug by READING, and nothing would have caught its
+    regression.
+
+    `repo_universe` dedupes on `.lower()`; its docstring calls `acme/Widget` and
+    `acme/widget` "one repository on GitHub and two identical-looking rows in
+    the picker". The guessed arm's `seen` set, the `extra` filter and
+    `top_is_the_guess` must use the same key, or a pane repo spelled with
+    different case survives the dedup — and because the promotion reads that
+    same set, the repo's OWN duplicate can be spliced directly above the guess
+    and captioned "this host's best-ranked repository".
+
+    Here the pane answers `WrongOrg/WrongRepo` while the universe holds
+    `wrongorg/wrongrepo`, ranked first. Red with exact-match comparison."""
+    table = {v: 5 for v in FAKE_UNIVERSE.values()}
+    table[PANE_GUESS] = 9000          # the pane's repo IS the ordering's pick
+    table[ALPHA_FIRST] = 5
+    seen = _guessed_picker(
+        monkeypatch, text="#1291", pane="WrongOrg/WrongRepo",
+        universe=[PANE_GUESS, ALPHA_FIRST], ranges=table, tmp_path=tmp_path)
+    urls = [c["url"] for c in seen["rows"]]
+    lowered = [u.lower() for u in urls]
+    assert len(lowered) == len(set(lowered)), (
+        f"the pane repo is offered TWICE under two spellings — the dedup "
+        f"compared case-sensitively: {urls}")
+    # ...and the case-differing duplicate must not have been promoted over it.
+    assert "best-ranked repository" not in seen["mesg"], (
+        f"a case-differing duplicate of the pane's own repo was promoted above "
+        f"it and captioned best-ranked: {seen['mesg']}")
