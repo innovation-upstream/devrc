@@ -24,33 +24,50 @@ notifications and repo browse are dropped.
   `mention-review` for a real review on a real screen and reported **"done, working"**
   (2026-09-18). That is the `judgement` line this doc froze at round 1. Everything below is
   either follow-through on it or a NEW arc.
-- **Three PRs merged today**, all verified by CONTENT on `origin/main` with a positive control
-  (never by ancestry — a squash is never an ancestor):
-  - `#1772` → **`2b131bf2`** — Phase 4, `nvim-octo` retired. 4,897 lines deleted across 3 package
-    files + 2 test suites; `flake.nix`, `run-tests.sh`, `launcher_scan.py`,
-    `test_no_real_launchers.py`, `test_runtime_shebangs.py` edited. Closure proof: 7,441-entry
-    home-manager closure, `nvim-octo`=0, `mention-review`=2 (control fires).
-  - `#1773` → **`97c20d06`** — Phase 3, cold open. `1,212 ms → 735 ms` to a readable diff.
-  - `#1775` → **`66e51d90`** — picker ranking. top-1 `62.6% → 73.0%`, top-3 `→ 96.5%`.
-- 🔴 **MERGED ≠ DEPLOYED, AND THE TWO HALVES DIVERGE HERE.** MEASURED after the merges: the
-  live binary is still `/nix/store/28yc4a0np6d5qf5p242mxvy999alvsk7-mention-review-0.3.0`, and
-  `ReadIntents` greps **0** in it against a positive control of 1 — so **no host has the 735 ms
-  version**. The picker half IS live on the workbench, because `mention-open.py` is reached
-  through the Alacritty wrapper's `mkOutOfStoreSymlink` onto the working tree and went live on
-  the pull. **`scripts/ship.sh` has not run.** See rank 1.
-- **CARRIED FORWARD — durable decisions this replace would otherwise have dropped:**
+- ✅ **RANK 1 IS DONE — but its stated premise was STALE, and that is the finding.** This doc
+  said *"no host has the 735 ms version"* and named store path `28yc4a0np6d5…`. **MEASURED
+  2026-09-19 BEFORE shipping anything: both hosts were ALREADY on
+  `ypqk42cfxv92aydpd9hgic3k75rhs49x-mention-review-0.3.0` with `ReadIntents`=2 against a
+  positive control of 1.** A switch had happened between the doc being written and being read.
+  **A stored deploy reading is a hypothesis about now — re-measure before acting on it.**
+- ✅ **THE SHIP WAS STILL NEEDED, FOR A DIFFERENT REASON THAN THIS DOC GAVE.** Both hosts were
+  behind on real *payload*, not the handoff docs the ranked item implied: **#1777**
+  (`find-session --arc`, 2,154 lines incl. a new `scripts/lib/handoff_arc.py`) plus #1753/#1778.
+  `scripts/ship.sh` rc=**0**; every per-host line read, not the verdict — **no skips**, both
+  hosts fast-forwarded and switched, converged to **`93e5bc1b`**, cross-host agreement on ONE
+  sha. Re-verified by CONTENT on BOTH hosts afterwards: `usage: mention-review`=1 (positive
+  control) / `ReadIntents`=**2**; deployed `find-session/SKILL.md` `--arc`=**7** against a
+  positive control of 9, same skills store path on both.
+- ✅ **RANK 3 IS CLOSED — all eight re-anchored mutation rows KILL.** `--only
+  K48,K49,K50,K54,K66,K67,K82,K92` → **9/9 KILLED, problems: none**, every row
+  `KILLED(attributed)` (killed for its OWN stated reason, not an unrelated error) with its
+  killer tests named. Control pristine **733 passed / 0 failed**; observation floor 366 tests
+  must RUN, met by every row; **P1 positive control KILLED — the battery can observe.**
+  `restore: OK` with all four file hashes. This upgrades the rows from *"apply"* to *"kill"* —
+  the two claims this doc was careful to separate.
+- 🔴 **DRIFT-CHECK EXITS rc 17 ON BOTH HOSTS — real, and OUTSIDE this arc.**
+  `homelab-talos/containers/clawgate` is the `srcDir` subtree a `nix/pkgs` package is BUILT
+  FROM, and it is **3 behind `origin/trunk` on workbench AND laptop** (repo-wide 4 / 7 behind).
+  Whatever version string that binary carries, the code in it is the code in that subtree.
+  ⚠ That tree is **DIRTY on both** (11 paths workbench, 1 laptop) and those paths are IN the
+  built binary — so a `pull --ff-only` there is not a safe blind action. Not acted on; see rank 2.
+- **CARRIED FORWARD — durable decisions a replace would otherwise drop:**
+  - **The three PRs of 2026-09-18, PR → squash sha** (verified by CONTENT on `origin/main`
+    with a positive control, never by ancestry — a squash is never an ancestor):
+    `#1772` → **`2b131bf2`** (Phase 4, `nvim-octo` retired, 4,897 lines deleted) ·
+    `#1773` → **`97c20d06`** (Phase 3 cold open, `1,212 ms → 735 ms`) ·
+    `#1775` → **`66e51d90`** (picker ranking, top-1 `62.6% → 73.0%`, top-3 `→ 96.5%`).
   - **§12.4 IS ANSWERED, not assumed:** PR-level comments only, **no inline diff-line
     positioning**. Operator decision 2026-09-15. Nothing in the code computes a diff position.
-  - ✅ **THE 422 ARC IS CLOSED** (#1761 → `1ff1bd6e`). The operator's `m` on devrc#1760 showed
-    only "unprocessable entity"; root cause was in the RENDERER — `apiMessage` read GitHub's
-    top-level `message` and discarded `errors[]`, which is where every validation failure puts
-    its reason. The shipped renderer surfaces `errors[]`, so the next occurrence names its own
-    reason. The diagnosis block for it is preserved under Open investigations.
-- **The `forcing: none` ratchet:** this doc's previous list carried 2; this one carries 2.
-- **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5** (nothing resolved).
-  Its positive control confirms the board is reachable and the token accepted, but it says
-  explicitly that a wrong session id also answers 200 with an empty array, so this is NOT a
-  clean bill of health: which task, if any, this session belongs to is UNKNOWN.
+  - ✅ **THE 422 ARC IS CLOSED** (#1761 → `1ff1bd6e`). Root cause was in the RENDERER —
+    `apiMessage` read GitHub's top-level `message` and discarded `errors[]`, which is where
+    every validation failure puts its reason. The shipped renderer surfaces `errors[]`, so the
+    next occurrence names its own reason. Diagnosis preserved under Open investigations.
+- **The `forcing: none` ratchet:** this doc's previous list carried 2; this one carries 1.
+- **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5** again (nothing
+  resolved). Its positive control confirms the board is reachable and the token accepted, but
+  a wrong session id ALSO answers 200 with an empty array, so this is NOT a clean bill of
+  health: which task, if any, this session belongs to is UNKNOWN.
 
 ## Open investigations — live diagnosis state
 
@@ -198,15 +215,31 @@ notifications and repo browse are dropped.
   a comma list; bare positional ids are **silently ignored** and start a ~90-row sweep). Closes
   when each row reports KILLED with its own error, or is honestly recorded SKIPPED/`<did-not-run>`.
 
+### RESOLVED — the eight re-anchored mutation rows KILL (retires the 2026-09-18 block of the same subject)
+- as-of: 2026-09-19
+- **Retracted as live.** The 2026-09-18 block "The eight re-anchored mutation rows APPLY but are
+  not known to KILL" is answered exactly as its closing condition was written: *"each row
+  reports KILLED with its own error."* Everything below is history.
+- **Symptom + exact repro:** n/a — a coverage gap in merged code, now measured shut.
+  `PYTHONDONTWRITEBYTECODE=1 nix develop $DEVRC -c python3 scripts/tests/mutation_battery_mentions.py --only K48,K49,K50,K54,K66,K67,K82,K92`
+- **Observed (with values):** `CONTROL (pristine): 733 passed, 0 failed, 0 errors`; observation
+  floor 366 tests must RUN. **`9/9 killed for the stated reason; problems: none`**, every row
+  `KILLED(attributed)`: K48 f=5 · K49 f=5 · K50 f=2 · K54 f=2 · K66 f=3 · K67 f=2 · K82 f=1 ·
+  K92 f=1, and `positive control P1: KILLED — the battery can observe`. `restore: OK —
+  default.nix=8fbc07fbcc71 session-tailer.py=49dea6798c1c mention_scan.py=fc2d0794f2ff
+  mention-open.py=3cb484e55584`. via: measurement
+- **Ruled out:** that the filter silently ran a full sweep — the banner printed
+  `🔴 FILTERED RUN — ['K48'…'K92'] plus the P1 control ONLY. This is evidence about those rows
+  and nothing else.` and the run scored exactly 9 rows. via: measurement
+- **Ruled out:** that a stale bytecode cache let a mutant score without executing — the run set
+  `PYTHONDONTWRITEBYTECODE=1`, and P1 (the known-fatal positive control) was KILLED in the same
+  batch. via: measurement
+- **Next probe:** none — closed.
+
 ## Next steps (ranked)
-1. 🔴 **SHIP IT — `scripts/ship.sh`.** Three PRs are on `main` and the 735 ms binary is on
-   neither host; the operator is still clicking into `0.3.0`. Read **every per-host line**, not
-   the final verdict — one skip hides among greens. Then re-verify by CONTENT, not `--version`
-   (it cannot distinguish these builds; see Defects): follow the wrapper to
-   `bin/.mention-review-wrapped` and grep for `ReadIntents` with `usage: mention-review` as the
-   positive control. Repo: devrc.
-   forcing: none
-2. **Decide symptoms 1 and 3 of the picker — they are YOURS, not an agent's.** The proposal is
+1. **Decide symptoms 1 and 3 of the picker — they are YOURS, not an agent's.** (Was rank 2; the
+   two items above it are closed, and **no live `mention-review-tui-*` claim existed** when this
+   was renumbered, so nothing was re-pointed.) The proposal is
    `claudedocs/proposal-mention-picker-visibility.md`. **(1)** fzf re-sorts by its own score the
    moment you type, so the ranking is invisible to anyone who types rather than scrolls — the
    options are making the class/rank visible in the row text, or fzf flags, each with a
@@ -214,8 +247,15 @@ notifications and repo browse are dropped.
    pinned above it; the original rationale is quoted in the doc. Nothing was implemented for
    either, deliberately. Repo: devrc.
    forcing: user — both are look-and-feel calls on the operator's own daily tool.
-3. **Verify the eight mutation rows KILL** (see Open investigations for the exact filter syntax
-   and what "apply" vs "kill" means here). Repo: devrc.
+2. **Bring `homelab-talos/containers/clawgate` current on both hosts, or say why not.**
+   `drift-check.sh` exits **rc 17** on workbench AND laptop: the built-source subtree is 3
+   behind `origin/trunk`, so both hosts' `clawgatectl` is built from stale source under
+   whatever version string it prints. 🔴 **Not a blind `pull --ff-only`** — the tree is DIRTY on
+   both hosts (11 paths / 1 path) and the build reads the TREE, so those edits are already in
+   the binary; read them before moving the branch. Fix per host is
+   `git -C ~/workspace/homelab-talos pull --ff-only` then a `home-manager switch`.
+   Closes when `scripts/drift-check.sh` no longer reports rc 17 for that scope on either host.
+   Repo: homelab-talos (+ a switch on each devrc host).
    forcing: none
 
 ## Defects (batched)
@@ -223,21 +263,17 @@ notifications and repo browse are dropped.
   across #1761 AND #1773 while the binary changed completely. Nix rebuilds on source hash so the
   STORE PATH moves, but the version string answers nothing — verify by content with a positive
   control (recipe in How to verify).
-- 🔴 **The eight re-anchored mutation rows are unverified for KILL** — see Open investigations.
-  Merged deliberately with that stated on the PR; the rows were in this state *before* the PR
-  too, so nothing regressed, but nothing is proven either.
-- 🔴 **181+ agent worktrees are registered in this clone**, oldest 2026-08-13, several added
-  today. A stale worktree holds its branch repo-globally. `scripts/worktree-prune` exists; not
-  run — removing that many at once is high blast radius and some belong to other sessions.
+- 🔴 **THIS REPO HAS NO `LICENSE` FILE AND THE DERIVATION CLAIMS MIT.**
+  `nix/pkgs/tools/mention-review/default.nix:146` declares `license = licenses.mit;` with nothing
+  in the tree backing it, and the repo is PUBLIC — which defaults to all-rights-reserved. One of
+  those two statements is false today.
+- 🔴 **181+ agent worktrees are registered in this clone**, oldest 2026-08-13. A stale worktree
+  holds its branch repo-globally. `scripts/worktree-prune` exists; not run — removing that many
+  at once is high blast radius and some belong to other sessions.
 - 🔴 **`scripts/lib/handoff_doc.py`'s pins have only 212 B of headroom** in
   `claude/skills/handoff/SKILL.md` (20,088 of a 20,300 budget). The next addition needs an
   eviction in the SAME commit; the durable fix is moving narrative into
   `claude/skills/handoff/reference/*.md`, which costs 0 until loaded.
-- 🔴 **THIS REPO HAS NO `LICENSE` FILE AND THE DERIVATION CLAIMS MIT.**
-  `nix/pkgs/tools/mention-review/default.nix:146` declares `license = licenses.mit;` with nothing
-  in the tree backing it, and the repo is PUBLIC — which defaults to all-rights-reserved. One of
-  those two statements is false today. Found while evaluating an open-source release; it is a
-  defect regardless of whether that ever happens.
 - **Four scanner limits shipped KNOWN**, documented in `detailrouting_test.go`, reported by an
   audit round and deliberately not fixed: `<ident>.detail(…)` classified as routed rather than
   `c.detail`; the `len(srcs) < 3` floor against an actual 5; `prFragmentSelections`' `(`-skip
@@ -249,12 +285,12 @@ notifications and repo browse are dropped.
   it pins the tier set; does not check `main-green-check.sh`) and `:361` (claims a slug check;
   there is none). ⚠ There were THREE — `internal/ui/words.go:179-184` was CLOSED by Phase 2.
 - `internal/ghapi/ghapi_test.go` and `internal/argv/argv_test.go` are not `gofmt`-clean — one
-  hunk each. **CONFIRMED PRE-EXISTING on `main` at `2b131bf2`** by two independent audit rounds;
-  left alone rather than mixing churn into a diff.
+  hunk each. **CONFIRMED PRE-EXISTING on `main` at `2b131bf2`** by two independent audit rounds.
 - `coldopen_test.go`'s `TestTabCyclesEveryPanelDuringTheSkeleton` seeds `visited` with the
-  starting focus, so `seen[PanelDiff]` proves nothing there. Mutation-tested: its unseeded
-  sibling catches the case with a precise message, so fixing it changes nothing anyone does.
-- Round 0 on homelab#827 left three deletion candidates, all PRE-EXISTING, none blocking.
+  starting focus, so `seen[PanelDiff]` proves nothing there. Its unseeded sibling catches the
+  case, so fixing it changes nothing anyone does.
+- ⚠ **REMOVED from this list: the eight mutation rows.** They are no longer unverified — see the
+  RESOLVED block under Open investigations. 9/9 KILLED(attributed), P1 control KILLED.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **"Local git first (~0ms)" is WRONG on the FIRST read, and that framing came from me.**
@@ -652,25 +688,62 @@ notifications and repo browse are dropped.
   cause. It cleared on its own; re-trigger by merging `main` in (which also gates the merged
   tree) rather than an empty commit.
 
+- 🔴 **A KILLED MUTATION BATTERY STRANDED A LIVE MUTANT FOR THE THIRD TIME — AND WORKTREE
+  ISOLATION IS WHAT MADE IT HARMLESS.** The Bash tool caps a call at **10 minutes and silently
+  CLAMPS a larger `timeout` argument**, so a 2,400 s battery was SIGTERM'd (exit 143) mid-run.
+  `git status` immediately after showed `M scripts/mention-open.py` — a live `emit_click`/
+  `surface` reordering mutant sitting in the tree. **The base clone was CLEAN**, because the
+  battery had been run in a throwaway worktree rather than in place. Restore by explicit path,
+  then verify with an INDEPENDENT `git status`. 🔴 **The general fix is not a bigger `timeout`
+  value — it is `run_in_background`**, which is not subject to the cap. A `finally` still cannot
+  restore a process that is killed; this doc has now recorded that three times.
+- 🔴 **`| tail` ATE A NON-ZERO EXIT CODE AND I PRINTED `DRIFT_RC=0` OVER AN rc 17.** Piping
+  `scripts/drift-check.sh` through `tail -60` returned **tail's** status *and* cut off the
+  per-host block — the very lines this repo's CLAUDE.md says to read instead of the verdict. The
+  rc was recoverable only because the script also PRINTS its verdict in the text. **Redirect a
+  gate/checker to a FILE and read the file; never pipe one.** Same family as the documented
+  `nix build … | tail` trap, in a new tool.
+- 🔴 **A STORED DEPLOY READING IS A HYPOTHESIS ABOUT *NOW*.** This doc's rank 1 asserted a store
+  path and `ReadIntents`=0 as the reason to ship. Both were false by the time anyone read it —
+  a switch had happened in between. The ranked item was still worth doing, but for payload the
+  doc never mentioned. **Re-measure the claim a ranked item rests on before you act on it; a
+  correct action reached through a false premise still teaches the wrong lesson.**
+- **`claim-work` renumbering is only safe against a MEASURED empty claim set.** Ranks 1 and 3
+  closed, so rank 2 became rank 1 — legitimate only because `claim-work --list` showed **no live
+  `mention-review-tui-*` claim** at that moment. The rank is half a claim's identity; re-ranking
+  without that check silently re-points every live claim.
+- **The mutation battery's `--only` takes a COMMA LIST and adds P1 automatically.** Bare
+  positional ids are silently ignored and start a ~90-row sweep. There is **no `--help`** —
+  passing it runs the control, aborts (`baseline is red or collected nothing`) and restores. The
+  banner it prints (`FILTERED RUN … evidence about those rows and nothing else`) is the thing to
+  quote, because it scopes the claim for you.
+
 ## How to verify
 ```bash
-# 🔴 FIRST — is the merged work actually DEPLOYED? `--version` CANNOT answer this.
-#   Follow the WRAPPER; `bin/mention-review` is a makeWrapper SCRIPT and grepping IT
-#   returns 0 on a HEALTHY deploy. POSITIVE CONTROL FIRST, or the zero is about the instrument.
+# 🔴 Is the merged work DEPLOYED? `--version` CANNOT answer this. Follow the WRAPPER;
+#   `bin/mention-review` is a makeWrapper SCRIPT and grepping IT returns 0 on a HEALTHY
+#   deploy. POSITIVE CONTROL FIRST, or the zero is a fact about the instrument.
 B=$(readlink -f "$(command -v mention-review)")
 R=$(grep -oE '/nix/store/[a-z0-9]+-mention-review[^/]*/bin/\.mention-review-wrapped' "$B"|tail -1)
 grep -ac 'usage: mention-review' "$R"   # POSITIVE CONTROL — must be 1
-grep -ac 'ReadIntents' "$R"             # Phase 3 shipped — 0 means NOT DEPLOYED
+grep -ac 'ReadIntents' "$R"             # Phase 3 shipped — expect 2; 0 means NOT DEPLOYED
 
-# The picker's new sort key on main (Tier B BELOW distance):
-git -C ~/workspace/devrc grep -n 'return (klass, distance' origin/main -- scripts/mention-open.py
-git -C ~/workspace/devrc grep -n 'return (klass, -scores' origin/main -- scripts/mention-open.py  # must be EMPTY
+# Host convergence + the rc 17 finding. 🔴 REDIRECT, never pipe — `| tail` eats the status
+#   AND cuts the per-host block, which is the half you are told to read.
+scripts/drift-check.sh > /tmp/drift.txt 2>&1; echo "rc=$?"   # rc 17 = built-source stale
+grep -E '^\[(workbench|laptop)\]' /tmp/drift.txt
 
-# nvim-octo is gone from the BUILD GRAPH, not just the tree (positive control included):
-nix-store -qR $(nix path-info --derivation ~/workspace/devrc#homeConfigurations.zach.activationPackage) \
-  | grep -c mention-review   # positive control, must be >0
-#   ... same pipeline grepping nvim-octo must be 0
+# The eight mutation rows (rank 3's evidence). 🔴 run_in_background — a 10-min tool cap
+#   SIGTERMs this mid-battery and strands a live mutant. Use a throwaway worktree.
+PYTHONDONTWRITEBYTECODE=1 nix develop $DEVRC -c python3 \
+  scripts/tests/mutation_battery_mentions.py --only K48,K49,K50,K54,K66,K67,K82,K92
+#   expect: CONTROL 733 passed · P1 KILLED · 9/9 killed · problems: none · restore: OK
+git status --porcelain   # MUST be empty afterwards — a killed run leaves a live mutant
+
+# The picker's sort key on main (Tier B BELOW distance):
+git -C $DEVRC grep -n 'return (klass, distance' origin/main -- scripts/mention-open.py
+git -C $DEVRC grep -n 'return (klass, -scores' origin/main -- scripts/mention-open.py  # EMPTY
 
 # The Go tier (the leg that gates this code at PR time):
-nix develop ~/workspace/devrc -c bash scripts/run-go-tests.sh .   # TOTAL pass>=386, SCOPE: FULL
+nix develop $DEVRC -c bash scripts/run-go-tests.sh .   # TOTAL pass>=386, SCOPE: FULL
 ```
