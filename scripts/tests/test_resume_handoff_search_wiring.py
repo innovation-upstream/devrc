@@ -556,3 +556,110 @@ def _step4_fence() -> str:
     start = max(i for i in range(idx) if lines[i].strip().startswith("```"))
     end = min(i for i in range(idx, len(lines)) if lines[i].strip() == "```")
     return "\n".join(l.strip() for l in lines[start + 1:end])
+
+
+# --------------------------------------------------------------------------- #
+# THE SEAM: what step 2 PRINTS must be what step 4 can EXCLUDE
+#
+# 🔴 `claude/RULES.md`: "verified in isolation is the new vacuous green — the
+# defect lives in the SEAM nobody owns". `resume-state.sh` produced a value,
+# `handoff_search` consumed one, each side was tested against its own fixtures,
+# and for a nested doc they disagreed: the printer emitted a BASENAME, the
+# consumer needed the path from `claudedocs/` down, and the mismatch rendered as
+# a confident `excluded=<slug>` that filtered nothing. These pin the
+# RELATIONSHIP — printer output -> `exclusion_slug` -> the INDEXER's own slug —
+# rather than either side's shape.
+# --------------------------------------------------------------------------- #
+RESUME_STATE = REPO_ROOT / "scripts" / "resume-state.sh"
+
+
+HANDOFF_REF_FN = "handoff_ref_for_exclusion"
+
+
+def _handoff_ref_fn_source() -> str:
+    """`resume-state.sh`'s OWN definition of the printer, lifted verbatim.
+
+    Sliced out rather than `source`d because sourcing the script runs a whole
+    digest — git, gh, kubectl — against the cwd. The slice is the real source
+    text, so this is not a second implementation; the assertion below is what
+    stops it silently becoming one.
+    """
+    text = RESUME_STATE.read_text(encoding="utf-8")
+    start = text.find(f"\n{HANDOFF_REF_FN}(){{")
+    assert start != -1, (
+        f"{RESUME_STATE} no longer defines `{HANDOFF_REF_FN}` at column 0. That "
+        "function is what puts a slug an archived doc can be excluded BY on the "
+        "digest's `handoff:` line; without it every test below would be testing "
+        "a function this file invented. Rename it here in the SAME commit."
+    )
+    end = text.find("\n}\n", start)
+    assert end != -1, f"unterminated `{HANDOFF_REF_FN}` in {RESUME_STATE}"
+    return text[start + 1 : end + 3]
+
+
+def _printed_handoff_ref(abs_path: str) -> str:
+    """What the digest's `handoff:` line would carry for `abs_path`."""
+    out = subprocess.run(
+        ["bash", "-c", _handoff_ref_fn_source() + f'\n{HANDOFF_REF_FN} "$1"',
+         "_", abs_path],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert out.returncode == 0, out.stderr
+    return out.stdout
+
+
+@pytest.mark.parametrize("doc_path", [
+    "claudedocs/handoff-widget-relay.md",
+    "claudedocs/archive/handoff-widget-relay.md",
+    "claudedocs/archive/2026/handoff-widget-relay.md",
+])
+def test_what_resume_state_prints_excludes_the_doc_the_indexer_indexed(doc_path):
+    """The whole chain, on one doc, with no component trusted to agree by shape.
+
+    RED before the fix for every NESTED case: the printer emitted
+    `handoff-widget-relay.md`, `exclusion_slug` derived `widget-relay`, and the
+    indexer had stored `archive/widget-relay` — so the exclusion named a slug no
+    row carried and `in_scope_docs` never moved. MEASURED on the live corpus the
+    same day: 34 nested slugs, and the prescribed basename left all 449 docs in
+    scope where the qualified path left 448.
+    """
+    hs = _load_search_module()
+    hi = sys.modules["handoff_index"]
+    printed = _printed_handoff_ref(f"/anywhere/some-repo/{doc_path}")
+    assert hs.exclusion_slug(printed) == hi.slug_for(doc_path), (
+        f"step 2 printed {printed!r}; step 4 normalises that to "
+        f"{hs.exclusion_slug(printed)!r}; the index stores {doc_path} as "
+        f"{hi.slug_for(doc_path)!r}. A slug that matches no row excludes "
+        "NOTHING while printing a confident `excluded=` line."
+    )
+
+
+def test_a_flat_doc_still_prints_its_bare_basename():
+    """The other direction — the fix must not have qualified the common case.
+
+    Almost every handoff sits directly under `claudedocs/`, the `handoff:` line
+    is matched literally by the /resume skill and by this module's own
+    `EXPECTED_COMMAND`, and widening it for every doc would have been a change
+    to an interface rather than a fix to a gap.
+    """
+    assert _printed_handoff_ref("/anywhere/some-repo/claudedocs/handoff-x.md") \
+        == "handoff-x.md"
+    # A doc outside any claudedocs/ has no directory the indexer would keep.
+    assert _printed_handoff_ref("/anywhere/some-repo/HANDOFF.md") == "HANDOFF.md"
+
+
+def test_the_harness_can_observe_the_two_halves_disagreeing():
+    """NEGATIVE CONTROL for the seam test above.
+
+    Every assertion here compares two derived strings. If `exclusion_slug` and
+    `slug_for` agreed on everything, or if `_printed_handoff_ref` returned the
+    same thing for every input, the parametrised test would pass for free. This
+    feeds the seam the value the OLD printer emitted for a nested doc and proves
+    the comparison goes red on it.
+    """
+    hs = _load_search_module()
+    hi = sys.modules["handoff_index"]
+    old_printer_output = "handoff-widget-relay.md"          # what basename gave
+    assert hs.exclusion_slug(old_printer_output) != hi.slug_for(
+        "claudedocs/archive/handoff-widget-relay.md"
+    ), "the seam assertion cannot fail; it is proving nothing"

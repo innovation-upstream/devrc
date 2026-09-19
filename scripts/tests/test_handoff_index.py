@@ -644,6 +644,123 @@ class TestSearchControls:
         assert [h.section for h in out.hits] == ["investigation", "gotcha", "goal"]
         assert out.hits[0].rank > out.hits[1].rank > out.hits[2].rank
 
+    # ----------------------------------------------------------------- #
+    # LENGTH DOMINATION — the ranker must not answer on size
+    #
+    # 🔴 Coverage was `len(present)/len(wanted)`: normalised by the QUERY and
+    # by nothing on the ROW, so a bigger row carried more distinct tokens and
+    # won regardless of topicality. MEASURED on the live corpus (6,321
+    # sections, 2026-09-19) over a 22-query replay of /resume step 4: the
+    # un-subdivided `## Gotchas` block — 6% of the index, one row per doc, the
+    # largest row in most documents — took 41 of 66 top-3 slots, 8 of 22
+    # queries returned NOTHING else, and the median returned row was 1,274
+    # distinct tokens against a corpus p50 of 81.
+    #
+    # 🔴 THESE PIN THE RELATIONSHIP, NOT A NUMBER. A literal rank is brittle
+    # and walkable — `LENGTH_PIVOT_TOKENS` is a tunable, and a test asserting
+    # `rank == 0.0625` would forbid tuning it while proving nothing about
+    # ordering. What must hold is that a big off-topic row cannot outrank a
+    # small on-topic one, and that a query of pure grammar is not a query.
+    # ----------------------------------------------------------------- #
+    def test_a_large_offtopic_row_does_not_outrank_a_small_ontopic_one(self):
+        """The defect, as a differential: the big row is the BOOSTED kind too.
+
+        `bloated` is `investigation` (boost 2.0) and carries one of the two
+        query terms; `focused` is a plain `goal` (boost 1.0) and carries both.
+        Under the old ranker the big row won on coverage-times-boost alone
+        (1/2 * 2.0 = 1.0 vs 2/2 * 1.0 = 1.0, then recency/ordering) while
+        being ten pivots long. The assertion is the ORDER, so it survives any
+        retune of the pivot that keeps the mechanism.
+        """
+        filler = " ".join(f"unrelated{i}" for i in range(hi.LENGTH_PIVOT_TOKENS * 10))
+        rows = [
+            hi.Section("r", "big", "p", "2026-01-01", None, "investigation", 0,
+                       "h", f"zarfwidget {filler}"),
+            hi.Section("r", "small", "p", "2026-01-01", None, "goal", 0,
+                       "h", "zarfwidget flurbmeter"),
+        ]
+        out = hs.run_search(hi.MemorySectionStore(rows), "zarfwidget flurbmeter",
+                            backend="memory")
+        assert [h.slug for h in out.hits] == ["small", "big"]
+        assert out.hits[0].rank > out.hits[1].rank
+
+    def test_a_row_at_or_below_the_pivot_is_scored_exactly_as_coverage_times_boost(self):
+        """The normalisation is ONE-SIDED, and that is what keeps the boost.
+
+        A symmetric length term would also REWARD tiny rows, moving every
+        ordinary row's rank and quietly rescaling `SECTION_BOOST` — the thumb
+        on the scale this module says must not move in only one ranker. So an
+        ordinary row's rank must still be exactly `coverage * boost`.
+
+        ⚠ AN INVARIANT GUARD, NOT A REGRESSION TEST — read its red carefully.
+        The BEHAVIOUR it pins (an ordinary row scores `coverage * boost`) was
+        already true of the old ranker, which had no length term at all; it
+        goes red at the previous commit only because it names the new
+        `LENGTH_PIVOT_TOKENS`, i.e. for a missing constant and not for a
+        different answer. So its evidence is the MUTATION, not the matrix:
+        making `_length_discount` symmetric (`1 - B + B*n/pivot`) was watched
+        to turn it red (obtained 1.0204 against 1.0).
+        """
+        body = " ".join(["zarfwidget", *(f"w{i}" for i in
+                                         range(hi.LENGTH_PIVOT_TOKENS - 10))])
+        row = hi.Section("r", "s", "p", "2026-01-01", None, "investigation", 0,
+                         "h", body)
+        out = hs.run_search(hi.MemorySectionStore([row]), "zarfwidget flurbmeter",
+                            backend="memory")
+        assert out.hits[0].rank == pytest.approx(
+            0.5 * hi.SECTION_BOOST["investigation"]
+        )
+
+    def test_the_boost_still_orders_rows_the_discount_cannot_separate(self):
+        """`SECTION_BOOST` must keep the authority the length fix borrowed.
+
+        Three rows, identical text and therefore identical length and
+        coverage, so the discount is the same constant for all three and only
+        the multiplier can order them. This is the sibling of
+        `test_investigation_and_gotcha_outrank_a_plain_section_on_an_equal_match`
+        with the rows pushed WELL ABOVE the pivot, where the discount is
+        actually engaged — a boost that survived only below the pivot would
+        pass that test and fail this one.
+
+        ⚠ AN INVARIANT GUARD, NOT A REGRESSION TEST, and its red at the
+        previous commit is for a missing `LENGTH_PIVOT_TOKENS` rather than for
+        a different ordering — the old ranker ordered these three correctly
+        too. It is the "do not neutralise `SECTION_BOOST` while normalising"
+        requirement made mechanical, so its evidence is the MUTATION: dropping
+        the `* SECTION_BOOST[...]` factor from `search` was watched to turn it
+        red (`['goal', 'gotcha', 'investigation']`).
+        """
+        term = "zarfwidget"
+        filler = " ".join(f"pad{i}" for i in range(hi.LENGTH_PIVOT_TOKENS * 4))
+        body = f"{term} {filler}"
+        rows = [
+            hi.Section("r", "s", "p", "2026-01-01", None, kind, 0, "h", body)
+            for kind in ("goal", "gotcha", "investigation")
+        ]
+        out = hs.run_search(hi.MemorySectionStore(rows), term, backend="memory")
+        assert [h.section for h in out.hits] == ["investigation", "gotcha", "goal"]
+        assert out.hits[0].rank > out.hits[1].rank > out.hits[2].rank
+
+    def test_a_query_of_pure_stopwords_returns_nothing(self):
+        """The control, verbatim from the live measurement.
+
+        MEASURED on the live corpus before the fix: this exact query returned
+        five hits at rank **2.0000** — perfect coverage, top boost, from a
+        query naming no subject, because `_tokens` filtered nothing and every
+        large row contains `the`. A pure-grammar query is not a query.
+        """
+        rows = [
+            hi.Section("r", f"s{i}", "p", "2026-01-01", None, "investigation", 0,
+                       "h", "the quick brown fox is a thing that it does")
+            for i in range(5)
+        ]
+        store = hi.MemorySectionStore(rows)
+        assert store.search("the and of to a is it that") == []
+        # POSITIVE CONTROL: the same store DOES answer a query with a subject,
+        # so the empty list above is the filter working rather than the fixture
+        # being unreachable.
+        assert [h.slug for h in store.search("brown fox")] != []
+
     def test_recency_breaks_a_tie_and_a_dateless_row_sorts_last(self):
         rows = [
             hi.Section("r", "old", "p", "2020-02-02", None, "goal", 0, "h", "flurb"),
@@ -5682,6 +5799,34 @@ class TestExcludingADocumentTheCallerHasAlreadyRead:
         assert out.filtered is True
         assert "in_scope_sections=" in text
         assert out.in_scope.indexed_sections < out.stats.indexed_sections
+
+    def test_the_scope_line_names_the_repos_the_corpus_COVERS_even_with_hits(self):
+        """🔴 THE COVERAGE BOUNDARY IS PART OF AN ANSWER, NOT ONLY OF A ZERO.
+
+        This corpus reaches exactly `REPO_ENV_HANDLES` — four repos. MEASURED
+        over 22 real `/resume` runs, 2 were launched from a repo OUTSIDE that
+        set, where the corpus structurally could not hold the session's own
+        work; `known_repos` already carried the fact and the renderer printed it
+        only on the `unknown-repo` branch, so a run with hits never said what
+        its reach was. RED before the fix: a hit-bearing render named no repo.
+        """
+        out = hs.run_search(self._corpus_with_two_docs(), "quixotry",
+                            backend="memory")
+        assert out.hits, "fixture must produce hits or this proves nothing"
+        text = hs.render(out)
+        for label in out.known_repos:
+            assert f"repos=" in text and label in text.split("repos=", 1)[1], text
+
+    def test_a_corpus_with_no_repos_names_none(self):
+        """NEGATIVE CONTROL for the line above — it must be able to be absent.
+
+        An empty store knows no labels, so the token must not appear. Without
+        this, a `repos=` hardcoded into the scope list would satisfy the test
+        above whatever `known_repos` held.
+        """
+        assert "repos=" not in hs.render(
+            hs.run_search(hi.MemorySectionStore([]), "quixotry", backend="memory")
+        )
 
     def test_an_unfiltered_run_still_prints_no_scope_pair(self):
         """🔴 THE NEGATIVE CONTROL for the assertion above. If `filtered` were

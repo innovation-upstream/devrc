@@ -928,6 +928,35 @@ UNRECONCILED=()  # sources that did NOT answer — an empty DRIFT means less whe
 # loudly, because reconciling against unpushed text is its own trap.
 HANDOFF_TEXT="" HANDOFF_NOTE="" HANDOFF_ALT="" HANDOFF_REF="" HANDOFF_REL=""
 
+# The value the `handoff:` line prints — which is NOT decoration: the /resume
+# skill tells the reader to paste it straight into
+# `handoff_search.py --exclude-slug`, so this string decides whether step 4
+# filters the document the session just read.
+#
+# 🔴 IT IS THE PATH FROM `claudedocs/` DOWN, NOT THE BASENAME, AND THE
+# DIFFERENCE IS A FILTER THAT SILENTLY FILTERS NOTHING. `handoff_index.slug_for`
+# indexes `claudedocs/archive/handoff-x.md` as `archive/x`; a basename
+# `handoff-x.md` normalises to the slug `x`, which matches no row. The run then
+# prints a confident `excluded=x`, leaves `in_scope_docs` equal to
+# `indexed_docs`, exits 0, and hands back the very document the caller was
+# dropping. MEASURED 2026-09-19 as a three-arm control against the live corpus
+# (449 docs): no exclusion -> 449; the prescribed basename of an archived doc ->
+# 449 (a no-op); the `claudedocs/`-qualified path -> 448. `#1627` archived 35
+# docs, so 34 nested slugs are live in the corpus today — the case a docstring
+# in `handoff_search.py` had called "latent" on a measurement taken before that.
+#
+# ⚠ UNCHANGED FOR EVERY DOC DIRECTLY UNDER `claudedocs/`, which is almost all of
+# them: `…/claudedocs/handoff-x.md` still prints `handoff-x.md`. Only a nested
+# doc grows a directory component, exactly as `slug_for` does — and a doc
+# outside any `claudedocs/` still prints its basename, because there is no
+# directory the indexer would have kept.
+handoff_ref_for_exclusion(){ # $1 = absolute handoff path
+  case "$1" in
+    */claudedocs/*) printf '%s' "${1##*/claudedocs/}" ;;
+    *)              printf '%s' "${1##*/}" ;;
+  esac
+}
+
 # --- shared with skill_block: ONE fetch policy, ONE default-branch rule -----
 #
 # 🔴 ONE RULE, ONE PLACE. Two consumers now need "bring origin up to date,
@@ -1410,7 +1439,7 @@ git_pr_block(){
     # the /resume skill match it exactly. Which COPY of that file was read is a
     # separate claim, so it gets its own line rather than being smuggled onto
     # the end of this one.
-    echo "  handoff: $(basename "$HANDOFF")"
+    echo "  handoff: $(handoff_ref_for_exclusion "$HANDOFF")"
     echo "  handoff-read: ${HANDOFF_NOTE:-working-tree copy}"
     [ -n "$HANDOFF_ALT" ] && echo "  handoff-other-copy: $HANDOFF_ALT"
   else
