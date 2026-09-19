@@ -87,7 +87,7 @@ paths that should use `config.home.homeDirectory`; duplicate config (direnv hook
 handlers, PATH entries); commented-out code; anything in the hook path calling
 `tmux rename-window` (auto-rename must stay ON — see `gotchas.md`).
 
-**Completeness** — missing keybindings for installed tools (flameshot, i3lock, rofi);
+**Completeness** — missing keybindings for installed tools (ksnip, i3lock, rofi);
 missing notification daemon or screen lock; missing `focus-events` / `automatic-rename`;
 missing `xss-lock` for suspend/idle protection.
 

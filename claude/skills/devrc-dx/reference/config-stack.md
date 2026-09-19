@@ -27,7 +27,7 @@ the scratch-slot system, the task-management wiring, and who owns which file.
 | i3 resize | hjkl (in mode) | vim-style |
 | i3 launcher | Alt+D | rofi -show drun |
 | i3 lock | Alt+Shift+X | i3lock -c 282828 |
-| i3 screenshot | Print / Alt+Print | flameshot gui / full |
+| i3 screenshot | Print / Alt+Print | ksnip --rectarea / --fullscreen --save |
 | tmux prefix | Ctrl-A | |
 | tmux panes | prefix+hjkl | vim-style |
 | tmux windows | prefix+n/p (repeatable) | 800ms repeat |

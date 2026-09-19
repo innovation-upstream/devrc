@@ -776,6 +776,7 @@ lib.mkIf isNixOS {
   home.packages = with pkgs; [
     nerd-fonts.jetbrains-mono
     ferdium
+    ksnip
     noto-fonts
     noto-fonts-color-emoji
     liberation_ttf
