@@ -3752,9 +3752,16 @@ def test_the_bare_hash_N_picker_SAYS_the_github_row_is_a_guess(monkeypatch):
     several hundred rows are in the list, an unexplained picker is the bug and
     the note is what stops it reading as one.
 
-    ⚠ THE NOTE MUST NAME THE ROW, NOT "THE FIRST ROW". The guess is at row 2
-    here — the clawgate task is above it — and #1380's wording said FIRST
-    unconditionally, which was true only of the `audit-pr` shape."""
+    ⚠ THE NOTE MUST NAME THE ROW, NOT "THE FIRST ROW". #1380's wording said
+    FIRST unconditionally, which was true only of the `audit-pr` shape.
+
+    🔴 RE-PINNED 2026-09-19 FOR THE PROMOTION, AND THE WORDING CHANGED TOO, NOT
+    ONLY THE NUMBER. The guess moved from row 2 to row 3 (the top-ranked
+    universe row is now promoted between the clawgate task and the guess), and
+    the old clause "the N rows below it are every repository this host knows"
+    became FALSE BY ONE ROW — one of them is above. A re-pin that had only
+    bumped the digit would have left a sentence that misdescribes the list, on
+    the shape the operator clicks most."""
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
     monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [])
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
@@ -3764,12 +3771,20 @@ def test_the_bare_hash_N_picker_SAYS_the_github_row_is_a_guess(monkeypatch):
         lambda c, mesg="": seen.update(rows=list(c), mesg=mesg) or "")
     assert MO.main(["#1291"]) == 0
     urls = [c["url"] for c in seen["rows"]]
-    # clawgate, the pane guess, then the three FAKE_UNIVERSE repos.
+    # clawgate, the PROMOTED top-ranked row, the pane guess, then the rest.
     assert len(urls) == 5, urls
     assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", urls
-    assert "wrongorg/wrongrepo" in urls[1], urls
-    assert "Row 2" in seen["mesg"], seen["mesg"]
-    assert "3 rows below it" in seen["mesg"], seen["mesg"]
+    assert "wrongorg/wrongrepo" in urls[2], (
+        f"the guess is at row 3 once the top-ranked row is promoted: {urls}")
+    assert "Row 3" in seen["mesg"], seen["mesg"]
+    # 🔴 THE NOTE MUST ACCOUNT FOR THE ROW *ABOVE* THE GUESS. Two rows remain
+    # below it, and the promoted one is named rather than silently dropped from
+    # the count — a note that says only "2 rows below" would be arithmetically
+    # correct and still tell the operator the guess is the top repository row.
+    assert "row 2 is this host's best-ranked repository" in seen["mesg"], seen["mesg"]
+    assert "the 2 rows below are the rest" in seen["mesg"], seen["mesg"]
+    assert "rows below it are every repository" not in seen["mesg"], (
+        f"the pre-promotion clause survived and is now false: {seen['mesg']}")
     assert "guess" in seen["mesg"].lower(), seen["mesg"]
     assert "nothing here knows" not in seen["mesg"], seen["mesg"]
     _no_universe_token_anywhere(seen["mesg"], "BARE-HASH-N GUESS NOTE")
@@ -4952,13 +4967,22 @@ def test_a_GUESSED_repo_is_offered_WITH_the_whole_universe_beneath_it(monkeypatc
     """🔴 THE REGRESSION FOR THE REPORTED SYMPTOM. Red before this change: the
     picker held exactly ONE row.
 
-    The guess must still be FIRST — it is the most likely answer and stays one
-    Enter away — and everything else must be reachable by typing."""
+    🔴 THE GUESS IS NO LONGER FIRST ON THIS SHAPE, AND THAT IS THE DELIBERATE
+    COST OF THE 2026-09-19 PROMOTION — SAY IT RATHER THAN QUIETLY RE-PIN IT.
+    `audit-pr N` has no clawgate row, so promoting the top-ranked universe row
+    above the pane guess puts it at row 1 and the guess at row 2: a CORRECT
+    guess now costs one arrow key where it used to cost none. The operator took
+    that trade knowing it (proposal §"Symptom 3" option 2) — the pane guess is
+    the weakest rung of the attribution ladder and the module already refuses to
+    auto-open it. What this test still guarantees is that the guess is demoted
+    by exactly ONE row and stays adjacent, never buried in the universe."""
     seen = _guessed_picker(monkeypatch, universe=[UNIVERSE_ONLY, "acme/widget"])
     urls = [c["url"] for c in seen["rows"]]
     assert len(urls) > 1, f"a guess with no alternatives is a dead end: {urls}"
-    assert "wrongorg/wrongrepo" in urls[0], (
-        f"the guess must stay FIRST — one Enter for the common case: {urls[0]}")
+    assert "acme/widget" in urls[0], (
+        f"row 1 must be the TOP-RANKED universe row, promoted: {urls[0]}")
+    assert "wrongorg/wrongrepo" in urls[1], (
+        f"the guess is demoted by exactly ONE row, not buried: {urls}")
     assert any(UNIVERSE_ONLY in u for u in urls), (
         f"the universe never reached the guessed picker: {urls}")
     assert all(u.endswith("/1291") for u in urls), urls
@@ -5067,30 +5091,38 @@ def test_a_bare_hash_N_offers_the_universe_UNDER_the_two_measured_rows(
     assert all(u.endswith("/1291") for u in urls), urls
 
 
-def test_the_bare_hash_N_ORDER_is_clawgate_then_the_guess_then_the_universe(
+def test_the_bare_hash_N_ORDER_is_clawgate_then_the_TOP_RANKED_then_the_guess(
         monkeypatch):
-    """🔴 THE HALF OF THE SUPERSEDED TEST'S CLAIM THAT SURVIVES, PINNED AS AN
-    ORDERING RATHER THAN AS A ROW COUNT.
+    """🔴 THE ORDERING AFTER THE 2026-09-19 PROMOTION, RE-PINNED DELIBERATELY.
 
-    The common case must stay one or two keystrokes: the picker opens on row 1, so the
-    clawgate task is still one Enter and the pane's repo is one arrow key away.
-    Every universe row must sit BELOW both.
+    This test previously asserted `clawgate, guess, universe…` and was RIGHT
+    for that design; the operator changed the design (proposal §"Symptom 3"
+    option 2) after measuring that the two pinned rows took 5 of 73 picks
+    (6.8%) while holding the top two slots. The top-ranked universe row is now
+    promoted ABOVE the pane guess and BELOW the clawgate row.
 
-    ⚠ THE ROW-COUNT FLOOR IS WHAT MAKES THIS A REGRESSION TEST RATHER THAN AN
-    INVARIANT GUARD. Without it the two positional assertions are satisfied by
-    the PRE-CHANGE two-row picker — there is simply nothing at index 2 to be
-    out of order — so it would have been green at base while claiming to pin the
-    ordering the change introduces."""
+    What is still pinned, and why each matters:
+      * the clawgate row KEEPS row 1 — it is evidence about the REFERENCE, and
+        the promotion was explicitly scoped not to displace it;
+      * row 2 is the row the ORDERING put first, not an arbitrary universe row;
+      * the guess is at row 3, i.e. demoted by exactly one, not buried.
+
+    ⚠ THE ROW-COUNT FLOOR STAYS. Without it the positional assertions are
+    satisfiable by a two-row picker that never exercised the promotion at all,
+    which is how this file's predecessor was green at base while claiming to pin
+    an ordering that did not exist yet."""
     seen = _guessed_picker(monkeypatch, text="#1291",
                            universe=[UNIVERSE_ONLY, "acme/widget"])
     urls = [c["url"] for c in seen["rows"]]
     assert len(urls) == 7, urls
     assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", (
-        f"the MEASURED rows must stay on top: {urls}")
-    assert urls[1] == "https://github.com/wrongorg/wrongrepo/pull/1291", (
-        f"the MEASURED rows must stay on top: {urls}")
-    assert not any(UNIVERSE_ONLY in u or "acme/widget" in u for u in urls[:2]), urls
-    assert UNIVERSE_ONLY in "\n".join(urls[2:]), urls
+        f"the clawgate row keeps row 1 — the promotion is scoped BELOW it: {urls}")
+    assert urls[1] == "https://github.com/acme/widget/pull/1291", (
+        f"row 2 must be the TOP-RANKED universe row, promoted: {urls}")
+    assert urls[2] == "https://github.com/wrongorg/wrongrepo/pull/1291", (
+        f"the pane guess is demoted by exactly ONE row, not buried: {urls}")
+    # The rest of the universe stays below the guess.
+    assert UNIVERSE_ONLY in "\n".join(urls[3:]), urls
 
 
 def test_the_bare_hash_N_note_names_the_GUESSED_ROWS_POSITION(monkeypatch):
@@ -5113,11 +5145,18 @@ def test_the_bare_hash_N_note_names_the_GUESSED_ROWS_POSITION(monkeypatch):
     wording."""
     seen = _guessed_picker(monkeypatch, text="#1291",
                            universe=[UNIVERSE_ONLY, "acme/widget"])
+    # 🔴 WHOLE-STRING PIN MOVED DELIBERATELY (2026-09-19, the promotion), and
+    # BOTH halves of it moved — the row number AND the clause. "the 5 rows
+    # below it are every repository this host knows" was true while the guess
+    # was the topmost repository row; the promotion puts one above it, so the
+    # sentence had to name that row rather than have its digit bumped from 5
+    # to 4. A pin that only tracked the number would have gone green over a
+    # sentence telling the operator the guess is the best row on offer.
     assert seen["mesg"] == (
-        "#1291 names no repository. Row 2 is a guess from the tmux pane, which "
-        "may not be the pane you clicked in — the 5 rows below it are every "
-        "repository this host knows. Type to search, or dismiss. · rows "
-        "unordered — no reference-range table on this host yet "
+        "#1291 names no repository. Row 3 is a guess from the tmux pane, which "
+        "may not be the pane you clicked in — row 2 is this host's best-ranked "
+        "repository and the 4 rows below are the rest. Type to search, or "
+        "dismiss. · rows unordered — no reference-range table on this host yet "
         "(scripts/regen-known-repos.py builds one)"), seen["mesg"]
     _no_universe_token_anywhere(seen["mesg"], "BARE-#N GUESS-NOTE DISCLOSURE")
 
@@ -5130,12 +5169,17 @@ def test_the_audit_pr_note_still_names_ROW_1(monkeypatch):
     see that test's note for why moving a whole-string pin was the right move
     here rather than a test edit to get green."""
     seen = _guessed_picker(monkeypatch, universe=[UNIVERSE_ONLY, "acme/widget"])
+    # 🔴 THE `audit-pr` SHAPE LOSES ROW 1 TO THE PROMOTION, AND THAT IS THE
+    # DELIBERATE COST THE OPERATOR ACCEPTED. With no clawgate row above it the
+    # promoted repository takes row 1 and the guess takes row 2 — so a correct
+    # guess costs one arrow key where it used to cost none. Pinned as the whole
+    # string so that trade cannot be reverted, widened or re-worded silently.
     assert seen["mesg"] == (
-        "audit-pr 1291 names no repository. Row 1 is a guess from the tmux "
-        "pane, which may not be the pane you clicked in — the 5 rows below it "
-        "are every repository this host knows. Type to search, or dismiss. · "
-        "rows unordered — no reference-range table on this host yet "
-        "(scripts/regen-known-repos.py builds one)"), seen["mesg"]
+        "audit-pr 1291 names no repository. Row 2 is a guess from the tmux "
+        "pane, which may not be the pane you clicked in — row 1 is this host's "
+        "best-ranked repository and the 4 rows below are the rest. Type to "
+        "search, or dismiss. · rows unordered — no reference-range table on "
+        "this host yet (scripts/regen-known-repos.py builds one)"), seen["mesg"]
 
 
 def test_the_bare_hash_N_guess_is_NEVER_opened_unconfirmed(monkeypatch):
@@ -5206,9 +5250,14 @@ def test_the_DEFAULT_REPO_FLAG_rides_the_same_rung_as_the_pane(monkeypatch):
     assert MO.main(["--default-repo", "wrongorg/wrongrepo", "#1291"]) == 0
     urls = [c["url"] for c in seen["rows"]]
     assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", urls
-    assert urls[1] == "https://github.com/wrongorg/wrongrepo/pull/1291", urls
+    # 🔴 THE FLAG RIDES THE SAME RUNG, SO IT TAKES THE SAME DEMOTION. The
+    # promotion is keyed on `repo_source == default`, which is precisely what
+    # this flag sets — so a guess handed in from outside lands at row 3 exactly
+    # as the pane's does. If these two shapes ever disagree, the predicate has
+    # drifted back to "the pane answered" and the hole this test guards is open.
+    assert urls[2] == "https://github.com/wrongorg/wrongrepo/pull/1291", urls
     assert any(UNIVERSE_ONLY in u for u in urls), urls
-    assert "Row 2" in seen["mesg"], seen["mesg"]
+    assert "Row 3" in seen["mesg"], seen["mesg"]
 
 
 def test_a_bare_hash_N_with_NO_pane_repo_is_UNCHANGED_by_this_widening(
@@ -7951,23 +8000,33 @@ def test_a_PINNED_row_is_NOT_reported_as_one_the_ORDERING_ranked(
     monkeypatch.setattr(MO, "open_url", lambda u: 0)
     _ranges_on_disk(monkeypatch, tmp_path,
                     {v: 9000 for v in FAKE_UNIVERSE.values()})
-    # A bare `#N` the pane attributes: row 0 is the clawgate task and row 1 is
-    # the PINNED pane repo; the ordered universe starts at row 2.
+    # 🔴 A bare `#N` the pane attributes, AFTER THE 2026-09-19 PROMOTION: row 0
+    # is the clawgate task, row 1 is the PROMOTED top-ranked universe row, and
+    # row 2 is the PINNED pane repo. The pinned row and an ordered row are now
+    # ADJACENT, which is exactly what makes this test sharp: a threshold test
+    # (`rank >= pinned_above`) reports BOTH with their flags inverted, and only
+    # a structural one gets them right.
     monkeypatch.setattr(MO, "pick", lambda c, mesg="":
                         MO.set_pick_reason(MO.PICK_REASON_SELECTED)
-                        or c[1]["url"])
+                        or c[2]["url"])
     assert MO.main(["#1291"]) == 0
 
     payload = _click_events(spool)[0]["payload"]
-    assert payload["rank"] == 1, (
-        f"this test is about the row at position 1; the fixture moved: {payload}")
+    assert payload["rank"] == 2, (
+        f"this test is about the PINNED pane repo, now at position 2; the "
+        f"fixture moved: {payload}")
     assert payload["repo"] == PANE_GUESS, payload
     assert payload["ordered"] is False, (
         f"the PANE-GUESSED repo is pinned above the ordered block and was never "
         f"placed by `order_universe`, but the row claims it was: {payload}")
     assert payload["pinned_above"] == 2, (
-        f"two measured rows (clawgate + the pane guess) sit above the ordered "
-        f"block: {payload}")
+        f"two rows were never ranked (clawgate + the pane guess): {payload}")
+    # 🔴 THE INVERSION GUARD. The pinned row now sits at `rank == pinned_above`,
+    # which the OLD threshold test (`rank >= pinned_above`) classified as
+    # ORDERED. That is the shape this assertion goes red on.
+    assert payload["rank"] >= payload["pinned_above"], (
+        f"fixture sanity: the pinned row must sit AT or BELOW the never-ranked "
+        f"count for the inversion to be reachable at all: {payload}")
     assert "plausibility" not in payload, (
         f"a class was reported for a row the ordering never ranked — that is "
         f"the conflation this test exists for: {payload}")
@@ -7976,15 +8035,27 @@ def test_a_PINNED_row_is_NOT_reported_as_one_the_ORDERING_ranked(
     # come back `ordered=True` WITH a class. Without this the assertions above
     # are satisfied by a mutant that hardcodes `ordered=False` and drops
     # `plausibility` entirely.
+    #
+    # Row 1 is the PROMOTED row: genuinely ordered, and sitting ABOVE the
+    # never-ranked count — the mirror image of the row just checked, and the
+    # other half the old threshold test got backwards.
     monkeypatch.setattr(MO, "pick", lambda c, mesg="":
                         MO.set_pick_reason(MO.PICK_REASON_SELECTED)
-                        or c[2]["url"])
+                        or c[1]["url"])
     assert MO.main(["#1291"]) == 0
     ordered_payload = _click_events(spool)[1]["payload"]
-    assert ordered_payload["rank"] == 2, ordered_payload
+    assert ordered_payload["rank"] == 1, ordered_payload
     assert ordered_payload["ordered"] is True, (
         f"a row from the ordered block was reported as pinned: {ordered_payload}")
     assert ordered_payload["pinned_above"] == 2, ordered_payload
+    # 🔴 THE OTHER HALF OF THE INVERSION, AND THE SHARPEST ASSERTION HERE: this
+    # row is ORDERED while sitting ABOVE the never-ranked count. The old
+    # threshold test (`rank >= pinned_above`) computes 1 >= 2 = False and calls
+    # this genuinely-ranked row pinned. Only membership in the set the ordering
+    # returned answers correctly.
+    assert ordered_payload["rank"] < ordered_payload["pinned_above"], (
+        f"fixture sanity: the PROMOTED row must sit above the never-ranked "
+        f"count, or the inversion this guards is unreachable: {ordered_payload}")
     assert ordered_payload["plausibility"] == "plausible", ordered_payload
     # ...and the two rows are genuinely different repos, so neither assertion
     # above can be satisfied by the other click's row.
@@ -9043,16 +9114,27 @@ def test_a_STUBBED_picker_OMITS_queried_rather_than_claiming_the_operator_scroll
 # suite green, which is exactly the operator's third complaint.
 # --------------------------------------------------------------------------- #
 _PINNED_SHAPES = [
-    # (shape, pane repo, rows pinned above the ordered block, what they are)
-    ("a bare `#N` nothing attributes", "", 1, ("clawgate",)),
+    # (shape, pane repo, rows NEVER RANKED, their kinds, index of the FIRST
+    #  ordered row)
+    #
+    # 🔴 THE LAST TWO COLUMNS CAME APART ON 2026-09-19 AND THAT IS THE POINT.
+    # Before the promotion the never-ranked rows were a PREFIX, so the count of
+    # them WAS the index of the first ordered row and one number did both jobs.
+    # Promoting the top-ranked row above the pane guess interleaves them —
+    # `[clawgate, ordered, guess, ordered…]` — so the count is still 2 while the
+    # first ordered row is at index 1. Collapsing these back into one column is
+    # how this guard would silently stop describing the list.
+    ("a bare `#N` nothing attributes", "", 1, ("clawgate",), 1),
     ("a bare `#N` the tmux pane attributes", PANE_GUESS, 2,
-     ("clawgate", "github")),
+     ("clawgate", "github"), 1),
 ]
 
 
-@pytest.mark.parametrize("shape,pane,expect_pinned,kinds", _PINNED_SHAPES)
+@pytest.mark.parametrize("shape,pane,expect_pinned,kinds,first_ordered",
+                         _PINNED_SHAPES)
 def test_the_rows_ABOVE_the_ordered_block_are_pinned_BY_KIND_and_COUNTED(
-        shape, pane, expect_pinned, kinds, monkeypatch, tmp_path, spool):
+        shape, pane, expect_pinned, kinds, first_ordered, monkeypatch,
+        tmp_path, spool):
     """🔴 THE TOP OF THE LIST IS NOT THE TOP OF THE RANKING, AND THIS IS THE
     LEDGER OF BY HOW MUCH. On both ambiguous shapes the operator actually
     clicks, the ordered block starts at row 1 or row 2 — so `rank=0` is
@@ -9079,7 +9161,7 @@ def test_the_rows_ABOVE_the_ordered_block_are_pinned_BY_KIND_and_COUNTED(
     def _capture(c, mesg=""):
         seen["platforms"] = [x["platform"] for x in c]
         MO.set_pick_reason(MO.PICK_REASON_SELECTED)
-        return c[expect_pinned]["url"]        # the FIRST ordered row
+        return c[first_ordered]["url"]        # the FIRST ordered row
 
     monkeypatch.setattr(MO, "pick", _capture)
     assert MO.main(["#1291"]) == 0
@@ -9091,13 +9173,23 @@ def test_the_rows_ABOVE_the_ordered_block_are_pinned_BY_KIND_and_COUNTED(
     assert payload["pinned_above"] == expect_pinned, (
         f"{shape}: {payload['pinned_above']} rows reported above the ordered "
         f"block, measured {expect_pinned}")
-    assert payload["rank"] == expect_pinned, (
+    assert payload["rank"] == first_ordered, (
         f"{shape}: the FIRST ordered row is at absolute row "
-        f"{payload['rank']}, not {expect_pinned} — the fixture moved")
+        f"{payload['rank']}, not {first_ordered} — the fixture moved")
     assert payload["ordered"] is True, payload
     # 🔴 AND THE WHOLE POINT: within the block it is row 0, while its ABSOLUTE
     # row is not. A consumer that reads `rank` alone measures the pinning.
-    assert payload["rank"] - payload["pinned_above"] == 0, payload
+    #
+    # 🔴 THE SUBTRACTION IS NO LONGER THE WAY TO SAY THAT. For a PROMOTED row
+    # `rank < pinned_above` and the difference is NEGATIVE — see `click_dims`'
+    # `ordered` paragraph. Both shapes must still report within-block row 0, so
+    # assert THAT, with the promoted case spelled out rather than folded away.
+    if payload["rank"] < payload["pinned_above"]:
+        assert payload["ordered"] is True, (
+            f"{shape}: only a PROMOTED row may sit above the never-ranked "
+            f"count, and it must still report ordered: {payload}")
+    else:
+        assert payload["rank"] - payload["pinned_above"] == 0, payload
     assert payload["rank"] != 0, (
         f"{shape}: the first ORDERED row is at absolute row 0, so this shape "
         f"pins nothing and the parametrisation is wrong")
@@ -9114,13 +9206,31 @@ def test_the_WITHIN_block_rank_is_DERIVABLE_from_the_emitted_dims():
 
     What it buys: if `rank` ever stops being the ABSOLUTE row index — the one
     change that would silently break every consumer's subtraction — this says
-    so, and the ledger stops claiming a derivation that no longer holds."""
+    so, and the ledger stops claiming a derivation that no longer holds.
+
+    🔴 THE DERIVATION NOW HAS EXACTLY ONE EXCEPTION AND THIS PINS IT TOO. The
+    `guessed_offer` arm promotes the top-ranked universe row above the pane
+    guess, so that ONE row is `ordered` with `rank < pinned_above` and the
+    subtraction goes NEGATIVE; its within-block position is 0 by construction.
+    That shape is still derivable from the three emitted dims — no row that was
+    never ordered can satisfy it — which is why the answer to `ordered_rank` is
+    still no. A docstring claiming an unconditional derivation would be a
+    comment the implementation contradicts."""
     assert {"rank", "pinned_above", "ordered"} <= set(MO.CLICK_DIM_FIELDS)
     assert "ordered_rank" not in MO.CLICK_DIM_FIELDS, (
         "a derived field was added beside the two it is derived from — pick "
         "one source of truth")
     dims = MO.click_dims(rank=7, pinned_above=2, ordered=True)
     assert dims["rank"] - dims["pinned_above"] == 5, dims
+
+    # The promoted row: ordered, but ABOVE the pinned count.
+    promoted = MO.click_dims(rank=1, pinned_above=2, ordered=True)
+    assert promoted["rank"] < promoted["pinned_above"], promoted
+    assert promoted["ordered"] is True, promoted
+    # A row that was never ordered can NEVER present this shape, which is what
+    # makes the promoted row identifiable without a fourth field.
+    pinned = MO.click_dims(rank=1, pinned_above=2, ordered=False)
+    assert pinned["ordered"] is False, pinned
 
 
 # --------------------------------------------------------------------------- #
@@ -9495,3 +9605,111 @@ def test_main_OFFERS_the_nearest_head_FIRST_even_when_the_pick_log_disagrees(
         f"the FIRST ordered row is {seen['repos'][1]!r}; the repository whose "
         f"head is nearest #1291 must lead, even though the operator has picked "
         f"the other one four times: {seen['repos']}")
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE PROMOTION'S TWO SEAMS — both named in comments in `mention-open.py`,
+# so both have to exist or those comments are claims about guards that are not
+# there.
+# --------------------------------------------------------------------------- #
+def test_every_arm_that_sets_pinned_above_also_sets_ordered_urls():
+    """🔴 A RELATIONSHIP, NOT A COMPONENT — and the failure it catches is
+    SILENT. `picked_ordered` stopped being `rank >= pinned_above` (a threshold)
+    and became membership of `ordered_urls` (a set) when the promotion made the
+    ordered rows non-contiguous. Three arms of `main()` append universe rows and
+    each must now set BOTH: an arm that sets `pinned_above` and forgets
+    `ordered_urls` reports every genuinely-ordered row it produced as
+    `ordered=False`, and nothing else in the suite would notice — the rows are
+    in the right order on screen, the counts are right, and only the dim that
+    says *which population this row came from* is wrong.
+
+    Asserted structurally so a FOURTH arm added later is covered for free; a
+    behavioural test can only ever cover the arms someone remembered to drive.
+
+    ⚠ ANTI-DEGENERATE FLOOR. A scanner that finds nothing passes vacuously and
+    reads like coverage, so this fails if it cannot see all three known arms —
+    the failure mode of a parse that silently stopped matching."""
+    tree = ast.parse(HANDLER.read_text())
+
+    def _assigned_names(body):
+        out = set()
+        for node in body:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Assign):
+                    for t in sub.targets:
+                        if isinstance(t, ast.Name):
+                            out.add(t.id)
+                elif isinstance(sub, ast.AugAssign) and isinstance(sub.target, ast.Name):
+                    out.add(sub.target.id)
+        return out
+
+    # Every statement-suite that assigns `pinned_above` directly (not via a
+    # nested block, which `_assigned_names` would also see).
+    suites = []
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            body = getattr(node, field, None)
+            if not isinstance(body, list):
+                continue
+            direct = set()
+            for stmt in body:
+                if isinstance(stmt, ast.Assign):
+                    for t in stmt.targets:
+                        if isinstance(t, ast.Name):
+                            direct.add(t.id)
+            if "pinned_above" in direct:
+                suites.append(body)
+
+    # The DECLARATION (`pinned_above: int | None = None`) is an AnnAssign and is
+    # deliberately not counted — it is not an arm.
+    assert len(suites) >= 3, (
+        f"the scanner found {len(suites)} arm(s) assigning `pinned_above`, "
+        f"expected at least the 3 known ones (dead end 1, dead end 2, the "
+        f"guessed offer) — a floor this low failing means the parse stopped "
+        f"matching, not that an arm was removed")
+
+    missing = [i for i, body in enumerate(suites)
+               if "ordered_urls" not in _assigned_names(body)]
+    assert not missing, (
+        f"{len(missing)} arm(s) set `pinned_above` without setting "
+        f"`ordered_urls`; every row those arms ordered will report "
+        f"`ordered=False`. Arms (by scan order): {missing}")
+
+
+def test_a_guessed_picker_with_ONE_universe_row_still_EXPLAINS(monkeypatch):
+    """🔴 THE REGRESSION THE PROMOTION ALMOST SHIPPED. `below` is the count of
+    searchable rows UNDER the guess, and the promotion moves one row out from
+    under it — so a host whose universe dedupes to exactly ONE row lands on
+    `below == 0` with a three-row picker. The note is chosen by
+    `below or promoted or len(candidates) == 1`; drop the middle clause and the
+    explanation for why the guess was not auto-opened VANISHES on precisely the
+    shape that most needs it — the operator sees an unexplained picker, which
+    this module's own docstring calls "the bug".
+
+    ⚠ IT DOES NOT COME BACK EMPTY, AND THE FIRST DRAFT OF THIS DOCSTRING SAID
+    IT DID. Measured by deleting the clause: the note falls through to
+    `universe_note` and reads "nothing here knows #1291" — which is FALSE here
+    (row 2 is a ranked recommendation and row 3 is the pane's own guess) and,
+    worse, is non-empty, so a bare `assert seen["mesg"]` passes straight over
+    it. That is why the assertions below pin WHICH note was chosen rather than
+    merely that one exists."""
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: ["acme/widget"])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
+    seen = {}
+    monkeypatch.setattr(
+        MO, "pick",
+        lambda c, mesg="": seen.update(rows=list(c), mesg=mesg) or "")
+    assert MO.main(["#1291"]) == 0
+    urls = [c["url"] for c in seen["rows"]]
+    assert "acme/widget" in urls[1], (
+        f"the single universe row must be PROMOTED above the guess: {urls}")
+    assert "wrongorg/wrongrepo" in urls[2], urls
+    assert seen["mesg"], (
+        "a guessed picker with a promoted row above it explained NOTHING — "
+        "the `or promoted` clause is gone and `below` is 0 here")
+    assert "nothing here knows" not in seen["mesg"], (
+        f"the GUESSED note was replaced by the universe note, which claims "
+        f"nothing is known while offering a ranked row and the pane's own "
+        f"guess: {seen['mesg']}")
+    assert "Row 3" in seen["mesg"], seen["mesg"]
+    assert "the only one it knows" in seen["mesg"], seen["mesg"]
