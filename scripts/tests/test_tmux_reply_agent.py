@@ -68,6 +68,7 @@ import tempfile
 _TMUX_EXE_AT_IMPORT = __import__("shutil").which("tmux")
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -92,6 +93,134 @@ from testlib import nix_units  # noqa: E402
 # did not travel. Pairwise distinct from every other literal in this file, so a
 # match cannot come from somewhere else.
 MARKER = "ZZ-SYNTHETIC-REPLY-MARKER-4471-ZZ"
+
+
+# --------------------------------------------------------------------------- #
+# The pane states that DECIDE how a reply must be delivered.
+# --------------------------------------------------------------------------- #
+# 🔴 EVERY SHAPE THAT CHANGES THE ANSWER IS EXPRESSIBLE HERE, and that is the
+# point rather than thoroughness for its own sake. A fake that could only build
+# ONE pane state would run every guard below in the one configuration where the
+# defect cannot appear: the whole bug is that a MENU needs different keys from a
+# PROMPT, so a fixture that cannot render a menu can only ever prove the prompt
+# path. The eight states are the two that must deliver (a shell prompt, a Claude
+# text prompt), the one that must deliver DIFFERENTLY (a single-question menu),
+# the two that must be REFUSED (a multi-question tab strip, a multiSelect list),
+# and the three that decide which branch of the menu path runs (no row matches,
+# the rows are in a different order from the ones clawgate sent, the pane cannot
+# be read at all — that last one via `tmux_stub.fail_capture`).
+#
+# ⚠ SYNTHETIC, and they have to be: this repo is PUBLIC and a capture of the
+# operator's real pane is captured text. These reproduce the SHAPE recorded in
+# the live measurement (Claude Code 2.1.232) — the `❯` cursor, the numbered rows,
+# the `☐` question marker, the tab strip, the `[ ]` checkboxes — with invented
+# questions and options.
+DEFAULT_PROMPT_CAPTURE = (
+    "devrc git:(main) $ ls\n"
+    "flake.nix  nix  scripts\n"
+    "devrc git:(main) $ \n"
+)
+
+CLAUDE_TEXT_PROMPT_CAPTURE = (
+    "● I have read the two files and the change is ready.\n"
+    "\n"
+    "╭──────────────────────────────────────────────────────────────╮\n"
+    "│ >                                                            │\n"
+    "╰──────────────────────────────────────────────────────────────╯\n"
+    "  ? for shortcuts\n"
+)
+
+#: One question, four rows. The measured single-question render: a `☐` marker,
+#: NO tab arrows and NO Submit tab, cursor on row 1.
+SINGLE_MENU_CAPTURE = (
+    "● Which store should the queue use?\n"
+    "\n"
+    "  ☐ Store\n"
+    "\n"
+    "  ❯ 1. Ledger\n"
+    "    2. Flatfile\n"
+    "    3. Type something.\n"
+    "    4. Chat about this\n"
+    "\n"
+    "  ↑↓ to select · enter to confirm\n"
+)
+
+#: The SAME four options in a DIFFERENT order. A digit derived from the order
+#: clawgate sent — rather than from the order the pane shows — answers the wrong
+#: row here and nowhere else.
+REORDERED_MENU_CAPTURE = SINGLE_MENU_CAPTURE.replace(
+    "  ❯ 1. Ledger\n    2. Flatfile\n",
+    "  ❯ 1. Flatfile\n    2. Ledger\n")
+
+#: The free-text row after its digit FOCUSED it: the cursor has moved to it and
+#: the hint has grown the Nvim affordance.
+SINGLE_MENU_FREE_TEXT_FOCUSED_CAPTURE = (
+    "● Which store should the queue use?\n"
+    "\n"
+    "  ☐ Store\n"
+    "\n"
+    "    1. Ledger\n"
+    "    2. Flatfile\n"
+    "  ❯ 3. Type something.\n"
+    "    4. Chat about this\n"
+    "\n"
+    "  enter to confirm · ctrl+g to edit in Nvim\n"
+)
+
+#: What the pane shows once the ask has been ANSWERED and the tool has returned.
+ANSWERED_CAPTURE = (
+    "● User answered Claude's questions:\n"
+    "  ⎿  · Which store should the queue use? → Flatfile\n"
+    "\n"
+    "● Wiring the flatfile store now.\n"
+)
+
+#: The measured MULTI-question render: a tab strip with arrows and a Submit tab.
+MULTI_QUESTION_MENU_CAPTURE = (
+    "● Two things before I start.\n"
+    "\n"
+    "  ←  ☐ Store  ☐ Region  ✔ Submit  →\n"
+    "\n"
+    "  ❯ 1. Ledger\n"
+    "    2. Flatfile\n"
+    "    3. Type something.\n"
+    "    4. Chat about this\n"
+)
+
+#: Its end screen, reached after every question has an answer.
+MULTI_QUESTION_REVIEW_CAPTURE = (
+    "● Review your answers\n"
+    "\n"
+    "  Store: Flatfile ✔\n"
+    "  Region: 1. Frankfurt ✔\n"
+    "\n"
+    "  ❯ 1. Submit answers\n"
+    "    2. Cancel\n"
+)
+
+#: The measured multiSelect render: `[ ]` checkboxes, and a completing `Submit`
+#: row that is UNNUMBERED and reachable only by arrow keys.
+MULTI_SELECT_MENU_CAPTURE = (
+    "● Which stores should be enabled?\n"
+    "\n"
+    "  ☐ Stores\n"
+    "\n"
+    "  ❯ [ ] 1. Ledger\n"
+    "    [ ] 2. Flatfile\n"
+    "    [ ] 3. Archive\n"
+    "\n"
+    "      Submit\n"
+)
+
+#: A numbered, cursored menu with NO free-text row — so a reply that matches no
+#: row has nowhere to go. Not an AskUserQuestion ask; the agent must refuse it
+#: rather than guess which shape it is looking at.
+UNKNOWN_MENU_CAPTURE = (
+    "  ☐ Proceed?\n"
+    "\n"
+    "  ❯ 1. Ledger\n"
+    "    2. Flatfile\n"
+)
 
 
 def load_agent():
@@ -272,9 +401,44 @@ def tmux_stub(tmp_path):
     landed_session.write_text("")
     landed_path = tmp_path / "tmux-landed-path"
     landed_path.write_text("")
+    # 🔴 A STUB THAT CAN SHOW THE AGENT A DIFFERENT PANE EACH TIME IT LOOKS. The
+    # agent reads the pane BEFORE typing (is this an AskUserQuestion menu, where
+    # typed characters are discarded?) and reads it AGAIN afterwards to check the
+    # menu actually moved. A stub with ONE fixed capture cannot express either the
+    # advance or its absence, so `delivered` would be unpinned and a mutant that
+    # skipped the read-back entirely would survive — which is the prior-defect
+    # shape `landed_session`/`landed_path` above already record.
+    captures = tmp_path / "tmux-captures"
+    capture_n = tmp_path / "tmux-capture-n"
+    capture_rc = tmp_path / "tmux-capture-rc"
+    capture_err = tmp_path / "tmux-capture-err"
+    capture_n.write_text("0")
+    capture_rc.write_text("0")
+    capture_err.write_text("")
+    # The default is an ORDINARY SHELL PROMPT, so every test that predates the
+    # menu path exercises the unchanged text delivery rather than an empty screen.
+    captures.write_text(DEFAULT_PROMPT_CAPTURE, encoding="utf-8")
 
     path = tmp_path / "bin" / "tmux"
     path.parent.mkdir(exist_ok=True)
+    # Python rather than sh, because the records are separated by a sentinel LINE
+    # and the counter has to advance on every call — `sed`/`awk` in the stub body
+    # would put a second quoting layer between the fixture and the bytes the agent
+    # reads, which is the distinction `write_exec`'s own comment is about.
+    capture_helper = tmp_path / "bin" / "capture-pane-stub.py"
+    capture_helper.write_text(
+        "import sys\n"
+        "SEP = '\\n@@NEXT-CAPTURE@@\\n'\n"
+        "recs = open(sys.argv[1], encoding='utf-8').read().split(SEP)\n"
+        "try:\n"
+        "    n = int(open(sys.argv[2], encoding='utf-8').read().strip() or '0')\n"
+        "except ValueError:\n"
+        "    n = 0\n"
+        "open(sys.argv[2], 'w', encoding='utf-8').write(str(n + 1))\n"
+        # The LAST record repeats for ever: a test that wants "the menu never
+        # moves" supplies one record, and one that wants an advance supplies two.
+        "sys.stdout.write(recs[min(n, len(recs) - 1)])\n",
+        encoding="utf-8")
     # POSIX-sh body, no shebang — write_exec owns that. Python does the JSON
     # quoting so an argument containing quotes, backslashes or newlines is
     # recorded faithfully rather than through a shell's idea of escaping.
@@ -289,6 +453,15 @@ def tmux_stub(tmp_path):
         # DISCRIMINATE ON THE FORMAT ARGUMENT FIRST — otherwise the re-read is
         # handed a server id (`1234:5678`) as its directory and the run refuses
         # with the misleading "tmux fell back" message.
+        # 🔴 BEFORE the display-message branch, and discriminating on the VERB.
+        # `capture-pane` is a READ — it types nothing — and it is the one the
+        # branch below would otherwise swallow by matching too early.
+        f'''if [ "$1" = "capture-pane" ]; then\n'''
+        f'''  crc="$(cat {capture_rc})"\n'''
+        f'''  if [ "$crc" != "0" ]; then cat {capture_err} >&2; exit "$crc"; fi\n'''
+        f'''  python3 {capture_helper} {captures} {capture_n}\n'''
+        f'''  exit 0\n'''
+        f'''fi\n'''
         f'''if [ "$1" = "display-message" ]; then cat {server_id}; exit 0; fi\n'''
         # 🔴 THE STUB NOW ECHOES WHAT THE AGENT READS BACK. The agent verifies the
         # session and working directory tmux ACTUALLY chose, so a stub printing a
@@ -345,6 +518,21 @@ def tmux_stub(tmp_path):
         @staticmethod
         def new_pane_id():
             return new_window_out.read_text().strip()
+
+        @staticmethod
+        def set_captures(*records):
+            """What successive `capture-pane` calls will show, last one repeating."""
+            captures.write_text("\n@@NEXT-CAPTURE@@\n".join(records), encoding="utf-8")
+            capture_n.write_text("0")
+
+        @staticmethod
+        def fail_capture(rc=1, stderr="can't find pane: %12"):
+            capture_rc.write_text(str(rc))
+            capture_err.write_text(stderr)
+
+        @staticmethod
+        def capture_calls():
+            return [c for c in Stub.calls() if c and c[0] == "capture-pane"]
 
         @staticmethod
         def reset():
@@ -409,6 +597,12 @@ def run_agent(server, tmux_stub, tmp_path, *, env_extra=None, conf_text=None,
     env["TMUX_REPLY_TMUX_BIN"] = str(tmux_stub.binary)
     env["TMUX_REPLY_POLL_SECONDS"] = "0.05"
     env["TMUX_REPLY_BACKOFF_SECONDS"] = "0.05"
+    # The menu read-back waits for a TUI redraw. Against a stub there is nothing
+    # to wait for, so the wait is shortened rather than removed: an attempt count
+    # of 1 would make "the menu never moved" indistinguishable from "we only
+    # looked once", which is the fact the failure path reports on.
+    env["TMUX_REPLY_MENU_SETTLE_SECONDS"] = "0.01"
+    env["TMUX_REPLY_MENU_VERIFY_ATTEMPTS"] = "3"
     env["ACTIVITY_HOST"] = "workbench"
     env.update(env_extra or {})
 
@@ -2777,3 +2971,532 @@ def test_the_reported_reason_bound_matches_the_TAILERS_OWN_set():
     assert AGENT.skip_memo_key({r: 1 for r in declared}) == frozenset(WANT_REPORTABLE), (
         "the memo key does not admit exactly the tailer's reportable reasons, so the bound "
         "the docstring describes is not the one the code enforces")
+
+
+# --------------------------------------------------------------------------- #
+# 16. THE ASKUSERQUESTION MENU — every option the operator tapped delivered
+#     OPTION 1, and the card said `Delivered`.
+# --------------------------------------------------------------------------- #
+#
+# 🔴 THE DEFECT, MEASURED LIVE (Claude Code 2.1.232). A menu DISCARDS typed
+# characters — no filter, no selection, the cursor unmoved — so
+#
+#     tmux send-keys -t %176 -l -- 'SQLite'
+#     tmux send-keys -t %176 Enter
+#
+# typed nothing and then selected whatever row was HIGHLIGHTED, which on a fresh
+# render is option 1. The pair is CORRECT against a text prompt, which is why it
+# survived: every stubbed test in this file described a pane that does not exist
+# in the failing case, because the stub had no pane content at all.
+#
+# So the load-bearing test here is `test_tapping_the_SECOND_option_delivers_the_
+# SECOND_option`: it is red at the pre-change code, with the agent sending the
+# label and an Enter, and green at HEAD with the row's DIGIT. Every refusal below
+# is a claim about that same instrument.
+
+
+def test_tapping_the_SECOND_option_delivers_the_SECOND_option(server, tmux_stub, tmp_path):
+    """🔴 THE REGRESSION TEST FOR THE WRONG-ANSWER BUG, AND THE DELIVERABLE.
+
+    Red at the pre-change code — which sends `-l -- 'Flatfile'` and an `Enter`,
+    i.e. nothing typed and row 1 selected — and green here, where the agent reads
+    the pane, finds the label on row 2, and presses `2`.
+
+    🔴 IT ASSERTS THE WHOLE argv LIST, not merely that a `2` appears somewhere.
+    The old pair still "contains" the right answer in the sense that the label is
+    in it; what makes the delivery correct is that the label is NOT typed and the
+    Enter is NOT pressed, so the absence is as load-bearing as the presence.
+    """
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE, ANSWERED_CAPTURE)
+    server.claim_batches = [[write(text="Flatfile")]]
+    rc, out = run_agent(server, tmux_stub, tmp_path)
+
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "2"]], (
+        "the agent did not answer the menu by its row's DIGIT. Typing into an "
+        "AskUserQuestion menu is discarded and the Enter selects whatever row is "
+        f"highlighted — option 1 — whatever the operator tapped.\n{out}")
+
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "delivered", body
+    assert "2" in body["detail"], body
+
+
+def test_tapping_the_FIRST_option_uses_its_own_digit_not_a_constant(server, tmux_stub, tmp_path):
+    """The pair to the test above, and it is not redundant with it.
+
+    A mutant that hardcodes `"1"` delivers the right answer for option 1 and the
+    wrong one for every other option; a mutant that hardcodes `"2"` does the
+    reverse. Only both tests together pin the digit to the row.
+    """
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE, ANSWERED_CAPTURE)
+    server.claim_batches = [[write(text="Ledger")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "1"]], tmux_stub.send_keys_calls()
+
+
+def test_a_REORDERED_menu_is_answered_by_the_row_the_PANE_shows(server, tmux_stub, tmp_path):
+    """🔴 THE DIGIT COMES OFF THE PANE, NEVER OFF THE ORDER CLAWGATE SENT.
+
+    clawgate renders its own option list and carries the index as
+    `data-reply-option` — a render-time data attribute the write route never
+    reads — so the only thing on the wire is the LABEL. A screen whose rows are
+    in a different order is exactly the case clawgate's own comment refuses to
+    send an index for, and it is the one where an index taken from anywhere but
+    this pane answers the wrong question.
+
+    Same two options as the test above, swapped: `Ledger` is now row 2.
+    """
+    tmux_stub.set_captures(REORDERED_MENU_CAPTURE, ANSWERED_CAPTURE)
+    server.claim_batches = [[write(text="Ledger")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "2"]], (
+        "the agent pressed the digit the option had in clawgate's list rather than the "
+        "one the pane is showing")
+
+
+def test_the_pane_is_READ_before_anything_is_typed(server, tmux_stub, tmp_path):
+    """A read that happens AFTER the keys is not a guard.
+
+    The positive control for the whole section: the capture must actually be
+    made, against the write's own pane, with the arguments real tmux accepts.
+    """
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE, ANSWERED_CAPTURE)
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+
+    calls = tmux_stub.calls()
+    caps = [i for i, c in enumerate(calls) if c and c[0] == "capture-pane"]
+    sends = [i for i, c in enumerate(calls) if c and c[0] == "send-keys"]
+    assert caps, f"the agent never read the pane: {calls}"
+    assert sends, f"the agent never sent anything: {calls}"
+    assert caps[0] < sends[0], (
+        f"the pane was read only AFTER keys had already gone into it: {calls}")
+    assert calls[caps[0]] == ["capture-pane", "-p", "-t", "%12"], calls[caps[0]]
+
+
+# --------------------------------------------------------------------------- #
+# 16b. The ordinary path is UNTOUCHED.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("capture,what", [
+    (DEFAULT_PROMPT_CAPTURE, "a shell prompt"),
+    (CLAUDE_TEXT_PROMPT_CAPTURE, "a Claude Code text prompt"),
+    (ANSWERED_CAPTURE, "a transcript with no prompt of its own"),
+    ("", "a pane that reads back blank"),
+])
+def test_a_text_prompt_is_delivered_EXACTLY_as_before(server, tmux_stub, tmp_path,
+                                                      capture, what):
+    """🔴 THE COMMON CASE, AND THE ONE THIS CHANGE MUST NOT TOUCH.
+
+    Typing works against a prompt, so the delivery there is the literal text and
+    then Enter — the exact argv the positive control at the top of this file
+    pins. A detector that answered "menu" for an ordinary prompt would send a
+    DIGIT into a shell, so the false-positive direction is pinned here rather
+    than assumed from the menu tests passing.
+
+    ⚠ A pane that reads back BLANK is in this list on purpose: it is not the same
+    fact as a pane that could not be READ (the next test), and it provably cannot
+    be a menu, because a menu has visible rows.
+    """
+    tmux_stub.set_captures(capture)
+    server.claim_batches = [[write(text="yes, go ahead")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "yes, go ahead"],
+        ["send-keys", "-t", "%12", "Enter"],
+    ], f"the delivery to {what} changed shape: {tmux_stub.send_keys_calls()}"
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "delivered", body
+
+
+def test_a_capture_that_FAILS_refuses_rather_than_typing_BLIND(server, tmux_stub, tmp_path):
+    """🔴 AN UNREADABLE PANE CANNOT RULE OUT A MENU.
+
+    The two possible guesses are not symmetric: typing into a menu is a WRONG
+    answer reported as delivered, and refusing is no answer, recorded as one. So
+    a capture this agent cannot make is a refusal with NO send at all.
+    """
+    tmux_stub.fail_capture(rc=1, stderr="can't find pane: %12")
+    server.claim_batches = [[write(text="yes, go ahead")]]
+    run_agent(server, tmux_stub, tmp_path)
+
+    assert tmux_stub.send_keys_calls() == [], (
+        "the agent typed into a pane it could not read, so whether the characters were "
+        "discarded by a menu is unknown — and the Enter would then have answered "
+        "whichever row was highlighted")
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "refused", body
+    assert "could not be read" in body["detail"], body
+
+
+# --------------------------------------------------------------------------- #
+# 16c. What this change deliberately REFUSES.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("capture,needle,what", [
+    (MULTI_QUESTION_MENU_CAPTURE, "MULTI-question", "a multi-question tab strip"),
+    (MULTI_QUESTION_REVIEW_CAPTURE, "MULTI-question", "its review screen"),
+    (MULTI_SELECT_MENU_CAPTURE, "multi-select", "a multiSelect checkbox list"),
+    (UNKNOWN_MENU_CAPTURE, "no free-text row", "a numbered menu with no free-text row"),
+])
+def test_a_menu_shape_this_agent_cannot_drive_is_REFUSED_with_no_send(
+        server, tmux_stub, tmp_path, capture, needle, what):
+    """🔴 REFUSE, DO NOT HALF-ANSWER.
+
+    Each shape is out of scope for a DIFFERENT reason, and each reason is a wrong
+    answer rather than a missing feature:
+
+      * the multi-question chain — answering question 1 leaves the rest
+        unanswered, and the operator's card says it was delivered;
+      * its review screen — `❯ 1. Submit answers` / `2. Cancel`, where a label
+        match on a real option would press Submit or Cancel;
+      * multiSelect — a digit TOGGLES in place and the completing `Submit` row is
+        UNNUMBERED, reachable only by arrow keys, which `termwrite.textIsAllowed`
+        refuses to carry by design;
+      * an unrecognised numbered menu — no free-text row, so a reply that matches
+        no option has no route and a typed one would be discarded.
+
+    The assertion is NO send-keys, not merely that the state says `refused`: a
+    refusal reported after the keys have gone is not a refusal.
+    """
+    tmux_stub.set_captures(capture)
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+
+    assert tmux_stub.send_keys_calls() == [], (
+        f"the agent sent keys into {what}: {tmux_stub.send_keys_calls()}")
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "refused", body
+    assert needle in body["detail"], body
+
+
+def test_an_AMBIGUOUS_match_is_refused_rather_than_guessed(server, tmux_stub, tmp_path):
+    """Two rows carrying the same label cannot both be what the operator tapped.
+
+    Picking the first would be a coin flip recorded as a delivery. The pane is
+    the only evidence there is, and it does not answer the question.
+    """
+    twin = SINGLE_MENU_CAPTURE.replace("    2. Flatfile\n", "    2. Ledger\n")
+    tmux_stub.set_captures(twin)
+    server.claim_batches = [[write(text="Ledger")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [], tmux_stub.send_keys_calls()
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "refused", body
+    assert "matches 2 of the menu's 4 option rows" in body["detail"], body
+
+
+def test_a_TYPE_ONLY_write_to_a_menu_is_refused(server, tmux_stub, tmp_path):
+    """`submit: false` means "put it in the pane and leave it there".
+
+    A menu has no such state: it discards the characters, and the digit that
+    would select the row also ADVANCES. So there is nothing to honour, and
+    pressing the digit anyway would answer a question the write said not to
+    answer. The field is still honoured exactly as before on a text prompt —
+    `test_type_only_sends_no_enter` pins that.
+    """
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE)
+    server.claim_batches = [[write(text="Flatfile", submit=False)]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [], tmux_stub.send_keys_calls()
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "refused", body
+    assert "type-only" in body["detail"], body
+
+
+# --------------------------------------------------------------------------- #
+# 16d. A reply that names no option is a genuine free-text answer.
+# --------------------------------------------------------------------------- #
+def test_a_reply_that_matches_NO_row_goes_through_the_free_text_row(server, tmux_stub, tmp_path):
+    """🔴 THE ONE ROUTE THAT DOES NOT PUT WORDS NOBODY CHOSE INTO A SELECTION.
+
+    Three keypresses in order: the free-text row's digit, the reply LITERALLY,
+    then Enter. The order is the whole thing — the digit must precede the text,
+    because before it the row is not focused and the characters are discarded.
+    """
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE,
+                           SINGLE_MENU_FREE_TEXT_FOCUSED_CAPTURE,
+                           ANSWERED_CAPTURE)
+    server.claim_batches = [[write(text="neither, use the ledger for now")]]
+    run_agent(server, tmux_stub, tmp_path)
+
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "3"],
+        ["send-keys", "-t", "%12", "-l", "--", "neither, use the ledger for now"],
+        ["send-keys", "-t", "%12", "Enter"],
+    ], tmux_stub.send_keys_calls()
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "delivered", body
+
+
+def test_a_free_text_row_that_never_TAKES_FOCUS_is_not_typed_into(server, tmux_stub, tmp_path):
+    """🔴 WITHOUT THIS THE FREE-TEXT PATH REBUILDS THE ORIGINAL DEFECT.
+
+    If the digit did not focus the row, the characters that follow are discarded
+    exactly as they were before this change and the Enter answers whichever row is
+    highlighted. So the reply is NOT typed and Enter is NEVER pressed until focus
+    is observed — the stub shows a menu that stays unfocused, and the outcome is
+    `failed`, not `delivered`.
+    """
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE)   # never focuses, repeats for ever
+    server.claim_batches = [[write(text="neither, use the ledger for now")]]
+    run_agent(server, tmux_stub, tmp_path)
+
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "3"]], (
+        "the agent typed into a free-text row that had not taken focus, so the Enter "
+        f"would have answered a highlighted row: {tmux_stub.send_keys_calls()}")
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "failed", body
+    assert "did not take focus" in body["detail"], body
+    assert "Enter was NOT pressed" in body["detail"], body
+
+
+# --------------------------------------------------------------------------- #
+# 16e. `delivered` is a MEASUREMENT, not an assumption.
+# --------------------------------------------------------------------------- #
+def test_a_menu_that_does_NOT_advance_is_reported_failed_not_delivered(
+        server, tmux_stub, tmp_path):
+    """🔴 THE WHOLE FAILURE BEING FIXED IS A WRONG ANSWER REPORTED AS SUCCESS.
+
+    So the digit is followed by a read-back, and a menu still showing the same
+    options is `failed` — which the audit log reads as delivery UNKNOWN. And it
+    must not RETRY: at-most-once is the one guarantee this agent cannot trade,
+    so exactly one keypress may appear.
+    """
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE)   # never moves, repeats for ever
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "2"]], (
+        f"the agent re-sent the answer after the menu did not move: "
+        f"{tmux_stub.send_keys_calls()}")
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "failed", body
+    assert "UNKNOWN" in body["detail"], body
+    assert "nothing was re-sent" in body["detail"], body
+
+
+def test_a_NEW_menu_after_the_answer_counts_as_an_advance(server, tmux_stub, tmp_path):
+    """The control for the failure above.
+
+    Answering may be followed immediately by another ask, so "there is still a
+    menu on screen" is not the question — "is it the SAME menu" is. Without this
+    the read-back would report `failed` for a perfectly good delivery whenever
+    Claude asks a second question, which is the failure direction that trains an
+    operator to ignore the state column.
+    """
+    second = SINGLE_MENU_CAPTURE.replace("Ledger", "Postgres").replace("Flatfile", "SQLite")
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE, second)
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "delivered", body
+
+
+def test_the_menu_detail_never_carries_the_reply_text(server, tmux_stub, tmp_path):
+    """🔴 A MATCHED LABEL *IS* THE REPLY TEXT, WHICH IS CREDENTIAL-GRADE.
+
+    Every diagnostic on the menu path names a digit, a count or a shape — never a
+    label — because the label that matched is by definition the text the operator
+    sent, and that text never leaves this process. Driven with the marker AS the
+    option label so a leak has somewhere to show up.
+    """
+    marked = SINGLE_MENU_CAPTURE.replace("    2. Flatfile\n", f"    2. {MARKER}\n")
+    tmux_stub.set_captures(marked)   # never advances -> the wordiest detail there is
+    server.claim_batches = [[write(text=MARKER)]]
+    rc, out = run_agent(server, tmux_stub, tmp_path)
+
+    assert MARKER not in out, f"the reply text reached the journal:\n{out}"
+    results = [r for r in server.requests if r["path"].endswith("/result")]
+    body = json.loads(results[0]["body"])
+    assert body["state"] == "failed", body
+    assert MARKER not in body["detail"], body
+
+
+# --------------------------------------------------------------------------- #
+# 16f. The predicates, driven directly.
+# --------------------------------------------------------------------------- #
+def test_the_pane_classifier_is_exercised_directly():
+    """Every kind, including the pairs no single agent run can reach at once."""
+    assert AGENT.classify_pane(DEFAULT_PROMPT_CAPTURE)[0] == AGENT.PANE_TEXT
+    assert AGENT.classify_pane(CLAUDE_TEXT_PROMPT_CAPTURE)[0] == AGENT.PANE_TEXT
+    assert AGENT.classify_pane("")[0] == AGENT.PANE_TEXT
+    assert AGENT.classify_pane(ANSWERED_CAPTURE)[0] == AGENT.PANE_TEXT
+
+    kind, labels, why = AGENT.classify_pane(SINGLE_MENU_CAPTURE)
+    assert kind == AGENT.PANE_MENU and why == ""
+    assert labels == ["Ledger", "Flatfile", "Type something.", "Chat about this"], labels
+
+    for capture, want in (
+            (MULTI_QUESTION_MENU_CAPTURE, AGENT.PANE_MULTI_QUESTION),
+            (MULTI_QUESTION_REVIEW_CAPTURE, AGENT.PANE_MULTI_QUESTION),
+            (MULTI_SELECT_MENU_CAPTURE, AGENT.PANE_MULTI_SELECT),
+            (UNKNOWN_MENU_CAPTURE, AGENT.PANE_UNKNOWN_MENU)):
+        kind, labels, why = AGENT.classify_pane(capture)
+        assert kind == want, f"{want}: got {kind}"
+        assert labels == [] and why, (kind, labels, why)
+
+    # A numbered block with NO cursor row is not a live menu, and one with TWO is
+    # not a shape this agent recognises either.
+    assert AGENT.classify_pane(
+        SINGLE_MENU_CAPTURE.replace("  ❯ 1.", "    1."))[0] == AGENT.PANE_UNKNOWN_MENU
+    assert AGENT.classify_pane(
+        SINGLE_MENU_CAPTURE.replace("    2. Flatfile", "  ❯ 2. Flatfile")
+    )[0] == AGENT.PANE_UNKNOWN_MENU
+
+
+def test_the_classifier_does_not_call_ANY_numbered_text_a_menu():
+    """🔴 THE FALSE-POSITIVE DIRECTION, WHICH SENDS A DIGIT INTO A SHELL.
+
+    Every case here is a real pane a reply is legitimately delivered to, and each
+    was chosen because it defeats one signal on its own. The signature that makes
+    a menu is narrow on purpose: contiguous rows from 1, on adjacent lines, with
+    the cursor glyph, and a free-text row.
+
+    🔴 THE FIRST CASE IS NOT HYPOTHETICAL — it was MEASURED as a false positive
+    while this was being written. A numbered block ALONE used to be enough of a
+    signal, so a pane whose ordinary output contained `1. … 2. … 3. …` classified
+    as a menu-shaped thing and every reply into it was refused. A detector whose
+    failure direction is refusing legitimate replies is the one an operator turns
+    off, so the numbering had to stop counting by itself.
+    """
+    for capture, defeats in (
+            ("1. install the thing\n2. run the thing\n3. profit\n",
+             "numbered rows, no cursor glyph"),
+            ("devrc $ grep -c '\\[ \\]' TODO.md\n7\ndevrc $ \n",
+             "a checkbox in shell output"),
+            ("  ❯ 1. Ledger\n", "a cursored row, but only one of them"),
+            ("  ❯ 1. Ledger\n\n\n\n\n\n    2. Flatfile\n",
+             "two numbered rows too far apart to be one block"),
+            ("● Reading the file now.\n\n  1. Ledger\n  ❯ tail -f log\n",
+             "a cursor glyph that is not on a numbered row"),
+    ):
+        assert AGENT.classify_pane(capture)[0] == AGENT.PANE_TEXT, (capture, defeats)
+
+
+def test_the_classifier_reads_the_BOTTOM_MOST_menu():
+    """A live menu is the thing at the bottom; anything above it is transcript."""
+    stacked = ANSWERED_CAPTURE + "\n" + SINGLE_MENU_CAPTURE.replace(
+        "Ledger", "Second").replace("Flatfile", "Third")
+    kind, labels, _ = AGENT.classify_pane(stacked)
+    assert kind == AGENT.PANE_MENU, stacked
+    assert labels[:2] == ["Second", "Third"], labels
+
+
+def test_label_matching_is_exact_case_insensitive_and_truncation_aware():
+    """What counts as "this row is the option the reply names"."""
+    assert AGENT.label_matches("Flatfile", "Flatfile")
+    assert AGENT.label_matches("Flatfile", "  Flatfile  ")
+    assert AGENT.label_matches("Flat  file", "Flat file")
+    assert AGENT.label_matches("flatfile", "Flatfile")
+    # A label too long for the pane renders truncated, and the mark is REQUIRED —
+    # so a short label can never prefix-match a longer, different reply.
+    assert AGENT.label_matches("Use the flatfile stor…", "Use the flatfile store for now")
+    assert AGENT.label_matches("Use the flatfile stor...", "Use the flatfile store for now")
+    assert not AGENT.label_matches("Use", "Use the flatfile store for now")
+    assert not AGENT.label_matches("Short…", "Shorter thing entirely")
+    assert not AGENT.label_matches("Flatfile", "Ledger")
+    assert not AGENT.label_matches("Flatfile", "Flatfiles")
+
+
+def test_the_free_text_row_is_recognised_by_an_ENUMERATED_label():
+    """The row a genuine free-text reply is routed through.
+
+    An enumeration rather than a pattern: it decides whether such a reply has a
+    route at all, and a pattern loose enough to match a real option label would
+    type the reply into the wrong row.
+    """
+    assert AGENT.free_text_key("Type something.") in AGENT.MENU_FREE_TEXT_LABELS
+    assert AGENT.free_text_key("  type SOMETHING  ") in AGENT.MENU_FREE_TEXT_LABELS
+    assert AGENT.free_text_key("Type your own…") in AGENT.MENU_FREE_TEXT_LABELS
+    assert AGENT.free_text_key("Chat about this") not in AGENT.MENU_FREE_TEXT_LABELS
+    assert AGENT.free_text_key("Flatfile") not in AGENT.MENU_FREE_TEXT_LABELS
+
+
+def test_a_row_past_the_ninth_is_refused_rather_than_approximated():
+    """A digit key selects; row 10 has no digit, and arrows are not sent here."""
+    assert AGENT.menu_digit(0) == ("1", "")
+    assert AGENT.menu_digit(8) == ("9", "")
+    digit, why = AGENT.menu_digit(9)
+    assert digit == "" and "row 10" in why, (digit, why)
+    assert str(AGENT.MENU_MAX_DIGIT) in why, why
+
+
+def test_the_menu_path_refuses_an_empty_text_rather_than_ABORTING_the_tool():
+    """🔴 ENTER ON AN EMPTY FREE-TEXT ROW ABORTS THE WHOLE ASK — measured: `●
+    User declined to answer questions`. That is destructive, not a no-op, so the
+    emptiness is re-checked on this path even though `validate` already refuses
+    it for a send-keys write."""
+    state, detail = AGENT.deliver_to_menu("%12", ["Ledger", "Type something."], "", True)
+    assert state == "refused", (state, detail)
+    assert "aborts the menu" in detail, detail
+
+
+# --------------------------------------------------------------------------- #
+# 16g. REAL tmux. The stub cannot prove `capture-pane -p -t %N` is a call real
+#      tmux accepts, nor that the detector works on bytes a terminal produced.
+# --------------------------------------------------------------------------- #
+def _real_pane_showing(real_tmux, body: str, tmp_path, name: str) -> str:
+    """A pane on the private server whose VISIBLE content is `body`."""
+    src = tmp_path / name
+    src.write_text(body, encoding="utf-8")
+    out = real_tmux["tmux"](
+        "new-window", "-d", "-t", "=keep:", "-P", "-F", "#{pane_id}",
+        "sh", "-c", f"cat {src}; sleep 120").stdout
+    return out.splitlines()[0].strip()
+
+
+def test_capture_pane_really_READS_a_menu_off_a_REAL_pane(monkeypatch, real_tmux, tmp_path):
+    """🔴 THE SEAM, AGAINST REAL tmux, WITH BOTH CONTROLS.
+
+    The stub answers whatever the fixture wrote, so it cannot tell a valid
+    `capture-pane` invocation from an invalid one — and an invalid one would make
+    every menu look like a text prompt and restore the wrong-answer bug in full,
+    with the whole stubbed section above still green.
+
+    So: a real pane rendering a menu must classify as a MENU with the labels the
+    terminal actually shows, and a real pane running a SHELL must classify as
+    TEXT. Both directions, because a detector that answered "menu" for everything
+    would satisfy the first alone.
+    """
+    _agent_with_real_tmux(monkeypatch, real_tmux)
+
+    pane = _real_pane_showing(real_tmux, SINGLE_MENU_CAPTURE, tmp_path, "menu.txt")
+    captured = ""
+    for _ in range(60):
+        captured, err = AGENT.capture_pane(pane)
+        assert not err, f"real tmux refused the capture: {err}"
+        if AGENT.classify_pane(captured)[0] == AGENT.PANE_MENU:
+            break
+        time.sleep(0.05)
+    kind, labels, why = AGENT.classify_pane(captured)
+    assert kind == AGENT.PANE_MENU, f"real capture did not read as a menu: {captured!r}"
+    assert labels == ["Ledger", "Flatfile", "Type something.", "Chat about this"], labels
+    assert why == ""
+
+    # THE CONTROL: a pane running an ordinary shell is a TEXT prompt.
+    shell_pane = real_tmux["tmux"](
+        "list-panes", "-t", "=keep:", "-F", "#{pane_id}").stdout.splitlines()[0].strip()
+    shell_capture, err = AGENT.capture_pane(shell_pane)
+    assert not err, err
+    assert AGENT.classify_pane(shell_capture)[0] == AGENT.PANE_TEXT, (
+        f"a real shell pane read as a menu, so a digit would be sent into a shell: "
+        f"{shell_capture!r}")
+
+
+def test_a_capture_of_a_pane_that_does_NOT_EXIST_is_an_ERROR_not_an_empty_read(
+        monkeypatch, real_tmux):
+    """🔴 THE TWO STATES THIS CODE MUST NOT CONFLATE, measured against real tmux.
+
+    "the pane could not be read" is a refusal and "the pane is blank" is a text
+    delivery, so a `capture_pane` that returned `("", "")` for a missing pane
+    would silently turn every unreadable pane into a blind type-and-Enter. Real
+    tmux is the only thing that can say which it does.
+    """
+    _agent_with_real_tmux(monkeypatch, real_tmux)
+    captured, err = AGENT.capture_pane("%9301")
+    assert captured == "", captured
+    assert err, "a capture of a non-existent pane reported no error"
