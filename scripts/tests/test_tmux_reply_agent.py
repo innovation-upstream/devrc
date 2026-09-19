@@ -3253,6 +3253,39 @@ def test_a_free_text_row_that_never_TAKES_FOCUS_is_not_typed_into(server, tmux_s
     assert "Enter was NOT pressed" in body["detail"], body
 
 
+def test_a_free_text_reply_TYPED_but_never_COMMITTED_is_not_reported_delivered(
+        server, tmux_stub, tmp_path):
+    """🔴 THE ONE STATE THE OBVIOUS READ-BACK CANNOT SEE, AND IT WAS MEASURED HERE.
+
+    Typing REPLACES the focused row's label, so a reply that was typed and never
+    committed changes the label set — and it also stops the pane classifying as a
+    menu at all, because the `Type something.` row that made it recognisable IS
+    now the reply. The first draft asked `menu_settled`'s question ("did the menu
+    move on") and BOTH of those satisfied it, so this exact fixture reported
+    `delivered` for a reply sitting uncommitted in a row.
+
+    So the free-text path asks a different question — is the reply still in a menu
+    row — and this is the fixture that distinguishes the two.
+    """
+    typed = SINGLE_MENU_FREE_TEXT_FOCUSED_CAPTURE.replace(
+        "  ❯ 3. Type something.\n", "  ❯ 3. neither, use the ledger for now\n")
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE,
+                           SINGLE_MENU_FREE_TEXT_FOCUSED_CAPTURE,
+                           typed)   # repeats for ever: Enter never took
+    server.claim_batches = [[write(text="neither, use the ledger for now")]]
+    run_agent(server, tmux_stub, tmp_path)
+
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "3"],
+        ["send-keys", "-t", "%12", "-l", "--", "neither, use the ledger for now"],
+        ["send-keys", "-t", "%12", "Enter"],
+    ], tmux_stub.send_keys_calls()
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "failed", body
+    assert "UNKNOWN" in body["detail"], body
+    assert "still sitting in a menu row" in body["detail"], body
+
+
 # --------------------------------------------------------------------------- #
 # 16e. `delivered` is a MEASUREMENT, not an assumption.
 # --------------------------------------------------------------------------- #
@@ -3287,11 +3320,20 @@ def test_a_NEW_menu_after_the_answer_counts_as_an_advance(server, tmux_stub, tmp
     the read-back would report `failed` for a perfectly good delivery whenever
     Claude asks a second question, which is the failure direction that trains an
     operator to ignore the state column.
+
+    ⚠ IT ASSERTS THE DIGIT TOO, and that clause is what stops it being VACUOUS.
+    A `delivered` on its own is what the PRE-CHANGE agent reports for this
+    fixture — it types the label, presses Enter and calls it delivered — so the
+    state alone was green at the base sha and proved nothing. Measured while
+    writing it: this was the one new test in this section that passed unchanged
+    against `origin/main`.
     """
     second = SINGLE_MENU_CAPTURE.replace("Ledger", "Postgres").replace("Flatfile", "SQLite")
     tmux_stub.set_captures(SINGLE_MENU_CAPTURE, second)
     server.claim_batches = [[write(text="Flatfile")]]
     run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "2"]], tmux_stub.send_keys_calls()
     body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
     assert body["state"] == "delivered", body
 
@@ -3378,8 +3420,16 @@ def test_the_classifier_does_not_call_ANY_numbered_text_a_menu():
 
 
 def test_the_classifier_reads_the_BOTTOM_MOST_menu():
-    """A live menu is the thing at the bottom; anything above it is transcript."""
-    stacked = ANSWERED_CAPTURE + "\n" + SINGLE_MENU_CAPTURE.replace(
+    """A live menu is the thing at the bottom; anything above it is transcript.
+
+    🔴 TWO COMPLETE MENUS, DELIBERATELY. An earlier version stacked a transcript
+    above ONE menu, which cannot see the defect at all: with only one block there
+    is nothing to choose between, so a mutant that took the FIRST block died on
+    the `kind` assertion — for the wrong reason — rather than on the labels. Both
+    blocks are full four-row menus here, so the only thing that differs between
+    the two readings is WHICH labels come back.
+    """
+    stacked = SINGLE_MENU_CAPTURE + "\n" + SINGLE_MENU_CAPTURE.replace(
         "Ledger", "Second").replace("Flatfile", "Third")
     kind, labels, _ = AGENT.classify_pane(stacked)
     assert kind == AGENT.PANE_MENU, stacked
@@ -3396,6 +3446,12 @@ def test_label_matching_is_exact_case_insensitive_and_truncation_aware():
     # so a short label can never prefix-match a longer, different reply.
     assert AGENT.label_matches("Use the flatfile stor…", "Use the flatfile store for now")
     assert AGENT.label_matches("Use the flatfile stor...", "Use the flatfile store for now")
+    # 🔴 THE MARK IS WHAT LICENSES THE PREFIX MATCH, and this is the case that
+    # says so. MEASURED: a mutant dropping the `endswith` check SURVIVED against
+    # the short `"Use"` line below, because the minimum-head length rejected it
+    # for an unrelated reason — so the fixture has to be long enough that only
+    # the missing mark can refuse it.
+    assert not AGENT.label_matches("Use the flatfile", "Use the flatfile store for now")
     assert not AGENT.label_matches("Use", "Use the flatfile store for now")
     assert not AGENT.label_matches("Short…", "Shorter thing entirely")
     assert not AGENT.label_matches("Flatfile", "Ledger")

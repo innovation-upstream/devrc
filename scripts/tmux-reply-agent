@@ -1034,24 +1034,18 @@ def menu_digit(index: int) -> tuple[str, str]:
     return str(n), ""
 
 
-def menu_settled(pane: str, labels: list[str], require_gone: bool) -> bool:
-    """Whether the menu we answered has actually moved on.
+def menu_settled(pane: str, labels: list[str]) -> bool:
+    """Whether the menu a DIGIT answered has actually moved on.
 
     🔴 THIS IS THE READ-BACK THAT MAKES `delivered` A MEASUREMENT RATHER THAN AN
-    ASSUMPTION — the whole failure being fixed here is that a wrong answer
-    reported success. It sends nothing; it only reads.
+    ASSUMPTION — the whole failure being fixed here is a wrong answer reported as
+    success. It sends nothing; it only reads.
 
-    `require_gone` is the FREE-TEXT path's stricter question. There, typing
-    replaces the focused row's label, so "the labels differ" is satisfied by a
-    reply that was typed and never committed — the one outcome that must not read
-    as delivered. On the digit path the menu is replaced wholesale, so a changed
-    label set is honest evidence of an advance.
-
-    ⚠ THE COST, STATED: a NEW question rendered inside this window looks like a
-    menu, so a free-text answer immediately followed by another ask can report
-    `failed` for a delivery that worked. That direction is chosen — an audit row
-    saying UNKNOWN over one that says DELIVERED wrongly — and it cannot cause a
-    second keypress, because nothing here retries.
+    The question is "is it the SAME menu", not "is a menu on screen": answering
+    may be followed immediately by another ask, and reporting `failed` for that
+    is the failure direction that trains an operator to ignore the state column.
+    ONE comparison rather than two clauses, so there is no redundant half a
+    mutation can survive in.
     """
     for _ in range(max(1, MENU_VERIFY_ATTEMPTS)):
         time.sleep(MENU_SETTLE_SECONDS)
@@ -1059,9 +1053,38 @@ def menu_settled(pane: str, labels: list[str], require_gone: bool) -> bool:
         if err:
             continue
         kind, now_labels, _ = classify_pane(captured)
-        if kind != PANE_MENU:
+        if (kind, now_labels) != (PANE_MENU, list(labels)):
             return True
-        if not require_gone and now_labels != list(labels):
+    return False
+
+
+def menu_committed(pane: str, text: str) -> bool:
+    """Whether a reply TYPED into the free-text row actually left the menu.
+
+    🔴 THE FREE-TEXT PATH NEEDS A DIFFERENT QUESTION FROM `menu_settled`, AND
+    ASKING THAT ONE HERE WAS WRONG. Typing REPLACES the focused row's label, so a
+    reply that was typed and never committed changes the label set — and it can
+    even stop the pane classifying as a menu at all, because the row that made it
+    recognisable is now the reply. Both of those satisfy "the menu moved on",
+    which is the one outcome that must not read as delivered.
+
+    So the question is whether the reply is still sitting in a menu row. It is
+    answered against the pane's own bytes inside this process and nothing about
+    it is reported — see the module header on the text being credential-grade.
+
+    ⚠ THE COST, STATED: a menu rendered AFTER the answer whose own row label
+    happens to match the reply reads as uncommitted, so a good delivery can be
+    reported `failed`. That direction is chosen — an audit row saying UNKNOWN
+    over one that says DELIVERED wrongly — and it cannot cause a second
+    keypress, because nothing on this path retries.
+    """
+    for _ in range(max(1, MENU_VERIFY_ATTEMPTS)):
+        time.sleep(MENU_SETTLE_SECONDS)
+        captured, err = capture_pane(pane)
+        if err:
+            continue
+        rows = menu_block(captured)
+        if not any(label_matches(r["label"], text) for r in rows):
             return True
     return False
 
@@ -1119,7 +1142,7 @@ def deliver_to_menu(pane: str, labels: list[str], text: str,
         rc, _, err = run_tmux(["send-keys", "-t", pane, "-l", "--", digit])
         if rc != 0:
             return "failed", redact(err or f"tmux exited {rc}", text)
-        if menu_settled(pane, labels, require_gone=False):
+        if menu_settled(pane, labels):
             return "delivered", f"selected menu row {digit} by its digit"
         return "failed", (f"menu row {digit} was sent and the menu did not move, so whether "
                           "the answer was accepted is UNKNOWN; nothing was re-sent")
@@ -1152,11 +1175,11 @@ def deliver_to_menu(pane: str, labels: list[str], text: str,
         return "failed", redact(
             "the reply was typed into the menu's free-text row but Enter was not accepted: "
             + (err or f"tmux exited {rc}"), text)
-    if menu_settled(pane, labels, require_gone=True):
+    if menu_committed(pane, text):
         return "delivered", f"typed the reply into menu row {digit} and committed it"
-    return "failed", (f"the reply was typed into menu row {digit} and committed, and the "
-                      "menu did not close, so whether it was accepted is UNKNOWN; nothing "
-                      "was re-sent")
+    return "failed", (f"the reply was typed into menu row {digit} and Enter was sent, and it "
+                      "is still sitting in a menu row, so whether it was accepted is "
+                      "UNKNOWN; nothing was re-sent")
 
 
 def deliver(write: dict) -> tuple[str, str]:
