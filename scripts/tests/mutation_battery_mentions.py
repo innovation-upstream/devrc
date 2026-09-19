@@ -492,9 +492,9 @@ MUTANTS: list[tuple] = [
     ("K47", "widening", "the universe is PREPENDED rather than appended, so the "
                         "common case opens on a fuzzy-matched stranger instead "
                         "of the clawgate task",
-     "            candidates = (candidates[:promote_at] + [extra[0]]\n"
-     "                          + candidates[promote_at:] + extra[1:])\n",
-     "            candidates = extra + candidates\n",
+     "                candidates = (candidates[:promote_at] + [extra[0]]\n"
+     "                              + candidates[promote_at:] + extra[1:])\n",
+     "                candidates = extra + candidates\n",
      "the clawgate row keeps row 1"),
     # ---- F14: the fzf picker (rofi's replacement, 2026-09-09) ---------------
     # 🔴 THE WHOLE POINT OF THE SWAP IS ONE FLAG, AND ITS LOSS IS SILENT: the

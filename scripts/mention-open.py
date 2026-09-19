@@ -3115,8 +3115,17 @@ def guessed_note(subject: str, below: int = 0, rank: int = 1,
     every repository this host knows" became FALSE by one row. `below` counts
     DOWNWARDS only, so a caller passing the reduced count would produce a
     sentence that is arithmetically right and still misdescribes the list. It is
-    a separate flag rather than `rank > 1` because `rank > 1` is ALSO true of a
-    bare `#N` with the clawgate row on top and nothing promoted.
+    a separate parameter rather than an inference.
+
+    ⚠ ITS FIRST-DRAFT JUSTIFICATION WAS FALSE AND IS RECORDED AS SUCH RATHER
+    THAN REPLACED WITH A BETTER-SOUNDING ONE. It said `rank > 1` would be
+    ambiguous "because `rank > 1` is ALSO true of a bare `#N` with the clawgate
+    row on top and nothing promoted" — but that picker never calls this
+    function (`main()` keeps `""` for it), so at every REACHABLE call site
+    `promoted` and `rank > 1` are exactly equivalent. The honest reason to keep
+    the parameter is narrower: tests call `guessed_note` directly, and an
+    explicit contract beats a coincidence that holds only because of which
+    shapes happen to reach here today.
 
     🔴 A PICKER WITH NO EXPLANATION READS AS A BUG. Suppressing the auto-open is
     the safety property; saying WHY is what stops the operator concluding the
@@ -3779,7 +3788,18 @@ def main(argv: list[str] | None = None) -> int:
         # Deduped: the pane's repo is usually IN the universe too, and offering
         # it twice makes the recommended row look like a rendering bug rather
         # than a recommendation.
-        extra = [c for c in universe_rows() if c["url"] not in seen]
+        ordered_rows = universe_rows()
+        extra = [c for c in ordered_rows if c["url"] not in seen]
+        # 🔴 IF THE ORDERING'S OWN TOP ROW *IS* THE PANE GUESS, PROMOTE NOTHING.
+        # Reported by `/audit-pr` round 0. The pane repo is usually in the
+        # universe too and is deduped out above, so when the ordering ranked it
+        # FIRST, `extra[0]` is the RUNNER-UP — and promoting that above the
+        # guess would demote the ordering's actual first pick beneath its second
+        # while `guessed_note` calls the second "this host's best-ranked
+        # repository". Tier B learns from picks, so a frequently-picked pane
+        # repo ranking first is an ordinary state, not an exotic one. Checked on
+        # the PRE-dedup list, which is the only place the answer still exists.
+        top_is_the_guess = bool(ordered_rows) and ordered_rows[0]["url"] in seen
         # 🔴 GUARDED ON `extra`, NOT ON `universe`. A host whose whole universe
         # is the pane's own repo dedupes to nothing, and setting
         # `offered_universe` there would claim rows that are not in the list —
@@ -3806,23 +3826,45 @@ def main(argv: list[str] | None = None) -> int:
             # is one line to change.
             pinned_above = len(candidates)
             ordered_urls = {c["url"] for c in extra}
-            # `guess_rank` is 1-BASED (`enumerate(candidates, 1)` above) while
-            # `picked_rank` is 0-BASED — two conventions in one file, which is
-            # why this converts rather than reusing either name.
-            promote_at = guess_rank - 1
-            candidates = (candidates[:promote_at] + [extra[0]]
-                          + candidates[promote_at:] + extra[1:])
+            # 🔴 GATED ON THE ORDERING HAVING ACTUALLY RUN, AND THE UNGATED
+            # VERSION SHIPPED IN THE FIRST DRAFT OF THIS CHANGE — caught by
+            # `/audit-pr` round 0. `_ordered_universe` RETURNS THE INPUT
+            # UNTOUCHED whenever the state is not `applied` (its own docstring
+            # says so, and `repo_universe` returns its union SORTED), so on a
+            # stale or missing range table `extra[0]` is merely the
+            # alphabetically first repository. Promoting it demotes the pane
+            # guess — a measured, weak, but REAL signal — beneath a row chosen
+            # by nothing, and `guessed_note` then calls it "this host's
+            # best-ranked repository".
+            #
+            # 🔴 THE TELL WAS IN THE TEST, NOT THE CODE: the whole-string pin
+            # asserted "row 2 is this host's best-ranked repository … · rows
+            # unordered — no reference-range table on this host yet" — a
+            # sentence that contradicts itself in its own second clause, pinned
+            # as correct. The entire justification for this change is ranking
+            # quality; where there is no ranking there is no justification.
+            if order_state == ORDER_APPLIED and not top_is_the_guess:
+                # `guess_rank` is 1-BASED (`enumerate(candidates, 1)` above)
+                # while `picked_rank` is 0-BASED — two conventions in one file,
+                # which is why this converts rather than reusing either name.
+                promote_at = guess_rank - 1
+                candidates = (candidates[:promote_at] + [extra[0]]
+                              + candidates[promote_at:] + extra[1:])
+                promoted = True
+                # 🔴 BOTH OF THESE MOVE, AND THE NOTE IS WRONG IF EITHER DOES
+                # NOT. The guess was pushed down exactly one row, and exactly
+                # one universe row is now ABOVE it rather than below — so the
+                # count the note quotes is `len(extra) - 1`. Quoting the
+                # unreduced count would overstate what is searchable underneath
+                # and contradict the list on screen.
+                guess_rank += 1
+                below = len(extra) - 1
+            else:
+                # The pre-promotion layout, unchanged: measured rows on top.
+                candidates = candidates + extra
+                below = len(extra)
             offered_universe = True
             universe_shown = True
-            promoted = True
-            # 🔴 BOTH OF THESE MOVE, AND THE NOTE IS WRONG IF EITHER DOES NOT.
-            # The guess was pushed down exactly one row, and exactly one of the
-            # universe rows is now ABOVE it rather than below — so the count the
-            # note quotes is `len(extra) - 1`, not `len(extra)`. Quoting the
-            # unreduced count would overstate what is searchable underneath by
-            # one and contradict the list the operator is looking at.
-            guess_rank += 1
-            below = len(extra) - 1
 
     # 🔴 `and not offered_universe`: see PASS 3. One candidate is enough to open
     # only when that candidate is EVIDENCE about the reference — an explicit

@@ -382,6 +382,40 @@ now real too. Three positions:
 PR has a week of clicks behind it — because if it turns out the operator almost always
 picks the clawgate row on a bare `#N`, (1) is simply correct and nothing should move.
 
+🔴 **DECIDED — Operator decision, 2026-09-19: option (2), SHIPPED as devrc#1793.** The
+condition above was **NOT** met and that is recorded rather than glossed: `66e51d90`
+(#1775, the sort-key fix and the `queried` instrument, one commit) landed
+`2026-09-18 19:09:29 -0500`, so at decision time it had **~1 day of a stated 7**, with
+**n=1** post-fix pick.
+
+**What decided it instead was the condition's own stated PURPOSE**, quoted above: *"if it
+turns out the operator almost always picks the clawgate row on a bare `#N`, (1) is simply
+correct"*. That question is answered — **the clawgate row took 1 of 73 recorded picks**,
+and the two pinned rows together took 5 (6.8%) while holding the top two slots. #1775
+cannot invalidate that: the clawgate row is never ranked, and a better universe ordering
+only makes the ranked rows *more* attractive, so 6.8% is an **upper bound** post-fix.
+
+⚠ **What is NOT measured, stated at the scope it was measured:** that the operator, shown
+the ranked row at position 2 rather than 3, presses Enter rather than typing. The 73 picks
+predate the current sort key; under the key it replaced, the modal pick was the
+**second**-ranked row (29) rather than the first (8). Promoting the *first* row is a
+prediction from the new key's replayed top-1 rate (62.6% → 73.0%), not a behavioural
+measurement. All picks come from one host (the laptop); the workbench has logged none.
+
+⚠ **And the cost this change imposes cannot be read back out of the telemetry.** On the
+`audit-pr N` shape the promotion moves the pane guess off row 1, so a correct guess costs
+one extra keystroke — but that shape and dead-end-2 both report `pinned_above = 1`, so
+"how often was that keystroke paid" is only partially recoverable. A change argued from
+telemetry that accepts a cost its telemetry cannot see is worth saying out loud.
+
+🔴 **Scoped twice after `/audit-pr` round 0, and neither scoping is cosmetic.** The
+promotion fires only when `order_state == ORDER_APPLIED` — on a stale or missing range
+table `_ordered_universe` returns its input **untouched** and `repo_universe` returns it
+**sorted**, so an ungated promotion demoted the pane guess beneath the *alphabetically
+first* row and the note called it "best-ranked". And it does not fire when the ordering's
+own top row **is** the pane guess, which the dedup would otherwise turn into "promote the
+runner-up above the winner".
+
 ### The test gap named in the brief
 
 *"Nothing pins how many rows sit above the ordered block on the common bare-`#N` shape."*

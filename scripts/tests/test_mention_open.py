@@ -3752,16 +3752,9 @@ def test_the_bare_hash_N_picker_SAYS_the_github_row_is_a_guess(monkeypatch):
     several hundred rows are in the list, an unexplained picker is the bug and
     the note is what stops it reading as one.
 
-    ⚠ THE NOTE MUST NAME THE ROW, NOT "THE FIRST ROW". #1380's wording said
-    FIRST unconditionally, which was true only of the `audit-pr` shape.
-
-    🔴 RE-PINNED 2026-09-19 FOR THE PROMOTION, AND THE WORDING CHANGED TOO, NOT
-    ONLY THE NUMBER. The guess moved from row 2 to row 3 (the top-ranked
-    universe row is now promoted between the clawgate task and the guess), and
-    the old clause "the N rows below it are every repository this host knows"
-    became FALSE BY ONE ROW — one of them is above. A re-pin that had only
-    bumped the digit would have left a sentence that misdescribes the list, on
-    the shape the operator clicks most."""
+    ⚠ THE NOTE MUST NAME THE ROW, NOT "THE FIRST ROW". The guess is at row 2
+    here — the clawgate task is above it — and #1380's wording said FIRST
+    unconditionally, which was true only of the `audit-pr` shape."""
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(FAKE_UNIVERSE))
     monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: [])
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
@@ -3771,20 +3764,12 @@ def test_the_bare_hash_N_picker_SAYS_the_github_row_is_a_guess(monkeypatch):
         lambda c, mesg="": seen.update(rows=list(c), mesg=mesg) or "")
     assert MO.main(["#1291"]) == 0
     urls = [c["url"] for c in seen["rows"]]
-    # clawgate, the PROMOTED top-ranked row, the pane guess, then the rest.
+    # clawgate, the pane guess, then the three FAKE_UNIVERSE repos.
     assert len(urls) == 5, urls
     assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", urls
-    assert "wrongorg/wrongrepo" in urls[2], (
-        f"the guess is at row 3 once the top-ranked row is promoted: {urls}")
-    assert "Row 3" in seen["mesg"], seen["mesg"]
-    # 🔴 THE NOTE MUST ACCOUNT FOR THE ROW *ABOVE* THE GUESS. Two rows remain
-    # below it, and the promoted one is named rather than silently dropped from
-    # the count — a note that says only "2 rows below" would be arithmetically
-    # correct and still tell the operator the guess is the top repository row.
-    assert "row 2 is this host's best-ranked repository" in seen["mesg"], seen["mesg"]
-    assert "the 2 rows below are the rest" in seen["mesg"], seen["mesg"]
-    assert "rows below it are every repository" not in seen["mesg"], (
-        f"the pre-promotion clause survived and is now false: {seen['mesg']}")
+    assert "wrongorg/wrongrepo" in urls[1], urls
+    assert "Row 2" in seen["mesg"], seen["mesg"]
+    assert "3 rows below it" in seen["mesg"], seen["mesg"]
     assert "guess" in seen["mesg"].lower(), seen["mesg"]
     assert "nothing here knows" not in seen["mesg"], seen["mesg"]
     _no_universe_token_anywhere(seen["mesg"], "BARE-HASH-N GUESS NOTE")
@@ -4938,8 +4923,31 @@ def test_systemctl_is_MENTIONED_but_never_SPAWNED():
 # the URL by hand. The universe was already built and already the answer
 # everywhere else a repository cannot be named; this arm just never reached it.
 # --------------------------------------------------------------------------- #
+# 🔴 A TABLE WHOSE RANKED ORDER IS DELIBERATELY *NOT* ALPHABETICAL ORDER.
+# `/audit-pr` round 0 measured that every promotion test ran with NO range
+# table: `_ordered_universe` then returns the input untouched and
+# `repo_universe` returns its union SORTED, so "the TOP-RANKED row" was
+# satisfied by `sorted()` and no test would have gone red if `extra` were built
+# from the unordered universe. `rivalorg/spadeworks` is PLAUSIBLE (class 0) for
+# `#1291` while every other row is BELOW (class 1), and it sorts LAST
+# alphabetically among the plausible candidates — so a row promoted by the
+# ORDERING and a row promoted by the SORT are different repositories, and the
+# assertion can finally tell them apart.
+RANKED_FIRST = "rivalorg/spadeworks"          # class 0 — the ordering's pick
+ALPHA_FIRST = "acme/widget"                   # class 1 — what `sorted()` picks
+DISCRIMINATING_RANGES = {
+    ALPHA_FIRST: 5,                           # BELOW  #1291
+    "gardenersguild/trowelcast": 5,           # BELOW
+    "hobbyist/plotwidget": 5,                 # BELOW
+    RANKED_FIRST: 9000,                       # PLAUSIBLE — ranks first
+    "rivalorg/spadeworks-archived": 5,        # BELOW
+    "wrongorg/wrongrepo": 5,                  # BELOW (the pane guess)
+}
+
+
 def _guessed_picker(monkeypatch, *, universe, pane="wrongorg/wrongrepo",
-                    mapping=FAKE_UNIVERSE, text="audit-pr 1291"):
+                    mapping=FAKE_UNIVERSE, text="audit-pr 1291",
+                    ranges=None, tmp_path=None):
     """Drive `main()` down the guessed-repo path and return what `pick` saw.
 
     ⚠ `mapping` IS A PARAMETER BECAUSE `universe=[]` DOES NOT EMPTY THE UNIVERSE.
@@ -4953,6 +4961,13 @@ def _guessed_picker(monkeypatch, *, universe, pane="wrongorg/wrongrepo",
     in exactly the way that broke the note: `audit-pr N` offers the guess at row
     1, a bare `#N` offers the clawgate task first and the guess at row 2. A
     helper hard-wired to one of them is how the second went unfixed."""
+    # 🔴 NO `ranges` ⇒ NO TABLE ⇒ `order_state` is `no-table`, the ordering
+    # returns its input untouched, and the promotion is GATED OFF. That is the
+    # DEGRADED path and it is a real shape — most callers here want it. Pass
+    # `ranges=DISCRIMINATING_RANGES` (with `tmp_path`) for the ordered path.
+    if ranges is not None:
+        assert tmp_path is not None, "a ranges table needs a tmp_path to live in"
+        _ranges_on_disk(monkeypatch, tmp_path, dict(ranges))
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: dict(mapping))
     monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: list(universe))
     monkeypatch.setattr(MO, "tmux_pane_repo", lambda: pane)
@@ -4967,22 +4982,13 @@ def test_a_GUESSED_repo_is_offered_WITH_the_whole_universe_beneath_it(monkeypatc
     """🔴 THE REGRESSION FOR THE REPORTED SYMPTOM. Red before this change: the
     picker held exactly ONE row.
 
-    🔴 THE GUESS IS NO LONGER FIRST ON THIS SHAPE, AND THAT IS THE DELIBERATE
-    COST OF THE 2026-09-19 PROMOTION — SAY IT RATHER THAN QUIETLY RE-PIN IT.
-    `audit-pr N` has no clawgate row, so promoting the top-ranked universe row
-    above the pane guess puts it at row 1 and the guess at row 2: a CORRECT
-    guess now costs one arrow key where it used to cost none. The operator took
-    that trade knowing it (proposal §"Symptom 3" option 2) — the pane guess is
-    the weakest rung of the attribution ladder and the module already refuses to
-    auto-open it. What this test still guarantees is that the guess is demoted
-    by exactly ONE row and stays adjacent, never buried in the universe."""
+    The guess must still be FIRST — it is the most likely answer and stays one
+    Enter away — and everything else must be reachable by typing."""
     seen = _guessed_picker(monkeypatch, universe=[UNIVERSE_ONLY, "acme/widget"])
     urls = [c["url"] for c in seen["rows"]]
     assert len(urls) > 1, f"a guess with no alternatives is a dead end: {urls}"
-    assert "acme/widget" in urls[0], (
-        f"row 1 must be the TOP-RANKED universe row, promoted: {urls[0]}")
-    assert "wrongorg/wrongrepo" in urls[1], (
-        f"the guess is demoted by exactly ONE row, not buried: {urls}")
+    assert "wrongorg/wrongrepo" in urls[0], (
+        f"the guess must stay FIRST — one Enter for the common case: {urls[0]}")
     assert any(UNIVERSE_ONLY in u for u in urls), (
         f"the universe never reached the guessed picker: {urls}")
     assert all(u.endswith("/1291") for u in urls), urls
@@ -5091,38 +5097,30 @@ def test_a_bare_hash_N_offers_the_universe_UNDER_the_two_measured_rows(
     assert all(u.endswith("/1291") for u in urls), urls
 
 
-def test_the_bare_hash_N_ORDER_is_clawgate_then_the_TOP_RANKED_then_the_guess(
+def test_the_bare_hash_N_ORDER_is_clawgate_then_the_guess_then_the_universe(
         monkeypatch):
-    """🔴 THE ORDERING AFTER THE 2026-09-19 PROMOTION, RE-PINNED DELIBERATELY.
+    """🔴 THE HALF OF THE SUPERSEDED TEST'S CLAIM THAT SURVIVES, PINNED AS AN
+    ORDERING RATHER THAN AS A ROW COUNT.
 
-    This test previously asserted `clawgate, guess, universe…` and was RIGHT
-    for that design; the operator changed the design (proposal §"Symptom 3"
-    option 2) after measuring that the two pinned rows took 5 of 73 picks
-    (6.8%) while holding the top two slots. The top-ranked universe row is now
-    promoted ABOVE the pane guess and BELOW the clawgate row.
+    The common case must stay one or two keystrokes: the picker opens on row 1, so the
+    clawgate task is still one Enter and the pane's repo is one arrow key away.
+    Every universe row must sit BELOW both.
 
-    What is still pinned, and why each matters:
-      * the clawgate row KEEPS row 1 — it is evidence about the REFERENCE, and
-        the promotion was explicitly scoped not to displace it;
-      * row 2 is the row the ORDERING put first, not an arbitrary universe row;
-      * the guess is at row 3, i.e. demoted by exactly one, not buried.
-
-    ⚠ THE ROW-COUNT FLOOR STAYS. Without it the positional assertions are
-    satisfiable by a two-row picker that never exercised the promotion at all,
-    which is how this file's predecessor was green at base while claiming to pin
-    an ordering that did not exist yet."""
+    ⚠ THE ROW-COUNT FLOOR IS WHAT MAKES THIS A REGRESSION TEST RATHER THAN AN
+    INVARIANT GUARD. Without it the two positional assertions are satisfied by
+    the PRE-CHANGE two-row picker — there is simply nothing at index 2 to be
+    out of order — so it would have been green at base while claiming to pin the
+    ordering the change introduces."""
     seen = _guessed_picker(monkeypatch, text="#1291",
                            universe=[UNIVERSE_ONLY, "acme/widget"])
     urls = [c["url"] for c in seen["rows"]]
     assert len(urls) == 7, urls
     assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", (
-        f"the clawgate row keeps row 1 — the promotion is scoped BELOW it: {urls}")
-    assert urls[1] == "https://github.com/acme/widget/pull/1291", (
-        f"row 2 must be the TOP-RANKED universe row, promoted: {urls}")
-    assert urls[2] == "https://github.com/wrongorg/wrongrepo/pull/1291", (
-        f"the pane guess is demoted by exactly ONE row, not buried: {urls}")
-    # The rest of the universe stays below the guess.
-    assert UNIVERSE_ONLY in "\n".join(urls[3:]), urls
+        f"the MEASURED rows must stay on top: {urls}")
+    assert urls[1] == "https://github.com/wrongorg/wrongrepo/pull/1291", (
+        f"the MEASURED rows must stay on top: {urls}")
+    assert not any(UNIVERSE_ONLY in u or "acme/widget" in u for u in urls[:2]), urls
+    assert UNIVERSE_ONLY in "\n".join(urls[2:]), urls
 
 
 def test_the_bare_hash_N_note_names_the_GUESSED_ROWS_POSITION(monkeypatch):
@@ -5145,18 +5143,11 @@ def test_the_bare_hash_N_note_names_the_GUESSED_ROWS_POSITION(monkeypatch):
     wording."""
     seen = _guessed_picker(monkeypatch, text="#1291",
                            universe=[UNIVERSE_ONLY, "acme/widget"])
-    # 🔴 WHOLE-STRING PIN MOVED DELIBERATELY (2026-09-19, the promotion), and
-    # BOTH halves of it moved — the row number AND the clause. "the 5 rows
-    # below it are every repository this host knows" was true while the guess
-    # was the topmost repository row; the promotion puts one above it, so the
-    # sentence had to name that row rather than have its digit bumped from 5
-    # to 4. A pin that only tracked the number would have gone green over a
-    # sentence telling the operator the guess is the best row on offer.
     assert seen["mesg"] == (
-        "#1291 names no repository. Row 3 is a guess from the tmux pane, which "
-        "may not be the pane you clicked in — row 2 is this host's best-ranked "
-        "repository and the 4 rows below are the rest. Type to search, or "
-        "dismiss. · rows unordered — no reference-range table on this host yet "
+        "#1291 names no repository. Row 2 is a guess from the tmux pane, which "
+        "may not be the pane you clicked in — the 5 rows below it are every "
+        "repository this host knows. Type to search, or dismiss. · rows "
+        "unordered — no reference-range table on this host yet "
         "(scripts/regen-known-repos.py builds one)"), seen["mesg"]
     _no_universe_token_anywhere(seen["mesg"], "BARE-#N GUESS-NOTE DISCLOSURE")
 
@@ -5169,17 +5160,12 @@ def test_the_audit_pr_note_still_names_ROW_1(monkeypatch):
     see that test's note for why moving a whole-string pin was the right move
     here rather than a test edit to get green."""
     seen = _guessed_picker(monkeypatch, universe=[UNIVERSE_ONLY, "acme/widget"])
-    # 🔴 THE `audit-pr` SHAPE LOSES ROW 1 TO THE PROMOTION, AND THAT IS THE
-    # DELIBERATE COST THE OPERATOR ACCEPTED. With no clawgate row above it the
-    # promoted repository takes row 1 and the guess takes row 2 — so a correct
-    # guess costs one arrow key where it used to cost none. Pinned as the whole
-    # string so that trade cannot be reverted, widened or re-worded silently.
     assert seen["mesg"] == (
-        "audit-pr 1291 names no repository. Row 2 is a guess from the tmux "
-        "pane, which may not be the pane you clicked in — row 1 is this host's "
-        "best-ranked repository and the 4 rows below are the rest. Type to "
-        "search, or dismiss. · rows unordered — no reference-range table on "
-        "this host yet (scripts/regen-known-repos.py builds one)"), seen["mesg"]
+        "audit-pr 1291 names no repository. Row 1 is a guess from the tmux "
+        "pane, which may not be the pane you clicked in — the 5 rows below it "
+        "are every repository this host knows. Type to search, or dismiss. · "
+        "rows unordered — no reference-range table on this host yet "
+        "(scripts/regen-known-repos.py builds one)"), seen["mesg"]
 
 
 def test_the_bare_hash_N_guess_is_NEVER_opened_unconfirmed(monkeypatch):
@@ -5250,14 +5236,9 @@ def test_the_DEFAULT_REPO_FLAG_rides_the_same_rung_as_the_pane(monkeypatch):
     assert MO.main(["--default-repo", "wrongorg/wrongrepo", "#1291"]) == 0
     urls = [c["url"] for c in seen["rows"]]
     assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", urls
-    # 🔴 THE FLAG RIDES THE SAME RUNG, SO IT TAKES THE SAME DEMOTION. The
-    # promotion is keyed on `repo_source == default`, which is precisely what
-    # this flag sets — so a guess handed in from outside lands at row 3 exactly
-    # as the pane's does. If these two shapes ever disagree, the predicate has
-    # drifted back to "the pane answered" and the hole this test guards is open.
-    assert urls[2] == "https://github.com/wrongorg/wrongrepo/pull/1291", urls
+    assert urls[1] == "https://github.com/wrongorg/wrongrepo/pull/1291", urls
     assert any(UNIVERSE_ONLY in u for u in urls), urls
-    assert "Row 3" in seen["mesg"], seen["mesg"]
+    assert "Row 2" in seen["mesg"], seen["mesg"]
 
 
 def test_a_bare_hash_N_with_NO_pane_repo_is_UNCHANGED_by_this_widening(
@@ -9155,7 +9136,14 @@ def test_the_rows_ABOVE_the_ordered_block_are_pinned_BY_KIND_and_COUNTED(
     reachable mutation (M9, `pinned_above = 0` on the guessed arm, KILLED here)
     and it is the guard every symptom-3 option in the proposal must go red
     against — which is why it exists BEFORE that decision rather than after."""
-    _ordering_fixture(monkeypatch, tmp_path, pane=pane)
+    # 🔴 A DISCRIMINATING TABLE, NOT THE DEFAULT. `_ordering_fixture`'s
+    # default is `{v: 9000 for v in FAKE_UNIVERSE.values()}` — one identical
+    # range for every row, so class and distance tie and the sort degenerates
+    # to input order, which is alphabetical. Round 0 measured that this made
+    # "the ordering's first pick" indistinguishable from `sorted()[0]`.
+    _ordering_fixture(monkeypatch, tmp_path, pane=pane,
+                      table={v: (9000 if v == RANKED_FIRST else 5)
+                             for v in FAKE_UNIVERSE.values()})
     seen: dict = {}
 
     def _capture(c, mesg=""):
@@ -9184,10 +9172,18 @@ def test_the_rows_ABOVE_the_ordered_block_are_pinned_BY_KIND_and_COUNTED(
     # `rank < pinned_above` and the difference is NEGATIVE — see `click_dims`'
     # `ordered` paragraph. Both shapes must still report within-block row 0, so
     # assert THAT, with the promoted case spelled out rather than folded away.
+    # ⚠ THE FIRST DRAFT OF THIS BRANCH WAS A TAUTOLOGY — it re-asserted
+    # `ordered is True`, which is made verbatim three lines above, under a
+    # comment claiming it asserted within-block position 0. Round 0 measured
+    # that on the commonest shape the property this test exists for was then
+    # asserted NOWHERE. The promoted row's within-block position is 0 BY
+    # CONSTRUCTION (it is `extra[0]`), so the checkable claim is that it is the
+    # row the ordering ranked first — assert THAT, against the fixture's own
+    # ranked-first repo rather than against a subtraction that cannot apply.
     if payload["rank"] < payload["pinned_above"]:
-        assert payload["ordered"] is True, (
-            f"{shape}: only a PROMOTED row may sit above the never-ranked "
-            f"count, and it must still report ordered: {payload}")
+        assert payload["repo"] == RANKED_FIRST, (
+            f"{shape}: the promoted row must be the ordering's FIRST pick "
+            f"({RANKED_FIRST}), so its within-block position is 0: {payload}")
     else:
         assert payload["rank"] - payload["pinned_above"] == 0, payload
     assert payload["rank"] != 0, (
@@ -9618,9 +9614,24 @@ def test_every_arm_that_sets_pinned_above_also_sets_ordered_urls():
     ordered rows non-contiguous. Three arms of `main()` append universe rows and
     each must now set BOTH: an arm that sets `pinned_above` and forgets
     `ordered_urls` reports every genuinely-ordered row it produced as
-    `ordered=False`, and nothing else in the suite would notice — the rows are
-    in the right order on screen, the counts are right, and only the dim that
-    says *which population this row came from* is wrong.
+    `ordered=False` — the rows are in the right order on screen, the counts are
+    right, and only the dim that says *which population this row came from* is
+    wrong.
+
+    ⚠ WHAT THIS GUARD UNIQUELY BUYS, MEASURED RATHER THAN CLAIMED. An earlier
+    draft said "nothing else in the suite would notice", and round 0 measured
+    that FALSE. Against four mutants:
+      * a FOURTH arm omitting `ordered_urls` entirely — caught HERE, and by
+        nothing else, because no behavioural test drives an arm nobody wrote yet;
+      * `ordered_urls = set()` — caught here by the value check below;
+      * `ordered_urls = {... for c in candidates}` (the exact inversion this
+        change fixes) — NOT caught here; killed behaviourally by
+        `test_a_PINNED_row_is_NOT_reported_as_one_the_ORDERING_ranked` and
+        `test_the_rows_ABOVE_the_ordered_block_are_pinned_BY_KIND_and_COUNTED`,
+        verified by planting it;
+      * `pinned_above` renamed away — caught by the anti-degenerate floor.
+    So this is a guard against an arm that does not exist yet, not a substitute
+    for the behavioural pair.
 
     Asserted structurally so a FOURTH arm added later is covered for free; a
     behavioural test can only ever cover the arms someone remembered to drive.
@@ -9674,34 +9685,58 @@ def test_every_arm_that_sets_pinned_above_also_sets_ordered_urls():
         f"`ordered_urls`; every row those arms ordered will report "
         f"`ordered=False`. Arms (by scan order): {missing}")
 
+    # 🔴 AND THE VALUE, NOT ONLY THE NAME — ROUND 0 MEASURED THIS GAP.
+    # `_assigned_names` answers "is this name bound anywhere in the suite",
+    # which `ordered_urls = set()` and `ordered_urls = {c["url"] for c in
+    # candidates}` (the EXACT inversion this change fixes) both satisfy. Require
+    # a set COMPREHENSION over a url key, at the suite's own level, and require
+    # it to be REACHABLE — a binding inside `if False:` satisfied the name check
+    # too.
+    def _binds_a_url_set(body):
+        for stmt in body:
+            for sub in ast.walk(stmt):
+                if isinstance(sub, ast.If) and isinstance(sub.test, ast.Constant)                         and not sub.test.value:
+                    continue          # unreachable branch — does not count
+                if not isinstance(sub, ast.Assign):
+                    continue
+                if not any(isinstance(t, ast.Name) and t.id == "ordered_urls"
+                           for t in sub.targets):
+                    continue
+                if isinstance(sub.value, ast.SetComp):
+                    src = ast.dump(sub.value)
+                    if "'url'" in src or '"url"' in src:
+                        return True
+        return False
 
-def test_a_guessed_picker_with_ONE_universe_row_still_EXPLAINS(monkeypatch):
+    empty = [i for i, body in enumerate(suites) if not _binds_a_url_set(body)]
+    assert not empty, (
+        f"{len(empty)} arm(s) bind `ordered_urls` to something that is not a "
+        f"set comprehension over a row's `url` — an empty set, or the WRONG "
+        f"rows, reports the ordering's own output as unordered while the name "
+        f"check above stays green. Arms (by scan order): {empty}")
+
+
+def test_a_guessed_picker_with_ONE_universe_row_still_EXPLAINS(
+        monkeypatch, tmp_path):
     """🔴 THE REGRESSION THE PROMOTION ALMOST SHIPPED. `below` is the count of
     searchable rows UNDER the guess, and the promotion moves one row out from
     under it — so a host whose universe dedupes to exactly ONE row lands on
     `below == 0` with a three-row picker. The note is chosen by
     `below or promoted or len(candidates) == 1`; drop the middle clause and the
     explanation for why the guess was not auto-opened VANISHES on precisely the
-    shape that most needs it — the operator sees an unexplained picker, which
-    this module's own docstring calls "the bug".
+    shape that most needs it — an unexplained picker, which this module's own
+    docstring calls "the bug".
 
-    ⚠ IT DOES NOT COME BACK EMPTY, AND THE FIRST DRAFT OF THIS DOCSTRING SAID
-    IT DID. Measured by deleting the clause: the note falls through to
-    `universe_note` and reads "nothing here knows #1291" — which is FALSE here
-    (row 2 is a ranked recommendation and row 3 is the pane's own guess) and,
-    worse, is non-empty, so a bare `assert seen["mesg"]` passes straight over
-    it. That is why the assertions below pin WHICH note was chosen rather than
-    merely that one exists."""
-    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
-    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: ["acme/widget"])
-    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "wrongorg/wrongrepo")
-    seen = {}
-    monkeypatch.setattr(
-        MO, "pick",
-        lambda c, mesg="": seen.update(rows=list(c), mesg=mesg) or "")
-    assert MO.main(["#1291"]) == 0
+    ⚠ IT DOES NOT COME BACK EMPTY, AND THE FIRST DRAFT OF THIS DOCSTRING SAID IT
+    DID. Measured by deleting the clause: the note falls through to
+    `universe_note` and reads "nothing here knows #1291" — FALSE here, and
+    non-empty, so a bare `assert seen["mesg"]` passes straight over it. The
+    assertions below pin WHICH note was chosen."""
+    seen = _guessed_picker(monkeypatch, text="#1291", universe=[ALPHA_FIRST],
+                           mapping={}, ranges=DISCRIMINATING_RANGES,
+                           tmp_path=tmp_path)
     urls = [c["url"] for c in seen["rows"]]
-    assert "acme/widget" in urls[1], (
+    assert ALPHA_FIRST in urls[1], (
         f"the single universe row must be PROMOTED above the guess: {urls}")
     assert "wrongorg/wrongrepo" in urls[2], urls
     assert seen["mesg"], (
@@ -9713,3 +9748,112 @@ def test_a_guessed_picker_with_ONE_universe_row_still_EXPLAINS(monkeypatch):
         f"guess: {seen['mesg']}")
     assert "Row 3" in seen["mesg"], seen["mesg"]
     assert "the only one it knows" in seen["mesg"], seen["mesg"]
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE PROMOTION, AGAINST AN ORDERING THAT ACTUALLY RAN
+#
+# `/audit-pr` round 0 on #1793 measured that every promotion assertion in the
+# first draft ran with NO range table, so "top-ranked" was satisfied by
+# `sorted()`. These drive the ORDERED path with a table whose ranked order is
+# deliberately not alphabetical.
+# --------------------------------------------------------------------------- #
+def test_the_PROMOTED_row_is_the_ORDERINGS_pick_not_the_ALPHABETICAL_one(
+        monkeypatch, tmp_path):
+    """🔴 THE ASSERTION THE FIRST DRAFT COULD NOT MAKE. With every row in one
+    class the sort degenerates to input order, which `repo_universe` returns
+    SORTED — so `assert urls[1] == "acme/widget"` was pinning `sorted()` and
+    would have stayed green had `extra` been built from the unordered universe.
+
+    Here `rivalorg/spadeworks` is the only PLAUSIBLE row for `#1291` and
+    `acme/widget` is the alphabetically first. The promoted row must be the
+    former. Red against a promotion that takes the unordered universe."""
+    seen = _guessed_picker(monkeypatch, text="#1291",
+                           universe=[UNIVERSE_ONLY, ALPHA_FIRST],
+                           ranges=DISCRIMINATING_RANGES, tmp_path=tmp_path)
+    urls = [c["url"] for c in seen["rows"]]
+    assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", (
+        f"the clawgate row keeps row 1: {urls}")
+    assert RANKED_FIRST + "/pull/1291" in urls[1], (
+        f"row 2 must be the ORDERING's first pick ({RANKED_FIRST}), not the "
+        f"alphabetically first ({ALPHA_FIRST}): {urls}")
+    assert ALPHA_FIRST not in urls[1], (
+        f"row 2 is the alphabetically-first row — the promotion is reading the "
+        f"UNORDERED universe: {urls}")
+    assert "wrongorg/wrongrepo" in urls[2], (
+        f"the pane guess is demoted by exactly ONE row: {urls}")
+
+
+def test_the_promotion_is_GATED_on_the_ordering_having_actually_RUN(
+        monkeypatch, tmp_path):
+    """🔴 THE 🔴 FROM ROUND 0, PINNED. `_ordered_universe` RETURNS THE INPUT
+    UNTOUCHED when the table is stale or missing — so an ungated promotion
+    demotes the pane guess (a weak but REAL signal) beneath whatever sorts
+    first, and `guessed_note` calls it "this host's best-ranked repository".
+
+    The tell was in the first draft's own whole-string pin, which asserted
+    "row 2 is this host's best-ranked repository … · rows unordered — no
+    reference-range table on this host yet" — a sentence contradicting itself in
+    its own second clause, pinned as correct.
+
+    Same click, same universe, ONLY the table's presence differs: with it, the
+    ranked row is promoted; without it, the pre-promotion layout, and the note
+    must never claim a best-ranked row."""
+    ordered = _guessed_picker(monkeypatch, text="#1291",
+                              universe=[UNIVERSE_ONLY, ALPHA_FIRST],
+                              ranges=DISCRIMINATING_RANGES, tmp_path=tmp_path)
+    assert RANKED_FIRST + "/pull/1291" in [c["url"] for c in ordered["rows"]][1], (
+        "positive control: with a table the promotion must fire, or the "
+        "negative case below proves nothing")
+    assert "best-ranked repository" in ordered["mesg"], ordered["mesg"]
+
+    # 🔴 THE TABLE MUST BE TAKEN AWAY EXPLICITLY. `monkeypatch` is
+    # FUNCTION-scoped, so the `KNOWN_RANGES_PATH` set by the call above is still
+    # live here — the first draft of this test "proved" the degraded case while
+    # the table was still installed, and passed the ORDERED layout off as the
+    # degraded one. Point it at a path that does not exist.
+    monkeypatch.setattr(MO, "KNOWN_RANGES_PATH", tmp_path / "no-such-table.json")
+    degraded = _guessed_picker(monkeypatch, text="#1291",
+                               universe=[UNIVERSE_ONLY, ALPHA_FIRST])
+    durls = [c["url"] for c in degraded["rows"]]
+    assert durls[0] == "https://clawgate.zacx.dev/tasks/1291", durls
+    assert "wrongorg/wrongrepo" in durls[1], (
+        f"with NO ordering the pane guess must KEEP its row — nothing ranked "
+        f"the row that would have displaced it: {durls}")
+    assert "best-ranked repository" not in degraded["mesg"], (
+        f"the note claims a best-ranked row while the ordering did not run: "
+        f"{degraded['mesg']}")
+    # 🔴 AND THE SELF-CONTRADICTION ITSELF, pinned as a RELATIONSHIP so a
+    # reworded note cannot reintroduce it: the note may not claim a ranking and
+    # disclaim one in the same breath.
+    assert not ("best-ranked" in degraded["mesg"]
+                and "rows unordered" in degraded["mesg"]), degraded["mesg"]
+
+
+def test_NO_promotion_when_the_ORDERINGS_top_row_IS_the_pane_guess(
+        monkeypatch, tmp_path):
+    """🔴 ROUND 0's F6, PINNED. The pane repo is usually in the universe too and
+    is deduped out of `extra` — so when the ordering ranked it FIRST, `extra[0]`
+    is the RUNNER-UP. Promoting that would put the ordering's second pick above
+    its first and call the second "this host's best-ranked repository". Tier B
+    learns from picks, so a frequently-picked pane repo ranking first is an
+    ordinary state.
+
+    The fixture makes the pane repo the ONLY plausible row for `#1291`, so the
+    ordering ranks it first; every other row is BELOW. Red against a promotion
+    that does not check the pre-dedup list."""
+    table = {v: 5 for v in FAKE_UNIVERSE.values()}
+    table[ALPHA_FIRST] = 5
+    table[PANE_GUESS] = 9000          # the pane repo is the ordering's pick
+    seen = _guessed_picker(
+        monkeypatch, text="#1291", universe=[UNIVERSE_ONLY, ALPHA_FIRST,
+                                             PANE_GUESS],
+        ranges=table, tmp_path=tmp_path)
+    urls = [c["url"] for c in seen["rows"]]
+    assert urls[0] == "https://clawgate.zacx.dev/tasks/1291", urls
+    assert PANE_GUESS in urls[1], (
+        f"the ordering ranked the pane repo FIRST, so nothing may be promoted "
+        f"above it — row 2 should still be the guess: {urls}")
+    assert "best-ranked repository" not in seen["mesg"], (
+        f"the note credits a promoted row while the ordering's own first pick "
+        f"is the guess itself: {seen['mesg']}")
