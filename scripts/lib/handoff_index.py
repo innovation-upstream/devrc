@@ -177,6 +177,8 @@ __all__ = [
     "PREFIX_SECTION",
     "SECTION_BOOST",
     "DEFAULT_BOOST",
+    "STOPWORDS",
+    "LENGTH_PIVOT_TOKENS",
     "HANDOFF_GLOB",
     "HANDOFF_DIR",
     "TABLE",
@@ -297,6 +299,63 @@ SECTION_BOOST: Mapping[str, float] = {
     "gotcha": 1.75,
 }
 DEFAULT_BOOST = 1.0
+
+#: Query words that carry no topical signal. Used by `_content_tokens` on BOTH
+#: sides of the offline match — the query and the row — so one rule decides what
+#: counts as a term.
+#:
+#: 🔴 WHY THIS EXISTS: the offline ranker divided coverage by the QUERY length
+#: alone, so every row containing `the`/`and`/`of` scored on them. MEASURED on
+#: the live corpus (6,321 sections, 2026-09-19): the query
+#: `"the and of to a is it that"` returned five hits at rank **2.0000** — perfect
+#: coverage, top boost, from a query with no subject. A pure-stopword query is
+#: not a query, and now returns nothing at all rather than the corpus's five
+#: largest `investigation` rows.
+#:
+#: ⚠ IT IS NOT A RELEVANCE KNOB. Removing these changed the ranked output by
+#: almost nothing on its own (16/66 -> 16/66 `Ruled out:` slots over the replay
+#: below); `LENGTH_PIVOT_TOKENS` is what fixed the ranking. This list exists for
+#: the degenerate-query case and for measuring row length in CONTENT tokens.
+STOPWORDS = frozenset("""
+a about after all also an and any are as at be because been before being both but
+by can could did do does doing done down during each either else even every for
+from further had has have having he her here hers him his how i if in into is it
+its itself just me more most my no nor not of off on once one only or other our
+out over own same she should so some still such than that the their them then
+there these they this those through to too under until up use used using very was
+we were what when where whether which while who whom why will with would you your
+""".split())
+
+#: The row size, in distinct CONTENT tokens, above which the offline ranker starts
+#: discounting a row for being big. Rows at or below it are scored EXACTLY as
+#: before — the normalisation is one-sided on purpose.
+#:
+#: 🔴 WHY: `len(present) / len(wanted)` normalises by the QUERY and by nothing on
+#: the ROW, so a bigger row carries more distinct tokens and wins on size rather
+#: than on topicality. MEASURED on the live corpus (6,321 sections / 449 docs,
+#: 2026-09-19) over a 22-query replay of `/resume` step 4 (each query = a recent
+#: handoff's own topic words, `--limit 3`, its own doc excluded):
+#:
+#:     top-3 slots   gotcha 41 · investigation 25 · next_step 0
+#:     median size of a returned row: 1,274 distinct tokens (corpus p50 is 81)
+#:     8 of 22 queries returned NOTHING but `gotcha`
+#:
+#: `gotcha#0` is the whole un-subdivided `## Gotchas` block — one row per doc, the
+#: largest row in most documents, 6% of the index. The step exists to surface
+#: `Ruled out:` bullets, and 998 of the 1,004 rows carrying one are
+#: `investigation`. With the discount the same replay returns investigation 63 /
+#: gotcha 3, `Ruled out:` slots 16/66 -> 34/66, and 0 of 22 all-`gotcha` queries.
+#:
+#: WHY ONE-SIDED, AND WHY 300: a symmetric BM25-style `(1-b) + b*L/pivot` also
+#: rewards TINY rows, and measured WORSE on the metric the step is for
+#: (22-24/66) because it selected below-average-size `investigation` rows that do
+#: not carry a bullet. `max(1, L/pivot)` cannot promote a small row — it only
+#: demotes an oversized one — so a normal row's rank, and therefore
+#: `SECTION_BOOST`'s meaning and the `[0, boost]` range, are unchanged. 300 sits
+#: just above the corpus p90 (256), so ~7.4% of rows are discounted at all; 57%
+#: of `gotcha` rows are, against 5% of `investigation` rows. The plateau is broad
+#: — 200-450 all score 32-35/66 — so this is not a tuned knife edge.
+LENGTH_PIVOT_TOKENS = 300
 
 #: Where a handoff doc lives, and what one is called. `/handoff` writes
 #: `claudedocs/handoff-<topic>.md` in every repo (`scripts/lib/handoff_doc.py`).
@@ -1303,6 +1362,26 @@ def _tokens(text: str) -> list[str]:
     return [t for t in re.split(r"[^0-9A-Za-z_]+", text.lower()) if t]
 
 
+def _content_tokens(text: str) -> set[str]:
+    """The distinct tokens that carry topic. ONE rule, both sides of the match.
+
+    Applied to the query AND to the row, so `wanted & row` compares like with
+    like and `len(row)` — the size the length discount is measured against —
+    counts content rather than grammar. Splitting those two rules is how a
+    coverage number and a length number end up describing different texts."""
+    return {t for t in _tokens(text) if t not in STOPWORDS}
+
+
+def _length_discount(row_tokens: int) -> float:
+    """How much to divide a row's coverage by for being oversized. NEVER < 1.
+
+    `max(1, n/pivot)`: a row at or below `LENGTH_PIVOT_TOKENS` is untouched, and
+    one above it is discounted in exact proportion to how many pivots long it is.
+    Deliberately NOT symmetric — see `LENGTH_PIVOT_TOKENS` for the measurement
+    that rejected the symmetric form."""
+    return max(1.0, row_tokens / LENGTH_PIVOT_TOKENS)
+
+
 class MemorySectionStore:
     """An in-process store over derived `Section` rows. No database, no network.
 
@@ -1315,6 +1394,25 @@ class MemorySectionStore:
     the recency tiebreak — `SECTION_BOOST` is read here and compiled into the SQL
     by `_boost_case`, so the one thing a reader would notice moving cannot move in
     only one of them.
+
+    🔴 THE DIVERGENCE IS NOW WIDER THAN A TIE BAND, AND THIS IS THE NOTICE.
+    2026-09-19 added two things HERE and nothing to the SQL: a `STOPWORDS` filter
+    and a one-sided `LENGTH_PIVOT_TOKENS` discount. Postgres has neither — it has
+    its own english stopword dictionary (a different list, applied at `tsvector`
+    build time, not this one), and `ts_rank` with the default normalisation flag
+    `0` applies NO length normalisation at all. So the indexed backend still
+    carries the same length bias this one was just fixed for; on the offline
+    corpus that bias put a doc's whole `## Gotchas` block in 41 of 66 top-3 slots.
+
+    ⚠ THE POSTGRES PATH DOES NEED A MATCHING CHANGE, AND IT IS DELIBERATELY NOT
+    IN THIS ONE. The analogue is `ts_rank`'s normalisation argument — flag `2`
+    (divide by document length) or `|32` (`rank/(rank+1)`), i.e.
+    `ts_rank(tsv, q, 2)` in `PostgresSectionStore.search_sql`. It is not taken
+    here because nothing in this repo can MEASURE it: the only consumer of this
+    module is `/resume` step 4, which runs `--offline`, and the indexed backend
+    has no test that executes against a live database — so a one-token SQL edit
+    would be a ranking change nobody could watch work. Flagged rather than
+    half-done; `claude/RULES.md` forbids the silent half, not the honest one.
 
     Every response from this backend is labelled `backend=memory` by the renderer."""
 
@@ -1371,15 +1469,26 @@ class MemorySectionStore:
         limit: int = 10,
         exclude: Sequence[str] = (),
     ) -> list[Hit]:
-        wanted = set(_tokens(query))
+        # 🔴 A PURE-STOPWORD QUERY IS NOT A QUERY, and used to be the best one
+        # there was: `"the and of to a is it that"` scored perfect coverage on
+        # every large row. It now derives no terms and returns no hits, which
+        # `run_search` renders as the corpus being silent rather than as five
+        # confident answers about nothing. See `STOPWORDS`.
+        wanted = _content_tokens(query)
         if not wanted:
             return []
         hits: list[Hit] = []
         for row in self._selected(repo, sections, exclude):
-            present = wanted & set(_tokens(f"{row.heading} {row.body}"))
+            row_tokens = _content_tokens(f"{row.heading} {row.body}")
+            present = wanted & row_tokens
             if not present:
                 continue
-            base = len(present) / len(wanted)
+            # Coverage of the QUERY, discounted for OVERSIZE of the ROW. Both
+            # halves are needed: coverage alone made size the ranking signal
+            # (`LENGTH_PIVOT_TOKENS` carries the measurement), and the discount
+            # is 1.0 for every row at or below the pivot, so `SECTION_BOOST`
+            # keeps exactly the authority it had and `rank` stays in [0, boost].
+            base = len(present) / len(wanted) / _length_discount(len(row_tokens))
             hits.append(
                 Hit(
                     repo=row.repo,

@@ -411,6 +411,47 @@ def test_explicit_path_beats_a_resolvable_glob(tmp_path, stub_bin):
 
 
 # --------------------------------------------------------------------------- #
+# an ARCHIVED doc must print a value step 4 can actually EXCLUDE BY
+#
+# 🔴 The /resume skill tells the reader to paste this line's value into
+# `handoff_search.py --exclude-slug`, and `handoff_index.slug_for` indexes
+# `claudedocs/archive/handoff-x.md` as `archive/x`. A bare basename normalises
+# to `x`, matches no row, and the run prints a confident `excluded=x` with
+# `in_scope_docs` unchanged — the "filter that silently declines to filter".
+# MEASURED 2026-09-19 against the live corpus: 34 nested slugs, and the
+# prescribed basename left all 449 docs in scope where the qualified path left
+# 448. The seam itself is pinned in `test_resume_handoff_search_wiring.py`.
+# --------------------------------------------------------------------------- #
+def test_an_archived_doc_prints_its_claudedocs_relative_path(tmp_path, stub_bin):
+    """RED before the fix — the line read `handoff: handoff-archived.md`."""
+    repo = make_repo(tmp_path, docs=())
+    doc = repo / "claudedocs" / "archive" / "handoff-archived.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("## archived\nsome handoff prose\n")
+    assert handoff_line(run_resume(repo, stub_bin, str(doc))) == (
+        "handoff: archive/handoff-archived.md"
+    )
+
+
+def test_a_doc_directly_under_claudedocs_still_prints_a_bare_basename(
+    tmp_path, stub_bin
+):
+    """The control for the test above, as a DIFFERENTIAL on one run shape.
+
+    Both docs are reached by the same explicit-path branch, so the only thing
+    that can differ between these two assertions is the nesting. Without this,
+    a printer that qualified EVERY doc — changing a line ~30 other assertions
+    in this file match literally — would satisfy the archived case alone.
+    """
+    repo = make_repo(tmp_path, docs=())
+    doc = repo / "claudedocs" / "handoff-flat.md"
+    doc.write_text("## flat\nsome handoff prose\n")
+    assert handoff_line(run_resume(repo, stub_bin, str(doc))) == (
+        "handoff: handoff-flat.md"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # the topic-slug form
 # --------------------------------------------------------------------------- #
 def test_slug_still_selects_within_the_lowercase_family(tmp_path, stub_bin):
@@ -3376,6 +3417,19 @@ def test_the_EPHEMERAL_classification_needs_the_WHOLE_agent_worktree_PATH(
 # --------------------------------------------------------------------------- #
 ARCHIVED = "handoff-archived-topic-2026-01-01.md"
 
+#: What the digest's `handoff:` line carries for an archived doc — the path from
+#: `claudedocs/` down, which is the value `handoff_search --exclude-slug` needs.
+#:
+#: 🔴 THE FOUR ASSERTIONS BELOW USED TO NAME THE BARE BASENAME, AND THAT WAS THE
+#: BUG THEY WERE PINNING IN PLACE. Their subject is RESOLUTION — "the run chose
+#: the doc that was NAMED rather than falling through to a live one" — and the
+#: basename was a discriminating value for that claim and an undiscriminating one
+#: for the next consumer: `handoff_index.slug_for` stores this doc as
+#: `archive/archived-topic-2026-01-01`, so the basename normalises to a slug no
+#: row carries and step 4's exclusion silently filters nothing. Still
+#: discriminating for resolution — `archive/<name>` names neither live doc.
+ARCHIVED_REF = f"archive/{ARCHIVED}"
+
 #: Newer than anything `make_repo` stamps (it starts at 1_700_000_000 and steps
 #: by 1000), so `ls -t` would put an archived doc FIRST if a glob reached it.
 ARCHIVE_MTIME = 1_800_000_000
@@ -3415,7 +3469,7 @@ def test_an_archived_doc_named_in_PROSE_resolves(tmp_path, stub_bin):
     repo = make_repo(tmp_path, docs=("handoff-live-a.md", "handoff-live-b.md"))
     doc = archive_doc(repo)
     out = run_resume(repo, stub_bin, f"pick the old thread back up; handoff: {doc}")
-    assert handoff_line(out) == f"handoff: {ARCHIVED}", out
+    assert handoff_line(out) == f"handoff: {ARCHIVED_REF}", out
 
 
 def test_an_archived_doc_named_as_the_BARE_argument_resolves(tmp_path, stub_bin):
@@ -3428,7 +3482,7 @@ def test_an_archived_doc_named_as_the_BARE_argument_resolves(tmp_path, stub_bin)
     """
     repo = make_repo(tmp_path, docs=("handoff-live-a.md", "handoff-live-b.md"))
     doc = archive_doc(repo)
-    assert handoff_line(run_resume(repo, stub_bin, str(doc))) == f"handoff: {ARCHIVED}"
+    assert handoff_line(run_resume(repo, stub_bin, str(doc))) == f"handoff: {ARCHIVED_REF}"
 
 
 def test_the_newest_of_N_fallback_NEVER_reaches_the_archive(tmp_path, stub_bin):
@@ -3526,7 +3580,7 @@ def test_an_archived_doc_in_a_LINKED_WORKTREE_resolves_out_of_the_RIGHT_one(
     assert not named.exists(), "the fixture must NOT put the doc in the base clone"
 
     out = run_resume(repo, stub_bin, f"resume that; handoff: {named}", cwd=repo)
-    assert handoff_line(out) == f"handoff: {ARCHIVED}", out
+    assert handoff_line(out) == f"handoff: {ARCHIVED_REF}", out
     assert gap_lines(out) == [], out
     assert _repo_as_the_script_resolved_it(out) == str(right.resolve()), out
 
@@ -3555,7 +3609,7 @@ def test_an_archived_doc_reached_by_the_RELATIVE_re_anchor_resolves(
     assert not (repo / tok).exists(), "the token must MISS from inside the repo"
 
     out = run_resume(repo, stub_bin, f"continue; handoff: {tok}", cwd=repo)
-    assert handoff_line(out) == f"handoff: {ARCHIVED}", out
+    assert handoff_line(out) == f"handoff: {ARCHIVED_REF}", out
 
 
 def test_the_accepted_handoff_DIRECTORIES_are_an_enumerated_ledger():

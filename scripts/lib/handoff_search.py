@@ -568,6 +568,18 @@ def render(outcome: SearchOutcome) -> str:
     # branch below emits before its own block.
     if outcome.exclude:
         scope.append("excluded=" + ",".join(outcome.exclude))
+    # 🔴 WHICH REPOS THE CORPUS COVERS IS PART OF EVERY ANSWER, NOT JUST THE
+    # ZEROS. `known_repos` was rendered only on the `unknown-repo` branch, so a
+    # run WITH hits never said what its reach was — and this corpus reaches
+    # exactly `handoff_index.REPO_ENV_HANDLES`, four repos. MEASURED over 22 real
+    # `/resume` runs: 2 were launched from a repo outside that set, where the
+    # corpus STRUCTURALLY could not hold the session's own work, and nothing in
+    # the output said so. Three hits from elsewhere then read as "here is what
+    # past sessions recorded" rather than "this corpus has never seen your repo".
+    # The label list is also what tells a reader a hit came from a CLIENT repo —
+    # the scope warning in the /resume skill turns on exactly that.
+    if outcome.known_repos:
+        scope.append("repos=" + ",".join(outcome.known_repos))
     lines = [
         recall_banner(),
         "",
@@ -902,15 +914,26 @@ def exclusion_slug(value: str) -> str:
     `slug_for` — the SAME function that wrote the row, never a second
     hand-rolled strip. A bare slug is idempotent under it.
 
-    ⚠ WHAT IT STILL CANNOT DO, stated because the old docstring claimed the
-    opposite: it cannot recover the DIRECTORY of a nested doc. `slug_for` indexes
-    `claudedocs/sub/handoff-t.md` as `sub/t`, while `resume-state.sh` prints only
-    the BASENAME `handoff-t.md`, from which `sub/` is simply absent — so passing
-    what the skill tells you to pass excludes nothing for a nested doc. Measured
-    zero nested handoff docs across the reachable repos today, so this is latent;
-    it is named here rather than papered over, because the previous docstring
-    cited the nested case as the REASON for using `slug_for` while the end-to-end
-    path could not satisfy it."""
+    ⚠ WHAT IT STILL CANNOT DO: it cannot recover the DIRECTORY of a nested doc.
+    `slug_for` indexes `claudedocs/sub/handoff-t.md` as `sub/t`, so a caller
+    holding only the BASENAME `handoff-t.md` derives `t` and excludes nothing.
+    That is a property of the value, not of this function — there is no `sub/`
+    in the input to recover.
+
+    🔴 THE "THIS IS LATENT" CLAIM THAT USED TO SIT HERE WAS TRUE WHEN WRITTEN
+    AND EXPIRED WITHOUT ANYONE RE-CHECKING, WHICH IS THE WHOLE POINT OF THE
+    NOTE. It read "measured zero nested handoff docs across the reachable repos
+    today" — then `#1627` archived 35 docs under `claudedocs/archive/`.
+    RE-MEASURED 2026-09-19: 34 nested `archive/`-prefixed slugs, 184 sections,
+    and `resume-state.sh`'s `handoff:` line printed a basename that filtered
+    NOTHING for every one of them (three-arm control: no exclusion 449 docs /
+    prescribed basename 449 / `claudedocs/`-qualified path 448). The caller side
+    is fixed — `resume-state.sh::handoff_ref_for_exclusion` now prints the path
+    from `claudedocs/` down — so the end-to-end path satisfies the nested case
+    the previous docstring cited as the reason for using `slug_for` at all.
+    ⚠ A basename for a nested doc STILL excludes nothing if one reaches here;
+    that is deliberate, because an unmatched slug must not become an error (see
+    `main`'s guard and `test_an_unmatched_slug_still_says_what_it_excluded`)."""
     cleaned = value.strip()
     if not cleaned:
         return ""
