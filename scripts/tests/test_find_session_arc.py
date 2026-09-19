@@ -141,9 +141,14 @@ class TestTrailerIds:
             "11111111-1111-4111-8111-111111111111",)
 
     def test_keeps_distinct_ids_in_first_appearance_order(self):
-        body = ("subject\n\nClaude-Session-Id: bbb\n\n* other\n\n"
-                "Claude-Session-Id: aaa\n")
-        assert ha.trailer_ids(body) == ("bbb", "aaa")
+        # Real-shaped ids: `trailer_ids` validates on READ (a value here becomes
+        # `claude --resume <value>` for someone to paste), so a placeholder like
+        # `bbb` is dropped by design.
+        b = "bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb"
+        a = "aaaaaaaa-2222-4222-8222-aaaaaaaaaaaa"
+        body = (f"subject\n\nClaude-Session-Id: {b}\n\n* other\n\n"
+                f"Claude-Session-Id: {a}\n")
+        assert ha.trailer_ids(body) == (b, a)
 
     def test_an_INDENTED_trailer_does_NOT_count(self):
         """Column 0 only — an indented line is a quotation, not a trailer.
@@ -485,17 +490,23 @@ class TestTheAnnotationCountIsAFloor:
 
 
 class TestTheExcludedCorpusIsNamed:
-    def test_the_opencode_corpus_is_reported_as_NOT_searched(self, arc_repo):
-        """🔴 The arc walk is `--claude-only`. Silently dropping a whole runtime
-        is the scoped-zero-as-absence pattern the report exists to refuse."""
-        rep = ha.resolve_arc(str(arc_repo), DOC, reader_rows=[],
-                             readers_measured=True)
-        rep.unmeasured_notes.append(
-            "the opencode corpus was NOT searched for readers (the arc walk is "
-            "--claude-only, because a resume command is runtime-specific), so an "
-            "opencode session that resumed this doc is NOT in this chain")
-        assert any("opencode corpus was NOT searched" in n
-                   for n in rep.unmeasured_notes)
+    """🔴 THE EARLIER VERSION OF THIS TEST WAS VACUOUS AND AN AUDIT PROVED IT BY
+    MUTATION. It appended the note to the report ITSELF and then asserted the note
+    was there — never calling `run_arc`. Deleting the production append left the
+    whole module green. It now drives `run_arc` and reads its real stdout."""
+
+    def test_run_arc_PRINTS_that_the_opencode_corpus_was_not_searched(
+            self, arc_repo, monkeypatch, capsys):
+        monkeypatch.setattr(fs, "arc_repo_for",
+                            lambda basename: (str(arc_repo), DOC))
+        monkeypatch.setattr(fs, "archive_search", lambda a, since: [])
+        a = fs.parse_args(["--arc", "handoff-arc-fixture"])
+        a.arc = "handoff-arc-fixture.md"
+        assert fs.run_arc(a) == fs.EXIT_OK
+        out = capsys.readouterr().out
+        assert "opencode corpus was NOT searched" in out, (
+            "run_arc did not disclose the corpus it skipped; a chain that omits "
+            "a whole runtime silently reads as complete")
 
 
 class TestSessionGenesisUsesTheSharedWalk:
@@ -511,3 +522,115 @@ class TestSessionGenesisUsesTheSharedWalk:
             '{"type":"user","message":{"content":"claudedocs/handoff-sub.md"}}\n',
             encoding="utf-8")
         assert fs.session_genesis(sid, root=tmp_path) == ""
+
+
+class TestTheAnnotationIsWIREDIntoTheClassicPath:
+    """🔴 `arc_annotation` WAS TESTED AS A PURE FUNCTION AND WIRED UP BY NOTHING.
+    An audit replaced the call site with `note = None` and the suite stayed fully
+    green — deleting "the half that fixes the reported pain" was invisible. A
+    function tested in isolation is not a feature; this drives `main`."""
+
+    def _run(self, monkeypatch, capsys, rows):
+        monkeypatch.setattr(fs, "archive_search", lambda a, since: rows)
+        monkeypatch.setattr(fs, "arc_writer_counts",
+                            lambda shown, repo_lookup=None: {})
+        rc = fs.main(["handoff-wired"])
+        return rc, capsys.readouterr().out
+
+    def _row(self, genesis):
+        return {"session_id": "s1", "cwd": "/x/devrc", "project_dir": "devrc",
+                "branch": "main", "first": "2026-09-01T00:00:00Z",
+                "last": "2026-09-01T01:00:00Z", "genesis": genesis,
+                "matched_terms": ["handoff-wired"], "total_hits": 1,
+                "snippets": {}, "path": "/x/s1.jsonl"}
+
+    def test_an_ordinary_hit_naming_a_doc_IS_annotated_in_real_output(
+            self, monkeypatch, capsys):
+        rc, out = self._run(monkeypatch, capsys,
+                            [self._row("/resume — claudedocs/handoff-wired.md")])
+        assert rc == fs.EXIT_OK
+        assert "arc: handoff-wired.md" in out
+        assert "--arc handoff-wired.md" in out, (
+            "the annotation printed no pasteable command — that command IS the "
+            "feature; the count is decoration")
+
+    def test_a_hit_naming_NO_doc_is_NOT_annotated(self, monkeypatch, capsys):
+        """The negative control. Without it, an annotator that printed on every
+        row would pass the test above."""
+        rc, out = self._run(monkeypatch, capsys, [self._row("just some text")])
+        assert rc == fs.EXIT_OK
+        assert "arc: " not in out
+
+
+class TestTheMeasuredZeroIsDistinguishable:
+    def test_zero_stamped_writers_reads_differently_from_UNMEASURED(self):
+        """🔴 `n == 0` means the history WAS read and holds no ids; `n is None`
+        means nothing was looked at. Rendering both as "" made a measured reading
+        byte-identical to an absent one."""
+        r = {"genesis": "claudedocs/handoff-z.md"}
+        measured = fs.arc_annotation(r, {"handoff-z.md": 0})
+        unmeasured = fs.arc_annotation(r, {})
+        assert measured != unmeasured
+        assert "0 stamped writers" in measured
+        assert "sessions" not in unmeasured
+
+
+class TestGitIsCalledWithoutAmbientOverrides:
+    def test_GIT_DIR_in_the_environment_cannot_redirect_the_walk(
+            self, arc_repo, monkeypatch, tmp_path):
+        """🔴 `git -C <path>` DOES NOT override `$GIT_DIR`. MEASURED before the
+        fix: with GIT_DIR exported the arc printed `0 of 0 commit(s)` at exit 0 —
+        a confident empty writer set, which is exactly the conflation this
+        module's GitUnavailable docstring claims the design prevents."""
+        other = tmp_path / "other"
+        other.mkdir()
+        _sh("git", "init", "-q", "-b", "main", cwd=other)
+        monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(other))
+        rep = ha.resolve_arc(str(arc_repo), DOC, readers_measured=True)
+        assert rep.total_commits == 3, (
+            "an ambient GIT_DIR redirected the walk and the arc rendered as "
+            "measured-empty")
+
+    def test_the_override_ledger_is_scrubbed_from_the_child_env(self):
+        env = {k: "x" for k in ha._GIT_ENV_OVERRIDES}
+        import os as _os
+        for k, v in env.items():
+            _os.environ[k] = v
+        try:
+            scrubbed = ha._git_env()
+        finally:
+            for k in env:
+                _os.environ.pop(k, None)
+        assert not [k for k in ha._GIT_ENV_OVERRIDES if k in scrubbed]
+
+
+class TestTrailerValuesAreValidatedOnREAD:
+    """🔴 The WRITE side validates and the READ side did not — and the read side
+    is where the value becomes `claude --resume <value>` for a human to paste."""
+
+    @pytest.mark.parametrize("bad", [
+        "x;rm -rf /", "$(whoami)", "`id`", "\x1b[2Jboo", "a" * 5000, "../../etc",
+    ])
+    def test_a_non_id_shaped_value_is_DROPPED(self, bad):
+        assert ha.trailer_ids(f"subject\n\n{ha.TRAILER_KEY}: {bad}\n") == ()
+
+    def test_a_real_uuid_still_parses(self):
+        sid = "6b88ffe8-ec33-4662-b169-a42e8008a69a"
+        assert ha.trailer_ids(f"s\n\n{ha.TRAILER_KEY}: {sid}\n") == (sid,)
+
+    def test_an_opencode_session_id_still_parses(self):
+        sid = "ses_abc123"
+        assert ha.trailer_ids(f"s\n\n{ha.TRAILER_KEY}: {sid}\n") == (sid,)
+
+
+class TestEverySessionOnTheOldestCommitIsOriginated:
+    def test_a_squash_carrying_TWO_sessions_labels_BOTH(self):
+        """🔴 The docstring said "session_S_" while the body labelled the first.
+        A squash putting several sessions in one body is this module's founding
+        premise, so the singular was on-path, not theoretical."""
+        c = ha.ArcCommit(sha="a" * 40, date="2026-09-01T00:00:00Z", subject="s",
+                         session_ids=("11111111-1111-4111-8111-111111111111",
+                                      "22222222-2222-4222-8222-222222222222"))
+        members = ha.writer_members([c])
+        assert {m.role for m in members} == {ha.ROLE_ORIGINATED}

@@ -72,6 +72,13 @@ TRAILER_KEY = "Claude-Session-Id"
 #: directions and both are load-bearing.
 _TRAILER_RE = re.compile(rf"^{TRAILER_KEY}:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
 
+#: What a session id may look like. Deliberately narrow: a UUID as Claude Code
+#: writes them, or an opencode `ses_`-prefixed token. Anything else is dropped
+#: rather than sanitised — a value we cannot recognise is not one we should be
+#: handing anybody to paste into a shell.
+_ID_SHAPE = re.compile(r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                       r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|ses_[A-Za-z0-9_-]{1,64})$")
+
 #: A handoff doc path as it appears in prose. `archive/` is included because
 #: `#1627` renamed 35 docs under it and an arc must not end at a rename.
 _DOC_IN_TEXT = re.compile(
@@ -177,6 +184,17 @@ def trailer_ids(body: str) -> tuple[str, ...]:
     """
     seen: list[str] = []
     for sid in _TRAILER_RE.findall(body or ""):
+        if not _ID_SHAPE.match(sid):
+            # 🔴 THE INPUT IS ANY COMMIT BODY IN ANY OF FOUR REPOS' HISTORY,
+            # INCLUDING IMPORTED AND SQUASHED CONTRIBUTIONS, and the output is
+            # printed to a terminal AND rendered as `claude --resume <value>` for
+            # the reader to paste. MEASURED before this filter:
+            # `Claude-Session-Id: x;rm` parsed to `x;rm` and rendered as
+            # `claude --resume x;rm`; ANSI escapes and a 100,000-char value were
+            # accepted too. Note the asymmetry this closes — the WRITE side
+            # already validates (`session_trailer.valid_id`); the read side did
+            # not, and a reader is exactly where an unvalidated value does harm.
+            continue
         if sid not in seen:
             seen.append(sid)
     return tuple(seen)
@@ -211,16 +229,48 @@ def genesis_names_doc(genesis: str, basename: str) -> bool:
     """
     if not genesis or not basename:
         return False
-    if basename in genesis:
-        return True
-    return basename in set(_DOC_IN_TEXT.findall(genesis))
+    # A plain substring test IS the whole predicate: `_DOC_IN_TEXT.findall`
+    # returns literal substrings of `genesis`, so a second check against its
+    # results is unreachable by construction. An earlier revision had one and it
+    # read as a widening guard that widened nothing.
+    return basename in genesis
+
+
+#: 🔴 `git -C <path>` DOES NOT OVERRIDE `$GIT_DIR` — and the failure is SILENT.
+#: With `GIT_DIR` exported, `git -C <repo> log -- <path>` logs the OTHER repo,
+#: finds no such path, and exits **0** with empty output. `GitUnavailable` never
+#: fires, `arc_repo_for` already found the doc on disk so exit 5 never fires, and
+#: the arc renders `0 of 0 commit(s)` — a confident empty writer set. MEASURED:
+#: `GIT_DIR=<other>/.git find-session.py --arc <doc>` printed exactly that at
+#: exit 0. That is the precise conflation this module's `GitUnavailable`
+#: docstring says the design structurally prevents, so it was not a gap in the
+#: posture but a hole underneath it. Every caller inherits the ambient
+#: environment: a git hook, `git rebase --exec`, `git bisect run`, or any shell
+#: that exported it — and this repo ships `githooks/`.
+_GIT_ENV_OVERRIDES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                      "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")
+
+#: `log.showSignature=true` prepends `gpg: …` lines to STDOUT ahead of each
+#: record, which would land inside the first field and make `ArcCommit.sha` read
+#: `gpg: Signature made…`. devrc's commits ARE signed; the setting is simply not
+#: on today, so this is latent rather than broken. Pinned off per-invocation
+#: rather than trusted.
+_GIT_CONFIG_PINS = ("-c", "log.showSignature=false")
+
+
+def _git_env() -> dict:
+    """The environment for a git call: ours, minus the repo-selecting overrides."""
+    env = dict(os.environ)
+    for name in _GIT_ENV_OVERRIDES:
+        env.pop(name, None)
+    return env
 
 
 def _git(repo: str, args: Sequence[str],
          run: Callable[..., subprocess.CompletedProcess] | None = None) -> str:
     runner = run or (lambda argv: subprocess.run(
-        argv, capture_output=True, text=True, timeout=60))
-    argv = ["git", "-C", str(repo), *args]
+        argv, capture_output=True, text=True, timeout=60, env=_git_env()))
+    argv = ["git", "-C", str(repo), *_GIT_CONFIG_PINS, *args]
     try:
         res = runner(argv)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -274,14 +324,22 @@ def writer_members(commits: Sequence[ArcCommit], repo: str = "") -> list[ArcMemb
     report's `unstamped_commits` is what tells a reader whether to trust it.
     """
     by_session: dict[str, list[ArcCommit]] = {}
+    oldest_ids: tuple[str, ...] = ()
     for c in reversed(commits):            # oldest first
+        if c.session_ids and not oldest_ids:
+            oldest_ids = c.session_ids
         for sid in c.session_ids:
             by_session.setdefault(sid, []).append(c)
     members: list[ArcMember] = []
-    for i, (sid, cs) in enumerate(by_session.items()):
+    for sid, cs in by_session.items():
+        # 🔴 EVERY session on the oldest stamped commit, not just the first. A
+        # GitHub squash puts SEVERAL sessions' trailers in one body — which is
+        # this module's founding premise — so `i == 0` labelled one of them and
+        # silently demoted its co-authors to `wrote`. The docstring said
+        # "session_S_" while the body labelled one; this is the body catching up.
         members.append(ArcMember(
             session_id=sid,
-            role=ROLE_ORIGINATED if i == 0 else ROLE_WROTE,
+            role=ROLE_ORIGINATED if sid in oldest_ids else ROLE_WROTE,
             repo=repo,
             first_seen=cs[0].date,
             commits=tuple(c.sha for c in cs),

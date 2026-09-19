@@ -107,6 +107,7 @@ python3 $DEVRC/scripts/find-session.py <terms> --live [--tail 80]
 - `3` — `--tail` ONLY: it could not resolve to exactly one live window — several matched, or none did on a fleet where every host answered. It carries NO claim about coverage; the candidate list may be incomplete, and `tail.coverage_complete` is the field that says so.
 - `4` — `--tail` ONLY: something the tail needed was NOT measured — the live scan failed or no host answered, or `session-manager tail` itself failed (rc 2/4/5), or nothing matched while a host was unreachable. Without `--tail` a failed scan still exits 0 and says so in the LIVE section.
 - `5` — `--arc` ONLY: the doc was named but NOT MEASURED — no repo handle ($DEVRC, $HOMELAB, $DATAPACKET, $CIVITAI) this shell can see holds it. 🔴 This is not an empty arc and must never be reported as one: nothing was read at all.
+- Branch on `tail.ok` / `tail.rc` / `tail.coverage_complete` in `--json` rather than on the
   code alone — `tail.coverage_complete` is `null` when the scan never ran, `false` when it
   ran and a host was missing. `--live` composes with `--json`, which then emits
   `{live, archive, tail}` instead of the bare array.

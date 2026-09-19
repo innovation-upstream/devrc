@@ -151,6 +151,11 @@ LIVE_TIMEOUT_SECS = 90
 # that one was applied — and `--all-time` turns it off.
 DEFAULT_SINCE_DAYS = 12
 
+#: How many DISTINCT docs the ordinary-path annotation will walk git for. Past
+#: this the annotation still prints (with its command), just without a count —
+#: see `arc_writer_counts`.
+MAX_ANNOTATION_DOC_WALKS = 12
+
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_AMBIGUOUS = 3      # --tail could not resolve to exactly one window
@@ -1131,7 +1136,7 @@ def render_arc(report, unresolved_note=None):
     return "\n".join(out)
 
 
-def run_arc(a, _since=None):
+def run_arc(a):
     """Resolve and print one arc. Returns an exit code."""
     basename = a.arc
     repo, rel = arc_repo_for(basename)
@@ -1217,7 +1222,19 @@ def arc_annotation(r, arc_counts=None):
     if not basename:
         return None
     n = (arc_counts or {}).get(basename)
-    suffix = f" ({n}+ sessions)" if isinstance(n, int) and n > 0 else ""
+    # 🔴 A MEASURED ZERO IS NOT AN ABSENT COUNT. `n == 0` means the doc resolved,
+    # its history was read, and NO commit on it carries a session id — a real and
+    # informative reading. `n is None` means nothing was looked at. Rendering
+    # both as "" made them byte-identical, which is the same measured-vs-
+    # unmeasured conflation this tool refuses everywhere else, pointing the other
+    # way. MEASURED on a real 20-hit run: one doc resolved with 0 ids and one
+    # resolved to no repo, and they annotated identically.
+    if n is None:
+        suffix = ""
+    elif n == 0:
+        suffix = " (0 stamped writers)"
+    else:
+        suffix = f" ({n}+ sessions)"
     return (f"   arc: {basename}{suffix} — "
             f"find-session.py --arc {basename}")
 
@@ -1232,6 +1249,15 @@ def arc_writer_counts(rows, repo_lookup=None):
     """
     lookup = repo_lookup or arc_repo_for
     counts = {}
+    # 🔴 BOUNDED. Each resolved doc costs a `git log --follow` subprocess with its
+    # own 60s timeout, and this runs on the ORDINARY (non-`--arc`) path. MEASURED
+    # on a real 20-hit query: +3.24s over 11 docs (~+9% of a 37.3s walk), per-doc
+    # mean 0.25s in devrc and 0.31s in a larger repo. It scales with `--limit`,
+    # and an unbounded `--limit 100` over 60 distinct docs had a one-hour
+    # theoretical ceiling with no progress output. The annotation's VALUE is the
+    # pasteable command, which needs no count — so capping degrades the count and
+    # never the feature.
+    budget = MAX_ANNOTATION_DOC_WALKS
     # 🔴 `seen` IS SEPARATE FROM `counts`, and the difference is the whole point.
     # Keying the skip on `counts` alone re-walked every doc that resolved to NO
     # repo — once per hit — because such a doc never lands in `counts`. A result
@@ -1242,6 +1268,9 @@ def arc_writer_counts(rows, repo_lookup=None):
         if not basename or basename in seen:
             continue
         seen.add(basename)
+        if budget <= 0:
+            continue
+        budget -= 1
         repo, rel = lookup(basename)
         if repo is None:
             continue
@@ -1471,7 +1500,7 @@ def main(argv=None):
     # 🔴 A FLAG THAT REACHES ONLY ONE LEG MUST SAY SO — see `ARCHIVE_ONLY_FLAGS`
     # for the ledger and for why this is data rather than an inline list closed
     # by a completeness sentence.
-    if a.live:
+    if a.live and not a.arc:
         notice = archive_only_notice(a)
         if notice:
             print(notice, file=sys.stderr)
@@ -1482,6 +1511,20 @@ def main(argv=None):
     # ARCHIVE_ONLY_FLAGS and why this runs before the live branch.
     # ------------------------------------------------------------------ #
     if a.arc:
+        # 🔴 `--arc` REPLACES the query; say so rather than printing a notice
+        # about a LIVE section that `run_arc` then never emits. MEASURED:
+        # `redis --live --arc <doc> --project foo --any` printed "the LIVE
+        # section below is NOT filtered by them" and there was no LIVE section
+        # below, while `redis`, `--project` and `--any` were silently discarded.
+        ignored = [name for name, val in (
+            ("terms", a.terms), ("--live", a.live), ("--deep", a.deep),
+            ("--project", a.project), ("--any", a.any),
+            ("--skill", a.skill), ("--opencode-only", a.opencode_only),
+            ("--claude-only", a.claude_only), ("--all", a.all),
+        ) if val]
+        if ignored:
+            print(f"(--arc names its own query, so these were NOT applied: "
+                  f"{', '.join(ignored)})", file=sys.stderr)
         return run_arc(a)
 
     # ------------------------------------------------------------------ #
