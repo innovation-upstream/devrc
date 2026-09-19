@@ -199,6 +199,34 @@ Ask the re-auditor to:
 round 1: Y) · elapsed: Z`. X is what the gate below reads; without it the flattening shows only in
 hindsight — on #498 the plateau was diagnosed six rounds late.
 
+### 🔴 "DISPATCHED" IS NOT "REPORTED" — check a round LANDED before you believe it ran
+
+🔴 **A round whose agent died with its session leaves no trace that distinguishes it from a round
+that ran and found nothing** — and the handoff sentence that carried it reads identically either
+way (*"a final delta round was dispatched; read its result first"*). Measured three times in one
+arc on `ZacxDev/naida-ai`; twice a session was one step from merging a change to a live client's
+LinkedIn send path on the strength of an audit that never finished.
+
+**Two read-only checks settle it, and neither needs the agent to still exist:**
+
+```
+gh pr view <n> --json comments --jq '.comments | length'   # then READ them
+git worktree list                                          # find the round's own worktree
+```
+
+- 🔴 **A comment COUNT is not a report — open them.** In the measured case the count was `1` and
+  that one comment was a prepared patch, not an audit. Count-only reads as "something is there".
+- 🔴 **An auditor of range `X..Y` STANDS ON `Y`. A surviving worktree sitting on `X` is the
+  PREVIOUS round's**, finished, and its clean tree is not evidence about the round you are asking
+  about. That one fact turns `git worktree list` into a verdict.
+- **Before concluding, check whether the round reported somewhere other than the PR** — the
+  dispatching session's scratchpad. Beware: a file named for the round (`msg5`, `final5`) is
+  usually that round's *fix* commit message and suite log, i.e. an artefact of the round BEFORE it.
+
+**When a round did not land, the ladder has not advanced** — re-run it. And re-read the missing
+round's CLAIMS problem above: a round that never reported never posted a block either, so the next
+`--round N` silently anchors wider rather than refusing.
+
 ### 🔴 THE FIX ROUND'S OWN PROSE IS THE LIKELIEST NEXT FINDING — a false claim replaced by a differently false one
 
 The delta bullet above says to hunt regressions the fix round introduced. **The one it actually
