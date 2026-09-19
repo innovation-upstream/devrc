@@ -804,6 +804,12 @@ def same_directory(a: str, b: str) -> bool:
 #     -> ● User answered Claude's questions:
 #          ⎿  · Which database should the queue use? → Postgres
 #
+# ⚠ THAT QUOTE IS PRETTY-PRINTED AND THE REAL BYTES ARE NOT. The spaces after `●`
+# and around `·` are NON-BREAKING (`\xa0`), measured byte-exact in live scrollback
+# — so a reader built by copying the two lines above matches NOTHING. Anything that
+# parses this render must go through `menu_answer_records`, which normalises
+# whitespace instead of pattern-matching the pretty form.
+#
 # So EVERY option the operator tapped delivered option 1, and the card reported
 # `Delivered`. clawgate's own rationale (internal/ui/reply.go: "send the option's
 # LABEL verbatim, never its index") assumed a text prompt; it is still the only
@@ -822,6 +828,110 @@ MENU_CURSOR = "❯"                              # ❯, the cursor row marker
 MENU_QUESTION_MARKS = ("☐", "☒")          # ☐ / ☒, one per question
 MENU_SUBMIT_TAB = "✔ Submit"                   # ✔ Submit, the multi-question tab
 MENU_REVIEW_HEADING = "Review your answers"         # the multi-question end screen
+
+# ── the footer: the ONLY modal signal that survives a short pane ──────────────
+# 🔴 EVERY OTHER SIGNAL THIS FILE HAD RENDERS AT THE **TOP** OF THE MODAL AND
+# SCROLLS OUT OF A SHORT VIEWPORT, WHILE `capture_pane` READS THE VIEWPORT ONLY.
+# The tab strip, the `☐` markers and the `Review your answers` heading all sit
+# above the option rows; the footer is the modal's LAST line, so it is the last
+# thing a short pane clips. MEASURED live on Claude Code 2.1.232 by raising a
+# real modal in a scratch tmux session and RESIZING THE WINDOW — not by
+# truncating a capture, which is a simulation: the TUI re-renders to fit, and it
+# scrolls its own option list rather than simply losing lines.
+#
+#     a real ONE-question ask, 104 columns, window resized to each height
+#     ──────────────────────────────────────────────────────────────────────
+#     40 32 28 24 20 16  ->  menu            (driven by digit; correct)
+#     15 14             ->  menu            (correct, but only 2 of 6 rows
+#                                            parse, so most replies refuse)
+#     13 12 11 10       ->  text   🔴 TYPED THE REPLY INTO A LIVE MODAL
+#
+#     a real TWO-question chain, same pane, same method
+#     ──────────────────────────────────────────────────────────────────────
+#     40 32 28 26 24 20 16 -> multi-question (refused; correct)
+#     15 14                -> menu   🔴 ANSWERED QUESTION 1 AND REPORTED
+#                                       `delivered` WITH THE CHAIN STILL OPEN
+#     13 12 11 10          -> text   🔴 TYPED THE REPLY INTO A LIVE MODAL
+#
+# The footer was present in ALL 24 of those captures, at every height, in both
+# shapes. 5 of the 57 live panes on this host are 28 lines or shorter and one is
+# 21, so the clipped band is not hypothetical.
+#
+# 🔴 AND IT COMES IN TWO SPELLINGS, ONE PER SHAPE — which is the fact that makes
+# it close the CHAIN case too, and the fact an earlier round got wrong. The
+# review that proposed this signal quoted `Enter to select · Tab/Arrow keys to
+# navigate · Esc to cancel` as "the modal's footer". That is the CHAIN's footer.
+# A one-question ask renders `Enter to select · ↑/↓ to navigate · Esc to cancel`
+# — measured — so requiring the chain string would have refused every
+# single-question modal and left the whole feature inert.
+MENU_FOOTER_SELECT = "Enter to select"
+#: `Tab` switches QUESTION TABS, so this spelling is itself a chain signal, and
+#: unlike the tab strip it is at the bottom of the modal and survives clipping.
+MENU_FOOTER_NAV_CHAIN = "Tab/Arrow keys to navigate"
+#: One question: there are no tabs to Tab between, so the nav hint names the
+#: arrow keys only. Measured with and without the free-text row focused — that
+#: render inserts `ctrl+g to edit in Nvim` and keeps both anchors.
+MENU_FOOTER_NAV_SINGLE = "↑/↓ to navigate"
+
+#: What `menu_footer` can answer. 🔴 THE DRIVING PATH REQUIRES `FOOTER_SINGLE`,
+#: i.e. POSITIVE evidence of a one-question ask, rather than the ABSENCE of a
+#: chain signal. Concluding "single" from an absence is the A1 defect's own
+#: shape, and RULES.md names it: an empty result cannot distinguish two
+#: mechanisms. So an `Enter to select` footer whose nav hint this file does not
+#: recognise resolves to FOOTER_UNKNOWN and REFUSES.
+FOOTER_NONE = ""
+FOOTER_SINGLE = "single"
+FOOTER_CHAIN = "chain"
+FOOTER_UNKNOWN = "unknown"
+
+#: 🔴 WHAT A **NON**-AskUserQuestion CURSORED NUMBERED MENU RENDERS INSTEAD, AND
+#: WHY THE FOOTER HAD TO BECOME A PRECONDITION RATHER THAN ONLY A WIDENING. Three
+#: live renders were captured, all of them classified `menu` by the shipped code
+#: and all of them answerable by digit:
+#:
+#:   * the tool-approval prompt — `❯ 1. Yes` / `2. Yes, allow all edits during
+#:     this session (shift+tab)` / `3. No`, footer `Esc to cancel · Tab to
+#:     amend`. A reply of `Yes` pressed 1 and **APPROVED A TOOL CALL THE OPERATOR
+#:     NEVER SAW**; `No` pressed 3 and denied it. BOTH directions were
+#:     deliverable, because `No` is a bare label here — an earlier round believed
+#:     the deny row always carried a suffix, and that is false for this render.
+#:   * the trust-this-folder dialog and the bypass-permissions warning — footer
+#:     `Enter to confirm · Esc to cancel`, and the second one is INVERTED
+#:     (`❯ 1. No, exit` / `2. Yes, I accept`), so a reply of `Yes` would have
+#:     pressed 2 there and 1 on the first.
+#:
+#: None of the three carries `Enter to select`. That is the whole discriminator,
+#: and it is structural rather than a wording heuristic over the OPTION LABELS.
+MENU_FOOTER_CONFIRM = "Enter to confirm"
+
+#: The render the pane leaves once an ask has been ANSWERED. MEASURED byte-exact
+#: in live scrollback on 18 of 57 panes, and again by answering a scratch modal
+#: with a digit: `●\xa0User answered Claude's questions:` then
+#: `  ⎿\xa0·\xa0<question> → <chosen label>` (NBSPs, and the question/answer wrap
+#: across continuation lines). ⚠ THE QUOTE AT THE TOP OF THIS SECTION WRITES
+#: THOSE AS ORDINARY SPACES and is therefore not matchable as-is — which is why
+#: this is a heading substring plus a joined-and-normalised read rather than a
+#: literal, and why `normalise_label` is what does the joining (`str.split()`
+#: treats `\xa0` as whitespace).
+MENU_ANSWERED_HEADING = "User answered Claude's questions"
+MENU_ANSWERED_ARROW = "→"
+#: 🔴 WHAT ENDS THE ANSWERED BLOCK, AND IT IS NOT "A LINE THAT STARTS AT COLUMN 0".
+#: That was the first rule written here and it was WRONG on real data: the
+#: question text WRAPS at the terminal width, so a continuation begins at column 0
+#: with an ordinary letter. MEASURED — of the 18 live panes carrying an answered
+#: record, that rule read the record on 17 and returned EMPTY on the one whose
+#: question wrapped mid-word (`… entirely a st` / `ale base. I`). So the block ends
+#: at a line opening a NEW top-level render, identified by its glyph.
+#: ⚠ Losing a record is the safe direction (the absence rule stands, so a good
+#: delivery reads UNKNOWN rather than a wrong one reading delivered) — but it is
+#: still a cost, which is why this is measured against the live corpus and not
+#: reasoned about.
+#: ⚠ `·` is NOT in this set, deliberately: it opens the SECOND and later records of
+#: a CHAIN (`     · Which region? → …`), so stopping on it would silently truncate a
+#: chain's record list to its first answer.
+MENU_ANSWERED_STOP_GLYPHS = ("●", "⏺", "✻", "✽", "❯", "─", "╭", "│", "╰")
+#: A sanity bound so a capture with no closing glyph cannot swallow the pane.
+MENU_ANSWERED_MAX_LINES = 40
 #: A multiSelect list renders `[ ]` / `[x]` rather than a numbered single choice.
 #: ONE spelling of "a checkbox", used to build the ROW pattern below.
 MENU_CHECKBOX = r"\[[ xX✔✓]\]"
@@ -845,6 +955,18 @@ MENU_OPTION_RE = re.compile(
 #: `❯ [ ] 1. Ledger` is the measured render, and `MENU_OPTION_RE` cannot see it —
 #: the checkbox precedes the number — which is why this needs its own pattern
 #: rather than a clause on the numbered one.
+#: 🔴 THE `^` AND THE `.match` AT THE CALL SITE ARE ONE GUARD AND BOTH ARE
+#: LOAD-BEARING TOGETHER. Individually they are EQUIVALENT mutants (with `^` and
+#: no MULTILINE, `.search` anchors exactly as `.match` does), but dropping BOTH
+#: widens the pattern to any position on the line — and an earlier round recorded
+#: that as unkillable on the grounds that "a mid-line `[x]` yields `cursor=False`,
+#: so it still cannot form the CURSORED run". THAT IS FALSE, and measured false: on
+#: `1. Ledger ❯ [x] more` the widened pattern finds `❯ [x]` mid-line, so
+#: `group(1)` IS the cursor and `cursor=True`. A pane quoting a cursored checkbox
+#: row inside prose therefore flips `text` -> `multi-select`, refusing a legitimate
+#: reply — and quoting a modal back at the operator is a shape this repo's own
+#: `waiting-signal.md` calls routine. It is pinned in
+#: `test_the_checkbox_ROW_pattern_requires_the_box_where_the_NUMBER_would_stand`.
 MENU_CHECKBOX_ROW_RE = re.compile(
     r"^[ \t]*(?:(" + MENU_CURSOR + r")[ \t]*)?(?:[-*•][ \t]*)?" + MENU_CHECKBOX)
 #: How far apart two consecutive option rows may sit and still be ONE block.
@@ -909,6 +1031,111 @@ def free_text_key(label: str) -> str:
     return normalise_label(label).casefold().rstrip(".!:… ").strip()
 
 
+def menu_footer(captured: str) -> str:
+    """Which AskUserQuestion footer the pane is showing, if any.
+
+    🔴 THIS IS THE ONE READ IN THIS FILE THAT IS NOT DEFEATED BY A SHORT PANE —
+    see the measured height tables in the section header. Everything else the
+    classifier had renders above the option rows and clips away; this renders
+    below them.
+
+    Returns FOOTER_CHAIN / FOOTER_SINGLE / FOOTER_UNKNOWN / FOOTER_NONE.
+
+    🔴 CHAIN WINS OVER SINGLE WHEN BOTH ARE PRESENT, and that ordering is the
+    safe one rather than an arbitrary tie-break: FOOTER_CHAIN refuses and
+    FOOTER_SINGLE drives, so a capture carrying both — a scrollback holding a
+    finished chain's footer beneath a live single ask, which is one read away
+    from happening — must resolve to the refusing value.
+
+    ⚠ IT IS A SUBSTRING TEST OVER THE WHOLE CAPTURE, NOT A READ OF THE LAST
+    LINE, deliberately. The footer is not always the final line: at every height
+    measured there were trailing blanks after it, and at 15 lines it sat two
+    lines from the bottom. Anchoring on position would have made this height-
+    dependent, which is the defect it exists to fix.
+    """
+    if MENU_FOOTER_SELECT not in captured:
+        return FOOTER_NONE
+    if MENU_FOOTER_NAV_CHAIN in captured:
+        return FOOTER_CHAIN
+    if MENU_FOOTER_NAV_SINGLE in captured:
+        return FOOTER_SINGLE
+    return FOOTER_UNKNOWN
+
+
+def menu_answer_records(captured: str) -> list[str]:
+    """Every answer the pane RECORDS for an ask, read off the answered render.
+
+    🔴 THIS IS THE POSITIVE EVIDENCE `menu_settled` USED TO SAY IT COULD NOT
+    HAVE. Its docstring claimed closing that residual "needs positive evidence
+    from the other side of the wire" — and the evidence is on THIS side, in the
+    pane, and this file already quoted it verbatim in the section header above.
+    Comparing a recorded answer against the reply turns `delivered` from "the
+    menu is gone" into "this option was recorded as the answer".
+
+    🔴 BOTTOM-MOST BLOCK ONLY, for the reason `menu_block` is bottom-most: 18 of
+    the 57 live panes on this host carry an answered record from an EARLIER ask
+    in scrollback, so taking any match would read a stale row as evidence about
+    this delivery.
+
+    The question and the answer WRAP across continuation lines, so the block is
+    joined into one normalised string before it is split — reading line by line
+    finds the `→` on a line whose label continues on the next one. Splitting on
+    the arrow yields the question as the head and each answer as a tail, and each
+    tail is cut at the `·` that starts the next question in a chain.
+
+    🔴 AND THE WRAP IS WHY THE BLOCK'S END IS A GLYPH TEST RATHER THAN AN INDENT
+    ONE — see MENU_ANSWERED_STOP_GLYPHS. A rule reading "the block ends at the
+    first line starting in column 0" returned EMPTY on the one live pane whose
+    question wrapped mid-word, because the continuation starts in column 0 with an
+    ordinary letter. Measured on the live corpus: 17 of 18 with the indent rule, 18
+    of 18 with this one.
+
+    ⚠ ITS LOOSENESS IS MONOTONE-SAFE, and that is why it is acceptable. A
+    question text that itself contains `→` yields extra junk candidates. A junk
+    candidate can only ADD to the set, so it can only make a MISMATCH verdict
+    more conservative (fewer good deliveries reported UNKNOWN) and make the
+    positive read slightly looser — and the positive read is only ever consulted
+    where the shipped code already returned `delivered` from an absence. So
+    nothing here makes `delivered` reachable in a state where it was not.
+    """
+    lines = captured.splitlines()
+    starts = [i for i, ln in enumerate(lines) if MENU_ANSWERED_HEADING in ln]
+    if not starts:
+        return []
+    start = starts[-1]
+    body = []
+    for ln in lines[start + 1:start + 1 + MENU_ANSWERED_MAX_LINES]:
+        if ln[:1] in MENU_ANSWERED_STOP_GLYPHS:
+            # A new top-level render begins here, so the answered block has ended.
+            break
+        body.append(ln)
+    joined = normalise_label(" ".join(body))
+    if MENU_ANSWERED_ARROW not in joined:
+        return []
+    out = []
+    for chunk in joined.split(MENU_ANSWERED_ARROW)[1:]:
+        answer = chunk.split("·")[0].strip()
+        if answer:
+            out.append(normalise_label(answer))
+    return out
+
+
+def menu_answer_verdict(captured: str, text: str) -> str:
+    """Whether the pane's recorded answer agrees with the reply.
+
+    Returns "" (no record read), "match", or "mismatch". `menu_row_holds_reply`
+    is the predicate, not `label_matches`: the recorded label wraps and is
+    sometimes truncated in that render, which is the same tolerance the read-back
+    end already needed for a wrapped menu row.
+    """
+    records = menu_answer_records(captured)
+    if not records:
+        return ""
+    if any(menu_row_holds_reply(r, text) for r in records):
+        return "match"
+    return "mismatch"
+
+
 def menu_option_rows(captured: str) -> list[dict]:
     """Every numbered option row in a pane capture, in screen order."""
     rows = []
@@ -949,9 +1176,20 @@ def rows_are_one_block(lines: list[str], first_line: int, second_line: int) -> b
     (`DESCRIBED_MENU_CAPTURE`) reproduces the measured spacing instead, and its
     test asserts its own widest inter-row span is >= 7 — because at 3 or 4 a mutant
     restoring the old bound passes it and SURVIVES without executing this function.
+
+    ⚠ NO `0 < gap` LOWER BOUND, deliberately, and this is the SECOND clause in
+    this file deleted for that reason. Both callers walk rows in SCREEN ORDER off
+    a `splitlines()` enumeration that yields each line once, so `second_line` is
+    strictly greater than `first_line` on every call and the lower bound can
+    never be false. Dropping it SURVIVED the module's mutation sweep — and the
+    commit that deleted `len(a) < len(b)` from `menu_row_holds_reply` gave the
+    reason this one has to go too: a clause no mutant can kill is a clause that
+    reads as a guard while guarding nothing. (At `gap == 0` the slice below is
+    empty and `all([])` is True, so the deletion is behaviour-preserving for
+    every input the callers can produce, not merely for the ones they do.)
     """
     gap = second_line - first_line
-    if not 0 < gap <= MENU_ROW_GAP:
+    if gap > MENU_ROW_GAP:
         return False
     return all(line.strip() for line in lines[first_line + 1:second_line])
 
@@ -1030,10 +1268,37 @@ def classify_pane(captured: str) -> tuple[str, list[str], str]:
       * PANE_MULTI_QUESTION — the `←  ☐ DB  ☐ Region  ✔ Submit  →` tab strip or
         its `Review your answers` end screen. Answering question 1 and leaving
         the rest is a HALF answer, which is its own wrong answer.
-      * PANE_UNKNOWN_MENU — numbered rows without exactly one cursor row, or a
-        numbered block plus a question marker carrying NO cursor row at all
-        (which is what a menu caught half-drawn looks like): either way whether a
-        live menu is up could not be decided.
+      * PANE_UNKNOWN_MENU — a modal footer is up but the row geometry does not
+        parse into exactly one cursored block numbered from 1; or a cursored
+        numbered menu that is NOT an AskUserQuestion at all; or a numbered block
+        plus a question marker carrying no cursor row (a menu caught half-drawn).
+        In every case whether a live ask is up, and which row is which, could not
+        be decided.
+
+    🔴 THE FOOTER IS WHAT MAKES THAT INVARIANT TRUE RATHER THAN CLAIMED. It was
+    false in two directions before, and both were measured on real renders rather
+    than argued:
+
+      * a SHORT PANE clipped every top-of-modal signal, so a live one-question
+        ask read `text` at ≤13 lines and a live CHAIN read `menu` at 14-15 and
+        `text` at ≤13 — the first typed into a modal, the second answered
+        question 1 and reported `delivered` with the rest of the chain open.
+      * a cursored numbered menu that is not an ask at all — the TOOL-APPROVAL
+        prompt, the trust-this-folder dialog, the bypass-permissions warning, a
+        transcript quoting a menu — read `menu`, so a reply of `Yes` pressed 1
+        and APPROVED A TOOL CALL THE OPERATOR NEVER SAW.
+
+    So the driving path now requires POSITIVE evidence of a one-question ask:
+    `Enter to select` plus the single-question nav hint. Every other footer state
+    — the chain's, an unrecognised nav wording, `Enter to confirm`, or no footer
+    at all — refuses.
+
+    ⚠ THE COST, STATED, AND IT IS THE DIRECTION THIS FILE CHOOSES EVERYWHERE: if
+    Claude Code rewords either anchor, `menu_footer` returns FOOTER_UNKNOWN or
+    FOOTER_NONE and every menu is REFUSED with a named reason — the feature goes
+    inert rather than wrong, and the refusal says which signal was missing so the
+    card shows why. That is the same trade `MENU_FREE_TEXT_LABELS` already
+    documents one screen up.
 
     ⚠ THE RESIDUAL, STATED: this is a read of the pane at one instant and the
     keypress happens after it, so a menu that re-renders in between is not
@@ -1043,14 +1308,45 @@ def classify_pane(captured: str) -> tuple[str, list[str], str]:
     lines = captured.splitlines()
     block = menu_block(captured)
     checkbox_block = menu_checkbox_block(captured)
+    footer = menu_footer(captured)
     multi = (MENU_REVIEW_HEADING in captured
              or MENU_SUBMIT_TAB in captured
              or any(sum(line.count(m) for m in MENU_QUESTION_MARKS) >= 2 for line in lines))
 
+    # 🔴 THE CHAIN, HOWEVER CLIPPED — AND THIS BRANCH IS FIRST BECAUSE THE
+    # SIGNALS BELOW IT ALL FAIL IN A SHORT PANE. `multi` is computed from the tab
+    # strip, the `Review your answers` heading and the `☐` markers, every one of
+    # which renders ABOVE the option rows: on a real 2-question chain resized to
+    # 15 lines all three were gone while the footer still said `Tab/Arrow keys to
+    # navigate`. Answering question 1 and leaving the rest is a half answer, and
+    # the shipped code reported it `delivered`.
+    #
+    # ⚠ AND IT NEEDS NO NUMBERED BLOCK, WHICH IS A DELIBERATE FALSE-POSITIVE COST.
+    # A pane merely QUOTING this footer string in prose is refused. That is the
+    # wrong direction of the two available, and it is chosen: requiring a block
+    # would reopen the ≤13-line band where the chain is live and the block is
+    # destroyed, which types into it. MEASURED over all 57 live panes on this host,
+    # viewport and 2000 lines of scrollback: the string appears on 2, both of them
+    # real chains — and notably on NONE of the 18 panes carrying an answered record,
+    # because Claude Code erases the footer when the ask closes. So the realistic
+    # false positive is a pane discussing this code, and its cost is one refusal
+    # with a named reason rather than an answer nobody chose.
+    if footer == FOOTER_CHAIN:
+        return PANE_MULTI_QUESTION, [], (
+            "the pane is showing a MULTI-question menu — its footer offers Tab to move "
+            "between question tabs — and answering the first question would leave the rest "
+            "unanswered, so nothing was typed and nothing was answered")
+
     # 🔴 THE PRECONDITION, AND IT GOVERNS EVERY BRANCH BELOW RATHER THAN ONE.
     # A live modal leaves a STRUCTURAL trace: a run of option rows, one of them
-    # carrying the cursor. Nothing else opens the question — not a `☐`, not a
-    # `✔ Submit`, not a `Review your answers`, not a `[ ]`.
+    # carrying the cursor. A `☐`, a `✔ Submit`, a `Review your answers` or a `[ ]`
+    # does NOT open the question on its own.
+    #
+    # ⚠ THE FOOTER DOES, AND THIS SENTENCE USED TO DENY IT. It read "Nothing else
+    # opens the question", which was true when it was written and false the moment
+    # the branch above and the gate below were added — the footer is precisely a
+    # non-structural signal that opens it, and it has to be, because the structure
+    # is what a short pane destroys. A comment is a claim like any other.
     #
     # 🔴 THAT WORDING IS THE FIX FOR A MEASURED BLOCKER, not a tightening for its
     # own sake. This used to read `… and question_marks == 0`, so ANY `☐`/`☒` on
@@ -1074,6 +1370,51 @@ def classify_pane(captured: str) -> tuple[str, list[str], str]:
     # this detector and it costs legitimate deliveries.
     cursor_rows = sum(1 for r in block if r["cursor"])
     question_marks = sum(line.count(m) for line in lines for m in MENU_QUESTION_MARKS)
+
+    # 🔴 A LIVE ASK WHOSE ROW GEOMETRY DOES NOT PARSE IS A REFUSAL, AND EVERY WAY
+    # IT USED TO FAIL LANDED ON THE TYPING PATH. The half-drawn exception below is
+    # gated on `block and question_marks`, so when the numbered block is DESTROYED
+    # there was nothing left to refuse on and control fell through to PANE_TEXT.
+    # FOUR measured routes to an empty block on a live modal, the last of which no
+    # earlier round named:
+    #
+    #   1. clipping — `menu_block` only starts a run at `number == 1`, so once row
+    #      1 leaves the viewport the whole block goes (real render, ≤13 lines);
+    #   2. a description taller than MENU_ROW_GAP under option 1 (verified at the
+    #      boundary: 12 lines seen, 13 empty);
+    #   3. one blank line between rows 1 and 2;
+    #   4. 🔴 THE MODAL SCROLLS ITS OWN OPTION LIST AND MARKS THE EDGE ROW WITH
+    #      `↓`, WHICH STANDS EXACTLY WHERE `MENU_OPTION_RE` EXPECTS WHITESPACE OR
+    #      THE CURSOR. Measured: at 104x13 a live ask rendered `↓ 2. SQLite`, the
+    #      1->2 run never formed, and the pane read `text`. This is why the fix is
+    #      a footer read and NOT a wider row pattern: a scrolled list shows only
+    #      SOME of the options, so its label set is incomplete and a match against
+    #      it is not evidence about the operator's choice either way.
+    #
+    # The row pattern is left alone deliberately. Refusing is the whole remedy: an
+    # unparseable live modal is a shape this agent cannot drive correctly, and the
+    # footer is the one signal that says a modal is there at all.
+    # ⚠ THE CONDITION IS `not (block and cursor_rows)`, NOT `cursor_rows == 1`,
+    # deliberately: a block carrying TWO cursor glyphs is a different fact with its
+    # own refusal further down, and folding it in here would replace that message
+    # with this one. This branch owns the case where the geometry is GONE.
+    if footer != FOOTER_NONE and not checkbox_block and not (block and cursor_rows):
+        # ⚠ TWO REASONS, KEPT APART, because an operator acts differently on each
+        # and because the half-drawn one is the case the marker-gated branch below
+        # already named — the footer's contribution there is seeing it when the
+        # marker itself has been clipped away.
+        if block:
+            return PANE_UNKNOWN_MENU, [], (
+                "the pane's footer says a live question menu is on screen and it is showing "
+                f"{len(block)} numbered option rows with no cursor row — which is what a menu "
+                "caught half-drawn looks like — so whether a live menu is up could not be "
+                "decided and nothing was typed")
+        return PANE_UNKNOWN_MENU, [], (
+            "the pane's footer says a live question menu is on screen, but none of its option "
+            "rows parsed into a block numbered from 1 — a short pane clips row 1, and the "
+            "modal marks a scrolled row with an arrow standing where the cursor would be — so "
+            "which row is which could not be decided and nothing was typed")
+
     if not (block and cursor_rows) and not checkbox_block:
         # ⚠ ONE NARROW EXCEPTION, AND IT IS THE HALF-DRAWN FRAME. A numbered block
         # from 1 on adjacent lines, a question marker on screen, and NO cursor row
@@ -1104,6 +1445,31 @@ def classify_pane(captured: str) -> tuple[str, list[str], str]:
         return PANE_UNKNOWN_MENU, [], (
             "the pane is showing numbered rows without exactly one cursor row, so whether "
             "it is a live menu could not be decided and nothing was typed")
+
+    # 🔴 A CURSORED NUMBERED MENU IS NOT EVIDENCE OF AN `AskUserQuestion`, AND
+    # BELIEVING IT WAS IS HOW A REPLY OF `Yes` COULD APPROVE A TOOL CALL. The
+    # driving path requires the ask's OWN footer — positive evidence, not the
+    # absence of a counter-signal. Three live renders were captured that satisfy
+    # everything above and are not asks at all (see MENU_FOOTER_CONFIRM): the
+    # tool-approval prompt, the trust-this-folder dialog and the
+    # bypass-permissions warning. A transcript quoting a menu, or a numbered list
+    # left in the composer, is the same class — `0 of 57` live panes today, but
+    # `claude/skills/session-manager/reference/waiting-signal.md` records the
+    # quoting shape as routine, "because agents quote menus back at the operator
+    # all day".
+    #
+    # ⚠ THIS IS A GUARD ON THE STATE, NOT ON A WORD. It does not read the option
+    # LABELS and cannot be walked by relabelling a row: the approval prompt's rows
+    # are `Yes` / `Yes, allow all edits during this session (shift+tab)` / `No`
+    # today and were `Yes, and don't ask again …` / `No, and tell Claude what to
+    # do differently (esc)` in an earlier render, and neither spelling is what this
+    # decides on.
+    if footer != FOOTER_SINGLE:
+        return PANE_UNKNOWN_MENU, [], (
+            "the pane is showing a cursored numbered menu that carries no AskUserQuestion "
+            "footer, so it is some other chooser — a tool-approval prompt, a startup dialog, "
+            "or a menu quoted in a transcript — where a digit would answer a question the "
+            "operator was never shown; nothing was typed")
 
     # 🔴 NO FREE-TEXT PRECONDITION HERE, DELIBERATELY. This used to refuse a
     # cursored numbered menu carrying no RECOGNISED free-text row — before any
@@ -1189,7 +1555,7 @@ def menu_digit(index: int) -> tuple[str, str]:
     return str(n), ""
 
 
-def menu_settled(pane: str, labels: list[str]) -> tuple[bool, str]:
+def menu_settled(pane: str, labels: list[str], text: str = "") -> tuple[bool, str]:
     """Whether the menu a DIGIT answered has moved on. Returns (settled, observed).
 
     🔴 THIS IS THE READ-BACK THAT MAKES `delivered` A MEASUREMENT RATHER THAN AN
@@ -1213,18 +1579,49 @@ def menu_settled(pane: str, labels: list[str]) -> tuple[bool, str]:
     function never saw; what it can vouch for is that the menu is gone, or that a
     different one is up.
 
-    ⚠ THE RESIDUAL THIS CANNOT CLOSE, STATED. "no menu on screen" is also what a
-    pane that had ALREADY moved on before the keypress looks like, with the digit
-    left uncommitted in the operator's buffer. No read this agent can make
-    distinguishes that from an answered ask — and the alternative, reporting
-    UNKNOWN for the state a CORRECT delivery produces, would make every real
-    delivery read UNKNOWN, which is the failure direction above. Closing it needs
-    positive evidence from the other side of the wire (the question's own text,
-    carried on the write), which is recorded as a clawgate-side change.
+    🔴 AND THE POSITIVE EVIDENCE IS ON **THIS** SIDE OF THE WIRE. This paragraph
+    used to say closing the residual below "needs positive evidence from the other
+    side of the wire … recorded as a clawgate-side change", and that was wrong
+    about its own file: the answered render — `● User answered Claude's questions:`
+    then `⎿ · <question> → <chosen label>` — appears where the modal was, this
+    module quotes it verbatim in the menu section header, and it was found in live
+    scrollback on 18 of 57 panes. `menu_answer_records` reads it. So:
+
+      * a record that HOLDS the reply upgrades the verdict from "the menu is gone"
+        to "the pane records this option as the answer" — the claim `delivered`
+        was always making and never measuring;
+      * a record that names something ELSE is a WRONG ANSWER caught red-handed,
+        and is reported UNKNOWN rather than delivered;
+      * a DIFFERENT MENU with no record is refused, and that is what independently
+        catches a clipped chain: pressing a digit there answers question 1 and
+        renders question 2, which the shipped code reported `delivered` because
+        "a different menu is now on screen" — while a chain prints no answered
+        line at all until Submit.
+
+    ⚠ THE COST OF THAT LAST ONE, STATED. A genuine answer followed immediately by
+    another ask, whose tall modal has pushed the answered line out of the
+    VIEWPORT, now reads UNKNOWN. That is a `failed` audit row over a good
+    delivery — the direction this whole file chooses — and it cannot cause a
+    second keypress, because nothing on this path retries. The plain "menu gone"
+    case keeps the absence rule precisely because it is the common correct one.
+
+    ⚠ `text` DEFAULTS TO EMPTY AND THAT DISABLES ONLY THE UPGRADE, never a
+    refusal: with no reply to compare against, a record cannot be said to hold it,
+    so `menu_answer_verdict` is not consulted and the absence rule stands alone.
+
+    ⚠ THE RESIDUAL THAT SURVIVES, STATED. "no menu on screen AND no record" is
+    still also what a pane that had ALREADY moved on before the keypress looks
+    like, with the digit left uncommitted in the operator's buffer. The record
+    narrows that band; it does not remove it, because the record is not guaranteed
+    to be in the viewport by the time these reads run.
     """
     prev = None
     last = None
     want = (PANE_MENU, list(labels))
+    # 🔴 `max(2, …)` IS LOAD-BEARING: two CONSECUTIVE agreeing reads are what make
+    # the absence evidence, so an operator who sets TMUX_REPLY_MENU_VERIFY_ATTEMPTS
+    # to 1 (or 0) must not thereby get a one-read verdict. Pinned by
+    # test_the_verify_attempt_FLOOR_survives_an_operator_setting_it_below_two.
     for _ in range(max(2, MENU_VERIFY_ATTEMPTS)):
         time.sleep(MENU_SETTLE_SECONDS)
         captured, err = capture_pane(pane)
@@ -1236,9 +1633,26 @@ def menu_settled(pane: str, labels: list[str]) -> tuple[bool, str]:
         kind, now_labels, _ = classify_pane(captured)
         seen = (kind, now_labels)
         last = seen
+        # ⚠ THE RECORD IS ONLY CONSULTED ONCE THE ASK IS GONE, and the ordering is
+        # load-bearing rather than tidy. While the SAME menu is still on screen any
+        # answered record in the viewport belongs to an EARLIER ask — 18 of the 57
+        # live panes on this host carry one — so reading it here would report "the
+        # pane records a DIFFERENT option" about a delivery that has not happened
+        # yet, which is a true-ish `failed` with a false explanation.
+        verdict = menu_answer_verdict(captured, text) if (text and seen != want) else ""
+        if verdict == "mismatch":
+            # One read is enough for this one: it is a POSITIVE observation of a
+            # recorded answer that is not the reply, not a conclusion from an
+            # absence, and no later frame makes that record correct.
+            return False, ("the pane records a DIFFERENT option as the answer to this ask")
         if seen != want and seen == prev:
-            return True, ("a different menu is now on screen" if kind == PANE_MENU
-                          else "the menu is no longer on screen")
+            if verdict == "match":
+                return True, "the pane records this option as the answer"
+            if kind == PANE_MENU:
+                return False, ("a different menu is now on screen and the pane records no "
+                               "answer to this one, which is also what answering the first "
+                               "question of a CHAIN looks like")
+            return True, "the menu is no longer on screen"
         prev = seen
     if last == want:
         return False, "the menu did not move"
@@ -1271,6 +1685,11 @@ def menu_committed(pane: str, text: str) -> bool:
     predicate, because a WRAPPED row carries no truncation mark.
     """
     prev = None
+    # 🔴 `max(2, …)`, for the reason `menu_settled` gives: the verdict rests on an
+    # absence and a half-drawn frame imitates one, so the floor of two consecutive
+    # reads must survive an operator setting TMUX_REPLY_MENU_VERIFY_ATTEMPTS below
+    # it. Pinned by the same test — BOTH call sites, because each `max` survived
+    # the sweep individually while no test drove the constant under 2.
     for _ in range(max(2, MENU_VERIFY_ATTEMPTS)):
         time.sleep(MENU_SETTLE_SECONDS)
         captured, err = capture_pane(pane)
@@ -1348,8 +1767,22 @@ def deliver_to_menu(pane: str, labels: list[str], text: str,
         # on a function that can be called from elsewhere, because on THIS path an
         # Enter with nothing typed does not merely do nothing: on an empty
         # free-text row it ABORTS THE WHOLE TOOL (`User declined to answer
-        # questions`), a destructive outcome rather than a no-op. It is NOT counted
-        # among the refusals a write can actually receive.
+        # questions`), a destructive outcome rather than a no-op.
+        #
+        # ⚠ IT IS NOT COUNTED AMONG THE REFUSALS A WRITE CAN RECEIVE **ON THE MENU
+        # PATH** — and the qualifier is the correction, because the unqualified
+        # version of this sentence was used to state a TOTAL that was wrong. A
+        # claimed write also passes through `validate()` and `should_refuse()`,
+        # whose refusals it very much can receive, so any count of "refusals a
+        # claimed write can receive" is larger than any count taken here.
+        # 🔴 AND NO NUMBER IS STATED IN PROSE ANYWHERE, deliberately: that count
+        # has now been quoted wrong three times across three rounds (nine-vs-eight,
+        # then eight-vs-ten, then one-vs-two divergences), always by a sentence
+        # copied forward instead of re-derived. The refusal shapes this path can
+        # produce are enumerated as a ledger in
+        # `test_every_menu_path_REFUSAL_SHAPE_is_enumerated`, which is pinned
+        # two-way and fails when one is added or removed — a prose number cannot
+        # be, and that is the whole mechanism fix.
         return "refused", "the write carries no text, and an empty answer aborts the menu"
 
     matches = [i for i, lbl in enumerate(labels) if label_matches(lbl, text)]
@@ -1364,7 +1797,7 @@ def deliver_to_menu(pane: str, labels: list[str], text: str,
         rc, _, err = run_tmux(["send-keys", "-t", pane, "-l", "--", digit])
         if rc != 0:
             return "failed", redact(err or f"tmux exited {rc}", text)
-        settled, observed = menu_settled(pane, labels)
+        settled, observed = menu_settled(pane, labels, text)
         if settled:
             # 🔴 THE DETAIL SAYS WHAT WAS OBSERVED, NOT WHAT WAS INTENDED. It used
             # to read "selected menu row N by its digit", which asserts a selection
