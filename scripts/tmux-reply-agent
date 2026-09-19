@@ -13,7 +13,13 @@ reports back. No inbound access to either machine, and no credential for either
 machine inside a pod on an unauthenticated LAN surface.
 
 🔴 WHAT ONE DELIVERY ACTUALLY DOES: `tmux send-keys` into a named pane, followed
-by Enter. That is arbitrary command execution as the operator on this host. The
+by Enter — OR, when the pane is showing a Claude Code `AskUserQuestion` menu, a
+single DIGIT keypress for the row whose label the reply names, read off a
+`capture-pane` of that pane rather than assumed (see "the AskUserQuestion menu
+surface"). Both shapes are arbitrary command execution as the operator on this
+host, and the second exists because the first delivered OPTION 1 for every
+option the operator tapped: a menu discards typed characters and the Enter then
+selects whatever row is highlighted. The
 operator took that decision explicitly, with the blast radius stated — free text
 into ANY pane, and clawgate presses Enter, because type-only makes remote
 answering pointless. Everything defensive below exists because of that, not
@@ -349,13 +355,22 @@ def should_refuse(expected: str, live: str) -> tuple[bool, str]:
 
     ⚠ WHAT IT DOES NOT CLOSE, stated because it is the residual the operator was
     told about: a pane that simply MOVED ON — same tmux server, same pane, the
-    question already answered or the prompt gone. Nothing here can see that. The
+    question already answered or the prompt gone. Nothing HERE can see that. The
     server's TTL bounds enqueue-to-delivery at 90s, and the attention queue
     retires stale questions off a 2-minute snapshot, so the exposed window is one
-    snapshot interval of display staleness. Closing it would need either a
-    content fingerprint (brittle against animated status lines, and its failure
-    direction is refusing legitimate replies, which trains an operator to turn
-    the guard off) or type-only writes, which the operator declined.
+    snapshot interval of display staleness.
+
+    ⚠ AND THAT PARAGRAPH USED TO END "closing it would need either a content
+    fingerprint (brittle …) or type-only writes, which the operator declined" —
+    which is now only half true, so it is corrected rather than left standing. A
+    content read DOES happen, immediately before the send: `capture_pane` plus
+    `classify_pane` answer one narrow question — is this pane a question MENU, and
+    of which shape — because the answer decides which keys are correct at all.
+    What was rejected is still rejected: no fingerprint decides whether the pane
+    is "the same screen the enqueuer saw", precisely because its failure direction
+    is refusing legitimate replies. So the MOVED-ON residual above stands
+    unchanged for a text prompt; for a menu it is narrowed to the window between
+    the capture and the keypress.
     """
     if not expected:
         return False, ""
@@ -776,6 +791,624 @@ def same_directory(a: str, b: str) -> bool:
         return False
 
 
+# ── the AskUserQuestion menu surface ─────────────────────────────────────────
+# 🔴 THE DEFECT THIS CLOSES, MEASURED. `send-keys -l -- '<text>'` followed by
+# `send-keys Enter` is correct against a TEXT prompt and WRONG against a Claude
+# Code `AskUserQuestion` menu: the menu DISCARDS typed characters — no filter, no
+# selection, the cursor unmoved — and the Enter then selects whatever row is
+# HIGHLIGHTED, which on a freshly rendered menu is option 1. Reproduced live on
+# Claude Code 2.1.232 against a one-question ask offering Postgres/SQLite:
+#
+#     tmux send-keys -t %176 -l -- 'SQLite'
+#     tmux send-keys -t %176 Enter
+#     -> ● User answered Claude's questions:
+#          ⎿  · Which database should the queue use? → Postgres
+#
+# So EVERY option the operator tapped delivered option 1, and the card reported
+# `Delivered`. clawgate's own rationale (internal/ui/reply.go: "send the option's
+# LABEL verbatim, never its index") assumed a text prompt; it is still the only
+# thing on the wire — `data-reply-option` is a render-time data attribute for test
+# handles and the route never reads it — so the LABEL is what this agent matches
+# on, and the index it presses is READ OFF THE PANE rather than assumed.
+#
+# 🔴 A WRONG ANSWER IS WORSE THAN NO ANSWER, and that orders every branch below.
+# Where the pane cannot be read, or can be read and is a shape this agent cannot
+# drive correctly (a multi-question chain, a multiSelect list, a numbered menu it
+# does not recognise), it SENDS NOTHING and refuses with a named reason. The
+# at-most-once ladder above is untouched: no path here retries, re-sends or
+# re-claims, and an unverified outcome is reported `failed` — which the audit log
+# reads as delivery UNKNOWN — never optimistically as `delivered`.
+MENU_CURSOR = "❯"                              # ❯, the cursor row marker
+MENU_QUESTION_MARKS = ("☐", "☒")          # ☐ / ☒, one per question
+MENU_SUBMIT_TAB = "✔ Submit"                   # ✔ Submit, the multi-question tab
+MENU_REVIEW_HEADING = "Review your answers"         # the multi-question end screen
+#: A multiSelect list renders `[ ]` / `[x]` rather than a numbered single choice.
+#: ONE spelling of "a checkbox", used to build the ROW pattern below.
+MENU_CHECKBOX = r"\[[ xX✔✓]\]"
+#: One numbered option row: an optional cursor, a number, a dot, the label.
+#: ⚠ `scripts/session-manager` OWNS A SECOND PREDICATE OVER THE SAME BYTES —
+#: `_MENU_SELECTED_RE` / `_MENU_OPTION_RE`, deciding "is a modal up" for its
+#: `waiting` signal, with the measured render facts in
+#: `claude/skills/session-manager/reference/waiting-signal.md`. They are NOT
+#: merged: that one feeds a signal with a measured 11/11 precision and changing it
+#: belongs in its own PR. What IS pinned is the RELATIONSHIP —
+#: `test_the_menu_predicate_AGREES_with_session_managers_over_a_shared_corpus` —
+#: because the disagreement is what found the blocker below: session-manager saw a
+#: modal on three live panes this file's `menu_block` could not see.
+MENU_OPTION_RE = re.compile(
+    r"^[ \t]*(?:(" + MENU_CURSOR + r")[ \t]*)?([0-9]{1,3})\.[ \t]+(\S.*?)[ \t]*$")
+#: One multiSelect option row. 🔴 THE CHECKBOX MUST STAND WHERE THE NUMBER WOULD
+#: — first thing on the row, after an optional cursor and an optional bullet —
+#: because a checkbox ANYWHERE was the live false positive this pattern replaces:
+#: a markdown `- [ ] task` list, a `grep -c '\[ \]'` in shell output, or an option
+#: label that merely CONTAINS `[x]` each made a legitimate pane unanswerable.
+#: `❯ [ ] 1. Ledger` is the measured render, and `MENU_OPTION_RE` cannot see it —
+#: the checkbox precedes the number — which is why this needs its own pattern
+#: rather than a clause on the numbered one.
+MENU_CHECKBOX_ROW_RE = re.compile(
+    r"^[ \t]*(?:(" + MENU_CURSOR + r")[ \t]*)?(?:[-*•][ \t]*)?" + MENU_CHECKBOX)
+#: How far apart two consecutive option rows may sit and still be ONE block.
+#: 🔴 THIS WAS 4 AND THAT WAS TOO SMALL TO SEE A REAL MENU. MEASURED over every
+#: live tmux pane on this host (57 panes; 3 of them showing a real
+#: `AskUserQuestion` modal): an option that carries a DESCRIPTION renders its
+#: description on the lines beneath it, indented further, so consecutive option
+#: rows sat 7, 5, 4, 2 / 5, 3, 3, 4, 2 / 6, 5, 3, 2 lines apart. At a gap of 4
+#: `menu_block` returned ZERO rows for all three — which is why a sweep of the
+#: whole fleet found not one menu this agent could drive, and why the pane a
+#: reply belonged in read as `text`. 12 overshoots the measured 7; it is not a
+#: multiple of any step here, and it is a sanity bound rather than the signal.
+MENU_ROW_GAP = 12
+MENU_MIN_OPTIONS = 2
+#: A digit key selects AND advances — measured — so rows past 9 are unreachable
+#: without arrow keys, which this agent will not drive.
+MENU_MAX_DIGIT = 9
+#: The free-text row's label, normalised (lowercased, trailing `.`/`…` stripped).
+#: An ENUMERATION rather than a pattern: it decides whether a genuine free-text
+#: reply has a route at all, and a pattern loose enough to match a real option
+#: label would type a reply into the wrong row.
+#: ⚠ ONE OF THE FOUR IS MEASURED (`Type something.`, Claude Code 2.1.232); the
+#: other three are guesses at spellings of the same affordance. If Claude Code
+#: rewords the row, the set matches nothing — and the consequence is NOT confined
+#: to free-text replies: with no recognised free-text row `deliver_to_menu` has no
+#: route for a reply that matches no label, so those are refused. A reply that
+#: matches a label EXACTLY is unaffected, because the match is decided before this
+#: set is consulted.
+MENU_FREE_TEXT_LABELS = frozenset({
+    "type something",
+    "type something else",
+    "type your own",
+    "write my own answer",
+})
+#: Shortest head of a truncated label (`Some very long opt…`) this agent will
+#: accept as a prefix match. Below this a truncation is not evidence of anything.
+MENU_TRUNCATION_MIN = 8
+MENU_TRUNCATION_MARKS = ("…", "...")
+#: How long to wait for the TUI to redraw before reading the pane back. Reads
+#: only — `capture-pane` types nothing — so a slow redraw costs latency, never a
+#: second keypress.
+MENU_SETTLE_SECONDS = float(os.environ.get("TMUX_REPLY_MENU_SETTLE_SECONDS", "0.15"))
+MENU_VERIFY_ATTEMPTS = int(os.environ.get("TMUX_REPLY_MENU_VERIFY_ATTEMPTS", "8"))
+
+#: What `classify_pane` can answer. Enumerated, and only PANE_TEXT means "deliver
+#: the way this agent always has": every other value is either a menu this agent
+#: drives by digit or a shape it refuses.
+PANE_TEXT = "text"
+PANE_MENU = "menu"
+PANE_MULTI_QUESTION = "multi-question"
+PANE_MULTI_SELECT = "multi-select"
+PANE_UNKNOWN_MENU = "unknown-menu"
+
+
+def normalise_label(s: str) -> str:
+    """Collapse whitespace, the one difference a terminal render introduces."""
+    return " ".join(s.split())
+
+
+def free_text_key(label: str) -> str:
+    """A menu label reduced to the key matched against MENU_FREE_TEXT_LABELS."""
+    return normalise_label(label).casefold().rstrip(".!:… ").strip()
+
+
+def menu_option_rows(captured: str) -> list[dict]:
+    """Every numbered option row in a pane capture, in screen order."""
+    rows = []
+    for lineno, line in enumerate(captured.splitlines()):
+        m = MENU_OPTION_RE.match(line)
+        if m:
+            rows.append({
+                "line": lineno,
+                "number": int(m.group(2)),
+                "label": normalise_label(m.group(3)),
+                "cursor": m.group(1) is not None,
+            })
+    return rows
+
+
+def rows_are_one_block(lines: list[str], first_line: int, second_line: int) -> bool:
+    """Whether two consecutive option rows belong to ONE block.
+
+    🔴 THE RULE IS "NO BLANK LINE BETWEEN THEM", NOT A LINE COUNT, AND THAT IS
+    MEASURED. An option's DESCRIPTION renders on the lines directly beneath it,
+    indented further, with no blank line anywhere in the run: over the three live
+    `AskUserQuestion` modals on this host, every inter-row span was 1-6
+    consecutive NON-blank lines and not one contained a blank. So the thing that
+    separates a menu from an unrelated numbered list further up the pane is the
+    blank line, which is exactly what a bare gap count cannot see — at a gap of 4
+    a real menu's rows were invisible while a synthetic pair six BLANK lines apart
+    was the case the bound had been chosen for.
+
+    MENU_ROW_GAP stays as a sanity bound so an arbitrarily long span of prose
+    cannot join two unrelated numbers; the blank-line rule is the signal.
+
+    🔴 AND THE LESSON THAT TRANSFERS, BECAUSE IT NEARLY SHIPPED THE ORIGINAL BUG
+    BACK: the review that caught the *other* half of this defect had a positive
+    control, and the control PASSED while the detector was blind to every real
+    render on the box — because the control's menu was SYNTHETIC, with its option
+    rows packed onto adjacent lines. A control built from clean fixture data cannot
+    detect a defect that only realistic data exposes. The fixture that pins this
+    (`DESCRIBED_MENU_CAPTURE`) reproduces the measured spacing instead, and its
+    test asserts its own widest inter-row span is >= 7 — because at 3 or 4 a mutant
+    restoring the old bound passes it and SURVIVES without executing this function.
+    """
+    gap = second_line - first_line
+    if not 0 < gap <= MENU_ROW_GAP:
+        return False
+    return all(line.strip() for line in lines[first_line + 1:second_line])
+
+
+def menu_block(captured: str) -> list[dict]:
+    """The BOTTOM-MOST run of option rows numbered 1..N, or [].
+
+    🔴 BOTTOM-MOST, because a live menu is the thing at the bottom of the pane
+    and anything above it is transcript. 🔴 AND NUMBERED FROM 1, because that is
+    what makes the block a menu rather than any numbered text that happens to be
+    on screen: an ordinary prompt cannot satisfy "1., 2., … contiguous, no blank
+    line between them, one of them carrying the cursor glyph".
+    """
+    lines = captured.splitlines()
+    best: list[dict] = []
+    current: list[dict] = []
+    for row in menu_option_rows(captured):
+        if row["number"] == 1:
+            current = [row]
+            continue
+        if (current and row["number"] == current[-1]["number"] + 1
+                and rows_are_one_block(lines, current[-1]["line"], row["line"])):
+            current.append(row)
+            if len(current) >= MENU_MIN_OPTIONS:
+                best = list(current)
+        else:
+            current = []
+    return best
+
+
+def menu_checkbox_block(captured: str) -> list[dict]:
+    """The BOTTOM-MOST run of CURSORED multiSelect option rows, or [].
+
+    🔴 THE SAME SHAPE AS `menu_block`, AND FOR THE SAME REASON: a run of adjacent
+    option rows, at least MENU_MIN_OPTIONS of them, at least one carrying the
+    cursor glyph. That combination is what the repo's own measured live-modal
+    signal is (`claude/skills/session-manager/reference/waiting-signal.md`: the
+    cursor plus a second option row, "because agents quote menus back at the
+    operator all day").
+
+    🔴 WHAT IT REPLACES, AND WHY THE OLD SIGNAL WAS A BLOCKER. A `[ ]` or `[x]`
+    ANYWHERE in the capture used to be the whole multiSelect signal, which refused
+    every reply to any pane that merely mentioned one. MEASURED over all 53 live
+    tmux panes on this host: 4 refused, 0 answerable. A markdown `- [ ] task` list
+    sitting above a genuine single-question menu, and an option label that merely
+    CONTAINS `[x]`, were both reproduced as refusals of a pane this agent can
+    answer correctly. There is no cursor and no adjacent run in any of those.
+    """
+    lines = captured.splitlines()
+    best: list[dict] = []
+    current: list[dict] = []
+    for lineno, line in enumerate(lines):
+        m = MENU_CHECKBOX_ROW_RE.match(line)
+        if not m:
+            continue
+        row = {"line": lineno, "cursor": m.group(1) is not None}
+        if current and rows_are_one_block(lines, current[-1]["line"], lineno):
+            current.append(row)
+        else:
+            current = [row]
+        if len(current) >= MENU_MIN_OPTIONS and any(r["cursor"] for r in current):
+            best = list(current)
+    return best
+
+
+def classify_pane(captured: str) -> tuple[str, list[str], str]:
+    """What the pane is showing. Returns (kind, option labels, refusal reason).
+
+    🔴 THE ONLY OUTCOME THAT TYPES IS PANE_TEXT, so every uncertainty resolves
+    AWAY from typing. The THREE refusing kinds are each a shape where a typed
+    reply would be discarded and an Enter would answer something nobody chose:
+
+      * PANE_MULTI_SELECT — `[ ]` checkboxes, where a digit TOGGLES in place and
+        the completing `Submit` row is UNNUMBERED and reachable only by arrow
+        keys, which `tmux_text_policy` refuses to deliver by design.
+      * PANE_MULTI_QUESTION — the `←  ☐ DB  ☐ Region  ✔ Submit  →` tab strip or
+        its `Review your answers` end screen. Answering question 1 and leaving
+        the rest is a HALF answer, which is its own wrong answer.
+      * PANE_UNKNOWN_MENU — numbered rows without exactly one cursor row, or a
+        numbered block plus a question marker carrying NO cursor row at all
+        (which is what a menu caught half-drawn looks like): either way whether a
+        live menu is up could not be decided.
+
+    ⚠ THE RESIDUAL, STATED: this is a read of the pane at one instant and the
+    keypress happens after it, so a menu that re-renders in between is not
+    covered here — the same TOCTOU window `should_refuse` already documents for
+    a pane that simply moved on. What bounds it is the read-back after the send.
+    """
+    lines = captured.splitlines()
+    block = menu_block(captured)
+    checkbox_block = menu_checkbox_block(captured)
+    multi = (MENU_REVIEW_HEADING in captured
+             or MENU_SUBMIT_TAB in captured
+             or any(sum(line.count(m) for m in MENU_QUESTION_MARKS) >= 2 for line in lines))
+
+    # 🔴 THE PRECONDITION, AND IT GOVERNS EVERY BRANCH BELOW RATHER THAN ONE.
+    # A live modal leaves a STRUCTURAL trace: a run of option rows, one of them
+    # carrying the cursor. Nothing else opens the question — not a `☐`, not a
+    # `✔ Submit`, not a `Review your answers`, not a `[ ]`.
+    #
+    # 🔴 THAT WORDING IS THE FIX FOR A MEASURED BLOCKER, not a tightening for its
+    # own sake. This used to read `… and question_marks == 0`, so ANY `☐`/`☒` on
+    # screen — a quoted tab strip in scrollback, a transcript of an earlier ask —
+    # sent the pane into the refusing branches below with no cursor row and no
+    # numbered block in sight. MEASURED over all 53 live tmux panes on this host:
+    # `text 49 · multi-question 2 · unknown-menu 2` — 4 refused, ZERO answerable,
+    # every one of the 4 with zero numbered rows and zero cursor rows.
+    #
+    # 🔴 EITHER SIGNAL SATISFIES IT, and that is not redundancy. A multiSelect
+    # list's rows carry their checkbox BEFORE the number, so `menu_block` does not
+    # see them at all — keying this on the numbered block alone would let a
+    # multiSelect menu fall through to the typing path, which is the exact defect
+    # this code exists to close.
+    #
+    # 🔴 AND A NUMBERED BLOCK ALONE IS NOT ONE OF THEM — IT MUST CARRY THE CURSOR.
+    # Measured while writing this: without that clause a pane whose ordinary
+    # output happens to contain `1. … 2. … 3. …` (a shell that just printed a
+    # numbered list, a README, a help screen) classified as a menu-shaped thing
+    # and every reply into it was REFUSED. That is the false-positive direction of
+    # this detector and it costs legitimate deliveries.
+    cursor_rows = sum(1 for r in block if r["cursor"])
+    question_marks = sum(line.count(m) for line in lines for m in MENU_QUESTION_MARKS)
+    if not (block and cursor_rows) and not checkbox_block:
+        # ⚠ ONE NARROW EXCEPTION, AND IT IS THE HALF-DRAWN FRAME. A numbered block
+        # from 1 on adjacent lines, a question marker on screen, and NO cursor row
+        # is what a menu caught mid-redraw looks like — and typing into that is the
+        # original defect. It requires BOTH signals, so it costs nothing the sweep
+        # measured: all 4 live refusals had zero numbered rows, and the PR's own
+        # measured false positive (`1. … 2. … 3. …` in shell output) carries no
+        # marker. Refusing here also keeps this end of the delivery agreeing with
+        # the read-back end, which reports the same frame UNKNOWN.
+        if block and question_marks:
+            return PANE_UNKNOWN_MENU, [], (
+                "the pane is showing numbered option rows and a question marker but no "
+                "cursor row — which is also what a menu caught half-drawn looks like — so "
+                "whether a live menu is up could not be decided and nothing was typed")
+        return PANE_TEXT, [], ""
+
+    if checkbox_block:
+        return PANE_MULTI_SELECT, [], (
+            "the pane is showing a multi-select question, whose completing `Submit` row is "
+            "unnumbered and reachable only by arrow keys — which this agent does not send — "
+            "so nothing was typed and nothing was answered")
+    if multi:
+        return PANE_MULTI_QUESTION, [], (
+            "the pane is showing a MULTI-question menu (a tab strip or its review screen), "
+            "and answering the first question would leave the rest unanswered — so nothing "
+            "was typed and nothing was answered")
+    if cursor_rows != 1:
+        return PANE_UNKNOWN_MENU, [], (
+            "the pane is showing numbered rows without exactly one cursor row, so whether "
+            "it is a live menu could not be decided and nothing was typed")
+
+    # 🔴 NO FREE-TEXT PRECONDITION HERE, DELIBERATELY. This used to refuse a
+    # cursored numbered menu carrying no RECOGNISED free-text row — before any
+    # label matching happened — so a reply naming row 2 EXACTLY was refused with
+    # "a reply that matches no option has no route", which was false about that
+    # reply. `deliver_to_menu` already refuses correctly and only when nothing
+    # matched, so the precondition was redundant in the one direction and wrong in
+    # the other. Its removal is what makes the `0 free-text rows` wording there
+    # reachable.
+    return PANE_MENU, [r["label"] for r in block], ""
+
+
+def capture_pane(pane: str) -> tuple[str, str]:
+    """Read a pane's visible content. Returns (text, error).
+
+    A non-empty error means the pane could NOT be read — which is not the same
+    fact as "the pane is empty", and the caller treats them differently: an
+    unreadable pane is a refusal, while a pane that reads back blank provably is
+    not a menu, because a menu has visible rows.
+    """
+    rc, out, err = run_tmux(["capture-pane", "-p", "-t", pane])
+    if rc != 0:
+        return "", (err.strip() or f"tmux exited {rc}")
+    return out, ""
+
+
+def label_matches(label: str, text: str) -> bool:
+    """Whether a pane row's label is the option the reply text names."""
+    a = normalise_label(label)
+    b = normalise_label(text)
+    if a == b or a.casefold() == b.casefold():
+        return True
+    # A label too long for the pane is rendered truncated, with a mark. Matching
+    # its head against the reply is the only way that option stays selectable —
+    # and the mark is REQUIRED, so an ordinary short label can never prefix-match
+    # a different, longer reply.
+    for mark in MENU_TRUNCATION_MARKS:
+        if a.endswith(mark):
+            head = a[:-len(mark)].rstrip()
+            if len(head) >= MENU_TRUNCATION_MIN and b.casefold().startswith(head.casefold()):
+                return True
+    return False
+
+
+def menu_row_holds_reply(label: str, text: str) -> bool:
+    """Whether a menu row still HOLDS (a head of) the reply. Read-back only.
+
+    🔴 A DIFFERENT QUESTION FROM `label_matches`, AND IT MUST NOT BE FOLDED INTO
+    IT. `label_matches` decides which row to PRESS, so an unmarked prefix match
+    there would select a short option row for a longer, different reply. This one
+    decides whether a reply is still SITTING in a row, where the same looseness is
+    the safe direction: a false positive reports `failed` (delivery UNKNOWN) for a
+    good delivery, which is the direction `menu_committed` already chose.
+
+    🔴 WHAT IT ADDS: A WRAPPED ROW. A reply longer than the option-row width
+    renders as `N. <head>` with NO truncation mark — the mark `label_matches`
+    REQUIRES — so nothing matched, `menu_committed` concluded the reply had left
+    the menu, and an uncommitted reply was reported `delivered`. That is the third
+    instance of this PR's own defect (a wrong outcome reported as success), inside
+    the guard written to close the second. The `…` case was handled; the wrap was
+    not.
+    """
+    if label_matches(label, text):
+        return True
+    a = normalise_label(label)
+    b = normalise_label(text)
+    # The head is REQUIRED to be long enough to be evidence, exactly as the marked
+    # case requires — a two-character row is not a rendering of a long reply.
+    # ⚠ NO `len(a) < len(b)` CLAUSE, deliberately: it cannot be false here. If `b`
+    # starts with `a` and they are the same length they are the same string, which
+    # `label_matches` already returned True for. A clause no mutant can kill is a
+    # clause that reads as a guard while guarding nothing.
+    return len(a) >= MENU_TRUNCATION_MIN and b.casefold().startswith(a.casefold())
+
+
+def menu_digit(index: int) -> tuple[str, str]:
+    """The digit key that selects row `index`, or ("", reason)."""
+    n = index + 1
+    if n > MENU_MAX_DIGIT:
+        return "", (f"the option to select is row {n}, past the {MENU_MAX_DIGIT} a single "
+                    "digit key can reach — the rest need arrow keys, which this agent does "
+                    "not send")
+    return str(n), ""
+
+
+def menu_settled(pane: str, labels: list[str]) -> tuple[bool, str]:
+    """Whether the menu a DIGIT answered has moved on. Returns (settled, observed).
+
+    🔴 THIS IS THE READ-BACK THAT MAKES `delivered` A MEASUREMENT RATHER THAN AN
+    ASSUMPTION — the whole failure being fixed here is a wrong answer reported as
+    success. It sends nothing; it only reads.
+
+    The question is "is it the SAME menu", not "is a menu on screen": answering
+    may be followed immediately by another ask, and reporting `failed` for that
+    is the failure direction that trains an operator to ignore the state column.
+
+    🔴 AN ABSENCE MUST BE READ TWICE, AND ONE READ USED TO BE ENOUGH. The verdict
+    here rests on NOT seeing the menu, and a half-drawn frame looks exactly like
+    that — so a menu caught mid-render read as "moved on" and reported `delivered`,
+    while the SAME frame at classify time is a pane this agent would type into.
+    Two ends of one delivery, two answers. Requiring two CONSECUTIVE reads to agree
+    is what makes the absence evidence rather than a snapshot; the `same menu`
+    state is stable by construction, so it needs no such treatment.
+
+    🔴 IT RETURNS WHAT IT OBSERVED, AND THE CALLER MUST SAY THAT RATHER THAN CLAIM
+    A SELECTION. "selected menu row 2 by its digit" asserted a selection this
+    function never saw; what it can vouch for is that the menu is gone, or that a
+    different one is up.
+
+    ⚠ THE RESIDUAL THIS CANNOT CLOSE, STATED. "no menu on screen" is also what a
+    pane that had ALREADY moved on before the keypress looks like, with the digit
+    left uncommitted in the operator's buffer. No read this agent can make
+    distinguishes that from an answered ask — and the alternative, reporting
+    UNKNOWN for the state a CORRECT delivery produces, would make every real
+    delivery read UNKNOWN, which is the failure direction above. Closing it needs
+    positive evidence from the other side of the wire (the question's own text,
+    carried on the write), which is recorded as a clawgate-side change.
+    """
+    prev = None
+    last = None
+    want = (PANE_MENU, list(labels))
+    for _ in range(max(2, MENU_VERIFY_ATTEMPTS)):
+        time.sleep(MENU_SETTLE_SECONDS)
+        captured, err = capture_pane(pane)
+        if err:
+            # An unreadable pane is not an observation, so it cannot be half of an
+            # agreeing pair either.
+            prev = None
+            continue
+        kind, now_labels, _ = classify_pane(captured)
+        seen = (kind, now_labels)
+        last = seen
+        if seen != want and seen == prev:
+            return True, ("a different menu is now on screen" if kind == PANE_MENU
+                          else "the menu is no longer on screen")
+        prev = seen
+    if last == want:
+        return False, "the menu did not move"
+    return False, "the pane never held one state long enough to be read twice"
+
+
+def menu_committed(pane: str, text: str) -> bool:
+    """Whether a reply TYPED into the free-text row actually left the menu.
+
+    🔴 THE FREE-TEXT PATH NEEDS A DIFFERENT QUESTION FROM `menu_settled`, AND
+    ASKING THAT ONE HERE WAS WRONG. Typing REPLACES the focused row's label, so a
+    reply that was typed and never committed changes the label set — and it can
+    even stop the pane classifying as a menu at all, because the row that made it
+    recognisable is now the reply. Both of those satisfy "the menu moved on",
+    which is the one outcome that must not read as delivered.
+
+    So the question is whether the reply is still sitting in a menu row. It is
+    answered against the pane's own bytes inside this process and nothing about
+    it is reported — see the module header on the text being credential-grade.
+
+    ⚠ THE COST, STATED: a menu rendered AFTER the answer whose own row label
+    happens to match the reply reads as uncommitted, so a good delivery can be
+    reported `failed`. That direction is chosen — an audit row saying UNKNOWN
+    over one that says DELIVERED wrongly — and it cannot cause a second
+    keypress, because nothing on this path retries.
+
+    🔴 AND THE ABSENCE IS READ TWICE, for the reason `menu_settled` gives: the
+    verdict here is "no row holds the reply", which is what a half-drawn frame
+    also looks like. `menu_row_holds_reply` — not `label_matches` — is the
+    predicate, because a WRAPPED row carries no truncation mark.
+    """
+    prev = None
+    for _ in range(max(2, MENU_VERIFY_ATTEMPTS)):
+        time.sleep(MENU_SETTLE_SECONDS)
+        captured, err = capture_pane(pane)
+        if err:
+            prev = None
+            continue
+        rows = menu_block(captured)
+        holds = any(menu_row_holds_reply(r["label"], text) for r in rows)
+        if holds is False and prev is False:
+            return True
+        prev = holds
+    return False
+
+
+def menu_free_text_focused(pane: str, index: int) -> bool:
+    """Whether the digit actually FOCUSED the free-text row.
+
+    🔴 WITHOUT THIS THE FREE-TEXT PATH REBUILDS THE ORIGINAL DEFECT. If the digit
+    did not focus the row, the characters that follow are discarded exactly as
+    before and the Enter answers whatever is highlighted. So the text is not
+    typed and Enter is never pressed until the focus is observed.
+
+    🔴 THE CURSOR ON THAT EXACT ROW IS THE WHOLE SIGNAL, AND A SECOND CLAUSE HAD
+    TO GO. This also accepted `ctrl+g` appearing ANYWHERE in the capture — the
+    constant's own comment said "the hint that grows UNDER the free-text row",
+    while the code substring-matched the whole pane. Reproduced: with `ctrl+g`
+    present for an unrelated reason and the cursor still on row 1, this returned
+    True, the reply was typed into an UNFOCUSED menu, Enter was pressed, and the
+    agent reported `delivered` — a fourth instance of the defect this file exists
+    to close, and one `menu_committed` structurally cannot see, because once the
+    ask is gone there are no menu rows left for the reply to sit in. The two
+    clauses also SHIELDED EACH OTHER: deleting either one left the suite green,
+    because the measured focused render satisfies both.
+
+    ⚠ SO THE FREE-TEXT PATH NOW DEPENDS ENTIRELY ON THE CURSOR MOVING. That is
+    what the measured render does (`❯` moves to the free-text row, Claude Code
+    2.1.232). If a future render focused the row WITHOUT moving the cursor, this
+    returns False and the reply is never typed — refused work rather than a wrong
+    answer, which is the direction this file chooses everywhere else.
+
+    ⚠ ONE READ IS ENOUGH HERE, unlike `menu_settled` and `menu_committed`. Those
+    conclude from an ABSENCE, which a half-drawn frame imitates; this concludes
+    from a POSITIVE structural observation — the cursor glyph on row `index` — and
+    a frame showing that is a frame in which the row is selected.
+    """
+    for _ in range(max(1, MENU_VERIFY_ATTEMPTS)):
+        time.sleep(MENU_SETTLE_SECONDS)
+        captured, err = capture_pane(pane)
+        if err:
+            continue
+        rows = menu_block(captured)
+        if len(rows) > index and rows[index]["cursor"]:
+            return True
+    return False
+
+
+def deliver_to_menu(pane: str, labels: list[str], text: str,
+                    submit: bool) -> tuple[str, str]:
+    """Answer a question menu by pressing the row's DIGIT. Returns (state, detail).
+
+    🔴 NO DETAIL HERE MAY CARRY A LABEL. A matched label IS the reply text, and
+    the reply text is credential-grade and never leaves this process — see the
+    module header. Every diagnostic below names a digit, a count or a shape.
+    """
+    if not submit:
+        return "refused", (
+            "the pane is showing a question menu, where a typed character is discarded and "
+            "a digit both selects and advances — so a type-only write has no meaning there "
+            "and nothing was sent")
+    if not text:
+        # ⚠ NOT REACHABLE THROUGH `deliver()`, AND SAYING SO IS THE POINT.
+        # `validate()` refuses an empty send-keys text before this function is
+        # called, so this branch is reachable only by calling `deliver_to_menu`
+        # directly — which is how its test drives it. It is kept as a precondition
+        # on a function that can be called from elsewhere, because on THIS path an
+        # Enter with nothing typed does not merely do nothing: on an empty
+        # free-text row it ABORTS THE WHOLE TOOL (`User declined to answer
+        # questions`), a destructive outcome rather than a no-op. It is NOT counted
+        # among the refusals a write can actually receive.
+        return "refused", "the write carries no text, and an empty answer aborts the menu"
+
+    matches = [i for i, lbl in enumerate(labels) if label_matches(lbl, text)]
+    if len(matches) > 1:
+        return "refused", (
+            f"the reply matches {len(matches)} of the menu's {len(labels)} option rows, so "
+            "which one the operator meant cannot be decided here and nothing was sent")
+    if matches:
+        digit, reason = menu_digit(matches[0])
+        if reason:
+            return "refused", reason
+        rc, _, err = run_tmux(["send-keys", "-t", pane, "-l", "--", digit])
+        if rc != 0:
+            return "failed", redact(err or f"tmux exited {rc}", text)
+        settled, observed = menu_settled(pane, labels)
+        if settled:
+            # 🔴 THE DETAIL SAYS WHAT WAS OBSERVED, NOT WHAT WAS INTENDED. It used
+            # to read "selected menu row N by its digit", which asserts a selection
+            # nothing here measured; the read-back can vouch for the menu being
+            # gone, or for a different one being up, and that is what it says.
+            return "delivered", f"menu row {digit} was sent and {observed}"
+        return "failed", (f"menu row {digit} was sent and {observed}, so whether "
+                          "the answer was accepted is UNKNOWN; nothing was re-sent")
+
+    # No row names this reply, so it is a genuine free-text answer. That has its
+    # own row, and it is the only route that does not put words nobody chose into
+    # a selection.
+    free = [i for i, lbl in enumerate(labels) if free_text_key(lbl) in MENU_FREE_TEXT_LABELS]
+    if len(free) != 1:
+        return "refused", (
+            f"the reply matches none of the menu's {len(labels)} option rows and the pane "
+            f"offers {len(free)} free-text rows, so there is no route for it and nothing "
+            "was sent")
+    digit, reason = menu_digit(free[0])
+    if reason:
+        return "refused", reason
+    rc, _, err = run_tmux(["send-keys", "-t", pane, "-l", "--", digit])
+    if rc != 0:
+        return "failed", redact(err or f"tmux exited {rc}", text)
+    if not menu_free_text_focused(pane, free[0]):
+        return "failed", (
+            f"menu row {digit} was sent to reach the free-text row and the row did not take "
+            "focus, so the reply was NOT typed and Enter was NOT pressed — an Enter there "
+            "would have answered whichever row is highlighted")
+    rc, _, err = run_tmux(["send-keys", "-t", pane, "-l", "--", text])
+    if rc != 0:
+        return "failed", redact(err or f"tmux exited {rc}", text)
+    rc, _, err = run_tmux(["send-keys", "-t", pane, "Enter"])
+    if rc != 0:
+        return "failed", redact(
+            "the reply was typed into the menu's free-text row but Enter was not accepted: "
+            + (err or f"tmux exited {rc}"), text)
+    if menu_committed(pane, text):
+        return "delivered", f"typed the reply into menu row {digit} and committed it"
+    return "failed", (f"the reply was typed into menu row {digit} and Enter was sent, and it "
+                      "is still sitting in a menu row, so whether it was accepted is "
+                      "UNKNOWN; nothing was re-sent")
+
+
 def deliver(write: dict) -> tuple[str, str]:
     """Execute ONE claimed write. Returns (state, detail).
 
@@ -825,6 +1458,27 @@ def deliver(write: dict) -> tuple[str, str]:
         # directions so a mutant that drops this line, or that starts honouring
         # the field, is caught.
         submit = NEW_SESSION_ALWAYS_SUBMITS
+    else:
+        # 🔴 READ THE PANE BEFORE TYPING INTO IT. See the menu section above: the
+        # text-then-Enter pair below is correct against a prompt and delivers
+        # OPTION 1 against an `AskUserQuestion` menu, whatever the operator tapped.
+        #
+        # 🔴 ONLY FOR THE send-keys KIND. A new-session's pane is one this agent
+        # just created, running a fresh shell, so there is no menu to read and a
+        # capture there could only add a way to refuse a window we opened.
+        captured, cap_err = capture_pane(pane)
+        if cap_err:
+            # An unreadable pane cannot RULE OUT a menu, and the failure direction
+            # of guessing is a wrong answer reported as delivered.
+            return "refused", redact(
+                "the pane could not be read, so whether it is showing a question menu — "
+                "where a typed reply is discarded and Enter answers whatever is highlighted "
+                "— is unknown: " + cap_err, text)
+        pane_kind, menu_labels, why = classify_pane(captured)
+        if pane_kind == PANE_MENU:
+            return deliver_to_menu(pane, menu_labels, text, submit)
+        if pane_kind != PANE_TEXT:
+            return "refused", why
 
     # 🔴 `-l` MAKES IT LITERAL, AND WITHOUT IT THIS IS A DIFFERENT COMMAND.
     # Un-flagged, `send-keys` interprets its arguments as KEY NAMES: a reply
