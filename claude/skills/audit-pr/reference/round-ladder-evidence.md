@@ -617,6 +617,10 @@ audit landed after the merge and every candidate it found became a follow-up. It
 the ROUTING, not a seventh trial. A record that grows every time someone hits the same thing is not
 a record.
 
+✅ **A POST-TRIAL BATCH, reported because the skill asks for the pair on every PR and NOT folded
+into the closed record above.** 2026-09-18, `civitai/civitai`: a round-0 requirements pass changed
+the outcome on **3 of 3** PRs, all of which read green beforehand. `ran: 3 · changed the outcome: 3`.
+
 ✅ **The trigger then worked on its first real test.** Round 0 fired at create time on `#1581`, ~16
 min after open with the PR still OPEN and CI pending, returned `deletion candidate`, and **three of
 that PR's seven appended bullets were cut as restatements** — the first pre-decision instance in the

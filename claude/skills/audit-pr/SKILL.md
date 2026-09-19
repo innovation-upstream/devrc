@@ -91,6 +91,11 @@ you get round to auditing** — that is the one finding the trial produced, and 
 
 🔴 **Do NOT re-type the auditor's environment and cleanup warnings into the prompt — `audit-dispatch.py` now carries them as invariant clauses (`cold-checkout-is-not-the-diff`, `own-what-you-spawn`), so every brief has them in every round.** They lived here as prose telling YOU to remember them, and a probe of two real briefs found them absent from both (0/0) — the precise failure that module exists to end. The rules they rest on — the process-pattern ban, killing by resolved PID, per-agent scratch names, unpopulated submodules, zsh's lack of word-splitting — are in `claude/RULES.md`, which every subagent already receives; only the audit-specific consequences moved. **Still yours, because no brief can do it:** sweep for leaked processes yourself afterwards and verify your own worktree is clean at the end — an auditor's "cleaned up" claim is not evidence.
 
+⚠ **A dispatched agent stuck in a drained CI poll-loop RE-EMITS ITS COMPLETION NOTICE INDEFINITELY** —
+measured at ~450k tokens before a `TaskStop` ended it. The tell is a completion result repeating
+VERBATIM with a rising token count; its work and its PR are unaffected, so read the first copy, stop
+the agent, and do not re-dispatch on the assumption the run was lost.
+
 ## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE (runs BEFORE the checklist)
 
 ✅ **A STANDING RULE — the trial is CLOSED. Read the TRIAL RECORD at the end of this section for
@@ -193,7 +198,10 @@ Ask the re-auditor to:
 - **label every finding `behaviour` or `guard`, and separate shipped behaviour from scaffolding.**
   Tests an earlier round wrote are in its diff *by construction*; report them only where the defect
   lets a real regression through;
-- treat "the author says it's fixed" as a claim to check against the diff.
+- treat "the author says it's fixed" as a claim to check against the diff — **an implementing
+  agent's own review ladder is not an audit**: one ran ten self-reported rounds in which rounds 7–10
+  each found a defect in the PREVIOUS round's guard on a single `if` block, and round 10 deleted the
+  guard rather than tighten it a fifth time.
 
 **Carry the ledger in every round's summary**: `round N · payload lines changed THIS round: X (since
 round 1: Y) · elapsed: Z`. X is what the gate below reads; without it the flattening shows only in
@@ -215,6 +223,19 @@ So, when a round's fix rewrites an explanation:
   when the comment said "nothing justifies this" and recorded all five dead drafts so nobody derived
   a sixth. **"I could not find a purpose" is a finding; a purpose you found while under pressure to
   supply one is a hypothesis.**
+- 🔴 **A GUARD REMOVED OR NARROWED ON A RATIONALE THAT ANSWERS A DIFFERENT QUESTION is the
+  highest-yield finding a ladder produces, and only MEASUREMENT catches it.** One fix round narrowed
+  a guard and justified it with reasoning that was true of a FULL revert, while the guard's own
+  comment said it existed for the PARTIAL one — read as prose the argument is sound, and it is about
+  another case. **Build the mutant the COMMENT describes**: that one was RED at the pre-narrowing tip
+  and GREEN at the narrowed head. 🔴 **That arm alone proves nothing** — "the mutant is green at the
+  new head" cannot distinguish *the guard has gone blind* from *my harness is wired to nothing*, so
+  run the same mutant against the PRE-FIX instrument as the positive control. **Prefer a guard that
+  counts on the ARGUMENT over one alternating CALLEE NAMES** — an alternation pins only the names
+  known today, which is how this kill was lost. And the rule directly above was handed to the fixing
+  agent **verbatim and violated anyway**: three successive rationales for one bound, each falsified
+  in turn. The failure mode is reaching for a fresh argument, so **tell the next writer they are the
+  Nth.**
 - 🔴 **A sentence that NAMES its own missing variable and then asserts a value for it.** *"Which is
   less wrong depends on the population, and the measured one favours X"* — the population was measured
   nowhere, and where both sides were observable it **inverted**. **Delete the comparative; do not
@@ -223,7 +244,18 @@ So, when a round's fix rewrites an explanation:
 - 🔴 **A sweep applied to ONE claim and not the others in the same commit.** One round grep-swept the
   tree for a retracted string and hand-counted a second claim's sites in the same breath — only the
   hand-counted one was wrong (2 of 5 sites). **Sweep every claim in the commit the way you swept the
-  hardest one**, and prove the sweep with a positive control, not a bare zero.
+  hardest one**, and prove the sweep with a positive control, not a bare zero. 🔴 **A RETRACTION IS A
+  TREE-WIDE SWEEP, NEVER AN EDIT AT THE SITE YOU WERE LOOKING AT** — that recurred three times in one
+  batch, once with the retracting PR introducing BOTH copies of the claim it was retracting. Sweep
+  over **normalised** text: a claim that WRAPS across comment lines is invisible to a line-based
+  regex, which hands you a confident zero. Use **two differently-shaped patterns**, and make the
+  positive control one you have watched HIT a known file.
+- 🔴 **`grep -r` with NO FILE OPERAND recurses the CWD instead of reading stdin**, so a piped
+  leak-scan silently greps your own repo and its hit is about that, not about the input you meant to
+  scan. Always give it the file list.
+- **Removing a guard makes the prose AROUND it false.** When a round deletes a prop, a guard or a
+  branch, grep the neighbourhood for comments reasoning about what it prevented — the deletion is in
+  the diff and the sentence that rested on it is not.
 - 🔴 **Sweep the surface a HUMAN reads FIRST.** The retracted claim survived longest in the
   operator-facing doc and in the docstring of the test that PINNED the guard — so the code said "this
   question is open" while the README said "this is deliberate" and the test said "it has a purpose".
@@ -579,6 +611,50 @@ refreshing the pinned constant scored **17 passed AND `✅ 20 row(s), all as exp
 whole-paragraph pin and the battery are both blind to that word. A future version of this
 shortcut needs a battery row on its SCOPE, not only on its presence.
 
+## Merge time: reading CI, and a conflict with no correct side
+
+🔴 **THE SETTLE TEST ASSERTS A SET, PINNED TO THE SHA — never a word, never a count.**
+`mergeStateStatus` is the authority on whether a PR CONFLICTS (`claude/RULES.md`) and says nothing
+about whether CI has FINISHED: it goes `CLEAN` as soon as the statuses that ALREADY EXIST are all
+`success`, and it knows nothing of the ones the pipeline has not posted yet — reproduced **5× across
+4 PRs**, including a `CLEAN` with `preview/smoke-tests` entirely absent. `UNKNOWN` is GitHub
+computing lazily: a property of the API, not of any PR. **Read BOTH surfaces** — `gh api
+…/check-runs` is structurally blind to commit STATUSES, and the inverse fires too (`UNSTABLE` with
+7/7 statuses `success` and the red living only in `check-runs`). Neither is a superset of the other.
+Seconds after a push, expect `13 check-runs` and `total_count=0` statuses (Tekton lags Actions ~4
+min) — and note that `statuses=0/7 nonsuccess=0` passes any "are there failures?" test over a rollup
+containing nothing. GitHub also reports the **pre-push head** for minutes after a successful push, so
+gate on the head sha actually REFRESHING before you read any rollup. Re-verify a settle after an
+earlier merge moves the base: one PR went `CLEAN` → `UNKNOWN` the instant a sibling landed.
+
+With `PR` the number and `REPO` the `owner/repo`:
+
+```
+SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid)
+gh api "repos/$REPO/commits/$SHA/status" \
+  --jq '[.statuses[]|"\(.context)=\(.state)"]|sort|join("  ")'
+```
+
+**Derive the expected SET per repo by enumerating three already-settled PRs — never carry a count
+between repos.** For `civitai/civitai` it is 7: `tekton/{typecheck,fixture-bootstrap}` and
+`preview/{deploy,render-check,component-tests,auth-tests,smoke-tests}`, with `preview/smoke-tests`
+landing last.
+
+🔴 **A CI LOG FETCHED WITH `gh api repos/$REPO/actions/jobs/$JOB/logs` COMES BACK AS ZERO BYTES**,
+with the reason on stderr only (`terminal escape sequences`) — so an empty stdout greps as "no
+failures". Pass `--allow-escape-sequences`, and **assert a NON-ZERO byte count before believing any
+grep over a CI log**. The **check-run id is not the job id**: take the job id from the check-run's
+`html_url` tail.
+
+🔴 **Actions evaluates the PR's MERGE COMMIT**, so a red inherited from the base branch reddens every
+open PR and reads as this PR's own defect. **Attribute a shared red by the failing TEST, never by the
+job name** — the job name is identical on every PR that shares it.
+
+🔴 **A CONFLICT WHERE ONE PR MOVED THE CODE THE OTHER EDITED HAS NO CORRECT WHOLESALE SIDE.**
+`--theirs` drops the edit with no signal; `--ours` restores the structure the move exists to remove.
+Take one side's STRUCTURE with the other side's change re-applied at the new location — then rewrite
+the comment, because the move falsified it.
+
 ## Mutation testing: deletion-mutants are the EASY half
 
 When a PR claims a guard is "mutation-verified", check **what kind**. Deletion is the obvious
@@ -588,13 +664,25 @@ only assert on TEXT, pin the WHOLE normalised statement** — a partial regex is
 code, and a pin that stops mid-sentence leaves the tail free to argue the opposite. Fixture and
 re-run rules: reference file.
 
+🔴 **A SWEEP WHOSE RESTORE STEP CAN FAIL SILENTLY SCORES BORROWED KILLS** — the next mutant lands on
+top of the previous one's damage, so a test dying to the leftover is recorded as killing a mutant it
+never saw. **Assert BY DIGEST that the file is byte-identical to the pristine original after EVERY
+restore**, and keep a post-sweep green re-check as the tripwire. (`claude/RULES.md` already says to
+restore from a `cp -a` rather than `git checkout --`; this is the assertion that tells you the
+restore actually WORKED.)
+
 **Price a defect from the CONSUMING code: verifying that a value is USED is not verifying what its
 ABSENCE costs.** Read the consuming code before repeating any costed consequence an audit asserts,
 and sanity-check frequency — "routine" and "rare" are asserted far more often than measured.
+**When a table carries a provider/tenant discriminator, GROUP BY IT before reading any distribution
+as a defect** — an ungrouped aggregate is a mix of populations, and the mix is what the shape shows.
 
 **A finding about the PR *description* gets corrected PUBLICLY.** If the audit shows the PR body
 misstates what the change does, post a **PR comment** saying so rather than silently editing the
-body — a reviewer may already have read (and believed) the wrong version.
+body — a reviewer may already have read (and believed) the wrong version. 🔴 **Expect the
+overstatement: a PR body written by the agent arguing for its own change overstates it.** Two were
+corrected in the direction that WEAKENED their own case. Editing the body is fine once the
+correction is VISIBLE as one — struck, dated, or carried in a comment — never as a silent rewrite.
 
 ## Output
 
