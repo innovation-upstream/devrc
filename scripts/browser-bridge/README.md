@@ -2213,15 +2213,15 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   Because the gate runs **before** the tab is opened, a gate failure leaks no tab.
 
   *Prerequisite:* an opencode whose `debug agent` reports a browser-only tool set.
-  **The workbench runs 1.18.29** — verified at the consumer 2026-09-08,
+  **The workbench runs 1.18.30** — verified at the consumer 2026-09-19,
   `readlink -f $(command -v opencode)` in a login shell resolving to the store
   path `flake.lock` pins, so the pin and the deploy agree there.
-  ✅ **The LAPTOP is now verified at this pin too** (2026-09-08), by the same
+  ✅ **The LAPTOP is verified at this pin too** (2026-09-19), by the same
   method: `readlink -f $(command -v opencode)` in a **login shell** resolves to
-  `/nix/store/6pw7n475…-opencode-1.18.29/bin/opencode` — byte-identical to the
+  `/nix/store/0lrwsxvl…-opencode-1.18.30/bin/opencode` — byte-identical to the
   workbench's. So "both hosts run the same opencode" is a re-checked claim, not
-  a repeated one.
-  ⚠ It was UNVERIFIED when the pin moved, and the reason is worth keeping: the
+  a repeated one; it has now been re-checked at two consecutive pins.
+  ⚠ It was UNVERIFIED when an EARLIER pin moved, and the reason is worth keeping: the
   laptop was unreachable at its **LAN** address, and the note recorded that as
   "unreachable" full stop. It answers on **nebula** (`zach@10.42.0.100`), which
   is how this check was run. A host being off-LAN is not a host being down.
@@ -2235,12 +2235,13 @@ field** (the CDP ops are bounded typed ops only; see the CDP security model abov
   a separate claim from the version, and closing the easy half must not be read
   as closing both. It needs `opencode debug agent` run on the laptop; only the
   workbench's resolution has been re-derived at this pin.
-  ✅ **The browser-only RESOLUTION *was* re-derived at the pin** (2026-09-08),
-  which the two bumps before this one had declined: the gate's scratch project
-  rebuilt exactly as the wrapper builds it and run against the REAL pinned
-  binary — and against the superseded one as a control — parses to exactly one
-  enabled tool, `browser`, out of 13, with every host tool present and `false`,
-  on both. It measured identical on 1.18.4, 1.18.16 and 1.18.18 before those two.
+  ✅ **The browser-only RESOLUTION *was* re-derived at the pin** (2026-09-19, and
+  at the pin before it — the two bumps before THOSE had declined it): the gate's
+  scratch project rebuilt exactly as the wrapper builds it and run against the
+  REAL pinned binary — and against the superseded one as a control — parses to
+  exactly one enabled tool, `browser`, out of 13, with every host tool present
+  and `false`, on both.
+  It measured identical on 1.18.4, 1.18.16 and 1.18.18 before those two.
   🔴 **But that was ON THE WORKBENCH ONLY, BY HAND, and nothing in CI observes
   it**: `browser-agent` is absent from the engine tests' `ENGINE_AGENTS`, and
   this repo's own browser-agent tests drive a FAKE opencode stub rather than the
@@ -2340,11 +2341,15 @@ ln -sf ~/workspace/devrc/scripts/browser-bridge/opencode/tools/browser_tool_impl
 (The global def keeps the `__STEPS__`/`__MODEL__` placeholders — inert on its own;
 the wrapper substitutes them per run.)
 
-**opencode version.** `flake.lock` pins 1.18.29; the workbench consumer was
-verified at it on 2026-09-08 and the laptop was NOT (unreachable — see the
-runtime tool-set gate section above).
+**opencode version.** `flake.lock` pins 1.18.30; BOTH consumers were verified at
+it on 2026-09-19 — the workbench, and the laptop over nebula (`zach@…`), each
+`readlink -f $(command -v opencode)` in a login shell resolving to the same store
+path. (An earlier draft of this line said the laptop was NOT verified, which had
+already been false for a pin: it contradicted the runtime tool-set gate section
+above, which recorded the laptop check. A host being off-LAN is not a host being
+down — see that section.)
 The custom-tool mechanism (`.opencode/tools/*.js`, `permission: {"*": deny, …}`)
-**was re-derived at the pin** on 2026-09-08, on the workbench, by hand:
+**was re-derived at the pin** on 2026-09-19, on the workbench, by hand:
 `opencode debug agent browser-agent` resolves to `bash:false … browser:true`
 (exactly one enabled tool out of 13) against the pinned binary and against the
 superseded one alike. It was verified the same way on 1.18.4, 1.18.16 and

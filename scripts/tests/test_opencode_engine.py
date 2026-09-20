@@ -11,7 +11,7 @@ duplicate of it).
   That is a real gap, and it is exactly the gap the version pin exists to cover:
   a config whose keys are unchanged can have its RESOLVED MEANING changed by the
   binary underneath it. opencode.jsonc's header documents a large set of
-  behaviours annotated "measured on v1.18.29 — do not re-derive" — last-match-
+  behaviours annotated "measured on v1.18.30 — do not re-derive" — last-match-
   wins ordering, hidden agents inheriting the global permission block, the exact
   tool set. A static test cannot see any of those change. This file runs the
   real engine and checks them.
@@ -91,7 +91,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OC_DIR = ROOT / "scripts" / "opencode"
 TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 
-# 🔴 THE PIN. Every "measured on v1.18.29" claim in opencode.jsonc's header, in
+# 🔴 THE PIN. Every "measured on v1.18.30" claim in opencode.jsonc's header, in
 # scripts/opencode/README.md and in test_opencode_config.py's docstrings is keyed
 # to this exact version. It is pinned declaratively by nix/pkgs/tools/default.nix
 # resolving `pkgs.opencode` out of flake.lock's nixpkgs.
@@ -250,9 +250,74 @@ TOOLS_NIX = ROOT / "nix" / "pkgs" / "tools" / "default.nix"
 #     argues for the principle less well than no example. "The version on PATH"
 #     is still a claim about ONE shell until you say which — that part needed no
 #     example to be true.
-PINNED_VERSION = "1.18.29"
+# 🔴 RE-DERIVED 1.18.29 -> 1.18.30 (2026-09-19). The lock bump that moved it was
+# `chore(flake): bump lock`, under a config this PR does not touch at all — so
+# `main` went red on the version assertion ALONE. That is the pin WORKING, not a
+# defect, and it is the exact class this file exists to catch. This pass ran the
+# STRONGEST control the file has carried, because BOTH binaries were still
+# realised in the local store. Measured in the DEV SHELL (`nix develop`), which
+# is the tier the gate runs in — the login shell was checked separately and
+# agrees:
+#
+#   * SEVEN-AGENT DUAL DUMP. `debug agent <a> --pure` for all seven agents (the
+#     four primaries plus the three hidden ones) under BOTH binaries, from a
+#     config dir seeded out of THIS REPO, with the harness's own TMPDIR
+#     normalised out of the generated `external_directory` rules: IDENTICAL on
+#     all seven — the permission array, the resolved tool map INCLUDING its key
+#     set, and the model.
+#   * 🔴 AND WITHOUT SORTING, which no previous pass could claim. Those passes
+#     had to canonicalise (sort every array) because the `external_directory`
+#     rules follow a readdir over the skills directories and two runs of ONE
+#     binary differed on 434 lines. Under this harness's throwaway HOME that
+#     noise is absent — MEASURED: the same-binary control diffed **0** lines
+#     RAW, not merely 0 after sorting. So the cross-version comparison was
+#     re-run with no canonicalisation at all and is STILL identical on all seven
+#     agents, ordering included. Sorting therefore cannot be what produced the
+#     verdict here.
+#   * ORDERED bash rule arrays for the four primaries, compared position by
+#     position without sorting: equal, at 66 / 67 / 68 / 93 rules
+#     (build / nav / k8s / review) — the same counts the previous pass recorded.
+#   * CONTROLS, reported as a PAIR rather than as a bare "identical":
+#       - same-binary control — two runs of the incoming binary collapse to
+#         identical for all seven agents, raw AND canonicalised.
+#       - comparator negative control — flipping ONE boolean in one dump's tool
+#         map makes the comparator name that agent and that key, so "identical"
+#         is not a comparator wired to nothing.
+#   * `nav`'s ENABLED tool set (NAV_EXPECTED_TOOLS below) read off the engine on
+#     BOTH binaries: {glob, grep, invalid, read} on each, out of the SAME 12-key
+#     map — and the key set itself was compared, so "there is no `list` tool and
+#     no `websearch` tool" is re-derived from the engine rather than re-spelled.
+#   * The three hidden agents' resolved tool sets (EMPTY) and resolved model (the
+#     cheap one) read off BOTH binaries.
+#   * The browser-only tool-set gate (scripts/browser-bridge/browser-agent's
+#     fail-closed `debug agent browser-agent` check) replicated against BOTH
+#     binaries by rebuilding its scratch project exactly as the wrapper does:
+#     exactly one enabled tool, `browser`, out of 13, with every host tool
+#     present and false, on each. 🔴 ON THE WORKBENCH ONLY and BY HAND, as in
+#     every pass before it — nothing in CI observes this.
+#   * This whole file against the NEW binary with the OLD pin: 1 failed (exactly
+#     the version assertion below), 24 passed. That is the load-bearing control
+#     every entry above also ran: every other engine claim holds on the incoming
+#     binary, so the harness DISCRIMINATES rather than being green by default.
+#   * The host was checked for the documented DEV-HOST cause FIRST, and it does
+#     not apply: `nix profile list` carries no opencode entry, and PATH resolves
+#     into a store path the flake built — in the login shell AND in the dev
+#     shell, which are the same path. A genuine lock movement; no profile
+#     removal and no switch could have cleared it.
+#   * BOTH HOSTS at the CONSUMER, 2026-09-19: `readlink -f $(command -v
+#     opencode)` in a LOGIN shell resolves to the same incoming store path on the
+#     workbench and on the laptop (reached over nebula). So "both hosts run the
+#     same opencode" is re-checked here, not repeated.
+#
+# NOT covered by this pass, carried forward unchanged from the entries above,
+# each still carrying its own in-place marker AND a HISTORICAL_VERSION_CLAIMS
+# entry so none was silently relabelled: `ask` semantics under a run that
+# EXECUTES, `small_model`'s scope, the DEPRECATED-key list, the hook-firing
+# claims, the @-import claim, the prompt-cache cross-version comparison, the k8s
+# index-74 incident record, and the browser-only RESOLUTION on the LAPTOP.
+PINNED_VERSION = "1.18.30"
 
-# MEASURED via `opencode debug agent nav --pure` at 1.18.29, on BOTH the incoming
+# MEASURED via `opencode debug agent nav --pure` at 1.18.30, on BOTH the incoming
 # and the superseded binary (identical). This is the cost AND
 # blast-radius pin that test_opencode_config.py's `test_nav_is_kept_lean` only
 # asserts about the CONFIG KEYS; here it is read off the engine's resolved tool
@@ -880,6 +945,15 @@ _VERSION_RE = re.compile(
 # nothing and reads as an orphan. Snippets carry no version literal of their own,
 # or they would match themselves when this file is scanned.
 HISTORICAL_VERSION_CLAIMS = (
+    # 🔴 Added by the 2026-09-19 re-derivation pass. Same rule as every group
+    # below it: a line that RECORDS a past measurement does not become false
+    # when the pin moves, and relabelling it to a version nobody ran that
+    # measurement on is worse than leaving it stale.
+    ("scripts/tests/test_opencode_engine.py", "The lock bump that moved it was",
+     "names the 2026-09-19 transition itself"),
+    ("scripts/tests/test_opencode_engine.py", "identical store path as the workbench",
+     "the 2026-09-08 pass's record of the store path the LAPTOP resolved to then; "
+     "the 2026-09-19 pass re-checked both hosts and records that separately"),
     # 🔴 Added by the 2026-09-08 re-derivation pass. Each of
     # these is a line in the PRIOR pass's own record — a statement about what was
     # measured THEN, which does not become false when the pin moves and must not
@@ -1272,7 +1346,7 @@ def test_engine_and_model_agree_on_every_pinned_command(engine_name, model_agent
 # --------------------------------------------------------------------------- #
 def test_engine_resolves_navs_tool_set_to_exactly_the_pinned_four():
     """test_opencode_config.py's `test_nav_is_kept_lean` docstring says "VERIFIED
-    against `opencode debug agent nav` on 1.18.29: the resolved tool set is
+    against `opencode debug agent nav` on 1.18.30: the resolved tool set is
     exactly {glob, grep, read} (+ the internal `invalid`)" — but that file
     asserts only the CONFIG KEYS, so the verification was a one-off nobody
     re-ran. This re-runs it every gate.

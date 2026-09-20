@@ -12,7 +12,7 @@ with pkgs; [
   # hosts, which drifted: MEASURED 2026-08-02, laptop 1.18.4 / workbench 1.18.9,
   # each movable independently by a `nix profile upgrade` that nothing records.
   # scripts/opencode/opencode.jsonc documents a large set of load-bearing
-  # behaviours annotated "measured on v1.18.29 — do not re-derive" (last-match-
+  # behaviours annotated "measured on v1.18.30 — do not re-derive" (last-match-
   # wins permission ordering, the hidden title/summary/compaction agents
   # inheriting the global permission block, the exact tool set). A few bullets
   # there — `ask` semantics under `opencode run` among them — are explicitly
@@ -20,7 +20,7 @@ with pkgs; [
   # Those claims were pinned to a version nothing pinned.
   #
   # This entry pins them: at flake.lock's current nixpkgs rev, `pkgs.opencode`
-  # is 1.18.29 (re-derived 2026-09-08).
+  # is 1.18.30 (re-derived 2026-09-19).
   #
   # 🔴 THE REV AND THE STORE PATH ARE DELIBERATELY NOT SPELLED HERE. Only the
   # VERSION is, because only the version is guarded — `test_opencode_engine.py`'s
@@ -34,8 +34,8 @@ with pkgs; [
   # shell can carry different builds of the same tool.)
   #
   # It was 1.18.4 at rev 9bc02893134c when this pin was introduced, and 1.18.16
-  # at rev 044bfe75bfe4; the 2026-08-13, 2026-08-19, 2026-08-29 and 2026-09-08
-  # bumps each re-derived the claims against the new binary rather than
+  # at rev 044bfe75bfe4; the 2026-08-13, 2026-08-19, 2026-08-29, 2026-09-08 and
+  # 2026-09-19 bumps each re-derived the claims against the new binary rather than
   # re-spelling them — see PINNED_VERSION in
   # scripts/tests/test_opencode_engine.py. A nixpkgs bump
   # that moves it now shows up as a flake.lock diff AND fails
