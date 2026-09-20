@@ -29,21 +29,21 @@ bug, unrelated.
   APPEND share **below 70%**. P2–P4 merging does NOT close this arc.
 
 ## State now
-- Branch `handoff-resume-prune-proposal`, pushed, **11 commits. No PR open.**
+- **PR OPEN: devrc#1815** — https://github.com/innovation-upstream/devrc/pull/1815
+  (branch `handoff-resume-prune-proposal`, 12 commits, 7 files, 0 commits behind `origin/main`
+  at creation). ⚠ **Not audited and not merged.**
 - 🔴 **ALL FOUR PROPOSED ITEMS ARE CLOSED. Nothing remains to build.**
   **P4** shipped (`b50709ca`) · **P1′** shipped + verified live (`97fee3d0`) ·
   **P2** refuted (`bb531558`) · **P1-as-written** retracted (`c2df1171`) ·
   **P3** deleted (`3966524f`).
-- **P3's probe CONFIRMED its hypothesis and the item was deleted anyway** — compatible, and
-  the reason matters: grandfathering does explain the 82% (born before rule (m): 84 docs, 6%
-  declared; born after: 14 docs, 93%), and the cohort does NOT self-heal (92 of 98 docs
-  touched within 30d, only 18 declare). But the `DOD` block ALREADY prints the fact, the
-  remedy, the exact syntax and the vocabulary at the decision point — verified live. The only
-  increment left is pre-filling the arc's finish line, which is the judgement rule (m) exists
-  to force a human to make.
-- Deploy: **NOT deployed.** `claude/skills/handoff/SKILL.md` is a nix-store symlink → needs
-  `home-manager switch` / `ship.sh`. `scripts/lib/handoff_doc.py` + `scripts/handoff-audit.py`
-  are live on this checkout only.
+- **Duplicate sweep done before creating it** (`gh pr list --state open`, 30 open PRs).
+  The one overlap — **#1715**, which names `budget_warning` in its title — touches only
+  `claudedocs/handoff-budget-warning-repo-aware.md`; its CODE half already landed as #1714
+  (`5f8e3952`). **No file overlap with this branch**, so no test-merge was required.
+- 858 tests green; 4 mutants killed under `PYTHONDONTWRITEBYTECODE=1`; P1′ verified live.
+- Deploy: **NOT deployed, and merging is not enough.** `claude/skills/handoff/SKILL.md` is a
+  nix-store symlink → the step-5 line reaches no session until `scripts/ship.sh` (or a
+  `home-manager switch`) runs AFTER the merge. The two scripts are live on a checkout now.
 - No `clawgate-task:` field (`resolve` exit 5).
 
 ## Open investigations — live diagnosis state
@@ -119,13 +119,15 @@ bug, unrelated.
   which of the four detectors actually fires per-doc rather than corpus-wide.
 
 ## Next steps (ranked)
-1. **Land it: open a PR for the 11 commits, then deploy** (`ship.sh` after merge, so the
-   `handoff/SKILL.md` line actually reaches a session — it is inert until a switch).
-   forcing: user — the operator approved implementing the proposal; this is what "implemented"
-   means for a nix-managed skill body.
-2. Re-measure the corpus in ~2 weeks: the evictable backlog (468,110 B today) and the
-   over-hard-cap count (28 docs today) are the numbers P1′ is meant to move. If neither
-   moves, P1′ informed nobody and should be deleted rather than elaborated.
+1. **Audit, then merge, then ship.** `/audit-pr 1815` — worked as its ROUND 0 (requirements &
+   deletion) FIRST, because that is the only round that can conclude "close this PR" and the
+   question is actionable only while the merge decision is open; then the nine correctness
+   axes. After merge run `scripts/ship.sh` — **read every per-host line, not the verdict** —
+   or the skill half of this work is inert on both hosts.
+   forcing: user — the operator asked for the PR; an unmerged, unshipped PR delivers nothing.
+2. Re-measure the corpus in ~2 weeks: evictable backlog (468,110 B today) and docs over the
+   hard cap (28 today). Those are the numbers P1′ is meant to move. If neither moves, P1′
+   informed nobody and should be deleted rather than elaborated.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
