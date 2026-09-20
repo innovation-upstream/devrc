@@ -3943,21 +3943,33 @@ def main(argv: list[str] | None = None) -> int:
             # someone deleted it as dead weight would silently restore round 0's
             # defect, with a green suite in both directions.
             #
-            # 🔴 THE RE-ARMING WIDENING, MEASURED RATHER THAN IMAGINED:
-            # replacing the PLAUSIBLE test with `top_key is not None` PROMOTES
-            # on a degraded table once this clause is gone, captioned
-            # "best-ranked repository" — and does NOT promote while it is kept.
-            # Both directions were run.
+            # 🔴 THE RE-ARMING WIDENING, MEASURED RATHER THAN IMAGINED —
+            # AND QUALIFIED, BECAUSE IT DOES NOT HOLD EVERYWHERE. Replacing the
+            # PLAUSIBLE test with `top_key is not None`, with this clause gone,
+            # PROMOTES on a degraded table **whose universe dedupes to a SINGLE
+            # ranked row**, captioned "best-ranked repository"; it does NOT
+            # promote while the clause is kept. MEASURED at three universe
+            # sizes: 1 row PROMOTES, 2 rows and 6 rows do not.
             #
-            # ⚠ AN EARLIER DRAFT ALSO OFFERED "allow `BELOW`" AS AN EXAMPLE AND
-            # IT IS FALSE — `/audit-pr` round 3 measured it: a degraded row is
-            # `CLASS_UNKNOWN` (2), never `CLASS_BELOW` (1), so that widening
-            # cannot re-arm anything. It is DELETED rather than reworded. That
-            # matters more than a wrong example usually would, because the
-            # paragraph above says no test can pin this clause — so this comment
-            # IS what stands between the clause and a future deletion, and a
-            # maintainer who checked the cheaper of two examples would have
-            # found it false and discounted the rest.
+            # The mechanism, so nobody has to re-derive it: with `ranges == {}`
+            # every `measured_rank_key` is `(CLASS_UNKNOWN, 0)`, so the
+            # uniqueness half of `top_is_separated` can only hold when
+            # `ordered_rows[1:]` is EMPTY.
+            #
+            # ⚠ TWO EARLIER DRAFTS OF THIS PARAGRAPH WERE WRONG, IN THE SAME
+            # DIRECTION — claiming more than measured — AND BOTH ARE RECORDED
+            # RATHER THAN QUIETLY REPLACED. (a) "allow `BELOW`" was offered as a
+            # second example and is FALSE: a degraded row is `CLASS_UNKNOWN`
+            # (2), never `CLASS_BELOW` (1). (b) The surviving example was then
+            # stated UNQUALIFIED, so a maintainer testing it on the nearest
+            # degraded fixture in the suite (6 rows) would see NO promotion and
+            # conclude this example was false too.
+            #
+            # 🔴 THAT IS THE WHOLE HAZARD: the paragraph BELOW says no test can
+            # pin this clause, so this comment is what stands between it and a
+            # future deletion — and an example a reader checks and finds false
+            # discredits the rest. An unqualified true claim fails the same way
+            # a false one does.
             #
             # ⚠ SO DO NOT LOOK FOR A TEST THAT PINS THIS CLAUSE ALONE: there
             # cannot be one while it is redundant. The guard that matters is
