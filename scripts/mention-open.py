@@ -1577,11 +1577,23 @@ def click_dims(repo: str = "", platform: str = "",
         dismissal there is.
       * dismissed by ESC             -> present SINCE 2026-09-20, via
         `--bind="esc:print-query+abort"`. It wrote nothing before that.
-      * dismissed by Ctrl-C          -> **ABSENT**. Still zero bytes, so the dim
+      * dismissed by Ctrl-C, Ctrl-G, Ctrl-Q, or Ctrl-D on an EMPTY query
+                                     -> **ABSENT**. Still zero bytes, so the dim
         is NOT MEASURED, not `False`.
     So "a dismissal after typing is distinguishable from one after scrolling" is
-    now TRUE of every ending but Ctrl-C. The three-valued design is what keeps
-    that honest instead of filing a Ctrl-C under "scrolled".
+    now TRUE of ESC and of Enter-with-no-match, and FALSE of every other abort.
+    The three-valued design is what keeps that honest instead of filing them
+    under "scrolled".
+
+    🔴 THAT LIST WAS "Ctrl-C" ALONE UNTIL /audit-pr ROUND 0, AND THE ERROR IS
+    WORTH KEEPING RATHER THAN QUIETLY WIDENING. fzf binds `abort` to FOUR keys
+    — its own keymap reads `abort  ctrl-c  ctrl-g  ctrl-q  esc` — and `ctrl-d`
+    aborts too when the query is empty. MEASURED at 0.74.4 with the two ESC
+    rows as the positive control: with the bind, `esc` writes `<query>\n` rc 0
+    while `ctrl-c`, `ctrl-g`, `ctrl-q` and empty-query `ctrl-d` each write ZERO
+    BYTES at rc 130. Naming one key and calling it "the only" remaining gap was
+    an EXCLUSIVITY claim that was never measured — the same error this file
+    congratulates itself on catching one screen above.
 
     🔴 AND THE ESC BIND CHANGED WHAT `reason == "dismissed"` MEANS — THE OLD
     "NOT A RATE, TRUE BY CONSTRUCTION" ARGUMENT NO LONGER HOLDS, AND DELETING IT
@@ -1594,11 +1606,25 @@ def click_dims(repo: str = "", platform: str = "",
     writes a bare `\n` and records **`False`**, so both values are now reachable
     under `dismissed` and the population is no longer self-selected.
     🔴 IT IS STILL NOT "THE DISMISSAL RATE", for two reasons that do not cancel:
-    Ctrl-C contributes nothing at all, and Enter-with-no-match remains `True` by
-    construction, so it SKEWS any average upward by however often it happens.
-    Scope by `reason` before averaging — `no-match` is structurally `True` and
-    belongs in its own bucket — and read what is left as "of ESC dismissals",
-    never "of all dismissals".
+    every abort key EXCEPT `esc` contributes nothing at all, and
+    Enter-with-no-match remains `True` by construction, so it SKEWS any average
+    upward by however often it happens.
+
+    🔴 AND THE REMEDY THIS PARAGRAPH FIRST GAVE — "scope by `reason`, `no-match`
+    belongs in its own bucket, read the rest as 'of ESC dismissals'" — IS NOT
+    IMPLEMENTABLE AGAINST WHAT IS EMITTED, so it is recorded as retracted rather
+    than quietly replaced. There is no `no-match` reason: the eight values are
+    `selected`/`dismissed`/`timeout`/`never-shown`/`fzf-missing`/`spawn-failed`/
+    `unmapped-row`/`unattributed`, and `pick()` files EVERY `PICKED_DISMISSED`
+    outcome under `dismissed` — ESC, Ctrl-C and Enter-with-no-match alike. Those
+    last two are BYTE-IDENTICAL on stdout (see `PICKER_SH`), so no dim
+    distinguishes them and "of ESC dismissals" cannot be computed at all.
+
+    ✅ THE ONE CLEAN CELL, which is what to use instead: under `dismissed`,
+    `queried == False` is UNAMBIGUOUSLY an ESC on an untouched picker. Nothing
+    else can produce it — Enter-with-no-match requires a non-empty query, and
+    every other abort key writes no dim at all. Count that; do not average the
+    arm.
 
     ⚠ SCOPED TO THE REASON, NOT TO THE ARM — AND AN EARLIER DRAFT SAID "THE
     DISMISSAL ARM", WHICH IS WIDER THAN THE TRUTH. That arm emits TWO outcomes
@@ -2486,7 +2512,8 @@ PICKER_LINES = 22
 #   * a SELECTION        -> `<query>\n<row>\n`   (2 lines, exit 0; query may be "")
 #   * ENTER, NO MATCH    -> `<query>\n`          (1 line, exit 1)
 #   * ESC ABORT          -> `<query>\n`          (1 line, exit 0)  <- the bind
-#   * Ctrl-C ABORT       -> **NOTHING AT ALL**   (0 bytes, exit 130)
+#   * ANY OTHER ABORT    -> **NOTHING AT ALL**   (0 bytes, exit 130)
+#     (`ctrl-c`, `ctrl-g`, `ctrl-q`; and `ctrl-d` on an EMPTY query)
 # ⚠ THIS TABLE HAS BEEN WRONG TWICE, IN THE SAME FOUR PLACES, AND THAT HISTORY
 # IS WHY IT CARRIES ITS fzf VERSION. Draft 1 said an abort "writes the query
 # ALONE" — without the bind it writes nothing. Draft 2 then asserted `exit 0`
@@ -2508,20 +2535,31 @@ PICKER_LINES = 22
 # returns "" for each. Do not add a status read to separate them without a
 # reason that needs separating.
 #
-# 🔴 THE RESIDUAL GAP IS Ctrl-C, NOT "ABORTS". It still writes zero bytes, so a
-# Ctrl-C click carries NO `queried` dim at all — see `click_dims`' `queried`
-# paragraph. Read the dismissal arm as "ESC and Enter-no-match", never as
-# "every dismissal".
+# 🔴 THE RESIDUAL GAP IS EVERY ABORT KEY EXCEPT `esc` — NOT "Ctrl-C", AND NOT
+# "ABORTS". fzf's keymap binds `abort` to `ctrl-c ctrl-g ctrl-q esc`, and
+# `ctrl-d` aborts as well on an EMPTY query. Each of the four still writes zero
+# bytes, so such a click carries NO `queried` dim at all — see `click_dims`'
+# `queried` paragraph. Read the dismissal arm as "ESC and Enter-no-match",
+# never as "every dismissal".
 #
-# ⚠ AND THAT GAP IS CLOSABLE — MEASURED, CORRECTING THIS COMMENT'S OWN FIRST
-# DRAFT, which asserted fzf "has no `ctrl-c:` binding (the key is handled below
-# the keymap)". It was never measured and it is FALSE: `--bind="ctrl-c:print-
-# query+abort"` is accepted at 0.74.4 and makes Ctrl-C write `<query>\n` with
-# exit 0, verified beside a control where the shipping config leaves Ctrl-C at
-# 0 bytes / exit 130. It is NOT taken here only because the operator approved
-# the Esc bind specifically, and rebinding Ctrl-C — the universal cancel — is a
-# separate call for them to make, not a detail to fold in. One flag, same shape,
-# same reversibility, whenever they want the arm complete.
+# 🔴 THIS COMMENT HAS NOW BEEN WRONG ABOUT THIS TWICE, IN OPPOSITE DIRECTIONS,
+# AND BOTH DRAFTS ARE KEPT SO NOBODY DERIVES A THIRD.
+#   Draft 1: "fzf has no `ctrl-c:` binding, the key is handled below the
+#            keymap" — never measured, and FALSE.
+#   Draft 2: "the residual gap is Ctrl-C ALONE" — measured for Ctrl-C, but the
+#            word ALONE was an EXCLUSIVITY claim nobody measured, and it is
+#            false for ctrl-g, ctrl-q and empty-query ctrl-d. Caught by
+#            /audit-pr round 0.
+# MEASURED at 0.74.4, both flag states, with the two ESC rows as the positive
+# control: `esc` + bind -> `<query>\n` rc 0; `ctrl-c`/`ctrl-g`/`ctrl-q`/empty
+# `ctrl-d` -> 0 bytes rc 130 either way.
+#
+# ⚠ AND THE GAP IS CLOSABLE FOR ALL OF THEM: `--bind="ctrl-c:print-query+abort"`
+# is accepted and works (measured), and the same form takes ctrl-g/ctrl-q. It is
+# NOT taken here because the operator chose the Esc bind specifically; rebinding
+# the universal cancel is a separate call for them, not a detail to fold in.
+# 🔴 If that is ever revisited, bind ALL of them or state which you left — the
+# defect above was naming a subset and calling it the whole.
 #
 # ⚠ SO THE READ LOOP WAITS FOR TWO LINES AND TAKES THE SECOND AS THE ROW. Taking
 # the first — which is what the pre-change loop did — would open whatever the
@@ -2884,10 +2922,11 @@ def run_picker(payload: str, header_lines: int) -> tuple[str, str]:
         # row — `row_to_url` maps that to nothing, every pick becomes
         # `unmapped-row`, and the picker opens nothing at all.
         #
-        # ⚠ THE SHORT ENDINGS ARE UNCHANGED, AND THERE ARE THREE OF THEM NOW.
+        # ⚠ THE SHORT ENDINGS ARE UNCHANGED, AND THERE ARE THREE KINDS OF THEM.
         # ENTER WITH NO MATCH and an ESC ABORT each write one line (the query);
-        # a Ctrl-C ABORT writes ZERO BYTES — measured, see `PICKER_SH`. None
-        # reaches the second newline, so all three fall through to the
+        # EVERY OTHER ABORT — `ctrl-c`, `ctrl-g`, `ctrl-q`, and `ctrl-d` on an
+        # empty query — writes ZERO BYTES (measured, see `PICKER_SH`). None
+        # reaches the second newline, so all of them fall through to the
         # `proc.poll()` arm below exactly as a dismissal always did, and `row`
         # comes out "" either way.
         #
@@ -2900,9 +2939,10 @@ def run_picker(payload: str, header_lines: int) -> tuple[str, str]:
         # before the flag existed; the bind moved an ending from the zero-line
         # column to the one-line column and the loop did not notice.
         #
-        # 🔴 THE RESIDUAL LIMIT IS Ctrl-C ALONE: it carries no query line, so
-        # `queried` stays NOT MEASURED there. What the bind bought on this arm
-        # is the ESC ending, which is the common one; what `--print-query`
+        # 🔴 THE RESIDUAL LIMIT IS EVERY ABORT KEY EXCEPT `esc` — `ctrl-c`,
+        # `ctrl-g`, `ctrl-q` and empty-query `ctrl-d` carry no query line, so
+        # `queried` stays NOT MEASURED for each. What the bind bought on this
+        # arm is the ESC ending, which is the common one; what `--print-query`
         # already bought is ENTER-WITH-NO-MATCH — "I typed the repo name and the
         # list went empty", the exact case `pick()`'s docstring has always named
         # as indistinguishable from a change of mind.
@@ -4320,10 +4360,16 @@ def main(argv: list[str] | None = None) -> int:
         # see `click_dims`. This comment used to say it "MATTERS MOST" here,
         # which oversold it, and then said "this arm", which is WIDER than the
         # truth: the arm also emits `no-selection` over seven reasons, and
-        # `unmapped-row` carries a MEASURED `queried` that can be `False`. Under
-        # `dismissed` specifically, an abort writes nothing so the dim appears
-        # only for Enter-with-no-match, where it is `True` by construction —
-        # diagnostic per row, meaningless averaged. The RATE is the picked arm's.
+        # `unmapped-row` carries a MEASURED `queried` that can be `False`.
+        #
+        # 🔴 AND IT USED TO FINISH "an abort writes nothing so the dim appears
+        # only for Enter-with-no-match, where it is `True` by construction" —
+        # RETIRED by `--bind="esc:print-query+abort"`. An ESC now writes the
+        # query line, and an ESC on an untouched picker writes a bare newline,
+        # so `False` IS reachable here. That retirement was written into
+        # `click_dims` and NOT here, in the same commit: one rule, two places,
+        # and the second went stale immediately. The live statement is
+        # `click_dims`' — read it there rather than re-deriving it here.
         emit_click(CLICK_DISMISSED if reason == PICK_REASON_DISMISSED
                    else CLICK_NO_SELECTION,
                    picker_shown=picker_was_shown(reason),
