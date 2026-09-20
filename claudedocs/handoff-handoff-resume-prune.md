@@ -29,38 +29,31 @@ bug, unrelated.
   APPEND share **below 70%**. P2–P4 merging does NOT close this arc.
 
 ## State now
-- Branch: `handoff-resume-prune-proposal`, **pushed to `origin`** — three commits:
-  `fcd0ad12` (the proposal doc), `19e5849e` (an `adoption-scan` gotcha), `8d7a3bfd` (this
-  handoff doc, landed by `handoff_doc.py --confirm --push`). 🔴 **No PR is open** — opening
-  one was not requested and is an outward action left to the operator.
-- DONE: `claudedocs/proposal-handoff-resume-prune.md` written and committed (`fcd0ad12`).
-  It carries the full measurement set, the four proposed changes P1–P4 and what is
-  deliberately NOT proposed.
-- DONE: `claude/skills/adoption-scan/SKILL.md` gained the dedup-by-`tool_use_id` gotcha
-  (`19e5849e`) — the skill already owned the PROVENANCE half of transcript sweeps but not
-  the copy half. 7,306 B, within the 12,038 B skill budget, so no eviction was needed.
-  🔴 **Not deployed** — `~/.claude/skills/` is a nix-store symlink, so this needs a
-  `home-manager switch` (or `scripts/ship.sh` after merge) before any session loads it.
-- DONE: three measurements, each with controls (commands in "How to verify"):
-  - **70% of the live corpus is in the three `APPEND_PREFIXES` buckets** — `gotchas`
-    1,389,966 B (42.6%), `open investigations` 879,515 B (26.9%); APPEND total 2,279,835 B
-    of 3,264,227 B section bytes across 97 live docs. The `REPLACE` buckets self-limit.
-  - **All 15 `handoff_doc.py` statuses have fired** over **7,023 deduped invocations**
-    (1,328 transcripts). Rarest `doc-per-effort` 10 (0.2%), `no-advance` 31 (0.6%).
-    The unanswerable warning is the finding: `DROPS N line(s) that look DURABLE` fired
-    **915× = 18.0% of runs**; budget-over 185 (3.6%); budget-near 28 (0.5%).
-  - **82% of live docs (80 of 97) declare no `closing-condition`**, holding 73% of bytes;
-    14 of the 20 biggest are undeclared. Of the 17 declared: 12 `check`, 5 `judgement`.
-- NOT DONE: no implementation of P1–P4. Nothing in `scripts/lib/` changed, and neither
-  `handoff/SKILL.md` nor `resume/SKILL.md` was touched.
-- Deploy/verify status: nothing deployed. No `home-manager switch` was run this session.
-- Subsystem index: BOTH windows read (`--session`, then `--commit` auto-run) — each
-  returned `status=no-match` with nothing nominated, so **no index write was proposed**.
-  The one durable lesson was routed to `adoption-scan` instead, per the skill's route rule.
-- No `clawgate-task:` field: `clawgate_handoff.sh resolve` exited **5** (nothing resolved).
-  Its positive control showed the board answered 2 links for a DIFFERENT session, so the
-  board is reachable — but a wrong id also answers 200 with an empty array, so this is a
-  narrow reading, not a clean bill of health.
+- Branch: `handoff-resume-prune-proposal`, pushed to `origin`. **No PR open** — an outward
+  action left to the operator.
+- **P4 is DONE and merged to the branch (`b50709ca`)** — `handoff/SKILL.md` step 5 now names
+  `scripts/handoff-audit.py`, and that tool's own banner was corrected (below). Body went
+  20,088 → 20,267 B, inside the 20,300 B enforced budget. **1,900 tests green** across all
+  ten modules that read the handoff/resume bodies.
+- 🔴 **P2 is REFUTED AND DELETED — do not build it.** Measured, twice over; see Gotchas.
+  `claudedocs/proposal-handoff-resume-prune.md` carries the struck-through section and the
+  numbers (`bb531558`).
+- **P4's `/resume` half was deleted too** — `/resume` is read-only re-entry, so a
+  corpus-maintenance pointer there is prose nobody acts on (the-algorithm §1).
+- NOT DONE: **P1** (slice-and-demote) and **P3** (DoD offer). P1 is what the closing
+  condition names; nothing else closes this arc.
+- ⚠ **The ranked list below was RENUMBERED** when P2 died: P1 is now rank 1. No `claim-work`
+  claim was ever taken on this doc, so no live claim was re-pointed — but re-rank with that
+  in mind, since the rank is half a claim's identity.
+- Deploy/verify status: **nothing deployed.** `claude/skills/handoff/SKILL.md` is a nix-store
+  symlink, so step 5's new line reaches no session until a `home-manager switch` (or
+  `scripts/ship.sh` after merge). The `handoff-audit.py` fix is a repo script and is live on
+  this checkout immediately.
+- Subsystem index: both windows read (`--session`, then `--commit`), both `no-match`, nothing
+  nominated, no index write. The one durable lesson went to `adoption-scan` (`19e5849e`).
+- No `clawgate-task:` field: `clawgate_handoff.sh resolve` exited **5**. Its positive control
+  showed the board answered for a DIFFERENT session, so the board is reachable — a narrow
+  reading, not a clean bill of health.
 
 ## Open investigations — live diagnosis state
 
@@ -99,26 +92,22 @@ bug, unrelated.
   deleted rather than strengthened.
 
 ## Next steps (ranked)
-1. Implement **P4 + P2** — route both SKILL.md bodies to `scripts/handoff-audit.py` (one line
-   each), then stamp + age the `gotchas` / `findings` APPEND buckets in
-   `$DEVRC/scripts/lib/handoff_doc.py` and report their ages from
-   `$DEVRC/scripts/resume-state.sh` using the existing `EXPIRED`/`UNDATED` vocabulary. P2 is
-   the prerequisite for P1 choosing WHAT to demote. Each PR must carry its own SKILL.md
-   eviction in the same commit — both bodies are already over budget.
-   forcing: user — the operator approved "proposal doc + then implement" this session.
-2. Implement **P1** — slice-and-demote oversized APPEND sections into
-   `claudedocs/refs/<topic>.md` by verbatim python line-range slice, leaving one routing
-   line. Needs a backup + union gap-audit before any write, and a mutation battery shaped
-   like `scripts/tests/mutation_battery_handoff_archive_and_cap.py` because its reassuring
-   answer is a zero ("0 lines lost").
-   forcing: user — same approval; this is the item the closing-condition names.
-3. Implement **P3** — `resume-state.sh`'s `DOD` block emits a paste-ready
-   `closing-condition:` line pre-filled from the doc's `## Goal`. Run the "Next probe" above
-   FIRST: if the grandfathering hypothesis is confirmed, P3 is right; if not, delete the
-   offer rather than strengthen it.
+1. **P1 — slice-and-demote the APPEND buckets** into `claudedocs/refs/<topic>.md` by verbatim
+   python line-range slice, leaving one routing line. 70% of the corpus is in those three
+   buckets and they cannot shrink by design. Needs: a backup, a union gap-audit (every source
+   line present in doc ∪ refs) BEFORE any write, and a mutation battery shaped like
+   `scripts/tests/mutation_battery_handoff_archive_and_cap.py` — its reassuring answer is a
+   zero ("0 lines lost"), which is indistinguishable from a detector wired to nothing.
+   ⚠ P1 does NOT need P2: it runs inside `handoff_doc.py`, which can `git blame` the doc
+   itself for the per-bullet ages it needs.
+   forcing: user — the operator approved implementation this session.
+2. **P3 — the paste-ready `closing-condition:` offer** in `resume-state.sh`'s `DOD` block.
+   🔴 Run the "Next probe" in Open investigations FIRST: if the grandfathering hypothesis is
+   confirmed, P3 is the right shape; if it is not, the prose was never the problem and P3
+   should be DELETED rather than strengthened.
    forcing: user — same approval.
-4. Re-measure DoD coverage (82% today) two weeks after P3 lands; if it has not moved, the
-   prose was never the problem and P3 gets deleted.
+3. Re-measure DoD coverage (82% today) two weeks after P3 lands; if it has not moved, delete
+   the offer.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -166,6 +155,46 @@ bug, unrelated.
   (handoff 20,088 B, resume 20,731 B against a 12,038 B budget). Note `resume`'s ceiling is
   pin-bound — ten test modules pin literal strings in that body — so trimming it means MOVING
   pins, not cutting text.
+
+- 🔴 **P2 (stamp + age the APPEND buckets) is REFUTED. Do not rebuild it.** Two independent
+  findings, and the second is the decisive one. (a) **Stamping was the wrong mechanism and
+  the code I was about to mirror said so**: `resume-state.sh`'s own comment records that the
+  introducing-commit pickaxe dated **478 of 478** investigation blocks — a stamp is the most
+  PRECISE clock, never the only one. Stamping the 3,732 gotcha bullets at ~12 B each would
+  have **ADDED 44,784 B to the 3.3 MB corpus this whole effort exists to shrink.** (b) **The
+  premise itself is false in this corpus**: aged all 3,732 bullets by `git blame` — p50
+  16.5d, p90 28d, **max 39d, ZERO over 90d**. At the 14-day investigations window **55%
+  would flag**, against the **3%** that design accepted and the **18%** it explicitly
+  rejected as "a gate that fires on a fifth of every doc is one everybody clicks through".
+  The reason the corpus is young is that **the archive rule already works** (0 live docs
+  >60d), so P2 would have duplicated a mechanism that is already doing the job.
+- **`git blame` is the cheap clock for handoff-doc content, and it was CONTROLLED.** One
+  `git blame --line-porcelain` per doc is **85 ms on the largest doc (1,906 lines)** and
+  yields per-line dates, where the pickaxe costs one `git log -S` per bullet (median 20, max
+  259 per doc). Blame reports LAST-TOUCHED, so it is a lower bound on true age — validated
+  against the pickaxe on the oldest content in the corpus: **38d vs 38d, exact agreement on
+  4 of 4**. Use blame; state the floor semantics.
+- 🔴 **`claude/skills/handoff/SKILL.md` is PIN-BOUND, NOT PROSE-BOUND — budget an eviction
+  that FAILS.** Twice this session a block I had verified as redundant (the
+  `OPENCODE_SESSION_ID`/`ROLES UNAVAILABLE` sentence; the `--exclude` paragraph) turned out
+  to be required verbatim by a test ledger — `test_resume_state_clawgate.py`'s
+  `test_handoff_skill_pins` (14 phrases) and `test_subsystem_touch.py`. **Citing where the
+  content also lives is NOT sufficient to delete it**, which is exactly what
+  `prune-skill` §3 warns and what I did anyway. The working method: grep the candidate's
+  distinctive fragments against **every test that reads the body** (10 modules) before
+  cutting, and if nothing is cuttable, **shrink your own addition** rather than raise
+  `MAX_BYTES`.
+- 🔴 **`scripts/handoff-audit.py` was MISINFORMING every reader, and P4's routing line would
+  have amplified it.** It printed *"No gate in this repo measures a handoff doc"* — true when
+  it shipped 2026-09-01, false from 2026-09-13 when #1648 added a real 65,536 B per-doc
+  ceiling (`test_handoff_doc_size.py`) that goes red on `main` for everyone. Fixed in
+  `b50709ca`: the banner now distinguishes the unenforced 12,288 B target from the enforced
+  ceiling and reads the latter from `handoff_budget`, loaded **defensively** (returns None)
+  because the tool audits other repos' corpora where that gate legitimately does not exist.
+  Both controls run: devrc prints 65,536 B, a missing module omits the line.
+- **Decision: P4 shipped for `/handoff` only.** `/resume` is read-only re-entry; a
+  corpus-maintenance pointer there is prose nobody acts on (the-algorithm §1 — question the
+  requirement, and this one could not name who would act on it).
 
 ## How to verify
 Re-derive every number in the proposal:
