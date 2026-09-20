@@ -4481,7 +4481,22 @@ def main(argv: list[str] | None = None) -> int:
     # `ordered=True` — both INVERTED, in the one dim that says whether the
     # ordering placed the row. `ordered_urls` is what the ordering actually
     # returned, so it answers without reading a position at all.
+    # 🔴 GATED ON `ORDER_APPLIED` FOR THE SAME REASON THE ROW MARKER IS, AND
+    # THIS SURFACE WAS LEFT BEHIND WHEN THAT ONE WAS FIXED. `ordered_urls` is
+    # filled unconditionally by every arm, but `_ordered_universe` returns the
+    # universe UNTOUCHED on a stale or absent table — so without this gate a
+    # degraded click emitted `ordered=True` while the header said "rows
+    # unordered" and the row marker said `-`. Three surfaces, one fact, and the
+    # telemetry was the one still asserting the retracted reading.
+    #
+    # ⚠ THAT IS NOT COSMETIC, BECAUSE THIS DIM IS THE HEADLINE FILTER. The
+    # paragraph in `click_dims` tells a consumer measuring the ordering to
+    # filter `ordered = true`; ungated, that filter ADMITS clicks where no
+    # ordering ran, biasing "did the ordering work" toward "no" with rows it
+    # never touched. Gating here keeps that instruction true as written rather
+    # than making every consumer remember a second condition.
     picked_ordered = (pinned_above is not None and picked_rank is not None
+                      and order_state == ORDER_APPLIED
                       and url in ordered_urls)
     # ...and the class is reported only for a row the ordering actually placed.
     # It used to be emitted whenever the ordering RAN, which made a pinned pane

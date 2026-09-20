@@ -2976,9 +2976,27 @@ def test_the_rank_marker_WIDTH_is_uniform_past_the_universe_size():
     universe (~395 rows) `W = 2` would put nearly 300 rows at a different
     field-1 width from the rest.
 
-    Asserted against the LIVE universe size rather than a literal, so the guard
-    tightens on its own as the universe grows."""
+    🔴 THE UNIVERSE SIZE BELOW IS A LITERAL AND THIS GUARD DOES **NOT** TIGHTEN
+    ON ITS OWN — an earlier version of this docstring said it was "asserted
+    against the LIVE universe size … so the guard tightens on its own as the
+    universe grows", with a hardcoded number on the very next line. Nothing here
+    reads `load_known_universe()`, and deliberately so: a test keyed to what is
+    installed on one host is environment-coupled without saying so. But the
+    claim mattered, because it told a maintainer this constant would never need
+    revisiting. It will: when the universe passes `10 ** PICKER_MARKER_RANK_W`,
+    rank 1000 renders 4 columns against rank 1's 3 and the split above is back —
+    and an assertion that only ever asks about rank 395 cannot see it.
+
+    The second assertion is what keeps the pair honest: it fails if the pinned
+    size ever grows past what the width can represent, so raising one without
+    the other is a red test rather than a silent regression."""
     universe = 395          # measured on the operator's host, 2026-09-20
+    assert 10 ** MO.PICKER_MARKER_RANK_W > universe, (
+        f"PICKER_MARKER_RANK_W={MO.PICKER_MARKER_RANK_W} cannot represent every "
+        f"rank in a {universe}-row universe, so rows past 10**W render wider "
+        f"than the rest and score differently in fzf. Raise the constant when "
+        f"you raise this literal — and re-read this test's docstring, because "
+        f"the literal does not update itself")
     widest = MO.picker_marker(str(universe))
     narrowest = MO.picker_marker("1")
     assert len(widest) == len(narrowest), (
@@ -6831,6 +6849,66 @@ def test_a_DEGRADED_ordering_marks_every_row_UNRANKED_not_1_to_N(monkeypatch,
         f"header one line above tells them nothing was")
 
 
+def test_a_DEGRADED_ordering_emits_ordered_FALSE_not_TRUE(monkeypatch,
+                                                          tmp_path, spool):
+    """🔴 THE THIRD SURFACE OF THE SAME FACT, AND IT WAS LEFT BEHIND.
+
+    A degraded ordering (stale or absent range table) places NO row. The header
+    says "rows unordered" and the row marker says `-` — but `ordered` was
+    emitted ungated, so the telemetry said `True` for the same click. Three
+    surfaces, one fact, and the one an analyst queries was the one still
+    asserting the retracted reading.
+
+    🔴 IT IS THE HEADLINE FILTER, WHICH IS WHY THIS IS NOT COSMETIC.
+    `click_dims` instructs: *"A consumer measuring the ordering must filter
+    `ordered = true`."* Ungated, that filter ADMITS clicks where no ordering
+    ran — biasing "did the ordering work" toward "no" using rows it never
+    touched. The gate keeps that instruction true as written.
+
+    The fixture is the stale-table one: `alpha/zeroref` has ZERO references and
+    cannot hold `#1291`, so a click on it under a stale table is exactly the
+    case that must not be filed as ordered."""
+    universe = ["alpha/zeroref", "mike/highhead", "zulu/unmeasured"]
+    _ranges_on_disk(monkeypatch, tmp_path,
+                    {"alpha/zeroref": 0, "mike/highhead": 9000},
+                    age_days=MO.STALE_MAPPING_DAYS + 3)
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: universe)
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "open_reference", lambda u: (0, "browser"))
+
+    # 🔴 PICK A URL OUT OF THE LIST THE PICKER WAS ACTUALLY GIVEN, never a
+    # hardcoded one. A guessed URL (`/issues/` vs `/pull/`) matches no
+    # candidate, and the click then emits `platform=''` with `rank` ABSENT —
+    # which makes `ordered` NOT MEASURED and the assertion below pass or fail
+    # for a reason that has nothing to do with the gate under test.
+    chosen = {}
+
+    def _pick_the_zero_ref_row(c, mesg=""):
+        for cand in c:
+            if MO.repo_of_github_url(cand["url"]) == "alpha/zeroref":
+                chosen.update(cand)
+                return cand["url"]
+        return ""                      # pragma: no cover — fixture broke
+
+    monkeypatch.setattr(MO, "pick", _pick_the_zero_ref_row)
+    assert MO.main(["#1291"]) == 0
+    assert chosen, "the zero-reference row was never offered to the picker"
+
+    events = _click_events(spool)
+    assert events, "no click row was emitted at all"
+    dims = events[-1]["payload"]
+    assert dims["outcome"] == MO.CLICK_PICKED, dims
+    # POSITIVE CONTROL: this really is the degraded path, or `ordered` being
+    # False below would be about something else entirely.
+    assert dims.get("ordering") == MO.ORDER_STALE, dims
+    assert dims.get("ordered") is False, (
+        f"a DEGRADED ordering emitted ordered={dims.get('ordered')!r} — no row "
+        f"was placed, so a consumer following `click_dims`' own instruction to "
+        f"filter `ordered = true` would count this click as evidence about an "
+        f"ordering that never ran. Full dims: {dims!r}")
+
+
 def test_main_RECORDS_the_repository_the_operator_PICKED(monkeypatch):
     """Tier B's write side, end to end: the row the operator selected becomes a
     line in the log, and the log is the one the autouse redirect points at."""
@@ -9523,11 +9601,19 @@ def test_a_DISMISSED_picker_carries_the_ORDERING_dims_and_whether_a_QUERY_was_ty
     🔴 WHAT THIS TEST DOES *NOT* PROVE, SAID HERE BECAUSE ITS FIRST DRAFT
     CLAIMED IT. `pick` is STUBBED, so this asserts the PLUMBING — that whatever
     `pick` recorded reaches the row. It is NOT evidence that a real Esc
-    dismissal records anything, and MEASURED against fzf 0.74.3 it does not:
-    an abort writes ZERO BYTES, so `queried` is NOT MEASURED there. The ending
-    the flag really covers on this arm is ENTER-WITH-NO-MATCH, which writes the
-    query line alone. `test_a_real_ABORT_records_NO_query_verdict_at_all` pins
-    the limit so nobody reads this test as the wider claim."""
+    dismissal records anything.
+
+    ⚠ AND THE REST OF THIS PARAGRAPH USED TO SAY AN ESC RECORDS NOTHING, WHICH
+    IS NO LONGER TRUE. It read: *"MEASURED against fzf 0.74.3 it does not: an
+    abort writes ZERO BYTES … the ending the flag really covers on this arm is
+    ENTER-WITH-NO-MATCH"*, and pointed at
+    `test_a_real_ABORT_records_NO_query_verdict_at_all`. Since
+    `--bind="esc:print-query+abort"` an ESC writes `<query>\\n` and IS measured;
+    the endings still writing zero bytes are `ctrl-c`/`ctrl-g`/`ctrl-q` and
+    empty-query `ctrl-d`. That test was renamed to
+    `test_an_ESC_abort_RECORDS_a_verdict_and_the_OTHER_aborts_do_not`, which is
+    where the limit is pinned. Missed by two audit rounds because it sits in a
+    file neither the bind nor the marker diff touched."""
     _ordering_fixture(monkeypatch, tmp_path)
 
     def _dismiss_after_typing(c, mesg=""):
