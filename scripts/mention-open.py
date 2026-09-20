@@ -3866,7 +3866,9 @@ def main(argv: list[str] | None = None) -> int:
         # row) and EXCLUDES offered rows the ordering never saw (the clawgate
         # row, and the guess when it is absent from the universe). The ranked
         # set is the right one — the claim being gated is about the RANKING —
-        # but a reader reproducing the old sentence would not find it. Operator decision 2026-09-19, choosing the narrower of two
+        # but a reader reproducing the old sentence would not find it.
+        #
+        # Operator decision 2026-09-19, choosing the narrower of two
         # options: it fires less often, and every time it fires "best-ranked" is
         # unambiguously true.
         #
@@ -3936,11 +3938,26 @@ def main(argv: list[str] | None = None) -> int:
             #
             # It stays as defence in depth, and the reason is nameable rather
             # than vague: the PLAUSIBLE requirement below it is the NARROWER of
-            # two options the operator chose between, so a later widening (allow
-            # `BELOW`, or test `top_key is not None`) re-arms the need for this
-            # clause — and a widening made after someone deleted it as dead
-            # weight would silently restore round 0's defect, with a green suite
-            # in both directions.
+            # two options the operator chose between, so a later widening can
+            # re-arm the need for this clause — and a widening made after
+            # someone deleted it as dead weight would silently restore round 0's
+            # defect, with a green suite in both directions.
+            #
+            # 🔴 THE RE-ARMING WIDENING, MEASURED RATHER THAN IMAGINED:
+            # replacing the PLAUSIBLE test with `top_key is not None` PROMOTES
+            # on a degraded table once this clause is gone, captioned
+            # "best-ranked repository" — and does NOT promote while it is kept.
+            # Both directions were run.
+            #
+            # ⚠ AN EARLIER DRAFT ALSO OFFERED "allow `BELOW`" AS AN EXAMPLE AND
+            # IT IS FALSE — `/audit-pr` round 3 measured it: a degraded row is
+            # `CLASS_UNKNOWN` (2), never `CLASS_BELOW` (1), so that widening
+            # cannot re-arm anything. It is DELETED rather than reworded. That
+            # matters more than a wrong example usually would, because the
+            # paragraph above says no test can pin this clause — so this comment
+            # IS what stands between the clause and a future deletion, and a
+            # maintainer who checked the cheaper of two examples would have
+            # found it false and discounted the rest.
             #
             # ⚠ SO DO NOT LOOK FOR A TEST THAT PINS THIS CLAUSE ALONE: there
             # cannot be one while it is redundant. The guard that matters is

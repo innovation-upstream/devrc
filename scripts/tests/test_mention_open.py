@@ -9992,9 +9992,21 @@ def test_the_PROMOTED_note_wordings_are_pinned_WHOLE(monkeypatch, tmp_path):
     assertions (`"best-ranked repository"`, `"Row 3"`), i.e. exactly the guard
     those tests call walkable.
 
-    Both promoted shapes are pinned here, whole and normalised:
-      * `below > 0`  — a guess with ranked rows above AND below it;
-      * `below == 0` — the single-universe-row shape.
+    🔴 THIS TEST PINS ONE SHAPE, NOT TWO — AND AN EARLIER DRAFT OF THIS
+    DOCSTRING SAID "both … are pinned HERE", WHICH WAS FALSE. Round 2 closed the
+    `below == 0` gap by putting that whole-string pin in a DIFFERENT test and
+    left this sentence untouched — in the very artifact the finding was about.
+    Reported by `/audit-pr` round 3.
+
+      * `below > 0`  — a guess with ranked rows above AND below it: pinned HERE;
+      * `below == 0` — the single-universe-row shape: pinned in
+        `test_a_guessed_picker_with_ONE_universe_row_still_EXPLAINS`, verified
+        live (deleting the `{above}` clause from `guessed_note`'s `below <= 0`
+        branch fails that test and nothing else).
+
+    The coverage is complete; only the attribution was wrong. That distinction
+    matters because a docstring reading as coverage it does not provide is what
+    let the original fragment-only gap survive to round 1.
 
     ⚠ A cosmetic reword will fail this. That is the trade the sibling tests
     already made and it is paid deliberately: these sentences make a CLAIM about
@@ -10064,3 +10076,55 @@ def test_a_CASE_DIFFERING_pane_repo_is_still_DEDUPED_and_never_promoted_over(
     assert "best-ranked repository" not in seen["mesg"], (
         f"a case-differing duplicate of the pane's own repo was promoted above "
         f"it and captioned best-ranked: {seen['mesg']}")
+
+
+def test_a_CASE_DIFFERING_UNIVERSE_row_is_deduped_AND_recognised_as_the_guess(
+        monkeypatch, tmp_path):
+    """🔴 ROUND 3's FINDING A: THE SIBLING TEST ABOVE IS RED ON ONE OF THE THREE
+    `.lower()` SITES. Measured, each reverted separately: `seen` KILLED, the
+    `extra` filter SURVIVED, `top_is_the_guess` SURVIVED — both at 485 passed.
+    Its fixture puts the differing spelling on the PANE side, which is the only
+    direction `seen` alone covers.
+
+    🔴 THIS IS THE REALISTIC DIRECTION, and it is the one that was unguarded.
+    `load_known_universe` carries GitHub's canonical mixed-case name, while
+    `tmux_pane_repo` -> `repo_of_checkout` carries whatever case the clone URL
+    was written in. So the differing spelling normally arrives on the UNIVERSE
+    side, not the pane's.
+
+    Both survivors are user-visible defects:
+      * `extra` exact-matched  -> the same repository is offered TWICE, and the
+        note counts the duplicate among "every repository this host knows";
+      * `top_is_the_guess` exact-matched -> the ordering's top row is the pane's
+        own repo under another spelling, is NOT recognised as such, so the
+        BELOW-class RUNNER-UP is spliced above the guess and captioned "this
+        host's best-ranked repository" — round 0's defect, restored.
+
+    The universe row here is the ordering's first pick (PLAUSIBLE); everything
+    else is BELOW. Nothing may be promoted, because the best-ranked row IS the
+    guess."""
+    canonical = "WrongOrg/WrongRepo"          # as GitHub spells it
+    table = {v: 5 for v in FAKE_UNIVERSE.values()}
+    table[canonical.lower()] = 9000           # ranks FIRST for #1291
+    table[ALPHA_FIRST] = 5
+    seen = _guessed_picker(
+        monkeypatch, text="#1291", pane=PANE_GUESS,      # lowercase, from the clone
+        universe=[canonical, ALPHA_FIRST], ranges=table, tmp_path=tmp_path)
+    urls = [c["url"] for c in seen["rows"]]
+    lowered = [u.lower() for u in urls]
+
+    # Kills the `extra` revert: the repo appears under two spellings.
+    assert len(lowered) == len(set(lowered)), (
+        f"the pane's repo is offered twice under two spellings — the `extra` "
+        f"filter compared case-sensitively: {urls}")
+
+    # Kills the `top_is_the_guess` revert: the ordering's top row IS the guess,
+    # so no runner-up may be promoted over it and nothing may be captioned
+    # best-ranked.
+    assert PANE_GUESS in urls[1].lower(), (
+        f"the ordering's top row is the pane's own repo under another "
+        f"spelling; it was not recognised, so a runner-up was promoted above "
+        f"the guess: {urls}")
+    assert "best-ranked repository" not in seen["mesg"], (
+        f"a runner-up was captioned best-ranked while the ordering's actual "
+        f"first pick is the guess itself: {seen['mesg']}")
