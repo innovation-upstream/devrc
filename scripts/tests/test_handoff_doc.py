@@ -7718,8 +7718,15 @@ def test_the_union_indices_match_each_buckets_tuple_shape():
     # exclude it from the union and understate every total. Both directions are
     # asserted against the buckets `evictable_note` actually consumes, scraped
     # from its own source so the ledger cannot drift from the code.
-    consumed = set(re.findall(r'a\["(resolved|done|retracted|dated)"\]',
-                              Path(hd.__file__).read_text(encoding="utf-8")))
+    # 🔴 NOT an alternation of the four known names — that is what made the
+    # previous version blind in the direction it claimed to cover (round 3, F2):
+    # a FIFTH bucket the note grew could never match a regex listing four. Scrape
+    # every `a["..."]` read, then keep those the auditor returns as a LIST, which
+    # is what a bucket is.
+    src = Path(hd.__file__).read_text(encoding="utf-8")
+    body = src[src.index("def evictable_note"):src.index("def budget_warning")]
+    consumed = {k for k in re.findall(r'a\["(\w+)"\]', body)
+                if isinstance(a.get(k), list)}
     assert consumed, "the scraper found no bucket reads — it is wired to nothing"
     assert set(hd.AUDIT_SPAN_INDEX) == consumed, (
         "AUDIT_SPAN_INDEX and the buckets evictable_note reads have drifted: "
@@ -7759,12 +7766,23 @@ def test_evictable_note_does_not_DOUBLE_COUNT_a_block_in_two_buckets():
     )
     note = hd.evictable_note(doc, 0)
     import re as _re
-    shown = [int(m.replace(",", "")) for m in _re.findall(r"([\d,]+) B", note)]
-    assert len(shown) >= 2, note
-    rows, net = shown[:-1], shown[-1]
-    assert net <= max(rows), (
-        f"net {net:,} exceeds the largest single bucket {max(rows):,}, so the same "
-        f"block was counted under two labels:\n{note}"
+    # 🔴 Parsed from the ARROW, not positionally: round 2 moved the `ALSO` rows
+    # BELOW the net line, so `shown[-1]` silently became a step-2 bucket's bytes
+    # and the assertion compared a number with itself (round 3, F3).
+    arrow = _re.search(r"→ ([\d,]+) B", note)
+    assert arrow, note
+    net = int(arrow.group(1).replace(",", ""))
+    counted = [int(m.replace(",", "")) for m in
+               _re.findall(r"^(?!\s+ALSO).*?([\d,]+) B  \(", note, _re.M)]
+    assert counted, note
+    assert net <= sum(counted), (
+        f"net {net:,} exceeds the counted buckets {sum(counted):,}:\n{note}"
+    )
+    # the overlapping block must be NAMED as a duplicate rather than silently
+    # itemised twice (round 3, F5)
+    assert "the SAME block already counted above" in note, (
+        "an overlapping step-2 row was itemised without saying it duplicates a "
+        f"counted row:\n{note}"
     )
 
 
@@ -7802,6 +7820,13 @@ def test_each_bucket_carries_the_PLAYBOOK_STEP_that_actually_applies():
         "retracted bullets are Gotchas by construction: the playbook keeps them in the "
         f"doc, so they must be REPORTED and not promised: {row!r}\n{note}"
     )
-    assert "step 2 MOVES dated evidence" in note and "stays in the doc" in note, (
-        "the step-2 explanation is missing:\n" + note
+    # 🔴 The step-2 advice is PER BUCKET — a single trailer necessarily mis-states
+    # one of the two, which is how round 2 came to tell authors to move the very
+    # gotchas the playbook keeps (round 3, F1).
+    assert "JUDGEMENT: the playbook calls retracted reasoning demotable" in note, (
+        "the retracted row must state the tension, not prescribe a move:\n" + note
+    )
+    assert "Do NOT satisfy a budget by deleting an open investigation, a gotcha" in note, (
+        "the prohibition must ride INSIDE the note so it reaches the near-headroom "
+        f"arm too, which is where this prints most often:\n{note}"
     )

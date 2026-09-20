@@ -371,7 +371,7 @@ makes P1 auditable rather than felt.
 | P3 | paste-ready DoD offer | — | — | 🔴 **DELETED** — remedy already printed |
 | P1′ | per-doc evictable backlog in `budget_warning()` | `handoff_doc.py`, `handoff-audit.py` | none (prints only) | **on this branch, `97fee3d0` — NOT merged**; verified live |
 
-**Nothing remains to build.** One shipped as specified (P4), one shipped corrected (P1′), two
+**Nothing remains to build.** One landed as specified (P4), one landed corrected (P1′) — on the branch; nothing is on `main` until #1815 merges, two
 deleted by measurement (P2, P3).
 
 🔴 **This arc's closing condition cannot be met as written and should not be re-aimed.** It

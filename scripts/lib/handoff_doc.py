@@ -2941,18 +2941,23 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         # than failing loudly. Caught by a control that re-derived each bucket's
         # byte count from its own range. Indices are explicit and pinned by
         # `test_the_union_indices_match_each_buckets_tuple_shape`.
-        lines = merged_text.splitlines(keepends=True)
-        step1_keys = {"resolved", "done"}
-        spans = sorted((x[i], x[j]) for key, (i, j) in AUDIT_SPAN_INDEX.items()
-                       if key in step1_keys for x in a[key])
-        merged_spans: list[list[int]] = []
-        for s_, e_ in spans:
-            if merged_spans and s_ <= merged_spans[-1][1]:
-                merged_spans[-1][1] = max(merged_spans[-1][1], e_)
-            else:
-                merged_spans.append([s_, e_])
-        union_b = sum(len("".join(lines[s_:e_]).encode()) for s_, e_ in merged_spans)
-        net = max(0, union_b - mod.RESUME_COST * len(a["done"]))
+        # 🔴 THE UNION IS DELETED, AND ITS REASON IS GONE RATHER THAN REPLACED.
+        # It was added (round 1, F5) because `resolved` and `dated` can hold the
+        # SAME block, so summing them double-counted. Round 2 then narrowed the
+        # counted set to step 1 = {resolved, done} — and those two are
+        # STRUCTURALLY DISJOINT: `resolved` is `### ` blocks under
+        # `## Open investigations`, `done` is items under `## Next steps`, so no
+        # block can be both. MEASURED at round 3 over this repo's 99 handoff docs:
+        # 2 docs overlap across all four buckets, **0** across the step-1 pair;
+        # and two mutants that restored the double-count verbatim SURVIVED the
+        # whole 502-test suite. A guard that cannot be exercised, cannot be
+        # killed, and whose cited measurement describes a pair it no longer
+        # covers is worse than none — so it is removed rather than kept
+        # "defensively" with a fresh justification invented for it.
+        # Re-derive before re-adding: if a future bucket joins step 1, check
+        # whether it can share lines with an existing one.
+        step1_b = sum(r[1] for r in step1)
+        net = max(0, step1_b - mod.RESUME_COST * len(a["done"]))
         # 🔴 NET, and the shortfall is stated rather than implied. Quoting a gross
         # number that does not actually clear the overage sends an author cutting
         # and leaves them still red — the one outcome worse than saying nothing.
@@ -2975,12 +2980,39 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         # pointer, so these bytes are not recovered at face value — and the
         # playbook keeps gotchas in the doc. Counting them toward "CLEARS" is the
         # defect this split fixes; naming them is still useful.
+        # 🔴 PER BUCKET, because the two step-2 buckets take OPPOSITE advice and a
+        # single trailer necessarily mis-states one of them. Round 2 replaced the
+        # blanket "never a delete" line with a blanket "step 2 MOVES dated
+        # evidence to refs/" — which, on a doc whose only step-2 content is
+        # `retracted`, told the author to move the gotchas the playbook keeps.
+        # That is round 1's F4 in a third spelling, and it is why this is split.
+        # 🔴 `retracted` is NOT prescribed either way: the playbook lists
+        # "superseded or retracted reasoning" as demotable AND says gotchas stay
+        # in the doc, and these bullets are BOTH by construction. The tool states
+        # the tension and leaves the call to the author rather than resolving a
+        # contradiction it has no standing to resolve.
+        counted_spans = {(x[AUDIT_SPAN_INDEX[k][0]], x[AUDIT_SPAN_INDEX[k][1]])
+                         for k in ("resolved", "done") for x in a[k]}
         for label, b, n, unit, _s in step2:
-            out.append(f"    ALSO {label:<19}{b:>9,} B  ({n} {unit}{'' if n == 1 else 's'})"
+            key = "retracted" if label.startswith("retracted") else "dated"
+            i, j = AUDIT_SPAN_INDEX[key]
+            dup = any((x[i], x[j]) in counted_spans for x in a[key])
+            advice = ("JUDGEMENT: the playbook calls retracted reasoning demotable AND "
+                      "keeps gotchas in the doc; these are both"
+                      if key == "retracted" else
+                      "MOVE to `claudedocs/refs/<topic>.md`, leave a pointer")
+            out.append(f"    ALSO {label:<21}{b:>9,} B  ({n} {unit}{'' if n == 1 else 's'})"
                        f"  — step 2, NOT counted above")
+            out.append(f"         {advice}"
+                       + ("  ⚠ the SAME block already counted above" if dup else ""))
         if step2:
-            out.append("    step 2 MOVES dated evidence to `claudedocs/refs/<topic>.md` and "
-                       "leaves a pointer; the rule itself stays in the doc.")
+            # 🔴 Carried INSIDE the note so it reaches BOTH arms. The over-budget
+            # arm states this prohibition separately; the near-headroom arm —
+            # which is the one that prints at over_by == 0, i.e. most of the time
+            # this note appears — carried no counterweight at all after round 2
+            # moved it. Round 3, F1.
+            out.append("    🔴 Do NOT satisfy a budget by deleting an open investigation, a "
+                       "gotcha or a ruled-out theory.")
         return "\n".join(out)
     except (Exception, SystemExit):
         # 🔴 `SystemExit` IS NOT AN `Exception` — it derives from BaseException,
