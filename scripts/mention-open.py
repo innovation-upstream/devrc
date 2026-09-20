@@ -1520,11 +1520,22 @@ def click_dims(repo: str = "", platform: str = "",
     last two are BYTE-IDENTICAL on stdout (see `PICKER_SH`), so no dim
     distinguishes them and "of ESC dismissals" cannot be computed at all.
 
-    ✅ THE ONE CLEAN CELL, which is what to use instead: under `dismissed`,
-    `queried == False` is UNAMBIGUOUSLY an ESC on an untouched picker. Nothing
-    else can produce it — Enter-with-no-match requires a non-empty query, and
-    every other abort key writes no dim at all. Count that; do not average the
-    arm.
+    ✅ THE CLEANEST CELL, which is what to use instead: under `dismissed`,
+    `queried == False` means an ESC whose query was EMPTY AFTER STRIPPING.
+    Enter-with-no-match cannot reach it (it requires a query that matched
+    nothing, and the picker always holds rows, so an empty query always
+    matches), and every other abort key writes no dim at all.
+
+    🔴 IT IS NOT "AN UNTOUCHED PICKER", AND THIS PARAGRAPH SAID SO FOR ONE
+    COMMIT — THE SAME COMMIT THAT RETRACTED THE PREVIOUS UNMEASURED
+    EXCLUSIVITY CLAIM. It read "UNAMBIGUOUSLY an ESC on an untouched picker,
+    nothing else can produce it". MEASURED at 0.74.4: a query of `"  "` writes
+    `"  \n"`, and typing then deleting writes `"\n"` — `bool(...strip())` is
+    `False` for both, so the operator DID touch the picker. The right reading
+    is "ESC with nothing typed, or nothing left after typing" — which is still
+    the population symptom 1 wants (they did not narrow the list), just not the
+    sentence that was written. **Third instance of this shape in one arc: the
+    reflex to write "nothing else can" is the defect, not any one claim.**
 
     ⚠ SCOPED TO THE REASON, NOT TO THE ARM — AND AN EARLIER DRAFT SAID "THE
     DISMISSAL ARM", WHICH IS WIDER THAN THE TRUTH. That arm emits TWO outcomes
@@ -2453,6 +2464,16 @@ PICKER_LINES = 22
 # MEASURED at 0.74.4, both flag states, with the two ESC rows as the positive
 # control: `esc` + bind -> `<query>\n` rc 0; `ctrl-c`/`ctrl-g`/`ctrl-q`/empty
 # `ctrl-d` -> 0 bytes rc 130 either way.
+#
+# 🔴 THE ACTION ORDER INSIDE THE BIND IS LOAD-BEARING, AND A REORDER IS SILENT.
+# MEASURED at 0.74.4: `--bind="esc:abort+print-query"` is ACCEPTED by fzf — no
+# parse error, no warning — and writes **0 bytes at rc 130**, i.e. exactly the
+# pre-change behaviour. `abort` terminates, so anything after it never runs.
+# The two guards happen to catch it (the whole-string `EXPECTED_PICKER_SH` pin,
+# and `_ESC_PRINTS_QUERY` keying on the substring `esc:print-query`, which a
+# reorder breaks), but neither was CHOSEN for that. Do not "simplify"
+# `_ESC_PRINTS_QUERY` to test for `"print-query"` alone: that would pass on the
+# reordered bind while production silently wrote nothing.
 #
 # ⚠ AND THE GAP IS CLOSABLE FOR ALL OF THEM: `--bind="ctrl-c:print-query+abort"`
 # is accepted and works (measured), and the same form takes ctrl-g/ctrl-q. It is

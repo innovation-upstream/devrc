@@ -233,29 +233,26 @@ notifications and repo browse are dropped.
 - **Next probe:** none — closed.
 
 ## Next steps (ranked)
-1. **Decide SYMPTOM 1 of the picker — the one objective this arc did not close.** Symptom 3 is
-   DONE (`#1793`/`cee56910`); this is what remains of the old "symptoms 1 and 3" rank. Proposal:
-   `claudedocs/proposal-mention-picker-visibility.md` §"Symptom 1". fzf re-sorts by its own
-   score the moment you type, so the pre-computed ranking is invisible to anyone who types
-   rather than scrolls. **FOUR options, not three** — an earlier draft of this item listed
-   A/B/C and `/audit-pr` round 0 caught the omission: **(A)** make class/rank visible in the
-   row text — survives a typed query, but a fuzzy-matchable marker can perturb fzf's scoring
-   and the picker is 110 cols; **(B)** `--no-sort` — our order wins, at the cost of fzf's
-   match-quality ordering on 394 rows; **(C)** wait for the `queried` rate; **(D)**
-   `--bind 'esc:print-query+abort'`, which CLOSES the blind spot in (C) — see the proposal's
-   §3.1. 🔴 **(C) IS THE ONE I LEANED ON AND IT CARRIES A MEASURED BLIND SPOT THE FIRST DRAFT
-   OF THIS ITEM DROPPED:** the proposal's own 🔴 says *"read §3.1 before relying on the rate"*
-   — an ESC/Ctrl-C abort writes nothing at all, so the dismissal arm's rate covers only the
-   Enter-with-no-match ending. **Dropping (D) and that warning in the same edit removed both
-   the caveat and its fix.** (C)'s precondition is also still unmet: MEASURED 2026-09-19 there
-   was exactly ONE post-`#1775` pick carrying `queried` (it recorded `queried=1`, so the
-   instrument works — there is simply almost no data); it is 3 now. ⚠ **Do not restate the
-   click rate here** — the proposal owns it with the SQL and a named closing condition, an
-   earlier draft of this line restated it ~2x low, and three independent re-derivations put it
-   at **11.5–14.9/day**, not the ~6 that draft claimed. ⚠ **There is no equivalent of the
-   1-in-73 clawgate rate that made symptom 3 decidable without data.** Repo: devrc.
-   forcing: user — a look-and-feel call on the operator's own daily tool; the proposal says so
-   explicitly and no agent may make it.
+1. ✅ **SYMPTOM 1 IS DECIDED — operator, 2026-09-20: (D) then (A), (B) REFUSED.** This was
+   the arc's one unmet objective; it is no longer open, and a `/resume` must not re-open it.
+   In flight as **`#1812`** (D — `--bind="esc:print-query+abort"`, so an ESC abort records
+   `queried`) and **`#1813`** (A — the row carries its RANK, with `--nth=2..` keeping the
+   marker out of fzf's haystack). #1813 is STACKED on #1812: do not `gh pr merge
+   --delete-branch` the parent while the child is open.
+   🔴 **THE SUPERSEDED FZF CONTRACT THIS ITEM USED TO STATE IS RETIRED — do not carry it
+   forward.** It said *"an ESC/Ctrl-C abort writes nothing at all, so the dismissal arm's
+   rate covers only the Enter-with-no-match ending."* Both halves are now false: an ESC
+   writes `<query>\n`, and `abort` is FOUR keys (`ctrl-c ctrl-g ctrl-q esc`, plus `ctrl-d`
+   on an empty query), of which only `esc` is covered. The live contract lives in
+   `PICKER_SH`'s comment and the proposal's §3.1 — read it there, never from this doc.
+   ⚠ **(A) SHIPPED NARROWER THAN OPTION (A) AS WRITTEN:** rank only, no class column.
+   Option (A) offered *"class and/or rank"*, `/audit-pr` round 0 logged the class field as
+   unattributed, and the operator chose rank. Reason, measured: the click-time class of the
+   picked row is `below` 56 against `plausible` 17, so a class column would read "the ranker
+   does not trust this" on the wanted row ~3 times in 4.
+   ⚠ **Do not restate the click rate here** — the proposal owns it with the SQL and a named
+   closing condition; an earlier draft of this line restated it ~2x low. Repo: devrc.
+   forcing: none — the decision is made; what remains is merging the two PRs.
 ## Defects (batched)
 - 🔴 **NO `LICENSE` FILE WHILE THE DERIVATION CLAIMS MIT** —
   `nix/pkgs/tools/mention-review/default.nix:146` declares `licenses.mit` with nothing backing

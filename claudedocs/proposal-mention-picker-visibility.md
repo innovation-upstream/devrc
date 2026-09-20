@@ -332,11 +332,17 @@ Consequences for reading the data:
   "the operator scrolled", which is the population the whole question is measured from —
   wrong in the reassuring direction.
 
-**Option (D)**, if the abort gap matters: `--bind 'esc:print-query+abort'`. **Measured:
+~~**Option (D)**, if the abort gap matters: `--bind 'esc:print-query+abort'`. **Measured:
 it works** — Esc then writes `<query>\n` (Ctrl-C still writes nothing), the picker closes
 exactly as before, and nothing on screen changes. It was **not** taken in this PR because
 it rebinds a key on the live click path, and that is the operator's call. It is one flag,
-reversible, and the pinned-string/metacharacter guards already cover `PICKER_SH`.
+reversible, and the pinned-string/metacharacter guards already cover `PICKER_SH`.~~
+
+⚠ **SUPERSEDED by the decision immediately below — struck, not deleted.** The paragraph
+above describes (D) as *not taken*; it was taken. This is the third superseded passage in
+this section, and the other two (the §3.1 table, the closing recommendation) were already
+marked — leaving this one unmarked made two adjacent paragraphs read as a flat
+contradiction.
 
 🔴 **DECIDED — operator, 2026-09-20: take (D) now, then (A). (B) is REFUSED on the data
 below.** Shipped as `--bind="esc:print-query+abort"` in `PICKER_SH`. Re-measured at fzf
@@ -346,7 +352,12 @@ an Esc on an untouched picker writes a bare `\n` (so **`False` is now reachable 
 dismissal arm**, which retires that arm's "True by construction" caveat), and Ctrl-C is
 unchanged at 0 bytes / exit 130.
 
-⚠ **And this doc's claim that Ctrl-C cannot be closed was never measured, and is FALSE.**
+⚠ **And the claim that Ctrl-C cannot be closed was never measured, and is FALSE.** ⚠ An
+earlier wording of this line said *"this doc's claim"* — **wrong, and checked**: this
+document never said it. Its only Ctrl-C sentence is *"(Ctrl-C still writes nothing)"*,
+which is true and is not an impossibility claim. The retracted assertion lived in
+`scripts/mention-open.py` (*"has no `ctrl-c:` binding … handled below the keymap"*). A
+misattributed retraction sends the next reader looking for a sentence nobody wrote.
 `--bind="ctrl-c:print-query+abort"` is accepted at 0.74.4 and makes Ctrl-C write
 `<query>\n` too, verified against a control where the shipping config leaves it at 0 bytes.
 It was **not** taken: the operator approved the Esc bind specifically, and rebinding the
