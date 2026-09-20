@@ -398,17 +398,6 @@ def test_a_COMPUTED_ref_gets_the_exemption_too(home, empty_repo, spelling):
         str(empty_repo / "claudedocs" / DOC)], "spelling %r lost the exemption" % spelling
 
 
-def test_a_LINE_CONTINUATION_does_not_strand_the_git_verb(home, empty_repo):
-    """🔴 SPLITTING ON `\\n` MAKES THE SEGMENT ONE LINE, NOT ONE COMMAND. A
-    `git … show \\` whose ref-prefixed path lands on the next line had its verb on the
-    previous segment and lost the exemption. Continuations are joined before the split;
-    a genuinely separate line is still a separate command and still loses it — the
-    negative half is the `git show HEAD; cat host:` case in the table below."""
-    cmd = "git -C %s show \\\n  origin/zach/topic:claudedocs/%s" % (empty_repo, DOC)
-    assert guard.handoff_read_docs(bash(cmd, cwd="/nowhere/else")) == [
-        str(empty_repo / "claudedocs" / DOC)]
-
-
 def test_a_LATER_base_wins_when_the_earlier_one_lacks_the_doc(home, tmp_path, repo):
     """🔴 PINS THE SECOND, UNDECLARED BEHAVIOUR CHANGE round 1 found in `_resolve`.
 
@@ -420,8 +409,15 @@ def test_a_LATER_base_wins_when_the_earlier_one_lacks_the_doc(home, tmp_path, re
     rather than left to be rediscovered.
 
     `other` is a REAL repo with a REAL `claudedocs/` and NO copy of the doc, so the
-    first base is rejected on the file and not on the directory — which is the whole
-    distinction. Without the fallthrough this returns `other`'s path and fails."""
+    first base is rejected on the FILE and not on the directory — which is the whole
+    distinction.
+
+    ⚠ WHAT THE MUTANT ACTUALLY DOES, because this docstring got it wrong: it said
+    "without the fallthrough this returns `other`'s path". It does not — reverting the
+    fallthrough yields `[]`, because `other`'s file is absent and `off_a_ref` is False,
+    so `_resolve` returns None. Verified: `assert [] == [<repo>/claudedocs/<DOC>]`.
+    A reader checking the pin by mutation must see the failure the docstring promises,
+    or they conclude they mutated the wrong thing."""
     other = tmp_path / "other" / "claudedocs"
     other.mkdir(parents=True)
     cmd = "git -C %s -C %s log -- claudedocs/%s" % (other.parent, repo, DOC)

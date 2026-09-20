@@ -319,8 +319,15 @@ DASH_C_RX = re.compile(r"(?:^|\s)-C\s*(\S+)")
 # 27 of them `$VAR`/`${VAR}`. 🔴 AND `claude/RULES.md` PRESCRIBES THE BRACED SPELLING:
 # zsh eats `$B:path` as a history modifier, so the rules mandate `${B}:path` — the guard
 # was blind to precisely the spelling this repo requires. An enumerated set encodes the
-# examples its author thought of; `[^\s:]+` encodes the actual boundary, which is that
-# a ref is one shell word and cannot contain the `:` that terminates it.
+# examples its author thought of; `[^\s:]+` encodes the shell-word boundary instead.
+# ⚠ THAT IS NOT THE SAME AS "THE BOUNDARY", and this note claimed it was: it read that
+# "a ref cannot contain the `:` that terminates it". True of ref NAMES
+# (`git check-ref-format` forbids `:`); FALSE of the revision EXPRESSIONS `git show`
+# accepts — `:0:claudedocs/…` (index stage) and `:claudedocs/…` (stage shorthand) both
+# carry a `:` inside the token and so lose the exemption here. Pre-existing (the
+# enumerated class failed them too) and fail-SAFE, since a lost exemption only makes
+# the guard quieter. Recorded rather than fixed: arguing a boundary while overstating
+# it is what this very paragraph criticises.
 REF_PREFIX_RX = re.compile(r"(?:^|[\s\"'=(])([^\s:]+):\Z")
 
 # …and a git object-read verb in the SAME command segment.
@@ -334,24 +341,41 @@ REF_PREFIX_RX = re.compile(r"(?:^|[\s\"'=(])([^\s:]+):\Z")
 # introduced the bug — the case was written because the hole was imaginable, and it
 # turned out to be real.
 #
-# ⚠ SPLITTING ON `\n` MAKES THE SEGMENT ONE **LINE**, so a `git … show \` whose
-# ref-prefixed path sits on the next line would lose its verb. Line continuations are
-# therefore JOINED before the split (`_read_off_a_ref`), which is the shape that
-# actually occurs; a genuinely separate line is a separate command and SHOULD lose it.
+# ⚠ SPLITTING ON `\n` MAKES THE SEGMENT ONE **LINE**, not one command, so a
+# `git … show \` whose ref-prefixed path sits on the next line loses its verb and the
+# exemption. That is KNOWN AND ACCEPTED, and it is the quiet direction: a lost
+# exemption makes the guard silent, never blocking.
+#
+# 🔴 A LINE-CONTINUATION JOIN WAS ADDED HERE AND THEN DELETED, WHICH IS THE ENTRY
+# WORTH READING. Round 1 of #1799 added `LINE_CONTINUATION_RX` to fix exactly the case
+# above. Round 2 killed it on two independent grounds: it was guarded in ONE direction
+# only (a mutant joining EVERY newline — destroying "a separate line is a separate
+# command" — left the whole suite green), and MEASURED over the corpus it changed
+# NOTHING. Re-measured independently before deleting: of 15,871 distinct handoff-path
+# Bash commands, 589 carry a `\`+newline and in **0** of them does joining change the
+# exemption verdict. A guard that alters no real outcome and is half-pinned is a
+# liability, not coverage. Do not re-add it without a case that reproduces.
 SEGMENT_SPLIT_RX = re.compile(r"[;&|\n]")
-LINE_CONTINUATION_RX = re.compile(r"\\\n")
 
-# 🔴 THE NEGATED CLASS IS BACK, AND THE SCAN IS LENGTH-CAPPED — both for COST, not
-# correctness. `\bgit\b.*?\b(?:show|cat-file)\b` anchors at every `git` and walks
-# forward from each, i.e. O(k·n): round 1 of #1799 measured 924 ms on 32 KB of `"git "`
-# with no verb, 13.9 s on 128 KB, against 0.8 ms at base. This hook runs after EVERY
-# tool call and can block a Stop, so a pathological command is a turn-level hang.
-# ⚠ REPORTED WITH ITS BOUND: the largest segment ever scanned across 20,670 real
-# corpus commands was 296 BYTES and the worst real delta +1.41 ms — there is no
-# adversary here, the operator writes his own commands. The cap is 4 KiB, an order of
-# magnitude above anything observed, so it bounds the hazard without reaching any real
-# command.
-GIT_OBJECT_READ_RX = re.compile(r"\bgit\b[^;&|\n]*?\b(?:show|cat-file)\b")
+# 🔴 THE SCAN IS LENGTH-CAPPED, AND THE CAP IS THE WHOLE FIX.
+# `\bgit\b.*?\b(?:show|cat-file)\b` anchors at every `git` and walks forward from each,
+# i.e. O(k·n). MEASURED on 32/64/128 KB of `"git "` with no verb: ~0.9 s / 3.5 s /
+# 14.2 s uncapped, a flat ~15-25 ms capped. This hook runs after EVERY tool call and
+# can block a Stop, so an unbounded scan is a turn-level hang.
+#
+# 🔴 THE NEGATED CLASS `[^;&|\n]*?` WAS ALSO RE-ADDED HERE AND IS ALSO DELETED. It was
+# justified as a COST measure and that was FALSE IN BOTH HALVES: `seg` is a segment
+# `SEGMENT_SPLIT_RX` already split, so by construction it contains none of those
+# characters and the class is EXACTLY equivalent to `.` there — and measured, it was
+# consistently the SLOWER of the two once capped (30.7 vs 17.6 ms at 32 KB). The
+# comment above `SEGMENT_SPLIT_RX` had already recorded that the class does not scope a
+# match to a segment; re-adding it on a cost rationale contradicted the same file.
+#
+# ⚠ THE CAP'S OWN COST, NAMED: >4 KiB between the git verb and the path loses the
+# exemption. Never reached — the largest segment across the whole corpus is ~296 bytes
+# — and fail-SAFE when it is. There is no adversary here; the operator writes his own
+# commands. This bounds a complexity regression, it does not defend against an attack.
+GIT_OBJECT_READ_RX = re.compile(r"\bgit\b.*?\b(?:show|cat-file)\b")
 GIT_VERB_SCAN_CAP = 4096
 
 # Tool calls that ARE work, by name. Also the tools whose `file_path` can SATISFY,
@@ -809,16 +833,21 @@ def _read_off_a_ref(cmd, start):
     a hook that fires after EVERY tool call of every session, to reject a shape nobody
     writes by accident.
     """
-    # Line continuations joined FIRST: `\<newline>` is one command, not two, and the
-    # segment split below would otherwise strand the git verb on the previous line.
-    head = LINE_CONTINUATION_RX.sub(" ", cmd[:start])
+    # 🔴 THE CAP IS APPLIED TO THE HEAD, NOT TO THE SEGMENT, AND THAT IS A FIX.
+    # It bounded `seg` only, leaving `REF_PREFIX_RX.search(head)` running on the FULL
+    # head — real heads reach ~29 KB here. The widened `[^\s:]+` is super-linear on a
+    # dense run of `"`/`'`/`=`/`(` (those are in BOTH its leading class and its token
+    # class, so the runs overlap): MEASURED 2,312 ms on a 32 KB synthetic head, where
+    # the old enumerated class was 0.4 ms. Round 1 capped one regex and moved cost onto
+    # the other. Capping the head covers both.
+    # ⚠ Truncating can let `(?:^|…)` match mid-token, which only ever ADMITS a token
+    # the untruncated head would have rejected — and the git-verb half still has to
+    # match. Bounded and in the harmless direction.
+    head = cmd[:start][-GIT_VERB_SCAN_CAP:]
     if not head.endswith(":") or not REF_PREFIX_RX.search(head):
         return False
-    # The command segment this token belongs to — everything since the last separator,
-    # and only its last `GIT_VERB_SCAN_CAP` bytes (see the constant for the measured
-    # cost that bound exists for, and for why no real command reaches it).
-    seg = SEGMENT_SPLIT_RX.split(head)[-1][-GIT_VERB_SCAN_CAP:]
-    return bool(GIT_OBJECT_READ_RX.search(seg))
+    # The command segment this token belongs to — everything since the last separator.
+    return bool(GIT_OBJECT_READ_RX.search(SEGMENT_SPLIT_RX.split(head)[-1]))
 
 
 def _resolve(raw, bases, off_a_ref=False):
@@ -862,11 +891,20 @@ def _resolve(raw, bases, off_a_ref=False):
         before: A/claudedocs/handoff-z.md  (a path that is not there)
         after:  B/claudedocs/handoff-z.md  (the real one)
 
-    MEASURED over the transcript corpus: 24 payloads arm here that were silent before,
-    and 47 arm a DIFFERENT doc. That is a widening on a hook that can block a turn, so
-    it is stated rather than left to be rediscovered. It is also the right answer —
-    it is what fixes the wrong-base resolution behind most of the latched-but-absent
-    records on this host — and it is pinned by
+    🔴 THE NET DIRECTION IS A **NARROWING**, NOT A WIDENING, AND THIS PARAGRAPH SAID
+    THE OPPOSITE. It read "24 payloads arm here that were silent before, and 47 arm a
+    DIFFERENT doc". Both numbers were inherited from an audit report and written in
+    without re-derivation — the exact failure the note in `handoff_read_docs` had just
+    retracted, repeated in the commit that retracted it. Round 2 refuted them
+    STRUCTURALLY, and the argument is short enough to check here: HEAD returns a
+    candidate only if it passed `isdir`, which is the WHOLE of the old condition, so
+    anything HEAD arms the old code armed too. **"Silent before, arms now" is
+    impossible.** What the gate actually does in bulk is turn ARM into SILENT.
+
+    So, stated as what is provable rather than as a count nobody can reproduce: the
+    fallthrough can only ever change WHICH of several bases answers, never create an
+    arming out of nothing. It is the right answer — it is what fixes wrong-base
+    resolution — and it is pinned by
     `test_a_LATER_base_wins_when_the_earlier_one_lacks_the_doc`.
     """
     p = os.path.expanduser(raw)
