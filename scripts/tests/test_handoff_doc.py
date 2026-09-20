@@ -23,6 +23,7 @@ tmp_path.
 from __future__ import annotations
 
 import hashlib
+import importlib.machinery
 import importlib.util
 import inspect
 import os
@@ -7492,6 +7493,21 @@ A fixture.
 """ % ("E" * 900, "D" * 900, "R" * 900)
 
 
+def _auditor_module():
+    """`handoff-audit.py`, loaded the way the module under test loads it — so the
+    control below sees what production sees, including `RESUME_COST`, which lives
+    in the AUDITOR and not in `handoff_doc`."""
+    loader = importlib.machinery.SourceFileLoader("_ha_for_tests", str(hd._AUDITOR))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def _audit_text(text):
+    return _auditor_module().audit_text(text)
+
+
 def test_evictable_note_reports_each_closed_class_with_its_own_count():
     """The three detectors must be reported SEPARATELY. A single total would hide
     which action to take, and they have different remedies: a resolved
@@ -7530,9 +7546,45 @@ def test_evictable_note_states_a_SHORTFALL_rather_than_implying_it_clears():
 def test_evictable_note_NEVER_raises_when_the_auditor_is_absent(monkeypatch):
     """🔴 THIS RUNS INSIDE THE WRITE PATH. An exception here would take down
     `/handoff`'s only landing step and cost a session its record, to decorate a
-    warning. `handoff-audit.py` is a devrc script, so a repo vendoring only this
-    module legitimately has no such file — the ordinary case, not an error."""
+    warning.
+
+    ⚠ NARROW BY CONSTRUCTION: this exercises only the `is_file()` early return.
+    The import itself is covered by the two tests below, which is where the real
+    hole was."""
     monkeypatch.setattr(hd, "_AUDITOR", Path("/nonexistent/handoff-audit.py"))
+    assert hd.evictable_note(_EVICTABLE_DOC, 100) == ""
+
+
+def test_evictable_note_survives_a_SystemExit_from_the_auditors_own_import(
+        tmp_path, monkeypatch):
+    """🔴 REGRESSION TEST — `SystemExit` is NOT an `Exception`.
+
+    `handoff-audit.py:_load_sibling()` raises `SystemExit` at MODULE level when
+    `scripts/skill-audit.py` is missing, and SystemExit derives from
+    BaseException — so the original `except Exception` did not catch the one
+    import failure this function is most likely to meet. On the write path that
+    kills the write it was only decorating. Round 1 of #1815, F3.
+
+    RED at the pre-fix tip (SystemExit escapes), GREEN at HEAD."""
+    stub = tmp_path / "handoff-audit.py"
+    stub.write_text("raise SystemExit('the shared parser is missing')\n",
+                    encoding="utf-8")
+    monkeypatch.setattr(hd, "_AUDITOR", stub)
+    assert hd.evictable_note(_EVICTABLE_DOC, 100) == ""
+
+
+def test_evictable_note_survives_a_BROKEN_auditor_module(tmp_path, monkeypatch):
+    """The sibling failure modes that are ordinary Exceptions — a syntax error,
+    and a module that imports but has no `audit_text`. Both must degrade to "",
+    never to a traceback on the write path."""
+    bad = tmp_path / "handoff-audit.py"
+    bad.write_text("def (\n", encoding="utf-8")
+    monkeypatch.setattr(hd, "_AUDITOR", bad)
+    assert hd.evictable_note(_EVICTABLE_DOC, 100) == ""
+
+    empty = tmp_path / "empty-audit.py"
+    empty.write_text("# no audit_text here\n", encoding="utf-8")
+    monkeypatch.setattr(hd, "_AUDITOR", empty)
     assert hd.evictable_note(_EVICTABLE_DOC, 100) == ""
 
 
@@ -7619,3 +7671,121 @@ def test_the_rank_charge_explainer_IS_present_when_a_rank_is_offered():
     note = hd.evictable_note(with_rank, 0)
     assert "completed ranked items" in note, note
     assert "200 B per evicted rank" in note, note
+
+
+def test_evictable_note_pins_the_NET_NUMBER_not_only_the_verdict_word():
+    """🔴 CLOSES A MEASURED MUTATION GAP (round 1 of #1815, F6): every assertion
+    on this note was on the WORDS `CLEARS` / `does NOT clear`, so a mutant
+    swapping `net` for `gross` SURVIVED the whole suite — and `net` exists
+    precisely to charge RESUME_COST per rank whose NUMBER must survive eviction.
+
+    Asserts the arithmetic against a value derived from the FIXTURE, not from the
+    implementation: the doc has exactly one completed rank and no overlapping
+    blocks, so net is exactly RESUME_COST below the summed buckets."""
+    note = hd.evictable_note(_EVICTABLE_DOC, 0)
+    # ONLY the bucket rows: they are the lines carrying a count in parentheses.
+    # An earlier version of this matcher also swept up the `→ … net` line and the
+    # RESUME_COST explainer, making the assertion compare a number with itself.
+    rows = [int(m.replace(",", "")) for m in
+            re.findall(r"([\d,]+) B  \(", note)]
+    arrow = re.search(r"→ ([\d,]+) B", note)
+    assert arrow and len(rows) >= 3, note
+    net = int(arrow.group(1).replace(",", ""))
+    assert net == sum(rows) - _auditor_module().RESUME_COST, (
+        f"net {net:,} != buckets {sum(rows):,} - {_auditor_module().RESUME_COST} for the one rank; "
+        f"a gross-for-net swap passes every word-only assertion:\n{note}"
+    )
+
+
+def test_the_union_indices_match_each_buckets_tuple_shape():
+    """🔴 THE CONTROL THAT CAUGHT A DEFECT IN THIS FEATURE'S OWN FIX, made
+    permanent. The four buckets have THREE different tuple shapes and no
+    positional rule covers all of them, so the first draft of the union read
+    `retracted`'s END and BYTES as a line range. Because `evictable_note` wraps
+    everything in `except (Exception, SystemExit)`, the IndexError that followed
+    would have DELETED THE NOTE SILENTLY rather than failing loudly.
+
+    Two-way: every key in the map must exist in the auditor's output, and the
+    range those indices select must reproduce that bucket's OWN byte count."""
+    a = _audit_text(_EVICTABLE_DOC)
+    lines = _EVICTABLE_DOC.splitlines(keepends=True)
+    assert set(hd.AUDIT_SPAN_INDEX) <= set(a), (
+        "AUDIT_SPAN_INDEX names a bucket audit_text does not return: "
+        f"{set(hd.AUDIT_SPAN_INDEX) - set(a)}"
+    )
+    checked = 0
+    for key, (i, j) in hd.AUDIT_SPAN_INDEX.items():
+        for x in a[key]:
+            want = x[3] if key == "done" else x[-1]
+            got = len("".join(lines[x[i]:x[j]]).encode())
+            assert got == want, (
+                f"{key}: indices {(i, j)} select {got} B but the bucket reports "
+                f"{want} B — the tuple shape moved"
+            )
+            checked += 1
+    assert checked, "the fixture produced no ranges, so this test proved nothing"
+
+
+def test_evictable_note_does_not_DOUBLE_COUNT_a_block_in_two_buckets():
+    """🔴 REGRESSION TEST (round 1 of #1815, F5). An H3 can match RESOLVED_HEAD
+    and WORK_STATUS at once, so the auditor's `gross` adds the same bytes twice;
+    this note turns that number into the promise "CLEARS the N B you are over
+    by", where an overstatement means the author evicts everything named and is
+    still red. Measured on the real corpus: 7 of 851 docs overlap, worst 42.6%.
+
+    The heading below is the live shape from
+    `claudedocs/handoff-agent-overguarding.md` (✅/CLOSED and the word history)."""
+    doc = (
+        "# Handoff: x — 2026-09-20\n\n## Goal\ng\n\n"
+        "## Open investigations — live diagnosis state\n"
+        "### ✅ CLOSED 2026-09-14 — history exposure sized and left to the operator\n"
+        "- **Observed (with values):** " + "E" * 900 + "\n"
+    )
+    note = hd.evictable_note(doc, 0)
+    import re as _re
+    shown = [int(m.replace(",", "")) for m in _re.findall(r"([\d,]+) B", note)]
+    assert len(shown) >= 2, note
+    rows, net = shown[:-1], shown[-1]
+    assert net <= max(rows), (
+        f"net {net:,} exceeds the largest single bucket {max(rows):,}, so the same "
+        f"block was counted under two labels:\n{note}"
+    )
+
+
+def test_each_bucket_carries_the_PLAYBOOK_STEP_that_actually_applies():
+    """🔴 PINS THE FIX FOR F4, which a mutant walked through: relabelling the
+    step-2 buckets as step 1 changed nothing any other test could see.
+
+    `test_handoff_doc_size.py`'s ladder is step 1 EVICT WHAT HAS CLOSED, step 2
+    DEMOTE DATED EVIDENCE to `refs/` LEAVING A POINTER — and then, in terms, "DO
+    NOT satisfy this by deleting an open investigation, a gotcha or a ruled-out
+    theory". `retracted` is BY CONSTRUCTION bullets inside a Gotchas section, so
+    labelling it "step 1 — do this first" told the author to delete exactly what
+    the playbook forbids, in a block that then quotes the prohibition.
+
+    Asserts the pairing per bucket, not merely that the words appear somewhere."""
+    doc = (
+        "# Handoff: x — 2026-09-20\n\n## Goal\ng\n\n"
+        "## Open investigations — live diagnosis state\n"
+        "### RESOLVED — the thing that was wrong\n"
+        "- **Observed (with values):** " + "E" * 900 + "\n\n"
+        "## Next steps (ranked)\n1. DONE — shipped as abc1234. " + "D" * 900 + "\n"
+        "   forcing: none\n\n"
+        "## Gotchas / decisions / dead-ends\n"
+        "- 🔴 RETRACTED — this reasoning was wrong. " + "R" * 900 + "\n"
+    )
+    note = hd.evictable_note(doc, 0)
+    expected = {
+        "resolved investigations": 1,
+        "completed ranked items": 1,
+        "retracted / dead-ends": 2,
+    }
+    for label, step in expected.items():
+        row = next((l for l in note.splitlines() if label in l), None)
+        assert row, f"{label!r} missing from the note:\n{note}"
+        assert f"step {step}" in row, (
+            f"{label!r} is labelled the wrong playbook step — expected step {step}: {row!r}"
+        )
+    assert "MOVE to refs/" in note and "never a delete" in note, (
+        "the step-2 rows lost the MOVE-not-delete warning:\n" + note
+    )

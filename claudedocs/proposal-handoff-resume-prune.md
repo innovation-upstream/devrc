@@ -5,7 +5,7 @@ stack**, deletion on the table, changes land **inside the two existing skills** 
 `prune-*` sibling.
 
 > **STATUS, 2026-09-20 (updated after implementation started — read before acting on §4):**
-> **P4 is MERGED** to `handoff-resume-prune-proposal` (`b50709ca`), **minus its `/resume`
+> **P4 is COMMITTED** to `handoff-resume-prune-proposal` (`b50709ca`) — the branch, **not** `main`, **minus its `/resume`
 > half, which was deleted** — `/resume` is read-only re-entry and a corpus-maintenance
 > pointer there is prose nobody acts on (the-algorithm §1).
 > 🔴 **P2 is REFUTED AND DELETED — do not build it.** Measured below. Its premise (gotcha
@@ -15,7 +15,7 @@ stack**, deletion on the table, changes land **inside the two existing skills** 
 > The archive rule that already exists keeps live docs young, so P2 would have duplicated a
 > working mechanism.
 >
-> 🔴 **P1 AS WRITTEN IS RETRACTED; P1′ SHIPPED** (`97fee3d0`). `claudedocs/refs/` is
+> 🔴 **P1 AS WRITTEN IS RETRACTED; P1′ COMMITTED** (`97fee3d0`, on the branch — nothing here is on `main`). `claudedocs/refs/` is
 > measurably outside the `handoff_search` corpus, and the authoritative playbook forbids
 > moving gotchas or open threads there for exactly that reason — so "demote the APPEND
 > buckets" meant "delete, for retrieval". The corrected item is the playbook's own step 1:
@@ -365,10 +365,10 @@ makes P1 auditable rather than felt.
 
 | # | change | files | risk | status |
 |---|---|---|---|---|
-| P4 | routing line (handoff only) | `handoff/SKILL.md`, `handoff-audit.py` | none | **MERGED `b50709ca`** |
+| P4 | routing line (handoff only) | `handoff/SKILL.md`, `handoff-audit.py` | none | **on this branch, `b50709ca` — NOT merged** |
 | P2 | stamp + age APPEND buckets | — | — | 🔴 **REFUTED, deleted** |
 | P3 | paste-ready DoD offer | — | — | 🔴 **DELETED** — remedy already printed |
-| P1′ | per-doc evictable backlog in `budget_warning()` | `handoff_doc.py`, `handoff-audit.py` | none (prints only) | **MERGED `97fee3d0`**, verified live |
+| P1′ | per-doc evictable backlog in `budget_warning()` | `handoff_doc.py`, `handoff-audit.py` | none (prints only) | **on this branch, `97fee3d0` — NOT merged**; verified live |
 
 **Nothing remains to build.** One shipped as specified (P4), one shipped corrected (P1′), two
 deleted by measurement (P2, P3).

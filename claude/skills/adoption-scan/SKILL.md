@@ -69,7 +69,11 @@ once per copy — the files are distinct, the event is not. **Dedupe by `tool_us
 stable across every copy (the same field the provenance fix already reads, used as an identity
 rather than a class). MEASURED 2026-09-20 sweeping `handoff_doc.py` refusals over 1,328 transcripts:
 ~8,500 raw matches → **5,095 distinct, i.e. 40% were copies**, and the per-status ranking moved.
-Provenance and dedup are INDEPENDENT — a sweep that fixes only the first still over-counts. Worked instrument:
+Provenance and dedup are INDEPENDENT — a sweep that fixes only the first still over-counts.
+🔴 **INCLUDING THE WORKED INSTRUMENT NAMED BELOW:** `audit-rule-firing-sweep.py` reads
+`tool_use_id` to resolve a tool NAME for provenance and keys no dedup on it, so it is
+precisely "a sweep that fixes only the first". Follow it for the provenance half; add the
+dedup yourself. Worked instrument:
 `scripts/audit-rule-firing-sweep.py` (+ `scripts/tests/test_audit_rule_firing_sweep.py`), which
 also carries the two traps that make such a sweep read a confident zero: an `rg` pre-pass reads RAW
 JSON while the matcher reads DECODED text, so an `ensure_ascii` transcript hides every non-ASCII
