@@ -16,7 +16,7 @@ const ORG = "11111111-1111-4111-8111-111111111111";
 const NAME = "user@example.com's Organization";
 
 const SW = await import("../extension/service_worker.js");
-const { badgeFor, formatBadgePct, severityColor } = SW;
+const { badgeFor, formatBadgePct } = SW;
 const { normalizeUsage } = await import("../extension/lib/normalize.js");
 // The widget's own entry points, so the badge/widget agreement test below
 // compares the two SHIPPED paths rather than re-deriving either of them here.
@@ -44,28 +44,12 @@ test(">2-digit values clamp to '99+' -- the badge never truncates to a lie", () 
   assert.equal(formatBadgePct(undefined), "?");
 });
 
-test("severity colors: known strings map, and ABSENCE is no longer green", () => {
-  assert.equal(severityColor("high"), "#d93025");
-  assert.equal(severityColor("critical"), "#d93025");
-  assert.equal(severityColor("medium"), "#f9ab00");
-  assert.equal(severityColor("elevated"), "#f9ab00");
-  assert.equal(severityColor("low"), "#31a73c");
-  assert.equal(severityColor("none"), "#31a73c");
-  assert.equal(severityColor("sev_from_a_future_release"), "#f9ab00",
-    "an unknown severity must not render as OK");
-
-  // 🔴 CHANGED 2026-09-19, and the old expectation was the BUG, not the spec.
-  // This test used to assert green for both of these, under the heading
-  // "absence is green". That is what let a 99%-utilized account with no
-  // severity row (`limits: null` -- a shape recon actually saw) paint a calm
-  // green badge: absence of information was being rendered as absence of
-  // problems. Both are now amber/unknown, and badgeFor takes the WORSE of
-  // this and the percent band, so the percentage supplies the real answer.
-  assert.equal(severityColor(null), "#f9ab00",
-    "absence is UNKNOWN, not OK -- see the 99%-with-no-severity case below");
-  assert.equal(severityColor(""), "#f9ab00",
-    "empty string is absence, and absence is not a clean bill of health");
-});
+// The old `severityColor()` export is GONE, not merely deprecated. It had one
+// caller, badgeFor, which now goes through lib/severity.js; keeping it would
+// have left a function nothing calls, pinned by five assertions, whose body
+// re-introduced the very null-vs-unknown conflation lib/severity.js warns
+// about. Its severity-string mapping is covered by severityTone() in
+// severity.test.mjs, where the single implementation now lives.
 
 function accountWith(sessionUtil, asOf = NOW) {
   const r = rec(asOf);

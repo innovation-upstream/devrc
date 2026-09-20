@@ -50,6 +50,21 @@ test("an UNREADABLE severity is 'unknown' -- a real vote, not silence", () => {
   assert.equal(S.severityTone("CRITICAL"), "unknown", "the map is case-sensitive on purpose");
 });
 
+test("a severity named after an Object.prototype member is not a tone", () => {
+  // A bare `SEVERITY_TONES[severity]` returns Object's own constructor for
+  // "constructor" -- truthy, so `|| "unknown"` never fires and a FUNCTION is
+  // handed back as a tone. It reaches the widget as a CSS class matching no
+  // rule (bar renders invisible) while the badge's colour fallback still
+  // lands amber: the two surfaces disagreeing about one record, which is the
+  // single thing this module exists to prevent.
+  for (const key of ["constructor", "__proto__", "toString", "valueOf", "hasOwnProperty"]) {
+    const tone = S.severityTone(key);
+    assert.equal(typeof tone, "string", `${key} produced a ${typeof tone}`);
+    assert.ok(S.TONE_ORDER.includes(tone), `${key} -> ${tone}, not a real tone`);
+    assert.equal(tone, "unknown");
+  }
+});
+
 test("an unreadable severity is NOT dropped when the percentages are calm", () => {
   // The distinction above has to survive the combination, or it is decorative:
   // a quiet source yields, a loud-but-unreadable one does not.
@@ -78,6 +93,30 @@ test("percentTone thresholds are inclusive at exactly WARN_PCT and CRIT_PCT", ()
   assert.equal(S.percentTone(S.WARN_PCT, null), "warn");
   assert.equal(S.percentTone(S.CRIT_PCT - 0.1, null), "warn");
   assert.equal(S.percentTone(S.CRIT_PCT, null), "crit");
+});
+
+test("🔴 the bands sit at LITERAL 80 and 95 -- not merely wherever the constants point", () => {
+  // Every assertion above is written in terms of the constants, so it moves
+  // WITH a mutant that moves them and cannot witness one. Measured: CRIT_PCT
+  // could be changed to 95.5, 96 or 97 and the entire 130-test suite stayed
+  // GREEN. The only literal witness to the crit band was a stray `97` in
+  // another test, which is what bounded the surviving window at ~2 points.
+  //
+  // WARN_PCT escaped this only by accident -- thresholds.test.mjs pins the
+  // TOAST at a literal 80, and the toast threshold is assigned from WARN_PCT.
+  // CRIT_PCT has no toast (by design; the 80 crossing already fired one) and
+  // so had no literal anywhere. These are that missing witness, on both sides
+  // of each boundary, in literals that CANNOT move with the constant.
+  assert.equal(S.WARN_PCT, 80);
+  assert.equal(S.CRIT_PCT, 95);
+
+  assert.equal(S.percentTone(79.9, null), "ok");
+  assert.equal(S.percentTone(80, null), "warn");
+  assert.equal(S.percentTone(94.9, null), "warn");
+  assert.equal(S.percentTone(95, null), "crit");
+  assert.equal(S.percentTone(95.5, null), "crit", "the window a mutant survived in");
+  assert.equal(S.percentTone(96, null), "crit");
+  assert.equal(S.percentTone(97, null), "crit");
 });
 
 test("no usable number at all is null -- no vote -- and specifically not 'ok'", () => {

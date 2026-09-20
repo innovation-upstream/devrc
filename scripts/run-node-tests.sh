@@ -249,7 +249,15 @@ SUITES=(
   # consolidates them and brings severity.test.mjs. 10 files / 130 tests.
   # Floors: 10 - min(50, max(1, 10/20)) = 9 files;
   # 130 - min(50, max(1, 130/20)) = 123.5 -> 124 tests.
-  "scripts/claude-usage/tests|9|124"
+  #
+  # Re-measured after round 1 of the audit found the shipped widget DEAD ON
+  # ARRIVAL -- lib/severity.js was missing from the manifest's
+  # web_accessible_resources, so its page-context dynamic import rejected and
+  # the content script's catch swallowed it. manifest.test.mjs now pins the
+  # web-accessible set against widget.js's real import closure. 11 files /
+  # 140 tests. Floors: 11 - min(50, max(1, 11/20)) = 10 files;
+  # 140 - min(50, max(1, 140/20)) = 133 tests.
+  "scripts/claude-usage/tests|10|133"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree; js-source:

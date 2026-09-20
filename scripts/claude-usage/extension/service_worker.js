@@ -28,7 +28,6 @@ import {
 } from "./lib/timefmt.js";
 import {
   WARN_PCT,
-  severityTone,
   toneColor,
   toneForRecord,
 } from "./lib/severity.js";
@@ -228,21 +227,6 @@ export function formatBadgePct(p) {
   const n = Math.round(p);
   if (n >= 100) return "99+"; // badge clamp: >2 digits never shown
   return String(n);
-}
-
-/**
- * DEPRECATED, kept only so the shape of the old mapping stays testable and
- * greppable: the badge no longer colours from the severity string ALONE.
- *
- * 🔴 It had a hole, and this is the sentence that should have existed: an
- * absent or empty severity returned GREEN, so an account at 99% whose payload
- * carried no severity row (`limits: null` is a shape recon actually saw)
- * painted a calm badge. `badgeFor` now goes through lib/severity.js, which
- * takes the WORSE of this signal and the percent band, so a missing severity
- * can no longer calm a high percentage.
- */
-export function severityColor(severity) {
-  return toneColor(severityTone(severity));
 }
 
 /**

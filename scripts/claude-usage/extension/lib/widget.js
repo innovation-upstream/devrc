@@ -16,7 +16,7 @@
 
 import { formatCountdown, isStale, stalenessLabel } from "./timefmt.js";
 import { creditsLine, formatPct } from "./format.js";
-import { CRIT_PCT, WARN_PCT, toneForRecord } from "./severity.js";
+import { CRIT_PCT, WARN_PCT, percentTone, toneForRecord } from "./severity.js";
 
 // Re-exported so the widget's own callers and tests keep addressing them here
 // while there is ONE implementation, in lib/severity.js, shared with the
@@ -89,7 +89,13 @@ export function widgetModel(record, now) {
       empty: true,
       name: "Claude usage",
       note: "Waiting for the first snapshot…",
-      tone: "unknown",
+      // Must match what toneFor(null) says, and what the BADGE shows for the
+      // same absence of data (badgeFor with no record paints grey). It read
+      // "unknown"/amber here while both of those said "stale"/grey, so a
+      // first-ever page load had the toolbar reporting "no data" and the page
+      // reporting "warning" about the identical state -- with this file
+      // containing both answers.
+      tone: toneFor(null, now),
       stale: false,
       asOf: "",
       rows: [],
@@ -103,12 +109,22 @@ export function widgetModel(record, now) {
   const wkPct = record.weekly && record.weekly.utilization;
   const cd = formatCountdown(record.session && record.session.resetsAt, now);
 
+  // 🔴 EACH BAR IS COLOURED BY ITS OWN WINDOW, not by the record's tone. The
+  // record tone is the WORSE of session and weekly, which is right for the
+  // card's overall signal and the collapsed pill -- but painting every bar
+  // with it made a 5%-wide Session bar render RED whenever the weekly window
+  // was critical, i.e. the bar misreported the very window it measures.
+  // Staleness still greys everything, since no individual number is
+  // trustworthy once the snapshot is old.
+  const rowTone = (v) => (stale ? "stale" : (percentTone(v, null) || "unknown"));
+
   const rows = [
     {
       key: "session",
       label: "Session",
       value: formatPct(sessPct),
       bar: clampPct(sessPct),
+      tone: rowTone(sessPct),
       // "resets soon" already carries its verb; a bare countdown gets one.
       meta: cd === "resets soon" ? cd : `resets ${cd}`,
     },
@@ -117,6 +133,7 @@ export function widgetModel(record, now) {
       label: "Weekly",
       value: formatPct(wkPct),
       bar: clampPct(wkPct),
+      tone: rowTone(wkPct),
       meta: weeklyMeta(record, now),
     },
   ];
@@ -127,6 +144,10 @@ export function widgetModel(record, now) {
       label: "Claude Code",
       value: formatPct(record.codeWeeklyPercent),
       bar: clampPct(record.codeWeeklyPercent),
+      // This row is a SHARE of the weekly window, not a quota of its own, so
+      // it is never alarming on its own terms -- 100% of your weekly usage
+      // being Claude Code says nothing about how close to a limit you are.
+      tone: stale ? "stale" : "ok",
       meta: "of weekly",
     });
   }

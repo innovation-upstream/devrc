@@ -204,6 +204,46 @@ test("an unknown weekly reset renders NOTHING, not the word 'unknown' twice", ()
   assert.equal(weeklyMeta(new Date(NOW + 2 * 3600 * 1000).toISOString()), "resets 2h0m");
 });
 
+test("🔴 each bar is coloured by ITS OWN window, not the record's worst", () => {
+  // The record tone is the worse of session and weekly -- right for the card
+  // and the pill, wrong for a per-window bar. Painting every bar with it made
+  // a 5%-wide Session bar render RED whenever the weekly window was critical:
+  // the bar misreporting the very window it measures.
+  const r = rec(ORG_A, NAME_A);
+  r.severity = null;
+  r.session.utilization = 5;
+  r.weekly.utilization = 97;
+  const m = W.widgetModel(r, NOW);
+  assert.equal(m.tone, "crit", "the record as a whole IS critical");
+  assert.equal(m.rows.find((x) => x.key === "session").tone, "ok",
+    "...but a 5% session window is not");
+  assert.equal(m.rows.find((x) => x.key === "weekly").tone, "crit");
+});
+
+test("the Claude Code row is a SHARE, so it never alarms on its own", () => {
+  // 100% of your weekly usage being Claude Code says nothing about how close
+  // to a limit you are, so this row must not borrow the crit band.
+  const r = rec(ORG_A, NAME_A);
+  r.severity = null;
+  r.codeWeeklyPercent = 99;
+  assert.equal(W.widgetModel(r, NOW).rows.find((x) => x.key === "code").tone, "ok");
+});
+
+test("staleness greys every bar, not just the card", () => {
+  const r = rec(ORG_A, NAME_A, NOW - 7 * 3600 * 1000);
+  r.session.utilization = 99;
+  for (const row of W.widgetModel(r, NOW).rows) {
+    assert.equal(row.tone, "stale", `${row.key} kept a live colour on a stale record`);
+  }
+});
+
+test("the waiting state agrees with toneFor AND with the badge", () => {
+  // widgetModel hardcoded "unknown" here while toneFor(null) returned
+  // "stale", so a first-ever page load had this file giving two answers for
+  // one state -- and the toolbar (grey) disagreeing with the page (amber).
+  assert.equal(W.widgetModel(null, NOW).tone, W.toneFor(null, NOW));
+});
+
 test("the waiting state is an instruction, never a row of zeroes", () => {
   const m = W.widgetModel(null, NOW);
   assert.equal(m.empty, true);

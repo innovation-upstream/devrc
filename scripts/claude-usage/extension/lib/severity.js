@@ -91,7 +91,17 @@ export function worstTone(a, b) {
  * invented later is a real signal we cannot read, and must not read as calm. */
 export function severityTone(severity) {
   if (typeof severity !== "string" || !severity) return null;
-  return SEVERITY_TONES[severity] || "unknown";
+  // 🔴 hasOwnProperty, not a bare lookup. `SEVERITY_TONES["constructor"]`
+  // returns Object's constructor FUNCTION, which is truthy, so a bare
+  // `|| "unknown"` hands that function back as a tone. It then reaches the
+  // widget as a CSS class (`t-function Object() { [native code] }`), matching
+  // no rule, so the bar renders invisible -- while the badge's own colour
+  // fallback still lands on amber. That is the two surfaces disagreeing about
+  // one record, the exact thing this module exists to prevent. Reachable only
+  // if the API emits a severity named after an Object.prototype member, which
+  // is why it is cheap to close rather than worth arguing about.
+  if (!Object.prototype.hasOwnProperty.call(SEVERITY_TONES, severity)) return "unknown";
+  return SEVERITY_TONES[severity];
 }
 
 /** The higher of two utilizations -> a tone, or null when neither is usable.

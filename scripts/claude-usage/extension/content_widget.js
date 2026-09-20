@@ -55,9 +55,13 @@
     ".root{font-family:ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;",
     "font-size:12px;line-height:1.4;color:#1f2328;-webkit-font-smoothing:antialiased}",
 
+    // pointer-events re-enabled here only: the HOST is `none` so clicks that
+    // miss the drawn card/pill fall through to claude.ai underneath.
     ".card{width:232px;background:#fffefb;border:1px solid rgba(0,0,0,.12);",
-    "border-radius:12px;padding:10px 12px 8px;box-shadow:0 4px 16px rgba(0,0,0,.13)}",
+    "border-radius:12px;padding:10px 12px 8px;box-shadow:0 4px 16px rgba(0,0,0,.13);",
+    "pointer-events:auto}",
     ".card.stale{opacity:.72}",
+    ".card.dead{opacity:.6}",
 
     ".head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}",
     ".name{font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
@@ -82,7 +86,8 @@
     ".pill{all:unset;cursor:pointer;display:flex;align-items:center;gap:6px;",
     "background:#fffefb;border:1px solid rgba(0,0,0,.12);border-radius:999px;",
     "padding:5px 10px 5px 8px;box-shadow:0 3px 10px rgba(0,0,0,.13);",
-    "font-family:inherit;font-size:12px;font-weight:600;color:#1f2328;font-variant-numeric:tabular-nums}",
+    "font-family:inherit;font-size:12px;font-weight:600;color:#1f2328;",
+    "font-variant-numeric:tabular-nums;pointer-events:auto}",
     ".pill:hover{background:#fff}",
     ".dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}",
 
@@ -139,7 +144,13 @@
       // Just under the 32-bit max: above claude.ai's overlays, still leaving
       // room for anything that deliberately wants to sit on top.
       "z-index: 2147483000",
-      "pointer-events: auto",
+      // 🔴 `none` on the HOST, re-enabled on the card and pill inside the
+      // shadow root. The host is a full-width-of-its-content box pinned over
+      // claude.ai's bottom-right corner, which is where its composer controls
+      // sit on a narrow (tiled) window -- with `auto` here, the host's own
+      // padding and any future margin would swallow clicks meant for the
+      // page. Only the pixels we actually draw should be clickable.
+      "pointer-events: none",
     ].join(";");
     document.documentElement.appendChild(hostEl);
     shadow = null;                                   // new host needs a new root
@@ -226,7 +237,7 @@
         val.className = "value";
         val.textContent = row.value;
         top.append(lab, val);
-        r.append(top, bar(row.bar, model.tone));
+        r.append(top, bar(row.bar, row.tone || model.tone));
         if (row.meta) {
           var meta = document.createElement("div");
           meta.className = "meta";
@@ -270,13 +281,43 @@
     render();                                        // don't wait for the round-trip
   }
 
+  /**
+   * The extension context is gone (reload/update/uninstall with this page
+   * open). Everything we could still show is frozen at whatever the last
+   * paint said, and because the "as of" line is computed AT RENDER TIME it
+   * would keep reading "just now" in green for the rest of the tab's life --
+   * the one surface that can no longer update would be the one most
+   * confidently claiming freshness, which inverts this extension's whole
+   * thesis that a stale number must LOOK stale.
+   *
+   * So: stop the tick, and replace the card with a terminal note rather than
+   * leaving a confident lie on screen.
+   */
+  function retire() {
+    if (timer !== null) { clearInterval(timer); timer = null; }
+    try {
+      if (!shadow) return;
+      var root = shadow.querySelector(".root");
+      if (!root) return;
+      root.textContent = "";
+      var card = document.createElement("div");
+      card.className = "card dead";
+      var note = document.createElement("div");
+      note.className = "note";
+      note.textContent = "Claude usage — extension reloaded. Refresh to resume.";
+      card.appendChild(note);
+      root.appendChild(card);
+    } catch (e) { /* the page is tearing down too; nothing to do */ }
+  }
+
   function render() {
     var c = ext();
-    if (!c || !mod) return;
+    if (!c) { retire(); return; }
+    if (!mod) return;
     var getting;
     try {
       getting = c.storage.local.get(["accounts", "lastActiveOrg", mod.COLLAPSE_KEY]);
-    } catch (e) { return; }
+    } catch (e) { retire(); return; }
     if (!getting || typeof getting.then !== "function") return;
     getting.then(function (got) {
       var now = Date.now();
@@ -309,7 +350,22 @@
         });
       } catch (e) { /* no live updates; the tick still refreshes */ }
       if (timer === null) timer = setInterval(render, TICK_MS);
-    }).catch(function () { /* module unavailable (reload mid-load): no widget */ });
+    }).catch(function (e) {
+      // 🔴 THE ONE FAILURE THAT MUST NOT BE SILENT. Every other catch in this
+      // file is a page-teardown race where quiet is correct. This one is
+      // different: the overwhelmingly likely cause is that a module in
+      // lib/widget.js's import graph is missing from the manifest's
+      // `web_accessible_resources`, which makes the whole widget DEAD ON
+      // ARRIVAL with no other observable symptom -- exactly how the
+      // severity.js omission shipped. This console line is in the ISOLATED
+      // world, so claude.ai's own scripts cannot see it, and it is the only
+      // thread an operator has to pull. tests/manifest.test.mjs now catches
+      // this case before it ships; the log is the belt to that braces.
+      try {
+        console.warn("[claude-usage] widget failed to load its modules —"
+          + " check web_accessible_resources in manifest.json:", e);
+      } catch (_) { /* console gone during teardown */ }
+    });
   }
 
   boot();
