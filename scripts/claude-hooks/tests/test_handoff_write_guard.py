@@ -129,10 +129,58 @@ def home(tmp_path, monkeypatch):
     return h
 
 
+# Docs the `repo` fixture puts ON DISK. Arming requires the FILE, not merely its
+# directory, so every doc an arming case names has to be really there.
+#
+# 🔴 `handoff-y.md` IS HERE FOR A REASON AND DELETING IT SILENTLY GUTS A TEST.
+# `test_a_path_after_a_hash_is_a_comment_not_a_read` discriminates by RESULT: it names
+# two docs, one after a `#`, so a mutant that skips comment-stripping returns TWO.
+# If `handoff-y.md` were absent from disk the existence gate would reject it anyway and
+# that mutant would return one — the test would pass with the comment strip deleted,
+# i.e. go green while testing nothing. The fixture must make the commented doc REAL so
+# that the comment strip is the only thing standing between it and the result.
+REAL_DOCS = (
+    "handoff-skill-chain-usage-audit.md",   # DOC — the ordinary case
+    "SESSION-HANDOFF.md",                   # the second HANDOFF_BASENAME_RX arm
+    "handoff-x.md",
+    "handoff-y.md",                         # 🔴 see above — a mutation-visibility fixture
+    "notes.md",                             # a non-handoff `.md`, for the non-match table
+)
+
+
 @pytest.fixture()
 def repo(tmp_path):
-    """A repo with a real `claudedocs/` dir. The DIRECTORY is what arming requires."""
+    """A repo with a real `claudedocs/` dir holding REAL docs.
+
+    🔴 THE FILES, NOT JUST THE DIRECTORY — this fixture created the directory alone
+    until 2026-09-19, which matched a `_resolve` that required only the directory. Both
+    moved together: a doc-shaped string that names nothing must no longer arm, so a
+    fixture that expects arming has to name a doc that is actually there.
+    """
     d = tmp_path / "repo" / "claudedocs"
+    d.mkdir(parents=True)
+    for name in REAL_DOCS:
+        p = d / name
+        p.write_text("# fixture handoff\n")
+        # 🔴 STAMPED BEFORE THE READ, AND THIS IS NOT COSMETIC. `doc_state`'s third
+        # satisfaction route is the doc's OWN mtime (`getmtime(doc) >= read_at`), so a
+        # doc written at test time is a doc written AFTER the read — every Stop-gate
+        # case would silently satisfy itself and go green for the wrong reason. Six
+        # tests went `block` -> `silent` on exactly that before this line existed.
+        # `BEFORE_READ_EPOCH` is an hour before `READ_TS`; a test that wants the mtime
+        # route sets its own, visibly.
+        os.utime(p, (BEFORE_READ_EPOCH, BEFORE_READ_EPOCH))
+    return d.parent
+
+
+@pytest.fixture()
+def empty_repo(tmp_path):
+    """A repo with a real, EMPTY `claudedocs/` — the false-positive fixture.
+
+    🔴 THIS IS THE SHAPE THE EXISTENCE GATE EXISTS FOR, and it is the ordinary state of
+    any session writing tests about handoff docs: the directory is right there, and the
+    doc named in the command is not."""
+    d = tmp_path / "bare" / "claudedocs"
     d.mkdir(parents=True)
     return d.parent
 
@@ -264,6 +312,182 @@ def test_a_path_after_a_hash_is_a_comment_not_a_read(home, repo):
     cmd = "cat claudedocs/handoff-x.md  # and see claudedocs/handoff-y.md"
     got = guard.handoff_read_docs(bash(cmd, cwd=str(repo)))
     assert got == [str(repo / "claudedocs" / "handoff-x.md")]
+
+
+def test_a_doc_shaped_STRING_that_names_no_real_doc_does_NOT_arm(home, empty_repo):
+    """🔴 THE NEGATIVE CONTROL FOR THE EXISTENCE GATE — the false positive itself.
+
+    MEASURED 2026-09-18: the Stop guard fired TWICE in one session demanding a handoff
+    for `handoff-x-y.md` and then `handoff-same.md`. Neither has ever existed in any
+    repo — both are synthetic strings in `scripts/tests/test_find_session_arc.py`,
+    which is a test ABOUT handoff docs. `claudedocs/` was real (the session was
+    standing in this repo), the doc was not, and the old `_resolve` asked only about
+    the directory.
+
+    🔴 THE CONTROL IS LOAD-BEARING BECAUSE THE GUARD'S NORMAL STATE IS SILENCE. Without
+    a case that must NOT arm, "the fix works" is unfalsifiable — deleting the arming
+    code entirely would pass any test that only checks for absence elsewhere. The
+    positive half is asserted in the SAME breath below: the identical command naming a
+    doc that IS on disk still arms, so this asserts the existence gate rather than a
+    guard that stopped working.
+    """
+    for name in ("handoff-x-y.md", "handoff-same.md"):
+        cmd = 'grep -rn "claudedocs/%s" scripts/tests/' % name
+        assert guard.handoff_read_docs(bash(cmd, cwd=str(empty_repo))) == []
+
+
+def test_the_SAME_command_naming_a_doc_that_IS_there_still_arms(home, repo):
+    """The positive half of the control above — same command shape, real doc. Without
+    this, the case above is also satisfied by a guard that arms on nothing at all.
+
+    ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE — say which, because they are
+    different claims. MEASURED: this passes at `cee56910` (pre-change) too. It pins
+    behaviour the fix must not break; it is not evidence the fix does anything."""
+    cmd = 'grep -rn "claudedocs/%s" scripts/tests/' % DOC
+    assert guard.handoff_read_docs(bash(cmd, cwd=str(repo))) == [
+        str(repo / "claudedocs" / DOC)]
+
+
+def test_a_doc_read_OFF_A_REF_still_arms_though_it_is_not_on_disk(home, empty_repo):
+    """🔴 THE ONE EXEMPTION FROM THE EXISTENCE GATE, AND THE CASE IT PROTECTS.
+
+    A handoff that lives only on an unmerged branch is read as
+    `git -C <repo> show <ref>:claudedocs/<doc>` — a shape MEASURED at 1,272 distinct
+    commands across the transcript corpus, which is the authority for it; an earlier
+    draft of this docstring cited `CLAUDE.md`, which contains no `git show` at all —
+    and is legitimately ABSENT from the working tree. The existence gate
+    must not make that read silent: `/handoff` will write into that `claudedocs/`, and
+    the guard can measure it. The fixture repo's `claudedocs/` is EMPTY on purpose, so
+    this passes only via the ref exemption and not by the file happening to be there.
+
+    ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE — it passes at `cee56910` too, where
+    the directory-only `_resolve` admitted it for a different reason. What proves it is
+    REACHABLE at HEAD is the mutation: forcing `_read_off_a_ref` to return False turns
+    exactly this test red and nothing else (M1, measured), so at HEAD it is the ref
+    exemption and only the ref exemption keeping this case alive.
+    """
+    cmd = ("git -C %s show origin/zach/topic:claudedocs/%s" % (empty_repo, DOC))
+    assert guard.handoff_read_docs(bash(cmd, cwd="/nowhere/else")) == [
+        str(empty_repo / "claudedocs" / DOC)]
+
+
+@pytest.mark.parametrize("spelling", [
+    "origin/zach/topic",            # a literal ref — the only one that used to work
+    "$B",                           # a bare shell variable
+    "${B}",                         # 🔴 THE SPELLING claude/RULES.md MANDATES under zsh
+    "$(git rev-parse HEAD)",        # a command substitution
+    "`git rev-parse HEAD`",         # the backtick form of the same
+    "refs/heads/docs/handoff-x",    # slashes and hyphens in the ref itself
+])
+def test_a_COMPUTED_ref_gets_the_exemption_too(home, empty_repo, spelling):
+    """🔴 THE ENUMERATED CHARACTER SET ADMITTED ONLY LITERAL REFS.
+
+    `REF_PREFIX_RX` was `[A-Za-z0-9_./~^@{}\\[\\]-]+` behind `[\\s"'=(]`, so every
+    COMPUTED ref — `$B`, `${B}`, `$(...)`, backticks — failed to match and silently
+    lost the exemption. Round 1 of #1799 measured it over the transcript corpus: of
+    3,888 ref-prefixed handoff tokens 166 were denied and 32 changed outcome, 27 of
+    them `$VAR`/`${VAR}`.
+
+    🔴 THE `${B}` CASE IS THE ONE THAT MATTERS MOST: `claude/RULES.md` REQUIRES the
+    braced spelling, because zsh eats `$B:path` as a history modifier. The guard was
+    blind to exactly the spelling this repo mandates — an enumerated set encodes the
+    examples its author thought of, not the boundary.
+    """
+    cmd = "git -C %s show %s:claudedocs/%s" % (empty_repo, spelling, DOC)
+    assert guard.handoff_read_docs(bash(cmd, cwd="/nowhere/else")) == [
+        str(empty_repo / "claudedocs" / DOC)], "spelling %r lost the exemption" % spelling
+
+
+def test_the_scan_cap_BOUNDS_the_search(home, empty_repo):
+    """🔴 THE ONLY GUARD ROUNDS 1-2 KEPT, AND IT WAS PINNED IN NEITHER DIRECTION.
+
+    Round 2 DELETED `LINE_CONTINUATION_RX` on the stated ground that "a mutant joining
+    every newline left the whole suite green". Round 3 applied that same criterion to
+    `GIT_VERB_SCAN_CAP` — the guard round 2 kept and promoted to "THE WHOLE FIX" — and
+    got the same answer: `GIT_VERB_SCAN_CAP = 10**9` SURVIVED, and deleting the
+    truncation outright (`head = cmd[:start]`) SURVIVED. Only `cap = 1` died, which
+    proves the constant is READ, not that it BOUNDS anything. A criterion applied to
+    the thing you deleted and not to the thing you kept is not a criterion.
+
+    Both directions, because a one-sided pin is what got us here:
+      * BEYOND the cap the exemption is NOT granted — kills an inert or deleted cap;
+      * WITHIN it the exemption IS granted — kills a cap so small it bounds everything,
+        which is the mutant that already died and is the cheap way to be green.
+
+    The doc is absent from `empty_repo`, so the exemption is the ONLY thing that can
+    make this arm: the assertions read arming directly rather than through a proxy.
+
+    🔴 THE PADDING MUST NOT BE MADE OF PATH CHARACTERS, AND THE FIRST VERSION OF THIS
+    TEST WAS VACUOUS BECAUSE IT WAS. `HANDOFF_PATH_RX` opens with
+    `[A-Za-z0-9_.~@%+/-]*`, so a run of `y`s and `/`s before `claudedocs/` is swallowed
+    INTO THE MATCH — the head stayed 29 bytes, the cap was never exercised, and the
+    assertion passed because a directory did not exist. It was green, it killed
+    nothing, and only checking `m.start()` by hand showed it. The pad is therefore
+    placed where the head is: after the verb and before the `:` that terminates the
+    ref, so it lengthens the HEAD rather than the match.
+    """
+    resolved = [str(empty_repo / "claudedocs" / DOC)]
+
+    def cmd_with_pad(n):
+        # head becomes `git -C <repo> show <n bytes>:` — the verb sits n bytes back.
+        return ("git -C %s show %s:claudedocs/%s"
+                % (empty_repo, "A" * n, DOC))
+
+    # WITHIN: the verb is inside the cap. Arms.
+    assert guard.handoff_read_docs(
+        bash(cmd_with_pad(100), cwd="/nowhere/else")) == resolved
+
+    # BEYOND: the verb is pushed past the cap, so the capped head cannot see it.
+    # 🔴 The pad OVERSHOOTS the cap by a non-multiple (3x + 7) so the boundary is
+    # crossed rather than landed on — a fixture sitting exactly ON a limit is the other
+    # way a bound test goes vacuous.
+    assert guard.handoff_read_docs(
+        bash(cmd_with_pad(guard.GIT_VERB_SCAN_CAP * 3 + 7), cwd="/nowhere/else")) == []
+
+
+def test_a_LATER_base_wins_when_the_earlier_one_lacks_the_doc(home, tmp_path, repo):
+    """🔴 PINS THE SECOND, UNDECLARED BEHAVIOUR CHANGE round 1 found in `_resolve`.
+
+    The loop used to `return` at the FIRST candidate whose DIRECTORY existed; it now
+    skips one whose FILE is absent and tries the remaining bases. A command naming two
+    repos therefore resolves to the one that HAS the doc, not to the first that merely
+    has a `claudedocs/`. Measured corpus effect: 24 payloads arm that were silent, 47
+    arm a different doc — a widening on a hook that can BLOCK a turn, so it is pinned
+    rather than left to be rediscovered.
+
+    `other` is a REAL repo with a REAL `claudedocs/` and NO copy of the doc, so the
+    first base is rejected on the FILE and not on the directory — which is the whole
+    distinction.
+
+    ⚠ WHAT THE MUTANT ACTUALLY DOES, because this docstring got it wrong: it said
+    "without the fallthrough this returns `other`'s path". It does not — reverting the
+    fallthrough yields `[]`, because `other`'s file is absent and `off_a_ref` is False,
+    so `_resolve` returns None. Verified: `assert [] == [<repo>/claudedocs/<DOC>]`.
+    A reader checking the pin by mutation must see the failure the docstring promises,
+    or they conclude they mutated the wrong thing."""
+    other = tmp_path / "other" / "claudedocs"
+    other.mkdir(parents=True)
+    cmd = "git -C %s -C %s log -- claudedocs/%s" % (other.parent, repo, DOC)
+    assert guard.handoff_read_docs(bash(cmd, cwd="/nowhere/else")) == [
+        str(repo / "claudedocs" / DOC)]
+
+
+@pytest.mark.parametrize("cmd", [
+    # No ref prefix — an ordinary read of an absent doc. The gate's whole point.
+    "cat claudedocs/%s" % DOC,
+    # A `:` that is not a ref prefix for THIS token: the path is a fresh argument.
+    "git show HEAD:some/other.txt claudedocs/%s" % DOC,
+    # 🔴 THE SEGMENT BOUNDARY. The `git` belongs to a DIFFERENT command, so the
+    # exemption must not be borrowed across the `;`.
+    "git show HEAD; cat host:claudedocs/%s" % DOC,
+    # A ref prefix with no git object-read verb anywhere.
+    "scp host:claudedocs/%s ." % DOC,
+])
+def test_the_ref_exemption_does_NOT_widen_into_a_hole(home, empty_repo, cmd):
+    """🔴 BOTH HALVES OF THE EXEMPTION ARE REQUIRED, one shape per case. An exemption
+    that admits any of these has re-opened the directory-only behaviour under a new
+    name — which is how a fix becomes a rename."""
+    assert guard.handoff_read_docs(bash(cmd, cwd=str(empty_repo))) == []
 
 
 def test_a_path_whose_directory_does_not_exist_does_NOT_arm(home, tmp_path):
@@ -680,6 +904,13 @@ def test_a_subagent_call_skips_the_arming_regex_entirely(home, monkeypatch):
     seen = []
 
     class _Spy:
+        # `finditer` is what the arming path calls (the ref exemption needs each
+        # match's POSITION); `findall` is kept so the spy still records a caller that
+        # reverts to it rather than going quietly blind.
+        def finditer(self, s):
+            seen.append(s)
+            return iter(())
+
         def findall(self, s):
             seen.append(s)
             return []

@@ -266,7 +266,24 @@ SUITES=(
   # second instance is obtainable at all. 12 files / 149 tests. Floors:
   # 12 - min(50, max(1, 12/20)) = 11 files;
   # 149 - min(50, max(1, 149/20)) = 141.55 -> 142 tests.
-  "scripts/claude-usage/tests|11|142"
+  
+  #
+  # Re-measured 2026-09-19 on fix/claude-usage-duplicate-toasts. The operator
+  # reported TWO notifications on opening claude.ai; asked what they SAID,
+  # they were DIFFERENT -- a threshold alert plus the account summary, both
+  # fired by ONE report. thresholds.test.mjs pins the suppression;
+  # concurrency.test.mjs pins a separate read-modify-write race found while
+  # investigating, and drives the handlers CONCURRENTLY because every existing
+  # test awaited one report before sending the next -- the one ordering in
+  # which that race cannot occur. 9 files / 97 tests. Floors:
+  # 9 - min(50, max(1, 9/20)) = 8 files;
+  # 97 - min(50, max(1, 97/20)) = 92.15 -> 93 tests.
+  #
+  # MERGED 2026-09-20 with #1806 (threshold/summary suppression +
+  # concurrency.test.mjs). Both sides added files AND tests, so this floor
+  # is the GATE'S OWN printed number for the merged tree, never arithmetic
+  # on the two sides -- which is how an eleven-value MIN_TESTS happened.
+  "scripts/claude-usage/tests|12|152"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree; js-source:

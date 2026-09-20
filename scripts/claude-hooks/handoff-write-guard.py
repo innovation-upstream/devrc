@@ -184,9 +184,12 @@ WHAT THIS STRUCTURALLY CANNOT SEE (say it here, not in a report nobody re-reads)
     is SILENT for X. That is the deliberate side of the trade;
   * whether the handoff that WAS written is any good — it checks that one exists
     since the read, never what it says. `/handoff`'s own write gate owns quality;
-  * a handoff doc whose directory does not exist on this host. Arming requires the
-    resolved `claudedocs/` directory to be real, so a path that resolves nowhere is
-    not armed at all — the quiet direction;
+  * a handoff doc that is not REALLY THERE on this host. Arming requires the resolved
+    `claudedocs/` directory to be real AND the doc itself to be a file, so a path that
+    resolves nowhere is not armed at all — the quiet direction. The one exemption is a
+    doc read out of a git object (`git show <ref>:claudedocs/<doc>`), which is
+    legitimately absent from the working tree; `_read_off_a_ref` says what that
+    exemption does and does not cover, and why it is not verified;
   * anything on a host where this hook is not deployed, or a runtime that is not
     Claude Code. The measurement covered opencode too; this covers Claude Code only.
 
@@ -273,10 +276,14 @@ HANDOFF_TOOL = "scripts/lib/handoff_doc.py"
 #
 # 🔴 `:` IS NOT IN THE CHARACTER CLASS, AND THAT IS LOAD-BEARING RATHER THAN
 # INCIDENTAL. `git show origin/zach/topic:claudedocs/handoff-x.md` is the canonical way
-# to read a handoff that lives on an unmerged branch — this repo's own CLAUDE.md
-# prescribes it — and excluding `:` makes the match start cleanly at `claudedocs/`
-# instead of swallowing the ref. The remaining leading run is what carries a `-C`-less
-# absolute or `~`-prefixed path.
+# to read a handoff that lives on an unmerged branch — MEASURED at 1,272 distinct such
+# commands across the transcript corpus — and excluding `:` makes the match start
+# cleanly at `claudedocs/` instead of swallowing the ref.
+# The remaining leading run is what carries a `-C`-less absolute or `~`-prefixed path.
+#
+# ⚠ THIS NOTE CITED `CLAUDE.md` AND THAT WAS FALSE: that file contains no `git show`
+# at all. Round 0 of #1799 caught it, and a LINE-BASED grep did NOT — the claim wrapped
+# across these comment lines, so only a sweep over normalised text found it.
 HANDOFF_PATH_RX = re.compile(r"[A-Za-z0-9_.~@%+/-]*claudedocs/[A-Za-z0-9_.%+-]+\.md")
 
 # 🔴 TWO BASENAME SHAPES, because `/resume` resolves in exactly this order and the
@@ -294,6 +301,96 @@ HANDOFF_RUN_RX = re.compile(r"\bpython3?(?:\.\d+)?\s+(?:-\S+\s+)*\S*handoff_doc\
 # `git -C <dir>` / `git -C<dir>`, used ONLY to widen the set of base directories a
 # relative match is resolved against. Never used to decide anything.
 DASH_C_RX = re.compile(r"(?:^|\s)-C\s*(\S+)")
+
+# The two halves of `_read_off_a_ref` — the ONLY exemption from the existence gate.
+#
+# 🔴 A `<ref>:` IMMEDIATELY BEFORE THE MATCH. `HANDOFF_PATH_RX` excludes `:` from its
+# class precisely so the match starts at `claudedocs/` rather than swallowing the ref
+# (see its own note), which is what leaves the ref sitting in the text BEFORE the
+# match for this to find. `\Z` anchors it there: a `:` anywhere else in the command
+# is not a ref prefix for THIS token.
+#
+# 🔴 THE REF TOKEN IS `[^\s:]+`, NOT AN ENUMERATED CHARACTER SET, AND THE ENUMERATION
+# IS WHY. It was `[A-Za-z0-9_./~^@{}\[\]-]+` with a leading class of `[\s"'=(]`, which
+# admits a LITERAL ref and rejects every computed one: `$B:`, `${B}:`, `$(git rev-parse
+# HEAD):` and a backtick substitution all failed, because `$`, `)` and `` ` `` are in
+# neither class. MEASURED by round 1 of #1799 over the transcript corpus: of 3,888
+# ref-prefixed handoff tokens, 166 were denied the exemption and 32 changed outcome —
+# 27 of them `$VAR`/`${VAR}`. 🔴 AND `claude/RULES.md` PRESCRIBES THE BRACED SPELLING:
+# zsh eats `$B:path` as a history modifier, so the rules mandate `${B}:path` — the guard
+# was blind to precisely the spelling this repo requires. An enumerated set encodes the
+# examples its author thought of; `[^\s:]+` encodes the shell-word boundary instead.
+# ⚠ THAT IS NOT THE SAME AS "THE BOUNDARY", and this note claimed it was: it read that
+# "a ref cannot contain the `:` that terminates it". True of ref NAMES
+# (`git check-ref-format` forbids `:`); FALSE of the revision EXPRESSIONS `git show`
+# accepts — `:0:claudedocs/…` (index stage) and `:claudedocs/…` (stage shorthand) both
+# carry a `:` inside the token and so lose the exemption here. Pre-existing (the
+# enumerated class failed them too) and fail-SAFE, since a lost exemption only makes
+# the guard quieter. Recorded rather than fixed: arguing a boundary while overstating
+# it is what this very paragraph criticises.
+REF_PREFIX_RX = re.compile(r"(?:^|[\s\"'=(])([^\s:]+):\Z")
+
+# …and a git object-read verb in the SAME command segment.
+#
+# 🔴 THE SEGMENT IS SPLIT OUT BEFORE THIS RUNS, NOT EXPRESSED INSIDE IT. The first
+# spelling was `\bgit\b[^;&|\n]*?\b(?:show|cat-file)\b` searched over the WHOLE
+# command, on the theory that the negated class kept it inside one segment. It does
+# not: `git show HEAD; cat host:claudedocs/x.md` matches `git show` in the FIRST
+# segment and the exemption is borrowed by a path in the second. Caught by
+# `test_the_ref_exemption_does_NOT_widen_into_a_hole`, which is in the diff that
+# introduced the bug — the case was written because the hole was imaginable, and it
+# turned out to be real.
+#
+# ⚠ SPLITTING ON `\n` MAKES THE SEGMENT ONE **LINE**, not one command, so a
+# `git … show \` whose ref-prefixed path sits on the next line loses its verb and the
+# exemption. That is KNOWN AND ACCEPTED, and it is the quiet direction: a lost
+# exemption makes the guard silent, never blocking.
+#
+# 🔴 A LINE-CONTINUATION JOIN WAS ADDED HERE AND THEN DELETED, WHICH IS THE ENTRY
+# WORTH READING. Round 1 of #1799 added `LINE_CONTINUATION_RX` to fix exactly the case
+# above. Round 2 killed it on two independent grounds: it was guarded in ONE direction
+# only (a mutant joining EVERY newline — destroying "a separate line is a separate
+# command" — left the whole suite green), and MEASURED over the corpus it changed
+# NOTHING. Re-measured independently before deleting: of 15,871 distinct handoff-path
+# Bash commands, 589 carry a `\`+newline and in **0** of them does joining change the
+# exemption verdict. A guard that alters no real outcome and is half-pinned is a
+# liability, not coverage. Do not re-add it without a case that reproduces.
+SEGMENT_SPLIT_RX = re.compile(r"[;&|\n]")
+
+# 🔴 THE SCAN IS LENGTH-CAPPED, AND THE CAP IS THE WHOLE FIX — PINNED BY
+# `test_the_scan_cap_BOUNDS_the_search` (both directions; see its docstring for why
+# that test had to exist).
+# `\bgit\b.*?\b(?:show|cat-file)\b` anchors at every `git` and walks forward from each,
+# i.e. O(k·n). MEASURED on 32/64/128 KB of `"git "` with no verb: ~0.9 s / 3.5 s /
+# 14.2 s uncapped, ~15 ms capped. This hook runs after EVERY tool call and can block a
+# Stop, so an unbounded scan is a turn-level hang.
+# ⚠ "~15 ms" IS PER CALL, NOT PER COMMAND, and the distinction matters on a hook that
+# can block a Stop: `_read_off_a_ref` runs once per `finditer` match, so a command with
+# many matches stays LINEAR in its length (~10 ms/KB measured). What the cap buys is
+# the complexity CLASS — quadratic to linear, 89 s to 2.7 s on a 264 KB command — not
+# a constant per-command cost.
+#
+# 🔴 THE NEGATED CLASS `[^;&|\n]*?` WAS ALSO RE-ADDED HERE AND IS ALSO DELETED. It was
+# justified as a COST measure and that was FALSE IN BOTH HALVES: `seg` is a segment
+# `SEGMENT_SPLIT_RX` already split, so by construction it contains none of those
+# characters and the class is EXACTLY equivalent to `.` there — and measured, it was
+# consistently the SLOWER of the two once capped (30.7 vs 17.6 ms at 32 KB). The
+# comment above `SEGMENT_SPLIT_RX` had already recorded that the class does not scope a
+# match to a segment; re-adding it on a cost rationale contradicted the same file.
+#
+# ⚠ THE CAP'S OWN COST, NAMED: >4 KiB between the git verb and the path loses the
+# exemption, and fail-SAFE when it does — a lost exemption makes the guard SILENT,
+# never blocking (proved at the consumer: `docs` only ever feeds `record_read`).
+# Never reached in practice. 🔴 TWO NUMBERS, BECAUSE ONE OF THEM WAS QUOTED WITHOUT ITS
+# QUALIFIER AND WENT FALSE: the largest segment EVER SCANNED — i.e. at sites where the
+# ref-prefix half passed and this regex actually ran — is 296 B (n=4,449); the largest
+# across ALL match sites is 1,681 B. An earlier wording dropped "ever scanned" and so
+# stated a precise, reproducible number that was wrong by 5.7x. Both are far under the
+# cap, so the conclusion holds either way — which is exactly why the slip survived.
+# There is no adversary here; the operator writes his own commands. This bounds a
+# complexity regression, it does not defend against an attack.
+GIT_OBJECT_READ_RX = re.compile(r"\bgit\b.*?\b(?:show|cat-file)\b")
+GIT_VERB_SCAN_CAP = 4096
 
 # Tool calls that ARE work, by name. Also the tools whose `file_path` can SATISFY,
 # when it names a handoff doc.
@@ -730,20 +827,122 @@ def _bases(cmd, cwd):
     return out
 
 
-def _resolve(raw, bases):
-    """A matched path token -> an absolute doc path whose DIRECTORY exists, or None.
+def _read_off_a_ref(cmd, start):
+    """Was the path token at `start` read out of a git OBJECT rather than off disk?
 
-    🔴 THE DIRECTORY, NOT THE FILE. Requiring the file would refuse the case this arc
-    ran into itself: a handoff that exists only on an unmerged branch and is read with
-    `git show`. Its `claudedocs/` dir is right there, `/handoff` will write into it,
-    and the guard can measure that. Requiring the directory is what keeps a path that
-    resolves NOWHERE from arming anything — the quiet direction.
+    🔴 THIS IS THE ONE EXEMPTION FROM THE EXISTENCE GATE, AND IT IS SYNTACTIC ON
+    PURPOSE. The honest check is `git cat-file -e <ref>:<path>` — and this hook
+    declares, and `test_the_hook_spawns_no_subprocess_on_any_path` ENFORCES, that it
+    spawns no subprocess on any path. So the ref is not verified; the COMMAND SHAPE is.
+    Two conditions, both required: the match is immediately preceded by a `<ref>:`
+    (which `HANDOFF_PATH_RX` leaves intact by excluding `:` from its character class),
+    and the same command segment carries a git object-read verb.
+
+    🔴 WHAT THIS DOES NOT COVER, SAID PLAINLY: a string of the exact shape
+    `git show <anything>:claudedocs/handoff-<anything>.md` still arms whether or not
+    that ref or that doc exists. That is a far narrower over-match than the one being
+    removed — the false positives this fix exists for (`claudedocs/handoff-x-y.md`,
+    `claudedocs/handoff-same.md`, both fixture strings) carry no ref prefix at all —
+    but it is an over-match, not an absence of one. Verifying it costs a subprocess on
+    a hook that fires after EVERY tool call of every session, to reject a shape nobody
+    writes by accident.
+    """
+    # 🔴 THE CAP IS APPLIED TO THE HEAD, NOT TO THE SEGMENT, AND THAT IS A FIX.
+    # It bounded `seg` only, leaving `REF_PREFIX_RX.search(head)` running on the FULL
+    # head — real heads reach tens of KB here. The widened `[^\s:]+` is super-linear on
+    # a head where the search GLOBALLY FAILS, because `"`/`'`/`=`/`(` are in BOTH its
+    # leading class and its token class, so the runs overlap. Round 1 capped one regex
+    # and moved the cost onto the other; capping the head covers both.
+    #
+    # 🔴 THE SHAPE IS PART OF THE MEASUREMENT AND WAS MISSING, WHICH MADE THE NUMBER
+    # LOOK WRONG. Three ordinary "quote-dense 32 KB head" shapes show the NEW class
+    # ~4x FASTER than the old — the opposite sign. The cost appears only on a
+    # global-failure shape: a run of `"`, then a `:` blocker, then a blocker-free tail
+    # containing none of `"'=(`. There it is ~2.7 s at 32 KB and ~10 s at 64 KB against
+    # ~0.4/0.8 ms for the old enumerated class.
+    # ⚠ THE 2,312 ms FIGURE THIS COMMENT ONCE CARRIED WAS INHERITED, NOT REPRODUCED —
+    # asserted under the word MEASURED in the very commit whose own message disclaimed
+    # it. What is stated above is the CLASS (quadratic, on a named shape), re-derived;
+    # treat the milliseconds as load-dependent, not as a constant.
+    #
+    # ⚠ TRUNCATION'S DIRECTION, STATED CORRECTLY: it can let `(?:^|…)` match mid-token
+    # and so ADMIT a token the untruncated head rejects. That is the ARMING direction —
+    # the same false-positive class this whole change exists to remove — NOT a
+    # "harmless" one, which is what this note used to call it. Measured reachability:
+    # 114 real match sites have a head past the cap and ZERO of them admit where the
+    # uncapped head rejects; a synthetic case confirms the counter can see one. So it
+    # is bounded and currently unreached, which is a different claim from harmless.
+    head = cmd[:start][-GIT_VERB_SCAN_CAP:]
+    if not head.endswith(":") or not REF_PREFIX_RX.search(head):
+        return False
+    # The command segment this token belongs to — everything since the last separator.
+    return bool(GIT_OBJECT_READ_RX.search(SEGMENT_SPLIT_RX.split(head)[-1]))
+
+
+def _resolve(raw, bases, off_a_ref=False):
+    """A matched path token -> an absolute doc path that is REALLY THERE, or None.
+
+    🔴 THE FILE, NOT MERELY ITS DIRECTORY — CHANGED, WITH THE REASON. This required
+    only `os.path.isdir(dirname)` until 2026-09-19, and the consequence was that any
+    `claudedocs/handoff-*.md`-SHAPED token in a command armed the guard as long as the
+    session happened to be standing in a repo that has a `claudedocs/`. MEASURED: the
+    Stop guard fired twice in one session demanding a handoff for `handoff-x-y.md` and
+    `handoff-same.md`, neither of which has ever existed in any repo — both are
+    synthetic strings in `scripts/tests/test_find_session_arc.py`. So writing tests
+    ABOUT handoff docs armed the guard against its own fixtures, and the arc whose
+    subject WAS handoff docs could not stop tripping it.
+
+    🔴 THE CASE THE OLD SPELLING PROTECTED IS STILL PROTECTED, VIA `off_a_ref`. A
+    handoff that exists only on an unmerged branch is read as
+    `git -C <repo> show <ref>:claudedocs/<doc>`, and such a doc is legitimately absent
+    from the working tree. That read still arms. Requiring the file for everything ELSE
+    is what stops a doc-shaped string from booking a document nobody can open.
+
+    ⚠ THE AUTHORITY FOR THAT SHAPE IS MEASUREMENT, NOT A DOCUMENT. This docstring said
+    "this repo's CLAUDE.md prescribes exactly that", and `CLAUDE.md` contains no `git
+    show` at all — the claim is false, it is pre-existing at `HANDOFF_PATH_RX` above,
+    and round 0 of #1799 caught it. What DOES support the shape: 1,272 distinct
+    `git … (show|cat-file) … <ref>:claudedocs/handoff-*.md` command strings across the
+    transcript corpus. Cite that, not a file that will not corroborate it.
+
+    The directory check is kept as well as, not instead of: it is what keeps a
+    dispatch-hub session naming a repo this host does not have from resolving at all,
+    and it is the only gate left for the `off_a_ref` case.
+
+    🔴 A SECOND, SEPARATE BEHAVIOUR CHANGE LIVES IN THIS LOOP AND IT SHIPPED
+    UNDECLARED — named here because round 1 of #1799 found it, not because it was
+    intended. The loop used to `return` at the FIRST candidate whose dirname existed;
+    it now `continue`s past one whose file is absent and tries the remaining bases. So
+    a command carrying several bases resolves to the one that HAS the doc rather than
+    to the first that merely has a `claudedocs/`:
+
+        git -C A -C B log -- claudedocs/handoff-z.md   # the doc exists only in B
+        before: A/claudedocs/handoff-z.md  (a path that is not there)
+        after:  B/claudedocs/handoff-z.md  (the real one)
+
+    🔴 THE NET DIRECTION IS A **NARROWING**, NOT A WIDENING, AND THIS PARAGRAPH SAID
+    THE OPPOSITE. It read "24 payloads arm here that were silent before, and 47 arm a
+    DIFFERENT doc". Both numbers were inherited from an audit report and written in
+    without re-derivation — the exact failure the note in `handoff_read_docs` had just
+    retracted, repeated in the commit that retracted it. Round 2 refuted them
+    STRUCTURALLY, and the argument is short enough to check here: HEAD returns a
+    candidate only if it passed `isdir`, which is the WHOLE of the old condition, so
+    anything HEAD arms the old code armed too. **"Silent before, arms now" is
+    impossible.** What the gate actually does in bulk is turn ARM into SILENT.
+
+    So, stated as what is provable rather than as a count nobody can reproduce: the
+    fallthrough can only ever change WHICH of several bases answers, never create an
+    arming out of nothing. It is the right answer — it is what fixes wrong-base
+    resolution — and it is pinned by
+    `test_a_LATER_base_wins_when_the_earlier_one_lacks_the_doc`.
     """
     p = os.path.expanduser(raw)
     cands = [p] if os.path.isabs(p) else [os.path.join(b, p) for b in bases]
     for c in cands:
         c = os.path.normpath(c)
-        if os.path.isdir(os.path.dirname(c)):
+        if not os.path.isdir(os.path.dirname(c)):
+            continue
+        if os.path.isfile(c) or off_a_ref:
             return c
     return None
 
@@ -773,8 +972,26 @@ def handoff_read_docs(data):
     if tool == "Read":
         for k in PATH_KEYS:
             v = ti.get(k)
+            # ⚠ THE ARMS ARE ASYMMETRIC ON `claudedocs/` AND THAT IS LEFT ALONE HERE.
+            # The Bash arm requires the literal segment (`HANDOFF_PATH_RX` is built
+            # around it) and so does ONE of `is_handoff_write`'s two routes — the
+            # Write/Edit one; the `handoff_doc.py` route does not. This arm takes
+            # `file_path` on basename alone. Narrowing it was tried in this PR and
+            # REMOVED: reads of REAL documents outside `claudedocs/` exist and at
+            # least one has armed AND FIRED in production
+            # (`containers/clawgate/HANDOFF.md`; `~/taxes/2026/HANDOFF.md` is another).
+            # Which arm is WRONG is an open question; narrowing the wider one makes
+            # both consistently blind to a doc class this guard was demonstrably
+            # working on. Decide it on fresh numbers, in its own change.
+            #
+            # ⚠ NO COUNT IS QUOTED HERE ON PURPOSE. This comment carried "39 reads …
+            # across 8 homelab checkouts"; round 1 re-derived over the same corpus and
+            # got 82 distinct, 23 still on disk, ONE clawgate `HANDOFF.md`. Both
+            # numbers are probably honest — worktrees come and go — but a count with
+            # no method and no date cannot be re-checked, and this one is load-bearing
+            # for a decision. Re-measure when you take it; do not inherit a number.
             if isinstance(v, str) and v:
-                raws.append(v)
+                raws.append((v, False))
         # 🔴 `cwd` IS A BASE HERE TOO, EVEN THOUGH THE TOOL ASKS FOR AN ABSOLUTE PATH.
         # `lib/subsystem_touch.py` — which reads these same payloads out of transcripts
         # — records that `file_path` is "ABSOLUTE whenever the caller passed an
@@ -788,15 +1005,18 @@ def handoff_read_docs(data):
         if not isinstance(cmd, str) or not cmd:
             return []
         stripped = re.sub(COMMENT_PAT, " ", cmd)
-        raws = HANDOFF_PATH_RX.findall(stripped)
+        # `finditer`, not `findall`: the exemption is decided from what sits BEFORE
+        # each match, so the position is part of the match.
+        raws = [(m.group(0), _read_off_a_ref(stripped, m.start()))
+                for m in HANDOFF_PATH_RX.finditer(stripped)]
         bases = _bases(stripped, d.get("cwd"))
     else:
         return []
     out = []
-    for raw in raws:
+    for raw, off_a_ref in raws:
         if not _is_handoff_basename(raw):
             continue
-        resolved = _resolve(raw, bases)
+        resolved = _resolve(raw, bases, off_a_ref)
         if resolved and resolved not in out:
             out.append(resolved)
     return out
@@ -888,10 +1108,14 @@ def is_handoff_write(data):
 # the final tree — a `handoff-<snake_case sentence>.md`, a `handoff-<kebab-case
 # sentence>.md` and a `<snake_case sentence>_HANDOFF.md` (the second arm of
 # `HANDOFF_BASENAME_RX` needs no prefix) each shipped as `entity`, against
-# `handoff- a sentence.md -> None` as the negative control. Nor is an admitted key
-# evidence that a FILE exists: `_resolve` requires only the DIRECTORY, deliberately, so
-# a `Read` of a path that was never on disk arms the guard and its basename ships —
-# measured, `entity_kind='handoff-doc'`, `decision='fired'`.
+# `handoff- a sentence.md -> None` as the negative control. ⚠ THIS PARAGRAPH USED TO
+# CARRY A THIRD CLAIM AND IT IS NOW FALSE — it read "Nor is an admitted key evidence
+# that a FILE exists: `_resolve` requires only the DIRECTORY, deliberately, so a `Read`
+# of a path that was never on disk arms the guard and its basename ships". Since the
+# existence gate (`_resolve`) an admitted key DOES name a file, with one stated
+# exemption: a doc read off a git ref, which exists as an OBJECT and not on disk. So
+# `entity` names something real in every case but that one — still not a promise a
+# consumer should lean on, because the exemption is real.
 #
 # So what `entity` carries is a NAME someone or something chose, ≤120 chars, not
 # guaranteed to name a file — going to the operator's own authenticated ClickHouse, as
@@ -1021,9 +1245,10 @@ def telemetry_entity(key, rec):
     ⚠ WHAT IT RETURNS IS A NAME, NOT A CERTIFICATE. Read the section header's "what
     that does NOT buy": a key that never needed laundering — any `snake_case` or
     `kebab-case` basename, which is how this repo names its own handoffs — is admitted
-    whole, and `_resolve` requires only the doc's DIRECTORY to exist, so the name need
-    not belong to a file that was ever on disk. This function bounds the REWRITING, and
-    that is all it bounds.
+    whole. Since the existence gate `_resolve` does require the doc itself, so the name
+    now belongs to a real file in every case but the stated `_read_off_a_ref` exemption
+    — which is exactly why this stays a ⚠ rather than becoming a guarantee. This
+    function bounds the REWRITING, and that is all it bounds.
 
     ⚠ `_sanitize(base) == base` AND `== key` ARE NOT INDEPENDENT, AND THE REDUNDANCY IS
     DELIBERATE — do not "fix the suite" for it. `key` reaching production is always a
