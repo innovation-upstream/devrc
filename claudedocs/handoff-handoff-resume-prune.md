@@ -29,31 +29,26 @@ bug, unrelated.
   APPEND share **below 70%**. P2–P4 merging does NOT close this arc.
 
 ## State now
-- Branch: `handoff-resume-prune-proposal`, pushed to `origin`. **No PR open** — an outward
-  action left to the operator.
-- **P4 is DONE and merged to the branch (`b50709ca`)** — `handoff/SKILL.md` step 5 now names
-  `scripts/handoff-audit.py`, and that tool's own banner was corrected (below). Body went
-  20,088 → 20,267 B, inside the 20,300 B enforced budget. **1,900 tests green** across all
-  ten modules that read the handoff/resume bodies.
-- 🔴 **P2 is REFUTED AND DELETED — do not build it.** Measured, twice over; see Gotchas.
-  `claudedocs/proposal-handoff-resume-prune.md` carries the struck-through section and the
-  numbers (`bb531558`).
-- **P4's `/resume` half was deleted too** — `/resume` is read-only re-entry, so a
-  corpus-maintenance pointer there is prose nobody acts on (the-algorithm §1).
-- NOT DONE: **P1** (slice-and-demote) and **P3** (DoD offer). P1 is what the closing
-  condition names; nothing else closes this arc.
-- ⚠ **The ranked list below was RENUMBERED** when P2 died: P1 is now rank 1. No `claim-work`
-  claim was ever taken on this doc, so no live claim was re-pointed — but re-rank with that
-  in mind, since the rank is half a claim's identity.
-- Deploy/verify status: **nothing deployed.** `claude/skills/handoff/SKILL.md` is a nix-store
-  symlink, so step 5's new line reaches no session until a `home-manager switch` (or
-  `scripts/ship.sh` after merge). The `handoff-audit.py` fix is a repo script and is live on
-  this checkout immediately.
-- Subsystem index: both windows read (`--session`, then `--commit`), both `no-match`, nothing
-  nominated, no index write. The one durable lesson went to `adoption-scan` (`19e5849e`).
-- No `clawgate-task:` field: `clawgate_handoff.sh resolve` exited **5**. Its positive control
-  showed the board answered for a DIFFERENT session, so the board is reachable — a narrow
-  reading, not a clean bill of health.
+- Branch: `handoff-resume-prune-proposal`, pushed. **No PR open.**
+- **P4 DONE** (`b50709ca`): `handoff/SKILL.md` step 5 names `scripts/handoff-audit.py`, and
+  that tool's stale "no gate measures a handoff doc" banner is corrected. 1,900 tests green.
+- 🔴 **P2 REFUTED** (`bb531558`) — see Gotchas. Do not build it.
+- 🔴 **P1 AS SPECIFIED IS WRONG AND WAS NOT BUILT.** It proposed demoting the APPEND
+  buckets — gotchas (42.6%) and open investigations (26.9%) — into `claudedocs/refs/`.
+  `test_handoff_doc_size.py`'s playbook (the authority `budget_warning` defers to) already
+  forbids exactly that, with the reason, and the reason MEASURES TRUE. See Gotchas.
+- **NOTHING IS BLOCKED ON CODE. The open question is a CHOICE**, recorded as rank 1: whether
+  to build the corrected item (P1′, evict-what-has-CLOSED) and in what form. Awaiting the
+  operator; see Open investigations for what a wrong answer costs.
+- 🔴 **THIS ARC'S CLOSING CONDITION NAMES WORK THAT SHOULD NOT BE DONE.** It was frozen at
+  round 1 as "P1 merged AND the APPEND share below 70%". Both halves are now known bad: the
+  demotion is forbidden, and the APPEND-share metric can only fall by moving searchable
+  content into an unsearchable sink. **Per the frozen-at-round-1 rule this does NOT extend
+  the arc** — a corrected P1′ is a NEW arc. The honest verdict on THIS one is **NOT
+  ADDRESSED, and not addressable as written**; say that rather than quietly re-aiming it.
+- Deploy/verify: **nothing deployed.** `claude/skills/handoff/SKILL.md` is a nix-store
+  symlink — step 5's new line reaches no session until `home-manager switch` / `ship.sh`.
+- No `clawgate-task:` field (`resolve` exit 5, positive control passed for another session).
 
 ## Open investigations — live diagnosis state
 
@@ -91,23 +86,61 @@ bug, unrelated.
   the right shape; if not, the prose is being ignored for some other reason and P3 should be
   deleted rather than strengthened.
 
+### What should replace P1, given that demotion of open threads is forbidden and eviction is not automated
+- as-of: 2026-09-20
+- **Symptom + exact repro:** the arc's frozen closing condition names a demotion that the
+  authoritative playbook forbids. Re-read it: `sed -n '138,160p'
+  scripts/tests/test_handoff_doc_size.py`.
+- **Observed (with values):** refs/ is genuinely outside the search corpus — control pair,
+  single-token queries through `handoff_search.py --offline`: a token unique to an indexed
+  handoff doc (`test_a_SUCCESS_does_NOT_buy_more_GUESSES`) returns **rank 2.0**, while
+  `MAX_IDENTITY_CHARS` (only in `refs/cairn-oss-multi-instance.md`) and
+  `scan_inert_negated_greps` (only in `refs/tmux-webapp-closed-investigations.md`) both return
+  **NO MATCH** against the same 6,370 indexed sections. Evictable backlog measured at
+  468,110 B / 14.1% (breakdown in rank 1). 8 `refs/` files already exist, created by hand
+  under this playbook, and 3 of them are named `*-closed-*`.
+- **Ruled out:** "the refs/ header's non-indexed claim is stale like `handoff-audit.py`'s
+  was" — it is not; measured by the control pair above; `via: measurement`.
+- **Ruled out:** "a fuzzy hit proves refs/ is indexed" — an early multi-word query DID return
+  a refs-shaped slug, but the corpus has a handoff doc of the SAME stem
+  (`handoff-index-store-claims-accuracy.md`, 59,764 B) and the unique phrase appears **0**
+  times in it; single-token discrimination was required to settle it; `via: measurement`.
+- **Ruled out:** "there is a gap in `budget_warning()` to patch about searchability" — the
+  playbook it defers to already states the trade in terms ("⚠ A `refs/` file is NOT indexed
+  by `handoff_search` … it is the reason only DATED material goes there, never an open
+  thread"); `via: code`.
+- **Leading hypothesis:** the valuable, safe increment is form (a) — surface the per-doc
+  evictable backlog at the moment of the write, reusing `handoff-audit.py`'s existing
+  detectors. It converts a generic ladder into the author's own numbers, rewrites nothing,
+  and adds no gate. Form (c) is the risk: an automatic rewrite must decide "is this
+  investigation resolved", and the auditor's sibling advisory (`RELOCATE_DURABLE`) prints
+  **no** byte estimate precisely because its regex undercounted a human reading 28-30 vs ~55
+  on the one doc checked — the same class of judgement an auto-rewrite would be making
+  unsupervised, against documents whose whole value is that nothing silently removes content.
+- **Next probe:** none needed to decide; this is a judgement for the operator. If (a) is
+  chosen, the first command is
+  `python3 $DEVRC/scripts/handoff-audit.py <doc>` on a doc that is over the ceiling, to see
+  which of the four detectors actually fires per-doc rather than corpus-wide.
+
 ## Next steps (ranked)
-1. **P1 — slice-and-demote the APPEND buckets** into `claudedocs/refs/<topic>.md` by verbatim
-   python line-range slice, leaving one routing line. 70% of the corpus is in those three
-   buckets and they cannot shrink by design. Needs: a backup, a union gap-audit (every source
-   line present in doc ∪ refs) BEFORE any write, and a mutation battery shaped like
-   `scripts/tests/mutation_battery_handoff_archive_and_cap.py` — its reassuring answer is a
-   zero ("0 lines lost"), which is indistinguishable from a detector wired to nothing.
-   ⚠ P1 does NOT need P2: it runs inside `handoff_doc.py`, which can `git blame` the doc
-   itself for the per-bullet ages it needs.
-   forcing: user — the operator approved implementation this session.
+1. **DECIDE what replaces P1** — this is a choice for the operator, not a coding task, and
+   nothing should be built until it is answered. The corrected target (**P1′**) is the
+   playbook's own step 1, *evict what has CLOSED*, which it calls "usually the whole answer"
+   and ranks ABOVE demotion. Measured backlog: **468,110 B, 14.1% of the corpus** — 284,262 B
+   resolved investigations (151 blocks), 120,127 B completed ranks (133 of 526), 79,393 B
+   retracted/dead-ends (141 bullets), 10,928 B work-status (9 blocks). `handoff-audit.py`
+   already DETECTS all four deterministically; only the action is unbuilt. The forms, in
+   ascending blast radius: (a) print the per-doc backlog inside `budget_warning()` so the
+   author sees their own numbers instead of a generic ladder; (b) a `--evict` proposal mode
+   that prints the exact slices and writes nothing; (c) an automatic rewrite. 🔴 (c) is
+   NOT recommended — see rank 1's risk note in Open investigations.
+   forcing: user — the operator approved implementation and this is the fork in it.
 2. **P3 — the paste-ready `closing-condition:` offer** in `resume-state.sh`'s `DOD` block.
-   🔴 Run the "Next probe" in Open investigations FIRST: if the grandfathering hypothesis is
-   confirmed, P3 is the right shape; if it is not, the prose was never the problem and P3
-   should be DELETED rather than strengthened.
+   Run the Open-investigations probe FIRST; if the grandfathering hypothesis fails, DELETE
+   P3 rather than strengthen it.
    forcing: user — same approval.
-3. Re-measure DoD coverage (82% today) two weeks after P3 lands; if it has not moved, delete
-   the offer.
+3. Re-measure DoD coverage (82% today) two weeks after P3 lands; delete the offer if
+   it has not moved.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -195,6 +228,33 @@ bug, unrelated.
 - **Decision: P4 shipped for `/handoff` only.** `/resume` is read-only re-entry; a
   corpus-maintenance pointer there is prose nobody acts on (the-algorithm §1 — question the
   requirement, and this one could not name who would act on it).
+
+- 🔴 **NEVER demote `## Gotchas` or an open `## Open investigations` block to
+  `claudedocs/refs/` — and the reason is MEASURED, not stylistic.** `refs/` is outside the
+  `handoff_search` corpus: control pair above, two refs-only tokens returning NO MATCH
+  against 6,370 sections while an indexed doc's token returns rank 2.0. So "demote" is
+  functionally "delete, for retrieval". The authoritative playbook in
+  `scripts/tests/test_handoff_doc_size.py` (lines 138-160) already ranks the steps — **evict
+  CLOSED first, demote DATED second, split third, raise the number LAST** — and says "Keep
+  the imperative, the open questions and the gotchas in the doc itself". **P1 was specified
+  against that playbook and is retracted.**
+- 🔴 **THE METRIC IN THIS ARC'S CLOSING CONDITION WAS BADLY CHOSEN, which is worth more than
+  the item it gated.** "APPEND share below 70%" can only fall by moving searchable content
+  out of the index — the one action the playbook forbids. Legitimate eviction barely moves
+  it, because completed ranks live under `## Next steps`, a REPLACE section. **A byte-share
+  target selected the harmful action as the cheapest way to satisfy it.** When freezing a
+  closing condition, ask which action most cheaply satisfies the metric, and whether you would
+  accept that action.
+- **The eviction backlog is real and already DETECTED, just not acted on:** 468,110 B /
+  14.1% of the corpus — 284,262 B resolved investigations, 120,127 B completed ranks,
+  79,393 B retracted/dead-ends, 10,928 B work-status. 28 docs are over the 40,960 B hard cap
+  and 75 of 98 over target. `handoff-audit.py` finds all four classes deterministically.
+- ⚠ **Do NOT quote the auditor's `RELOCATE_DURABLE` count as a measurement** — it says so
+  itself, prints no byte estimate on purpose, and its regex read 28-30 where a human reading
+  the same doc found ~55.
+- **Three of four proposed items died on contact with measurement** (P2 refuted, P4's
+  `/resume` half deleted, P1 retracted) and the survivor shipped in ~180 bytes. That is
+  the-algorithm working, not the effort failing: the expensive part was never the code.
 
 ## How to verify
 Re-derive every number in the proposal:
