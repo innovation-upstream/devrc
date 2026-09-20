@@ -237,12 +237,14 @@ SUITES=(
   # claude-usage tracker (2026-09-19): 8 files / 85 tests measured on the
   # claude-usage-tracker branch. Floors: 8 - min(50, max(1, 8/20)) = 7 files;
   # 85 - min(50, max(1, 85/20)) = 81 tests.
-  # Re-measured 2026-09-19 on fix/claude-usage-duplicate-toasts: the operator
-  # reported TWO identical notifications on opening claude.ai, which is a
-  # read-modify-write race between the two reports one page load produces.
-  # concurrency.test.mjs drives handlers CONCURRENTLY — every existing test
-  # awaited one report before sending the next, which is the one ordering the
-  # bug cannot occur in. 9 files / 97 tests. Floors:
+  # Re-measured 2026-09-19 on fix/claude-usage-duplicate-toasts. The operator
+  # reported TWO notifications on opening claude.ai; asked what they SAID,
+  # they were DIFFERENT -- a threshold alert plus the account summary, both
+  # fired by ONE report. thresholds.test.mjs pins the suppression;
+  # concurrency.test.mjs pins a separate read-modify-write race found while
+  # investigating, and drives the handlers CONCURRENTLY because every existing
+  # test awaited one report before sending the next -- the one ordering in
+  # which that race cannot occur. 9 files / 97 tests. Floors:
   # 9 - min(50, max(1, 9/20)) = 8 files;
   # 97 - min(50, max(1, 97/20)) = 92.15 -> 93 tests.
   "scripts/claude-usage/tests|8|93"

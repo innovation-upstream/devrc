@@ -25,28 +25,6 @@
   // cap -- recon saw a handful of orgs per user).
   var ORG_FETCH_CAP = 8;
 
-  // 🔴 ONE PAGE LOAD USED TO RUN THE WHOLE PROBE TWICE. autoRun() fires at
-  // document_idle, and independently the service worker's onTabUpdated fires
-  // at status "complete" and sends `cu:probe` -- so every claude.ai open cost
-  // 2x(/api/organizations + one /usage per org), roughly four requests where
-  // two would do, against a cookie-authed endpoint with no documented rate
-  // budget.
-  //
-  // The worker's own PROBE_MIN_INTERVAL_MS gates its ASK against other asks;
-  // it cannot see this auto-run at all, because the two live in different
-  // contexts. So the dedup has to be here, where both paths converge.
-  //
-  // Matches the worker's constant deliberately. The 15-minute alarm re-probe
-  // is far outside this window and is unaffected -- which is the case to
-  // check first if this number is ever raised.
-  var MIN_RUN_GAP_MS = 30 * 1000;
-  var lastRunAt = 0;
-
-  /** True when a probe ran recently enough that another would be redundant. */
-  function tooSoon(now) {
-    return lastRunAt !== 0 && now - lastRunAt < MIN_RUN_GAP_MS;
-  }
-
   function classifyStatus(status) {
     if (status === 401) return "unauthorized";
     if (status === 403) return "forbidden";
@@ -149,31 +127,14 @@
     } catch (e) { /* extension context invalidated (reload) -- nothing to do */ }
   }
 
-  /** The ONE place a probe is started. Stamps lastRunAt BEFORE the await so a
-   * second caller in the same turn is already gated -- stamping after the
-   * fetch would leave the whole request window unguarded, which is exactly
-   * the interval the two callers land in. */
-  function startProbe(now) {
-    lastRunAt = now;
-    return runProbe().then(report, function () { /* never let a probe reject */ });
-  }
-
   function autoRun() {
-    startProbe(Date.now());
+    runProbe().then(report, function () { /* never let a probe reject */ });
   }
 
   if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       if (msg && msg.type === "cu:probe") {
-        var now = Date.now();
-        // Answer synchronously either way: the worker only needs to know the
-        // message was received, and telling it `skipped` lets a future
-        // caller distinguish "no content script" from "already fresh".
-        if (tooSoon(now)) {
-          sendResponse({ ok: true, skipped: "too-soon" });
-          return false;
-        }
-        startProbe(now);
+        runProbe().then(report, function () { /* ditto */ });
         sendResponse({ ok: true });
       }
       return false; // always a synchronous answer
@@ -187,17 +148,10 @@
   // --- node test surface ------------------------------------------------
   globalThis.__CU_PROBE__ = {
     ORG_FETCH_CAP,
-    MIN_RUN_GAP_MS,
     classifyStatus,
     validateOrgs,
     pickActiveOrg,
     fetchJson,
     runProbe,
-    tooSoon,
-    startProbe,
-    // Read/reset the gate so a test can drive the window explicitly rather
-    // than sleeping through it.
-    _lastRunAt: function () { return lastRunAt; },
-    _setLastRunAt: function (v) { lastRunAt = v; },
   };
 })();

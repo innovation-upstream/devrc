@@ -320,11 +320,6 @@ export function enqueueReport(msg) {
   return reportQueue;
 }
 
-/** Test seam: drain the queue so a test can assert on settled state. */
-export function reportsSettled() {
-  return reportQueue;
-}
-
 export async function handleReport(msg) {
   if (!isObj(msg) || msg.type !== "cu:usage-report") {
     return { ok: false, error: "bad-message" };
@@ -387,7 +382,23 @@ export async function handleReport(msg) {
   // an account SWITCH gets its own kind so it always reads as news.
   const activeUuid = typeof msg.activeUuid === "string" ? msg.activeUuid : null;
   const activeRec = activeUuid ? accounts[activeUuid] : null;
-  if (activeRec && activeRec.staleSince === null) {
+
+  // 🔴 AN ALERT ALREADY SAID THIS, MORE URGENTLY. The summary is the ambient
+  // "here is where you are" toast; a threshold/locked/credits alert for the
+  // SAME account carries the same numbers with a reason attached. Firing both
+  // means crossing 80% hands the operator two notifications at once —
+  // "Claude usage — session threshold" immediately followed by the account
+  // summary — which is what he reported, and it needs no concurrency at all:
+  // one report, one handler, two toasts.
+  //
+  // This is the same suppression the `switch` kind already performs below by
+  // recording the `summary` key alongside its own; it simply was never
+  // applied to the alert path. The alert wins because it is strictly more
+  // informative, and the summary's dedup slot is consumed (see newLastToast)
+  // so the next report inside the window does not deliver it late.
+  const alertedActive = fired.some((f) => f.orgUuid === activeUuid);
+
+  if (activeRec && activeRec.staleSince === null && !alertedActive) {
     const switched = detectSwitch(lastActiveOrg, activeUuid);
     const kind = switched ? "switch" : "summary";
     if (!withinDedup(lastToast, activeUuid, kind, now)) {
@@ -410,6 +421,12 @@ export async function handleReport(msg) {
     // A switch toast IS the account summary in content: record both kinds,
     // so a page-open right after a switch cannot re-toast the same thing.
     if (alert.kind === "switch") newLastToast[toastKey(orgUuid, "summary")] = now;
+    // Same reasoning for every OTHER alert kind: it has just delivered the
+    // account's numbers, so it consumes the summary's dedup slot. Without
+    // this the summary is not suppressed but merely DELAYED — the next
+    // report inside the window would deliver it, which reads as a stray
+    // duplicate arriving minutes after the alert.
+    else newLastToast[toastKey(orgUuid, "summary")] = now;
   }
 
   if (activeUuid) lastActiveOrg = activeUuid;

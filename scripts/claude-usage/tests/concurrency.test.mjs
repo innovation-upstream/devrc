@@ -1,11 +1,24 @@
 // concurrency.test.mjs -- two reports in flight at once.
 //
-// 🔴 OPERATOR-REPORTED, not hypothesised: opening claude.ai produced TWO
-// identical system notifications. One page load genuinely produces two
-// reports — content_probe.js auto-runs at `document_idle`, and independently
-// the worker's `onTabUpdated` fires at status "complete" and asks the probe to
-// run again — and `onMessage` dispatched them with `void handleReport(...)`,
-// fire-and-forget, with no ordering.
+// ⚠ THIS IS NOT THE BUG THE OPERATOR REPORTED, and an earlier version of this
+// header said it was. He reported "2 native system notifications"; he never
+// said they were identical, and when asked, they were DIFFERENT — a threshold
+// alert plus the account summary. That is a separate defect with its own
+// tests in thresholds.test.mjs, and it needs no concurrency at all.
+//
+// The diagnosis here was fitted to the COUNT: concurrency also produces two,
+// so it was taken as the explanation. A round-0 audit named the rival
+// mechanism and reproduced it on this branch's own fixed code.
+//
+// The race below is real and worth fixing on its own merits — it is watched
+// red at origin/main — but it is kept here as a defect found WHILE
+// investigating, not as the answer to the report.
+//
+// One page load does genuinely produce two reports: content_probe.js
+// auto-runs at `document_idle`, and independently the worker's `onTabUpdated`
+// fires at status "complete" and asks the probe to run again — and
+// `onMessage` dispatched them with `void handleReport(...)`, fire-and-forget,
+// with no ordering.
 //
 // `handleReport` is a read-modify-write over chrome.storage: it awaits
 // readState(), decides which toasts fall outside their dedup window, then
@@ -49,7 +62,6 @@ test("🔴 two concurrent reports toast ONCE, not twice", async () => {
   await fresh();
   // Exactly how onMessage dispatches them: both started, neither awaited.
   await Promise.all([SW.enqueueReport(report()), SW.enqueueReport(report())]);
-  await SW.reportsSettled();
   assert.equal(calls.notifications.length, 1,
     `${calls.notifications.length} notifications — the operator sees each one`);
 });
@@ -58,7 +70,6 @@ test("the sequential case still toasts once (the control that always passed)", a
   await fresh();
   await SW.enqueueReport(report());
   await SW.enqueueReport(report());
-  await SW.reportsSettled();
   assert.equal(calls.notifications.length, 1);
 });
 
@@ -67,7 +78,6 @@ test("a burst of five concurrent reports still toasts once", async () => {
   // queued alarm plus two tab events can produce more.
   await fresh();
   await Promise.all(Array.from({ length: 5 }, () => SW.enqueueReport(report())));
-  await SW.reportsSettled();
   assert.equal(calls.notifications.length, 1);
 });
 
@@ -85,7 +95,6 @@ test("🔴 concurrent reports do not LOSE an account write", async () => {
       results: [{ orgUuid: ORG_B, ok: true, usage: fullUsage() }],
     })),
   ]);
-  await SW.reportsSettled();
   const got = await chrome.storage.local.get(["accounts"]);
   assert.deepEqual(Object.keys(got.accounts).sort(), [ORG_A, ORG_B].sort(),
     "an account write was lost to the read-modify-write window");
@@ -98,7 +107,6 @@ test("one failing report does not poison the queue for every later one", async (
   await fresh();
   await SW.enqueueReport({ type: "cu:usage-report", fetchedAt: NOW, results: "not-an-array" });
   await SW.enqueueReport(report());
-  await SW.reportsSettled();
   assert.equal(calls.notifications.length, 1, "a later report was dropped");
 });
 
