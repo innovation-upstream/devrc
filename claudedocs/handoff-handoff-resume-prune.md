@@ -29,26 +29,26 @@ bug, unrelated.
   APPEND share **below 70%**. P2–P4 merging does NOT close this arc.
 
 ## State now
-- Branch: `handoff-resume-prune-proposal`, pushed. **No PR open.**
-- **P4 DONE** (`b50709ca`): `handoff/SKILL.md` step 5 names `scripts/handoff-audit.py`, and
-  that tool's stale "no gate measures a handoff doc" banner is corrected. 1,900 tests green.
-- 🔴 **P2 REFUTED** (`bb531558`) — see Gotchas. Do not build it.
-- 🔴 **P1 AS SPECIFIED IS WRONG AND WAS NOT BUILT.** It proposed demoting the APPEND
-  buckets — gotchas (42.6%) and open investigations (26.9%) — into `claudedocs/refs/`.
-  `test_handoff_doc_size.py`'s playbook (the authority `budget_warning` defers to) already
-  forbids exactly that, with the reason, and the reason MEASURES TRUE. See Gotchas.
-- **NOTHING IS BLOCKED ON CODE. The open question is a CHOICE**, recorded as rank 1: whether
-  to build the corrected item (P1′, evict-what-has-CLOSED) and in what form. Awaiting the
-  operator; see Open investigations for what a wrong answer costs.
-- 🔴 **THIS ARC'S CLOSING CONDITION NAMES WORK THAT SHOULD NOT BE DONE.** It was frozen at
-  round 1 as "P1 merged AND the APPEND share below 70%". Both halves are now known bad: the
-  demotion is forbidden, and the APPEND-share metric can only fall by moving searchable
-  content into an unsearchable sink. **Per the frozen-at-round-1 rule this does NOT extend
-  the arc** — a corrected P1′ is a NEW arc. The honest verdict on THIS one is **NOT
-  ADDRESSED, and not addressable as written**; say that rather than quietly re-aiming it.
+- Branch `handoff-resume-prune-proposal`, pushed. **No PR open.** 8 commits.
+- **P4 DONE** (`b50709ca`) — step 5 names `handoff-audit.py`; that tool's stale "no gate
+  measures a handoff doc" banner corrected (it predated #1648's 65,536 B ceiling by 12 days).
+- **P1′ DONE** (`97fee3d0`) — `budget_warning()` now prints THIS doc's evictable breakdown
+  (resolved investigations / completed ranks / retracted / work-status) instead of a generic
+  ladder, reusing `handoff-audit.py`'s detectors. `audit_one` split into `audit_text` + a
+  disk wrapper, verified behaviour-identical. Never raises (write path). Withheld from the
+  ungated arm. States a SHORTFALL rather than quoting a total that does not clear.
+  **858 tests green; 4 mutants killed.**
+- 🔴 **P2 REFUTED** (`bb531558`) and 🔴 **P1-as-specified RETRACTED** (`c2df1171`).
+- **P3 is the only proposed item still open.**
+- ⚠ **Verified by direct call + tests, NOT by a live over-budget write.** Every doc this
+  session wrote is ~20 KB, far under the 65,536 B ceiling, so the new note correctly stayed
+  SILENT on every real run — the silent path is exercised, the printing path is not. To
+  exercise it live, run an update against a doc near its allowance (e.g.
+  `handoff-audit-pr-ladder.md`, 2,294 B of headroom) and read the warning above the diff.
 - Deploy/verify: **nothing deployed.** `claude/skills/handoff/SKILL.md` is a nix-store
-  symlink — step 5's new line reaches no session until `home-manager switch` / `ship.sh`.
-- No `clawgate-task:` field (`resolve` exit 5, positive control passed for another session).
+  symlink → needs `home-manager switch` / `ship.sh`. `scripts/lib/handoff_doc.py` and
+  `scripts/handoff-audit.py` are repo scripts and ARE live on this checkout now.
+- No `clawgate-task:` field (`resolve` exit 5).
 
 ## Open investigations — live diagnosis state
 
@@ -123,24 +123,17 @@ bug, unrelated.
   which of the four detectors actually fires per-doc rather than corpus-wide.
 
 ## Next steps (ranked)
-1. **DECIDE what replaces P1** — this is a choice for the operator, not a coding task, and
-   nothing should be built until it is answered. The corrected target (**P1′**) is the
-   playbook's own step 1, *evict what has CLOSED*, which it calls "usually the whole answer"
-   and ranks ABOVE demotion. Measured backlog: **468,110 B, 14.1% of the corpus** — 284,262 B
-   resolved investigations (151 blocks), 120,127 B completed ranks (133 of 526), 79,393 B
-   retracted/dead-ends (141 bullets), 10,928 B work-status (9 blocks). `handoff-audit.py`
-   already DETECTS all four deterministically; only the action is unbuilt. The forms, in
-   ascending blast radius: (a) print the per-doc backlog inside `budget_warning()` so the
-   author sees their own numbers instead of a generic ladder; (b) a `--evict` proposal mode
-   that prints the exact slices and writes nothing; (c) an automatic rewrite. 🔴 (c) is
-   NOT recommended — see rank 1's risk note in Open investigations.
-   forcing: user — the operator approved implementation and this is the fork in it.
-2. **P3 — the paste-ready `closing-condition:` offer** in `resume-state.sh`'s `DOD` block.
-   Run the Open-investigations probe FIRST; if the grandfathering hypothesis fails, DELETE
-   P3 rather than strengthen it.
-   forcing: user — same approval.
-3. Re-measure DoD coverage (82% today) two weeks after P3 lands; delete the offer if
-   it has not moved.
+1. **P3 — the paste-ready `closing-condition:` offer** in `resume-state.sh`'s `DOD` block,
+   for the 82% of live docs that declare none. 🔴 Run the Open-investigations probe FIRST
+   (`git log --diff-filter=A` correlation against the rule's landing date): if the
+   grandfathering hypothesis holds, P3 is the right shape; if not, the prose was never the
+   problem and P3 should be DELETED rather than strengthened.
+   forcing: user — the operator approved implementation of the proposal's items.
+2. Exercise P1′'s printing path live against a doc near its allowance, and read the note
+   above the diff. Cheap, and it is the one claim this arc has not verified end-to-end.
+   forcing: user — same approval; it closes this arc's own verification gap.
+3. Re-measure DoD coverage (82% today) two weeks after P3 lands; delete the offer if it has
+   not moved.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -255,6 +248,27 @@ bug, unrelated.
 - **Three of four proposed items died on contact with measurement** (P2 refuted, P4's
   `/resume` half deleted, P1 retracted) and the survivor shipped in ~180 bytes. That is
   the-algorithm working, not the effort failing: the expensive part was never the code.
+
+- 🔴 **A MUTANT SURVIVED A GREEN SUITE, and the cause is worth more than the fix: the test
+  drove the WRONG ARM.** `test_the_note_is_withheld_from_the_UNGATED_arm` asserts exactly the
+  right thing, but its fixture is over the ceiling, so `budget_warning` returns from the
+  OVER-budget arm **before** the near arm's `if gated` is ever evaluated. Deleting that guard
+  therefore changed nothing any test could observe. The assertion was correct, the
+  REACHABILITY was not — `claude/RULES.md`'s "prove it REACHABLE, not just breakable", hit in
+  a new shape. Two near-arm tests added; M3 and M4 now die. **Sweep ran under
+  `PYTHONDONTWRITEBYTECODE=1`** (the same-second/same-length `.pyc` trap), with a control
+  green either side and the file restored byte-identical (`cmp`).
+- 🔴 **`handoff_doc.py` is the WRITE PATH — code added there must not be able to raise.**
+  `evictable_note` catches everything and returns `""`. An exception would take down
+  `/handoff`'s only landing step and cost a session its record, to decorate a warning. The
+  auditor is also a devrc script, so a repo vendoring only this module legitimately has no
+  such file: absence is the ordinary case, not an error.
+- **Reuse the auditor's detectors; never reimplement "is this resolved".** Its matchers have
+  already absorbed corrections a fresh implementation would re-earn — the `retracted` bucket
+  over-counted by 30% until bullets crossing a heading were clipped. One rule, one place.
+- ⚠ **`audit_one` now delegates to `audit_text`** because `budget_warning` holds a merge that
+  is not yet on disk. Verified behaviour-identical on a real doc (`audit_one == audit_text`
+  across size/gross/net/done_b/resolved_b) before anything depended on it.
 
 ## How to verify
 Re-derive every number in the proposal:
