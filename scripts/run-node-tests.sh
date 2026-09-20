@@ -237,6 +237,37 @@ SUITES=(
   # claude-usage tracker (2026-09-19): 8 files / 85 tests measured on the
   # claude-usage-tracker branch. Floors: 8 - min(50, max(1, 8/20)) = 7 files;
   # 85 - min(50, max(1, 85/20)) = 81 tests.
+  #
+  # Re-measured 2026-09-19 on feat/claude-usage-widget after the in-page widget
+  # landed (lib/widget.js + content_widget.js + the shared lib/format.js
+  # extraction): 9 files / 110 tests. Floors: 9 - min(50, max(1, 9/20)) = 8
+  # files; 110 - min(50, max(1, 110/20)) = 104.5 -> 105 tests.
+  #
+  # Re-measured again the same day after a round-0 audit found the badge and
+  # the widget deciding severity by two different rules (and the badge's rule
+  # painting green at 99% when the API sent no severity row): lib/severity.js
+  # consolidates them and brings severity.test.mjs. 10 files / 130 tests.
+  # Floors: 10 - min(50, max(1, 10/20)) = 9 files;
+  # 130 - min(50, max(1, 130/20)) = 123.5 -> 124 tests.
+  #
+  # Re-measured after round 1 of the audit found the shipped widget DEAD ON
+  # ARRIVAL -- lib/severity.js was missing from the manifest's
+  # web_accessible_resources, so its page-context dynamic import rejected and
+  # the content script's catch swallowed it. manifest.test.mjs now pins the
+  # web-accessible set against widget.js's real import closure. 11 files /
+  # 140 tests. Floors: 11 - min(50, max(1, 11/20)) = 10 files;
+  # 140 - min(50, max(1, 140/20)) = 133 tests.
+  #
+  # Re-measured after round 2. Both of that round's findings were in
+  # content_widget.js -- the file with ZERO coverage, which is also where
+  # round 1's 🔴 was -- so it now has DOM tests against the repo's
+  # shadow-DOM content-script harness (discord-embed-ext's fake_discord_dom),
+  # and content_widget.js grew a NO_AUTOSTART hook like its two siblings so a
+  # second instance is obtainable at all. 12 files / 149 tests. Floors:
+  # 12 - min(50, max(1, 12/20)) = 11 files;
+  # 149 - min(50, max(1, 149/20)) = 141.55 -> 142 tests.
+  
+  #
   # Re-measured 2026-09-19 on fix/claude-usage-duplicate-toasts. The operator
   # reported TWO notifications on opening claude.ai; asked what they SAID,
   # they were DIFFERENT -- a threshold alert plus the account summary, both
@@ -247,7 +278,12 @@ SUITES=(
   # which that race cannot occur. 9 files / 97 tests. Floors:
   # 9 - min(50, max(1, 9/20)) = 8 files;
   # 97 - min(50, max(1, 97/20)) = 92.15 -> 93 tests.
-  "scripts/claude-usage/tests|8|93"
+  #
+  # MERGED 2026-09-20 with #1806 (threshold/summary suppression +
+  # concurrency.test.mjs). Both sides added files AND tests, so this floor
+  # is the GATE'S OWN printed number for the merged tree, never arithmetic
+  # on the two sides -- which is how an eleven-value MIN_TESTS happened.
+  "scripts/claude-usage/tests|12|152"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree; js-source:

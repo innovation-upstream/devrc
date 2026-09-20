@@ -26,6 +26,11 @@ import {
   isStale,
   stalenessLabel,
 } from "./lib/timefmt.js";
+import {
+  WARN_PCT,
+  toneColor,
+  toneForRecord,
+} from "./lib/severity.js";
 
 export const ALARM_NAME = "cu-reprobe";
 export const REPROBE_PERIOD_MIN = 15;
@@ -33,7 +38,10 @@ export const REPROBE_PERIOD_MIN = 15;
 // the same tab within seconds; only one of them may trigger a probe.
 export const PROBE_MIN_INTERVAL_MS = 30 * 1000;
 export const TOAST_DEDUP_MS = 30 * 60 * 1000;
-export const ALERT_THRESHOLD_PCT = 80;
+// The toast threshold IS the shared warn band -- one number, not two that a
+// test asserts are equal. A test can only catch a drift that has already been
+// written; this cannot drift.
+export const ALERT_THRESHOLD_PCT = WARN_PCT;
 
 const CLAUDE_AI_HOST = "claude.ai";
 const CLAUDE_AI_MATCH = ["https://claude.ai/*"];
@@ -212,17 +220,7 @@ export function summaryToastText(record, now) {
 
 // --- badge ------------------------------------------------------------------- //
 
-const SEVERITY_COLORS = {
-  critical: "#d93025",
-  high: "#d93025",
-  elevated: "#f9ab00",
-  medium: "#f9ab00",
-  low: "#31a73c",
-  none: "#31a73c",
-};
-const COLOR_OK = "#31a73c";
-const COLOR_UNKNOWN = "#f9ab00";
-const COLOR_STALE = "#80868b";
+const COLOR_STALE = toneColor("stale");
 
 export function formatBadgePct(p) {
   if (p === null || p === undefined) return "?";
@@ -231,15 +229,15 @@ export function formatBadgePct(p) {
   return String(n);
 }
 
-export function severityColor(severity) {
-  if (typeof severity !== "string" || !severity) return COLOR_OK;
-  return SEVERITY_COLORS[severity] || COLOR_UNKNOWN;
-}
-
 /**
  * Badge for the ACTIVE account's session %: {text, color, title}, or null to
- * clear. Color follows severity; gray wins when the record is stale (>6h or
- * 401/403'd) -- a gray badge is the honest "this number is old" signal.
+ * clear. Gray wins when the record is stale (>6h or 401/403'd) -- a gray badge
+ * is the honest "this number is old" signal.
+ *
+ * Colour comes from lib/severity.js, the SAME predicate the in-page widget
+ * uses, so the toolbar and the page cannot disagree about one record. They did
+ * before: the badge read the API's severity string and the widget banded the
+ * percentages.
  */
 export function badgeFor(accounts, lastActiveOrg, now) {
   const rec = accounts && lastActiveOrg ? accounts[lastActiveOrg] : null;
@@ -247,7 +245,7 @@ export function badgeFor(accounts, lastActiveOrg, now) {
     return { text: "", color: COLOR_STALE, title: "Claude Usage Tracker — no active account yet" };
   }
   const stale = isStale(rec.asOf, now) || rec.staleSince !== null;
-  const color = stale ? COLOR_STALE : severityColor(rec.severity);
+  const color = toneColor(toneForRecord(rec, now, isStale));
   const s = pct(rec.session && rec.session.utilization);
   const text = stale && s === null ? "" : formatBadgePct(s);
   const asOfLine = stalenessLabel(rec.asOf, now);

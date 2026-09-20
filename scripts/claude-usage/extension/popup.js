@@ -7,30 +7,13 @@
 // after the last snapshot still shows a live countdown.
 
 import { formatCountdown, isStale, stalenessLabel } from "./lib/timefmt.js";
+import { creditsLine, formatPct } from "./lib/format.js";
 
-/** Integer percent with a "?" for unknown. */
-export function formatPct(p) {
-  return typeof p === "number" && Number.isFinite(p) ? `${Math.round(p)}%` : "?";
-}
-
-const CURRENCY_SYMBOLS = { USD: "$", EUR: "\u20ac", GBP: "\u00a3" };
-
-/**
- * Credits remaining, from minor units -> a display string. Null when the
- * numbers are unknown; the disabled reason verbatim when credits are off.
- */
-export function creditsLine(credits) {
-  if (!credits || typeof credits !== "object") return null;
-  if (credits.enabled === false) {
-    return credits.disabledReason ? `Credits disabled: ${credits.disabledReason}` : "Credits disabled";
-  }
-  const { limit, used, currency } = credits;
-  if (typeof limit !== "number" || !Number.isFinite(limit)) return null;
-  const remaining = limit - (typeof used === "number" && Number.isFinite(used) ? used : 0);
-  const major = remaining / 100;
-  const sym = CURRENCY_SYMBOLS[currency] || (currency ? `${currency} ` : "");
-  return `${sym}${major.toFixed(2)} credits left`;
-}
+// formatPct/creditsLine moved to lib/format.js when the injected widget needed
+// the same rules (2026-09-19). Re-exported rather than relocated outright: the
+// popup's tests and renderRow() address them here, and one implementation with
+// two names beats two implementations.
+export { creditsLine, formatPct };
 
 /**
  * Popup order: the ACTIVE account first, then by snapshot freshness
