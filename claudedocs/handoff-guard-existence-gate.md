@@ -22,25 +22,29 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   🔴 FROZEN AT ROUND 1.
 
 ## State now
-- **PR `#1799`, head `d7af847c` — FOUR commits.** `0ac60ad1` the fix · `f7ccbfce` round 0 ·
-  `be12c7ae` round 1 · `1a2943ad` round 2 · `d7af847c` round 3. Based on `cee56910`.
-- ✅ **THE AUDIT LADDER RAN: rounds 0, 1, 2 AND 3.** Every round found things that needed
-  fixing, so none of them was a stopping round. Round 3's advisory verdict is **safe to
-  merge**; its executable delta is **behaviour-neutral across 17,978 real corpus commands**.
-  Claims blocks posted for rounds 1 and 2 (`payload=94`, `payload=100`) — both non-zero, so
-  the attribution gate never fired and the ladder continued by the rule, not by inertia.
-- **PR body REWRITTEN** to match the tree (it advertised the Read-arm narrowing round 0
-  removed). This repo squash-merges, so that body becomes `main`'s permanent commit message.
-- 🔴 **NOT MERGED, NOT DEPLOYED.** `~/.claude/hooks/handoff-write-guard.py` is a nix-store
-  COPY: merge → pull → `home-manager switch`/`ship.sh`. Until then both hosts run the OLD guard.
-- ⚠ **ONE MUTATION RESULT IS UNRESOLVED AND IS NOT ROUNDED UP.** `test_the_scan_cap_BOUNDS_
-  the_search` kills `head = cmd[:start]` (cap deleted) — observed, own assertion. It does NOT
-  have an established verdict for `GIT_VERB_SCAN_CAP = 10**9` (cap inert): the pytest run
-  carrying that mutant does not terminate, twice. That is COULD-NOT-MEASURE, neither pass nor
-  kill. See the open investigation below.
-- **`main` moved a lot during this work** (`cee56910` → `a2b1893a` → `c46bb9d4` → `7ef01c05`
-  → …). `#1780` was merged this session (`a2b1893a`), so `main` now carries the
-  find-session arc's CLOSED state.
+- ✅ **MERGED AND SHIPPED. `#1799` → squash `a371da4e`.** Four commits of ladder
+  (`0ac60ad1` fix · `f7ccbfce` r0 · `be12c7ae` r1 · `1a2943ad` r2 · `d7af847c` r3).
+- ✅ **DEPLOYED TO BOTH HOSTS AND VERIFIED AT THE CONSUMER, not just at the deploy.**
+  `ship.sh` converged both to `a371da4e` (`✅ VERIFIED` on each per-host line, cross-host
+  agreement on ONE sha). The deployed copy moved
+  `6pjq8jidyb3ihnc8ravpwmk9lc5w5g0c` → `py0j13ikwakwmibp1k0k3wrpimg1kxhv`, identical on both
+  hosts, `_read_off_a_ref` 0 → 6 occurrences. `readlink -f` was the arbiter, never a diff.
+- ✅ **ORIGINAL SYMPTOM REPRODUCED AND GONE, with the pair reported rather than the zero:**
+  positive control `cat claudedocs/handoff-find-session-arc-resolution.md` → returns a path;
+  `grep -rn "claudedocs/handoff-x-y.md" .` and `…handoff-same.md` → **`[]`**. A bare zero from
+  a probe that might be wired to nothing would not have been evidence.
+- 🔴 **THE SANDBOX TIER WAS THE GAP EVERY ROUND NAMED, AND IT IS NOW CLOSED.** All three
+  audit rounds verified only the dev-host tier. `tekton/devrc-pytests` on `d7af847c`:
+  **`collected=24037 passed=24032 skipped=4 failed=1`**. The single failure is
+  `test_engine_is_the_version_every_measurement_is_keyed_to` — the opencode version pin,
+  INHERITED FROM `main` and unreachable from a diff touching only `scripts/claude-hooks/**`.
+  `cairn-client-runs`, `gotests`, `nodetests` all `success`.
+- ⚠ **STILL TRUE AND NOT FIXED BY SHIPPING: already-latched records keep firing.** The gate
+  runs at ARM time. This session watched the deployed-OLD guard fire twice more on strings
+  (`handoff-x.md`, and `handoff-skill-chain-usage-audit.md`) while the fix sat unmerged.
+- ⚠ **The `handoff-x.md` firing would have survived this fix** — it carried a `<ref>:` prefix,
+  so it is the DECLARED residual over-match, not the bug that was fixed. That is rank 2 below,
+  and it stopped being hypothetical within hours of being written down.
 
 ## Open investigations — live diagnosis state
 
@@ -105,28 +109,25 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   dominates is the answer, and it decides whether the cap's comment is understated.
 
 ## Next steps (ranked)
-1. **Decide the ladder's end and merge `#1799`.** Round 3 is advisory safe-to-merge and every
-   open item is a sentence, not behaviour. Merging means `gh pr merge --squash`, then
-   `scripts/ship.sh` BOTH hosts, then re-run the probe in *How to verify* against the
-   DEPLOYED copy — `readlink -f` is the arbiter.
-   forcing: gate — a fleet-wide Stop hook that can block a turn, sitting unmerged with a
-   4-commit audit ladder already paid for.
-2. **Settle the unresolved mutant** per the open investigation above — one narrow, terminating
-   question, not a general round 4.
+1. **Settle the unresolved mutant** — `GIT_VERB_SCAN_CAP = 10**9` hangs the suite instead of
+   failing it, so the cap's pin is established in ONE direction only (cap-DELETED is killed).
+   The open investigation below names the next probe. One narrow, terminating question.
    forcing: gate — the ladder's only surviving guard has an unestablished mutation verdict,
-   and "could not measure" was recorded rather than rounded to a pass.
-3. **Operator call: lift `test_the_hook_spawns_no_subprocess_on_any_path`?** It is an
-   OBSERVATION from `#1092`'s body frozen into a prohibition, wider than the `shutil` standard
-   the same file uses for the same hot path. Lifting it allows `git cat-file -e <ref>:<path>`,
-   which would make the exemption VERIFIED instead of shape-matched — and would have prevented
-   the false firing this session actually hit (`handoff-x.md`, armed via a `<ref>:` prefix in a
-   measurement command, a doc that has never existed).
+   now live on both hosts.
+2. **Operator call: lift `test_the_hook_spawns_no_subprocess_on_any_path`?** It is an
+   OBSERVATION from `#1092`'s body frozen into a prohibition, and wider than the `shutil`
+   standard the same file uses for the same hot path. Lifting it allows
+   `git cat-file -e <ref>:<path>`, making the exemption VERIFIED instead of shape-matched —
+   which would have prevented the `handoff-x.md` firing this session actually hit.
    forcing: user — reopens the fix shape the operator originally chose; not mine to take.
-4. **Re-key the three `v1.18.29` claims** — `main` is RED on `test_opencode_engine.py:745`.
-   🔴 The dual-binary control is AVAILABLE NOW and DECAYS: `1.18.29` is still realised at
-   `/nix/store/6pw7n475…`. After a GC it is not, and the strong control is gone. Both hosts are
-   on `1.18.30` at the same store path; the cheap control already passes (`1 failed, 24 passed`,
-   the failure being exactly the version assertion — identical to both prior re-derivations).
+3. **Re-key the three `v1.18.29` claims.** 🔴 NOW BLOCKING EVERY PR IN THE REPO: it is the
+   sole failure in the sandbox tier on `main` and on every branch, so CI cannot be read as
+   green by anyone until it is fixed. The dual-binary control is AVAILABLE NOW AND DECAYS —
+   `1.18.29` is still realised at `/nix/store/6pw7n475…`; after a GC the strong control is
+   gone. Both hosts are on `1.18.30` at one store path; the cheap control already passes
+   (`1 failed, 24 passed`, the failure being exactly the version assertion — identical to
+   both prior re-derivations). Protocol: seven-agent dual dump + the two controls, in the
+   header of `scripts/tests/test_opencode_engine.py`. Do NOT loosen the assertion.
    forcing: regression — `main-green-check` rc 10, RED and REPRODUCED.
 
 ## Gotchas / decisions / dead-ends
@@ -178,6 +179,22 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
 - **The guard fired CORRECTLY at the end of this session** — on
   `handoff-find-session-arc-resolution.md`, a doc that exists, after real work. That is
   the behaviour the fix preserves, and it is the reason this doc exists.
+
+- 🔴 **A SQUASH MERGE IS NEVER AN ANCESTOR OF ITS BASE, AND THIS RUN DEMONSTRATED IT.**
+  `git merge-base --is-ancestor d7af847c origin/main` returned **FALSE** immediately after a
+  successful merge. Trusted, it reads as "not merged — redo the work". Verified by CONTENT
+  instead (`_read_off_a_ref` 6, `GIT_VERB_SCAN_CAP` 2, the new pin present on `main`).
+- 🔴 **WAITING FOR CI WAS THE WHOLE VALUE, AND THE RED WAS NOT MINE.** Merging on the
+  pending state would have shipped with the one gap all three audit rounds named still open.
+  The red resolved to a test the diff cannot reach — attribute a shared red by the FAILING
+  TEST, never by the job name or the colour.
+- 🔴 **MY OWN POSITIVE CONTROL WAS WRONG ON ITS FIRST RUN and returned a reassuring `[]`.**
+  It named `claudedocs/handoff-guard-existence-gate.md` — a doc that lives on the UNMERGED
+  `#1800` and is not on disk. So the control agreed with the defect probes for a completely
+  different reason. Caught only because a control that cannot go non-empty is not a control.
+- **Decision: the residual over-match ships knowingly.** `git show <anything>:claudedocs/
+  handoff-<anything>.md` arms whether or not the ref or the doc exists. Stated on
+  `_read_off_a_ref`, and rank 2 is the decision about closing it.
 
 ## How to verify
 ```bash
