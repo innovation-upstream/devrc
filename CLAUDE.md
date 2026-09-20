@@ -20,6 +20,39 @@ Portable rules (`git add -A`, `reset --hard`, `stash`, worktree isolation, featu
 base-clone re-sync, stranded docs) are in **`claude/RULES.md` → "Git Workflow"** — read them
 there. Only what's specific to this repo, where a working tree is also a **deploy target**:
 
+- 🔴 **NEVER `commit` / `add` / `checkout` / `switch` / `stash` IN THE PRIMARY CLONE
+  `~/workspace/devrc`. Do every change through a throwaway worktree off `origin/main`.**
+  This clone is shared by concurrent sessions, and its checked-out branch is **not yours** —
+  modelled on `datapacket-talos` CLAUDE.md rule #10, which exists for the same reason.
+  **MEASURED HERE 2026-09-20:** while one session held a feature branch checked out, another
+  session committed its own unrelated work onto **that branch** (`e1ed617d`), dragging
+  `SECRETS.md`, `nix/home.nix`, `scripts/stt` and seven `browser-bridge` renames into a PR
+  about the handoff skill. Nothing errored; `git log` afterwards read exactly as expected,
+  because you are reading the branch you landed on. Found only after the push, and rescued as
+  `origin/rescued-stt-and-browser-flows`.
+  ```bash
+  WT=$(mktemp -d -u /tmp/devrc-XXXX)
+  git -C $DEVRC fetch -q origin main
+  git -C $DEVRC worktree add --detach "$WT" origin/main   # the REMOTE tip, never a local ref
+  cp $DEVRC/.envrc "$WT"/ && direnv allow "$WT"           # NOT tracked here — verified; unlike
+                                                          # datapacket-talos, where copying it
+                                                          # stages a tracked-file DELETION
+  git -C "$WT" switch -c <branch>   # edit · commit · push FROM THE WORKTREE
+  git -C $DEVRC worktree remove --force "$WT"             # ONLY after the push SUCCEEDED
+  ```
+  🔴 **Gate `worktree remove` on a SUCCESSFUL push** — removing after a failed one deletes the
+  branch ref and orphans the commit (`git fsck --dangling` to recover).
+  🔴 **AND THIS REPO ESCALATES THE HAZARD BEYOND A WRONG-BRANCH COMMIT: a checkout here
+  changes LIVE BEHAVIOUR ON THIS HOST IMMEDIATELY, with no `switch`.** Every
+  `mkOutOfStoreSymlink` path resolves INTO this working tree — verified 2026-09-20,
+  `readlink -f ~/.claude/skills/browser/SKILL.md` →
+  `/home/zach/workspace/devrc/scripts/browser-bridge/SKILL.md` — so checking out a branch
+  swaps the deployed `browser` and `dl-router` skills for every session on the box, mid-flight.
+  `home-manager switch --flake ~/workspace/devrc` likewise builds **whatever is checked out**.
+  Keep this clone on `main`; that is what makes it a safe deploy target.
+  ⚠ Read-only agents need no worktree; **any file-modifying agent does** (`claude/RULES.md` →
+  "Git Workflow"), and that rule's surfaces — env, submodules, `cp -a`, repo-global config —
+  apply unchanged.
 - 🔴 **Never commit to `main` in EITHER host checkout** (`~/workspace/devrc`, workbench *or*
   laptop). `ship.sh` converges with `merge --ff-only`, so a diverged host is **skipped and
   left as found** — it then silently stops receiving every future change while still looking
