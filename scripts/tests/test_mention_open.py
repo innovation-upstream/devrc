@@ -2847,6 +2847,12 @@ def test_every_picker_row_carries_the_TWO_marker_FIELDS_that_nth_indexes():
     `picker_rows` is what protects a future assembly arm that forgets."""
     cands = _marked(["acme/widget", "acme/api"])
     unstamped = MO.picker_rows(cands)
+    # 🔴 AN UNSTAMPED ROW IS A BUG, AND IT MUST NOT SPELL ITSELF `pinned`.
+    # Nothing reaches `picker_rows` unstamped through `stamp_picker_markers`;
+    # if one does, an assembly arm contributed a row after the stamp. Rendering
+    # that with the same word a legitimately unranked row uses would make the
+    # one state nobody can see look exactly like the ordinary one.
+    assert [r.split()[0] for r in unstamped] == ["?", "?"], unstamped
     MO.stamp_picker_markers("1804", cands, {cands[0]["url"]},
                             {"acme/widget": 9999})
     for rows, what in ((unstamped, "unstamped"), (MO.picker_rows(cands),

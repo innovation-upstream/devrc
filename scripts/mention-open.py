@@ -469,6 +469,14 @@ PICKER_MARKER_RANK_W = 3
 # exists to prevent.
 PICKER_MARKER_UNRANKED = "pinned"
 PICKER_MARKER_NO_RANK = "-"
+# 🔴 A DIFFERENT WORD FOR "NOBODY STAMPED THIS ROW", AND THE DIFFERENCE IS THE
+# POINT. `picker_rows` falls back when a candidate carries no `marker` at all,
+# which cannot happen through `stamp_picker_markers` — it means an assembly arm
+# contributed a row after the stamp, i.e. a BUG. Rendering that as `pinned`
+# would spell a defect with the same word as a legitimately unranked row, so
+# the one state nobody can see is the one that looks normal. This keeps the
+# click working (never raise on the click path) and makes the failure legible.
+PICKER_MARKER_UNSTAMPED = "?"
 
 
 def picker_marker(klass_name: str, rank: str) -> str:
@@ -491,9 +499,18 @@ def picker_markers(num: str, candidates: list[dict],
     is the ordering's own top row — and cannot go negative.
 
     A row the ordering did not place gets `pinned -`: no number, because it has
-    no rank. The four class names are the SAME strings the `plausibility` dim
-    emits, so what the operator reads and what the telemetry records cannot
-    drift into two vocabularies.
+    no rank.
+
+    ⚠ THE CLASS COLUMN HOLDS FIVE WORDS, NOT FOUR, AND ONLY FOUR OF THEM ARE
+    `CLASS_NAMES`'. The four class names are the SAME strings the `plausibility`
+    dim emits, so what the operator reads and what the telemetry records cannot
+    drift into two vocabularies — but `pinned` is a FIFTH word with no
+    counterpart in that dim, which expresses the same state as an ABSENT
+    `plausibility` beside `ordered=false`. An earlier draft of this paragraph
+    claimed the column was `CLASS_NAMES`' vocabulary flat out, which was true of
+    four values and false of the one the operator sees most often at the top of
+    the list. (`picker_rows` can render a sixth, `?`, for a row nothing stamped
+    — that is a BUG marker, not a class; see its own constant.)
     """
     markers = []
     rank = 0
@@ -544,11 +561,11 @@ def picker_rows(candidates: list[dict]) -> list[str]:
     ⚠ The marker is a PREFIX because `row_to_url` matches on the URL SUFFIX and
     says so — decoration on the left cannot open the wrong row.
     """
-    unranked = picker_marker(PICKER_MARKER_UNRANKED, PICKER_MARKER_NO_RANK)
+    unstamped = picker_marker(PICKER_MARKER_UNSTAMPED, PICKER_MARKER_NO_RANK)
     rows = []
     for c in candidates:
         label = PLATFORM_LABEL.get(c["platform"], c["platform"])
-        rows.append(f"{c.get('marker') or unranked}  "
+        rows.append(f"{c.get('marker') or unstamped}  "
                     f"{label} {c['id']} — {c['url']}")
     return rows
 
