@@ -96,13 +96,14 @@
     // 🔴 THIS IS WHAT REPLACED THE `+N more` CAP, AND IT IS LOAD-BEARING.
     // lib/widget.js used to hand over at most 4 rows plus a count of the
     // rest; that count was TERMINAL -- no click in the card could reveal
-    // them -- and the operator's live profile has more candidates than the
-    // cap. Making the count clickable would have put a button inside this
-    // section, which content_widget.test.mjs forbids for the round-1
-    // pointer-events reason. So every row is painted and the height is
-    // bounded here instead: ~5 rows visible, the rest reachable by SCROLL.
-    // Drop the overflow and the card grows without limit over his composer,
-    // which is the hazard the cap existed for.
+    // them. Making it clickable would have put a button inside this section,
+    // which content_widget.test.mjs forbids for the round-1 pointer-events
+    // reason. So every row is painted and the height is bounded here
+    // instead: ~5 rows visible, the rest reachable by SCROLL. Drop the
+    // overflow and the card grows without limit over his composer, which is
+    // the hazard the cap existed for. Drop the max-height and the overflow
+    // never engages. The full argument is in lib/widget.js, where the cap
+    // used to live.
     ".otherlist{max-height:170px;overflow-y:auto;overscroll-behavior:contain}",
     ".other{display:flex;align-items:baseline;gap:6px;margin-bottom:5px}",
     ".other.stale{opacity:.72}",

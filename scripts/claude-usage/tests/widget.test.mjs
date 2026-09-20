@@ -512,10 +512,11 @@ test("an other-row carries NOTHING the painter does not read", () => {
 
 test("🔴 EVERY other account reaches the card -- no row is counted-but-unreachable", () => {
   // This replaces a test that pinned OTHERS_MAX = 4 and `othersMore = 2`.
-  // The cap was real and it FIRED (the operator's live profile holds more
-  // than four candidates), and the "+N more" line it produced was TERMINAL:
-  // no click anywhere in the card could reveal those rows. A count of rows
-  // you cannot see is worse than either showing them or not mentioning them.
+  // The "+N more" line that cap produced was TERMINAL: no click anywhere in
+  // the card could reveal those rows. A count of rows you cannot see is
+  // worse than either showing them or not mentioning them -- and that is
+  // true whether or not the cap fires on any particular profile, which was
+  // NOT measured (see lib/widget.js for what was).
   // The height bound moved into CSS (`.otherlist` scrolls), which keeps the
   // "card over his chat" constraint without hiding anything; the painter's
   // half is pinned in content_widget.test.mjs.

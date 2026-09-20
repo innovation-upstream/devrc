@@ -366,11 +366,11 @@ test("🔴 the stale dim is scoped to the active account, never to the whole car
 
 test("🔴 the card PAINTS every account -- the '+N more' dead end is gone", async () => {
   // This test used to assert the opposite: 4 rows and a "+2 more" line. That
-  // line was TERMINAL -- nothing in the card could expand it -- so two of the
-  // operator's accounts were counted and unreachable, and the cap fires on
-  // his real profile. Making the count clickable would have put a button
-  // inside this section, which the pointer-events test below forbids. So
-  // every row is painted and the height is bounded by CSS instead.
+  // line was TERMINAL -- nothing in the card could expand it -- so on this
+  // very fixture two accounts were counted and unreachable. Making the count
+  // clickable would have put a button inside this section, which the
+  // pointer-events test below forbids. So every row is painted and the
+  // height is bounded by CSS instead.
   const now = Date.now();
   const accounts = { [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0) };
   [23, 31, 42, 53, 62, 71].forEach((p, i) => {

@@ -33,8 +33,18 @@ export { ACCOUNT_LABELS_KEY };
 // 🔴 THERE IS NO `OTHERS_MAX` CAP ANY MORE, AND ADDING ONE BACK NEEDS AN
 // ANSWER TO THIS. The card showed at most 4 other rows and summarised the
 // rest as a "+N more" line -- which was TERMINAL: nothing in the card could
-// expand it, so those rows were unreachable by any click. The account map on
-// the operator's live profile holds more than four candidates, so it fired.
+// expand it, so any row past the fourth was unreachable by any click.
+//
+// ⚠ WHETHER IT FIRES TODAY IS NOT MEASURED, and the argument does not rest
+// on it. What IS measured (2026-09-20, the operator's LAPTOP -- the widget is
+// registered in no profile on the workbench, so "is it running" is
+// host-dependent): the extension is live from this repo path, its store is
+// ~645 KB, and it holds 266 `resetsAt` occurrences, i.e. many real snapshots.
+// Six distinct UUID-shaped values appear in it, but that is an INDICATOR and
+// NOT an account count -- some may be other identifiers, and nobody has
+// counted the accounts. So: a cap that MIGHT already be hiding rows, with no
+// way to see them if it is. A counted-but-unexpandable row is a dead end
+// whenever it occurs; it does not have to occur today to be one.
 //
 // The two ways out were "make +N more reachable" and "drop the cap". Making
 // it reachable means a BUTTON inside the other-accounts section, and
@@ -45,6 +55,11 @@ export { ACCOUNT_LABELS_KEY };
 // "card over his chat" constraint it existed for is now held by CSS --
 // `.otherlist` in content_widget.js scrolls past a fixed max-height. Scrolled
 // content is reachable; counted content is not.
+//
+// ⚠ NOT VERIFIED ON SCREEN. The scroll bound is CSS in a shadow root inside
+// claude.ai; the node harness has no layout and this box is not the host the
+// extension runs on. What is pinned is that the rule exists and carries both
+// declarations, and that every row is painted inside the bounded container.
 
 /** The host element's id. Also the handle content_widget.js uses to detect an
  * existing mount, so a double-injected content script cannot stack widgets. */

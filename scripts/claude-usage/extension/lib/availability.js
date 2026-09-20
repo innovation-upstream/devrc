@@ -168,8 +168,12 @@ export function availability(record, now) {
  */
 export function orderForSwitch(accounts, now) {
   const map = isRecord(accounts) ? accounts : {};
+  // `index` is map-insertion order, kept as the final tiebreak so the sort is
+  // total. The org key itself is NOT carried: it was only ever read to find
+  // the active record for the pin removed above, and a second consumer-less
+  // field is exactly what this change is cleaning out.
   const entries = Object.keys(map)
-    .map((key, index) => ({ key, index, rec: map[key] }))
+    .map((key, index) => ({ index, rec: map[key] }))
     .filter((e) => isRecord(e.rec));
 
   const verdicts = new Map();

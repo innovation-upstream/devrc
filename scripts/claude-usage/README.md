@@ -93,11 +93,14 @@ most-available-first; the popup keeps its own freshness ordering) — that is
 deliberate, and it is not a difference of verdict.
 
 ⚠ **There is no `+N more` cap.** The widget drew at most four other-account
-rows and summarised the rest as a count that nothing could expand, so those
-rows were unreachable — and the cap fires on a real multi-account profile.
-Making the count clickable would have added a button inside the card, which
-is forbidden (see the pointer-events note below), so every row is painted and
-the height is bounded by CSS instead: `.otherlist` scrolls past ~170px.
+rows and summarised the rest as a count that nothing could expand, so any row
+past the fourth was unreachable by any click. Making the count clickable
+would have added a button inside the card, which is forbidden (see the
+pointer-events note below), so every row is painted and the height is bounded
+by CSS instead: `.otherlist` scrolls past ~170px. ⚠ Whether the cap was
+already firing on the operator's own store is **not measured** — a dead end
+does not need to be occupied today to be a dead end. `lib/widget.js` records
+what *was* measured about that store, and what was not.
 
 ⚠ **Staleness must not grey a `free` row**, and that is not a style
 preference. The account worth switching to is by construction the one measured
