@@ -173,7 +173,9 @@ def test_picker_rows_show_the_platform_and_the_url():
     _span, cands = MO.resolve("#370", default_repo="civitai/talos-infra")
     rows = MO.picker_rows(cands)
     assert len(rows) == 2
-    assert rows[0].startswith("clawgate task 370 ")
+    # The marker is a PREFIX, so the platform/id/url text is what follows it —
+    # asserted from field 3 on, which is exactly the slice `--nth=3..` matches.
+    assert rows[0].split(None, 2)[2].startswith("clawgate task 370 ")
     assert rows[0].endswith("https://clawgate.zacx.dev/tasks/370")
     assert rows[1].endswith("https://github.com/civitai/talos-infra/pull/370")
 
@@ -2431,8 +2433,16 @@ def _eponymous_corpus() -> tuple[list[str], str]:
              "mortar", "nectar", "oxbow")
     repos += [f"{o}/{n}" for o in others for n in names]
     repos = sorted(set(repos), key=str.lower)
-    return ([f"github 1234 — https://github.com/{r}/pull/1234" for r in repos],
-            f"{owner}/{owner}")
+    # 🔴 BUILT BY `picker_rows` ITSELF, NOT SPELLED HERE. This docstring has
+    # always claimed "the exact shape `picker_rows()` builds", and a hardcoded
+    # f-string made that a claim rather than a fact: when the row format grew a
+    # marker, this corpus silently became the OLD shape and the real-fzf tests
+    # below started measuring a row production no longer emits — with `--nth`
+    # indexing fields, that is not a cosmetic difference, it is fzf matching a
+    # different substring. Deriving the rows is what makes the docstring true.
+    cands = [{"platform": MO.PLATFORM_GITHUB, "id": "1234",
+              "url": f"https://github.com/{r}/pull/1234"} for r in repos]
+    return MO.picker_rows(cands), f"{owner}/{owner}"
 
 
 def _fzf_rank(rows: list[str], query: str, target: str, *flags) -> int:
@@ -2513,6 +2523,33 @@ def _drop_query_line(lines: list[str]) -> list[str]:
     return lines[MO.PICKER_QUERY_LINE + 1:]
 
 
+def _counter(drawn: bytes) -> tuple[int, int]:
+    """fzf's MOST RECENT `<matched>/<total>` counter, as `(matched, total)`.
+
+    `--info=inline` draws it beside the prompt. `total` is how many rows fzf
+    has READ, so it climbing to the row count means the list finished loading;
+    `matched` is how many survive the current query, so it being non-zero means
+    the query has actually been APPLIED.
+
+    🔴 BOTH HALVES ARE LOAD-BEARING, AND CHECKING ONLY `total` LEFT THIS TEST
+    FAILING 3 TIMES IN 20. fzf reads stdin and filters concurrently, so the
+    denominator can reach the full count while the numerator is still 0 — Enter
+    lands there, fzf has no selection, and it exits with the query line alone.
+    That is the same failure as the original race, one step later.
+
+    ⚠ LAST, NOT LARGEST. The counter is re-rendered as it climbs and every
+    intermediate value is still in the byte stream, so the largest numerator is
+    a value from the PAST. Only the most recent pair describes the screen Enter
+    is about to be pressed against.
+
+    ⚠ Returns `(0, 0)` when nothing has been drawn, so a caller comparing
+    against a real row count cannot read "no counter" as "counter matched"."""
+    import re  # noqa: PLC0415 — only this helper needs it
+    text = drawn.decode("utf-8", "replace")
+    found = re.findall(r"(\d+)/(\d+)", text)
+    return (int(found[-1][0]), int(found[-1][1])) if found else (0, 0)
+
+
 def _fzf_interactive_first_row(rows: list[str], query: str) -> str:
     """The row a REAL interactive fzf selects on Enter, driven through a pty."""
     import fcntl     # noqa: PLC0415 — only this pair needs them
@@ -2561,10 +2598,39 @@ def _fzf_interactive_first_row(rows: list[str], query: str) -> str:
         return seen
 
     try:
-        drawn = _drain(master, lambda b: _PTY_PROMPT.encode() in b,
+        # 🔴 THE PROMPT IS NOT READINESS, AND TREATING IT AS ONE MADE THIS TEST
+        # FAIL 11 TIMES IN 20. fzf draws its prompt BEFORE it has finished
+        # reading stdin, so Enter sent on the prompt alone can land while the
+        # list is still loading: fzf then has nothing to match, exits with the
+        # query line ALONE, and the failure reads as "returned 1 of the 2
+        # lines" — a harness race wearing the costume of a ranking bug.
+        #
+        # ⚠ MEASURED, and the measurement is why this is a fix and not a
+        # re-run: 0 failures in 20 at the parent commit, 11 in 20 once the row
+        # marker made every row ~16 bytes longer. The marker did not break
+        # anything — it widened a window that was always open, and a corpus
+        # that grows again would have reopened it.
+        #
+        # The real signal is fzf's own match counter (`--info=inline` renders
+        # `<matched>/<total>`): when its DENOMINATOR reaches the row count,
+        # every row has been read. One drain for both, because `_drain`
+        # accumulates only the bytes it saw — a second call can miss a counter
+        # the first already consumed.
+        total = len(rows)
+        drawn = _drain(master,
+                       lambda b: (_PTY_PROMPT.encode() in b
+                                  and _counter(b) == (_counter(b)[0], total)
+                                  and _counter(b)[0] >= 1),
                        time.monotonic() + 20)
         assert _PTY_PROMPT.encode() in drawn, (
             "fzf never drew its prompt in 20s — this test measured nothing. "
+            f"terminal saw: {drawn[-400:]!r}")
+        matched, seen = _counter(drawn)
+        assert seen == total and matched >= 1, (
+            f"fzf's counter never settled at `>=1/{total}` in 20s — last seen "
+            f"{matched}/{seen}. Enter would be pressed against a list that is "
+            f"still loading ({seen} != {total}) or not yet filtered "
+            f"({matched} == 0), and neither measures the ranking. "
             f"terminal saw: {drawn[-400:]!r}")
         os.write(master, b"\r")
         # `--print-query` writes the query first, so the SELECTION is the last
@@ -2668,7 +2734,7 @@ def test_REAL_fzf_is_CASE_INSENSITIVE_only_with_the_flag():
 # --------------------------------------------------------------------------- #
 EXPECTED_PICKER_SH = (
     'fzf -i --tiebreak=end --layout=reverse --info=inline --print-query '
-    '--bind="esc:print-query+abort" '
+    '--bind="esc:print-query+abort" --nth=3.. '
     '--prompt="mention > " --pointer=">" --color=16 '
     '--header-lines="$3" <"$1" >"$2"'
 )
@@ -2701,6 +2767,147 @@ def test_the_picker_shell_script_carries_no(metachar, what):
     substring check. Two guards on one property, on purpose: the hazard here is
     disclosure, and the exact-string pin is the kind a future edit "fixes"."""
     assert metachar not in MO.PICKER_SH, f"PICKER_SH gained {metachar!r}: {what}"
+
+
+def _marked(repos: list[str], num: str = "1804") -> list[dict]:
+    """Candidate dicts for `repos`, in the shape the universe arm builds."""
+    return [{"platform": MO.PLATFORM_GITHUB, "id": num,
+             "url": f"https://github.com/{r}/issues/{num}"} for r in repos]
+
+
+def test_the_row_MARKER_names_the_CLASS_and_the_RANK_and_pinned_rows_have_NEITHER():
+    """🔴 SYMPTOM 1: the pre-computed order reaches fzf as INPUT ORDER, so the
+    first keystroke hands ordering to fzf's own score and our rank becomes
+    invisible to anyone who types. The marker puts it in the row TEXT, which a
+    narrowed list still shows.
+
+    A row the ordering did not place must carry NO number. Printing one would
+    invent a rank for a row that was never ranked — the clawgate row and the
+    pane guess are pinned, not ranked, and the telemetry already keeps that
+    distinction (`ordered`)."""
+    cands = _marked(["acme/widget", "acme/api"])
+    pinned = [{"platform": "clawgate", "id": "1804",
+               "url": "https://clawgate.zacx.dev/tasks/1804"}]
+    allc = pinned + cands
+    ordered = {c["url"] for c in cands}
+    MO.stamp_picker_markers("1804", allc, ordered,
+                            {"acme/widget": 9999, "acme/api": 3})
+    assert allc[0]["marker"].split() == ["pinned", "-"], allc[0]["marker"]
+    # `acme/widget` has reached #1804, `acme/api` has not — the two classes the
+    # operator most needs told apart, and the words are CLASS_NAMES' own.
+    assert allc[1]["marker"].split() == ["plausible", "1"], allc[1]["marker"]
+    assert allc[2]["marker"].split() == ["below", "2"], allc[2]["marker"]
+
+
+def test_the_PROMOTED_row_is_marked_rank_1_not_a_NEGATIVE_offset():
+    """🔴 THE TRAP THIS MODULE ALREADY DOCUMENTS, ONE FIELD ALONG. A promoted
+    row sits at position 0 with `rank < pinned_above`, so `rank - pinned_above`
+    goes NEGATIVE and the arithmetic reports the genuinely-ordered row as
+    pinned and the demoted guess as ordered — both inverted. `picker_markers`
+    counts off `ordered_urls` instead, so the promoted row reads `1`: it IS the
+    ordering's top row, which is why it was promoted.
+
+    Built as the promotion arm builds it: the ordered row FIRST, the pinned
+    guess BELOW it, and THEN the rest of the ordered block.
+
+    🔴 THAT THIRD ROW IS THE WHOLE TEST, AND WITHOUT IT THIS WAS VACUOUS —
+    measured, not supposed. With only [promoted, guess], the promoted row is at
+    index 0, so counting off `ordered_urls` and counting off the INDEX both say
+    `1`: the mutant that swaps one for the other SURVIVED a green assertion.
+    A pinned row sitting ABOVE a later ordered row is what makes the two
+    disagree — ordered-count says `2`, the index says `3`."""
+    promoted = _marked(["acme/widget"])
+    guess = [{"platform": MO.PLATFORM_GITHUB, "id": "1804",
+              "url": "https://github.com/acme/guess/issues/1804"}]
+    rest = _marked(["acme/api"])
+    allc = promoted + guess + rest   # promoted, then the pinned guess, then more
+    MO.stamp_picker_markers("1804", allc,
+                            {promoted[0]["url"], rest[0]["url"]},
+                            {"acme/widget": 9999, "acme/api": 9999})
+    assert allc[0]["marker"].split() == ["plausible", "1"], (
+        f"the promoted row is marked {allc[0]['marker']!r} — it is the "
+        f"ordering's own top row and must read rank 1, never a negative or "
+        f"pinned marker")
+    assert allc[1]["marker"].split() == ["pinned", "-"], allc[1]["marker"]
+    assert allc[2]["marker"].split() == ["plausible", "2"], (
+        f"the row below the pinned guess is marked {allc[2]['marker']!r} — it "
+        f"is the SECOND row the ordering placed, and a rank counted off the "
+        f"list INDEX would call it 3, skipping a number for a row that was "
+        f"never ranked")
+
+
+def test_every_picker_row_carries_the_TWO_marker_FIELDS_that_nth_indexes():
+    """🔴 `--nth=3..` INDEXES FIELDS, SO A ROW WITHOUT A MARKER MATCHES THE
+    WRONG SUBSTRING — its `<platform> <id>` is eaten by the offset and only the
+    URL stays in the haystack. This pins the contract both halves rest on: at
+    least three fields on EVERY row, and field 3 onward byte-identical to the
+    text the picker showed before markers existed.
+
+    Driven for a STAMPED list and an UNSTAMPED one, because the fallback in
+    `picker_rows` is what protects a future assembly arm that forgets."""
+    cands = _marked(["acme/widget", "acme/api"])
+    unstamped = MO.picker_rows(cands)
+    MO.stamp_picker_markers("1804", cands, {cands[0]["url"]},
+                            {"acme/widget": 9999})
+    for rows, what in ((unstamped, "unstamped"), (MO.picker_rows(cands),
+                                                  "stamped")):
+        for row, c in zip(rows, cands):
+            fields = row.split()
+            assert len(fields) >= 3, f"{what}: {row!r} has {len(fields)} fields"
+            assert row.split(None, 2)[2] == (
+                f"github {c['id']} — {c['url']}"), (
+                f"{what}: field 3.. is {row.split(None, 2)[2]!r}, which is what "
+                f"`--nth=3..` hands fzf as the haystack")
+
+
+def test_REAL_fzf_does_NOT_match_the_row_MARKER():
+    """🔴 THE COST THE PROPOSAL NAMES, MEASURED SHUT. A leading token is
+    fuzzy-matchable, so without `--nth` the words `below`/`unknown`/
+    `impossible` join the haystack and a query starts matching rows on OUR
+    label rather than on the repository the operator typed.
+
+    Asserted as a SET comparison against the same corpus with no marker at all:
+    under the picker's real flags the marker must change NOTHING about which
+    rows match. The control below is what makes that meaningful — with `--nth`
+    removed the sets must DIFFER, or this test would pass against a corpus the
+    marker could never have affected."""
+    _require_fzf()
+    repos = [f"{o}/{n}"
+             for o in ("nimbusworks", "harborlight", "quillstone", "acme")
+             for n in ("widget", "api", "cli", "ledger", "ember", "gateway")]
+    bare = MO.picker_rows(_marked(repos))          # every row `pinned -`
+    cands = _marked(repos)
+    # Stamp a SPREAD of classes, so every marker word is somewhere in the
+    # corpus — a fixture where they were all identical could not see a query
+    # matching one of them.
+    MO.stamp_picker_markers("1804", cands, {c["url"] for c in cands},
+                            {r.lower(): (9999 if i % 2 else 3)
+                             for i, r in enumerate(repos)})
+    marked = MO.picker_rows(cands)
+    flags = _picker_flags()
+    assert any(f.startswith("--nth") for f in flags), (
+        "the picker lost --nth, so the marker is in the haystack: this test's "
+        "premise is gone, not merely its assertion")
+    no_nth = [f for f in flags if not f.startswith("--nth")]
+
+    def matched(rows, fl, query):
+        out = subprocess.run(["fzf", "--filter", query, *fl],
+                             input="\n".join(rows) + "\n",
+                             capture_output=True, text=True)
+        # Compare on the URL, the one part the marker cannot alter.
+        return {ln.rsplit(" ", 1)[-1] for ln in out.stdout.split("\n") if ln}
+
+    control_differs = 0
+    for query in ("below", "plausible", "widget", "led", "ember", "api"):
+        base = matched(bare, flags, query)
+        assert matched(marked, flags, query) == base, (
+            f"query {query!r} matched a different SET of rows once the marker "
+            f"was on them — `--nth` is supposed to keep it out of the haystack")
+        if matched(marked, no_nth, query) != base:
+            control_differs += 1
+    assert control_differs, (
+        "POSITIVE CONTROL FAILED: removing --nth changed nothing either, so "
+        "the equality asserted above is not evidence that --nth does anything")
 
 
 def test_the_picker_shell_script_has_EXACTLY_the_two_redirections():
