@@ -7454,3 +7454,131 @@ class TestTheBudgetWarningDoesNotDescribeAWriteThatIsRefused:
         printed = src.index("print(budget_note)", call)
         diff = src.index("print(diff,", printed)
         assert call < printed < diff, "the budget note must still print before the diff"
+
+
+# --- evictable_note: the per-doc eviction backlog, printed where the decision is --
+#
+# 🔴 THESE ARE NEW-BEHAVIOUR TESTS, NOT REGRESSION TESTS, and the distinction is
+# not pedantry: `evictable_note` did not exist before this change, so every one of
+# them fails at the base ref with AttributeError — which proves nothing about a bug,
+# because there was no bug. Nothing here should be counted as regression coverage.
+#
+# WHY THE FUNCTION EXISTS. The ladder in `test_handoff_doc_size.py` ranks EVICT WHAT
+# HAS CLOSED first and calls it "usually the whole answer", but said so generically
+# to every author. MEASURED 2026-09-20: 468,110 B (14.1%) of the corpus is already
+# evictable while 28 docs sit over the hard cap. Detection was never the gap.
+
+_EVICTABLE_DOC = """# Handoff: fixture — 2026-09-20
+
+## Goal
+A fixture.
+- **closing-condition:** `check` — this test passes.
+
+## Open investigations — live diagnosis state
+### RESOLVED — the thing that was wrong
+- **Observed (with values):** %s
+- **Ruled out:** it was never DNS, `via: measurement`
+
+### Still open — a live one
+- **Observed (with values):** short
+
+## Next steps (ranked)
+1. DONE — shipped as abc1234. %s
+   forcing: none
+
+## Gotchas / decisions / dead-ends
+- 🔴 RETRACTED — this reasoning was wrong. %s
+- A live gotcha that must never be counted as evictable.
+""" % ("E" * 900, "D" * 900, "R" * 900)
+
+
+def test_evictable_note_reports_each_closed_class_with_its_own_count():
+    """The three detectors must be reported SEPARATELY. A single total would hide
+    which action to take, and they have different remedies: a resolved
+    investigation and a completed rank are evicted differently (the rank's NUMBER
+    must survive, which is why `net` is charged 200 B for it)."""
+    note = hd.evictable_note(_EVICTABLE_DOC, 0)
+    assert "resolved investigations" in note, note
+    assert "completed ranked items" in note, note
+    assert "retracted / dead-ends" in note, note
+    # the live gotcha and the open investigation must NOT be counted
+    assert "2 blocks" not in note, (
+        "an OPEN investigation was counted as resolved — the whole point is that "
+        "only CLOSED content is offered for eviction:\n" + note
+    )
+
+
+def test_evictable_note_is_SILENT_when_nothing_has_closed():
+    """🔴 THE NEGATIVE CONTROL, and the one that makes the positive readable. A
+    note that printed on every doc would be a line nobody reads by the third one,
+    which is the contract `budget_warning` states for itself."""
+    clean = ("# Handoff: x — 2026-09-20\n\n## Goal\nA goal.\n\n"
+             "## Gotchas / decisions / dead-ends\n- A live gotcha.\n")
+    assert hd.evictable_note(clean, 0) == ""
+
+
+def test_evictable_note_states_a_SHORTFALL_rather_than_implying_it_clears():
+    """🔴 Quoting a number that does not actually clear the overage sends an author
+    cutting and leaves them still red — worse than saying nothing. Both branches
+    are asserted because the wording differs and only one can be right per case."""
+    big = hd.evictable_note(_EVICTABLE_DOC, 10 ** 7)
+    assert "does NOT clear" in big, big
+    small = hd.evictable_note(_EVICTABLE_DOC, 1)
+    assert "CLEARS" in small and "does NOT clear" not in small, small
+
+
+def test_evictable_note_NEVER_raises_when_the_auditor_is_absent(monkeypatch):
+    """🔴 THIS RUNS INSIDE THE WRITE PATH. An exception here would take down
+    `/handoff`'s only landing step and cost a session its record, to decorate a
+    warning. `handoff-audit.py` is a devrc script, so a repo vendoring only this
+    module legitimately has no such file — the ordinary case, not an error."""
+    monkeypatch.setattr(hd, "_AUDITOR", Path("/nonexistent/handoff-audit.py"))
+    assert hd.evictable_note(_EVICTABLE_DOC, 100) == ""
+
+
+def test_the_over_budget_warning_CARRIES_the_note_and_still_refuses_nothing():
+    """The note is an addition to the warning, never a new refusal: `budget_warning`
+    returns text and blocks no write, which is the property
+    `test_the_over_budget_warning_REFUSES_NOTHING` already pins for the arm itself."""
+    w = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
+                          _EVICTABLE_DOC + "z" * 70_000, "z" * 100, gated=True)
+    assert w.startswith("🔴 THIS UPDATE PUTS THE DOC OVER ITS SIZE BUDGET")
+    assert "Evictable in THIS doc" in w, w
+
+
+def test_the_note_is_withheld_from_the_UNGATED_arm():
+    """🔴 The ungated arm REPORTS THE NUMBER AND PRESCRIBES NOTHING, deliberately:
+    outside devrc the ladder cites a playbook the repo does not ship, so a
+    breakdown keyed to its step 1 would be prescribing where that arm must not."""
+    w = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
+                          _EVICTABLE_DOC + "z" * 70_000, "z" * 100, gated=False)
+    assert "SIZE ONLY, NO GATE" in w
+    assert "Evictable in THIS doc" not in w, w
+
+
+def _near_text():
+    """Text sized into the NEAR-budget arm: under the ceiling, but with less than
+    `BUDGET_NEAR_BYTES` of headroom left."""
+    pad = hd.handoff_budget.MAX_BYTES - hd.BUDGET_NEAR_BYTES // 2 - len(_EVICTABLE_DOC)
+    assert pad > 0
+    return _EVICTABLE_DOC + "z" * pad
+
+
+def test_the_NEAR_budget_arm_carries_the_note_when_gated():
+    """🔴 REACHABILITY, and this test exists because its absence let a mutant live.
+    `test_the_note_is_withheld_from_the_UNGATED_arm` drives the OVER-budget arm,
+    which returns before the near arm's `if gated` is ever evaluated — so deleting
+    that guard changed nothing any test could see, and the mutant SURVIVED a green
+    suite. These two cases execute the guard itself, in both directions."""
+    w = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
+                          _near_text(), "z" * 100, gated=True)
+    assert w.startswith("⚠ Size:"), w
+    assert "Evictable in THIS doc" in w, w
+
+
+def test_the_NEAR_budget_arm_withholds_the_note_when_UNGATED():
+    """The other direction of the guard the mutant walked through."""
+    w = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
+                          _near_text(), "z" * 100, gated=False)
+    assert w.startswith("⚠ Size:"), w
+    assert "Evictable in THIS doc" not in w, w

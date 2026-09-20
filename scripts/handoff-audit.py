@@ -377,7 +377,14 @@ def status_for(size):
 
 
 def audit_one(doc):
-    text = doc.read_text(errors="replace")
+    """Audit a doc ON DISK. The text half is `audit_text`, which is what a caller
+    holding a not-yet-written merge (`handoff_doc.budget_warning`) needs — the
+    warning is about the document the update WOULD produce, so round-tripping it
+    through a temp file would be both wasteful and a second thing to keep true."""
+    return audit_text(doc.read_text(errors="replace"), doc)
+
+
+def audit_text(text, doc=None):
     lines = text.splitlines(keepends=True)
     heads = SA._headings(lines)
     size = len(text.encode())
@@ -415,7 +422,7 @@ def audit_one(doc):
     net = max(0, gross - RESUME_COST * len(done))
     return {
         "path": doc,
-        "name": doc.name,
+        "name": doc.name if doc is not None else "",
         "size": size,
         "lines": len(lines),
         "status": status_for(size),
