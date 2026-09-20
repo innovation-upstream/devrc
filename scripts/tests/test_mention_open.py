@@ -174,8 +174,8 @@ def test_picker_rows_show_the_platform_and_the_url():
     rows = MO.picker_rows(cands)
     assert len(rows) == 2
     # The marker is a PREFIX, so the platform/id/url text is what follows it —
-    # asserted from field 3 on, which is exactly the slice `--nth=3..` matches.
-    assert rows[0].split(None, 2)[2].startswith("clawgate task 370 ")
+    # asserted from field 3 on, which is exactly the slice `--nth=2..` matches.
+    assert rows[0].split(None, 1)[1].startswith("clawgate task 370 ")
     assert rows[0].endswith("https://clawgate.zacx.dev/tasks/370")
     assert rows[1].endswith("https://github.com/civitai/talos-infra/pull/370")
 
@@ -2734,7 +2734,7 @@ def test_REAL_fzf_is_CASE_INSENSITIVE_only_with_the_flag():
 # --------------------------------------------------------------------------- #
 EXPECTED_PICKER_SH = (
     'fzf -i --tiebreak=end --layout=reverse --info=inline --print-query '
-    '--bind="esc:print-query+abort" --nth=3.. '
+    '--bind="esc:print-query+abort" --nth=2.. '
     '--prompt="mention > " --pointer=">" --color=16 '
     '--header-lines="$3" <"$1" >"$2"'
 )
@@ -2790,13 +2790,12 @@ def test_the_row_MARKER_names_the_CLASS_and_the_RANK_and_pinned_rows_have_NEITHE
                "url": "https://clawgate.zacx.dev/tasks/1804"}]
     allc = pinned + cands
     ordered = {c["url"] for c in cands}
-    MO.stamp_picker_markers("1804", allc, ordered,
-                            {"acme/widget": 9999, "acme/api": 3})
-    assert allc[0]["marker"].split() == ["pinned", "-"], allc[0]["marker"]
+    MO.stamp_picker_markers(allc, ordered)
+    assert allc[0]["marker"].split() == ["-"], allc[0]["marker"]
     # `acme/widget` has reached #1804, `acme/api` has not — the two classes the
     # operator most needs told apart, and the words are CLASS_NAMES' own.
-    assert allc[1]["marker"].split() == ["plausible", "1"], allc[1]["marker"]
-    assert allc[2]["marker"].split() == ["below", "2"], allc[2]["marker"]
+    assert allc[1]["marker"].split() == ["1"], allc[1]["marker"]
+    assert allc[2]["marker"].split() == ["2"], allc[2]["marker"]
 
 
 def test_the_PROMOTED_row_is_marked_rank_1_not_a_NEGATIVE_offset():
@@ -2821,15 +2820,13 @@ def test_the_PROMOTED_row_is_marked_rank_1_not_a_NEGATIVE_offset():
               "url": "https://github.com/acme/guess/issues/1804"}]
     rest = _marked(["acme/api"])
     allc = promoted + guess + rest   # promoted, then the pinned guess, then more
-    MO.stamp_picker_markers("1804", allc,
-                            {promoted[0]["url"], rest[0]["url"]},
-                            {"acme/widget": 9999, "acme/api": 9999})
-    assert allc[0]["marker"].split() == ["plausible", "1"], (
+    MO.stamp_picker_markers(allc, {promoted[0]["url"], rest[0]["url"]})
+    assert allc[0]["marker"].split() == ["1"], (
         f"the promoted row is marked {allc[0]['marker']!r} — it is the "
         f"ordering's own top row and must read rank 1, never a negative or "
         f"pinned marker")
-    assert allc[1]["marker"].split() == ["pinned", "-"], allc[1]["marker"]
-    assert allc[2]["marker"].split() == ["plausible", "2"], (
+    assert allc[1]["marker"].split() == ["-"], allc[1]["marker"]
+    assert allc[2]["marker"].split() == ["2"], (
         f"the row below the pinned guess is marked {allc[2]['marker']!r} — it "
         f"is the SECOND row the ordering placed, and a rank counted off the "
         f"list INDEX would call it 3, skipping a number for a row that was "
@@ -2837,7 +2834,7 @@ def test_the_PROMOTED_row_is_marked_rank_1_not_a_NEGATIVE_offset():
 
 
 def test_every_picker_row_carries_the_TWO_marker_FIELDS_that_nth_indexes():
-    """🔴 `--nth=3..` INDEXES FIELDS, SO A ROW WITHOUT A MARKER MATCHES THE
+    """🔴 `--nth=2..` INDEXES FIELDS, SO A ROW WITHOUT A MARKER MATCHES THE
     WRONG SUBSTRING — its `<platform> <id>` is eaten by the offset and only the
     URL stays in the haystack. This pins the contract both halves rest on: at
     least three fields on EVERY row, and field 3 onward byte-identical to the
@@ -2853,42 +2850,44 @@ def test_every_picker_row_carries_the_TWO_marker_FIELDS_that_nth_indexes():
     # that with the same word a legitimately unranked row uses would make the
     # one state nobody can see look exactly like the ordinary one.
     assert [r.split()[0] for r in unstamped] == ["?", "?"], unstamped
-    MO.stamp_picker_markers("1804", cands, {cands[0]["url"]},
-                            {"acme/widget": 9999})
+    MO.stamp_picker_markers(cands, {cands[0]["url"]})
     for rows, what in ((unstamped, "unstamped"), (MO.picker_rows(cands),
                                                   "stamped")):
         for row, c in zip(rows, cands):
             fields = row.split()
-            assert len(fields) >= 3, f"{what}: {row!r} has {len(fields)} fields"
-            assert row.split(None, 2)[2] == (
+            assert len(fields) >= 2, f"{what}: {row!r} has {len(fields)} fields"
+            assert row.split(None, 1)[1] == (
                 f"github {c['id']} — {c['url']}"), (
-                f"{what}: field 3.. is {row.split(None, 2)[2]!r}, which is what "
-                f"`--nth=3..` hands fzf as the haystack")
+                f"{what}: field 2.. is {row.split(None, 1)[1]!r}, which is what "
+                f"`--nth=2..` hands fzf as the haystack")
 
 
 def test_REAL_fzf_does_NOT_match_the_row_MARKER():
     """🔴 THE COST THE PROPOSAL NAMES, MEASURED SHUT. A leading token is
-    fuzzy-matchable, so without `--nth` the words `below`/`unknown`/
-    `impossible` join the haystack and a query starts matching rows on OUR
-    label rather than on the repository the operator typed.
+    fuzzy-matchable, so without `--nth` the rank DIGITS join the haystack — and
+    this picker's subjects are NUMBERS (`#1804`), so digit queries are ordinary.
+    Under the picker's real flags the marker must change nothing about which
+    rows match, or in what order.
 
-    Asserted as a SET comparison against the same corpus with no marker at all:
-    under the picker's real flags the marker must change NOTHING about which
-    rows match. The control below is what makes that meaningful — with `--nth`
-    removed the sets must DIFFER, or this test would pass against a corpus the
-    marker could never have affected."""
+    🔴 THE QUERY LIST IS THE INSTRUMENT, AND A WORD-ONLY ONE IS BLIND HERE.
+    When the marker was `<class> <rank>` its words (`below`, `impossible`) were
+    matched by ordinary word queries, so the control fired easily. A rank-only
+    marker is DIGITS, and against word queries it changes nothing even with
+    `--nth` removed — MEASURED, 0 of 20 — so the first version of this test
+    asserted equality while its own control could not fire, and said so by
+    failing. The digit queries below are what make the flag observable. A sweep
+    is only a claim about the dimension its fixtures can vary.
+
+    Compared as an ORDERED list, not a set: a digit marker is more likely to
+    reorder the tail than to admit a new row, and the set comparison is the
+    weaker of the two."""
     _require_fzf()
     repos = [f"{o}/{n}"
              for o in ("nimbusworks", "harborlight", "quillstone", "acme")
              for n in ("widget", "api", "cli", "ledger", "ember", "gateway")]
-    bare = MO.picker_rows(_marked(repos))          # every row `pinned -`
+    bare = MO.picker_rows(_marked(repos))          # every row `-`
     cands = _marked(repos)
-    # Stamp a SPREAD of classes, so every marker word is somewhere in the
-    # corpus — a fixture where they were all identical could not see a query
-    # matching one of them.
-    MO.stamp_picker_markers("1804", cands, {c["url"] for c in cands},
-                            {r.lower(): (9999 if i % 2 else 3)
-                             for i, r in enumerate(repos)})
+    MO.stamp_picker_markers(cands, {c["url"] for c in cands})
     marked = MO.picker_rows(cands)
     flags = _picker_flags()
     assert any(f.startswith("--nth") for f in flags), (
@@ -2896,20 +2895,22 @@ def test_REAL_fzf_does_NOT_match_the_row_MARKER():
         "premise is gone, not merely its assertion")
     no_nth = [f for f in flags if not f.startswith("--nth")]
 
-    def matched(rows, fl, query):
+    def ranked(rows, fl, query):
         out = subprocess.run(["fzf", "--filter", query, *fl],
                              input="\n".join(rows) + "\n",
                              capture_output=True, text=True)
-        # Compare on the URL, the one part the marker cannot alter.
-        return {ln.rsplit(" ", 1)[-1] for ln in out.stdout.split("\n") if ln}
+        # Compare on the URL, the one part the marker cannot alter, IN ORDER.
+        return [ln.rsplit(" ", 1)[-1] for ln in out.stdout.split("\n") if ln]
 
     control_differs = 0
-    for query in ("below", "plausible", "widget", "led", "ember", "api"):
-        base = matched(bare, flags, query)
-        assert matched(marked, flags, query) == base, (
-            f"query {query!r} matched a different SET of rows once the marker "
-            f"was on them — `--nth` is supposed to keep it out of the haystack")
-        if matched(marked, no_nth, query) != base:
+    # Word queries AND digit queries — the digits are the discriminating half.
+    for query in ("widget", "led", "ember", "api", "1", "12", "7", "2"):
+        base = ranked(bare, flags, query)
+        assert base, f"positive control: fzf matched nothing for {query!r}"
+        assert ranked(marked, flags, query) == base, (
+            f"query {query!r} ranked rows differently once the marker was on "
+            f"them — `--nth` is supposed to keep it out of the haystack")
+        if ranked(marked, no_nth, query) != base:
             control_differs += 1
     assert control_differs, (
         "POSITIVE CONTROL FAILED: removing --nth changed nothing either, so "
