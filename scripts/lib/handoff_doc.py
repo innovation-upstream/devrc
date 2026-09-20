@@ -2822,6 +2822,74 @@ def gate_enforces_budget(repo: Path) -> bool:
         return False
 
 
+#: Sibling auditor. Loaded LAZILY and DEFENSIVELY — see `evictable_note`.
+_AUDITOR = Path(__file__).resolve().parent.parent / "handoff-audit.py"
+
+
+def evictable_note(merged_text: str, over_by: int) -> str:
+    """What playbook step 1 would recover from THIS doc, in bytes, or "".
+
+    🔴 WHY THIS EXISTS. The ladder in `test_handoff_doc_size.py` ranks EVICT WHAT
+    HAS CLOSED first and calls it "usually the whole answer" — but it says that
+    to every author about every document, and nothing told them how much "here"
+    holds for the doc in front of them. MEASURED 2026-09-20 corpus-wide: 468,110 B
+    (14.1%) is already evictable — 284,262 B of resolved investigations alone —
+    while 28 docs sit over the hard cap. The detection was never the gap.
+
+    🔴 IT REUSES `handoff-audit.py`'S DETECTORS AND KEEPS NO COPY. A second
+    implementation of "is this investigation resolved" is how the two answers
+    drift, and that auditor's own comments record the corrections its matchers
+    have already absorbed (a `retracted` bucket over-counted by 30% until bullets
+    crossing a heading were clipped). One rule, one place.
+
+    🔴 NEVER RAISES, AND THAT IS NOT DEFENSIVE PROGRAMMING — this runs inside the
+    WRITE PATH. An exception here would take down `/handoff`'s only landing step
+    and cost a session its record, to decorate a warning. The auditor is also a
+    devrc script: another repo using this module has no such file, which is the
+    ordinary case rather than an error. Any failure ⇒ "" and the warning prints
+    exactly as it did before.
+    """
+    if not _AUDITOR.is_file():
+        return ""
+    try:
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("_handoff_audit",
+                                                      str(_AUDITOR))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        a = mod.audit_text(merged_text)
+        rows = [
+            ("resolved investigations", a["resolved_b"], len(a["resolved"]), "block"),
+            ("completed ranked items", a["done_b"], len(a["done"]), "item"),
+            ("retracted / dead-ends", a["retracted_b"], len(a["retracted"]), "bullet"),
+            ("work-status headings", a["dated_b"], len(a["dated"]), "block"),
+        ]
+        rows = [r for r in rows if r[1] > 0]
+        if not rows:
+            return ""
+        out = ["  Evictable in THIS doc, measured (playbook step 1 — do this first):"]
+        for label, b, n, unit in rows:
+            out.append(f"    {label:<24}{b:>9,} B  ({n} {unit}{'' if n == 1 else 's'})")
+        net = a["net"]
+        # 🔴 NET, and the shortfall is stated rather than implied. Quoting a gross
+        # number that does not actually clear the overage sends an author cutting
+        # and leaves them still red — the one outcome worse than saying nothing.
+        if net >= over_by > 0:
+            out.append(f"    → {net:,} B net, which CLEARS the {over_by:,} B you are over by.")
+        elif over_by > 0:
+            out.append(f"    → {net:,} B net, which does NOT clear the {over_by:,} B you are "
+                       f"over by; steps 2-4 of the playbook cover the rest.")
+        else:
+            out.append(f"    → {net:,} B net available before you need the ladder at all.")
+        out.append("    Net of 200 B per evicted rank: the NUMBER must stay (it is half a "
+                   "claim-work slug).")
+        return "\n".join(out)
+    except Exception:
+        return ""
+
+
 def budget_warning(relpath: str, merged_text: str, base_text: str, *,
                    gated: bool) -> str:
     """A one-block warning, or "" when there is nothing worth saying.
@@ -2864,6 +2932,9 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
     if after > allowance:
         which = ("its grandfathered allowance" if grandfathered
                  else "the handoff-document ceiling")
+        # Computed ONCE: `evictable_note` execs the auditor module, so calling it
+        # twice to test-then-use would pay that twice on the write path.
+        note = evictable_note(merged_text, after - allowance)
         return "\n".join([
             f"🔴 THIS UPDATE PUTS THE DOC OVER ITS SIZE BUDGET: {after:,} B "
             f"against {which} of {allowance:,} B, over by {after - allowance:,} B "
@@ -2874,6 +2945,7 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
             "number is LAST: evict what has CLOSED (usually the whole answer), then "
             "demote dated evidence to `claudedocs/refs/<topic>.md` leaving a pointer, "
             "then split by initiative.",
+            *([note] if note else []),
             "  🔴 Do NOT satisfy it by deleting an open investigation, a gotcha or a "
             "ruled-out theory — those are the sections whose whole value is that a "
             "future session does not repeat the work.",
@@ -2900,9 +2972,15 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
                 "red `main`." if gated else
                 "no gate enforces it here, so this is a note about readability, "
                 "not a deadline.")
-        return (f"⚠ Size: {after:,} B of {allowance:,} B "
+        head = (f"⚠ Size: {after:,} B of {allowance:,} B "
                 f"({sign}{delta:,} B this update) — {headroom:,} B left. The next "
                 f"update or two will go over; {tail}")
+        # 🔴 GATED ONLY, for the ungated arm's stated reason: outside devrc the
+        # ladder has no authority, and a breakdown keyed to its step 1 would be
+        # prescribing where that arm deliberately only reports. Here it is the
+        # CHEAPEST moment to act — the tail above says so — so the number belongs.
+        note = evictable_note(merged_text, 0) if gated else ""
+        return f"{head}\n{note}" if note else head
     return ""
 
 
