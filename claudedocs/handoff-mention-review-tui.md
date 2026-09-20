@@ -20,8 +20,12 @@ notifications and repo browse are dropped.
   this; Phase 4 (deleting `nvim-octo`) is gated on it by the proposal's own rollback section.
 
 ## State now
-- 🔴 **THE ARC'S CLOSING CONDITION IS MET AND THE ARC IS CLOSED** — the operator used
-  `mention-review` for a real review and reported **"done, working"** (2026-09-18).
+- 🔴 **THE ARC IS CLOSED** — the operator used `mention-review` for a real review **on a real
+  screen** and reported **"done, working"** (2026-09-18); that is the `judgement` line this doc
+  froze at round 1. ⚠ **Stated at the scope of the evidence:** the condition as written also
+  says *"beats octo at reading a diff"*, and `"done, working"` carries no comparison. The gap
+  is pre-existing; an earlier draft of this bullet dropped the qualifiers that scoped it while
+  keeping the 🔴, which round 0 caught.
 - ✅ **RANKS 1 AND 3 CLOSED** (2026-09-19): both hosts converged and verified by CONTENT
   (`ReadIntents`=2 against a positive control of 1); the eight re-anchored mutation rows all
   report `KILLED(attributed)` with the P1 control killed.
@@ -49,36 +53,25 @@ notifications and repo browse are dropped.
     (operator, 2026-09-15). ✅ **The 422 arc is CLOSED** (#1761 → `1ff1bd6e`) — the renderer
     discarded `errors[]`; diagnosis preserved below.
   - 🔴 **`--version` CANNOT distinguish builds** — verify by content with a positive control.
-- **The `forcing: none` ratchet:** previous ranked list carried 0; this one carries 0.
 - **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5**. Its positive
   control shows the board is reachable, but a wrong session id also answers 200 with an empty
   array, so this is NOT a clean bill of health.
-- 🔴 **THIS DOC IS AT ITS BYTE CEILING.** This update was rewritten to fit; the session's
-  methodology lessons live in the **cairn index** (`devrc/scripts`, `devrc/tests`, both dated
-  2026-09-20) rather than here, because an index entry costs nothing until recalled. Read them
-  with `cairn recall --repo ~/workspace/devrc`. **The next update must EVICT before it adds.**
+- 🔴 **THE SESSION'S METHODOLOGY LESSONS ARE IN THE CAIRN INDEX, NOT HERE** — `devrc/scripts`
+  and `devrc/tests`, both dated 2026-09-20; an index entry costs nothing until recalled.
+  `cairn recall --repo ~/workspace/devrc`. ⚠ **Do not restate this doc's byte headroom** —
+  `handoff_doc.py`'s `budget_warning` prints live numbers on every write and
+  `test_handoff_doc_size.py` is the gate; a hand-written figure here is a frozen mirror of a
+  live check, which is the shape round 0 has now killed twice in this doc.
 
 ## Open investigations — live diagnosis state
 
-### The Go tier has NO CI leg — ~7,000 lines run only when a human types the command
-- as-of: 2026-09-14
-- **Symptom + exact repro:** `gh pr checks 1698 --repo innovation-upstream/devrc` lists
-  `tekton/devrc-pytests`, `tekton/devrc-nodetests`, `tekton/devrc-cairn-client-runs` and
-  **no** `tekton/devrc-gotests`.
-- **Observed (with values):** `gh api /repos/innovation-upstream/devrc/commits/<sha>/statuses
-  --jq '[.[].context]|unique'` returns exactly those three contexts. `flake.nix` DOES define
-  a `gotests` check output and documents honestly that it "may be built by nobody".
-  `scripts/main-status-watch.py` contains no tier names at all.
-- **Ruled out:** that the deadman covers it — `scripts/main-green-check.sh:424` read
-  `for tier in pytests nodetests; do`, Go absent. **FIXED in #1698**, now reads
-  `pytests nodetests gotests`. via: measurement
-- **Ruled out:** that the tier is simply unwired locally — `scripts/gate.sh --tier go`
-  works and the runner is 357 lines, the smallest of the three. via: command
-- **Leading hypothesis:** the Tekton pipeline hardcodes its legs and lives in the infra
-  repo (`devrc-ci-pipeline.yaml`), not in devrc — so no change inside devrc can add the leg.
-- **Next probe:** find `devrc-ci-pipeline.yaml` in the infra repo and add a `gotests` leg
-  mirroring the `nodetests` one. Closes when `gh pr checks` on ANY devrc PR lists
-  `tekton/devrc-gotests`.
+### EVICTED — two superseded blocks (2026-09-20, byte ceiling)
+- The 2026-09-14 "Go tier has NO CI leg" block (superseded by the 09-15 block below,
+  which is itself retired by the 09-16 RESOLVED one) and the 2026-09-18 "eight rows
+  APPLY but are not known to KILL" block (retired by the RESOLVED block that records
+  its apply-vs-kill correction). 🔴 Evicted because this doc was 229 B from its
+  ceiling and the playbook says evict what has CLOSED before anything else — the
+  surviving RESOLVED blocks carry both outcomes. History: `git log -p` this file.
 
 ### The `gotests` CI leg — pipeline LOCATED, change not yet made (supersedes the 2026-09-14 block above)
 - as-of: 2026-09-15
@@ -183,27 +176,6 @@ notifications and repo browse are dropped.
   surfaces `errors[]`, so **the next occurrence names its own reason**. If it recurs, capture the
   card verbatim before anything else; that single string settles this block.
 
-### The eight re-anchored mutation rows APPLY but are not known to KILL
-- as-of: 2026-09-18
-- **Symptom + exact repro:** n/a — a coverage gap in merged code, not a defect. Changing
-  `PICKER_SH` and the two `emit_click` call sites in `scripts/mention-open.py` moved the text six
-  (later eight) mutation anchors were anchored on, taking each to **0×**.
-- **Observed (with values):** an anchor at 0× scores as **SURVIVED while executing nothing**, so
-  a fully green battery reported coverage it did not have. `test_every_mutation_anchor_occurs_
-  exactly_once_in_its_target` passes at `66e51d90`, which establishes the anchors **apply** to
-  their targets. Rows: K48/49/50/54/66/67/82/92. via: measurement
-- **Ruled out:** that the CI red on `7d83f5fa` was the ~42% noise — the failing test was
-  `test_every_mutation_anchor_occurs_exactly_once_in_its_target[mutation_battery_mentions.py]`
-  and the diff reached it directly. via: measurement
-- **Ruled out:** that narrow test selection would have caught it — the two-file scoped runs
-  could not see it; only the full suite did. via: measurement
-- **Leading hypothesis:** none needed. The rows are re-anchored; whether each still kills is
-  simply unrun. **"An anchor that applies" and "a mutant that kills" are different claims and
-  only the first is established.** Recorded on the PR before merge rather than left implied.
-- **Next probe:** run the battery with `--only K48,K49,K50,K54,K66,K67,K82,K92` (the filter takes
-  a comma list; bare positional ids are **silently ignored** and start a ~90-row sweep). Closes
-  when each row reports KILLED with its own error, or is honestly recorded SKIPPED/`<did-not-run>`.
-
 ### RESOLVED — the eight re-anchored mutation rows KILL (retires the 2026-09-18 block of the same subject)
 - as-of: 2026-09-19
 - **Retracted as live.** The 2026-09-18 block "The eight re-anchored mutation rows APPLY but are
@@ -233,55 +205,57 @@ notifications and repo browse are dropped.
   via: measurement
 - **Next probe:** none — closed.
 
-### 🔴 `main` is RED on `test_opencode_engine` — a stale version pin, not a host problem
+### RESOLVED — `main` was red on `test_opencode_engine`; the pin was RIGHT and the BINARY was wrong
 - as-of: 2026-09-20
-- **Symptom + exact repro:** `tekton/devrc-main-pytests` fails on
-  `test_engine_is_the_version_every_measurement_is_keyed_to`. Reproduces on a **pristine**
-  `origin/main` checkout: `nix develop ~/workspace/devrc -c python3 -m pytest
-  scripts/tests/test_opencode_engine.py -k engine_is_the_version -q` → `1 failed`.
-- **Observed (with values):** `opencode on PATH is '1.18.30', but every 'measured on v1.18.29'
-  claim in scripts/opencode/opencode.jsonc, scripts/opencode/README.md and
-  scripts/tests/test_opencode_config.py is keyed to '1.18.29'`. `PINNED_VERSION = "1.18.29"`.
-  `main-green-check` last run `ExecMainStatus=10` — RED, **reproduced** (failed both attempts).
+- **Retracted as live, and the retraction matters more than the diagnosis did.** Closed by
+  **`#1804` → `7ef01c05`** — merged **36 minutes after this doc's PR opened**, and caught by
+  `/audit-pr` round 0 before it could publish a harmful instruction.
+- **Observed (with values):** `main` is GREEN on all four `tekton/devrc-main-*` at
+  `7ef01c05`; the dev shell reports `1.18.29` and `PINNED_VERSION = "1.18.29"` — they agree.
   via: measurement
-- **Ruled out:** an imperative-profile HOST problem — the test names two causes needing
-  opposite fixes and the discriminator was run: `nix profile list | grep -i opencode` returns
-  **nothing**. via: command
-- **Ruled out:** the two-shell divergence it first looked like — when found, login was `1.18.29`
-  and the dev shell `1.18.30`; after 2026-09-19's switch **both are `1.18.30`**, so only the
-  stale pin remains. via: measurement
-- **Ruled out:** that `#1793` caused it — `cee56910` touches `mention-open.py` and its two test
-  files; `origin/main` was red on this test at `d8362875`, `cd2f9435` and `c8cf7b15`.
-  via: measurement
-- **Leading hypothesis:** `flake.lock` moved opencode 1.18.29 → 1.18.30; the pin and the
-  header's measurements did not follow.
-- **Next probe:** 🔴 **do NOT just bump `PINNED_VERSION`** — the test forbids it and names the
-  work: re-derive the header's measurements against the new binary first (the superseded binary
-  is usually still realised, `ls -d /nix/store/*-opencode-*`, which makes the seven-agent dual
-  dump the cheapest control), then update pin and measurements together.
+- 🔴 **MY NEXT PROBE WAS WRONG IN THE DIRECTION THAT MATTERS, AND IS RECORDED RATHER THAN
+  DELETED.** It said *"re-derive the header's measurements against the NEW binary, then update
+  pin and measurements together"* — i.e. re-key seven measurement claims to **1.18.30**. But
+  `#1804` pinned opencode **back to 1.18.29 via a third frozen nixpkgs input** precisely
+  because **1.18.30 cannot run a single prompt** (upstream `anomalyco/opencode#48645`). A
+  session following it would measure a binary that cannot complete a prompt and could re-break
+  `main`. It also named four files of which the real fix touched one, and omitted `flake.nix` /
+  `flake.lock`, where the fix actually lives. **I diagnosed the symptom correctly and inferred
+  the wrong remedy: "the pin is stale" and "the pinned version is the good one" look identical
+  from the failing assertion.**
+- 🔴 **THE SHAPE, AND IT IS THE SECOND TIME IN TWO UPDATES OF THIS DOC:** a handoff minting a
+  ranked item for a property a LIVE MECHANISM already owns. `#1781` round 0 killed the same
+  shape for `drift-check.sh` rc 17; this one was owned by `main-green-check` (4-hourly,
+  reproduces before alerting), `main-status-watch.py` (10-min poll) and the four
+  `tekton/devrc-main-*` checks — and it went stale in **36 minutes**. 🔴 **Do not mirror a
+  live deadman into this doc. Ask deletion test (c): does something else already check this
+  against reality?**
+- **Next probe:** none — closed.
 
 ## Next steps (ranked)
 1. **Decide SYMPTOM 1 of the picker — the one objective this arc did not close.** Symptom 3 is
    DONE (`#1793`/`cee56910`); this is what remains of the old "symptoms 1 and 3" rank. Proposal:
    `claudedocs/proposal-mention-picker-visibility.md` §"Symptom 1". fzf re-sorts by its own
    score the moment you type, so the pre-computed ranking is invisible to anyone who types
-   rather than scrolls. **(A)** make class/rank visible in the row text — survives a typed
-   query, but a fuzzy-matchable marker can perturb fzf's scoring and the picker is 110 cols;
-   **(B)** `--no-sort` — our order wins, at the cost of fzf's match-quality ordering on 394
-   rows; **(C)** wait for the `queried` rate. 🔴 **(C)'s precondition is still UNMET: MEASURED
-   2026-09-19 there was exactly ONE post-`#1775` pick carrying `queried`** (it recorded
-   `queried=1`, so the instrument works — there is simply almost no data). ~6 clicks/day on the
-   laptop ⇒ ~44 samples in a week. ⚠ **There is no equivalent of the 1-in-73 clawgate rate that
-   made symptom 3 decidable without data.** Repo: devrc.
+   rather than scrolls. **FOUR options, not three** — an earlier draft of this item listed
+   A/B/C and `/audit-pr` round 0 caught the omission: **(A)** make class/rank visible in the
+   row text — survives a typed query, but a fuzzy-matchable marker can perturb fzf's scoring
+   and the picker is 110 cols; **(B)** `--no-sort` — our order wins, at the cost of fzf's
+   match-quality ordering on 394 rows; **(C)** wait for the `queried` rate; **(D)**
+   `--bind 'esc:print-query+abort'`, which CLOSES the blind spot in (C) — see the proposal's
+   §3.1. 🔴 **(C) IS THE ONE I LEANED ON AND IT CARRIES A MEASURED BLIND SPOT THE FIRST DRAFT
+   OF THIS ITEM DROPPED:** the proposal's own 🔴 says *"read §3.1 before relying on the rate"*
+   — an ESC/Ctrl-C abort writes nothing at all, so the dismissal arm's rate covers only the
+   Enter-with-no-match ending. **Dropping (D) and that warning in the same edit removed both
+   the caveat and its fix.** (C)'s precondition is also still unmet: MEASURED 2026-09-19 there
+   was exactly ONE post-`#1775` pick carrying `queried` (it recorded `queried=1`, so the
+   instrument works — there is simply almost no data); it is 3 now. ⚠ **Do not restate the
+   click rate here** — the proposal owns it with the SQL and a named closing condition, an
+   earlier draft of this line restated it ~2x low, and three independent re-derivations put it
+   at **11.5–14.9/day**, not the ~6 that draft claimed. ⚠ **There is no equivalent of the
+   1-in-73 clawgate rate that made symptom 3 decidable without data.** Repo: devrc.
    forcing: user — a look-and-feel call on the operator's own daily tool; the proposal says so
    explicitly and no agent may make it.
-2. **Unbreak `main`: the `opencode` version pin.** Diagnosis, both eliminations and the
-   forbidden shortcut are in the Open investigation above. Repo: devrc; files
-   `scripts/tests/test_opencode_engine.py`, `scripts/opencode/opencode.jsonc`,
-   `scripts/opencode/README.md`, `scripts/tests/test_opencode_config.py`.
-   forcing: incident — `main-green-check` fired and REPRODUCED the red (`ExecMainStatus=10`,
-   unit `failed`), and `main`'s `tekton/devrc-main-pytests` is red at three consecutive heads.
-
 ## Defects (batched)
 - 🔴 **NO `LICENSE` FILE WHILE THE DERIVATION CLAIMS MIT** —
   `nix/pkgs/tools/mention-review/default.nix:146` declares `licenses.mit` with nothing backing
@@ -293,11 +267,10 @@ notifications and repo browse are dropped.
   `~/.config/mention-open/picks.jsonl`. Found by `/audit-pr` round 4, **pre-existing**, inert
   for those tests (Tier B sits below class and distance and cannot move a uniquely-PLAUSIBLE
   top row). Worth closing on its own.
-- ⚠ **`drift-check.sh` rc 17 on BOTH hosts, and they have DIVERGED from each other.** MEASURED
-  2026-09-20: `homelab-talos/containers/clawgate` is **1 behind** `origin/trunk` on the
-  workbench and **6 behind** on the laptop (repo-wide 19); earlier the same day it was 3 behind
-  on both. 🔴 **No ranked item is minted** — the deadman already reports it every 6 h, and
-  these numbers going stale within a day is exactly why a hand-written mirror is worse.
+- ⚠ **`drift-check.sh` rc 17 on BOTH hosts, and the two have DIVERGED from each other** on
+  `homelab-talos/containers/clawgate`. 🔴 **No ranked item, and NO COUNTS WRITTEN HERE** — the
+  deadman reports it every 6 h with live numbers, and an earlier draft's counts were stale
+  within hours (round 0 re-derived one of the three as already wrong). Run the checker.
 - Pre-existing and known: `ghapi_test.go`/`argv_test.go` not `gofmt`-clean (confirmed on `main`
   at `2b131bf2`); four scanner limits documented in `detailrouting_test.go`; two guards at
   `scripts/tests/test_mention_review.py:122` and `:361` claiming more than they check.
@@ -772,8 +745,12 @@ grep -ac 'ReadIntents' "$R"             # NON-ZERO. Zero-vs-non-zero only: `grep
 #   is still true before trusting a `git pull` to have deployed it:
 A=$(readlink -f ~/.config/alacritty/alacritty.toml)
 S=$(grep -oE '/nix/store/[^ "]*alacritty-mention-open' "$A" | head -1)
+[ -n "$S" ] || { echo "NO WRAPPER RESOLVED — the zero below would be about THIS, not the code"; }
+grep -c 'exec' "$S"                                  # POSITIVE CONTROL — must be >0
 grep -oE '/home/[^ ]*mention-open\.py' "$S"          # must print the WORKING-TREE path
-grep -c 'top_is_separated' $DEVRC/scripts/mention-open.py    # gate 3 — expect 4
+grep -c 'top_is_separated' $DEVRC/scripts/mention-open.py    # gate 3 — NON-ZERO, not a
+                                                            # count: a refactor adding a use
+                                                            # must not read as a failed deploy.
 
 # The suite, with the scope NAMED so the number reproduces (640 passed / 2 skipped;
 # collection 486 + 124 + 32 = 642):
