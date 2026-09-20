@@ -280,6 +280,51 @@ async function notify(title, message) {
  * and (deduped) toasts. A 401/403 marks accounts stale SILENTLY -- never a
  * toast, which is what would turn a logged-out week into notification spam.
  */
+/**
+ * 🔴 REPORTS ARE SERIALIZED, AND THAT IS LOAD-BEARING, NOT TIDINESS.
+ *
+ * `handleReport` is a read-modify-write over chrome.storage: it `await
+ * readState()`s, decides which toasts are not within their dedup window, then
+ * `await writeState()`s the updated `lastToast`. Two reports in flight at once
+ * both read the OLD `lastToast`, both conclude nothing has been toasted, and
+ * both fire — so the operator gets the same notification twice.
+ *
+ * That is not hypothetical and it is the DEFAULT path, not a rare interleave.
+ * ONE page load produces TWO reports by design: content_probe.js auto-runs at
+ * `document_idle`, and independently `onTabUpdated` fires at status
+ * "complete" and asks the probe to run again. `PROBE_MIN_INTERVAL_MS` gates
+ * the worker's ASK; it does not gate the content script's auto-run, and
+ * nothing gated these two handlers against each other because `onMessage`
+ * fires them with `void handleReport(...)` — fire-and-forget, no ordering.
+ *
+ * REPORTED BY THE OPERATOR: two identical system notifications on opening
+ * claude.ai. Reproduced in node: the same two reports awaited SEQUENTIALLY
+ * produce 1 notification, and run CONCURRENTLY produce 2.
+ *
+ * The toasts are the visible half. The same window silently loses ACCOUNT
+ * writes: both invocations build `accounts` from their own snapshot, so the
+ * second write erases anything the first added — including a history sample.
+ *
+ * In-memory chain, deliberately: MV3 tears this worker down after ~30s idle,
+ * which resets it. That is correct — reports from different wakes cannot
+ * overlap — and the chain never needs persisting.
+ */
+let reportQueue = Promise.resolve();
+
+export function enqueueReport(msg) {
+  // The `.catch` goes INSIDE the chain: without it one rejecting report would
+  // poison `reportQueue` and every later report would be dropped silently.
+  reportQueue = reportQueue.then(
+    () => handleReport(msg).catch(() => ({ ok: false, error: "handler-threw" })),
+  );
+  return reportQueue;
+}
+
+/** Test seam: drain the queue so a test can assert on settled state. */
+export function reportsSettled() {
+  return reportQueue;
+}
+
 export async function handleReport(msg) {
   if (!isObj(msg) || msg.type !== "cu:usage-report") {
     return { ok: false, error: "bad-message" };
@@ -421,7 +466,8 @@ export async function probeExistingTabs() {
  */
 export function onMessage(msg, sender, sendResponse) {
   if (isObj(msg) && msg.type === "cu:usage-report") {
-    void handleReport(msg).catch(() => {});
+    // enqueueReport, never handleReport directly — see the comment above it.
+    void enqueueReport(msg);
     sendResponse({ ok: true });
     return false;
   }

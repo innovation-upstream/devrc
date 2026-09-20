@@ -237,7 +237,15 @@ SUITES=(
   # claude-usage tracker (2026-09-19): 8 files / 85 tests measured on the
   # claude-usage-tracker branch. Floors: 8 - min(50, max(1, 8/20)) = 7 files;
   # 85 - min(50, max(1, 85/20)) = 81 tests.
-  "scripts/claude-usage/tests|7|81"
+  # Re-measured 2026-09-19 on fix/claude-usage-duplicate-toasts: the operator
+  # reported TWO identical notifications on opening claude.ai, which is a
+  # read-modify-write race between the two reports one page load produces.
+  # concurrency.test.mjs drives handlers CONCURRENTLY — every existing test
+  # awaited one report before sending the next, which is the one ordering the
+  # bug cannot occur in. 9 files / 97 tests. Floors:
+  # 9 - min(50, max(1, 9/20)) = 8 files;
+  # 97 - min(50, max(1, 97/20)) = 92.15 -> 93 tests.
+  "scripts/claude-usage/tests|8|93"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree; js-source:
