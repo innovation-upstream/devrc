@@ -70,11 +70,18 @@ SA = _load_sibling()
 def _load_budget(path=Path(__file__).resolve().parent / "lib" / "handoff_budget.py"):
     """The ENFORCED per-doc ceiling, read from the module that owns it.
 
-    🔴 Returns None rather than raising: the ceiling is a devrc gate, and this
-    tool runs against other repos' corpora too (the population block takes any
-    root). A missing module there is the normal case, not an error — the banner
-    then simply omits the enforced-ceiling line rather than quoting a number
-    this repo would have supplied for a tree it does not govern.
+    🔴 Returns None rather than raising — DEFENCE IN DEPTH, and the honest reason
+    is that this import is decoration on a reporting path, not that anyone has
+    been observed running without `lib/`.
+
+    ⚠ An earlier version of this docstring justified the branch by "this tool runs
+    against other repos' corpora, where the module is legitimately absent". Round 0
+    of #1815 checked: `handoff-audit.py` resolves `handoff_budget` from its own
+    `Path(__file__).parent/"lib"`, so that state needs this script present WITHOUT
+    its sibling `lib/`, and a sweep of `~/workspace` found neither file vendored
+    anywhere outside devrc clones. The configuration named did not exist. Keeping a
+    reason that names an impossible state is what stops the next reader deleting a
+    branch that has become genuinely dead — so the reason is stated as what it is.
     """
     if not path.is_file():
         return None

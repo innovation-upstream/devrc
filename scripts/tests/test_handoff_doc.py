@@ -7582,3 +7582,40 @@ def test_the_NEAR_budget_arm_withholds_the_note_when_UNGATED():
                           _near_text(), "z" * 100, gated=False)
     assert w.startswith("⚠ Size:"), w
     assert "Evictable in THIS doc" not in w, w
+
+
+def test_the_rank_charge_explainer_is_WITHHELD_when_no_rank_is_offered():
+    """🔴 A REGRESSION TEST — unlike its neighbours above, this one pins a defect
+    that actually shipped and was caught by round 0 of #1815's audit (F4).
+
+    The 200 B/rank sentence explains a charge applied ONLY to completed ranked
+    items, but printed unconditionally — so a doc offering only retracted bullets
+    got a line explaining a charge that had not been applied. It is the exact
+    failure `test_evictable_note_is_SILENT_when_nothing_has_closed` pins one level
+    up: a line that prints every time is a line nobody reads by the third one.
+
+    RED at the pre-fix tip, GREEN at HEAD."""
+    only_retracted = (
+        "# Handoff: x — 2026-09-20\n\n## Goal\ng\n\n"
+        "## Gotchas / decisions / dead-ends\n"
+        "- 🔴 RETRACTED — this reasoning was wrong. " + "R" * 900 + "\n"
+    )
+    note = hd.evictable_note(only_retracted, 0)
+    assert "retracted / dead-ends" in note, note
+    assert "completed ranked items" not in note, note
+    assert "200 B per evicted rank" not in note, (
+        "the rank-charge explainer printed on a note that offers no ranks:\n" + note
+    )
+
+
+def test_the_rank_charge_explainer_IS_present_when_a_rank_is_offered():
+    """The other direction — without this the fix above could be satisfied by
+    deleting the sentence outright, which would lose a real explanation."""
+    with_rank = (
+        "# Handoff: x — 2026-09-20\n\n## Goal\ng\n\n"
+        "## Next steps (ranked)\n1. DONE — shipped as abc1234. " + "D" * 900 + "\n"
+        "   forcing: none\n"
+    )
+    note = hd.evictable_note(with_rank, 0)
+    assert "completed ranked items" in note, note
+    assert "200 B per evicted rank" in note, note

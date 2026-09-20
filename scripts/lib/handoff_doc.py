@@ -2842,12 +2842,17 @@ def evictable_note(merged_text: str, over_by: int) -> str:
     have already absorbed (a `retracted` bucket over-counted by 30% until bullets
     crossing a heading were clipped). One rule, one place.
 
-    🔴 NEVER RAISES, AND THAT IS NOT DEFENSIVE PROGRAMMING — this runs inside the
-    WRITE PATH. An exception here would take down `/handoff`'s only landing step
-    and cost a session its record, to decorate a warning. The auditor is also a
-    devrc script: another repo using this module has no such file, which is the
-    ordinary case rather than an error. Any failure ⇒ "" and the warning prints
-    exactly as it did before.
+    🔴 NEVER RAISES — this runs inside the WRITE PATH. An exception here would take
+    down `/handoff`'s only landing step and cost a session its record, to decorate
+    a warning. That reason alone carries the guard. Any failure ⇒ "" and the
+    warning prints exactly as it did before.
+
+    ⚠ An earlier draft added "another repo using this module has no such file,
+    which is the ordinary case". Round 0 of #1815 checked and found neither
+    `handoff_doc.py` nor `handoff-audit.py` vendored anywhere outside devrc
+    clones, so that clause named a configuration nobody has. Removed rather than
+    replaced with a better-sounding one: the write-path argument is sufficient,
+    and reaching for a second justification is how a wrong one gets written.
     """
     if not _AUDITOR.is_file():
         return ""
@@ -2883,8 +2888,14 @@ def evictable_note(merged_text: str, over_by: int) -> str:
                        f"over by; steps 2-4 of the playbook cover the rest.")
         else:
             out.append(f"    → {net:,} B net available before you need the ladder at all.")
-        out.append("    Net of 200 B per evicted rank: the NUMBER must stay (it is half a "
-                   "claim-work slug).")
+        # 🔴 CONDITIONAL, and the unconditional version was a real defect (round 0,
+        # F4): it explained a charge that had not been applied, on a note whose
+        # whole argument is that a line printing every time is a line nobody
+        # reads. `net` is only charged for completed RANKS, so the sentence
+        # belongs only when that row is present.
+        if any(label == "completed ranked items" for label, *_ in rows):
+            out.append("    Net of 200 B per evicted rank: the NUMBER must stay (it is "
+                       "half a claim-work slug).")
         return "\n".join(out)
     except Exception:
         return ""
