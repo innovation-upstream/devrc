@@ -23,10 +23,26 @@ finds the opposite — the guard stack is defended); `handoff-handoff-resume-ski
 is CLOSED, verdict ADDRESSED 2026-09-17, and pruned the `resume` skill BODY, which this arc
 explicitly does not touch; `handoff-guard-existence-gate.md` is the Stop-hook fixture-string
 bug, unrelated.
-- **closing-condition:** `check` — P1 (slice-and-demote of the APPEND buckets into
-  `claudedocs/refs/<topic>.md`) is merged to `origin/main`, AND a re-run of
-  `python3 $DEVRC/scripts/handoff-audit.py $DEVRC/claudedocs` reports the live corpus
-  APPEND share **below 70%**. P2–P4 merging does NOT close this arc.
+- **closing-condition:** `check` — **devrc#1815 is merged to `origin/main` AND
+  `scripts/ship.sh` has converged both hosts** (read every per-host line, not the verdict),
+  so `readlink -f ~/.claude/skills/handoff/SKILL.md` resolves into `/nix/store` at the
+  merged size on both machines.
+
+🔴 **THE CONDITION ABOVE IS A CORRECTION OF A MALFORMED ONE, NOT AN EXTENSION OF THE ARC —
+and the distinction is the whole reason this note exists.** Round 1 froze it as *"P1
+merged AND the corpus APPEND share below 70%"*. Both halves were later measured
+unsatisfiable: P1 is RETRACTED (demoting gotchas into `claudedocs/refs/` is forbidden —
+`refs/` is measurably outside the `handoff_search` corpus), and the APPEND-share metric
+could only fall by performing that forbidden action. **A `check` that can never go green is
+a permanently-red gate, which `claude/RULES.md` calls worse than no gate** — and `/resume`
+reads this FIELD, not the prose, so every future re-entry would have reported NOT MET
+forever (round 0 of #1815, F6).
+⚠ **The freeze rule still binds, and this does not weaken it.** It forbids letting later
+ASKS grow an arc; it is not a reason to preserve a condition that named a forbidden action
+at the moment it was written. The scope is unchanged — the same deliverable, now named by
+something that can actually be run. **Nothing was added to the arc**: P1′, P4, and the four
+retractions are exactly what #1815 carries. If the operator disagrees, the remedy is to
+close this doc as NOT ADDRESSED and open a new one, not to restore an unrunnable check.
 
 ## State now
 - **PR OPEN: devrc#1815** — https://github.com/innovation-upstream/devrc/pull/1815
