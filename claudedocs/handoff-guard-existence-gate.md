@@ -22,25 +22,25 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   🔴 FROZEN AT ROUND 1.
 
 ## State now
-- Branch `fix/handoff-guard-existence-gate`, commit `0ac60ad1`, based on `cee56910`.
-  **PR `#1799` OPEN**, `mergeable=MERGEABLE`, `mergeStateStatus=UNSTABLE`, all four
-  Tekton checks `PENDING` at hand-off time.
-- **Files changed (2):** `scripts/claude-hooks/handoff-write-guard.py` and
-  `scripts/claude-hooks/tests/test_handoff_write_guard.py`. +250/−24.
-- **DONE:** `_resolve` gates on the FILE (`os.path.isfile`) instead of only the
-  resolved `claudedocs/` DIRECTORY; the `git show <ref>:claudedocs/<doc>` case is
-  preserved explicitly by a new `_read_off_a_ref`; the Read arm now requires the
-  literal `claudedocs/` segment, which the Bash arm (`HANDOFF_PATH_RX`) and
-  `is_handoff_write` always did.
-- **NOT AUDITED.** `/audit-pr 1799` has not been run — neither round 0 nor the nine
-  correctness axes. **NOT MERGED, NOT DEPLOYED.**
-- 🔴 **DEPLOYED ≠ MERGED HERE, AND THE HOOK IS THE `home.file` KIND.**
-  `~/.claude/hooks/handoff-write-guard.py` is a nix-store COPY, so a `git pull` changes
-  nothing: the sequence is merge → pull → `home-manager switch`/`ship.sh`. Until then
-  the guard on both hosts is the OLD one and will keep firing on fixtures.
-- **No `clawgate-task:` field**: `clawgate_handoff.sh resolve` exited **5** — 0 tasks
-  for this session, with its positive control confirming the board answered. A wrong id
-  also answers 200/empty, so that zero is a real reading and NOT a clean bill of health.
+- **PR `#1799`, head `d7af847c` — FOUR commits.** `0ac60ad1` the fix · `f7ccbfce` round 0 ·
+  `be12c7ae` round 1 · `1a2943ad` round 2 · `d7af847c` round 3. Based on `cee56910`.
+- ✅ **THE AUDIT LADDER RAN: rounds 0, 1, 2 AND 3.** Every round found things that needed
+  fixing, so none of them was a stopping round. Round 3's advisory verdict is **safe to
+  merge**; its executable delta is **behaviour-neutral across 17,978 real corpus commands**.
+  Claims blocks posted for rounds 1 and 2 (`payload=94`, `payload=100`) — both non-zero, so
+  the attribution gate never fired and the ladder continued by the rule, not by inertia.
+- **PR body REWRITTEN** to match the tree (it advertised the Read-arm narrowing round 0
+  removed). This repo squash-merges, so that body becomes `main`'s permanent commit message.
+- 🔴 **NOT MERGED, NOT DEPLOYED.** `~/.claude/hooks/handoff-write-guard.py` is a nix-store
+  COPY: merge → pull → `home-manager switch`/`ship.sh`. Until then both hosts run the OLD guard.
+- ⚠ **ONE MUTATION RESULT IS UNRESOLVED AND IS NOT ROUNDED UP.** `test_the_scan_cap_BOUNDS_
+  the_search` kills `head = cmd[:start]` (cap deleted) — observed, own assertion. It does NOT
+  have an established verdict for `GIT_VERB_SCAN_CAP = 10**9` (cap inert): the pytest run
+  carrying that mutant does not terminate, twice. That is COULD-NOT-MEASURE, neither pass nor
+  kill. See the open investigation below.
+- **`main` moved a lot during this work** (`cee56910` → `a2b1893a` → `c46bb9d4` → `7ef01c05`
+  → …). `#1780` was merged this session (`a2b1893a`), so `main` now carries the
+  find-session arc's CLOSED state.
 
 ## Open investigations — live diagnosis state
 
@@ -74,25 +74,60 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   to enumerate every literal that must move together. Check the laptop too: if the two
   hosts disagree, the pin is host-dependent and that is a second finding.
 
+### The cap-inert mutant hangs the suite instead of failing it
+- as-of: 2026-09-20
+- **Symptom + exact repro:** with `GIT_VERB_SCAN_CAP = 10**9` in a scratch copy, a filtered
+  pytest run of `test_the_scan_cap_BOUNDS_the_search` does not terminate (killed at 150 s and
+  again at 10 min). With the cap at 4096 the same filtered run is **1.5–1.7 s**.
+  ```bash
+  sed -i 's/^GIT_VERB_SCAN_CAP = 4096$/GIT_VERB_SCAN_CAP = 10**9/' <scratch>/handoff-write-guard.py
+  PYTHONDONTWRITEBYTECODE=1 nix develop ~/workspace/devrc -c python3 -m pytest \
+    <scratch>/scripts/claude-hooks/tests/test_handoff_write_guard.py -q -k scan_cap
+  ```
+- **Observed (with values):** the sibling mutant `head = cmd[:start]` IS killed, by this
+  test's own assertion (`AssertionError: assert ['/tmp/nix-sh…age-audit.md'] == []`). Isolated
+  regex timings on the same 12,316-byte head show **no blowup**: `REF_PREFIX_RX` 0.03 ms,
+  `GIT_OBJECT_READ_RX` 0.03 ms, capped or not. So the hang is NOT in the two regexes the cap
+  guards, which is the whole puzzle.
+- **Ruled out:** that the test is simply vacuous — the verdict provably flips on pad length
+  alone (121 B head ⇒ exempt, 12,316 B ⇒ not). via: measurement
+- **Ruled out:** an in-process probe showing `handoff_read_docs -> []` under the inert cap
+  (which would mean SURVIVED). **That probe was WRONG**: it passed `-C /tmp/er`, a directory
+  that does not exist, so `_resolve` failed on the DIRECTORY and never reached the cap. A
+  probe that fails for the wrong reason reads exactly like a result. via: code
+- **Leading hypothesis:** something on the arming path other than the two regexes is
+  superlinear in head length — `COMMENT_PAT`/`QUOTED_PAT` substitution over a 12 KB command,
+  or `_bases`/`DASH_C_RX`. The cap masks it by shortening the head, which would mean the cap
+  buys MORE than the comment claims.
+- **Next probe:** time each stage separately on the 12 KB command with the cap inert —
+  `re.sub(COMMENT_PAT, …)`, `_bases`, `HANDOFF_PATH_RX.finditer`, then `_read_off_a_ref` —
+  using a real existing repo dir for `-C` so `_resolve` is actually reached. Whichever stage
+  dominates is the answer, and it decides whether the cap's comment is understated.
+
 ## Next steps (ranked)
-1. **`/audit-pr 1799` — round 0 FIRST, then the nine correctness axes.** Round 0 is the
-   only round that can conclude *close this PR*, and that is actionable only while the
-   merge decision is open; it reports and cannot end a ladder.
-   forcing: gate — an unaudited PR changing a fleet-wide Stop hook that can BLOCK a
-   turn on every session on both hosts.
-2. **Merge `#1799`, then `scripts/ship.sh` both hosts, then re-run the probe below.**
-   🔴 Read every per-host line of `ship.sh`, not the final verdict, and confirm the
-   DEPLOYED copy carries `_read_off_a_ref` — `readlink -f` is the arbiter, never a diff.
-   forcing: gate — merged ≠ deployed; this hook is a `home.file` copy, so the fix is
-   inert on both hosts until a switch runs.
-3. **Merge `#1780`** (`docs/handoff-arc-closed-final`, touches only
-   `claudedocs/handoff-find-session-arc-resolution.md`). Until it lands, `origin/main`
-   carries that arc's PRE-CLOSE copy — a 4-item ranked list for a finished arc — so
-   every `/resume` re-opens an arc whose closing condition is met.
-   forcing: gate — a stale queue on `main` that re-opens a closed arc on every read.
-4. **Re-key the three `v1.18.29` claims to the installed opencode**, per the open
-   investigation above. Do NOT loosen the assertion.
-   forcing: regression — `main-green-check` rc 10, RED and REPRODUCED on `52939157`.
+1. **Decide the ladder's end and merge `#1799`.** Round 3 is advisory safe-to-merge and every
+   open item is a sentence, not behaviour. Merging means `gh pr merge --squash`, then
+   `scripts/ship.sh` BOTH hosts, then re-run the probe in *How to verify* against the
+   DEPLOYED copy — `readlink -f` is the arbiter.
+   forcing: gate — a fleet-wide Stop hook that can block a turn, sitting unmerged with a
+   4-commit audit ladder already paid for.
+2. **Settle the unresolved mutant** per the open investigation above — one narrow, terminating
+   question, not a general round 4.
+   forcing: gate — the ladder's only surviving guard has an unestablished mutation verdict,
+   and "could not measure" was recorded rather than rounded to a pass.
+3. **Operator call: lift `test_the_hook_spawns_no_subprocess_on_any_path`?** It is an
+   OBSERVATION from `#1092`'s body frozen into a prohibition, wider than the `shutil` standard
+   the same file uses for the same hot path. Lifting it allows `git cat-file -e <ref>:<path>`,
+   which would make the exemption VERIFIED instead of shape-matched — and would have prevented
+   the false firing this session actually hit (`handoff-x.md`, armed via a `<ref>:` prefix in a
+   measurement command, a doc that has never existed).
+   forcing: user — reopens the fix shape the operator originally chose; not mine to take.
+4. **Re-key the three `v1.18.29` claims** — `main` is RED on `test_opencode_engine.py:745`.
+   🔴 The dual-binary control is AVAILABLE NOW and DECAYS: `1.18.29` is still realised at
+   `/nix/store/6pw7n475…`. After a GC it is not, and the strong control is gone. Both hosts are
+   on `1.18.30` at the same store path; the cheap control already passes (`1 failed, 24 passed`,
+   the failure being exactly the version assertion — identical to both prior re-derivations).
+   forcing: regression — `main-green-check` rc 10, RED and REPRODUCED.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **THE APPROVED FIX WAS NARROWED AFTER AN EXISTING GUARD FORBADE IT, AND THE
@@ -146,9 +181,7 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
 
 ## How to verify
 ```bash
-# 1. the defect, and that the fix addresses it — run against the DEPLOYED hook after a
-#    switch, and against the branch copy before one. `armed` must be [] for a doc that
-#    does not exist and non-empty for one that does.
+# the defect and the fix, against whichever copy you mean — run BEFORE and AFTER a switch
 python3 - <<'PY'
 import importlib.machinery, importlib.util, os
 H = os.path.expanduser("~/.claude/hooks/handoff-write-guard.py")   # or the branch copy
@@ -158,18 +191,17 @@ m = importlib.util.module_from_spec(sp); ld.exec_module(m)
 def probe(cmd):
     return m.handoff_read_docs({"tool_name": "Bash", "tool_input": {"command": cmd},
                                 "cwd": os.path.expanduser("~/workspace/devrc")})
-print("absent doc  ->", probe('grep -rn "claudedocs/handoff-no-such-doc.md" .'))
-print("real doc    ->", probe('cat claudedocs/handoff-find-session-arc-resolution.md'))
-print("off a ref   ->", probe('git -C ~/workspace/devrc show HEAD:claudedocs/handoff-no-such-doc.md'))
+print("absent doc, plain    ->", probe('grep -rn "claudedocs/handoff-no-such-doc.md" .'))
+print("real doc             ->", probe('cat claudedocs/handoff-guard-existence-gate.md'))
+print("absent doc, off a ref->", probe('git -C ~/workspace/devrc show HEAD:claudedocs/handoff-no-such-doc.md'))
 PY
-# EXPECTED after the fix: absent=[] · real=[<a path>] · off-a-ref=[<a path>]
-# BEFORE the fix all three return a path — that is the bug.
+# AFTER the fix: [] · [<path>] · [<path>]
+# 🔴 The THIRD line still arms by design — that is the declared residual over-match, and it
+#    is the one that actually fired on this session. Rank 3 above is the decision about it.
 
-# 2. the test matrix, on the branch
+# the deployed copy is the new one — readlink is the arbiter, never a diff
+grep -c _read_off_a_ref "$(readlink -f ~/.claude/hooks/handoff-write-guard.py)"
+
 nix develop ~/workspace/devrc -c python3 -m pytest \
   ~/workspace/devrc-guard-exist/scripts/claude-hooks/tests/test_handoff_write_guard.py -q
-
-# 3. the deployed copy is the new one (readlink is the arbiter, never a diff)
-readlink -f ~/.claude/hooks/handoff-write-guard.py
-grep -c _read_off_a_ref "$(readlink -f ~/.claude/hooks/handoff-write-guard.py)"
 ```
