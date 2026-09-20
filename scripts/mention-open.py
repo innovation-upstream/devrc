@@ -457,17 +457,39 @@ def openable(span: dict) -> list[dict]:
 
 
 # The marker every picker row carries: ONE whitespace-free field, the row's
-# rank in the ordering. Width is for ALIGNMENT only — fzf splits on runs of
-# whitespace, so padding never changes the field COUNT, which is what `--nth`
-# indexes. Three digits covers a 394-row universe with room before it grows.
+# rank in the ordering. Padding never changes the field COUNT, which is what
+# `--nth` indexes. Three digits covers a 394-row universe with room to grow.
+#
+# 🔴 THE WIDTH IS NOT COSMETIC. fzf's positional tiebreaks score against
+# offsets in the ORIGINAL line, so field 1's WIDTH reaches the ranking even
+# though `--nth=2..` keeps its TEXT out of the haystack. MEASURED at 0.74.4:
+# two rows whose field-2.. text is BYTE-IDENTICAL and whose field-1 widths
+# differ (`1` padded to 3 vs `1000` padded to 6) come back in the OPPOSITE
+# order under `--tiebreak=end --nth=2..`, and in input order once the widths
+# are equalised. So a uniform width is load-bearing, and this constant going
+# too small — letting some ranks overflow it — is a correctness bug, not a
+# cosmetic one. `test_the_rank_marker_WIDTH_is_uniform_past_the_universe_size`
+# is the guard.
 PICKER_MARKER_RANK_W = 3
-# 🔴 LEFT-ALIGNED, AND THAT IS A CORRECTNESS CONSTRAINT, NOT A LOOK. Right-
-# aligning puts LEADING BLANKS before field 1 on ranks 1-99, which shifts what
-# `--nth=2..` selects — so the rank lands back INSIDE the haystack for narrow
-# ranks and outside it for wide ones, i.e. the marker becomes matchable
-# depending on its own value. MEASURED at fzf 0.74.4 over a 120-row synthetic
-# corpus: right-aligned, top-1 changed on 7 of 20 queries; left-aligned, 0 of
-# 20. Do not "tidy" this into `:>`.
+# 🔴 LEFT-ALIGNED, AND MEASURED BETTER — BUT THE MECHANISM IS NOT ESTABLISHED,
+# AND SAYING SO IS DELIBERATE. MEASURED at fzf 0.74.4 over a 120-row synthetic
+# corpus, 20 queries: right-aligned, top-1 changed on 7; left-aligned, on 0
+# (tail order 13 vs 1). Keep `:<`.
+#
+# ⚠ AN EARLIER VERSION OF THIS COMMENT EXPLAINED IT AND THE EXPLANATION WAS
+# FALSE. It said right-alignment's leading blanks shift what `--nth=2..`
+# selects, so "the rank lands back INSIDE the haystack for narrow ranks".
+# MEASURED against that claim directly: a query matching ONLY the marker digits
+# returns ZERO rows under BOTH alignments with `--nth=2..` (positive control:
+# 1 row with the flag dropped). The marker is never matchable either way.
+#
+# 🔴 AND THE WIDTH EFFECT ABOVE DOES NOT EXPLAIN IT EITHER: `:<3` and `:>3`
+# produce the SAME width, so the offsets are unchanged between the two
+# alignments. The direction is reproducible and the choice rests on it; WHY
+# right-alignment moves the ranking at constant width is UNKNOWN. Recorded as
+# unknown rather than given a second plausible mechanism — the first one read
+# just as well and was wrong, and a reason invented under pressure to supply
+# one is a hypothesis wearing a comment's clothes.
 PICKER_MARKER_UNRANKED = "-"
 # 🔴 A DIFFERENT TOKEN FOR "NOBODY STAMPED THIS ROW", AND THE DIFFERENCE IS THE
 # POINT. `picker_rows` falls back when a candidate carries no `marker` at all,
@@ -481,7 +503,13 @@ PICKER_MARKER_UNSTAMPED = "?"
 
 def picker_marker(rank: str) -> str:
     """The marker field, padded for alignment. One writer, so the width used to
-    BUILD a row and the width used to STRIP one cannot drift apart."""
+    BUILD a row and the width the guards assert on cannot drift apart.
+
+    ⚠ NOTHING STRIPS BY WIDTH, and an earlier version of this line said
+    something did: `row_to_url` matches the URL SUFFIX and the tests split
+    on whitespace, so no consumer depends on this width to find the row.
+    What it IS load-bearing for is fzf's positional scoring — see
+    `PICKER_MARKER_RANK_W`."""
     return f"{rank:<{PICKER_MARKER_RANK_W}}"
 
 
@@ -539,7 +567,7 @@ def stamp_picker_markers(candidates: list[dict],
 
 def picker_rows(candidates: list[dict]) -> list[str]:
     """One `TAB`-free display row per candidate:
-    `<class> <rank>  <platform> <id> — <url>`.
+    `<rank>  <platform> <id> — <url>`.
 
     The URL is IN the row on purpose: the whole point of the picker is that the
     operator can see which of two plausible references they are about to open,
@@ -1614,11 +1642,22 @@ def click_dims(repo: str = "", platform: str = "",
     last two are BYTE-IDENTICAL on stdout (see `PICKER_SH`), so no dim
     distinguishes them and "of ESC dismissals" cannot be computed at all.
 
-    ✅ THE ONE CLEAN CELL, which is what to use instead: under `dismissed`,
-    `queried == False` is UNAMBIGUOUSLY an ESC on an untouched picker. Nothing
-    else can produce it — Enter-with-no-match requires a non-empty query, and
-    every other abort key writes no dim at all. Count that; do not average the
-    arm.
+    ✅ THE CLEANEST CELL, which is what to use instead: under `dismissed`,
+    `queried == False` means an ESC whose query was EMPTY AFTER STRIPPING.
+    Enter-with-no-match cannot reach it (it requires a query that matched
+    nothing, and the picker always holds rows, so an empty query always
+    matches), and every other abort key writes no dim at all.
+
+    🔴 IT IS NOT "AN UNTOUCHED PICKER", AND THIS PARAGRAPH SAID SO FOR ONE
+    COMMIT — THE SAME COMMIT THAT RETRACTED THE PREVIOUS UNMEASURED
+    EXCLUSIVITY CLAIM. It read "UNAMBIGUOUSLY an ESC on an untouched picker,
+    nothing else can produce it". MEASURED at 0.74.4: a query of `"  "` writes
+    `"  \n"`, and typing then deleting writes `"\n"` — `bool(...strip())` is
+    `False` for both, so the operator DID touch the picker. The right reading
+    is "ESC with nothing typed, or nothing left after typing" — which is still
+    the population symptom 1 wants (they did not narrow the list), just not the
+    sentence that was written. **Third instance of this shape in one arc: the
+    reflex to write "nothing else can" is the defect, not any one claim.**
 
     ⚠ SCOPED TO THE REASON, NOT TO THE ARM — AND AN EARLIER DRAFT SAID "THE
     DISMISSAL ARM", WHICH IS WIDER THAN THE TRUTH. That arm emits TWO outcomes
@@ -2547,6 +2586,16 @@ PICKER_LINES = 22
 # MEASURED at 0.74.4, both flag states, with the two ESC rows as the positive
 # control: `esc` + bind -> `<query>\n` rc 0; `ctrl-c`/`ctrl-g`/`ctrl-q`/empty
 # `ctrl-d` -> 0 bytes rc 130 either way.
+#
+# 🔴 THE ACTION ORDER INSIDE THE BIND IS LOAD-BEARING, AND A REORDER IS SILENT.
+# MEASURED at 0.74.4: `--bind="esc:abort+print-query"` is ACCEPTED by fzf — no
+# parse error, no warning — and writes **0 bytes at rc 130**, i.e. exactly the
+# pre-change behaviour. `abort` terminates, so anything after it never runs.
+# The two guards happen to catch it (the whole-string `EXPECTED_PICKER_SH` pin,
+# and `_ESC_PRINTS_QUERY` keying on the substring `esc:print-query`, which a
+# reorder breaks), but neither was CHOSEN for that. Do not "simplify"
+# `_ESC_PRINTS_QUERY` to test for `"print-query"` alone: that would pass on the
+# reordered bind while production silently wrote nothing.
 #
 # ⚠ AND THE GAP IS CLOSABLE FOR ALL OF THEM: `--bind="ctrl-c:print-query+abort"`
 # is accepted and works (measured), and the same form takes ctrl-g/ctrl-q. It is
@@ -4328,7 +4377,24 @@ def main(argv: list[str] | None = None) -> int:
     # invisible to anyone who types rather than scrolls — symptom 1. The marker
     # is in the row text, so it survives narrowing; `--nth=2..` keeps it out of
     # the haystack (see `PICKER_SH`).
-    stamp_picker_markers(candidates, ordered_urls)
+    # 🔴 GATED ON `ORDER_APPLIED`, AND WITHOUT THIS THE MARKER LIES ON EVERY
+    # DEGRADED CLICK. `_ordered_universe` returns the universe UNTOUCHED when
+    # the table is stale or absent, but every arm still fills `ordered_urls`
+    # with the whole appended block — so an ungated stamp numbers rows 1..N
+    # that the ordering never placed, one line under a header that says
+    # "rows unordered". MEASURED on the shipped code: with a stale table, the
+    # repository with ZERO references — which cannot contain the clicked
+    # number — was marked rank 1, rendering identically to a run where the
+    # ordering had actually worked.
+    #
+    # ⚠ `no-table` is not exotic: it fires on every picker until the generator
+    # has run once, and FOREVER on a host where `gh` is absent or logged out.
+    # The promotion is already gated on this same state; the marker inherited
+    # neither that gate nor the note's wording. Passing `None` makes every row
+    # read `-`, which is what `picker_markers`' own docstring promises for a
+    # row the ordering did not place.
+    stamp_picker_markers(
+        candidates, ordered_urls if order_state == ORDER_APPLIED else None)
     url = pick(candidates, mesg=mesg)
     reason = last_pick_reason()
     queried = last_pick_queried()
