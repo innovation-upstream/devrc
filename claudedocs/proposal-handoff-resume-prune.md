@@ -2,7 +2,18 @@
 
 Proposal, 2026-09-20. Scope set by the operator: **doc-corpus lifecycle** and **the guard
 stack**, deletion on the table, changes land **inside the two existing skills** — no fourth
-`prune-*` sibling. Nothing in this document has been implemented.
+`prune-*` sibling.
+
+> **STATUS, 2026-09-20 (updated after implementation started — read before acting on §4):**
+> **P4 is MERGED** to `handoff-resume-prune-proposal` (`b50709ca`), **minus its `/resume`
+> half, which was deleted** — `/resume` is read-only re-entry and a corpus-maintenance
+> pointer there is prose nobody acts on (the-algorithm §1).
+> 🔴 **P2 is REFUTED AND DELETED — do not build it.** Measured below. Its premise (gotcha
+> bullets go stale unnoticed) is false in this corpus: **max age 39 days, zero over 90**, and
+> at the 14-day window used for investigations **55% of bullets would flag** — against the 3%
+> that design accepted and the 18% it rejected as "a gate everybody clicks through".
+> The archive rule that already exists keeps live docs young, so P2 would have duplicated a
+> working mechanism. **P1 and P3 stand.**
 
 ---
 
@@ -204,7 +215,32 @@ routed-to is no longer a line that "will be deleted on the next update".
 gap-audit the union (every source line present in doc ∪ refs) before writing; and the existing
 two-run `proposed` → `--confirm --push` shape stays, so the diff is in the transcript.
 
-### P2 — Give the APPEND buckets a clock
+### P2 — ~~Give the APPEND buckets a clock~~ 🔴 REFUTED AND DELETED, 2026-09-20
+
+**Do not build this.** Kept, struck through, because the measurement that killed it is worth
+more than the proposal was — and a deleted section reads as an oversight.
+
+Two findings, in order:
+
+1. **Stamping was the wrong mechanism, and the code I was about to mirror says so.**
+   `resume-state.sh`'s own comment records that the introducing-commit pickaxe dated
+   **478 of 478** investigation blocks: a stamp is the most PRECISE clock, never the only
+   one. Stamping 3,732 gotcha bullets at ~12 B each would have **added 44,784 B to a
+   3.3 MB corpus this proposal exists to shrink**.
+2. **Then the premise itself failed.** Aged every one of those 3,732 bullets by `git blame`
+   (85 ms/doc, one call; validated against the pickaxe on the oldest content — 38d vs 38d,
+   exact agreement): **p50 16.5d · p90 28d · max 39d · zero over 90d.** At the
+   investigations window of 14d, **55% would flag**. That design chose 14d *because* it
+   flagged 3% and explicitly rejected 18% as "a gate that fires on a fifth of every doc is
+   one everybody clicks through". 55% is worse than the option it rejected.
+
+Why the corpus is young: the **archive rule already works** (F2 — 0 live docs >60d). P2
+would have rebuilt a freshness mechanism on top of one already doing the job.
+
+⚠ **This also retracts the proposal's claim that P2 was a prerequisite for P1.** It is not:
+P1 runs at write time inside `handoff_doc.py`, which can blame the doc itself.
+
+<details><summary>the original P2 text, for the record</summary>
 *From `prune-skill` §0 — "a prune preserves rot BY CONSTRUCTION". Forced by F1 + the fact that
 only `### ` blocks under Open investigations carry `as-of`.*
 
@@ -216,6 +252,8 @@ alongside the `INVESTIGATIONS` block it already prints — same `EXPIRED` (a `-`
 
 P2 is a prerequisite for P1 choosing correctly, and is independently useful: a 2026-07 gotcha
 presented in the present tense is the failure `resume` step 3 already warns about three times.
+
+</details>
 
 ### P3 — Make the DoD field reachable on the 82%
 *From `prune-memory` ("archive the moment it ships") — but F3 says the trigger must be built
@@ -249,14 +287,14 @@ makes P1 auditable rather than felt.
 
 ## 5. Implementation plan
 
-| # | change | files | risk |
-|---|---|---|---|
-| P4 | routing lines | 2 SKILL.md | none |
-| P2 | stamp + age APPEND buckets | `handoff_doc.py`, `resume-state.sh` | low — additive |
-| P3 | paste-ready DoD offer | `resume-state.sh` | low |
-| P1 | slice-and-demote | `handoff_doc.py`, both SKILL.md | **rewrites docs** |
+| # | change | files | risk | status |
+|---|---|---|---|---|
+| P4 | routing line (handoff only) | `handoff/SKILL.md`, `handoff-audit.py` | none | **MERGED `b50709ca`** |
+| P2 | stamp + age APPEND buckets | — | — | 🔴 **REFUTED, deleted** |
+| P3 | paste-ready DoD offer | `resume-state.sh` | low | open, gated on the probe |
+| P1 | slice-and-demote | `handoff_doc.py`, `handoff/SKILL.md` | **rewrites docs** | open — the closing condition |
 
-Order: P4 → P2 → P3 → P1. Each is its own PR with test coverage; P1 gets a mutation battery
+Order: ~~P4 → P2 → P3~~ → **P1**, then P3. Each is its own PR with test coverage; P1 gets a mutation battery
 in the shape of `mutation_battery_handoff_archive_and_cap.py`, since its reassuring answer is
 a zero ("0 lines lost"), and a zero is indistinguishable from a detector wired to nothing.
 
