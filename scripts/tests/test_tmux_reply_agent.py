@@ -130,8 +130,37 @@ CLAUDE_TEXT_PROMPT_CAPTURE = (
     "  ? for shortcuts\n"
 )
 
+#: 🔴 THE FOOTERS BELOW ARE MEASURED VERBATIM AND THEY USED TO BE INVENTED.
+#: Every menu fixture in this file carried `↑↓ to select · enter to confirm` or
+#: `enter to confirm · ctrl+g to edit in Nvim`, and Claude Code 2.1.232 renders
+#: NEITHER. Re-measured by raising real modals in a scratch tmux session:
+#:
+#:   one question          Enter to select · ↑/↓ to navigate · Esc to cancel
+#:   one question, the     Enter to select · ↑/↓ to navigate · ctrl+g to edit in
+#:     free-text row         Nvim · Esc to cancel
+#:     focused
+#:   a question CHAIN      Enter to select · Tab/Arrow keys to navigate · Esc to
+#:                           cancel
+#:   tool-approval         Esc to cancel · Tab to amend
+#:   trust-folder /        Enter to confirm · Esc to cancel
+#:     bypass warning
+#:
+#: A fabricated footer is not a harmless detail here: the footer is now the
+#: signal that decides whether the pane is an ask at all, so a wrong one makes
+#: every menu fixture a test of a render that does not exist. This is the same
+#: lesson `rows_are_one_block`'s docstring records about synthetic ROW SPACING,
+#: one field over — and it was live in this file the whole time that lesson was.
+#: The option LABELS stay invented (this repo is public; a real capture is
+#: captured text). The CHROME is measured, because the code reads the chrome.
+MENU_FOOTER_SINGLE = "Enter to select · ↑/↓ to navigate · Esc to cancel"
+MENU_FOOTER_FREE_TEXT = ("Enter to select · ↑/↓ to navigate · ctrl+g to edit in Nvim · "
+                         "Esc to cancel")
+MENU_FOOTER_CHAIN = "Enter to select · Tab/Arrow keys to navigate · Esc to cancel"
+MENU_FOOTER_APPROVAL = "Esc to cancel · Tab to amend"
+MENU_FOOTER_STARTUP = "Enter to confirm · Esc to cancel"
+
 #: One question, four rows. The measured single-question render: a `☐` marker,
-#: NO tab arrows and NO Submit tab, cursor on row 1.
+#: NO tab arrows and NO Submit tab, cursor on row 1, and the ask's own footer.
 SINGLE_MENU_CAPTURE = (
     "● Which store should the queue use?\n"
     "\n"
@@ -142,7 +171,7 @@ SINGLE_MENU_CAPTURE = (
     "    3. Type something.\n"
     "    4. Chat about this\n"
     "\n"
-    "  ↑↓ to select · enter to confirm\n"
+    + MENU_FOOTER_SINGLE + "\n"
 )
 
 #: 🔴 THE SHAPE A REAL ASK ACTUALLY HAS, AND THE ONE THE DETECTOR COULD NOT SEE.
@@ -176,13 +205,14 @@ DESCRIBED_MENU_CAPTURE = (
     "     write your own answer\n"
     "    4. Chat about this\n"
     "\n"
-    "  ↑↓ to select · enter to confirm\n"
+    + MENU_FOOTER_SINGLE + "\n"
 )
 
-#: The same render carrying a `✔ Submit` tab strip — a MULTI-question chain, which
-#: must still be refused once its rows become visible.
+#: The same render carrying a `✔ Submit` tab strip AND the chain's own footer — a
+#: MULTI-question chain, which must still be refused once its rows become visible.
 DESCRIBED_MULTI_QUESTION_CAPTURE = DESCRIBED_MENU_CAPTURE.replace(
-    "  ☐ Store\n", "  ←  ☐ Store  ☐ Region  ✔ Submit  →\n")
+    "  ☐ Store\n", "  ←  ☐ Store  ☐ Region  ✔ Submit  →\n").replace(
+    MENU_FOOTER_SINGLE, MENU_FOOTER_CHAIN)
 
 #: The SAME four options in a DIFFERENT order. A digit derived from the order
 #: clawgate sent — rather than from the order the pane shows — answers the wrong
@@ -203,7 +233,7 @@ SINGLE_MENU_FREE_TEXT_FOCUSED_CAPTURE = (
     "  ❯ 3. Type something.\n"
     "    4. Chat about this\n"
     "\n"
-    "  enter to confirm · ctrl+g to edit in Nvim\n"
+    + MENU_FOOTER_FREE_TEXT + "\n"
 )
 
 #: What the pane shows once the ask has been ANSWERED and the tool has returned.
@@ -214,7 +244,8 @@ ANSWERED_CAPTURE = (
     "● Wiring the flatfile store now.\n"
 )
 
-#: The measured MULTI-question render: a tab strip with arrows and a Submit tab.
+#: The measured MULTI-question render: a tab strip with arrows and a Submit tab,
+#: plus the chain's own footer.
 MULTI_QUESTION_MENU_CAPTURE = (
     "● Two things before I start.\n"
     "\n"
@@ -224,6 +255,150 @@ MULTI_QUESTION_MENU_CAPTURE = (
     "    2. Flatfile\n"
     "    3. Type something.\n"
     "    4. Chat about this\n"
+    "\n"
+    + MENU_FOOTER_CHAIN + "\n"
+)
+
+#: 🔴 THE SAME LIVE CHAIN AFTER A SHORT PANE CLIPPED ITS TAB STRIP, which is the
+#: A1 blocker's own shape. Reproduced from a real render: a 2-question chain in a
+#: 104x14 window showed the cursored rows and the footer, and NOTHING above them —
+#: no tab strip, no `☐` marker, no `Review your answers`. The shipped classifier
+#: read this `menu`, pressed a digit, answered question 1, watched question 2
+#: appear, and reported `delivered`. The footer is the only surviving signal.
+CLIPPED_CHAIN_CAPTURE = (
+    "  ❯ 1. Ledger\n"
+    "     keeps an append-only journal and replays it on start\n"
+    "    2. Flatfile\n"
+    "     one file per row, no journal at all\n"
+    "────────────────────────────────────────────────────\n"
+    "  5. Chat about this\n"
+    "\n"
+    + MENU_FOOTER_CHAIN + "\n"
+)
+
+#: 🔴 THE SAME CLIPPING ONE STEP FURTHER, where the numbered block is DESTROYED.
+#: Reproduced from a real render at 104x13: row 1 has left the viewport and the
+#: modal marks the scrolled edge row with `↓`, which stands exactly where
+#: `MENU_OPTION_RE` expects whitespace or the cursor — so ZERO rows parse. The
+#: shipped classifier read this `text` and TYPED THE REPLY INTO A LIVE MODAL.
+#: ⚠ The `↓` is measured, not decorative: it is the fourth route to an empty
+#: block and no earlier round named it.
+SCROLLED_SINGLE_ASK_CAPTURE = (
+    "↓ 2. Flatfile\n"
+    "     one file per row, no journal at all\n"
+    "────────────────────────────────────────────────────\n"
+    "  5. Chat about this\n"
+    "\n"
+    + MENU_FOOTER_SINGLE + "\n"
+)
+
+#: 🔴 THE LIVE TOOL-APPROVAL PROMPT, CAPTURED. A cursored numbered menu that the
+#: shipped classifier drove by digit — so a reply of `Yes` pressed row 1 and
+#: APPROVED A TOOL CALL THE OPERATOR NEVER SAW, and `No` pressed row 3 and denied
+#: it. BOTH were deliverable: the deny row's label is bare here, which an earlier
+#: round believed impossible. Its footer names neither `Enter to select` nor
+#: `Enter to confirm`, and that is the discriminator — not the labels.
+PERMISSION_PROMPT_CAPTURE = (
+    "● Write(queue-schema.sql)\n"
+    "\n"
+    "────────────────────────────────────────────────────\n"
+    " Create file\n"
+    " queue-schema.sql\n"
+    "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n"
+    "  1 create table queue ()\n"
+    "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n"
+    " Do you want to create queue-schema.sql?\n"
+    " ❯ 1. Yes\n"
+    "   2. Yes, allow all edits during this session (shift+tab)\n"
+    "   3. No\n"
+    "\n"
+    " " + MENU_FOOTER_APPROVAL + "\n"
+)
+
+#: 🔴 THE LIVE STARTUP DIALOGS, CAPTURED, AND THE SECOND ONE IS INVERTED. The
+#: trust-this-folder prompt reads `❯ 1. Yes, I trust this folder` / `2. No, exit`;
+#: the bypass-permissions warning that follows it reads `❯ 1. No, exit` /
+#: `2. Yes, I accept`. So a reply of `Yes` would have pressed 1 on one and 2 on
+#: the other — the row a label sits on is not a property of the word. Both carry
+#: `Enter to confirm`, never `Enter to select`.
+STARTUP_DIALOG_CAPTURE = (
+    " Do you trust the files in this folder?\n"
+    "\n"
+    " ❯ 1. Yes, I trust this folder\n"
+    "   2. No, exit\n"
+    "\n"
+    " " + MENU_FOOTER_STARTUP + "\n"
+)
+INVERTED_STARTUP_DIALOG_CAPTURE = (
+    " Bypass permissions mode disables all permission checks.\n"
+    "\n"
+    " ❯ 1. No, exit\n"
+    "   2. Yes, I accept\n"
+    "\n"
+    " " + MENU_FOOTER_STARTUP + "\n"
+)
+
+#: 🔴 THE TWO LIVE CHOOSERS THAT **DO** CARRY `Enter to select`, AND THE REASON THE
+#: SUBSTRING PAIR WAS NEVER A DISCRIMINATOR.
+#:
+#: ⚠ PROVENANCE, STATED, BECAUSE THE TWO HALVES ARE NOT THE SAME KIND OF EVIDENCE.
+#: The live captures were taken by the REVIEW round at 104 columns on Claude Code
+#: 2.1.232; this round read them rather than re-raising the dialogs (an isolated
+#: `CLAUDE_CONFIG_DIR` has no credentials, and using the real one would have fired
+#: the operator's clawgate/notify Stop hooks). What this round measured itself is the
+#: stronger half: both footers are WHOLE LITERALS in the shipped bundle —
+#: `grep -aoP '.{0,120}Enter to select.{0,120}' .claude-wrapped` returns exactly
+#: these two strings and nothing else — so they are structural rather than a version
+#: accident, and the two sources agree byte for byte.
+#:
+#: Under `Enter to select` + `↑/↓ to navigate` both classified `menu` and both were
+#: driven by digit: a reply naming a `/sandbox` row CHANGED THE SANDBOX/PERMISSION
+#: MODE, and `/permissions`' row 1 ends in `…` so `label_matches`' truncation rule
+#: accepted ANY reply beginning `Add a new rule`. Neither dialog was anything the
+#: operator was shown.
+#:
+#: ⚠ THE ORDER OF THE FIELDS IS THE FACT THAT SEPARATES THEM, and it is not a
+#: heuristic: in BOTH ask renderers `Enter to select` is field 1, and in both of
+#: these it is field 2 or 3, behind a nav or switch hint. `/sandbox` also terminates
+#: on `Esc to close` rather than `Esc to cancel`.
+#: ⚠ The option labels are invented (this repo is public); the CHROME is measured,
+#: because the chrome is what the code reads.
+SANDBOX_PICKER_FOOTER = ("←/→ to switch · ↑/↓ to navigate · Enter to select · "
+                         "Esc to close")
+SANDBOX_PICKER_CAPTURE = (
+    " Sandbox mode\n"
+    "\n"
+    "   1. Sandbox BashTool, with auto-allow\n"
+    "   2. Sandbox BashTool, with regular permissions\n"
+    " ❯ 3. No Sandbox ✔\n"
+    "\n"
+    " " + SANDBOX_PICKER_FOOTER + "\n"
+)
+PERMISSIONS_RULE_LIST_FOOTER = ("↑/↓ to navigate · Enter to select · ←/→ to switch · "
+                                "Esc to cancel")
+#: ⚠ THE INDENTATION AND THE `↓` SCROLL MARKER ARE MEASURED, the rule names are not.
+#: The live render indents the cursor row by two and pads the number column
+#: (`  ❯ 1.   Add a new rule…` / `    2.   …`), and it marks the scrolled edge row with
+#: `↓` standing exactly where `MENU_OPTION_RE` expects whitespace or the cursor — the
+#: same fourth route to a broken block this file records for a scrolled ask. Reproduced
+#: because the pane this fixture stands for was scrolled. The rule names themselves are
+#: INVENTED: the real ones are the operator's own permission entries and real paths,
+#: which this public repo must not carry.
+PERMISSIONS_RULE_LIST_CAPTURE = (
+    " Permissions · Allow\n"
+    "\n"
+    "  ❯ 1.   Add a new rule…\n"
+    "    2.   Bash(git status)\n"
+    "    3.   Bash(git diff:*)\n"
+    "    4.   Read(~/notes/**)\n"
+    "    5.   Bash(cat:*)\n"
+    "    6.   Bash(chmod:*)\n"
+    "    7.   Bash(curl:*)\n"
+    "    8.   Bash(bash:*)\n"
+    "    9.   Bash(dig:*)\n"
+    "  ↓ 10.  Bash(find:*)\n"
+    "\n"
+    "  " + PERMISSIONS_RULE_LIST_FOOTER + "\n"
 )
 
 #: Its end screen, reached after every question has an answer.
@@ -237,18 +412,39 @@ MULTI_QUESTION_REVIEW_CAPTURE = (
     "    2. Cancel\n"
 )
 
-#: The measured multiSelect render: `[ ]` checkboxes, and a completing `Submit`
-#: row that is UNNUMBERED and reachable only by arrow keys.
+#: 🔴 THE MULTISELECT RENDER, CORRECTED — THIS FIXTURE USED TO BE A RENDER THAT
+#: DOES NOT EXIST. It read `❯ [ ] 1. Ledger` with the box BEFORE the number, and it
+#: carried NO footer. Both were wrong, and together they made every multiSelect test
+#: in this file a test of an invented pane:
+#:
+#:   * the real row is `❯ 1. [ ] Ledger` — number, then box. Taken from the
+#:     renderer itself (Claude Code 2.1.232 `.claude-wrapped`, the `Ltl` component
+#:     reached from `rB.multiSelect ? h6(...)`), which composes a flex row with
+#:     `gap:1` as `<cursor-or-space> {`${index}.`.padEnd(w)} {["[", tick|" ", "]"]}
+#:     {label}`. A live capture of pane %170 agreed. ⚠ NO LIVE MULTISELECT WAS
+#:     CAPTURED FOR THIS ROUND — a read-only sweep of all 58 panes on this host
+#:     (viewport + 2000 scrollback lines) found zero; the renderer is the source,
+#:     and it is the stronger one because it produces every capture.
+#:   * a real multiSelect ask DOES render the ask footer, so omitting it let this
+#:     fixture pass through a code path no live pane takes.
+#:
+#: ⚠ WHY THE `Submit` ROW CARRIES NO `✔`: the renderer draws it as
+#: `<cursor-or-space><marginLeft:3><bold>{submitButtonText}</bold>`, and
+#: `submitButtonText` is `"Submit"` on the last question and `"Next"` before it —
+#: no tick anywhere. So `MENU_SUBMIT_TAB` (`✔ Submit`) cannot see it, which is
+#: exactly why the checkbox ROW pattern has to be the thing that refuses this pane.
 MULTI_SELECT_MENU_CAPTURE = (
     "● Which stores should be enabled?\n"
     "\n"
     "  ☐ Stores\n"
     "\n"
-    "  ❯ [ ] 1. Ledger\n"
-    "    [ ] 2. Flatfile\n"
-    "    [ ] 3. Archive\n"
+    "  ❯ 1. [ ] Ledger\n"
+    "    2. [ ] Flatfile\n"
+    "    3. [✔] Archive\n"
     "\n"
     "      Submit\n"
+    "\n"
+    + MENU_FOOTER_SINGLE + "\n"
 )
 
 #: A numbered, cursored menu with NO free-text row. A reply naming one of its rows
@@ -260,6 +456,8 @@ NO_FREE_TEXT_MENU_CAPTURE = (
     "\n"
     "  ❯ 1. Ledger\n"
     "    2. Flatfile\n"
+    "\n"
+    + MENU_FOOTER_SINGLE + "\n"
 )
 
 #: Numbered rows with TWO cursor glyphs — whether a live menu is up at all cannot
@@ -269,6 +467,8 @@ TWO_CURSOR_MENU_CAPTURE = (
     "\n"
     "  ❯ 1. Ledger\n"
     "  ❯ 2. Flatfile\n"
+    "\n"
+    + MENU_FOOTER_SINGLE + "\n"
 )
 
 #: 🔴 THE FOUR LIVE SHAPES THAT USED TO BE REFUSED, taken from a sweep of all 53
@@ -3397,30 +3597,55 @@ def test_a_menu_that_does_NOT_advance_is_reported_failed_not_delivered(
     assert "nothing was re-sent" in body["detail"], body
 
 
-def test_a_NEW_menu_after_the_answer_counts_as_an_advance(server, tmux_stub, tmp_path):
-    """The control for the failure above.
+def test_a_NEW_menu_after_the_answer_counts_as_an_advance_ONLY_WITH_A_RECORD(
+        server, tmux_stub, tmp_path):
+    """🔴 THE ONE STATE THAT IS SHARED BY A GOOD DELIVERY AND A HALF-ANSWERED CHAIN.
 
-    Answering may be followed immediately by another ask, so "there is still a
-    menu on screen" is not the question — "is it the SAME menu" is. Without this
-    the read-back would report `failed` for a perfectly good delivery whenever
-    Claude asks a second question, which is the failure direction that trains an
-    operator to ignore the state column.
+    Answering may be followed immediately by another ask, so "there is still a menu
+    on screen" is not the question. But neither is "is it the SAME menu": answering
+    the FIRST question of a CHAIN also renders a different menu, and the shipped
+    code reported that `delivered` while the tool was still blocked. Two very
+    different outcomes, one observation — RULES.md's "an empty result cannot
+    distinguish two mechanisms", in the read-back.
 
-    ⚠ IT ASSERTS THE DIGIT TOO, and that clause is what stops it being VACUOUS.
-    A `delivered` on its own is what the PRE-CHANGE agent reports for this
-    fixture — it types the label, presses Enter and calls it delivered — so the
-    state alone was green at the base sha and proved nothing. Measured while
-    writing it: this was the one new test in this section that passed unchanged
-    against `origin/main`.
+    What distinguishes them is POSITIVE evidence, and it is in the pane: a genuine
+    answer prints `● User answered Claude's questions:` with the chosen label,
+    while a chain prints nothing at all until Submit. So a different menu settles
+    only when the pane RECORDS this reply as an answer.
+
+    ⚠ IT ASSERTS THE DIGIT TOO, and that clause is what stops the first half being
+    VACUOUS. A `delivered` on its own is what the PRE-CHANGE agent reported for
+    this fixture — it typed the label, pressed Enter and called it delivered — so
+    the state alone was green at the base sha and proved nothing.
     """
     second = SINGLE_MENU_CAPTURE.replace("Ledger", "Postgres").replace("Flatfile", "SQLite")
-    tmux_stub.set_captures(SINGLE_MENU_CAPTURE, second)
+
+    # A REAL answer followed by a new ask: the record is there, above the new modal.
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE, ANSWERED_CAPTURE + second)
     server.claim_batches = [[write(text="Flatfile")]]
     run_agent(server, tmux_stub, tmp_path)
     assert tmux_stub.send_keys_calls() == [
         ["send-keys", "-t", "%12", "-l", "--", "2"]], tmux_stub.send_keys_calls()
     body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
     assert body["state"] == "delivered", body
+    assert "records this option as the answer" in body["detail"], body
+
+    # The SAME observable with no record — which is what a half-answered chain
+    # looks like — is UNKNOWN, and nothing is re-sent.
+    tmux_stub.reset()
+    server.requests.clear()
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE, second)
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [
+        ["send-keys", "-t", "%12", "-l", "--", "2"]], tmux_stub.send_keys_calls()
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "failed", body
+    assert "no answered record here is attributable to this ask" in body["detail"], body
+    # 🔴 AND THE CHAIN CLAUSE IS ONLY LICENSED HERE, where there really is no record.
+    # The same arm used to emit it after reading one, which is what
+    # test_the_CHAIN_accusation_never_denies_a_record_this_function_read pins.
+    assert "CHAIN" in body["detail"], body
 
 
 def test_the_menu_detail_never_carries_the_reply_text(server, tmux_stub, tmp_path):
@@ -3479,8 +3704,18 @@ def test_the_pane_classifier_is_exercised_directly():
     nocursor = SINGLE_MENU_CAPTURE.replace("  ❯ 1.", "    1.")
     assert AGENT.classify_pane(nocursor)[0] == AGENT.PANE_UNKNOWN_MENU
     assert "half-drawn" in AGENT.classify_pane(nocursor)[2], AGENT.classify_pane(nocursor)[2]
+
+    # 🔴 AND STRIPPING THE MARKER IS NO LONGER ENOUGH TO MAKE IT ORDINARY TEXT,
+    # which is a DELIBERATE change to this assertion rather than an accident of
+    # one. It used to read "the same block with the marker stripped is an ordinary
+    # numbered list" — true when the `☐` was the only evidence a modal was up, and
+    # false now that the FOOTER is, because the footer survives the clipping that
+    # takes the marker. Both signals have to go before this is text.
+    marker_stripped = nocursor.replace("  ☐ Store\n", "")
+    assert AGENT.classify_pane(marker_stripped)[0] == AGENT.PANE_UNKNOWN_MENU, (
+        "the ask's own footer stopped being read as evidence a modal is up")
     assert AGENT.classify_pane(
-        nocursor.replace("  ☐ Store\n", ""))[0] == AGENT.PANE_TEXT
+        marker_stripped.replace(MENU_FOOTER_SINGLE, ""))[0] == AGENT.PANE_TEXT
 
     # And numbered rows carrying TWO cursor glyphs are undecidable, not a menu.
     assert AGENT.classify_pane(
@@ -3746,41 +3981,91 @@ def test_a_TASK_LIST_above_a_REAL_menu_does_not_make_it_a_multiSelect(
         f"{tmux_stub.send_keys_calls()}")
 
 
-def test_the_checkbox_ROW_pattern_requires_the_box_where_the_NUMBER_would_stand():
-    """The pattern's contract, asserted directly — and NOT pinned by mutation.
+def test_the_checkbox_ROW_pattern_requires_the_box_where_the_LABEL_would_stand():
+    """The pattern's contract — and the COMBINED anchoring mutant, now killed.
 
-    🔴 STATED PLAINLY BECAUSE A CLAIM OF COVERAGE HERE WOULD BE FALSE. Three
-    mutants were run against the anchoring and all three SURVIVED the whole file:
-    removing the `^`, swapping `.match` for `.search`, and removing BOTH together.
-    The first two are equivalent mutants — with `^` in the pattern and no
-    MULTILINE, `.search` anchors exactly as `.match` does, so neither spelling is
-    individually breakable. The third genuinely widens the pattern, and no
-    REALISTIC pane distinguishes it: a mid-line `[x]` yields `cursor=False`, so it
-    still cannot form the CURSORED run the multiSelect branch needs. Constructing a
-    pane that does (`1. Ledger ❯ [x] more`) would be inventing a render nobody has
-    measured, and a test built on that would assert a fiction.
+    🔴 THE PREVIOUS VERSION OF THIS DOCSTRING ASSERTED A FALSEHOOD AND USED IT TO
+    EXCUSE A GAP. It said the combined mutant (no `^`, `.match` -> `.search`) was
+    undistinguishable by realistic data because "a mid-line `[x]` yields
+    `cursor=False`", and that constructing a pane that did otherwise — it even
+    named `1. Ledger ❯ [x] more` — "would assert a fiction". Measured: on the
+    equivalent line for the REAL render the widened pattern matches the cursored
+    group mid-line, `group(1)` is the cursor, and `cursor` is **True**. The
+    counter-example it dismissed is the kill.
 
-    So this pins the pattern's SEMANTICS rather than pretending to a kill: the
-    checkbox must stand where the number would, first thing on the row after an
-    optional cursor and an optional bullet. It catches a rewrite of the pattern; it
-    does not catch a change of the anchoring alone, and that gap is recorded rather
-    than papered over.
+    🔴 AND THE FIXTURES THIS TEST PINNED WERE THEMSELVES A FICTION — the defect one
+    level up. Every assertion here asserted `❯ [ ] 1. Ledger`, box before number,
+    on the strength of a comment claiming that was "the measured render". It is not
+    what Claude Code 2.1.232 emits: the multiSelect renderer composes
+    `<cursor-or-space> {`${index}.`.padEnd(w)} {["[", tick|" ", "]"]} {label}`, i.e.
+    `❯ 1. [ ] Ledger`. So the pattern matched nothing a real pane contains,
+    `menu_checkbox_block` returned `[]` for every live multiSelect, and
+    `PANE_MULTI_SELECT` was unreachable code with a green test over it. The name of
+    this test changed with the fix, because the OLD name stated the falsehood.
+
+    The `^`/`.match` pair really are EQUIVALENT mutants individually (with `^` and
+    no MULTILINE, `.search` anchors exactly as `.match` does), and that stands. It
+    is the pair dropped TOGETHER that is killable, and the assertions below kill it
+    on a realistic shape: a transcript quoting a cursored checkbox row inside
+    prose, which `claude/skills/session-manager/reference/waiting-signal.md`
+    records as routine ("agents quote menus back at the operator all day").
+
+    ⚠ STATED PRECISELY, BECAUSE THE SCOPE IS WHAT THE OLD VERSION GOT WRONG, AND THE
+    FIGURE IS RE-MEASURED FOR THE CORRECTED ROW SPELLING RATHER THAN CARRIED FORWARD:
+    a cursored numbered CHECKBOX row appearing mid-line, with text before it, occurs
+    on 0 of the 58 live panes on this host — 0 in the viewport and 0 in 2000 lines of
+    scrollback. So this is a realistic SHAPE, not a live capture — which is the
+    honest claim, and a stronger basis than "nobody has measured it" was for
+    declining to test it at all. ⚠ The same sweep found ZERO genuine multiSelect
+    renders either, so the corrected row spelling rests on the RENDERER and on one
+    cited capture of pane %170, not on a pane this round watched.
     """
     m = AGENT.MENU_CHECKBOX_ROW_RE
-    # The measured multiSelect render, cursored and not.
-    assert m.match("  ❯ [ ] 1. Ledger")
-    assert m.match("    [x] 2. Flatfile")
-    assert m.match("  ❯ [✔] 1. Ledger")
-    # A markdown task list is row-shaped too — the CURSOR is what excludes it, and
-    # `menu_checkbox_block` is where that lives, not here.
-    assert m.match("  - [ ] wire the store")
-    # A checkbox that is NOT where the number would stand.
+    # 🔴 THE COMBINED MUTANT, KILLED. Built here rather than described: the widened
+    # pattern must NOT see a cursor where the real one sees no row at all.
+    widened = re.compile(m.pattern.lstrip("^"))
+    quoted_row = "● The list rendered 2. Flatfile ❯ 9. [x] Ledger"
+    assert not m.match(quoted_row), (
+        "the row pattern stopped requiring the row to START at the line's beginning, so a "
+        "quoted cursored checkbox row inside prose now reads as a multiSelect option")
+    assert widened.search(quoted_row).group(1) == AGENT.MENU_CURSOR, (
+        "the widened pattern no longer finds a mid-line cursor, so this kill is stale and "
+        "the docstring's claim needs re-measuring rather than trusting")
+    # And end to end: the quoted pair must stay TEXT, which is what makes the kill
+    # a behavioural one rather than a fact about a regex.
+    quoted_pair = (quoted_row + "\n"
+                   + "  and the next one as   3. [ ] Flatfile\n"
+                   + "\n● Carrying on.\n")
+    assert AGENT.classify_pane(quoted_pair)[0] == AGENT.PANE_TEXT, (
+        "a transcript quoting a cursored checkbox row now refuses a legitimate reply: "
+        f"{AGENT.classify_pane(quoted_pair)}")
+    # 🔴 THE MEASURED multiSelect RENDER — NUMBER, THEN BOX. This is the assertion
+    # block that was pinned to a render Claude Code does not produce: it read
+    # `m.match("  ❯ [ ] 1. Ledger")`, and the shipped renderer emits
+    # `❯ 1. [ ] Ledger`. Cursored and not, and both tick spellings.
+    assert m.match("  ❯ 1. [ ] Ledger")
+    assert m.match("    2. [x] Flatfile")
+    assert m.match("  ❯ 3. [✔] Archive")
+    # 🔴 AND THE FALSIFIED RENDER MUST NOT MATCH ANY MORE. Keeping it would leave the
+    # pattern accepting a shape no renderer emits, which is where the mid-line
+    # `❯ [x]` false positive came from.
+    assert not m.match("  ❯ [ ] 1. Ledger"), (
+        "the box-BEFORE-number spelling is back; no renderer in Claude Code 2.1.232 "
+        "emits it and accepting it re-opens the quoted-row false positive")
+    # A markdown task list is NOT row-shaped under this pattern — it has no number —
+    # which is a second, independent reason it cannot be a multiSelect. The cursor
+    # requirement in `menu_checkbox_block` is the first.
+    assert not m.match("  - [ ] wire the store")
+    # An ORDERED markdown checklist IS row-shaped; the cursor is what excludes it,
+    # and `menu_checkbox_block` is where that lives, not here.
+    assert m.match("  1. [ ] wire the store")
+    # A checkbox that is NOT where the label would stand.
     assert not m.match("    2. Flatfile [x] (current)")
     assert not m.match("devrc $ grep -c '[ ]' TODO.md")
     assert not m.match("  ❯ 1. Ledger [x]")
     # And the cursor group is what `menu_checkbox_block` reads.
-    assert m.match("  ❯ [ ] 1. Ledger").group(1) == AGENT.MENU_CURSOR
-    assert m.match("    [ ] 2. Flatfile").group(1) is None
+    assert m.match("  ❯ 1. [ ] Ledger").group(1) == AGENT.MENU_CURSOR
+    assert m.match("    2. [ ] Flatfile").group(1) is None
 
 
 def test_an_option_LABEL_containing_a_checkbox_does_not_refuse_the_menu():
@@ -3796,29 +4081,64 @@ def test_a_REAL_multiSelect_list_is_STILL_refused_and_the_CURSOR_is_why():
     """🔴 THE OTHER DIRECTION OF THE SAME CHANGE, PINNED SO IT CANNOT DRIFT.
 
     Narrowing the checkbox signal must not reopen the hole it closes: a live
-    multiSelect list is still refused, and `menu_block` cannot see it at all
-    (the checkbox stands before the number), so this is the ONLY thing standing
-    between a multiSelect ask and a blind type-and-Enter.
+    multiSelect list is still refused.
 
-    ⚠ THE RESIDUAL THIS TEST ALSO STATES: the cursor glyph is load-bearing. Strip
-    it and the same list reads as a TEXT pane, because there is no numbered block
-    to fall back on. A live Claude Code modal always draws the cursor — that is the
-    repo's own measured live-modal signal in `waiting-signal.md` — so what is lost
-    is coverage of an UNFOCUSED checkbox list, which is not a modal awaiting an
-    answer. Stated rather than left for someone to find.
+    🔴 AND THE REASON THIS TEST USED TO GIVE WAS FALSE, WHICH IS WHY IT PASSED OVER
+    A DEAD GUARD. It asserted `menu_block(...) == []` "because the checkbox stands
+    before the number", making the checkbox signal "the ONLY thing standing between
+    a multiSelect ask and a blind type-and-Enter". The real row is `❯ 1. [ ] Ledger`,
+    which `MENU_OPTION_RE` matches with `label="[ ] Ledger"` — so `menu_block` sees
+    a multiSelect perfectly well, and the old assertion was green only because the
+    fixture was an invented render. RED at `a324b00e` with the fixture corrected.
+
+    ⚠ SO WHAT ACTUALLY KEPT A MULTISELECT SAFE BEFORE THIS FIX WAS AN ACCIDENT, NOT
+    A GUARD: the parsed labels carry the box (`[ ] Ledger`), so an operator's reply
+    of `Ledger` matched no row, and `[ ] Type something` is not a recognised
+    free-text row either — the pane was refused by `deliver_to_menu` with "the reply
+    matches none of the menu's N option rows", a true outcome with a wrong reason.
+    The refusal is now on purpose and says multi-select.
+
+    ⚠ THE RESIDUAL THIS TEST ALSO STATES: the cursor glyph is load-bearing for the
+    CHECKBOX block. Strip it and the pane falls back to the numbered block, which
+    does see these rows — so it reads as an unknown/quoted menu rather than a
+    multiSelect. A live Claude Code modal always draws the cursor (`waiting-signal.md`
+    is the repo's measured live-modal signal), so what is lost is a precise REASON on
+    an UNFOCUSED checkbox list, not the refusal itself.
     """
     assert AGENT.classify_pane(MULTI_SELECT_MENU_CAPTURE)[0] == AGENT.PANE_MULTI_SELECT
-    assert AGENT.menu_block(MULTI_SELECT_MENU_CAPTURE) == [], (
-        "the numbered block now sees a multiSelect row, so the checkbox signal is no "
-        "longer the only thing refusing one")
+    # 🔴 THE CORRECTED FACT, ASSERTED SO THE OLD ONE CANNOT COME BACK: the numbered
+    # block DOES see a multiSelect, and its labels carry the box.
+    numbered = AGENT.menu_block(MULTI_SELECT_MENU_CAPTURE)
+    assert [r["label"] for r in numbered] == [
+        "[ ] Ledger", "[ ] Flatfile", "[✔] Archive"], numbered
+    # …which is exactly why the checkbox block has to win. Without it this pane is a
+    # cursored numbered menu under a single-question ask footer, i.e. `menu`.
+    assert AGENT.menu_footer(MULTI_SELECT_MENU_CAPTURE) == AGENT.FOOTER_SINGLE
+    assert AGENT.MENU_SUBMIT_TAB not in MULTI_SELECT_MENU_CAPTURE, (
+        "the fixture grew a `✔ Submit`, so `multi` would refuse this pane and the "
+        "checkbox block would stop being what this test measures")
 
-    uncursored = MULTI_SELECT_MENU_CAPTURE.replace("  ❯ [ ] 1.", "    [ ] 1.")
-    assert AGENT.classify_pane(uncursored)[0] == AGENT.PANE_TEXT, (
-        "the stated residual has changed — update the docstring, not this assertion")
+    # 🔴 THE INDEPENDENT CLIPPING CASE, which is what the checkbox block reaches and
+    # the numbered one cannot: row 1 has scrolled out, so no run starts at 1. The
+    # cursor moves onto a VISIBLE row, which is what a real scrolled render shows —
+    # and the checkbox block needs it, so constructing this by deleting row 1 alone
+    # would have measured the cursor requirement instead of the clipping.
+    clipped = MULTI_SELECT_MENU_CAPTURE.replace(
+        "  ❯ 1. [ ] Ledger\n", "").replace("    2. [x]", "  ❯ 2. [x]").replace(
+        "    2. [ ]", "  ❯ 2. [ ]")
+    assert AGENT.menu_block(clipped) == [], AGENT.menu_block(clipped)
+    assert AGENT.classify_pane(clipped)[0] == AGENT.PANE_MULTI_SELECT, (
+        "a multiSelect whose first row is clipped is no longer refused as one: "
+        f"{AGENT.classify_pane(clipped)}")
+
+    uncursored = MULTI_SELECT_MENU_CAPTURE.replace("  ❯ 1. [ ]", "    1. [ ]")
+    assert AGENT.classify_pane(uncursored)[0] != AGENT.PANE_MENU, (
+        "the stated residual has changed — an uncursored checkbox list is being "
+        f"driven by digit: {AGENT.classify_pane(uncursored)}")
 
     # And a single cursored checkbox row is not a list: MENU_MIN_OPTIONS applies
     # here exactly as it does to the numbered block.
-    lone = "● Noting one item:\n  ❯ [ ] wire the store\n\ndevrc git:(main) $ \n"
+    lone = "● Noting one item:\n  ❯ 1. [ ] wire the store\n\ndevrc git:(main) $ \n"
     assert AGENT.classify_pane(lone)[0] == AGENT.PANE_TEXT, AGENT.classify_pane(lone)
 
 
@@ -4067,28 +4387,466 @@ def test_the_delivered_detail_says_what_was_OBSERVED_not_that_a_row_was_SELECTED
     """🔴 EVERY SENTENCE IN AN AUDIT ROW IS A CLAIM.
 
     The old detail read `selected menu row 2 by its digit` — a selection nothing on
-    this path measures. What the read-back can vouch for is that the menu is gone,
-    or that a different one is up, and that is what it now says.
+    this path measures. What the read-back can vouch for is what it SAW, and the
+    strongest thing it can see is the pane's own record of the answer.
     """
     tmux_stub.set_captures(SINGLE_MENU_CAPTURE, ANSWERED_CAPTURE)
     server.claim_batches = [[write(text="Flatfile")]]
     run_agent(server, tmux_stub, tmp_path)
     body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
     assert body["state"] == "delivered", body
-    assert body["detail"] == "menu row 2 was sent and the menu is no longer on screen", body
+    assert body["detail"] == (
+        "menu row 2 was sent and the pane records this option as the answer"), body
 
+    # The same delivery with the record out of the viewport: the weaker claim, and
+    # it says exactly what it saw rather than borrowing the stronger one.
     tmux_stub.reset()
     server.requests.clear()
-    second = SINGLE_MENU_CAPTURE.replace("Ledger", "Postgres").replace("Flatfile", "SQLite")
-    tmux_stub.set_captures(SINGLE_MENU_CAPTURE, second)
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE, DEFAULT_PROMPT_CAPTURE)
     server.claim_batches = [[write(text="Flatfile")]]
     run_agent(server, tmux_stub, tmp_path)
     body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
     assert body["state"] == "delivered", body
-    assert body["detail"] == "menu row 2 was sent and a different menu is now on screen", body
+    assert body["detail"] == "menu row 2 was sent and the menu is no longer on screen", body
+
+    # And a record naming a DIFFERENT option is a wrong answer caught red-handed.
+    tmux_stub.reset()
+    server.requests.clear()
+    wrong = ANSWERED_CAPTURE.replace("→ Flatfile", "→ Ledger")
+    tmux_stub.set_captures(SINGLE_MENU_CAPTURE, wrong)
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "failed", body
+    assert "records a DIFFERENT option" in body["detail"], body
 
 
-def test_the_settle_verdict_is_driven_directly_through_all_FOUR_outcomes(monkeypatch):
+def test_a_record_that_APPEARS_while_THIS_menu_is_still_up_is_not_this_asks(monkeypatch):
+    """🔴 F4a: THE ORDERING `verdict = … if seen != want` IS LOAD-BEARING, AND NOTHING
+    PINNED IT. An independent mutation sweep dropped the `seen != want` clause and the
+    mutant SURVIVED the whole suite, while the comment beside it called the ordering
+    "load-bearing rather than tidy". A comment is a claim; this is the measurement.
+
+    THE FRAME: our menu is still demonstrably on screen, and the bottom-most answered
+    record has CHANGED since the pre-keypress read — which the baseline alone cannot
+    rule out, because the transcript ABOVE a live modal keeps rendering and an earlier
+    ask's record can finish drawing there. Without the ordering clause that record is
+    attributed to THIS ask and named as a DIFFERENT option, so a delivery that has not
+    happened yet is reported `failed` with a false explanation.
+
+    ⚠ THE MUTANT THIS KILLS, EXACTLY: `verdict = menu_answer_verdict(captured, text,
+    before) if text else ""` — i.e. the same line with `and seen != want` removed. It
+    dies on this test's own assertion message, not on a neighbouring guard's.
+    """
+    monkeypatch.setattr(AGENT, "MENU_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(AGENT, "MENU_VERIFY_ATTEMPTS", 4)
+    labels = ["Ledger", "Flatfile", "Type something.", "Chat about this"]
+
+    # An earlier ask's record finishes drawing ABOVE the live menu. `menu_block` is
+    # bottom-most, so the pane still classifies as the SAME menu with the SAME labels.
+    someone_elses = ANSWERED_CAPTURE.replace("→ Flatfile", "→ Postgres")
+    frame = someone_elses + SINGLE_MENU_CAPTURE
+
+    kind, seen_labels, _ = AGENT.classify_pane(frame)
+    assert (kind, seen_labels) == (AGENT.PANE_MENU, labels), (
+        "the fixture no longer shows THIS menu, so it cannot measure the ordering: "
+        f"{(kind, seen_labels)}")
+    assert AGENT.menu_answer_records(frame) == ["Postgres"], (
+        "the fixture no longer carries a record that differs from the baseline, so the "
+        "`before` difference would not fire and this test would pass vacuously: "
+        f"{AGENT.menu_answer_records(frame)}")
+
+    def fake(pane):
+        return frame, ""
+    monkeypatch.setattr(AGENT, "capture_pane", fake)
+
+    # The baseline is EMPTY, so `Postgres` genuinely is new -- and must still not be
+    # read as the answer to an ask whose menu is right there on screen.
+    assert AGENT.menu_settled("%12", labels, "Flatfile", []) == (
+        False, "the menu did not move"), (
+        "a record that appeared while THIS menu is still on screen is being attributed "
+        "to this ask, so a delivery that has not happened yet reports a DIFFERENT "
+        f"option: {AGENT.menu_settled('%12', labels, 'Flatfile', [])}")
+
+
+def test_a_record_seen_while_our_menu_was_UP_is_not_half_of_an_AGREEING_PAIR(monkeypatch):
+    """🔴 F4, THE SECOND HALF: THE `if seen != want else None` ON THE **`new`** LINE.
+
+    The comment beside those two lines claimed the ordering was "load-bearing rather
+    than tidy" and named ONE test as pinning it — and that test pins the `verdict`
+    line's `and seen != want` only. An independent mutation sweep dropped the clause
+    from the `new` line instead and SURVIVED the whole 195-test suite. Reproduced here
+    before writing this: the mutant
+    `new = menu_answer_records_for_this_ask(captured, before)` scored 195 passed with a
+    sentinel mutant in the same batch KILLED (32 failed), so the sweep could see a
+    difference and there was none to see.
+
+    ⚠ THE COMMENT WAS A COVERAGE CLAIM WIDER THAN ITS IMPLEMENTATION — the exact shape
+    RULES.md names. Two lines, one pin, a docstring naming both.
+
+    THE CONSEQUENCE, WHICH IS WHY THIS IS A BEHAVIOURAL TEST AND NOT A STRUCTURAL ONE:
+    without the clause, a record that appeared while OUR menu was still up is carried
+    into `prev_new`, and the very next read — our menu gone, our OWN record not drawn
+    yet, the stale one still bottom-most — finds `new == prev_new` and fires the
+    MISMATCH arm. A correct delivery is then reported `failed` with
+    "the pane records a DIFFERENT option as the answer to this ask". MEASURED: the
+    mutant returns exactly `(False, 'the pane records a DIFFERENT option as the answer
+    to this ask')` here, against `(True, 'the menu is no longer on screen')` at HEAD.
+
+    ⚠ AND THE DELIVERED DETAIL HERE IS THE WEAKER ONE ON PURPOSE. The record that
+    finally appears is ours, but it has not been read twice by the time the pane has
+    been, so the absence rule is what answers — see
+    `test_the_UPGRADE_needs_the_RECORD_read_twice_not_only_the_PANE`.
+    """
+    monkeypatch.setattr(AGENT, "MENU_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(AGENT, "MENU_VERIFY_ATTEMPTS", 6)
+    labels = ["Ledger", "Flatfile", "Type something.", "Chat about this"]
+
+    # An EARLIER ask's record, finishing after the baseline was taken.
+    stale = ANSWERED_CAPTURE.replace("→ Flatfile", "→ Postgres")
+    frames = [
+        stale + SINGLE_MENU_CAPTURE,   # our menu still up, the stale record present
+        stale,                         # our menu gone, our own record not drawn yet
+        stale + ANSWERED_CAPTURE,      # our record finally arrives, bottom-most
+    ]
+    # Fixture controls: if any of these three stops holding, the sequence no longer
+    # exercises the ordering and the test would pass for the wrong reason.
+    assert AGENT.classify_pane(frames[0])[:2] == (AGENT.PANE_MENU, labels), (
+        "frame 1 no longer shows THIS menu, so `seen == want` never holds and the "
+        f"ordering clause is never consulted: {AGENT.classify_pane(frames[0])[:2]}")
+    assert AGENT.menu_answer_records(frames[0]) == ["Postgres"], (
+        "frame 1 no longer carries a record differing from the baseline, so the "
+        f"`before` difference would not fire: {AGENT.menu_answer_records(frames[0])}")
+    assert AGENT.menu_answer_records(frames[1]) == ["Postgres"], (
+        "frame 2 must carry the SAME stale record as frame 1 — that identity is what "
+        f"the mutant reads as an agreeing pair: {AGENT.menu_answer_records(frames[1])}")
+    assert AGENT.menu_answer_records(frames[2]) == ["Flatfile"], (
+        f"frame 3 no longer records OUR answer: {AGENT.menu_answer_records(frames[2])}")
+
+    seq = list(frames)
+
+    def fake(pane):
+        return (seq.pop(0) if len(seq) > 1 else seq[0]), ""
+    monkeypatch.setattr(AGENT, "capture_pane", fake)
+
+    # ⚠ CAPTURED ONCE, NOT RE-CALLED IN THE MESSAGE. `fake` CONSUMES the frame list, so
+    # a second call inside the f-string reads a different sequence and prints a value
+    # the assertion never saw — which is how a failure message comes to disagree with
+    # its own assertion. (Measured while writing this: the re-call printed
+    # `(True, 'the pane records this option as the answer')` for a mutant that had
+    # actually returned the accusation.)
+    got = AGENT.menu_settled("%12", labels, "Flatfile", [])
+    assert got == (True, "the menu is no longer on screen"), (
+        "a record read while OUR menu was still on screen is being used as half of the "
+        "agreeing pair the mismatch arm requires, so a correct delivery is reported as "
+        f"answering a DIFFERENT option: {got}")
+
+
+def test_the_UPGRADE_needs_the_RECORD_read_twice_not_only_the_PANE(monkeypatch):
+    """🔴 F2/F3: THE MATCH ARM RESTED ON **PANE** STABILITY, WHICH IS THE WRONG ONE.
+
+    `menu_settled`'s own docstring says so, about the arm beside it: "the classification
+    is identical across both halves of a half-drawn record, so the stability that
+    matters is the RECORD's, not the pane kind's". The MISMATCH arm required
+    `new == prev_new`; the MATCH arm required only `seen == prev` — so the strongest
+    claim this function emits, `the pane records this option as the answer`, could be
+    made off ONE read of the record while the accusation beside it needed two.
+
+    THE FRAME: the pane is stable across both reads (same kind, same labels) and the
+    record BLOCK is still filling in — a chain's second answer arriving. Both reads say
+    `match`, so no accusation is at stake; what is at stake is whether the strong
+    detail is emitted off a record nobody watched hold still.
+
+    ⚠ BOTH OUTCOMES ARE `delivered` **IN THIS FIXTURE**, and the unqualified version of
+    that sentence was false. It read "The fix costs no delivery — it costs the CLAIM",
+    generalising from a fixture whose pane is NOT a menu: there the second read costs
+    only the claim, because control reaches the absence rule and says what it saw ("the
+    menu is no longer on screen"). Where a DIFFERENT MENU is on screen the fall-through
+    reaches the chain arm instead and the delivery IS lost —
+    `test_the_CHAIN_accusation_never_denies_a_record_this_function_read` drives that
+    case, and it is where the cost actually lands.
+    """
+    monkeypatch.setattr(AGENT, "MENU_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(AGENT, "MENU_VERIFY_ATTEMPTS", 6)
+    labels = ["Ledger", "Flatfile", "Type something.", "Chat about this"]
+
+    one = ANSWERED_CAPTURE
+    two = ANSWERED_CAPTURE.replace(
+        "  ⎿  · Which store should the queue use? → Flatfile\n",
+        "  ⎿  · Which store should the queue use? → Flatfile\n"
+        "     · Which region? → us-east\n")
+    # Fixture controls: the pane must be STABLE while the record CHANGES, and both
+    # reads must say `match` — otherwise this measures the mismatch arm instead.
+    assert AGENT.classify_pane(one)[:2] == AGENT.classify_pane(two)[:2], (
+        "the two frames classify differently, so `seen == prev` never holds and the "
+        "match arm is never reached")
+    assert AGENT.menu_answer_records(one) == ["Flatfile"], AGENT.menu_answer_records(one)
+    assert AGENT.menu_answer_records(two) == ["Flatfile", "us-east"], (
+        AGENT.menu_answer_records(two))
+    assert (AGENT.menu_answer_verdict(one, "Flatfile", [])
+            == AGENT.menu_answer_verdict(two, "Flatfile", []) == "match"), (
+        "both frames must hold the reply, or this test is measuring the mismatch arm")
+
+    seq = [one, two]
+
+    def fake(pane):
+        return (seq.pop(0) if len(seq) > 1 else seq[0]), ""
+    monkeypatch.setattr(AGENT, "capture_pane", fake)
+
+    # ⚠ CAPTURED ONCE — `fake` consumes `seq`, so re-calling in the message would print
+    # a value the assertion never saw.
+    got = AGENT.menu_settled("%12", labels, "Flatfile", [])
+    assert got == (True, "the menu is no longer on screen"), (
+        "the strongest claim this function makes — `the pane records this option as "
+        "the answer` — is being emitted off a record that was read ONCE, while the "
+        f"accusation arm beside it requires two agreeing reads: {got}")
+
+    # 🔴 AND THE POSITIVE CONTROL: with the record STABLE across both reads the upgrade
+    # must still be reached, or the fix has simply deleted the strong claim.
+    seq[:] = [two]
+    got = AGENT.menu_settled("%12", labels, "Flatfile", [])
+    assert got == (True, "the pane records this option as the answer"), (
+        "a record that IS stable across two reads no longer reaches the upgrade, so "
+        f"the strong claim is now unreachable rather than better-founded: {got}")
+
+
+#: A DIFFERENT single-question ask: different question, different option labels, the
+#: same measured single-question footer. `SINGLE_MENU_CAPTURE.replace(...)` is what the
+#: rest of this file uses for "another ask"; this one is spelled out because the
+#: `menu_settled` arm below turns on the pane being a MENU whose labels are not ours,
+#: and a fixture built by substring replacement can stop being that silently.
+OTHER_SINGLE_MENU_CAPTURE = (
+    "● Which region should it run in?\n"
+    "\n"
+    "  ☐ Region\n"
+    "\n"
+    "  ❯ 1. us-east\n"
+    "    2. eu-west\n"
+    "    3. Type something.\n"
+    "    4. Chat about this\n"
+    "\n"
+    + MENU_FOOTER_SINGLE + "\n"
+)
+
+
+def test_the_CHAIN_accusation_never_denies_a_record_this_function_read(monkeypatch):
+    """🔴 THE ARM BELOW A DIFFERENT MENU SAID "records no answer" AFTER READING ONE.
+
+    🔴 THE SAME FALSE THING — "the fall-through reaches the absence rule" — WAS WRITTEN
+    IN FIVE PLACES AND FIVE WORDINGS, AND THIS PARAGRAPH SAID THREE. The five share no
+    phrase, so THE SET IS NOT GREPPABLE and no count written here is verifiable by
+    anyone reading it; it is ENUMERATED instead, and a sixth is ruled out by nothing.
+    Every one of them was found by reading `menu_settled`'s arms against its prose, not
+    by grepping for a wording:
+
+      1. `menu_settled`'s docstring — requiring the second read costs "NOT THE
+         DELIVERY".
+      2. the comment on the different-menu arm — it "costs nothing, because control
+         falls through to the absence rule below".
+      3. `test_the_UPGRADE_needs_the_RECORD_read_twice_not_only_the_PANE`'s docstring —
+         "The fix costs no delivery — it costs the CLAIM".
+      4. `menu_answer_records_for_this_ask`'s docstring — a record identical to the one
+         already on screen means "the verdict falls back to the plain absence rule …
+         never the wrong one".
+      5. `menu_settled`'s docstring, the `text`-defaults-to-empty paragraph — with no
+         reply "`menu_answer_verdict` is not consulted and the absence rule stands
+         alone".
+
+    1-3 were corrected earlier in this same range (`3feed80d..285e25b8`); 4 and 5 were
+    still live on `285e25b8`, were measured false in process — each against a no-menu
+    control on the same frames, which DOES reach the absence rule — and are corrected
+    at their own sites. This paragraph is where the enumeration lives because a count
+    kept being written here and kept being wrong: FOUR successive rounds each produced
+    a fresh completeness claim about this falsity, so do not replace the list with a
+    number.
+
+    IT DOES NOT ALWAYS FALL THROUGH TO THE ABSENCE RULE. When the pane is a DIFFERENT
+    MENU the fall-through reaches the chain arm, which both reported `failed` AND said
+    `the pane records no answer to this one` — in the very iteration that had computed
+    `verdict == "match"`. A denial of a record the same iteration had just read.
+
+    MEASURED head-vs-base on the sequence below, in process, with fixture controls on
+    every frame:
+
+        fc464f0e   (True,  'the pane records this option as the answer')
+        3feed80d   (False, 'a different menu is now on screen and the pane records no
+                            answer to this one, …CHAIN…')
+
+    ⚠ WHAT IS FIXED HERE IS THE SENTENCE, NOT THE VERDICT, AND THAT IS DELIBERATE. The
+    refusal stays: the record was read on ONE frame, so it was not established, and a
+    `failed` row over a good delivery is the direction this whole file chooses (nothing
+    on this path retries, so it cannot cost a second keypress). What it may no longer
+    do is call the observation chain-shaped, because a chain prints no answered line at
+    all until Submit — the absence IS the chain signature, and asserting it while
+    holding a record destroys the one thing that arm knows.
+
+    🔴 BOTH DIRECTIONS. A genuine different-menu-with-NO-record must still get the
+    chain sentence, or this fix has simply deleted the guard that catches a clipped
+    chain.
+    """
+    monkeypatch.setattr(AGENT, "MENU_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(AGENT, "MENU_VERIFY_ATTEMPTS", 6)
+    labels = ["Ledger", "Flatfile", "Type something.", "Chat about this"]
+    other = OTHER_SINGLE_MENU_CAPTURE
+
+    # Fixture controls. Each one is a premise of the arm under test; if any stops
+    # holding, the sequence exercises a different branch and passes vacuously.
+    assert AGENT.classify_pane(other)[0] == AGENT.PANE_MENU, (
+        "the second ask no longer classifies as a MENU, so `kind == PANE_MENU` is "
+        f"false and the arm under test is never reached: {AGENT.classify_pane(other)}")
+    assert AGENT.classify_pane(other)[1] != labels, (
+        "the second ask now carries OUR labels, so `seen != want` is false and this "
+        "measures 'the menu did not move' instead")
+    assert AGENT.classify_pane(other)[:2] == AGENT.classify_pane(ANSWERED_CAPTURE + other)[:2], (
+        "the two frames classify differently, so `seen == prev` never holds")
+    assert AGENT.menu_answer_records(other) == [], (
+        f"frame 1 already carries a record, so `new` is not None on it: "
+        f"{AGENT.menu_answer_records(other)}")
+    assert AGENT.menu_answer_verdict(ANSWERED_CAPTURE + other, "Flatfile", []) == "match", (
+        "frame 2's record no longer holds the reply, so `verdict == \"match\"` is false "
+        "and this test measures the no-record arm twice")
+
+    seq = [other, ANSWERED_CAPTURE + other]
+
+    def fake(pane):
+        return (seq.pop(0) if len(seq) > 1 else seq[0]), ""
+    monkeypatch.setattr(AGENT, "capture_pane", fake)
+
+    # ⚠ CAPTURED ONCE — `fake` consumes `seq`.
+    got = AGENT.menu_settled("%12", labels, "Flatfile", [])
+    assert got == (False, "a different menu is now on screen and the answered record here "
+                          "differs from the pre-keypress baseline, but it was not read TWICE "
+                          "holding this option, so it was not established as this ask's "
+                          "answer"), (
+        "the arm below a DIFFERENT MENU is not saying what this iteration observed. It "
+        "read a record that HOLDS the reply (verdict `match`, asserted above) on one "
+        f"frame, and the detail must not deny it or call the frame chain-shaped: {got}")
+    assert "CHAIN" not in got[1], (
+        "a chain prints NO answered line until Submit, so an observation carrying a "
+        f"record is not what a chain looks like and must not say it is: {got}")
+
+    # 🔴 THE OTHER DIRECTION: no record at all, which is the chain signature, must
+    # still be accused — otherwise the clipped-chain guard is gone.
+    seq[:] = [other]
+    got = AGENT.menu_settled("%12", labels, "Flatfile", [])
+    assert got == (False, "a different menu is now on screen and no answered record here is "
+                          "attributable to this ask, which is also what answering the first "
+                          "question of a CHAIN looks like"), (
+        "a different menu with NO record is what a half-answered chain looks like, and "
+        f"it is no longer being refused as one: {got}")
+
+    # 🔴 ALL THREE WAYS THE OLD SENTENCE WAS FALSE, because the comment on that arm
+    # claims three and a test pinning two would be the same defect one layer up. The
+    # `match` one is above; these are the other two.
+    #
+    # (2) A record naming a DIFFERENT option, read on one frame. The mismatch arm needs
+    # two agreeing reads too, so control reaches here — and a record IS on screen.
+    wrong = ANSWERED_CAPTURE.replace("→ Flatfile", "→ Postgres")
+    assert AGENT.menu_answer_verdict(wrong + other, "Flatfile", []) == "mismatch", (
+        "the fixture no longer looks like a WRONG answer, so this drives the no-record "
+        "arm a second time instead of the mismatch one")
+    seq[:] = [other, wrong + other]
+    got = AGENT.menu_settled("%12", labels, "Flatfile", [])
+    assert "no answered record" not in got[1], (
+        "a record naming a DIFFERENT option was read here; the detail asserts there is "
+        f"none: {got}")
+    assert "CHAIN" not in got[1], (
+        f"a frame carrying a record is not what a chain looks like: {got}")
+
+    # (3) No reply to compare against at all — `verdict` is never computed, but the
+    # record was still read.
+    seq[:] = [ANSWERED_CAPTURE + other]
+    got = AGENT.menu_settled("%12", labels, "", [])
+    assert "no answered record" not in got[1], (
+        "with `text` empty the record is never compared, but it WAS read — the detail "
+        f"must not assert its absence: {got}")
+    assert "CHAIN" not in got[1], (
+        f"a frame carrying a record is not what a chain looks like: {got}")
+
+
+def test_a_record_read_ACROSS_an_unreadable_frame_is_not_an_AGREEING_PAIR(monkeypatch):
+    """🔴 `prev_new = None` IN THE UNREADABLE-PANE BRANCH, WHICH NO TEST REACHED.
+
+    `prev = None` there has a test; the `prev_new = None` beside it did not. MEASURED
+    with that line deleted: 199 of this file's 200 tests PASS and only this one fails —
+    so nothing else in here reaches it. Unlike the two clauses this file labels GRAMMAR
+    it is KILLABLE, and what it needs is four frames with an `err` in the MIDDLE, which
+    no other sequence here has.
+
+    WHAT THE MUTANT DOES. `prev_new` then carries a record across a frame that was not
+    an observation at all, so the mismatch arm can fire on two NON-CONSECUTIVE reads —
+    exactly the defect `test_a_record_seen_while_our_menu_was_UP_is_not_half_of_an_
+    AGREEING_PAIR` exists to prevent, reached by the other door. The sibling `prev =
+    None` does not cover it: the arm it guards (`seen == prev`) is a different arm.
+
+    THE SEQUENCE, and why each frame is needed:
+
+        1  a STALE record, our ask already gone      -> prev_new = ['Postgres']
+        2  capture_pane FAILS                        -> HEAD clears prev_new; mutant does not
+        3  the SAME stale record                     -> mutant: new == prev_new, ACCUSES
+        4  our OWN record, bottom-most               -> HEAD: pane stable, record moved,
+                                                        so the absence rule answers
+
+    MEASURED: HEAD `(True, 'the menu is no longer on screen')`; the mutant
+    `(False, 'the pane records a DIFFERENT option as the answer to this ask')` — a
+    correct delivery reported as a wrong answer, off a pair straddling an unreadable
+    frame. The `continue` -> `break` mutant in the same branch dies here too (it stops
+    reading at frame 2 and returns "never held one state long enough").
+    """
+    monkeypatch.setattr(AGENT, "MENU_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(AGENT, "MENU_VERIFY_ATTEMPTS", 6)
+    labels = ["Ledger", "Flatfile", "Type something.", "Chat about this"]
+
+    stale = ANSWERED_CAPTURE.replace("→ Flatfile", "→ Postgres")
+    mine = stale + ANSWERED_CAPTURE
+
+    # Fixture controls: frames 1/3/4 must classify IDENTICALLY (and not as our menu),
+    # frames 1 and 3 must carry the SAME record, and frame 4 a DIFFERENT one holding
+    # the reply — or the mutant is not distinguishable from HEAD here.
+    assert AGENT.classify_pane(stale)[:2] == AGENT.classify_pane(mine)[:2], (
+        f"the frames classify differently: {AGENT.classify_pane(stale)[:2]} vs "
+        f"{AGENT.classify_pane(mine)[:2]}")
+    assert AGENT.classify_pane(stale)[1] != labels, (
+        "a frame carries OUR labels, so `seen != want` is false")
+    assert AGENT.menu_answer_records(stale) == ["Postgres"], (
+        f"the stale frame no longer carries the record the pair is built from: "
+        f"{AGENT.menu_answer_records(stale)}")
+    assert AGENT.menu_answer_records(mine) == ["Flatfile"], (
+        f"frame 4 no longer records OUR answer bottom-most: "
+        f"{AGENT.menu_answer_records(mine)}")
+    assert AGENT.menu_answer_verdict(stale, "Flatfile", []) == "mismatch", (
+        "the stale record no longer looks like a WRONG answer, so the arm the mutant "
+        "reaches is not the mismatch arm")
+
+    reads = {"n": 0}
+
+    def fake(pane):
+        reads["n"] += 1
+        if reads["n"] == 2:
+            return "", "no such pane"
+        return (stale if reads["n"] < 4 else mine), ""
+    monkeypatch.setattr(AGENT, "capture_pane", fake)
+
+    got = AGENT.menu_settled("%12", labels, "Flatfile", [])
+    # 🔴 THE VERDICT IS ASSERTED FIRST, AND THE READ COUNT SECOND, DELIBERATELY. With
+    # the count first both mutants died on IT — "the sequence stopped after 3 reads" —
+    # which is a true statement about the run and says nothing about the defect, so the
+    # test would have been red for a reason that does not name what broke. The count
+    # stays as a VACUITY control below: a HEAD that reached the right answer in two
+    # reads never executed the straddle this test is for.
+    assert got == (True, "the menu is no longer on screen"), (
+        "the unreadable frame is no longer breaking the chain of observations. Either a "
+        "record read BEFORE it is being used as half of the agreeing pair the mismatch "
+        "arm requires — a correct delivery reported as answering a DIFFERENT option — "
+        "or the loop stopped reading at the error instead of skipping it. The read "
+        f"count separates them: {reads['n']} reads, verdict {got}")
+    assert reads["n"] >= 4, (
+        f"the verdict was reached in {reads['n']} reads, so the frame that straddles "
+        "the unreadable one was never taken and this test passed without exercising "
+        "the branch it exists for")
+
+
+def test_the_settle_verdict_is_driven_directly_through_EVERY_outcome(monkeypatch):
     """Each verdict with its own observed string, so none can be reached by accident.
 
     🔴 THE TWO FALSE ONES ARE DIFFERENT FACTS AND MUST NOT SHARE A SENTENCE. "the
@@ -4096,6 +4854,16 @@ def test_the_settle_verdict_is_driven_directly_through_all_FOUR_outcomes(monkeyp
     pane could not be read consistently at all. An operator acts differently on
     each, and a single wording would have hidden the second behind the first — which
     is how the half-drawn frame went unnoticed.
+
+    ⚠ AND THE `text` ARGUMENT IS WHAT SEPARATES THE ABSENCE RULE FROM THE RECORD
+    RULE, so it is driven both ways here: omitted (the old behaviour, absence only)
+    and supplied (the record is consulted). A call with no reply to compare against
+    must not gain a refusal it cannot justify.
+
+    🔴 AND SO IS `before`, THE PRE-KEYPRESS RECORD SET — the arms that read the
+    answered render are claims about THIS ask, and a bottom-most block is not
+    evidence of that. Without a baseline they fired on STALE rows in BOTH directions,
+    and both are driven below as regressions rather than described.
     """
     monkeypatch.setattr(AGENT, "MENU_SETTLE_SECONDS", 0.0)
     monkeypatch.setattr(AGENT, "MENU_VERIFY_ATTEMPTS", 4)
@@ -4112,10 +4880,72 @@ def test_the_settle_verdict_is_driven_directly_through_all_FOUR_outcomes(monkeyp
     feed(ANSWERED_CAPTURE)
     assert AGENT.menu_settled("%12", labels) == (
         True, "the menu is no longer on screen")
+    # With the reply AND a baseline supplied, the SAME frame yields the stronger
+    # claim. `[]` is a real baseline: the pane carried no record before the keypress.
+    assert AGENT.menu_settled("%12", labels, "Flatfile", []) == (
+        True, "the pane records this option as the answer")
+    # 🔴 F3 REGRESSION — A STALE RECORD IS NOT THIS ASK'S ANSWER. Same frame, but the
+    # record was ALREADY on screen before the keypress, so this ask produced none.
+    # The previous round returned `delivered` + "the pane records this option as the
+    # answer" here, which is a false measurement claim about a row it did not watch
+    # appear. The honest verdict is the weaker one.
+    assert AGENT.menu_settled("%12", labels, "Flatfile", ["Flatfile"]) == (
+        True, "the menu is no longer on screen")
+    # 🔴 AND WITH NO BASELINE AT ALL THERE IS NO UPGRADE EITHER — `None` means
+    # attribution is impossible, which is not the same fact as an empty record set.
+    assert AGENT.menu_settled("%12", labels, "Flatfile") == (
+        True, "the menu is no longer on screen")
+
+    # A record naming another option is a mismatch — now on TWO AGREEING READS of the
+    # same attributable record, not one.
+    feed(ANSWERED_CAPTURE.replace("→ Flatfile", "→ Ledger"))
+    assert AGENT.menu_settled("%12", labels, "Flatfile", []) == (
+        False, "the pane records a DIFFERENT option as the answer to this ask")
+    # 🔴 F2 REGRESSION — THE FALSE ACCUSATION. The ask has closed and its own record
+    # has not been drawn yet, while a record from an EARLIER ask in the same pane is
+    # still bottom-most. The previous round read that one snapshot and reported
+    # `failed` with "the pane records a DIFFERENT option as the answer to this ask" —
+    # a correct delivery accused of answering the wrong thing. Nothing about this
+    # frame is attributable, so nothing may be claimed about it.
+    stale = ANSWERED_CAPTURE.replace("→ Flatfile", "→ Ledger")
+    assert AGENT.menu_settled("%12", labels, "Flatfile", ["Ledger"]) == (
+        True, "the menu is no longer on screen"), (
+        "a stale record from an earlier ask is being read as THIS ask's answer")
+    assert AGENT.menu_answer_records(stale) == ["Ledger"], (
+        "the F2 fixture no longer carries the stale record it is built around")
+    # 🔴 F4b REGRESSION — ONE READ IS NOT ENOUGH, BECAUSE THE RECORD RENDERS
+    # PROGRESSIVELY. A wrapped answer caught half-drawn reads SHORT, does not hold the
+    # reply, and is indistinguishable from a wrong answer on a single frame. The
+    # verdict must be a DELIVERY, not the accusation the first frame alone would have
+    # produced.
+    # ⚠ AND THE DETAIL IS THE WEAKER ONE, WHICH IS A CHANGE FROM THE ROUND THAT ADDED
+    # THIS LINE. It used to assert `the pane records this option as the answer` here.
+    # The match arm now needs the RECORD read twice as well (the mismatch arm always
+    # did), and in this sequence the record differs between the only two reads the pane
+    # holds still for — so control falls through to the absence rule, which says what
+    # it saw. Both outcomes are `delivered`; what moved is the strength of the claim,
+    # and the claim that was being made here was not measured. See
+    # test_the_UPGRADE_needs_the_RECORD_read_twice_not_only_the_PANE.
+    half = ANSWERED_CAPTURE.replace("→ Flatfile", "→ Flat")
+    full = ANSWERED_CAPTURE.replace("→ Flatfile", "→ Flatfile with the journal")
+    assert AGENT.menu_answer_verdict(half, "Flatfile with the journal", []) == "mismatch", (
+        "the half-drawn fixture no longer looks like a wrong answer, so this "
+        "regression is measuring nothing")
+    feed(half, full)
+    assert AGENT.menu_settled(
+        "%12", labels, "Flatfile with the journal", []) == (
+        True, "the menu is no longer on screen"), (
+        "a half-drawn answered record is being reported as a DIFFERENT option")
 
     feed(other)
     assert AGENT.menu_settled("%12", labels) == (
-        True, "a different menu is now on screen")
+        False, "a different menu is now on screen and no answered record here is "
+               "attributable to this ask, which is also what answering the first question "
+               "of a CHAIN looks like")
+    # The record turns the same frame into a delivery.
+    feed(ANSWERED_CAPTURE + other)
+    assert AGENT.menu_settled("%12", labels, "Flatfile", []) == (
+        True, "the pane records this option as the answer")
 
     feed(SINGLE_MENU_CAPTURE)
     assert AGENT.menu_settled("%12", labels) == (False, "the menu did not move")
@@ -4242,6 +5072,17 @@ def test_a_capture_of_a_pane_that_does_NOT_EXIST_is_an_ERROR_not_an_empty_read(
 # caught. A ledger that fails when either side drifts is the cheap half of
 # consolidation and the half that does the finding.
 # --------------------------------------------------------------------------- #
+#: Spelled out so the docstring assertion below has one canonical phrase to look
+#: for. It exists because the NUMBER is the thing that drifts, not the prose.
+_COUNT_WORDS = {0: "ZERO", 1: "ONE", 2: "TWO", 3: "THREE", 4: "FOUR", 5: "FIVE",
+                6: "SIX", 7: "SEVEN", 8: "EIGHT", 9: "NINE", 10: "TEN"}
+
+
+def divergence_phrase(n: int) -> str:
+    """The exact phrase a docstring must carry to claim `n` enumerated divergences."""
+    return f"the {_COUNT_WORDS[n]} divergence" + ("" if n == 1 else "s")
+
+
 def test_the_menu_predicate_AGREES_with_session_managers_over_a_shared_corpus():
     """🔴 A RELATIONSHIP, NOT A COMPONENT — and the ONE divergence is enumerated.
 
@@ -4251,22 +5092,27 @@ def test_the_menu_predicate_AGREES_with_session_managers_over_a_shared_corpus():
     real render), when it starts seeing one that is not there (the live
     false-positive direction), and when session-manager drifts either way.
 
-    ⚠ THE TWO ENUMERATED DIVERGENCES ARE FINDINGS, NOT CARVE-OUTS, and BOTH were
-    measured by this guard rather than assumed:
+    🔴 THERE USED TO BE **TWO** ENUMERATED DIVERGENCES AND THE FIRST ONE WAS NOT
+    REAL. It read: "session-manager's `_MENU_OPTION_RE` requires the number first, so
+    `❯ [ ] 1. Ledger` matches nothing and it does not see a multiSelect modal at all —
+    a gap in the `waiting` detector". There is no such gap. `❯ [ ] 1. Ledger` is not a
+    render Claude Code produces; the real multiSelect row is `❯ 1. [ ] Ledger`, which
+    `_MENU_SELECTED_RE` (`^\\s*❯\\s*\\d+\\.\\s+\\S`) matches like any other numbered row.
+    So a "divergence" was reported, written into a ledger, and passed for a round —
+    an invented render can manufacture a finding about a NEIGHBOURING subsystem, and
+    this is the third claim in this file descended from that one fiction.
 
-      1. session-manager's `_MENU_OPTION_RE` requires the number first, so
-         `❯ [ ] 1. Ledger` matches nothing and it does **not** see a multiSelect
-         modal at all — a gap in the `waiting` detector.
-      2. session-manager has no adjacency rule, so two numbered rows separated by a
-         BLANK line read as a modal to it and not to this agent. Its predicate is
-         the broader of the two in both cases; for a `waiting` signal that is
-         checked by its own measured precision, and for a surface that PRESSES KEYS
-         it would be unsafe.
+    ⚠ THE ONE divergence THAT REMAINS IS A FINDING, NOT A CARVE-OUT, and it was
+    measured by this guard rather than assumed: session-manager has no adjacency rule, so two
+    numbered rows separated by a BLANK line read as a modal to it and not to this
+    agent. Its predicate is the broader of the two; for a `waiting` signal that is
+    checked by its own measured precision, and for a surface that PRESSES KEYS it
+    would be unsafe.
 
-    Neither is fixed here — changing that detector belongs in its own PR. Each is
-    one literal row below rather than a silent mismatch, so closing either moves
-    this test. Both sides' verdicts are written out, so the ledger fails when
-    EITHER predicate drifts, in either direction.
+    It is not fixed here — changing that detector belongs in its own PR. It is one
+    literal row below rather than a silent mismatch, so closing it moves this test.
+    Both sides' verdicts are written out, so the ledger fails when EITHER predicate
+    drifts, in either direction.
     """
     sm = _load_collector()
     sm_selected = sm._MENU_SELECTED_RE
@@ -4292,9 +5138,13 @@ def test_the_menu_predicate_AGREES_with_session_managers_over_a_shared_corpus():
         (NO_FREE_TEXT_MENU_CAPTURE, True, True),
         (TWO_CURSOR_MENU_CAPTURE, True, True),
         (SINGLE_MENU_FREE_TEXT_FOCUSED_CAPTURE, True, True),
-        # 🔴 DIVERGENCE 1: session-manager cannot see a multiSelect row at all.
-        (MULTI_SELECT_MENU_CAPTURE, True, False),
-        # 🔴 DIVERGENCE 2: session-manager has no adjacency rule, so a BLANK line
+        # 🔴 THIS ROW USED TO READ `True, False` UNDER A HEADING CLAIMING
+        # session-manager "cannot see a multiSelect row at all". It can — see the
+        # docstring. The AGREEMENT is load-bearing: session-manager seeing this pane
+        # as `waiting` is what makes clawgate raise a reply card for it, which is the
+        # reachability half of the multi-select refusal this file now emits.
+        (MULTI_SELECT_MENU_CAPTURE, True, True),
+        # 🔴 DIVERGENCE: session-manager has no adjacency rule, so a BLANK line
         # between two numbered rows still reads as a modal to it.
         ("  ❯ 1. Ledger\n\n    2. Flatfile\n", False, True),
         (DEFAULT_PROMPT_CAPTURE, False, False),
@@ -4326,6 +5176,1165 @@ def test_the_menu_predicate_AGREES_with_session_managers_over_a_shared_corpus():
     # it is measuring one predicate twice.
     assert sum(1 for _, a, _ in CORPUS if a) >= 8, "the corpus has no modal rows"
     assert sum(1 for _, a, _ in CORPUS if not a) >= 8, "the corpus has no text rows"
-    assert sum(1 for _, a, s in CORPUS if a is not s) == 2, (
-        "the enumerated divergences are no longer exactly the two the docstring "
-        "names — re-derive them rather than adjusting the count")
+
+    # 🔴 THE COUNT IS PINNED TO THE DOCSTRING RATHER THAN RESTATED IN IT, and that
+    # is the mechanism fix for a defect that has now recurred three times in this
+    # file's history: a prose number copied forward while the assertion beside it
+    # moved. This docstring's opening line said "the ONE divergence is enumerated"
+    # while the body enumerated two and this assertion read `== 2`. A number a
+    # human types cannot be checked; a phrase a function builds can be.
+    measured = sum(1 for _, a, s in CORPUS if a is not s)
+    doc = test_the_menu_predicate_AGREES_with_session_managers_over_a_shared_corpus.__doc__
+    assert divergence_phrase(measured) in doc, (
+        f"the corpus now has {measured} divergence(s) between the two predicates, and this "
+        f"test's own docstring does not say so. Write the phrase "
+        f"{divergence_phrase(measured)!r} into it — and re-derive the enumeration beneath "
+        f"it, because a divergence appearing or closing is a FINDING about one of the two "
+        f"detectors, never a number to adjust.")
+
+
+# --------------------------------------------------------------------------- #
+# 16h. THE FOOTER: the only modal signal a SHORT PANE does not clip.
+#
+# 🔴 EVERY GUARD IN THIS SECTION EXISTS BECAUSE THE WHOLE SUITE WAS BLIND TO ONE
+# DIMENSION. Every capture in this file, and every live measurement behind them,
+# was taken at 104x32 or 118x38 — so the fixtures pinned ONE pane height and the
+# classifier's height-dependent defects passed a 27-mutant sweep untouched.
+# RULES.md names the class: "a suite whose CONFIG pins a dimension is
+# STRUCTURALLY BLIND to that dimension's bugs".
+#
+# The shapes below were re-measured by raising REAL modals in a scratch tmux
+# session and RESIZING THE WINDOW at 104 columns — not by truncating a capture,
+# which is a simulation the real render disproves: the TUI re-renders to fit and
+# scrolls its own option list rather than losing lines off the top. What came
+# back (see the module under test for the full tables):
+#
+#     one question   menu at 40/32/28/24/20/16/15/14 · TEXT at 13/12/11/10
+#     two questions  multi at 40/32/28/26/24/20/16   · MENU at 15/14
+#                                                    · TEXT at 13/12/11/10
+#
+# `TEXT` there means the agent typed the reply and pressed Enter into a live
+# modal — the original blocker. `MENU` on the chain means it answered question 1
+# and reported `delivered` with the rest of the chain still open.
+# --------------------------------------------------------------------------- #
+def test_a_CLIPPED_question_CHAIN_is_refused_rather_than_ANSWERED_HALFWAY(
+        server, tmux_stub, tmp_path):
+    """🔴 A1: THE CHAIN SIGNALS ALL RENDER ABOVE THE ROWS AND A SHORT PANE EATS THEM.
+
+    `multi` is computed from `✔ Submit`, `Review your answers` and the `☐` markers.
+    Every one of those is at the TOP of the modal, and `capture_pane` reads the
+    viewport only — so on a REAL 2-question chain resized to 104x14 all three were
+    gone while the cursored rows and the footer remained. The shipped code read
+    that `menu`, pressed a digit, answered question 1, saw question 2 render, and
+    reported `delivered` because "a different menu is now on screen".
+
+    RED at `c8cf7b15e`: there the fixture classifies `menu` and the run sends
+    `send-keys … 2`. GREEN here: `multi-question`, and nothing is sent.
+    """
+    kind, labels, why = AGENT.classify_pane(CLIPPED_CHAIN_CAPTURE)
+    assert kind == AGENT.PANE_MULTI_QUESTION, (
+        "a live question CHAIN whose tab strip has been clipped out of the viewport is "
+        f"being driven as a single menu: {(kind, labels, why)}")
+    assert labels == [] and "MULTI-question" in why, (kind, labels, why)
+
+    tmux_stub.set_captures(CLIPPED_CHAIN_CAPTURE)
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [], (
+        "a key was sent to a half-visible question chain: "
+        f"{tmux_stub.send_keys_calls()}")
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "refused", body
+
+
+@pytest.mark.parametrize("capture,route", [
+    pytest.param(SCROLLED_SINGLE_ASK_CAPTURE,
+                 "row 1 clipped, and the scrolled edge row carries the modal's own `↓`",
+                 id="clipped-and-scroll-marked"),
+    pytest.param(
+        ("  ❯ 1. Ledger\n"
+         + "     more description\n" * (13)
+         + "    2. Flatfile\n"
+         + "\n" + MENU_FOOTER_SINGLE + "\n"),
+        "option 1's description is taller than MENU_ROW_GAP",
+        id="description-taller-than-the-gap"),
+    pytest.param(
+        ("  ❯ 1. Ledger\n\n    2. Flatfile\n\n" + MENU_FOOTER_SINGLE + "\n"),
+        "a blank line between rows 1 and 2",
+        id="blank-line-between-rows"),
+    pytest.param(
+        ("  ☐ Store\n\n    1. Ledger\n    2. Flatfile\n\n" + MENU_FOOTER_SINGLE + "\n"),
+        "the cursor row has not been drawn yet",
+        id="no-cursor-row"),
+])
+def test_a_live_ask_whose_ROW_GEOMETRY_is_GONE_is_REFUSED_not_TYPED_INTO(
+        capture, route, server, tmux_stub, tmp_path):
+    """🔴 A2: EVERY FAILURE OF THE ROW PARSER USED TO LAND ON THE TYPING PATH.
+
+    The half-drawn refusal was gated on `block and question_marks`, so when the
+    numbered block was DESTROYED there was nothing left to refuse on and control
+    fell through to `return PANE_TEXT` — the agent typed the reply and pressed
+    Enter into a live modal, which is the original defect of this whole file.
+
+    Four routes to an empty or cursorless block on a live ask are parametrised
+    here, and the FIRST is the one no earlier round named: the modal scrolls its
+    own option list and marks the edge row with `↓`, which stands exactly where
+    `MENU_OPTION_RE` expects whitespace or the cursor glyph. Measured on a real
+    render at 104x13.
+
+    RED at `c8cf7b15e` for the first three: all three classify `text` there and
+    the run sends the reply plus Enter. The fourth (`no-cursor-row`) is an
+    INVARIANT GUARD — it was already refused at base by the `block and
+    question_marks` branch — and it is here to pin that the footer route reaches
+    the same verdict, not as evidence about this fix.
+    """
+    kind, labels, why = AGENT.classify_pane(capture)
+    assert kind == AGENT.PANE_UNKNOWN_MENU, (
+        f"a live ask ({route}) classified {kind}, so the reply would be TYPED into a modal "
+        f"that discards it and the Enter would answer whichever row is highlighted")
+    assert labels == [] and why, (kind, labels, why)
+
+    tmux_stub.set_captures(capture)
+    server.claim_batches = [[write(text="Flatfile")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert tmux_stub.send_keys_calls() == [], (
+        f"a key was sent to a live ask ({route}): {tmux_stub.send_keys_calls()}")
+    body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+    assert body["state"] == "refused", body
+
+
+def test_the_menu_fixtures_span_MORE_THAN_ONE_PANE_HEIGHT():
+    """🔴 THE STRUCTURAL GUARD ON THE BLIND DIMENSION ITSELF.
+
+    A1 and A2 both survived a 27-mutant sweep for one reason: every fixture in
+    this file was the same height, so no mutant could be distinguished by a height
+    it was never shown. Pinning the individual defects does not stop the next
+    height-dependent one — this does, by failing when the menu corpus collapses
+    back onto a single height.
+
+    ⚠ AN INVARIANT GUARD BY CONSTRUCTION, and labelled as one: it pins a property
+    of the FIXTURE SET, not a behaviour of the agent, so it is not regression
+    coverage for A1/A2. It is the thing that would have made them findable.
+    """
+    corpus = {
+        "full single ask": SINGLE_MENU_CAPTURE,
+        "described single ask": DESCRIBED_MENU_CAPTURE,
+        "full chain": MULTI_QUESTION_MENU_CAPTURE,
+        "clipped chain": CLIPPED_CHAIN_CAPTURE,
+        "scrolled single ask": SCROLLED_SINGLE_ASK_CAPTURE,
+        "approval prompt": PERMISSION_PROMPT_CAPTURE,
+        "startup dialog": STARTUP_DIALOG_CAPTURE,
+    }
+    heights = {name: len(cap.splitlines()) for name, cap in corpus.items()}
+    short = {n: h for n, h in heights.items() if h <= 10}
+    tall = {n: h for n, h in heights.items() if h >= 14}
+    assert short, (
+        "no menu fixture is short enough to reproduce a CLIPPED render. 5 of the 57 live "
+        f"panes on this host are <=28 lines and one is 21. heights={heights}")
+    assert tall, f"no menu fixture reproduces a full-height render. heights={heights}"
+    assert len(set(heights.values())) >= 4, (
+        "the menu corpus has collapsed onto too few distinct heights, which is exactly the "
+        f"condition that let A1 and A2 through a green sweep. heights={heights}")
+
+
+# --------------------------------------------------------------------------- #
+# 16i. A cursored numbered menu is NOT evidence of an `AskUserQuestion`.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("capture,what", [
+    pytest.param(PERMISSION_PROMPT_CAPTURE, "a tool-approval prompt", id="approval"),
+    pytest.param(STARTUP_DIALOG_CAPTURE, "the trust-this-folder dialog", id="trust"),
+    pytest.param(INVERTED_STARTUP_DIALOG_CAPTURE,
+                 "the bypass-permissions warning, whose rows are INVERTED",
+                 id="bypass"),
+    pytest.param(
+        ("● Earlier I offered you:\n"
+         "\n"
+         "  ❯ 1. Ledger\n"
+         "    2. Flatfile\n"
+         "\n"
+         "● and you picked the second one.\n"),
+        "a transcript quoting a menu back at the operator",
+        id="quoted-transcript"),
+    pytest.param(
+        ("devrc git:(main) $ cat plan.md\n"
+         "  ❯ 1. Ledger\n"
+         "    2. Flatfile\n"
+         "devrc git:(main) $ \n"),
+        "a numbered list left on screen by a shell command",
+        id="shell-output"),
+    # 🔴 THE TWO THAT THE `Enter to select` SUBSTRING COULD NOT REFUSE, and the
+    # reason this test's own premise had to be rebuilt: it is not the ABSENCE of
+    # the anchor that makes a chooser safe.
+    pytest.param(SANDBOX_PICKER_CAPTURE,
+                 "the /sandbox picker, which DOES carry `Enter to select`",
+                 id="sandbox"),
+    pytest.param(PERMISSIONS_RULE_LIST_CAPTURE,
+                 "the /permissions rule list, which DOES carry `Enter to select`",
+                 id="permissions"),
+])
+def test_a_cursored_numbered_menu_with_NO_ASK_FOOTER_is_REFUSED(
+        capture, what, server, tmux_stub, tmp_path):
+    """🔴 B1 + B2: THE CHOOSER ON SCREEN MAY NOT BE THE ONE THE REPLY ANSWERS.
+
+    Deleting the free-text precondition left "a cursored numbered block" as the
+    whole signal, and it is not enough. FIVE of these seven are LIVE CAPTURES of
+    Claude Code choosers that are not asks at all, and the first is the one that
+    matters: against the measured approval render (`❯ 1. Yes` / `2. Yes, allow all
+    edits during this session (shift+tab)` / `3. No`) a reply of `Yes` pressed 1
+    and APPROVED A TOOL CALL THE OPERATOR NEVER SAW.
+
+    🔴 AND THE LAST TWO ARE WHY THIS TEST'S OWN PREMISE HAD TO BE REBUILT. The
+    previous round's reasoning was "none of these carries `Enter to select`, that is
+    the whole discriminator" — a guard on a WORD, dressed as a guard on state.
+    `/sandbox` and `/permissions` both carry it, both carry the single-question nav
+    hint beside it, and both were therefore DRIVEN BY DIGIT: a reply naming a
+    `/sandbox` row changed the sandbox/permission mode, and `/permissions`' row 1
+    ends in `…` so the truncation rule accepted any reply beginning `Add a new rule`.
+    Neither was a regression — base classifies them the same way — but the PR
+    asserted the opposite of what it shipped, and the test below pinned the
+    incomplete footer set AS IF CLOSED. Both are fixed by reading the whole field
+    list; these two rows are the behavioural half.
+
+    🔴 AND BOTH DIRECTIONS WERE DELIVERABLE, contrary to an earlier round's
+    reading: `No` is a BARE label in that render, so it matched row 3 exactly and
+    denied the call. There is no asymmetry to lean on.
+
+    🔴 THE MITIGATION THAT WAS OFFERED INSTEAD IS A CLAIM ABOUT CONFIGURATION, NOT
+    CODE. "those go through clawgate's approval router, so this is not a path in
+    use" is true of a settings file, which a `--settings` override, a fresh
+    `CLAUDE_CONFIG_DIR` or an unset hook changes — all three were used to PRODUCE
+    the capture this test is built from. The guard is deterministic instead.
+
+    ⚠ AND IT IS A GUARD ON THE STATE, NOT ON A WORD. It reads the footer, never the
+    labels, so it cannot be walked by relabelling a row — which matters because the
+    approval prompt's rows have already been reworded once between renders, and
+    because the trust dialog and the bypass warning put `Yes` on DIFFERENT rows.
+
+    RED at `c8cf7b15e`: ALL FIVE, measured — each classifies `menu` there and the
+    run sends `send-keys … 1`. ⚠ The fifth was drafted as an INVARIANT guard on the
+    assumption that shell output could not carry a cursor on a contiguous numbered
+    block; running it at base showed otherwise, so the label was corrected rather
+    than the case dropped. That is the whole reason the matrix is measured and not
+    reasoned about.
+    """
+    kind, labels, why = AGENT.classify_pane(capture)
+    assert kind != AGENT.PANE_MENU, (
+        f"{what} is being driven by digit, so a reply naming one of its rows would answer a "
+        f"question the operator was never shown: {(kind, labels, why)}")
+    assert labels == [], (kind, labels, why)
+
+    tmux_stub.set_captures(capture)
+    server.claim_batches = [[write(text="Yes")]]
+    run_agent(server, tmux_stub, tmp_path)
+    assert ["send-keys", "-t", "%12", "-l", "--", "1"] not in tmux_stub.send_keys_calls(), (
+        f"a DIGIT was sent to {what}: {tmux_stub.send_keys_calls()}")
+
+
+def test_a_reply_of_Yes_can_never_APPROVE_A_TOOL_CALL(server, tmux_stub, tmp_path):
+    """🔴 B2, END TO END AND AS THE OUTCOME RATHER THAN THE CLASSIFICATION.
+
+    The classification is the mechanism; this is the consequence. A single word in
+    a reply must not be able to authorise a write the operator never saw — and
+    against the live approval render at `c8cf7b15e` it could, because `Yes` matched
+    row 1 exactly.
+
+    ⚠ BOTH REPLIES ARE DRIVEN, because the approve direction is the dangerous one
+    and the deny direction is the one an earlier round believed already safe. The
+    guard must hold for both, since `No` matched row 3 exactly too.
+    """
+    for reply in ("Yes", "No"):
+        tmux_stub.reset()
+        server.requests.clear()
+        tmux_stub.set_captures(PERMISSION_PROMPT_CAPTURE)
+        server.claim_batches = [[write(text=reply)]]
+        run_agent(server, tmux_stub, tmp_path)
+        assert tmux_stub.send_keys_calls() == [], (
+            f"a reply of {reply!r} reached a tool-approval prompt: "
+            f"{tmux_stub.send_keys_calls()}")
+        results = [r for r in server.requests if r["path"].endswith("/result")]
+        body = json.loads(results[0]["body"])
+        assert body["state"] == "refused", (reply, body)
+        assert "tool-approval prompt" in body["detail"], (reply, body)
+
+
+#: 🔴 FOOTERS THAT CAN RENDER `Enter to select` IN CLAUDE CODE 2.1.232, WITH THE
+#: VERDICT THE READER GIVES EACH. It replaces a ledger that named FIVE footers and
+#: pinned them "as if closed" while two greps over the shipped binary already found
+#: SIXTEEN — of which seven satisfied the guard it was defending.
+#:
+#: 🔴 WHAT THIS LEDGER IS, SAID PRECISELY, BECAUSE THE PREVIOUS HEADER DID THE
+#: ARITHMETIC WRONG. Each row is a footer STRING, not a renderer SITE, and the two
+#: counts have no relationship to derive from each other. The old header said
+#: "14 + 2 = 16, and every one is a row below"; that is false three ways:
+#:
+#:   * the TWO AskUserQuestion sites contribute THREE rows each — one per render
+#:     state (plain / free-text row focused / question chain), so 2 sites -> 6 rows;
+#:   * several non-ask sites render the SAME string and SHARE one row. `nt` sites 4,
+#:     5 and 6 are all `↑/↓ to navigate · Enter to select · Esc to back`; sites 3
+#:     and 8 are both `Enter to select · Esc to cancel`; site 1 renders the
+#:     `Esc to cancel` and `Esc to go back` rows depending on its step index;
+#:   * two rows were a SHORTENED form of their site's whole footer. `nt` site 12
+#:     renders `←/→ to tabs · ↑/↓ to move · Enter to select · Esc to close` and the
+#:     row dropped the first field; `nt` site 9's search mode renders
+#:     `Type to Search · [Ctrl+A to show all projects] · Enter to select ·
+#:     Esc to clear` and the row kept only two fields. Both are fixed below, and
+#:     the whole-footer form is what is asserted.
+#:
+#: So `len(rows) == 16` was a coincidence. The relationship this file can actually
+#: assert is checked in two places, deliberately split: every row's VERDICT here,
+#: and the SITE COUNTS against the bundle in the DEV-HOST tier
+#: (`scripts/devhost-tests/test_claude_footer_sites.py`) — see FOOTER_SITE_ALARM
+#: below for why that half cannot live in this file.
+#:
+#: 🔴 AND THE SET OF PRODUCING SITES IS **NOT** CLOSED. `Enter to select` is not a
+#: literal in the ask's renderer — the footer is assembled from a
+#: `<chord>`/`<action>` component (`nt`) joined with ` · ` — so the bundle can be
+#: asked which sites produce it, and it was, four ways:
+#:
+#:     B=…/claude-code-2.1.232/bin/.claude-wrapped
+#:     grep -aoP 'chord:"enter",action:"select"' "$B"                 -> 14 literal
+#:                                                                       chord/action pairs
+#:     grep -aoP '.{0,120}Enter to select.{0,120}' "$B"               ->  2 whole literals
+#:     grep -aoP 'lo,\{action:"[^"]*",context:"[^"]*",'
+#:              'fallback:"Enter",description:"select"\}' "$B"        ->  6 `lo` sites
+#:     the scrollable picker's DEFAULTED action
+#:       (`qJl = hfw === void 0 ? "select" : hfw`, rendered
+#:        `nt({chord:"enter", action: …})`)                           ->  1 site
+#:
+#: `lo({action,context,fallback,description})` renders
+#: `nt({chord: WT(action,context,fallback), action: description})` and `WT` returns
+#: the FALLBACK when that action has no configured keybinding — so those six sites
+#: spell the anchor with a chord the first grep cannot see. At least 23 SITES
+#: therefore reach it, not 16, and a third composition path would be invisible to
+#: all four probes above. This is stated as unestablished: there is no completeness
+#: argument here, and the previous one is retracted in `tmux-reply-agent`'s footer
+#: section header.
+#:
+#: 🔴 WHAT CARRIES THE SAFETY IS THE GRAMMAR, MEASURED. Every one of the seven
+#: additional producers is a row below and every one resolves FOOTER_UNKNOWN. WHICH
+#: RULE refuses each was measured by walking the reader's own branches, not inferred:
+#: all six `lo` footers on the LAST-field rule (`Esc to go back`, so the field run
+#: never reaches a terminator and stops at the anchor), the picker on the FIRST-field
+#: rule at >= 120 columns (its nav field renders BEFORE the anchor) and on the
+#: NAV-COUNT rule below that width, where its nav field reads `↑/↓ to nav` and is not
+#: a field this file names at all. The permitted field set is transcribed from the two
+#: ask RENDERERS, so a field it does not name refuses whatever produced it.
+#:
+#: ⚠ NOT CLOSED ACROSS VERSIONS EITHER. A reworded render is a field this set does
+#: not name, and there the reader FAILS SAFE: FOOTER_UNKNOWN, which refuses with a
+#: named reason. So the failure mode of staleness is an inert feature, never a
+#: driven chooser.
+#: ⚠ THE VERDICT HALF BELOW IS TIER-INDEPENDENT AND THE BUNDLE HALF IS NOT. The
+#: `nix build` tier CI runs has no `claude` in it, so the grep re-derivation lives in
+#: a DEV-HOST-tier file, which that tier does not collect at all — not behind a skip,
+#: because an unpinned skip reds `run-tests.sh`. The verdicts below run everywhere.
+#: Splitting them is what gives CI the verdicts and the dev host a staleness alarm,
+#: instead of one test that skips in the tier that matters.
+ASK_FOOTER_LEDGER = [
+    # (footer, verdict, what renders it)
+    (MENU_FOOTER_SINGLE, AGENT.FOOTER_SINGLE,
+     "ask renderer 1, one question"),
+    (MENU_FOOTER_FREE_TEXT, AGENT.FOOTER_SINGLE,
+     "ask renderer 1, one question, free-text row focused"),
+    (MENU_FOOTER_CHAIN, AGENT.FOOTER_CHAIN,
+     "ask renderer 1, a question CHAIN"),
+    ("Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel",
+     AGENT.FOOTER_UNKNOWN,
+     "ask renderer 2 (options carry a preview), one question — a REAL ask, refused "
+     "because a digit there only moves the highlight"),
+    ("Enter to select · ↑/↓ to navigate · n to add notes · ctrl+g to edit in Nvim · "
+     "Esc to cancel", AGENT.FOOTER_UNKNOWN,
+     "ask renderer 2, free-text row focused"),
+    ("Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · "
+     "Esc to cancel", AGENT.FOOTER_CHAIN,
+     "ask renderer 2, a question CHAIN — its chain marker is `switch questions`, "
+     "which nothing in this file could see before"),
+    (SANDBOX_PICKER_FOOTER, AGENT.FOOTER_UNKNOWN,
+     "literal 1: the /sandbox picker — LIVE, and driven by digit at base"),
+    (PERMISSIONS_RULE_LIST_FOOTER, AGENT.FOOTER_UNKNOWN,
+     "literal 2: the /permissions rule list — LIVE, and driven by digit at base"),
+    ("↑/↓ to navigate · Enter to select · Esc to back", AGENT.FOOTER_UNKNOWN,
+     "`nt` sites 4, 5 and 6 — the MCP server-detail and tool-list choosers: nav "
+     "first, and `Esc to back`. Three sites, one string"),
+    ("↑/↓ to navigate · Enter to select · Esc to cancel", AGENT.FOOTER_UNKNOWN,
+     "`nt` sites 1 (wizard, step 0) and 11: the ask's own fields in the WRONG "
+     "ORDER — the row that makes `Enter to select` first a requirement rather "
+     "than an observation. Also what the scrollable picker renders at >= 120 "
+     "columns, so THREE producers share it"),
+    ("Enter to select · Esc to continue", AGENT.FOOTER_UNKNOWN,
+     "`nt` site 7"),
+    ("Enter to select · Esc to cancel", AGENT.FOOTER_UNKNOWN,
+     "`nt` sites 3 (the settings theme picker) and 8 (the remote-environment "
+     "picker) — NO nav field, and the ask always has exactly one"),
+    ("Enter to select · Esc to go back", AGENT.FOOTER_UNKNOWN,
+     "`nt` site 10, `nt` site 1 past step 0, AND `lo` sites 1-4 (the plugin/"
+     "marketplace settings choosers). SIX producers, one string — and the anchor "
+     "is field 1 in all of them, so the first-field rule does not decide these; "
+     "the LAST-field rule does, measured"),
+    ("Enter to select · u to update · d to remove · Esc to go back",
+     AGENT.FOOTER_UNKNOWN,
+     "`lo` site 5, the marketplace pending-changes footer with no pending action: "
+     "anchor first, two fields the ask never emits, and the wrong terminator"),
+    ("↑ to navigate · Enter to select · Esc to go back", AGENT.FOOTER_UNKNOWN,
+     "`lo` site 6, the failed-plugin detail view — its nav chord is the UP arrow "
+     "alone, so the nav wording differs from the ask's as well"),
+    ("Type to Search · Ctrl+A to show all projects · Enter to select · "
+     "Esc to clear", AGENT.FOOTER_UNKNOWN,
+     "`nt` site 9's search mode, the WHOLE footer — the row this replaces kept "
+     "only `Enter to select · Esc to clear`, which is not what the site renders. "
+     "⚠ the `Ctrl+A` field is conditional and its chord is rendered through a "
+     "`format` option this row does not transcribe exactly; the verdict does not "
+     "turn on it, and the ROW here is what the reader is driven against"),
+    ("Enter to select · ctrl+e to edit · Esc to cancel", AGENT.FOOTER_UNKNOWN,
+     "`nt` site 2, the theme picker: an EDIT field the ask does not have (the "
+     "ask's is ctrl+g), and its chord really is `ctrl+e` — a keybinding lookup on "
+     "`theme:editCustom` whose fallback is that literal"),
+    ("←/→ to tabs · ↑/↓ to move · Enter to select · Esc to close",
+     AGENT.FOOTER_UNKNOWN,
+     "`nt` site 12, the WHOLE footer — the row this replaces dropped `←/→ to "
+     "tabs`, and its nav field says `move`"),
+    # 🔴 THE SCROLLABLE PICKER, WHICH NO GREP FOR A LITERAL CHORD/ACTION PAIR CAN
+    # FIND: its action is DEFAULTED (`qJl = hfw === void 0 ? "select" : hfw`) and its
+    # nav wording is computed from the terminal WIDTH (`KJl = columns < 120`). Both
+    # shapes are rows, because they are refused by DIFFERENT rules — the wide one by
+    # nav-first, the narrow one by the nav COUNT, since `↑/↓ to nav` is not a field
+    # this file names. The wide shape's string is shared with the row above; this row
+    # is the narrow one plus the optional `Tab` hint the component can carry.
+    ("↑/↓ to nav · Enter to select · Esc to cancel", AGENT.FOOTER_UNKNOWN,
+     "the generic scrollable picker below 120 columns — anchor first and the ask's "
+     "own terminator, refused on having NO nav field this file recognises"),
+    ("↑/↓ to navigate · Enter to select · Tab to toggle · Esc to cancel",
+     AGENT.FOOTER_UNKNOWN,
+     "the same picker at >= 120 columns with its optional Tab hint present"),
+    # 🔴 A GRAMMAR ROW, NOT A SIGHTING, AND IT IS LABELLED AS ONE. No chooser in
+    # 2.1.232 renders exactly `Enter to select · ↑/↓ to navigate · Esc to close`, so
+    # nothing in the enumeration above needs the `Esc to cancel` LAST requirement —
+    # and a mutation sweep proved it: dropping that half of the guard SURVIVED the
+    # whole suite, because select-first and exactly-one-nav happened to reject every
+    # real row on their own. A guard no mutant can kill reads as a guard while
+    # guarding nothing, so the requirement is pinned on its own terms instead: the
+    # ask's terminator is `Esc to cancel`, and an ask-shaped footer ending anywhere
+    # else is not one. ⚠ SYNTHETIC. It is what the GRAMMAR forbids, not what any
+    # pane shows, and saying so is the difference between this row and the fifteen
+    # above it.
+    ("Enter to select · ↑/↓ to navigate · Esc to close", AGENT.FOOTER_UNKNOWN,
+     "GRAMMAR (synthetic): the ask's own field order, terminated by `Esc to close` "
+     "— what the cancel-last requirement is for, since no live chooser needs it"),
+    # 🔴 THE SECOND GRAMMAR ROW, AND THE SECOND MUTANT THAT FOUND ITS CLAUSE DEAD.
+    # The reader refuses to extend the field run leftwards past the anchor only when
+    # the anchor was NOT head-glued — the encoding of "`Enter to select` is field 1 in
+    # both ask renderers". A mutant that treats every anchor as head-glued SURVIVED,
+    # because `/permissions` and `/sandbox` are each rejected by TWO other clauses as
+    # well (their `←/→ to switch` / `Esc to close` stops the run short of a
+    # terminator). This row is the case where that clause is the ONLY thing standing:
+    # a permitted field before the anchor, and a perfectly ask-shaped tail after it.
+    # ⚠ SYNTHETIC — no chooser in 2.1.232 renders this — and it is the honest way to
+    # keep a clause whose live cases are all double-covered.
+    ("↑/↓ to navigate · Enter to select · ↑/↓ to navigate · Esc to cancel",
+     AGENT.FOOTER_UNKNOWN,
+     "GRAMMAR (synthetic): an ask-shaped tail with a permitted field BEFORE the "
+     "anchor — the only case where refusing to extend the run leftwards is what "
+     "decides it"),
+]
+
+#: The number of DISTINCT footers on the ledger at the commit that introduced the floor
+#: — MEASURED, not chosen: 22 rows, all 22 footers distinct, 20 of them taken from the
+#: bundle and 2 labelled GRAMMAR. ⚠ IT IS COMPARED AGAINST THE DISTINCT COUNT, NOT THE
+#: ROW COUNT, because a row count is cardinality and a corpus can rot while keeping it
+#: (drop one row, duplicate another — 22 rows, 2 GRAMMAR, every verdict green). It is a
+#: RATCHET, not a derived quantity: see
+#: `test_the_footer_reader_resolves_EVERY_LEDGERED_FOOTER` for why a row count has no
+#: arithmetic relationship to the producing-site count, and what lowering this number
+#: obliges a commit message to say.
+ASK_FOOTER_LEDGER_FLOOR = 22
+
+#: 🔴 WHERE THE BUNDLE HALF LIVES, AND WHY IT IS NOT IN THIS FILE. Re-deriving the
+#: producing-site counts needs the `claude` binary, which the `nix build` sandbox tier
+#: does not have — and a `skipif` on a missing BINARY cannot be pinned in
+#: `run-tests.sh`'s EXPECTED_SKIPS (its only conditional predicate is `unset:VAR`), so
+#: putting it here would be an UNPINNED SKIP and would red the runner. It therefore
+#: lives in the DEV-HOST tier, exactly where the nvim behavioural tests live and for
+#: the same documented reason. CI keeps every verdict above; the dev host gains the
+#: staleness alarm. `test_the_bundle_STALENESS_ALARM_still_exists` pins that the alarm
+#: has not quietly vanished — a dev-host file is invisible from here, so without that
+#: guard deleting it would cost nothing this tier can see.
+FOOTER_SITE_ALARM = Path(__file__).resolve().parents[1] / (
+    "devhost-tests/test_claude_footer_sites.py")
+
+#: Footers that never spell the anchor at all, so they resolve before any parsing.
+#: The audit's negative corpus, all of them live renders.
+NON_ANCHOR_FOOTERS = [
+    (MENU_FOOTER_APPROVAL, "the tool-approval prompt"),
+    (MENU_FOOTER_STARTUP, "the trust-folder dialog and the bypass warning"),
+    ("←/→ to switch · ↓ to select · Esc to cancel",
+     "/permissions with its TAB STRIP focused"),
+    ("Type to filter · Enter/↓ to select · Esc to cancel", "a filter picker"),
+    ("Enter to approve · r to retry · ↑/↓ to navigate · Esc to cancel",
+     "the approve/retry prompt"),
+    ("↑/↓ to navigate · enter to resume as a background session · esc to close",
+     "the resume picker"),
+    ("", "the theme and login pickers, which render no footer at all"),
+]
+
+
+def test_a_DIGIT_can_never_reach_a_multiSelect_list(server, tmux_stub, tmp_path):
+    """🔴 F6 END TO END, AND AS THE OUTCOME RATHER THAN THE CLASSIFICATION.
+
+    `PANE_MULTI_SELECT` was UNREACHABLE for a whole round: the row pattern demanded
+    `❯ [ ] 1. Ledger`, a render Claude Code does not produce, so
+    `menu_checkbox_block` returned `[]` for every real multiSelect and the refusal it
+    exists to emit was never emitted. What stopped a digit anyway was an ACCIDENT —
+    the numbered labels carry the box (`[ ] Ledger`), so an operator's reply of
+    `Ledger` matched nothing and `[ ] Type something` was not a recognised free-text
+    row, and the pane was refused with "the reply matches none of the menu's N option
+    rows": a true outcome with the wrong reason, one relabelling away from failing.
+
+    In the multiSelect renderer a digit calls `toggleValue(n)` — it TICKS A BOX and
+    does not submit — so a reply that did match would tick a box the operator never
+    chose and leave the ask open.
+
+    ⚠ BOTH DIRECTIONS DRIVEN: a reply naming a row's LABEL, and a reply naming the
+    row's rendered text INCLUDING the box, which is the one an accidental guard lets
+    through.
+
+    🔴 AND THE FOOTER CANNOT HELP HERE, WHICH IS WHY THE CHECKBOX BLOCK CARRIES THE
+    WHOLE REFUSAL. A multiSelect is a MODE of ask renderer 1 — `rB.multiSelect` swaps
+    the list component, and that component emits no footer of its own — so a live
+    multiSelect renders the ASK's footer and `menu_footer` answers FOOTER_SINGLE. That
+    is not a bug: it IS an AskUserQuestion, just not one a digit can answer. It does
+    mean `FOOTER_SINGLE` never licenses "driveable", and the assertion below pins that
+    so no comment can quietly start implying otherwise.
+    """
+    assert AGENT.menu_footer(MULTI_SELECT_MENU_CAPTURE) == AGENT.FOOTER_SINGLE, (
+        "a live multiSelect no longer carries the ask's own footer. If that is a real "
+        "render change, the comments in MENU_CHECKBOX_ROW_RE and classify_pane saying "
+        "the footer CANNOT separate a multiSelect from a driveable ask are now wrong "
+        "and must be rewritten — do not delete this assertion to make them true")
+    assert AGENT.classify_pane(MULTI_SELECT_MENU_CAPTURE)[0] == AGENT.PANE_MULTI_SELECT, (
+        "the checkbox block is the ONLY thing refusing this shape, and it is no longer "
+        "doing it — the footer read above returns the DRIVING verdict")
+    for reply in ("Ledger", "[ ] Ledger", "Archive"):
+        tmux_stub.reset()
+        server.requests.clear()
+        tmux_stub.set_captures(MULTI_SELECT_MENU_CAPTURE)
+        server.claim_batches = [[write(text=reply)]]
+        run_agent(server, tmux_stub, tmp_path)
+        assert tmux_stub.send_keys_calls() == [], (
+            f"a reply of {reply!r} reached a multiSelect list: "
+            f"{tmux_stub.send_keys_calls()}")
+        body = json.loads(
+            [r for r in server.requests if r["path"].endswith("/result")][0]["body"])
+        assert body["state"] == "refused", (reply, body)
+        assert "multi-select" in body["detail"], (
+            f"the refusal for {reply!r} no longer names the shape: {body['detail']!r}")
+
+
+def test_the_answered_block_STOPS_on_every_SPINNER_frame():
+    """🔴 F9: THE STOP SET HELD TWO OF THE SEVEN SPINNER FRAMES.
+
+    A record block ends at a line opening a NEW top-level render, identified by its
+    first glyph — and Claude Code's spinner is a top-level render whose glyph CHANGES
+    per frame. The set named `✻` and `✽` and missed the rest, so a record followed by
+    a spinner caught on any other frame was read as continuing INTO it.
+
+    🔴 ENUMERATED FROM THE BINARY, NOT FROM SIGHTINGS. 2.1.232 picks its frames by
+    `$TERM`: `["·", "✢", "✳", "✶", "✻", "✻"]` under `xterm-ghostty` and
+    `["·", "✢", "*", "✶", "✻", "✽"]` otherwise, so the union is seven. A read-only
+    sweep of all 58 live panes found `✶` twice and `✢` once at column 0, which is how
+    the gap was noticed — but two more sightings would not have closed it.
+
+    ⚠ `·` IS THE NAMED RESIDUAL and this test asserts it stays out: it also opens the
+    SECOND and later records of a CHAIN, and truncating every chain to its first
+    answer is the worse of the two losses. So a spinner caught on its `·` frame still
+    does not end the block.
+    """
+    frames = ("·", "✢", "✳", "*", "✶", "✻", "✽")
+    stop = AGENT.MENU_ANSWERED_STOP_GLYPHS
+    assert set(frames) - {"·"} <= set(stop), (
+        "a spinner frame is missing from the stop set, so a record block can be read "
+        f"as continuing into a spinner line: {sorted(set(frames) - {'·'} - set(stop))}")
+    assert "·" not in stop, (
+        "`·` was added to the stop set, which truncates every CHAIN's record list to "
+        "its first answer — see MENU_ANSWERED_STOP_GLYPHS for why it is excluded")
+
+    # 🔴 THE BEHAVIOURAL HALF. A structural check on a tuple would pass with the
+    # reader wired to nothing, so each frame is driven through a real capture: the
+    # record must be read, and the spinner's own line must NOT become part of it.
+    for frame in frames:
+        cap = ("●\xa0User answered Claude's questions:\n"
+               "  ⎿\xa0·\xa0Which store should the queue use? → Flatfile\n"
+               + frame + " Thinking about the flatfile store → Postgres\n")
+        got = AGENT.menu_answer_records(cap)
+        if frame == "·":
+            # The documented residual, asserted so it is a measurement and not a
+            # hope: the `·` frame is indistinguishable from a chain's separator.
+            assert got == ["Flatfile", "Postgres"], (frame, got)
+        else:
+            assert got == ["Flatfile"], (
+                f"a spinner line opening with {frame!r} is being read as part of the "
+                f"answered record: {got}")
+
+    # And the POSITIVE CONTROL for this test: the reader must be capable of reading
+    # past a line that is NOT a stop glyph, or every row above passes vacuously.
+    wrapped = ("●\xa0User answered Claude's questions:\n"
+               "  ⎿\xa0·\xa0Which store should the queue use? → Flatfile with the\n"
+               "     journal enabled\n")
+    assert AGENT.menu_answer_records(wrapped) == ["Flatfile with the journal enabled"], (
+        AGENT.menu_answer_records(wrapped))
+
+
+def test_the_footer_reader_resolves_EVERY_LEDGERED_FOOTER():
+    """🔴 THE LEDGER THIS REPLACES NAMED FIVE FOOTERS AND CALLED THE SET MEASURED.
+
+    Two greps over the binary found sixteen that can render `Enter to select`, and
+    seven of those satisfied the guard the old ledger was pinning — so the ledger read
+    as coverage while providing none, and its own docstring called itself "the
+    unit-level ledger of the measurement". `ASK_FOOTER_LEDGER` carries the corpus, the
+    four probes that re-derive the producing sites, and the RETRACTION of the claim
+    that those probes close the set.
+
+    ⚠ THIS TEST'S NAME USED TO SAY `EVERY_FOOTER_THAT_CAN_SPELL_THE_ANCHOR`, WHICH IS
+    A COMPLETENESS CLAIM IT CANNOT MAKE — the anchor is reachable through composition
+    paths no enumeration here has closed. What it asserts is that every footer ON THE
+    LEDGER resolves as the ledger says, which is a verdict claim and is true.
+
+    RED at `a324b00e` on the two live rows (`/sandbox`, `/permissions`) plus four
+    more: both resolved FOOTER_SINGLE there and every reply naming a row was driven
+    by digit.
+    """
+    for footer, want, what in ASK_FOOTER_LEDGER:
+        # Bare, and as it really arrives — inside a whole pane capture, where the
+        # text above the footer is glued to its first field by the normalising read.
+        for shape, cap in (("bare", footer),
+                           ("in a capture", SINGLE_MENU_CAPTURE.replace(
+                               MENU_FOOTER_SINGLE, footer))):
+            assert AGENT.menu_footer(cap) == want, (
+                f"{what}: {shape} footer {footer!r} resolves "
+                f"{AGENT.menu_footer(cap)!r}, wanted {want!r}")
+    for footer, what in NON_ANCHOR_FOOTERS:
+        assert AGENT.menu_footer(footer) == AGENT.FOOTER_NONE, (
+            f"{what}: {footer!r} -> {AGENT.menu_footer(footer)!r}")
+
+    # 🔴 THE POSITIVE CONTROL. A ledger whose every row says "refuse" cannot tell a
+    # working reader from one wired to `return FOOTER_UNKNOWN`, so the counts are
+    # asserted: the driving verdict must be REACHED, and by more than one row.
+    assert sum(1 for _, v, _ in ASK_FOOTER_LEDGER if v == AGENT.FOOTER_SINGLE) >= 2
+    assert sum(1 for _, v, _ in ASK_FOOTER_LEDGER if v == AGENT.FOOTER_CHAIN) >= 2
+    assert sum(1 for _, v, _ in ASK_FOOTER_LEDGER if v == AGENT.FOOTER_UNKNOWN) >= 10
+    # 🔴 THE RELATIONSHIP THIS ASSERTS, AND IT IS NOT A SITE COUNT. The previous
+    # version asserted `len(non-GRAMMAR rows) == 16` with a message telling the
+    # maintainer to re-derive a SITE count to fix a ROW count — two different
+    # quantities, and the equality between them was a coincidence (the two ask sites
+    # contribute three rows each, several non-ask sites share a row, and no row is
+    # forced to exist for a site at all). What is true and worth pinning is that the
+    # corpus only GROWS: a row is a measured verdict, and deleting one silently
+    # removes a refusal from the record.
+    #
+    # ⚠ `ASK_FOOTER_LEDGER_FLOOR` is the size at the commit that introduced this
+    # assertion. Raising it is the normal outcome of adding a row; LOWERING it means
+    # a measured footer stopped being checked, and the commit message has to say
+    # which one and why. The site counts live in the dev-host tier
+    # (`scripts/devhost-tests/test_claude_footer_sites.py`), which is where a number
+    # derived from the binary belongs — and where it can be re-derived on demand.
+    #
+    # 🔴 AND IT COUNTS DISTINCT FOOTERS, NOT ROWS — a row count is CARDINALITY and a
+    # corpus can rot while keeping it. Constructed: drop the `n to add notes` row and
+    # duplicate row 0, and the ledger still has 22 rows, still exactly 2 GRAMMAR rows,
+    # and every per-row verdict above still passes — a measured footer silently gone.
+    # All 22 footers are distinct today, so deduplicating before the compare closes it
+    # and costs nothing. (A duplicate row is not merely harmless-but-useless: it is how
+    # a deletion pays for itself.)
+    footers = [row[0] for row in ASK_FOOTER_LEDGER]
+    assert len(set(footers)) >= ASK_FOOTER_LEDGER_FLOOR, (
+        f"the ledger SHRANK: {len(set(footers))} DISTINCT footers over "
+        f"{len(footers)} rows, against a floor of {ASK_FOOTER_LEDGER_FLOOR}. Every row "
+        "is a footer whose verdict was measured once; dropping one removes that "
+        "measurement from the record, and re-adding a footer already on the ledger does "
+        "not replace it. If a row was genuinely wrong, say so in the commit message and "
+        "lower the floor in the same change — do not adjust the floor to make a deletion "
+        "quiet, and do not pad the count with a duplicate")
+    # And the two SYNTHETIC rows stay distinguishable from the measured ones, because
+    # a grammar row is what a rule forbids rather than what a pane shows.
+    assert sum(1 for r in ASK_FOOTER_LEDGER if r[2].startswith("GRAMMAR")) == 2, (
+        "the GRAMMAR rows are the two clauses whose only killing case is invented; "
+        "adding or removing one changes what this file claims is measured")
+
+    # `Enter to select` with a nav hint this file does not know resolves AWAY from
+    # driving — the whole point of naming the single-question hint positively.
+    assert AGENT.menu_footer(
+        "Enter to select · j/k to navigate · Esc to cancel") == AGENT.FOOTER_UNKNOWN
+    # The anchor quoted MID-SENTENCE is not a footer field at all.
+    assert AGENT.menu_footer(
+        "the footer said Enter to select and I pressed it") == AGENT.FOOTER_UNKNOWN
+    # 🔴 THE TIE-BREAK, AND IT MUST FAVOUR THE REFUSING VALUE. A viewport holding a
+    # finished chain's footer above a live single ask carries both hints; resolving
+    # that to `single` would drive a pane that may be a chain.
+    assert AGENT.menu_footer(
+        MENU_FOOTER_CHAIN + "\n" + MENU_FOOTER_SINGLE) == AGENT.FOOTER_CHAIN
+    assert AGENT.menu_footer(
+        MENU_FOOTER_SINGLE + "\n" + MENU_FOOTER_CHAIN) == AGENT.FOOTER_CHAIN
+    # 🔴 BOTTOM-MOST WINS OTHERWISE: a live `/permissions` under a stale ask footer
+    # must not be driven on the strength of the older one.
+    assert AGENT.menu_footer(
+        MENU_FOOTER_SINGLE + "\n● work happened\n"
+        + PERMISSIONS_RULE_LIST_FOOTER) == AGENT.FOOTER_UNKNOWN
+
+
+def test_the_bundle_STALENESS_ALARM_still_exists():
+    """🔴 THE SEAM BETWEEN THE TWO HALVES OF THE FOOTER MEASUREMENT.
+
+    The ledger above used to argue that the producing-site counts could NOT be
+    machine-checked, because "the `nix build` tier CI runs has no `claude` in it, so a
+    test that greps the bundle would be a test that skips in the tier that matters".
+    The premise is true; the conclusion is too wide. It argues against putting the grep
+    in the SAME test as the verdicts — not against having it at all. So the work is
+    split: the verdicts run in every tier from this file, and the bundle re-derivation
+    runs on the dev host from `scripts/devhost-tests/test_claude_footer_sites.py`.
+
+    🔴 THIS TEST IS WHAT STOPS THE SPLIT BECOMING A DISAPPEARANCE. A dev-host-tier
+    file is invisible to the hermetic tier, so deleting it would cost nothing visible
+    here and the ledger's attributions would silently stop being checked against
+    anything. This asserts the alarm exists AND still names each probe — a file that
+    exists but no longer greps for the `lo` composition path is the same loss with a
+    filename.
+
+    🔴 IT READS THE ALARM'S `FOOTER_SITE_PROBES` TUPLE, NOT ITS SOURCE TEXT, BECAUSE THE
+    SUBSTRING VERSION WAS WALKED BY THE ALARM'S OWN DOCUMENTATION. It used to assert one
+    FRAGMENT PER PATH `in` the whole file body, and a commit that added a prose
+    measurement table to that file's header — the per-bundle probe-count table — took the
+    fragment `chord:"enter",action:"select"` from ONE occurrence to TWO. The second one
+    is a table cell, so the needle stayed satisfied by the PROSE DESCRIBING the probe
+    after the probe itself had been neutered. MEASURED on `285e25b8` (the substring
+    guard) and on this tree, rotting each probe INSIDE THE TUPLE ALONE so the header
+    prose is untouched, with every mutation diffed before its run:
+
+        probe                             substring guard   this guard
+        chord:"enter",action:"select"     SURVIVED          KILLED
+        fallback:"Enter",…"select"        KILLED            KILLED
+        ===void 0?"select":               KILLED            KILLED
+        Enter to select                   SURVIVED          KILLED
+        the whole tuple ENTRY deleted     SURVIVED          KILLED
+        the whole alarm FILE deleted      KILLED            KILLED
+
+    `Enter to select` had the same weakness and it was PRE-EXISTING: it occurs FOUR
+    times in the alarm file and only ONE of those is the probe. Deleting probe 1's tuple
+    entry outright also survived, which is the failure scenario in full — the 14-site
+    chord/action probe is the one whose own description says two of those sites are the
+    AskUserQuestion renderers, and nothing else pins the probe set (the alarm file only
+    ITERATES it). Reading the VALUE closes the whole class: no sentence anyone writes
+    about a probe can satisfy it. That is the same lesson `_load_collector`'s docstring
+    records one file over — the value, not the source text.
+
+    ⚠ PATTERNS ONLY, NOT THE EXPECTED COUNTS. The counts are the alarm's own to own and
+    they move on nearly every Claude Code bump — its header's table measures all four
+    probes across six bundles and concludes a red there is the EXPECTED outcome of one —
+    so pinning them here would red this on every bump and put the same number in two
+    places. What this pins is that each composition path is still PROBED.
+
+    ⚠ ONE FRAGMENT IS NO LONGER SPELLED THE WAY THE SITE IS, AND THAT IS ON PURPOSE. The
+    alarm's probes for paths 2 and 3 used to be keyed on the MINIFIER-GENERATED names
+    `lo` and `qJl`/`hfw`, which are build artifacts: a rebuild can rename them without
+    touching a renderer, and the alarm would then red for a reason that has nothing to do
+    with footers. Both probes were de-minified — same counts, MEASURED both ways on
+    2.1.232 and on five older bundles — so the `hfw` half of the third fragment went with
+    it. What the fragments still identify is the PATH (a keybinding FALLBACK for 2, a
+    DEFAULTED select prop for 3), which is the property this seam is about.
+    """
+    assert FOOTER_SITE_ALARM.is_file(), (
+        f"the dev-host staleness alarm is gone ({FOOTER_SITE_ALARM}). "
+        "ASK_FOOTER_LEDGER's per-site attributions are then checked by nothing: "
+        "re-add it, or delete the attributions it was checking and say so")
+    # 🔴 THE VALUE, BY IMPORT. The module is stdlib-only and has no import-time side
+    # effects — `_bundle()` is a function, and nothing at module level touches the
+    # binary — so loading it costs nothing in this tier. It is NOT registered in
+    # sys.modules: pytest collects this same file under its own name in the `all` set,
+    # and a pre-seeded entry there is an import-file-mismatch waiting to happen.
+    name = "claude_footer_sites_seamcheck"
+    loader = importlib.machinery.SourceFileLoader(name, str(FOOTER_SITE_ALARM))
+    spec = importlib.util.spec_from_file_location(name, str(FOOTER_SITE_ALARM),
+                                                  loader=loader)
+    alarm = importlib.util.module_from_spec(spec)
+    loader.exec_module(alarm)
+    # One pattern per composition path, so a probe cannot be dropped or neutered
+    # quietly. These are the four the ledger's header names; the alarm owns their
+    # expected counts. Element 0 only, so adding a FIFTH field to a probe row is not
+    # a red — dropping or rewording a PATTERN is.
+    want = ('chord:"enter",action:"select"',
+            r'\{action:"[^"]*",context:"[^"]*",fallback:"Enter",description:"select"\}',
+            r'===void 0\?"select":',
+            "Enter to select")
+    got = tuple(probe[0] for probe in alarm.FOOTER_SITE_PROBES)
+    assert got == want, (
+        f"{FOOTER_SITE_ALARM.name}'s FOOTER_SITE_PROBES no longer match this seam's "
+        f"ledger.\n  dropped or reworded: {[p for p in want if p not in got]}\n"
+        f"  new or unexpected:   {[p for p in got if p not in want]}\n"
+        "Each pattern is one composition path ASK_FOOTER_LEDGER attributes a footer "
+        "to. Every path dropped here is a path the next reader will believe is still "
+        "measured against the bundle: re-add it, or delete the attribution it was "
+        "checking and update this tuple in the same commit")
+
+
+def test_the_ask_footer_survives_the_WRAP_at_every_measured_WIDTH():
+    """🔴 WIDTH IS THE DIMENSION NOBODY HAD VARIED TWICE, AND THE OLD READER FAILED IT.
+
+    The footer WRAPS, and the previous reader tested raw substrings against the
+    capture: at 30 columns `↑/↓ to navigate` is split across two lines, so a LIVE
+    single-question ask resolved FOOTER_NONE and every reply to it was refused —
+    inert, not wrong, but inert for a reason nobody had measured. A chain at 30 and
+    40 lost `Tab/Arrow keys to navigate` the same way.
+
+    The fix is in the reader rather than in this test: it normalises the capture
+    before looking, and `Nr` joins fields with ` · ` while a wrap breaks at a space,
+    so re-joining the lines restores the field string exactly.
+
+    ⚠ MEASURED AT FIVE WIDTHS, THE NARROWEST WELL BELOW ANY LIVE PANE (all 58 on this
+    host are >= 79 columns). 30 is the boundary the previous reader broke at, so it is
+    kept as the row that would go red if the normalisation were dropped.
+    """
+    for footer, want in ((MENU_FOOTER_SINGLE, AGENT.FOOTER_SINGLE),
+                         (MENU_FOOTER_FREE_TEXT, AGENT.FOOTER_SINGLE),
+                         (MENU_FOOTER_CHAIN, AGENT.FOOTER_CHAIN)):
+        for width in (30, 40, 48, 60, 104):
+            lines, cur = [], ""
+            for word in footer.split(" "):
+                if cur and len(cur) + 1 + len(word) > width:
+                    lines.append(cur)
+                    cur = word
+                else:
+                    cur = (cur + " " + word) if cur else word
+            lines.append(cur)
+            wrapped = SINGLE_MENU_CAPTURE.replace(
+                MENU_FOOTER_SINGLE, "\n".join(lines))
+            assert AGENT.menu_footer(wrapped) == want, (
+                f"at {width} columns the footer wraps onto {len(lines)} lines and "
+                f"resolves {AGENT.menu_footer(wrapped)!r}, wanted {want!r}")
+            # And the POSITIVE CONTROL for this test: the wrap must really have
+            # happened at the narrow widths, or it is asserting nothing.
+            if width <= 40:
+                assert len(lines) >= 2, (width, lines)
+
+
+def test_the_ANSWERED_RENDER_is_read_with_the_NBSPs_the_pane_really_uses():
+    """🔴 THE BYTES, NOT THE PRETTY-PRINTED QUOTE. Measured in live scrollback.
+
+    The render is `●\\xa0User answered Claude's questions:` then
+    `  ⎿\\xa0·\\xa0<question> → <label>` — NON-BREAKING spaces, and the module's own
+    header quotes them as ordinary ones. A reader built from that quote matches
+    nothing, which is why this asserts against the measured bytes.
+
+    ⚠ AN INVARIANT GUARD on a new function, and the ledger of the measurement.
+    """
+    measured = ("●\xa0User answered Claude's questions:\n"
+                "\n"
+                "  ⎿\xa0·\xa0Which store should the queue use? → Flatfile\n")
+    assert AGENT.menu_answer_records(measured) == ["Flatfile"], (
+        AGENT.menu_answer_records(measured))
+    # 🔴 A VERDICT NEEDS THE PRE-KEYPRESS BASELINE, AND `[]` IS ONE. It says "the
+    # pane carried no record before the keypress", so any record here IS this ask's.
+    assert AGENT.menu_answer_verdict(measured, "Flatfile", []) == "match"
+    assert AGENT.menu_answer_verdict(measured, "Ledger", []) == "mismatch"
+    assert AGENT.menu_answer_verdict(DEFAULT_PROMPT_CAPTURE, "Flatfile", []) == ""
+    # 🔴 AND WITH **NO** BASELINE THERE IS NO VERDICT AT ALL — `before=None` means
+    # attribution is impossible, not that the record set was empty. This is the F3
+    # fix: the previous signature had no baseline, so it read a STALE record as this
+    # ask's answer and reported `delivered` with "the pane records this option as the
+    # answer" about a row that predated the keypress.
+    assert AGENT.menu_answer_verdict(measured, "Flatfile") == ""
+    assert AGENT.menu_answer_verdict(measured, "Ledger") == ""
+    # 🔴 AND A RECORD THAT HAS NOT CHANGED SINCE THE BASELINE IS STALE, WHICHEVER
+    # WAY IT POINTS. This is the F2 fix: the ask had closed, its own record was not
+    # drawn yet, and the stale one was still bottom-most — which the snapshot reader
+    # reported as `the pane records a DIFFERENT option as the answer to this ask`,
+    # a false accusation against a correct delivery.
+    assert AGENT.menu_answer_verdict(measured, "Ledger", ["Flatfile"]) == ""
+    assert AGENT.menu_answer_verdict(measured, "Flatfile", ["Flatfile"]) == ""
+
+    # A CHAIN records one row per question, and a reply matching either is a match —
+    # which is also why a chain that has NOT reached Submit records nothing at all.
+    chain = ("●\xa0User answered Claude's questions:\n"
+             "  ⎿\xa0·\xa0Which store? → Flatfile\n"
+             "     ·\xa0Which region? → Frankfurt\n")
+    assert AGENT.menu_answer_records(chain) == ["Flatfile", "Frankfurt"], (
+        AGENT.menu_answer_records(chain))
+    assert AGENT.menu_answer_verdict(CLIPPED_CHAIN_CAPTURE, "Flatfile", []) == ""
+
+    # 🔴 THE BOTTOM-MOST BLOCK ONLY. Panes on this host carry an answered record from
+    # an EARLIER ask in their SCROLLBACK, so a reader that took any match would read a
+    # stale row as evidence about THIS delivery. ⚠ NO FIGURE HERE: this comment said
+    # `18 of the 57 live panes` — a second copy of the fraction MENU_ANSWERED_HEADING
+    # retracts, and the numerator was superseded too. That block states the number
+    # once, with what a scrollback count does and does not license.
+    stale = ("●\xa0User answered Claude's questions:\n"
+             "  ⎿\xa0·\xa0An older ask → Ledger\n"
+             "\n"
+             "● Some work happened here.\n"
+             "\n"
+             "●\xa0User answered Claude's questions:\n"
+             "  ⎿\xa0·\xa0Which store? → Flatfile\n")
+    assert AGENT.menu_answer_records(stale) == ["Flatfile"], AGENT.menu_answer_records(stale)
+
+    # A WRAPPED label carries no truncation mark, so `menu_row_holds_reply`'s
+    # tolerance — not `label_matches`' — is what has to be used here.
+    wrapped = ("●\xa0User answered Claude's questions:\n"
+               "  ⎿\xa0·\xa0Which store? → Flatfile with the journal\n")
+    assert AGENT.menu_answer_verdict(
+        wrapped, "Flatfile with the journal and compaction enabled", []) == "match"
+
+    # 🔴 THE BLOCK ENDS ON A GLYPH, NOT ON AN INDENT — and this is a REAL defect
+    # this reader shipped with for one draft. The question text WRAPS at the
+    # terminal width, so a continuation line starts in COLUMN 0 with an ordinary
+    # letter; a reader that treated that as "a new top-level render" stopped before
+    # the `→` and returned NOTHING. Measured over the live corpus: the indent rule
+    # read a record on 17 of the 18 panes that have one, the glyph rule on 18.
+    # ⚠ SYNTHETIC, like every fixture here — this repo is public. What is
+    # reproduced is the SHAPE: a question long enough to wrap, broken MID-WORD at
+    # the pane's width so the continuation opens in column 0 with a letter.
+    mid_word_wrap = ("●\xa0User answered Claude's questions:\n"
+                     "  ⎿\xa0·\xa0Which store should the queue use once the journal grows too la\n"
+                     "rge to replay on start? → Flatfile, and compact later\n"
+                     "\n"
+                     "● Wiring the flatfile store now.\n")
+    assert AGENT.menu_answer_records(mid_word_wrap) == [
+        "Flatfile, and compact later"], AGENT.menu_answer_records(mid_word_wrap)
+    # And the stop glyph really does stop it: the following render's text must not
+    # be absorbed into a record.
+    assert "Wiring" not in " ".join(AGENT.menu_answer_records(mid_word_wrap))
+
+
+def test_the_verify_attempt_FLOOR_survives_an_operator_setting_it_below_two(monkeypatch):
+    """🔴 C2: BOTH `max(2, MENU_VERIFY_ATTEMPTS)` CALL SITES, PINNED.
+
+    `MENU_VERIFY_ATTEMPTS` is operator-settable (`TMUX_REPLY_MENU_VERIFY_ATTEMPTS`,
+    default 8) and no test drove it below 2, so each `max(2, …)` SURVIVED the
+    module's mutation sweep individually. Two consecutive agreeing reads are what
+    make an ABSENCE evidence rather than a snapshot — the half-drawn frame is the
+    reason — so a one-read verdict must not be reachable by configuration.
+
+    ⚠ AN INVARIANT GUARD, LABELLED: the floor was already in the shipped code, so
+    this is not regression coverage. It is the mutation pin the sweep lacked, and
+    it fails with each site's own observable (`menu_settled`'s verdict string and
+    `menu_committed`'s boolean) rather than sharing one.
+    """
+    monkeypatch.setattr(AGENT, "MENU_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(AGENT, "MENU_VERIFY_ATTEMPTS", 1)
+    labels = ["Ledger", "Flatfile", "Type something.", "Chat about this"]
+
+    reads = {"n": 0}
+
+    def always_gone(pane):
+        reads["n"] += 1
+        return ANSWERED_CAPTURE, ""
+
+    # 🔴 THE PANE IS GONE ON EVERY READ, which is what makes the floor OBSERVABLE
+    # in the verdict and not only in a read count. Two agreeing reads settle;
+    # `range(1)` gives one read, which can never agree with a predecessor, so the
+    # mutant reaches the "never held one state" fallthrough instead.
+    monkeypatch.setattr(AGENT, "capture_pane", always_gone)
+    settled, observed = AGENT.menu_settled("%12", labels)
+    assert reads["n"] == 2, (
+        "menu_settled did not read the pane exactly twice at MENU_VERIFY_ATTEMPTS=1, so the "
+        f"floor of two consecutive reads is not being enforced. reads={reads['n']}")
+    assert (settled, observed) == (True, "the menu is no longer on screen"), (settled, observed)
+
+    # menu_committed: the same floor, its own observable — a boolean, not a string.
+    reads["n"] = 0
+    monkeypatch.setattr(AGENT, "capture_pane", always_gone)
+    assert AGENT.menu_committed("%12", "Flatfile") is True, (
+        "menu_committed concluded 'no row holds the reply' from fewer than two frames")
+    assert reads["n"] == 2, (
+        "menu_committed did not read the pane exactly twice at MENU_VERIFY_ATTEMPTS=1. "
+        f"reads={reads['n']}")
+
+
+def test_the_row_block_rule_has_NO_LOWER_BOUND_left_to_read_as_a_guard():
+    """🔴 C1: THE CLAUSE NO MUTANT COULD KILL IS GONE, and this pins the contract.
+
+    `rows_are_one_block` read `if not 0 < gap <= MENU_ROW_GAP`. Both callers walk
+    rows in screen order off a `splitlines()` enumeration, so `gap >= 1` on every
+    call and dropping the lower bound SURVIVED the sweep. The commit that deleted
+    `len(a) < len(b)` from `menu_row_holds_reply` gave the reason: a clause no
+    mutant can kill reads as a guard while guarding nothing.
+
+    ⚠ RED at `c8cf7b15e` — and on a CALL NO CALLER MAKES, which is exactly what
+    that reason means. `rows_are_one_block(lines, 1, 1)` returns False at base and
+    True here, so this is a CONTRACT pin rather than regression coverage: it
+    documents the invariant the deletion relies on (a zero-length span is one
+    block, because `all([])` is True) and it would have failed had the deletion
+    changed anything a caller can reach. The UPPER bound is the live one, and
+    `test_a_BLANK_line_between_two_numbered_rows_…` is what kills a mutant on it.
+    """
+    lines = ["  ❯ 1. Ledger", "     desc", "    2. Flatfile"]
+    # The degenerate call the deleted clause used to reject: an empty span is one
+    # block, because `all([])` is True and there is no blank line in between.
+    assert AGENT.rows_are_one_block(lines, 1, 1) is True
+    # And the real contract is unchanged in both directions.
+    assert AGENT.rows_are_one_block(lines, 0, 2) is True
+    assert AGENT.rows_are_one_block(["  ❯ 1. Ledger", "", "    2. Flatfile"], 0, 2) is False
+    assert AGENT.rows_are_one_block(
+        ["  ❯ 1. Ledger"] + ["     d"] * (AGENT.MENU_ROW_GAP + 1) + ["    2. Flatfile"],
+        0, AGENT.MENU_ROW_GAP + 2) is False
+
+
+def test_every_menu_path_REFUSAL_SHAPE_is_enumerated():
+    """🔴 C3: THE COUNT IS A LEDGER, NOT A SENTENCE.
+
+    Three rounds of this work have quoted a refusal count wrong — nine-vs-eight,
+    then eight-vs-ten, then one-vs-two divergences — every time by a prose number
+    copied forward while the code beside it moved. The mechanism fix is to stop
+    writing the number: this enumerates the refusal shapes the MENU PATH can
+    produce and pins the set two-way, so adding or removing one fails HERE with the
+    missing row named.
+
+    ⚠ THE SCOPE IS THE QUALIFIER THAT WAS MISSING. These are the refusals reachable
+    on the menu path. A claimed write also passes `validate()` and `should_refuse()`
+    and can receive THEIR refusals, so this is not a count of "refusals a claimed
+    write can receive" — it never was, and the unqualified sentence is what made
+    the number wrong.
+
+    ⚠ AN INVARIANT GUARD, LABELLED: it is a ledger over the shapes, not a behaviour
+    that regressed.
+    """
+    # (name, capture-or-None, reply, the substring the refusal must carry)
+    approval = PERMISSION_PROMPT_CAPTURE
+    SHAPES = [
+        ("a question chain, tab strip visible", DESCRIBED_MULTI_QUESTION_CAPTURE,
+         "Flatfile", "MULTI-question"),
+        ("a question chain, tab strip clipped", CLIPPED_CHAIN_CAPTURE,
+         "Flatfile", "MULTI-question"),
+        ("a multiSelect list", MULTI_SELECT_MENU_CAPTURE, "Ledger", "multi-select"),
+        ("a live ask with no parseable block", SCROLLED_SINGLE_ASK_CAPTURE,
+         "Flatfile", "none of its option rows parsed"),
+        ("a live ask caught half-drawn", SINGLE_MENU_CAPTURE.replace("  ❯ 1.", "    1."),
+         "Flatfile", "half-drawn"),
+        ("numbered rows with two cursors", TWO_CURSOR_MENU_CAPTURE,
+         "Flatfile", "exactly one cursor row"),
+        ("a chooser that is not an ask", approval, "Yes", "tool-approval prompt"),
+        ("a reply matching several rows",
+         SINGLE_MENU_CAPTURE.replace("    2. Flatfile\n", "    2. Ledger\n"),
+         "Ledger", "option rows, so"),
+        ("a reply matching nothing, no free-text row", NO_FREE_TEXT_MENU_CAPTURE,
+         "something else entirely", "free-text rows"),
+    ]
+    seen = {}
+    for name, capture, reply, wanted in SHAPES:
+        kind, labels, why = AGENT.classify_pane(capture)
+        if kind != AGENT.PANE_MENU:
+            detail = why
+        else:
+            state, detail = AGENT.deliver_to_menu("%12", labels, reply, True)
+            assert state == "refused", (name, state, detail)
+        assert wanted in detail, (
+            f"the refusal for {name!r} no longer says {wanted!r}: {detail!r}")
+        seen[name] = detail
+
+    assert len(seen) == len(SHAPES), seen
+    # Two-way, and the expected count is DERIVED from the ledger's own third column
+    # rather than written as a literal — the whole point of this test. Two routes
+    # SHARE the chain sentence on purpose (a chain reached with its tab strip
+    # visible and with it clipped is one refusal reached two ways), so the number of
+    # distinct sentences is the number of distinct expectations, not of rows.
+    wanted_sentences = {w for _, _, _, w in SHAPES}
+    assert len(set(seen.values())) == len(wanted_sentences), (
+        "the menu path's refusal sentences no longer partition the way the ledger says — "
+        "either two refusals collapsed into one wording, or a row's expectation now matches "
+        f"a sentence it did not before. rows={len(SHAPES)} "
+        f"expectations={len(wanted_sentences)} sentences={len(set(seen.values()))}")
+    # And the two refusals that are NOT on this ledger, named so the scope is closed.
+    assert AGENT.deliver_to_menu("%12", ["Ledger"], "Ledger", False)[0] == "refused"
+    assert AGENT.deliver_to_menu("%12", ["Ledger"], "", True)[0] == "refused"
+
+
+def _shape_product():
+    """Every combination of the dimensions `classify_pane` reads, as captures.
+
+    Built as a PRODUCT rather than a hand-picked list because the point is
+    exhaustiveness over the dimensions, not plausibility of each cell — a shape
+    nobody has seen still must not reach the typing path.
+    """
+    footers = {
+        "none": "",
+        "single": MENU_FOOTER_SINGLE,
+        "free-text": MENU_FOOTER_FREE_TEXT,
+        "chain": MENU_FOOTER_CHAIN,
+        "unknown-nav": "Enter to select · j/k to navigate · Esc to cancel",
+        "confirm": MENU_FOOTER_STARTUP,
+        "approval": MENU_FOOTER_APPROVAL,
+    }
+    rows = {
+        "no rows": "",
+        "1,2 adjacent": "{c}1. Ledger\n    2. Flatfile\n",
+        "1,2 with a blank between": "{c}1. Ledger\n\n    2. Flatfile\n",
+        "2,3 only (row 1 clipped)": "{c}2. Flatfile\n    3. Archive\n",
+        "1, then a scroll-arrow row": "{c}1. Ledger\n↓ 2. Flatfile\n",
+        "1,2,3 adjacent": "{c}1. Ledger\n    2. Flatfile\n    3. Archive\n",
+    }
+    cursors = {"cursor on row 1": "  ❯ ", "no cursor": "    "}
+    markers = {"marker": "  ☐ Store\n\n", "no marker": ""}
+    tabstrips = {"tab strip": "  ←  ☐ Store  ☐ Region  ✔ Submit  →\n\n", "no tab strip": ""}
+    checkboxes = {
+        "checkbox rows": "  ❯ [ ] 1. Ledger\n    [ ] 2. Flatfile\n",
+        "no checkbox rows": "",
+    }
+    for fname, foot in footers.items():
+        for rname, rowtpl in rows.items():
+            for cname, cur in cursors.items():
+                for mname, mark in markers.items():
+                    for tname, tab in tabstrips.items():
+                        for xname, cbx in checkboxes.items():
+                            body = rowtpl.format(c=cur) if rowtpl else ""
+                            cap = ("● Some transcript above.\n\n" + tab + mark + body
+                                   + cbx + ("\n" + foot + "\n" if foot else ""))
+                            yield (cap, f"{fname} / {rname} / {cname} / {mname} / "
+                                        f"{tname} / {xname}")
+
+
+def test_NOTHING_CARRYING_AN_ASK_FOOTER_CAN_REACH_THE_TYPING_PATH():
+    """🔴 THE FILE'S OWN INVARIANT, ENFORCED RATHER THAN ASSERTED IN A DOCSTRING.
+
+    `classify_pane` says "THE ONLY OUTCOME THAT TYPES IS PANE_TEXT, so every
+    uncertainty resolves AWAY from typing". That sentence was FALSE in two
+    directions and the file said it anyway for a whole release — which is the shape
+    RULES.md warns about: a comment is a claim, and a claim nothing checks is the
+    one that rots.
+
+    So this checks it, over the PRODUCT of every dimension `classify_pane` reads
+    (footer state x row geometry x cursor x question marker x tab strip x
+    checkbox rows), in both directions:
+
+      * PANE_TEXT — the only outcome that types — is reachable ONLY from a pane
+        whose footer is FOOTER_NONE. If an ask's own footer is on screen, nothing
+        gets typed, whatever the geometry has done.
+      * PANE_MENU — the only outcome that presses a digit — is reachable ONLY from
+        FOOTER_SINGLE, i.e. positive evidence of a one-question ask.
+
+    ⚠ A STRUCTURAL GUARD, and it is not a substitute for the behavioural ones: it
+    cannot tell you the refusal reason is right, only that no shape slips past into
+    typing or pressing. The per-defect guards above are what pin the reasons.
+
+    ⚠ AND IT NEEDS ITS OWN POSITIVE CONTROLS, because a product that produced no
+    typing cells and no menu cells would pass while measuring nothing.
+    """
+    typed, pressed, total = [], [], 0
+    for cap, what in _shape_product():
+        total += 1
+        kind = AGENT.classify_pane(cap)[0]
+        foot = AGENT.menu_footer(cap)
+        if kind == AGENT.PANE_TEXT:
+            typed.append((what, foot))
+            assert foot == AGENT.FOOTER_NONE, (
+                f"a pane carrying an ask footer ({foot!r}) reached the TYPING path: {what}\n"
+                f"{cap!r}")
+        if kind == AGENT.PANE_MENU:
+            pressed.append((what, foot))
+            assert foot == AGENT.FOOTER_SINGLE, (
+                f"a pane whose footer is {foot!r} reached the DIGIT path: {what}\n{cap!r}")
+
+    # 🔴 THE POSITIVE CONTROLS. A zero here would be indistinguishable from a
+    # product wired to nothing.
+    assert total >= 200, total
+    assert len(typed) >= 10, (
+        f"the product produced {len(typed)} typing cells, so the first assertion above "
+        "never ran and this test proves nothing about the typing path")
+    assert len(pressed) >= 5, (
+        f"the product produced {len(pressed)} digit cells, so the second assertion above "
+        "never ran — and a classifier that drives NOTHING would pass it")
