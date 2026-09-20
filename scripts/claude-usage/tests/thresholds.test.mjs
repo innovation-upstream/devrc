@@ -22,6 +22,7 @@ const NAME = "user@example.com's Organization";
 const SW = await import("../extension/service_worker.js");
 const { evaluateAlerts, handleReport, TOAST_DEDUP_MS } = SW;
 const { normalizeUsage } = await import("../extension/lib/normalize.js");
+const { fullUsage } = await import("./fixtures.mjs");
 
 function record(util, ts = NOW) {
   const rec = normalizeUsage({}, ORG, NAME, ts);
@@ -172,4 +173,96 @@ test("threshold firing is recorded in lastToast for the right (account, kind)", 
   const lt = storage.lastToast;
   assert.ok(lt[`${ORG}:session-high`], JSON.stringify(lt));
   assert.equal(lt[`${ORG}:summary`] !== undefined, true, "the summary kind is deduped separately");
+});
+
+// --- an alert and the summary are ONE event, not two ------------------------- //
+//
+// 🔴 OPERATOR-REPORTED: "2 native system notifications when i opened
+// claude.ai", and when asked what they SAID, they were DIFFERENT — a
+// threshold alert and the account summary. No concurrency involved: ONE
+// report, one handler, two toasts, because handleReport appends the summary
+// independently of whatever evaluateAlerts returned.
+//
+// The two carry the same numbers; the alert just adds a reason. Two
+// notifications landing together for one event is the symptom.
+//
+// The codebase already had this idea — the `switch` kind records the
+// `summary` key alongside its own so a page-open cannot re-toast the same
+// content — it simply was never applied to the alert path.
+
+test("🔴 crossing a threshold fires the ALERT ONLY, not alert + summary", async () => {
+  await chrome.storage.local.set({ accounts: {}, lastActiveOrg: null, lastToast: {} });
+  calls.notifications.length = 0;
+
+  const u = fullUsage();
+  u.five_hour.utilization = 85;          // over ALERT_THRESHOLD_PCT
+  await SW.enqueueReport({
+    type: "cu:usage-report", fetchedAt: NOW,
+    orgs: [{ uuid: ORG, name: NAME }], activeUuid: ORG,
+    results: [{ orgUuid: ORG, ok: true, usage: u }],
+  });
+
+  assert.equal(calls.notifications.length, 1,
+    `${calls.notifications.length} notifications for ONE event — `
+    + calls.notifications.map((n) => n.title).join(" + "));
+  assert.match(calls.notifications[0].title, /threshold/,
+    "the ALERT is the one that survives — it carries the same numbers plus a reason");
+});
+
+test("the summary is SUPPRESSED, not merely delayed into the next report", async () => {
+  // If the alert did not consume the summary's dedup slot, the next report
+  // inside the window would deliver it — a stray duplicate arriving minutes
+  // after the alert, which is the same complaint with a gap in the middle.
+  await chrome.storage.local.set({ accounts: {}, lastActiveOrg: null, lastToast: {} });
+  calls.notifications.length = 0;
+
+  const u = fullUsage();
+  u.five_hour.utilization = 85;
+  const send = (at) => SW.enqueueReport({
+    type: "cu:usage-report", fetchedAt: at,
+    orgs: [{ uuid: ORG, name: NAME }], activeUuid: ORG,
+    results: [{ orgUuid: ORG, ok: true, usage: u }],
+  });
+  await send(NOW);
+  await send(NOW + 60 * 1000);           // a minute later, well inside TOAST_DEDUP_MS
+  assert.equal(calls.notifications.length, 1,
+    "the summary arrived late instead of being suppressed");
+});
+
+test("with NO alert firing, the summary still toasts", async () => {
+  // The suppression must not silence the ordinary page-open summary, which is
+  // the feature working as intended.
+  await chrome.storage.local.set({ accounts: {}, lastActiveOrg: null, lastToast: {} });
+  calls.notifications.length = 0;
+
+  await SW.enqueueReport({
+    type: "cu:usage-report", fetchedAt: NOW,
+    orgs: [{ uuid: ORG, name: NAME }], activeUuid: ORG,
+    results: [{ orgUuid: ORG, ok: true, usage: fullUsage() }],   // 9% — calm
+  });
+  assert.equal(calls.notifications.length, 1);
+  assert.doesNotMatch(calls.notifications[0].title, /threshold/);
+});
+
+test("an alert on a NON-active account does not suppress the active one's summary", async () => {
+  // The suppression is per-account. A threshold crossing on a background org
+  // must not silence the summary for the org the operator is looking at.
+  const ORG_B = "22222222-2222-4222-8222-222222222222";
+  await chrome.storage.local.set({ accounts: {}, lastActiveOrg: null, lastToast: {} });
+  calls.notifications.length = 0;
+
+  const hot = fullUsage(); hot.five_hour.utilization = 85;
+  await SW.enqueueReport({
+    type: "cu:usage-report", fetchedAt: NOW,
+    orgs: [{ uuid: ORG, name: NAME }, { uuid: ORG_B, name: "Second Org" }],
+    activeUuid: ORG,
+    results: [
+      { orgUuid: ORG, ok: true, usage: fullUsage() },   // active, calm
+      { orgUuid: ORG_B, ok: true, usage: hot },           // background, hot
+    ],
+  });
+  const titles = calls.notifications.map((n) => n.title);
+  assert.equal(titles.length, 2, `expected the B alert AND the A summary, got ${titles.join(" + ")}`);
+  assert.ok(titles.some((t) => /threshold/.test(t)), "B's alert is missing");
+  assert.ok(titles.some((t) => t === NAME), "A's summary was wrongly suppressed");
 });
