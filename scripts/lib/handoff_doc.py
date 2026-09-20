@@ -2845,7 +2845,10 @@ _AUDITOR = Path(__file__).resolve().parent.parent / "handoff-audit.py"
 
 
 def evictable_note(merged_text: str, over_by: int) -> str:
-    """What playbook step 1 would recover from THIS doc, in bytes, or "".
+    """What the eviction playbook would recover from THIS doc, in bytes, or "".
+
+    Step 1 (evict what has CLOSED) is COUNTED; step 2 (demote dated evidence) is
+    reported beside it and deliberately not counted — see the split below.
 
     🔴 WHY THIS EXISTS. The ladder in `test_handoff_doc_size.py` ranks EVICT WHAT
     HAS CLOSED first and calls it "usually the whole answer" — but it says that
@@ -2900,14 +2903,23 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         rows = [r for r in rows if r[1] > 0]
         if not rows:
             return ""
+        # 🔴 ONLY STEP 1 IS COUNTED, and that is the fix for two findings at once
+        # (round 2 of #1815, 🟡-4 and 🟡-5). Counting step-2 bytes toward a line
+        # that promises "CLEARS the N B you are over by" was wrong twice over: the
+        # playbook's step 2 is a MOVE that must leave a POINTER behind, so the
+        # bytes are not recovered at face value; and `retracted` is by
+        # construction bullets in a Gotchas section, which that same playbook says
+        # stay. The note now promises only what step 1 recovers and reports step 2
+        # beside it, uncounted — so no row is both promised and prohibited, and
+        # the itemisation reconciles with the total instead of exceeding it.
+        step1 = [r for r in rows if r[4] == 1]
+        step2 = [r for r in rows if r[4] == 2]
         out = ["  Evictable in THIS doc, measured:"]
-        for label, b, n, unit, step in rows:
-            verb = "evict" if step == 1 else "MOVE to refs/, leave a pointer"
+        for label, b, n, unit, _s in step1:
             out.append(f"    {label:<24}{b:>9,} B  ({n} {unit}{'' if n == 1 else 's'})"
-                       f"  — step {step}, {verb}")
-        if any(step == 2 for *_, step in rows):
-            out.append("    🔴 step 2 is a MOVE, never a delete: a gotcha or a ruled-out "
-                       "theory stays in the doc.")
+                       f"  — step 1, evict")
+        if not step1:
+            out.append("    (nothing has CLOSED — step 1 recovers nothing here)")
 
         # 🔴 UNION, NOT SUM — `audit_text`'s `gross` adds the four buckets without
         # unioning their line ranges, and one block can land in two of them (an
@@ -2930,8 +2942,9 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         # byte count from its own range. Indices are explicit and pinned by
         # `test_the_union_indices_match_each_buckets_tuple_shape`.
         lines = merged_text.splitlines(keepends=True)
+        step1_keys = {"resolved", "done"}
         spans = sorted((x[i], x[j]) for key, (i, j) in AUDIT_SPAN_INDEX.items()
-                       for x in a[key])
+                       if key in step1_keys for x in a[key])
         merged_spans: list[list[int]] = []
         for s_, e_ in spans:
             if merged_spans and s_ <= merged_spans[-1][1]:
@@ -2955,9 +2968,19 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         # whole argument is that a line printing every time is a line nobody
         # reads. `net` is only charged for completed RANKS, so the sentence
         # belongs only when that row is present.
-        if any(label == "completed ranked items" for label, *_ in rows):
+        if any(label == "completed ranked items" for label, *_ in step1):
             out.append("    Net of 200 B per evicted rank: the NUMBER must stay (it is "
                        "half a claim-work slug).")
+        # Reported, never promised: step 2 is a MOVE to `refs/` that must leave a
+        # pointer, so these bytes are not recovered at face value — and the
+        # playbook keeps gotchas in the doc. Counting them toward "CLEARS" is the
+        # defect this split fixes; naming them is still useful.
+        for label, b, n, unit, _s in step2:
+            out.append(f"    ALSO {label:<19}{b:>9,} B  ({n} {unit}{'' if n == 1 else 's'})"
+                       f"  — step 2, NOT counted above")
+        if step2:
+            out.append("    step 2 MOVES dated evidence to `claudedocs/refs/<topic>.md` and "
+                       "leaves a pointer; the rule itself stays in the doc.")
         return "\n".join(out)
     except (Exception, SystemExit):
         # 🔴 `SystemExit` IS NOT AN `Exception` — it derives from BaseException,

@@ -25,8 +25,9 @@ stack**, deletion on the table, changes land **inside the two existing skills** 
 > ALREADY printed by the `DOD` block at the right moment; the only increment left is
 > auto-filling the arc's finish line, which is the judgement that defines the arc.
 >
-> **ALL FOUR ITEMS ARE CLOSED. Nothing in §4 remains to build.** Final tally: one shipped as
-> specified, one shipped corrected, two deleted by measurement.
+> **ALL FOUR ITEMS ARE CLOSED. Nothing in §4 remains to build.** Final tally: one landed as
+> specified, one landed corrected, two deleted by measurement — all on the branch, none on
+> `main` until #1815 merges.
 
 ---
 

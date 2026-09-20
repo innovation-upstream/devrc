@@ -148,7 +148,8 @@ close this doc as NOT ADDRESSED and open a new one, not to restore an unrunnable
    ADDRESSED and a new arc opened.
    forcing: user — both reverse a decision an agent took; neither is an agent's to settle.
 3. **Land the two rescued branches**, or tell that session they are there. They are not mine
-   to merge, and `rescued-shared-branch-20260920` will be garbage-collected eventually.
+   to merge. ⚠ They are BRANCH REFS on origin, so they are not garbage-collected — an
+   earlier wording said they were, which overstated the urgency.
    forcing: none
 
 ## Gotchas / decisions / dead-ends

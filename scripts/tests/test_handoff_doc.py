@@ -7686,10 +7686,13 @@ def test_evictable_note_pins_the_NET_NUMBER_not_only_the_verdict_word():
     # ONLY the bucket rows: they are the lines carrying a count in parentheses.
     # An earlier version of this matcher also swept up the `→ … net` line and the
     # RESUME_COST explainer, making the assertion compare a number with itself.
+    # Step-1 rows only: step-2 rows render as "ALSO <label> … NOT counted above"
+    # and are deliberately outside the promise (round 2, 🟡-4/🟡-5).
     rows = [int(m.replace(",", "")) for m in
-            re.findall(r"([\d,]+) B  \(", note)]
+            re.findall(r"^(?!\s+ALSO).*?([\d,]+) B  \(", note, re.M)]
     arrow = re.search(r"→ ([\d,]+) B", note)
-    assert arrow and len(rows) >= 3, note
+    # 2, not 3: the fixture's retracted bullet is step 2 and is no longer counted.
+    assert arrow and len(rows) >= 2, note
     net = int(arrow.group(1).replace(",", ""))
     assert net == sum(rows) - _auditor_module().RESUME_COST, (
         f"net {net:,} != buckets {sum(rows):,} - {_auditor_module().RESUME_COST} for the one rank; "
@@ -7709,9 +7712,22 @@ def test_the_union_indices_match_each_buckets_tuple_shape():
     range those indices select must reproduce that bucket's OWN byte count."""
     a = _audit_text(_EVICTABLE_DOC)
     lines = _EVICTABLE_DOC.splitlines(keepends=True)
-    assert set(hd.AUDIT_SPAN_INDEX) <= set(a), (
-        "AUDIT_SPAN_INDEX names a bucket audit_text does not return: "
-        f"{set(hd.AUDIT_SPAN_INDEX) - set(a)}"
+    # 🔴 TWO-WAY, and an earlier version was only a SUBSET check (round 2, 🟢-8):
+    # it failed when the map named a bucket the auditor had dropped, but NEVER
+    # when the note grew a bucket the map had not learned — which would silently
+    # exclude it from the union and understate every total. Both directions are
+    # asserted against the buckets `evictable_note` actually consumes, scraped
+    # from its own source so the ledger cannot drift from the code.
+    consumed = set(re.findall(r'a\["(resolved|done|retracted|dated)"\]',
+                              Path(hd.__file__).read_text(encoding="utf-8")))
+    assert consumed, "the scraper found no bucket reads — it is wired to nothing"
+    assert set(hd.AUDIT_SPAN_INDEX) == consumed, (
+        "AUDIT_SPAN_INDEX and the buckets evictable_note reads have drifted: "
+        f"mapped-not-read={set(hd.AUDIT_SPAN_INDEX) - consumed}, "
+        f"read-not-mapped={consumed - set(hd.AUDIT_SPAN_INDEX)}"
+    )
+    assert consumed <= set(a), (
+        f"a consumed bucket is not in audit_text's output: {consumed - set(a)}"
     )
     checked = 0
     for key, (i, j) in hd.AUDIT_SPAN_INDEX.items():
@@ -7775,17 +7791,17 @@ def test_each_bucket_carries_the_PLAYBOOK_STEP_that_actually_applies():
         "- 🔴 RETRACTED — this reasoning was wrong. " + "R" * 900 + "\n"
     )
     note = hd.evictable_note(doc, 0)
-    expected = {
-        "resolved investigations": 1,
-        "completed ranked items": 1,
-        "retracted / dead-ends": 2,
-    }
-    for label, step in expected.items():
+    for label in ("resolved investigations", "completed ranked items"):
         row = next((l for l in note.splitlines() if label in l), None)
-        assert row, f"{label!r} missing from the note:\n{note}"
-        assert f"step {step}" in row, (
-            f"{label!r} is labelled the wrong playbook step — expected step {step}: {row!r}"
+        assert row and "step 1, evict" in row, (
+            f"{label!r} must be a COUNTED step-1 row: {row!r}\n{note}"
         )
-    assert "MOVE to refs/" in note and "never a delete" in note, (
-        "the step-2 rows lost the MOVE-not-delete warning:\n" + note
+    row = next((l for l in note.splitlines() if "retracted / dead-ends" in l), None)
+    assert row, f"the retracted row vanished:\n{note}"
+    assert "ALSO" in row and "step 2, NOT counted above" in row, (
+        "retracted bullets are Gotchas by construction: the playbook keeps them in the "
+        f"doc, so they must be REPORTED and not promised: {row!r}\n{note}"
+    )
+    assert "step 2 MOVES dated evidence" in note and "stays in the doc" in note, (
+        "the step-2 explanation is missing:\n" + note
     )
