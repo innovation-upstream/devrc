@@ -357,11 +357,18 @@ REF_PREFIX_RX = re.compile(r"(?:^|[\s\"'=(])([^\s:]+):\Z")
 # liability, not coverage. Do not re-add it without a case that reproduces.
 SEGMENT_SPLIT_RX = re.compile(r"[;&|\n]")
 
-# 🔴 THE SCAN IS LENGTH-CAPPED, AND THE CAP IS THE WHOLE FIX.
+# 🔴 THE SCAN IS LENGTH-CAPPED, AND THE CAP IS THE WHOLE FIX — PINNED BY
+# `test_the_scan_cap_BOUNDS_the_search` (both directions; see its docstring for why
+# that test had to exist).
 # `\bgit\b.*?\b(?:show|cat-file)\b` anchors at every `git` and walks forward from each,
 # i.e. O(k·n). MEASURED on 32/64/128 KB of `"git "` with no verb: ~0.9 s / 3.5 s /
-# 14.2 s uncapped, a flat ~15-25 ms capped. This hook runs after EVERY tool call and
-# can block a Stop, so an unbounded scan is a turn-level hang.
+# 14.2 s uncapped, ~15 ms capped. This hook runs after EVERY tool call and can block a
+# Stop, so an unbounded scan is a turn-level hang.
+# ⚠ "~15 ms" IS PER CALL, NOT PER COMMAND, and the distinction matters on a hook that
+# can block a Stop: `_read_off_a_ref` runs once per `finditer` match, so a command with
+# many matches stays LINEAR in its length (~10 ms/KB measured). What the cap buys is
+# the complexity CLASS — quadratic to linear, 89 s to 2.7 s on a 264 KB command — not
+# a constant per-command cost.
 #
 # 🔴 THE NEGATED CLASS `[^;&|\n]*?` WAS ALSO RE-ADDED HERE AND IS ALSO DELETED. It was
 # justified as a COST measure and that was FALSE IN BOTH HALVES: `seg` is a segment
@@ -372,9 +379,16 @@ SEGMENT_SPLIT_RX = re.compile(r"[;&|\n]")
 # match to a segment; re-adding it on a cost rationale contradicted the same file.
 #
 # ⚠ THE CAP'S OWN COST, NAMED: >4 KiB between the git verb and the path loses the
-# exemption. Never reached — the largest segment across the whole corpus is ~296 bytes
-# — and fail-SAFE when it is. There is no adversary here; the operator writes his own
-# commands. This bounds a complexity regression, it does not defend against an attack.
+# exemption, and fail-SAFE when it does — a lost exemption makes the guard SILENT,
+# never blocking (proved at the consumer: `docs` only ever feeds `record_read`).
+# Never reached in practice. 🔴 TWO NUMBERS, BECAUSE ONE OF THEM WAS QUOTED WITHOUT ITS
+# QUALIFIER AND WENT FALSE: the largest segment EVER SCANNED — i.e. at sites where the
+# ref-prefix half passed and this regex actually ran — is 296 B (n=4,449); the largest
+# across ALL match sites is 1,681 B. An earlier wording dropped "ever scanned" and so
+# stated a precise, reproducible number that was wrong by 5.7x. Both are far under the
+# cap, so the conclusion holds either way — which is exactly why the slip survived.
+# There is no adversary here; the operator writes his own commands. This bounds a
+# complexity regression, it does not defend against an attack.
 GIT_OBJECT_READ_RX = re.compile(r"\bgit\b.*?\b(?:show|cat-file)\b")
 GIT_VERB_SCAN_CAP = 4096
 
@@ -835,14 +849,29 @@ def _read_off_a_ref(cmd, start):
     """
     # 🔴 THE CAP IS APPLIED TO THE HEAD, NOT TO THE SEGMENT, AND THAT IS A FIX.
     # It bounded `seg` only, leaving `REF_PREFIX_RX.search(head)` running on the FULL
-    # head — real heads reach ~29 KB here. The widened `[^\s:]+` is super-linear on a
-    # dense run of `"`/`'`/`=`/`(` (those are in BOTH its leading class and its token
-    # class, so the runs overlap): MEASURED 2,312 ms on a 32 KB synthetic head, where
-    # the old enumerated class was 0.4 ms. Round 1 capped one regex and moved cost onto
-    # the other. Capping the head covers both.
-    # ⚠ Truncating can let `(?:^|…)` match mid-token, which only ever ADMITS a token
-    # the untruncated head would have rejected — and the git-verb half still has to
-    # match. Bounded and in the harmless direction.
+    # head — real heads reach tens of KB here. The widened `[^\s:]+` is super-linear on
+    # a head where the search GLOBALLY FAILS, because `"`/`'`/`=`/`(` are in BOTH its
+    # leading class and its token class, so the runs overlap. Round 1 capped one regex
+    # and moved the cost onto the other; capping the head covers both.
+    #
+    # 🔴 THE SHAPE IS PART OF THE MEASUREMENT AND WAS MISSING, WHICH MADE THE NUMBER
+    # LOOK WRONG. Three ordinary "quote-dense 32 KB head" shapes show the NEW class
+    # ~4x FASTER than the old — the opposite sign. The cost appears only on a
+    # global-failure shape: a run of `"`, then a `:` blocker, then a blocker-free tail
+    # containing none of `"'=(`. There it is ~2.7 s at 32 KB and ~10 s at 64 KB against
+    # ~0.4/0.8 ms for the old enumerated class.
+    # ⚠ THE 2,312 ms FIGURE THIS COMMENT ONCE CARRIED WAS INHERITED, NOT REPRODUCED —
+    # asserted under the word MEASURED in the very commit whose own message disclaimed
+    # it. What is stated above is the CLASS (quadratic, on a named shape), re-derived;
+    # treat the milliseconds as load-dependent, not as a constant.
+    #
+    # ⚠ TRUNCATION'S DIRECTION, STATED CORRECTLY: it can let `(?:^|…)` match mid-token
+    # and so ADMIT a token the untruncated head rejects. That is the ARMING direction —
+    # the same false-positive class this whole change exists to remove — NOT a
+    # "harmless" one, which is what this note used to call it. Measured reachability:
+    # 114 real match sites have a head past the cap and ZERO of them admit where the
+    # uncapped head rejects; a synthetic case confirms the counter can see one. So it
+    # is bounded and currently unreached, which is a different claim from harmless.
     head = cmd[:start][-GIT_VERB_SCAN_CAP:]
     if not head.endswith(":") or not REF_PREFIX_RX.search(head):
         return False

@@ -398,6 +398,53 @@ def test_a_COMPUTED_ref_gets_the_exemption_too(home, empty_repo, spelling):
         str(empty_repo / "claudedocs" / DOC)], "spelling %r lost the exemption" % spelling
 
 
+def test_the_scan_cap_BOUNDS_the_search(home, empty_repo):
+    """🔴 THE ONLY GUARD ROUNDS 1-2 KEPT, AND IT WAS PINNED IN NEITHER DIRECTION.
+
+    Round 2 DELETED `LINE_CONTINUATION_RX` on the stated ground that "a mutant joining
+    every newline left the whole suite green". Round 3 applied that same criterion to
+    `GIT_VERB_SCAN_CAP` — the guard round 2 kept and promoted to "THE WHOLE FIX" — and
+    got the same answer: `GIT_VERB_SCAN_CAP = 10**9` SURVIVED, and deleting the
+    truncation outright (`head = cmd[:start]`) SURVIVED. Only `cap = 1` died, which
+    proves the constant is READ, not that it BOUNDS anything. A criterion applied to
+    the thing you deleted and not to the thing you kept is not a criterion.
+
+    Both directions, because a one-sided pin is what got us here:
+      * BEYOND the cap the exemption is NOT granted — kills an inert or deleted cap;
+      * WITHIN it the exemption IS granted — kills a cap so small it bounds everything,
+        which is the mutant that already died and is the cheap way to be green.
+
+    The doc is absent from `empty_repo`, so the exemption is the ONLY thing that can
+    make this arm: the assertions read arming directly rather than through a proxy.
+
+    🔴 THE PADDING MUST NOT BE MADE OF PATH CHARACTERS, AND THE FIRST VERSION OF THIS
+    TEST WAS VACUOUS BECAUSE IT WAS. `HANDOFF_PATH_RX` opens with
+    `[A-Za-z0-9_.~@%+/-]*`, so a run of `y`s and `/`s before `claudedocs/` is swallowed
+    INTO THE MATCH — the head stayed 29 bytes, the cap was never exercised, and the
+    assertion passed because a directory did not exist. It was green, it killed
+    nothing, and only checking `m.start()` by hand showed it. The pad is therefore
+    placed where the head is: after the verb and before the `:` that terminates the
+    ref, so it lengthens the HEAD rather than the match.
+    """
+    resolved = [str(empty_repo / "claudedocs" / DOC)]
+
+    def cmd_with_pad(n):
+        # head becomes `git -C <repo> show <n bytes>:` — the verb sits n bytes back.
+        return ("git -C %s show %s:claudedocs/%s"
+                % (empty_repo, "A" * n, DOC))
+
+    # WITHIN: the verb is inside the cap. Arms.
+    assert guard.handoff_read_docs(
+        bash(cmd_with_pad(100), cwd="/nowhere/else")) == resolved
+
+    # BEYOND: the verb is pushed past the cap, so the capped head cannot see it.
+    # 🔴 The pad OVERSHOOTS the cap by a non-multiple (3x + 7) so the boundary is
+    # crossed rather than landed on — a fixture sitting exactly ON a limit is the other
+    # way a bound test goes vacuous.
+    assert guard.handoff_read_docs(
+        bash(cmd_with_pad(guard.GIT_VERB_SCAN_CAP * 3 + 7), cwd="/nowhere/else")) == []
+
+
 def test_a_LATER_base_wins_when_the_earlier_one_lacks_the_doc(home, tmp_path, repo):
     """🔴 PINS THE SECOND, UNDECLARED BEHAVIOUR CHANGE round 1 found in `_resolve`.
 
