@@ -196,6 +196,17 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   handoff-<anything>.md` arms whether or not the ref or the doc exists. Stated on
   `_read_off_a_ref`, and rank 2 is the decision about closing it.
 
+- 🔴 **THE LADDER'S DURABLE MEASUREMENT, MOVED HERE BECAUSE A REPLACE ALMOST ATE IT.** Round 3
+  established that the shipped executable delta is **behaviour-neutral across 17,978 real
+  corpus commands** — `_read_off_a_ref`'s verdict differs from the pre-round-1 spelling on
+  **zero** of them — and that the base-selection argument holds analytically AND empirically
+  (400-combination differential fuzz, 0 violations; 17,981 payloads: silent→arm **0**,
+  arm→silent 1,187, different-doc 46). Those numbers are the evidence the merge rested on.
+  They were living under `## State now`, which is a REPLACE heading, and `handoff_doc.py`
+  warned `DROPS 1 line(s) that look DURABLE` on the very next update. **A measurement that
+  justifies a decision belongs under an APPEND heading the moment it is made** — status goes
+  in `State now`, evidence does not.
+
 ## How to verify
 ```bash
 # the defect and the fix, against whichever copy you mean — run BEFORE and AFTER a switch
