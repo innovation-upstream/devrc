@@ -25,6 +25,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,9 +34,18 @@ const EXT = resolve(HERE, "../extension");
 const manifest = JSON.parse(readFileSync(join(EXT, "manifest.json"), "utf8"));
 
 /** Every `from "./x.js"` / `from "../y.js"` in a file, resolved to a path
- * relative to the extension root. Static imports only -- this extension uses
- * no dynamic imports inside its modules, and the ONE dynamic import (the
- * content script's entry into lib/widget.js) is the root we start from. */
+ * relative to the extension root.
+ *
+ * 🔴 STATIC IMPORTS ONLY, AND THAT IS A PRECONDITION THIS FILE ENFORCES
+ * RATHER THAN ASSERTS IN PROSE. A `await import("./x.js")` inside a walked
+ * module is INVISIBLE to this regex, so the closure would silently omit
+ * `lib/x.js`, both directions of the equality below would pass, and the
+ * widget would be dead on arrival again with this guard green -- which is
+ * precisely the failure it was written for. A comment saying "we don't use
+ * dynamic imports" is not a guard; `no_dynamic_imports_in_the_closure` below
+ * is. (Measured against the regex: re-exports, multi-line imports,
+ * side-effect imports and import attributes are all SEEN; a commented-out
+ * import is a false positive, which fails loud and safe.) */
 function staticImports(relFile) {
   const src = readFileSync(join(EXT, relFile), "utf8");
   const dir = dirname(relFile);
@@ -82,21 +92,50 @@ test("🔴 the web-accessible set IS the page-loaded import closure -- no more, 
 test("the closure walker actually walks -- positive control", () => {
   // A zero from an unproven walker is indistinguishable from a walker wired to
   // nothing. This asserts the instrument CAN see a transitive dependency: the
-  // ONLY way severity.js enters the set is via widget.js importing it, since
-  // content_widget.js does not name it.
+  // ONLY way severity.js enters the set is via widget.js importing it.
   const closure = importClosure(["lib/widget.js"]);
   assert.ok(closure.size >= 4, `walked only ${closure.size} file(s)`);
   assert.ok(closure.has("lib/severity.js"),
     "the walker must reach a SECOND-level import, not just the root");
-  assert.ok(!staticImports("content_widget.js").has("lib/severity.js"),
-    "severity.js is reached transitively, not named directly -- if this ever "
-    + "becomes false the test above stops proving transitivity");
+  // A third assertion lived here -- that content_widget.js does not name
+  // severity.js directly -- and it was VACUOUS: content_widget.js is a classic
+  // content script whose static-import set the test below separately asserts
+  // must be EMPTY, so it checked that an empty set lacks an element. True by
+  // construction, incapable of failing, and its stated tripwire could never
+  // fire. Removed rather than repaired: the two assertions above do the real
+  // work, and a third layer that cannot fail reads as protection while
+  // providing none.
 });
 
-test("every path the manifest names actually exists on disk", () => {
-  // The other direction, and the one a hand-check already covered. Kept
-  // because it is cheap and the flake ships only TRACKED files: a manifest
-  // entry pointing at a file that was never `git add`ed deploys as a 404.
+test("🔴 no DYNAMIC import hides inside the walked closure", () => {
+  // The precondition that makes the closure test meaningful. `import(expr)` is
+  // unresolvable by static analysis, so if one appears inside a walked module
+  // the closure silently under-reports and the guard above goes green over a
+  // dead widget. Enforced, not asserted in a comment.
+  //
+  // The ONE legitimate dynamic import is content_widget.js's entry into
+  // lib/widget.js -- the root of the walk, and not itself walked.
+  for (const rel of importClosure(["lib/widget.js"])) {
+    const src = readFileSync(join(EXT, rel), "utf8");
+    const hit = src.match(/\bimport\s*\(/);
+    assert.equal(hit, null,
+      `${rel} contains a dynamic import, which the closure walker cannot `
+      + `follow -- add it to the walk explicitly, or the WAR list is unpinned`);
+  }
+});
+
+test("every path the manifest names exists AND is git-tracked", () => {
+  // Two different hazards, and an earlier version of this test conflated them:
+  // its comment named the `git add` trap (the flake ships only TRACKED files,
+  // so an untracked file deploys as a 404) while its assertion called
+  // existsSync, which sees an untracked file perfectly well and passes. A
+  // comment claiming coverage the code does not provide is worse than no
+  // comment, because it stops the next person looking.
+  //
+  // So both are checked. The nix sandbox tier would also catch the trackedness
+  // half -- its source copy contains only tracked files -- but that is a
+  // property of THAT TIER, not of this test, and the dev-host tier is where
+  // most runs happen.
   const named = [
     manifest.background.service_worker,
     ...manifest.content_scripts.flatMap((c) => c.js),
@@ -107,6 +146,18 @@ test("every path the manifest names actually exists on disk", () => {
   ];
   const absent = named.filter((p) => !existsSync(join(EXT, p))).sort();
   assert.deepEqual(absent, [], "manifest names a file that is not on disk");
+
+  // `git ls-files` lists tracked paths only, so an added-but-not-`git add`ed
+  // file is absent from it while sitting right there on disk.
+  const tracked = new Set(
+    execFileSync("git", ["ls-files", "--", "."], { cwd: EXT, encoding: "utf8" })
+      .split("\n").filter(Boolean).map((p) => p.replace(/\\/g, "/")),
+  );
+  assert.ok(tracked.size > 0, "git ls-files returned nothing — the check would be vacuous");
+  const untracked = named.filter((p) => !tracked.has(p)).sort();
+  assert.deepEqual(untracked, [],
+    "manifest names a file that is NOT git-tracked — the flake ships only "
+    + "tracked files, so the switch succeeds and the file is simply not there");
 });
 
 test("the content scripts are registered in dependency-free order", () => {

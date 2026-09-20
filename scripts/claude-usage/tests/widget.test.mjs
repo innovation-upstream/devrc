@@ -11,6 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const W = await import("../extension/lib/widget.js");
+const { TONE_ORDER: TONES } = await import("../extension/lib/severity.js");
 const { NAME_A, NAME_B, NOW, ORG_A, ORG_B, fullUsage, nullUsage } =
   await import("./fixtures.mjs");
 const { normalizeUsage } = await import("../extension/lib/normalize.js");
@@ -332,7 +333,38 @@ test("every row the painter receives carries the full field set", () => {
     assert.equal(typeof row.value, "string");
     assert.equal(typeof row.meta, "string");
     assert.ok(row.bar === null || (typeof row.bar === "number" && row.bar >= 0 && row.bar <= 100));
+    // `tone` was added to every row and paintExpanded reads it, but this pin
+    // was not extended with it -- a row shipped without a tone passed a test
+    // whose whole purpose is that the painter's fields are present.
+    assert.ok(TONES.includes(row.tone), `${row.key} tone=${row.tone}`);
   }
+});
+
+test("the MODEL keeps a record tone distinct from the per-window tones", () => {
+  // ⚠ THIS IS AN INVARIANT GUARD ON THE MODEL, NOT A REGRESSION TEST, and the
+  // distinction cost a round to learn. Round 2's finding was that the PAINTER
+  // rendered model.tone nowhere; the model was already correct, so this
+  // assertion was GREEN at the broken tip — watched, not assumed. Titled
+  // "the RECORD tone survives on the card" at first, which claimed coverage
+  // of a surface it never touches.
+  //
+  // The regression guard for that defect lives where the defect lives:
+  // tests/content_widget.test.mjs, "the expanded card RENDERS the record
+  // tone", which IS watched red at d2c68d20. This test pins the model's half
+  // of the contract so the painter has something correct to render.
+  const r = rec(ORG_A, NAME_A);
+  r.severity = "critical";
+  r.session.utilization = 5;
+  r.weekly.utilization = 5;
+  const m = W.widgetModel(r, NOW);
+  assert.equal(m.tone, "crit", "the record is critical because the API says so");
+  assert.deepEqual(m.rows.map((x) => x.tone), ["ok", "ok", "ok"],
+    "...while each individual WINDOW is genuinely fine");
+
+  // And the fixture's own disagreement, which is the everyday case.
+  const f = rec(ORG_A, NAME_A);            // severity "medium", 9% / 47%
+  assert.equal(W.widgetModel(f, NOW).tone, "warn",
+    "an API severity the percentages do not justify must still reach the card");
 });
 
 test("the widget's warn threshold matches the service worker's toast threshold", async () => {

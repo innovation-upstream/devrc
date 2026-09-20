@@ -257,7 +257,16 @@ SUITES=(
   # web-accessible set against widget.js's real import closure. 11 files /
   # 140 tests. Floors: 11 - min(50, max(1, 11/20)) = 10 files;
   # 140 - min(50, max(1, 140/20)) = 133 tests.
-  "scripts/claude-usage/tests|10|133"
+  #
+  # Re-measured after round 2. Both of that round's findings were in
+  # content_widget.js -- the file with ZERO coverage, which is also where
+  # round 1's 🔴 was -- so it now has DOM tests against the repo's
+  # shadow-DOM content-script harness (discord-embed-ext's fake_discord_dom),
+  # and content_widget.js grew a NO_AUTOSTART hook like its two siblings so a
+  # second instance is obtainable at all. 12 files / 149 tests. Floors:
+  # 12 - min(50, max(1, 12/20)) = 11 files;
+  # 149 - min(50, max(1, 149/20)) = 141.55 -> 142 tests.
+  "scripts/claude-usage/tests|11|142"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree; js-source:

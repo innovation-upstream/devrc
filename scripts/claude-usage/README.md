@@ -68,3 +68,12 @@ read. They each decided it independently until a round-0 audit found they
 disagreed — the badge coloured from the API's `severity` string, the widget
 banded the raw percentages — and that a missing severity row painted a green
 badge at 99%. It now takes the worse of the two signals.
+
+⚠ **Two different claims, and collapsing them is how this went wrong twice.**
+The *record* tone — worst of (API severity, percent band) — is what the badge,
+the collapsed pill and the card's header dot show. The *bars* inside the card
+show each window's own percent band, deliberately: a 5% session bar must not
+turn red because the weekly window is at 97%. A round-2 audit caught the
+in-between state where the bars had been given their own tone and the record
+tone was rendered nowhere, so a `severity: "critical"` account showed a red
+badge above three green bars.

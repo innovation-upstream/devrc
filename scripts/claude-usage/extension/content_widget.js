@@ -61,10 +61,13 @@
     "border-radius:12px;padding:10px 12px 8px;box-shadow:0 4px 16px rgba(0,0,0,.13);",
     "pointer-events:auto}",
     ".card.stale{opacity:.72}",
-    ".card.dead{opacity:.6}",
+    ".card.dead,.pill.dead{opacity:.6}",
+    ".pill.dead{cursor:default;padding:5px 10px}",
+    ".pill.dead .note{padding:0;color:inherit}",
 
-    ".head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}",
-    ".name{font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+    ".head{display:flex;align-items:center;gap:6px;margin-bottom:8px}",
+    ".name{font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;",
+    "white-space:nowrap;flex:1 1 auto}",
     ".collapse{all:unset;cursor:pointer;width:18px;height:18px;border-radius:5px;",
     "display:grid;place-items:center;font-size:14px;line-height:1;color:#6b7280;flex:0 0 auto}",
     ".collapse:hover{background:rgba(0,0,0,.07)}",
@@ -91,8 +94,22 @@
     ".pill:hover{background:#fff}",
     ".dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}",
 
-    // Tones match the service worker's badge palette exactly, so the toolbar
-    // badge and the in-page widget can never disagree about severity.
+    // Tone hexes come from lib/severity.js's toneColor(), the same source the
+    // badge reads.
+    //
+    // 🔴 THIS COMMENT HAS BEEN WRONG TWICE AND IS NOT A PLACE TO BE CLEVER.
+    // It first read "tones match the badge palette exactly, so the two can
+    // never disagree about severity" -- false, because a matching PALETTE is
+    // not a matching PREDICATE, and the two were in fact computing severity by
+    // different rules (lib/severity.js's header records that). Consolidating
+    // the predicate made the sentence true; the very next commit made it false
+    // again by giving each bar its own per-window tone and rendering the
+    // record tone nowhere, so a "critical" record showed a red badge and three
+    // green bars. What is actually true, and all that should be claimed here:
+    // the CARD'S HEADER DOT and the collapsed PILL show `model.tone`, which is
+    // the same record-level worst-of value the badge shows; the BARS show
+    // their own window's percent band, which is a different and narrower
+    // claim. Do not compress those two sentences into one.
     ".t-ok{background:#31a73c}",
     ".t-warn{background:#f9ab00}",
     ".t-crit{background:#d93025}",
@@ -206,6 +223,18 @@
 
     var head = document.createElement("div");
     head.className = "head";
+    // 🔴 THE RECORD TONE LIVES HERE, and it must live SOMEWHERE on the card.
+    // Each bar is coloured by its own window (a 5% session bar must not be red
+    // because the weekly window is), which is right -- but the first version of
+    // that fix left `model.tone` rendered nowhere at all, so the API's
+    // `severity` signal vanished from the expanded card entirely: a record with
+    // severity "critical" at 5%/5% painted a RED badge and three GREEN bars.
+    // That is the badge-vs-page disagreement lib/severity.js exists to
+    // eliminate, reintroduced inverted. This dot is the record-level signal --
+    // the same worst-of tone the badge and the collapsed pill show.
+    var tone = document.createElement("span");
+    tone.className = "dot t-" + model.tone;
+    tone.title = "overall: " + model.tone;
     var name = document.createElement("span");
     name.className = "name";
     name.textContent = model.name;
@@ -216,7 +245,7 @@
     collapse.setAttribute("aria-label", "Collapse");
     collapse.textContent = "–";
     collapse.addEventListener("click", function () { setCollapsed(true); });
-    head.append(name, collapse);
+    head.append(tone, name, collapse);
     card.appendChild(head);
 
     if (model.empty) {
@@ -299,14 +328,26 @@
       if (!shadow) return;
       var root = shadow.querySelector(".root");
       if (!root) return;
+      // 🔴 RETIRING MUST NOT EXPAND A WIDGET THE OPERATOR COLLAPSED. Storage
+      // is unreachable by now (the context is what died), so the preference
+      // is read off what is currently on screen. The first version of this
+      // unconditionally painted the 232px card, which meant a reload of the
+      // extension re-occupied claude.ai's composer corner with an
+      // undismissable box -- for a widget the operator had deliberately
+      // shrunk to a pill, and directly undoing the pointer-events fix made in
+      // the same commit.
+      var wasCollapsed = !!root.querySelector(".pill");
       root.textContent = "";
-      var card = document.createElement("div");
-      card.className = "card dead";
+      var box = document.createElement("div");
+      box.className = wasCollapsed ? "pill dead" : "card dead";
+      box.title = "Claude usage — extension reloaded. Refresh the page to resume.";
       var note = document.createElement("div");
       note.className = "note";
-      note.textContent = "Claude usage — extension reloaded. Refresh to resume.";
-      card.appendChild(note);
-      root.appendChild(card);
+      note.textContent = wasCollapsed
+        ? "—"
+        : "Claude usage — extension reloaded. Refresh to resume.";
+      box.appendChild(note);
+      root.appendChild(box);
     } catch (e) { /* the page is tearing down too; nothing to do */ }
   }
 
@@ -368,5 +409,31 @@
     });
   }
 
-  boot();
+  // --- test surface ------------------------------------------------------- //
+  //
+  // Mirrors content_probe.js's `__CU_PROBE__` and discord-embed's
+  // DEE_NO_AUTOSTART: the same convention, for the same reason. Without it
+  // this file is structurally untestable — it is an unconditional IIFE, and a
+  // node test cannot get a second instance of it (the ESM cache does not
+  // re-evaluate a module per query string, measured), so every test after the
+  // first would share one mount's state.
+  //
+  // `reset()` is what makes a per-test fixture possible: it drops the module
+  // scope's handles to the previous page so the next boot builds a fresh host
+  // against whatever `document` the test has installed.
+  globalThis.__CU_WIDGET__ = {
+    boot: boot,
+    render: render,
+    retire: retire,
+    reset: function () {
+      if (timer !== null) { clearInterval(timer); timer = null; }
+      mod = null;
+      shadow = null;
+      hostEl = null;
+    },
+  };
+
+  if (!(typeof globalThis !== "undefined" && globalThis.CLAUDE_USAGE_WIDGET_NO_AUTOSTART)) {
+    boot();
+  }
 })();
