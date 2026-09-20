@@ -335,15 +335,24 @@ DASH_C_RX = re.compile(r"(?:^|\s)-C\s*(\S+)")
 # claim. ⚠ A possessive `[^\s:]++` was tried and does NOT fix it (309 ms at 32 KB):
 # the outer alternation still retries at every position.
 #
-# ⚠ THE NARROWING THIS BUYS, DECLARED RATHER THAN DISCOVERED LATER: a ref token whose
-# LAST character is one of the excluded four loses the exemption. In practice that is
-# the QUOTED computed ref — `git show "${B}":`, `git show '$B':`,
-# `git show "$(git rev-parse HEAD)":` all go True -> False. The UNQUOTED spellings
-# (`$B`, `${B}`, `$(…)`, backticks) all still arm. Direction is fail-SAFE (a lost
-# exemption makes the guard quieter, never blocking) and corpus incidence is ZERO, so
-# this is accepted, not fixed — but it is PINNED by
-# `test_a_QUOTED_computed_ref_loses_the_exemption` so it cannot drift unnoticed. An
-# earlier draft of this note claimed "every computed ref" still works. It does not.
+# ⚠ THE NARROWING THIS BUYS, DECLARED RATHER THAN DISCOVERED LATER — AND IT IS WIDER
+# THAN TWO EARLIER DRAFTS OF THIS NOTE SAID. The rule is mechanical: a ref token whose
+# LAST character is one of the four excluded ones loses the exemption. Draft 1 claimed
+# "every computed ref" still works — false. Draft 2 said the cost is "the QUOTED
+# COMPUTED ref" — also too narrow: ordinary shell QUOTING produces the trailing `"` or
+# `'`, so a quoted LITERAL goes too (`git show "refs/heads/docs/handoff-x":` flips).
+# All ten quoted spellings flip; every UNQUOTED spelling (`$B`, `${B}`, `$(…)`,
+# backticks, plain refs) still arms.
+# 🔴 AND THE INCIDENCE IS NOT ZERO — THAT CLAIM WAS FALSE AND IT MATTERED. Re-derived
+# by round 1 of #1811 over the transcripts INCLUDING `subagents/`: **2** real sites
+# flip, and only one is this arc's own probe. The other is a genuine ref-read from a
+# different session five days before this PR —
+# `subprocess.run(['git','-C',R,'show',ref+':claudedocs/handoff-tmux-webapp.md'])`,
+# whose token ends in `'`. So this narrowing has already cost a real arming once.
+# It is still ACCEPTED — the direction is fail-SAFE (a lost exemption makes the guard
+# quieter, never blocking) and the alternative reinstates a quadratic — but it is a
+# measured cost, not a free one, and it is PINNED by
+# `test_a_QUOTED_ref_loses_the_exemption` so it cannot drift unnoticed.
 #
 # ⚠ THIS IS A SHELL-WORD BOUNDARY, NOT "THE" BOUNDARY, and an earlier note overstated
 # it as "a ref cannot contain the `:` that terminates it". True of ref NAMES
@@ -390,16 +399,29 @@ SEGMENT_SPLIT_RX = re.compile(r"[;&|\n]")
 # added to pin the cap, and settling that test's mutation verdict became a ranked work
 # item. All three are gone: find the first `git`, then look for a verb after it.
 #
-# 🔴 THE CAP WAS RETIRED ON THE WRONG OPERAND'S NUMBERS, AND THE CORRECT ONES ARE HERE.
-# The argument was "the largest SEGMENT ever scanned is 296 B against a 4096 B cap".
-# 296 B is exact — and irrelevant: the cap truncated the **HEAD**, which is what both
-# scans are quadratic in. MEASURED 2026-09-20 over all 6,626 transcripts on this host,
-# 21,291 match sites: head max **29,039 B**, p99 3,111 B, median 156 B, and **108
-# sites exceeded the deleted cap**. So the cap WAS reached, on a quantity 7x larger
-# than the one quoted to retire it. The deletion is still right — but because the two
-# scans above and `REF_PREFIX_RX` are now LINEAR, never because the input is small.
-# 🔴 As written before, the argument would have licensed deleting the cap WITHOUT those
-# changes, which measurement says is unsafe.
+# 🔴 WHY DELETING THE CAP IS SAFE — AND THE FIRST TWO ARGUMENTS FOR IT WERE BOTH WRONG.
+# Draft 1: "the largest SEGMENT ever scanned is 296 B against a 4096 B cap". Exact, and
+# about the wrong operand — the cap truncated the HEAD. Measured over all transcripts on
+# this host, head max ~28-29 KB and ~110 sites DID exceed the cap.
+# Draft 2: "the scans are now linear, so the cap is unnecessary". Linear PER CALL, and
+# the conclusion is about the COMMAND: this helper runs once per `HANDOFF_PATH_RX`
+# match, so k matches x a full-head scan is still O(n^2) per command — round 1 of #1811
+# measured 27.9x at k=6,400. The comment that said exactly this was DELETED to make
+# room for draft 2, which is the failure mode this file keeps repeating.
+#
+# 🔴 THE ARGUMENT THAT SURVIVES MEASUREMENT: the cap never delivered the property it was
+# credited with. It did not bound `HANDOFF_PATH_RX` (`:287`), which is ITSELF O(n^2) on
+# a long path-class run and dominates the whole hot path. MEASURED on
+# `git show <64 KB of 'a'>:claudedocs/handoff-x.md`: **1,598 ms WITH the cap, 1,636 ms
+# without** — no material difference, because the cap was bounding the cheap half.
+# What makes the residual acceptable is REACH, stated as such rather than dressed up as
+# linearity: corpus max is 18 matches/command and ~34 KB, `stop_decision` never calls
+# this path so the cost is PostToolUse-only, and a blown hook loses an ARMING (silent,
+# fail-safe) rather than hanging a turn.
+# ⚠ A bounded-tail fix IS available and is answer-preserving (`REF_PREFIX_RX` is
+# `\Z`-anchored, so only the trailing token can match). It was written and then REVERTED:
+# it adds code plus two new two-way ledgers to bound an unreachable case, which is the
+# over-guarding this deletion exists to undo. Reach for it if reach ever changes.
 #
 # 🔴 EQUIVALENCE WAS MEASURED, NOT ASSUMED — including the cases that distinguish
 # ORDER, which is the whole content of the original `.*?`. Those are pinned by

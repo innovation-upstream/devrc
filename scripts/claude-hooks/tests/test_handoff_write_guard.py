@@ -398,22 +398,32 @@ def test_a_COMPUTED_ref_gets_the_exemption_too(home, empty_repo, spelling):
         str(empty_repo / "claudedocs" / DOC)], "spelling %r lost the exemption" % spelling
 
 
-@pytest.mark.parametrize("spelling", ['"${B}"', "'$B'", '"$(git rev-parse HEAD)"'])
-def test_a_QUOTED_computed_ref_loses_the_exemption(home, empty_repo, spelling):
-    """🔴 A DECLARED NARROWING, PINNED SO IT CANNOT DRIFT UNNOTICED.
+@pytest.mark.parametrize("spelling", [
+    '"${B}"', "'${B}'", '"$B"', "'$B'",
+    '"$(git rev-parse HEAD)"', "'$(git rev-parse HEAD)'",
+    '"`git rev-parse HEAD`"', "'`git rev-parse HEAD`'",
+    '"refs/heads/docs/handoff-x"',          # 🔴 a quoted LITERAL, not a computed ref
+    "'origin/main'",                        # 🔴 the same, single-quoted
+])
+def test_a_QUOTED_ref_loses_the_exemption(home, empty_repo, spelling):
+    """🔴 A DECLARED NARROWING, PINNED SO IT CANNOT DRIFT — AND WIDER THAN FIRST WRITTEN.
 
     `REF_PREFIX_RX`'s token class excludes `"'=(` to kill a quadratic (see the
-    constant). The cost is that a ref token ENDING in one of them — in practice the
-    QUOTED computed ref — no longer arms. The unquoted spellings still do, and
-    `test_a_COMPUTED_ref_gets_the_exemption_too` pins those.
+    constant). The rule is mechanical: a ref token whose LAST character is one of those
+    four loses the exemption. Ordinary shell QUOTING puts a `"` or `'` there, so this is
+    not limited to COMPUTED refs — a quoted LITERAL flips too, which is why the last two
+    rows are here. All ten spellings below flip; every unquoted one still arms and is
+    pinned by `test_a_COMPUTED_ref_gets_the_exemption_too`.
 
-    🔴 THIS TEST EXISTS BECAUSE THE SUITE WAS GREEN EITHER WAY. Round 0 of #1811 found
-    the PR claiming it still accepts "every computed ref" while these five shapes had
-    silently flipped True -> False, invisible because every parametrized case was
-    UNQUOTED. A narrowing nothing asserts is a narrowing nobody can see.
+    🔴 THIS TEST EXISTS BECAUSE THE SUITE WAS GREEN EITHER WAY. Every parametrized case
+    in the original was UNQUOTED, so the narrowing was invisible to it. Round 0 of #1811
+    found the PR claiming it still accepted "every computed ref"; round 1 found the
+    follow-up claim ("the quoted COMPUTED ref") still too narrow, and the accompanying
+    "corpus incidence is ZERO" simply false — it is 2, one of them a genuine ref-read
+    from another session. A narrowing nothing asserts is a narrowing nobody can see.
 
     Direction is fail-SAFE — a lost exemption makes the guard quieter, never blocking —
-    and corpus incidence is ZERO, which is why it is accepted rather than fixed.
+    which is why it is accepted rather than fixed.
     """
     cmd = "git -C %s show %s:claudedocs/%s" % (empty_repo, spelling, DOC)
     assert guard.handoff_read_docs(bash(cmd, cwd="/nowhere/else")) == []
