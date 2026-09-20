@@ -352,8 +352,10 @@ def test_a_doc_read_OFF_A_REF_still_arms_though_it_is_not_on_disk(home, empty_re
     """🔴 THE ONE EXEMPTION FROM THE EXISTENCE GATE, AND THE CASE IT PROTECTS.
 
     A handoff that lives only on an unmerged branch is read as
-    `git -C <repo> show <ref>:claudedocs/<doc>` — this repo's CLAUDE.md prescribes
-    exactly that — and is legitimately ABSENT from the working tree. The existence gate
+    `git -C <repo> show <ref>:claudedocs/<doc>` — a shape MEASURED at 1,272 distinct
+    commands across the transcript corpus, which is the authority for it; an earlier
+    draft of this docstring cited `CLAUDE.md`, which contains no `git show` at all —
+    and is legitimately ABSENT from the working tree. The existence gate
     must not make that read silent: `/handoff` will write into that `claudedocs/`, and
     the guard can measure it. The fixture repo's `claudedocs/` is EMPTY on purpose, so
     this passes only via the ref exemption and not by the file happening to be there.
@@ -385,21 +387,6 @@ def test_the_ref_exemption_does_NOT_widen_into_a_hole(home, empty_repo, cmd):
     that admits any of these has re-opened the directory-only behaviour under a new
     name — which is how a fix becomes a rename."""
     assert guard.handoff_read_docs(bash(cmd, cwd=str(empty_repo))) == []
-
-
-def test_a_handoff_shaped_Read_OUTSIDE_claudedocs_does_NOT_arm(home, tmp_path):
-    """🔴 THE ARMS WERE ASYMMETRIC AND THIS IS THE SIDE THAT WAS WRONG. The Bash arm's
-    own non-match table already declares `cat docs/handoff-format.md` a non-read
-    ("handoff-shaped, wrong directory"), and `is_handoff_write` requires `claudedocs/`
-    before a Write can SATISFY. Only the Read arm took `file_path` on basename alone —
-    so a document ABOUT the handoff format armed a guard that no write could ever
-    satisfy. The file is REAL here, so this pins the `claudedocs/` requirement and not
-    the existence gate."""
-    d = tmp_path / "repo" / "docs"
-    d.mkdir(parents=True)
-    doc = d / "handoff-format.md"
-    doc.write_text("# about the format\n")
-    assert guard.handoff_read_docs(read_tool(str(doc))) == []
 
 
 def test_a_path_whose_directory_does_not_exist_does_NOT_arm(home, tmp_path):

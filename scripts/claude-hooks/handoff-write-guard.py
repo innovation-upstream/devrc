@@ -276,9 +276,12 @@ HANDOFF_TOOL = "scripts/lib/handoff_doc.py"
 #
 # 🔴 `:` IS NOT IN THE CHARACTER CLASS, AND THAT IS LOAD-BEARING RATHER THAN
 # INCIDENTAL. `git show origin/zach/topic:claudedocs/handoff-x.md` is the canonical way
-# to read a handoff that lives on an unmerged branch — this repo's own CLAUDE.md
-# prescribes it — and excluding `:` makes the match start cleanly at `claudedocs/`
-# instead of swallowing the ref. The remaining leading run is what carries a `-C`-less
+# to read a handoff that lives on an unmerged branch — MEASURED at 1,272 distinct such
+# commands across the transcript corpus — and excluding `:` makes the match start
+# cleanly at `claudedocs/` instead of swallowing the ref.
+# ⚠ THIS SENTENCE CITED `CLAUDE.md` AND THAT WAS FALSE: that file contains no `git
+# show` at all. Round 0 of #1799 caught it, and a LINE-BASED grep did not — the claim
+# wrapped across these comment lines, so only a sweep over normalised text found it. The remaining leading run is what carries a `-C`-less
 # absolute or `~`-prefixed path.
 HANDOFF_PATH_RX = re.compile(r"[A-Za-z0-9_.~@%+/-]*claudedocs/[A-Za-z0-9_.%+-]+\.md")
 
@@ -797,10 +800,16 @@ def _resolve(raw, bases, off_a_ref=False):
 
     🔴 THE CASE THE OLD SPELLING PROTECTED IS STILL PROTECTED, VIA `off_a_ref`. A
     handoff that exists only on an unmerged branch is read as
-    `git -C <repo> show <ref>:claudedocs/<doc>` — this repo's CLAUDE.md prescribes
-    exactly that — and such a doc is legitimately absent from the working tree. That
-    read still arms. Requiring the file for everything ELSE is what stops a
-    doc-shaped string from booking a document nobody can open.
+    `git -C <repo> show <ref>:claudedocs/<doc>`, and such a doc is legitimately absent
+    from the working tree. That read still arms. Requiring the file for everything ELSE
+    is what stops a doc-shaped string from booking a document nobody can open.
+
+    ⚠ THE AUTHORITY FOR THAT SHAPE IS MEASUREMENT, NOT A DOCUMENT. This docstring said
+    "this repo's CLAUDE.md prescribes exactly that", and `CLAUDE.md` contains no `git
+    show` at all — the claim is false, it is pre-existing at `HANDOFF_PATH_RX` above,
+    and round 0 of #1799 caught it. What DOES support the shape: 1,272 distinct
+    `git … (show|cat-file) … <ref>:claudedocs/handoff-*.md` command strings across the
+    transcript corpus. Cite that, not a file that will not corroborate it.
 
     The directory check is kept as well as, not instead of: it is what keeps a
     dispatch-hub session naming a repo this host does not have from resolving at all,
@@ -842,13 +851,17 @@ def handoff_read_docs(data):
     if tool == "Read":
         for k in PATH_KEYS:
             v = ti.get(k)
-            # 🔴 `claudedocs/` IS REQUIRED HERE TOO — THE ARMS WERE ASYMMETRIC. The
-            # Bash arm has always required it (`HANDOFF_PATH_RX` is built around the
-            # literal segment) and so does `is_handoff_write`; only this arm took
-            # `file_path` on basename alone, so `docs/handoff-format.md` — a document
-            # ABOUT the format, which the Bash arm's own non-match table already
-            # names — armed through Read and could never be satisfied through Write.
-            if isinstance(v, str) and v and "claudedocs/" in v:
+            # ⚠ THE ARMS ARE ASYMMETRIC ON `claudedocs/` AND THAT IS LEFT ALONE HERE.
+            # The Bash arm requires the literal segment (`HANDOFF_PATH_RX` is built
+            # around it) and so do two of `is_handoff_write`'s routes; this arm takes
+            # `file_path` on basename alone. Narrowing it was tried in this PR and
+            # REMOVED after round 0 measured the cost: 39 reads of REAL documents
+            # outside `claudedocs/` (`containers/clawgate/HANDOFF.md` across 8 homelab
+            # checkouts, `~/taxes/2026/HANDOFF.md`), one of which has armed AND FIRED
+            # in production. Which arm is WRONG is an open question; narrowing the
+            # wider one makes both consistently blind to a doc class this guard was
+            # demonstrably working on. Decide it on the numbers, in its own change.
+            if isinstance(v, str) and v:
                 raws.append((v, False))
         # 🔴 `cwd` IS A BASE HERE TOO, EVEN THOUGH THE TOOL ASKS FOR AN ABSOLUTE PATH.
         # `lib/subsystem_touch.py` — which reads these same payloads out of transcripts
