@@ -94,6 +94,48 @@ def _load_budget(path=Path(__file__).resolve().parent / "lib" / "handoff_budget.
 
 BUDGET = _load_budget()
 
+
+def _repo_of(doc):
+    """The nearest ancestor of `doc` holding a `.git` entry, or None.
+
+    A worktree's `.git` is a FILE, not a directory, so this tests existence
+    rather than is_dir() — `gate_enforces_budget` records the same trap from the
+    other side (path-equality against a known root is wrong in a worktree).
+    """
+    try:
+        for d in [doc if doc.is_dir() else doc.parent, *doc.parents]:
+            if (d / ".git").exists():
+                return d
+    except OSError:
+        return None
+    return None
+
+
+def gate_reads(doc):
+    """Does the per-doc byte gate actually READ this document's repo?
+
+    🔴 THE QUESTION IS ABOUT THE AUDITED ROOT, NEVER ABOUT THIS SCRIPT. Asking
+    whether the gate sits next to `handoff-audit.py` answers a question about the
+    script's own checkout, which is TRUE IN EVERY DEVRC CLONE — so the banner
+    announced an enforced ceiling over corpora that nothing enforces, e.g. a run
+    against `homelab-talos/claudedocs`, which ships neither the gate nor
+    `handoff_budget`. Round 1 of #1815, F1. The cost of that class is in
+    `handoff_doc.gate_enforces_budget`: civitai/cli#618, five evictions and
+    35,517 B moved against a gate that could not see the repo.
+
+    Fails toward the WEAKER claim: an unknown repo, or one we cannot read, is
+    reported as ungated. We never invent a gate we could not see.
+    """
+    if BUDGET is None:
+        return False
+    repo = _repo_of(doc)
+    if repo is None:
+        return False
+    try:
+        return (repo / BUDGET.GATE_RELPATH).is_file()
+    except OSError:
+        return False
+
 # 🔴 BORROWED, NOT RE-DECLARED, AND THESE TWO ARE NOT ENFORCED.
 # skill-audit reads these from the gate that owns them, so there is one copy.
 # ⚠ CORRECTED 2026-09-20: this block used to say "A handoff doc has NO gate:
@@ -539,13 +581,28 @@ def render(audits, show_all, n_detail, n_sections, out=sys.stdout, per_root=(),
     p("     different threshold, so read the verdicts below as a REFERENCE you may")
     p("     argue with. The numbers are borrowed from the SKILL.md gate via")
     p("     skill-audit.py rather than re-declared here, so there is one copy.")
-    if BUDGET is not None:
-        p(f"  ⚠ BUT scripts/tests/test_handoff_doc_size.py DOES enforce "
-          f"{BUDGET.MAX_BYTES:,} B per doc")
-        p("     (plus a grandfather ledger) over claudedocs/**/handoff-*.md in")
-        p("     THIS repo, and it fails on `main` for everyone. A doc can sit far")
-        p("     over the target above and still pass it — they are different")
-        p("     thresholds, and only that one can go red.")
+    # 🔴 PER AUDITED ROOT — see `gate_reads`. The three arms are different claims
+    # and the ungated one is the load-bearing arm: telling an author their corpus
+    # is enforced when it is not is what cost civitai/cli#618 its 35,517 B.
+    if BUDGET is not None and audits:
+        gated = [a for a in audits if gate_reads(a["path"])]
+        if len(gated) == len(audits):
+            p(f"  ⚠ BUT `{BUDGET.GATE_RELPATH}` DOES enforce "
+              f"{BUDGET.MAX_BYTES:,} B per doc")
+            p("     (plus a grandfather ledger) over these docs, and it fails on")
+            p("     `main` for everyone. A doc can sit far over the target above and")
+            p("     still pass it — different thresholds, and only that one goes red.")
+        elif not gated:
+            p(f"  ⚠ AND NO per-document gate reads these docs either: their repo")
+            p(f"     ships no `{BUDGET.GATE_RELPATH}`, so NOTHING here can go red.")
+            p("     Treat every verdict below as JUDGEMENT about what the next")
+            p("     session has to read, never as a build to fix.")
+        else:
+            p(f"  ⚠ MIXED: `{BUDGET.GATE_RELPATH}` reads {len(gated)} of "
+              f"{len(audits)} of these docs")
+            p(f"     ({BUDGET.MAX_BYTES:,} B each); for the other "
+              f"{len(audits) - len(gated)} NOTHING can go red. The")
+            p("     per-doc rows below do not distinguish them — check the repo.")
 
     sizes = sorted(a["size"] for a in audits)
     if sizes:

@@ -2796,7 +2796,11 @@ BUDGET_NEAR_BYTES = 4_096
 # whatever checkout it ships in — the base clone, a worktree, any future clone.
 # Hence the predicate below is DERIVED from that fact rather than hardcoding a
 # path: a repo is gated iff it ships the gate.
-BUDGET_GATE_RELPATH = "scripts/tests/test_handoff_doc_size.py"
+#: Re-exported, NOT re-declared: `handoff_budget` owns it beside the ceiling it
+#: gates, because `handoff-audit.py` must ask the same question of a DIFFERENT
+#: root and two copies are how the two tools come to disagree. Name kept so every
+#: existing reference (and its tests) keeps working.
+BUDGET_GATE_RELPATH = handoff_budget.GATE_RELPATH
 
 
 def gate_enforces_budget(repo: Path) -> bool:
@@ -2821,6 +2825,20 @@ def gate_enforces_budget(repo: Path) -> bool:
         # weaker claim: we never invent a gate we could not see.
         return False
 
+
+#: Where each `audit_text` bucket keeps its (start, end) LINE RANGE. The four
+#: buckets have three different tuple shapes and there is no positional rule that
+#: covers all of them — `retracted` is `(s, e, b)`, `resolved`/`dated` are
+#: `(title, s, e, b)`, `done` is `(rank, s, e, b, is_done)`, so "the last three"
+#: works for every bucket except `done`, whose last element is a bool. Enumerated
+#: rather than derived, and pinned two-way by a test that re-derives each bucket's
+#: own byte count from the range these indices select.
+AUDIT_SPAN_INDEX = {
+    "resolved": (1, 2),
+    "dated": (1, 2),
+    "done": (1, 2),
+    "retracted": (0, 1),
+}
 
 #: Sibling auditor. Loaded LAZILY and DEFENSIVELY — see `evictable_note`.
 _AUDITOR = Path(__file__).resolve().parent.parent / "handoff-audit.py"
@@ -2865,19 +2883,63 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         mod = importlib.util.module_from_spec(spec)
         loader.exec_module(mod)
         a = mod.audit_text(merged_text)
+        # 🔴 THE STEP IS PART OF THE ROW, and getting it wrong told authors to do
+        # the thing the playbook forbids. `test_handoff_doc_size.py`'s ladder is:
+        # step 1 EVICT WHAT HAS CLOSED; step 2 DEMOTE DATED EVIDENCE to `refs/`
+        # LEAVING A POINTER — and then, in terms, "DO NOT satisfy this by deleting
+        # an open investigation, a gotcha or a ruled-out theory". `retracted` is
+        # BY CONSTRUCTION bullets inside a Gotchas section, i.e. simultaneously a
+        # gotcha and a ruled-out theory. Labelling all four "step 1 — do this
+        # first" prescribed deleting exactly those. Round 1 of #1815, F4.
         rows = [
-            ("resolved investigations", a["resolved_b"], len(a["resolved"]), "block"),
-            ("completed ranked items", a["done_b"], len(a["done"]), "item"),
-            ("retracted / dead-ends", a["retracted_b"], len(a["retracted"]), "bullet"),
-            ("work-status headings", a["dated_b"], len(a["dated"]), "block"),
+            ("resolved investigations", a["resolved_b"], len(a["resolved"]), "block", 1),
+            ("completed ranked items", a["done_b"], len(a["done"]), "item", 1),
+            ("retracted / dead-ends", a["retracted_b"], len(a["retracted"]), "bullet", 2),
+            ("work-status headings", a["dated_b"], len(a["dated"]), "block", 2),
         ]
         rows = [r for r in rows if r[1] > 0]
         if not rows:
             return ""
-        out = ["  Evictable in THIS doc, measured (playbook step 1 — do this first):"]
-        for label, b, n, unit in rows:
-            out.append(f"    {label:<24}{b:>9,} B  ({n} {unit}{'' if n == 1 else 's'})")
-        net = a["net"]
+        out = ["  Evictable in THIS doc, measured:"]
+        for label, b, n, unit, step in rows:
+            verb = "evict" if step == 1 else "MOVE to refs/, leave a pointer"
+            out.append(f"    {label:<24}{b:>9,} B  ({n} {unit}{'' if n == 1 else 's'})"
+                       f"  — step {step}, {verb}")
+        if any(step == 2 for *_, step in rows):
+            out.append("    🔴 step 2 is a MOVE, never a delete: a gotcha or a ruled-out "
+                       "theory stays in the doc.")
+
+        # 🔴 UNION, NOT SUM — `audit_text`'s `gross` adds the four buckets without
+        # unioning their line ranges, and one block can land in two of them (an
+        # H3 matching both RESOLVED_HEAD and WORK_STATUS). Measured: 7 of 851
+        # handoff docs under ~/workspace overlap, worst overstatement 42.6%. That
+        # is tolerable in a REPORT and not here, because this line promises
+        # "CLEARS the N B you are over by" — an author who evicts everything named
+        # and is still red got the one outcome worse than saying nothing.
+        # Round 1 of #1815, F5. `audit_text`'s own `gross` is left alone: it is a
+        # report number with its own tests, and this is the consumer that makes a
+        # promise out of it.
+        # 🔴 THE BUCKETS DO NOT SHARE A TUPLE SHAPE, and assuming they did was a
+        # defect in the FIRST draft of this union: `retracted` is a 3-tuple
+        # `(start, end, bytes)` while `resolved`/`dated` are `(title, start, end,
+        # bytes)` and `done` is `(rank, start, end, bytes, is_done)`. Blindly
+        # indexing [1],[2] read `retracted`'s END and BYTES as a line range, and
+        # because this whole body is wrapped in a `except (Exception, SystemExit)`
+        # the resulting IndexError would have DELETED THE NOTE SILENTLY rather
+        # than failing loudly. Caught by a control that re-derived each bucket's
+        # byte count from its own range. Indices are explicit and pinned by
+        # `test_the_union_indices_match_each_buckets_tuple_shape`.
+        lines = merged_text.splitlines(keepends=True)
+        spans = sorted((x[i], x[j]) for key, (i, j) in AUDIT_SPAN_INDEX.items()
+                       for x in a[key])
+        merged_spans: list[list[int]] = []
+        for s_, e_ in spans:
+            if merged_spans and s_ <= merged_spans[-1][1]:
+                merged_spans[-1][1] = max(merged_spans[-1][1], e_)
+            else:
+                merged_spans.append([s_, e_])
+        union_b = sum(len("".join(lines[s_:e_]).encode()) for s_, e_ in merged_spans)
+        net = max(0, union_b - mod.RESUME_COST * len(a["done"]))
         # 🔴 NET, and the shortfall is stated rather than implied. Quoting a gross
         # number that does not actually clear the overage sends an author cutting
         # and leaves them still red — the one outcome worse than saying nothing.
@@ -2897,7 +2959,15 @@ def evictable_note(merged_text: str, over_by: int) -> str:
             out.append("    Net of 200 B per evicted rank: the NUMBER must stay (it is "
                        "half a claim-work slug).")
         return "\n".join(out)
-    except Exception:
+    except (Exception, SystemExit):
+        # 🔴 `SystemExit` IS NOT AN `Exception` — it derives from BaseException,
+        # and `handoff-audit.py`'s own `_load_sibling()` raises exactly that, at
+        # MODULE level, when `scripts/skill-audit.py` is missing. So a bare
+        # `except Exception` left the one import failure this function is most
+        # likely to meet uncaught, on the WRITE PATH, where it kills the write
+        # `budget_warning` is only decorating. Round 1 of #1815, F3.
+        # KeyboardInterrupt is deliberately NOT caught: a human interrupting the
+        # write must still interrupt it.
         return ""
 
 
