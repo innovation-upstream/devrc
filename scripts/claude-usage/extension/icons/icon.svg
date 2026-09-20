@@ -1,0 +1,28 @@
+<!-- icon.svg is the SOURCE OF TRUTH for the toolbar/notification icons.
+     The PNGs beside it are generated: scripts/claude-usage/make-icons.sh.
+     Edit this, re-run that, `git add` all four files (the flake only ships
+     TRACKED files; an untracked icon is silently omitted, no error).
+     NB: a literal double-hyphen is illegal inside an XML comment and makes
+     librsvg refuse the whole file, so this block uses none. -->
+<!--
+
+     Design constraints, in order:
+       * must read at 16px in a browser toolbar -> one bold shape, no detail,
+         no text, no thin strokes;
+       * must sit on BOTH a light and a dark toolbar -> an opaque tile rather
+         than a transparent glyph, so contrast never depends on the host;
+       * must say "usage" at a glance -> a ring gauge, the same metaphor the
+         badge percentage and the injected widget's bars use.
+     The arc is a fixed ~65% sweep: a static icon cannot track live usage
+     (the BADGE does that), so it depicts the concept, not a reading. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <rect width="128" height="128" rx="28" fill="#d97757"/>
+  <!-- track: the unfilled remainder of the gauge -->
+  <circle cx="64" cy="64" r="38" fill="none" stroke="#ffffff" stroke-opacity="0.34"
+          stroke-width="15"/>
+  <!-- filled sweep: circumference 2*pi*38 = 238.76; 155.2 = 65% of it.
+       rotate(-90) starts the arc at 12 o'clock instead of 3 o'clock. -->
+  <circle cx="64" cy="64" r="38" fill="none" stroke="#ffffff" stroke-width="15"
+          stroke-linecap="round" stroke-dasharray="155.2 238.76"
+          transform="rotate(-90 64 64)"/>
+</svg>

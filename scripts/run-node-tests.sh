@@ -237,7 +237,12 @@ SUITES=(
   # claude-usage tracker (2026-09-19): 8 files / 85 tests measured on the
   # claude-usage-tracker branch. Floors: 8 - min(50, max(1, 8/20)) = 7 files;
   # 85 - min(50, max(1, 85/20)) = 81 tests.
-  "scripts/claude-usage/tests|7|81"
+  #
+  # Re-measured 2026-09-19 on feat/claude-usage-widget after the in-page widget
+  # landed (lib/widget.js + content_widget.js + the shared lib/format.js
+  # extraction): 9 files / 110 tests. Floors: 9 - min(50, max(1, 9/20)) = 8
+  # files; 110 - min(50, max(1, 110/20)) = 104.5 -> 105 tests.
+  "scripts/claude-usage/tests|8|105"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree; js-source:
