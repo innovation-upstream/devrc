@@ -156,7 +156,7 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
    🔴 **`This replace DROPS N line(s) that look DURABLE` — a WARNING, never a refusal**, and **a FLOOR: a silent run is NOT evidence that nothing durable was dropped.** Durable content under a REPLACE heading (usually `State now`) is deleted on the next update; move it under an APPEND heading or carry it forward, and read the diff anyway.
 
-   📊 Before cutting: `python3 $DEVRC/scripts/handoff-audit.py <doc>` — what has CLOSED, in bytes; never edits.
+   📊 `python3 $DEVRC/scripts/handoff-audit.py <doc>` — what has CLOSED, in bytes.
 
    🔴 **Land it — no question. SHOW the diff, then push.** Operator decision 2026-08-23: always answered `y` — a round trip and no safety. Re-run the identical command with **`--confirm --push`**: one commit, path-limited, carrying exactly the diff shown. **The two-run shape STAYS**: the proposal run is what puts the diff in the transcript, the only record of what landed.
 
