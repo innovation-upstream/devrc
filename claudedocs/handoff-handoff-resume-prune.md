@@ -29,25 +29,20 @@ bug, unrelated.
   APPEND share **below 70%**. P2–P4 merging does NOT close this arc.
 
 ## State now
-- Branch `handoff-resume-prune-proposal`, pushed. **No PR open.** 8 commits.
-- **P4 DONE** (`b50709ca`) — step 5 names `handoff-audit.py`; that tool's stale "no gate
-  measures a handoff doc" banner corrected (it predated #1648's 65,536 B ceiling by 12 days).
-- **P1′ DONE** (`97fee3d0`) — `budget_warning()` now prints THIS doc's evictable breakdown
-  (resolved investigations / completed ranks / retracted / work-status) instead of a generic
-  ladder, reusing `handoff-audit.py`'s detectors. `audit_one` split into `audit_text` + a
-  disk wrapper, verified behaviour-identical. Never raises (write path). Withheld from the
-  ungated arm. States a SHORTFALL rather than quoting a total that does not clear.
-  **858 tests green; 4 mutants killed.**
-- 🔴 **P2 REFUTED** (`bb531558`) and 🔴 **P1-as-specified RETRACTED** (`c2df1171`).
+- Branch `handoff-resume-prune-proposal`, pushed. **No PR open.** 9 commits.
+- **P4 DONE** (`b50709ca`) · **P1′ DONE** (`97fee3d0`) · **P2 REFUTED** (`bb531558`) ·
+  **P1-as-specified RETRACTED** (`c2df1171`).
+- ✅ **P1′ IS NOW VERIFIED LIVE, end-to-end** — a proposal run of the real tool against
+  `claudedocs/handoff-audit-pr-ladder.md` (2,216 B of headroom) printed the note above the
+  diff: `resolved investigations 16,331 B (8 blocks) · completed ranked items 2,105 B
+  (1 item) · retracted / dead-ends 7,174 B (8 bullets) → 25,410 B net`. `status=proposed`,
+  nothing written, that doc left untouched. The earlier caveat that only the SILENT path had
+  been exercised is now discharged.
+- 858 tests green; 4 mutants killed under `PYTHONDONTWRITEBYTECODE=1`.
 - **P3 is the only proposed item still open.**
-- ⚠ **Verified by direct call + tests, NOT by a live over-budget write.** Every doc this
-  session wrote is ~20 KB, far under the 65,536 B ceiling, so the new note correctly stayed
-  SILENT on every real run — the silent path is exercised, the printing path is not. To
-  exercise it live, run an update against a doc near its allowance (e.g.
-  `handoff-audit-pr-ladder.md`, 2,294 B of headroom) and read the warning above the diff.
-- Deploy/verify: **nothing deployed.** `claude/skills/handoff/SKILL.md` is a nix-store
-  symlink → needs `home-manager switch` / `ship.sh`. `scripts/lib/handoff_doc.py` and
-  `scripts/handoff-audit.py` are repo scripts and ARE live on this checkout now.
+- Deploy: **nothing deployed.** `claude/skills/handoff/SKILL.md` needs `home-manager switch` /
+  `ship.sh`; `scripts/lib/handoff_doc.py` + `scripts/handoff-audit.py` are live on this
+  checkout now.
 - No `clawgate-task:` field (`resolve` exit 5).
 
 ## Open investigations — live diagnosis state
@@ -124,15 +119,10 @@ bug, unrelated.
 
 ## Next steps (ranked)
 1. **P3 — the paste-ready `closing-condition:` offer** in `resume-state.sh`'s `DOD` block,
-   for the 82% of live docs that declare none. 🔴 Run the Open-investigations probe FIRST
-   (`git log --diff-filter=A` correlation against the rule's landing date): if the
-   grandfathering hypothesis holds, P3 is the right shape; if not, the prose was never the
-   problem and P3 should be DELETED rather than strengthened.
+   for the 82% of live docs that declare none. 🔴 Run the Open-investigations probe FIRST:
+   if the grandfathering hypothesis fails, DELETE P3 rather than strengthen it.
    forcing: user — the operator approved implementation of the proposal's items.
-2. Exercise P1′'s printing path live against a doc near its allowance, and read the note
-   above the diff. Cheap, and it is the one claim this arc has not verified end-to-end.
-   forcing: user — same approval; it closes this arc's own verification gap.
-3. Re-measure DoD coverage (82% today) two weeks after P3 lands; delete the offer if it has
+2. Re-measure DoD coverage (82% today) two weeks after P3 lands; delete the offer if it has
    not moved.
    forcing: none
 
