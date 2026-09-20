@@ -45,22 +45,25 @@ retractions are exactly what #1815 carries. If the operator disagrees, the remed
 close this doc as NOT ADDRESSED and open a new one, not to restore an unrunnable check.
 
 ## State now
-- **PR OPEN: devrc#1815** — https://github.com/innovation-upstream/devrc/pull/1815
-  (branch `handoff-resume-prune-proposal`, 12 commits, 7 files, 0 commits behind `origin/main`
-  at creation). ⚠ **Not audited and not merged.**
-- 🔴 **ALL FOUR PROPOSED ITEMS ARE CLOSED. Nothing remains to build.**
-  **P4** shipped (`b50709ca`) · **P1′** shipped + verified live (`97fee3d0`) ·
-  **P2** refuted (`bb531558`) · **P1-as-written** retracted (`c2df1171`) ·
-  **P3** deleted (`3966524f`).
-- **Duplicate sweep done before creating it** (`gh pr list --state open`, 30 open PRs).
-  The one overlap — **#1715**, which names `budget_warning` in its title — touches only
-  `claudedocs/handoff-budget-warning-repo-aware.md`; its CODE half already landed as #1714
-  (`5f8e3952`). **No file overlap with this branch**, so no test-merge was required.
-- 858 tests green; 4 mutants killed under `PYTHONDONTWRITEBYTECODE=1`; P1′ verified live.
-- Deploy: **NOT deployed, and merging is not enough.** `claude/skills/handoff/SKILL.md` is a
-  nix-store symlink → the step-5 line reaches no session until `scripts/ship.sh` (or a
-  `home-manager switch`) runs AFTER the merge. The two scripts are live on a checkout now.
-- No `clawgate-task:` field (`resolve` exit 5).
+- **PR devrc#1815 — OPEN, 20 commits, 0 behind `main`, 9 files.**
+  Branch `handoff-resume-prune-proposal` @ `05c7f9bc`. ⚠ Not merged, not deployed.
+- 🔴 **THE BRANCH WAS CONTAMINATED BY A CONCURRENT SESSION AND HAS BEEN REBUILT.** Twice in
+  one hour another session committed its own work onto this branch in the shared clone:
+  `e1ed617d` (16:55 — `SECRETS.md`, `nix/home.nix`, `scripts/stt`, 7 `browser-bridge`
+  renames) and `3c290bec` (17:36 — its own handoff doc). **Both are preserved on origin**:
+  `rescued-stt-and-browser-flows` and `rescued-shared-branch-20260920` (the full pre-rewrite
+  tip). The PR branch was rebuilt in a throwaway worktree off `origin/main` by cherry-picking
+  only this session's 19 commits, then force-pushed **with `--force-with-lease`**.
+- **The rule that prevents it is now IN THIS REPO** (`CLAUDE.md` → Git discipline,
+  `05c7f9bc`), ported from `datapacket-talos` rule #10 and sharpened for devrc: every
+  `mkOutOfStoreSymlink` path resolves INTO this working tree, so a checkout here swaps the
+  deployed `browser`/`dl-router` skills for every session on the box with no `switch`.
+- **Audit: round 0 and round 1 (blind) both run; every finding fixed or surfaced.**
+  Round 1's two 🔴 were real: a banner claiming an enforced gate for repos that have none
+  (fixed per audited root), and a **merged-tree break with open PR #1798** — test-merged at
+  20,355 B against a 20,300 B budget, gate RED. Now 20,294 B, **FITS by 6 B**, re-verified
+  against current `main`.
+- 1,763 tests green in the clean worktree; 4 mutants killed under `PYTHONDONTWRITEBYTECODE=1`.
 
 ## Open investigations — live diagnosis state
 
@@ -135,15 +138,17 @@ close this doc as NOT ADDRESSED and open a new one, not to restore an unrunnable
   which of the four detectors actually fires per-doc rather than corpus-wide.
 
 ## Next steps (ranked)
-1. **Audit, then merge, then ship.** `/audit-pr 1815` — worked as its ROUND 0 (requirements &
-   deletion) FIRST, because that is the only round that can conclude "close this PR" and the
-   question is actionable only while the merge decision is open; then the nine correctness
-   axes. After merge run `scripts/ship.sh` — **read every per-host line, not the verdict** —
-   or the skill half of this work is inert on both hosts.
-   forcing: user — the operator asked for the PR; an unmerged, unshipped PR delivers nothing.
-2. Re-measure the corpus in ~2 weeks: evictable backlog (468,110 B today) and docs over the
-   hard cap (28 today). Those are the numbers P1′ is meant to move. If neither moves, P1′
-   informed nobody and should be deleted rather than elaborated.
+1. **Merge #1815, then `scripts/ship.sh`** — read every per-host line, not the verdict. The
+   `handoff/SKILL.md` line is inert on both hosts until a `home-manager switch`.
+   forcing: user — the operator asked for this shipped.
+2. **Decide the two open questions surfaced by the audit, both recorded on the PR:**
+   (a) round 0 F2 — should the evictable note print NUMBERS in ungated repos? `homelab-talos`
+   holds 370,563 B of evictable content the current withholding hides. (b) whether correcting
+   this arc's frozen closing-condition was right, or whether the doc should be closed NOT
+   ADDRESSED and a new arc opened.
+   forcing: user — both reverse a decision an agent took; neither is an agent's to settle.
+3. **Land the two rescued branches**, or tell that session they are there. They are not mine
+   to merge, and `rescued-shared-branch-20260920` will be garbage-collected eventually.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -300,6 +305,27 @@ close this doc as NOT ADDRESSED and open a new one, not to restore an unrunnable
   **When freezing a closing condition, ask which action most cheaply satisfies the metric and
   whether you would accept that action.** Verdict on this arc: **NOT ADDRESSED as written,
   and not addressable**; what replaced it is a new arc.
+
+- 🔴 **A SHARED CLONE IS A SHARED BRANCH — and the failure is SILENT in both directions.**
+  Another session's commit landing on your branch produces no error, and `git log` afterwards
+  reads exactly as you expect because you are reading the branch you landed on. It was found
+  only because a `git log --oneline -3` after a push showed a subject nobody here had written.
+  **`git branch --show-current` before every commit removes the class; a worktree removes the
+  opportunity.** Ported as a numbered rule into `CLAUDE.md`.
+- 🔴 **Preserve BEFORE you rewrite, and preserve the TIP, not the commit you noticed.** The
+  first rescue branch captured `e1ed617d` only; a second commit arrived 40 minutes later and
+  would have been orphaned by the force-push. Pushing the whole branch tip to a rescue ref is
+  one command and captures whatever you have not noticed yet.
+- 🔴 **Verify a duplicate by CONTENT before dropping it.** `e1ed617d` shared a subject with
+  main's `2e8d8a11`, and `scripts/stt` / `SECRETS.md` / `nix/home.nix` were byte-identical
+  (same blob shas) — but it was a SUPERSET: the `browser-bridge/reference/sites → flows`
+  rename existed nowhere else. Dropping on the subject match would have destroyed it.
+- ⚠ **`for x in $VAR` runs ONCE in zsh.** The cherry-pick loop silently passed all 20 shas as
+  a single argument and died with `File name too long` — which reads as a path bug, not a
+  splitting bug. `${=VAR}`. Documented in `claude/RULES.md`; hit anyway.
+- ⚠ **`gh pr view --json files` served a STALE file list** for minutes after a successful
+  force-push, still showing the contaminated set. `git diff --name-only origin/main...origin/<branch>`
+  is the authority; do not re-fix a PR on the API's word.
 
 ## How to verify
 Re-derive every number in the proposal:
