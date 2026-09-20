@@ -29,20 +29,21 @@ bug, unrelated.
   APPEND share **below 70%**. P2–P4 merging does NOT close this arc.
 
 ## State now
-- Branch `handoff-resume-prune-proposal`, pushed. **No PR open.** 9 commits.
-- **P4 DONE** (`b50709ca`) · **P1′ DONE** (`97fee3d0`) · **P2 REFUTED** (`bb531558`) ·
-  **P1-as-specified RETRACTED** (`c2df1171`).
-- ✅ **P1′ IS NOW VERIFIED LIVE, end-to-end** — a proposal run of the real tool against
-  `claudedocs/handoff-audit-pr-ladder.md` (2,216 B of headroom) printed the note above the
-  diff: `resolved investigations 16,331 B (8 blocks) · completed ranked items 2,105 B
-  (1 item) · retracted / dead-ends 7,174 B (8 bullets) → 25,410 B net`. `status=proposed`,
-  nothing written, that doc left untouched. The earlier caveat that only the SILENT path had
-  been exercised is now discharged.
-- 858 tests green; 4 mutants killed under `PYTHONDONTWRITEBYTECODE=1`.
-- **P3 is the only proposed item still open.**
-- Deploy: **nothing deployed.** `claude/skills/handoff/SKILL.md` needs `home-manager switch` /
-  `ship.sh`; `scripts/lib/handoff_doc.py` + `scripts/handoff-audit.py` are live on this
-  checkout now.
+- Branch `handoff-resume-prune-proposal`, pushed, **11 commits. No PR open.**
+- 🔴 **ALL FOUR PROPOSED ITEMS ARE CLOSED. Nothing remains to build.**
+  **P4** shipped (`b50709ca`) · **P1′** shipped + verified live (`97fee3d0`) ·
+  **P2** refuted (`bb531558`) · **P1-as-written** retracted (`c2df1171`) ·
+  **P3** deleted (`3966524f`).
+- **P3's probe CONFIRMED its hypothesis and the item was deleted anyway** — compatible, and
+  the reason matters: grandfathering does explain the 82% (born before rule (m): 84 docs, 6%
+  declared; born after: 14 docs, 93%), and the cohort does NOT self-heal (92 of 98 docs
+  touched within 30d, only 18 declare). But the `DOD` block ALREADY prints the fact, the
+  remedy, the exact syntax and the vocabulary at the decision point — verified live. The only
+  increment left is pre-filling the arc's finish line, which is the judgement rule (m) exists
+  to force a human to make.
+- Deploy: **NOT deployed.** `claude/skills/handoff/SKILL.md` is a nix-store symlink → needs
+  `home-manager switch` / `ship.sh`. `scripts/lib/handoff_doc.py` + `scripts/handoff-audit.py`
+  are live on this checkout only.
 - No `clawgate-task:` field (`resolve` exit 5).
 
 ## Open investigations — live diagnosis state
@@ -118,12 +119,13 @@ bug, unrelated.
   which of the four detectors actually fires per-doc rather than corpus-wide.
 
 ## Next steps (ranked)
-1. **P3 — the paste-ready `closing-condition:` offer** in `resume-state.sh`'s `DOD` block,
-   for the 82% of live docs that declare none. 🔴 Run the Open-investigations probe FIRST:
-   if the grandfathering hypothesis fails, DELETE P3 rather than strengthen it.
-   forcing: user — the operator approved implementation of the proposal's items.
-2. Re-measure DoD coverage (82% today) two weeks after P3 lands; delete the offer if it has
-   not moved.
+1. **Land it: open a PR for the 11 commits, then deploy** (`ship.sh` after merge, so the
+   `handoff/SKILL.md` line actually reaches a session — it is inert until a switch).
+   forcing: user — the operator approved implementing the proposal; this is what "implemented"
+   means for a nix-managed skill body.
+2. Re-measure the corpus in ~2 weeks: the evictable backlog (468,110 B today) and the
+   over-hard-cap count (28 docs today) are the numbers P1′ is meant to move. If neither
+   moves, P1′ informed nobody and should be deleted rather than elaborated.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -259,6 +261,27 @@ bug, unrelated.
 - ⚠ **`audit_one` now delegates to `audit_text`** because `budget_warning` holds a merge that
   is not yet on disk. Verified behaviour-identical on a real doc (`audit_one == audit_text`
   across size/gross/net/done_b/resolved_b) before anything depended on it.
+
+- 🔴 **A CONFIRMED HYPOTHESIS DOES NOT ENTITLE THE ITEM THAT MOTIVATED IT.** P3's probe was
+  pre-registered ("confirmed ⇒ P3 is the right shape") and came back confirmed — then the
+  item was deleted anyway, because the probe answered the question I had framed and not the
+  question that decided the build. What decided it was reading the tool's actual output: the
+  remedy was already there. **Pre-registration protects against post-hoc rationalisation; it
+  does not license skipping the look at what already exists.**
+- 🔴 **The unautomatable part is the point, not an obstacle.** Rule (m) exists to make a human
+  state what ENDS an arc. Any mechanism that fills that field in has produced a finish line
+  nobody asserted — the same defect `/handoff` step 1 forbids for `clawgate-task:` ("a task
+  minted to fill a blank field is a fact nobody asserted"). When the only remaining increment
+  is the judgement itself, the correct build is none.
+- 🔴 **Grandfathering here is CORRECT and must not be "closed".** Refusing all 84 pre-rule
+  docs would go red on the first update to each, which `claude/RULES.md` calls worse than no
+  gate. An exemption that looks like a coverage gap can be the thing keeping a gate credible.
+- 🔴 **THIS ARC'S CLOSING CONDITION SELECTED FOR THE HARMFUL ACTION.** "APPEND share below
+  70%" could only fall by moving searchable content into an unsearchable sink — the one thing
+  the playbook forbids. The metric made the forbidden action the cheapest way to satisfy it.
+  **When freezing a closing condition, ask which action most cheaply satisfies the metric and
+  whether you would accept that action.** Verdict on this arc: **NOT ADDRESSED as written,
+  and not addressable**; what replaced it is a new arc.
 
 ## How to verify
 Re-derive every number in the proposal:
