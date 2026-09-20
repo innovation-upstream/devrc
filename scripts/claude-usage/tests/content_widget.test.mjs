@@ -77,7 +77,9 @@ if (typeof FakeElement.prototype.append !== "function") {
     for (const n of nodes) this.appendChild(n);
   };
 }
-const { NOW, ORG_A, ORG_B, ORG_C, ORG_D, NAME_A, NAME_B, NAME_C, NAME_D, fullUsage } =
+// No NOW here on purpose: every fixture below is built relative to
+// `Date.now()`, because render() reads the real clock.
+const { ORG_A, ORG_B, ORG_C, ORG_D, NAME_A, NAME_B, NAME_C, NAME_D, fullUsage } =
   await import("./fixtures.mjs");
 const { normalizeUsage } = await import("../extension/lib/normalize.js");
 
@@ -362,7 +364,13 @@ test("🔴 the stale dim is scoped to the active account, never to the whole car
     "the scoped dim rule is gone — the active account no longer greys at all");
 });
 
-test("the card counts the accounts it could not fit", async () => {
+test("🔴 the card PAINTS every account -- the '+N more' dead end is gone", async () => {
+  // This test used to assert the opposite: 4 rows and a "+2 more" line. That
+  // line was TERMINAL -- nothing in the card could expand it -- so two of the
+  // operator's accounts were counted and unreachable, and the cap fires on
+  // his real profile. Making the count clickable would have put a button
+  // inside this section, which the pointer-events test below forbids. So
+  // every row is painted and the height is bounded by CSS instead.
   const now = Date.now();
   const accounts = { [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0) };
   [23, 31, 42, 53, 62, 71].forEach((p, i) => {
@@ -370,9 +378,34 @@ test("the card counts the accounts it could not fit", async () => {
     accounts[id] = acct(id, `acct ${i}`, p, now + (i + 1) * HOUR, 1);
   });
   const m = await mount({ storage: { accounts, lastActiveOrg: ORG_A } });
-  assert.equal(m.shadow.querySelectorAll(".other").length, 4,
-    "an unbounded list would cover his composer");
-  assert.match(textOf(find(m.shadow, ".more")), /\+2 more/);
+  assert.equal(m.shadow.querySelectorAll(".other").length, 6,
+    "an account was counted instead of painted");
+  const counts = m.shadow.querySelectorAll(".more")
+    .map(textOf).filter((t) => /^\+\d+\s+more/.test(t));
+  assert.deepEqual(counts, [], `a hidden-row count is back: ${JSON.stringify(counts)}`);
+  // ...and the rows live inside the scrolling box, not loose in the section,
+  // or the height bound that replaced the cap applies to nothing.
+  const list = find(m.shadow, ".otherlist");
+  assert.ok(list, "no .otherlist container — the card now grows without limit");
+  assert.equal(list.querySelectorAll(".other").length, 6,
+    "rows were painted outside the bounded container");
+});
+
+test("🔴 the height bound that replaced the cap actually scrolls", async () => {
+  // A SOURCE-LEVEL MECHANISM PIN, and labelled as one for the reason the
+  // `.card.stale` pin above records: the shadow-DOM harness has no cascade
+  // and no layout, so no DOM assertion can see whether `.otherlist` is
+  // bounded. Without both declarations the test above still passes while an
+  // unbounded list covers claude.ai's composer -- which is exactly what the
+  // deleted cap existed to prevent.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../extension/content_widget.js", import.meta.url), "utf8");
+  const rule = src.match(/"\.otherlist\{[^"]*"/);
+  assert.ok(rule, "the .otherlist CSS rule is gone");
+  assert.match(rule[0], /max-height:\s*\d+px/, `no height bound in ${rule[0]}`);
+  assert.match(rule[0], /overflow-y:\s*auto/,
+    `bounded but not scrollable in ${rule[0]} — rows below the bound are clipped, `
+    + "which is the unreachable-row defect again with a different mechanism");
 });
 
 test("the next-free footer is painted when something is pending", async () => {

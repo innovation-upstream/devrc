@@ -8,6 +8,7 @@
 
 import { formatCountdown, isStale, stalenessLabel } from "./lib/timefmt.js";
 import { ACCOUNT_LABELS_KEY, accountLabel, creditsLine, formatPct } from "./lib/format.js";
+import { FREE, availability } from "./lib/availability.js";
 
 // formatPct/creditsLine moved to lib/format.js when the injected widget needed
 // the same rules (2026-09-19). Re-exported rather than relocated outright: the
@@ -57,12 +58,43 @@ export function orderAccounts(accounts, lastActiveOrg) {
   return [...active, ...rest.sort(byFreshness)];
 }
 
-/** Session/weekly headline for one record, e.g. "Session 9% · resets 4h46m". */
-export function sessionLine(rec, now) {
+/**
+ * Session headline for one record, e.g. "Session 9% · resets 4h46m".
+ *
+ * 🔴 THE ELAPSED-RESET VERDICT IS `availability()`, NOT `formatCountdown()`.
+ * This line rendered "Session 92% · resets soon" for an account whose window
+ * had already closed -- the single state the switch-accounts workflow depends
+ * on, reported backwards -- and it kept doing so for a round AFTER the in-page
+ * widget was fixed, so the two surfaces showed opposite answers for the same
+ * stored record at the same `now`. One rule, one place: lib/availability.js
+ * decides, both surfaces read it, and nothing here re-derives it from a
+ * countdown string. `formatCountdown()`'s "resets soon" branch is now
+ * unreachable from this function, which is the point.
+ *
+ * `isActive` is availability.js's documented exemption, applied here because
+ * this is where the popup knows which row is the active one. content_probe.js
+ * fetches with the CURRENT session cookie, so the active account is the one
+ * account that really will be re-measured within seconds; for it an elapsed
+ * reset is a pending correction and the countdown stays. The in-page widget
+ * applies the same exemption by keeping the active record on its own card and
+ * off the other-accounts list, so the two surfaces agree row for row.
+ */
+export function sessionLine(rec, now, isActive) {
+  const v = availability(rec, now);
+  if (v.state === FREE && isActive !== true) {
+    // The verdict, then the evidence for it. The last MEASURED percentage
+    // stays visible so an inference can never read as a fresh reading, and
+    // there is never a fabricated 0%. Its AGE is already on the row (renderRow
+    // puts stalenessLabel(rec.asOf) in `asOf`), which is the one thing the
+    // widget's longer meta adds and this one does not need to repeat.
+    return `Session AVAILABLE · reset ${stalenessLabel(v.resetsAt, now)}`
+      + ` (was ${formatPct(v.sessionPct)})`;
+  }
   const s = rec.session && rec.session.utilization;
   const cd = formatCountdown(rec.session && rec.session.resetsAt, now);
   // "resets soon" already carries the verb; everything else (a real
-  // countdown, or "unknown") gets it.
+  // countdown, or "unknown") gets it. It survives only for the active
+  // account, where it is true.
   const resetPart = cd === "resets soon" ? cd : `resets ${cd}`;
   return `Session ${formatPct(s)} · ${resetPart}`;
 }
@@ -104,7 +136,7 @@ export function renderRow(rec, now, isActive, labels) {
     name: accountLabel(rec, labels),
     orgUuid: typeof rec.orgUuid === "string" ? rec.orgUuid : null,
     isActive: Boolean(isActive),
-    session: sessionLine(rec, now),
+    session: sessionLine(rec, now, Boolean(isActive)),
     weekly: weeklyLine(rec),
     codeWeekly: typeof rec.codeWeeklyPercent === "number"
       ? `Claude Code ${formatPct(rec.codeWeeklyPercent)}` : null,

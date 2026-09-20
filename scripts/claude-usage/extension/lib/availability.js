@@ -18,6 +18,22 @@
 // percentage and its age beside the verdict (see widget.js's other-account
 // rows). Nothing here fabricates a 0%.
 //
+// 🔴 ONE RULE, ONE PLACE. `availability()` is the ONLY place this verdict is
+// decided, and BOTH surfaces read it: the in-page widget's other-account rows
+// (lib/widget.js's `otherRow`) and the popup's per-account rows
+// (popup.js's `sessionLine`). It shipped fixed in the widget and still broken
+// in the popup for one round -- same storage, same `now`, two surfaces giving
+// opposite answers about one account -- which is exactly the failure mode a
+// predicate duplicated across call sites produces. Nothing may re-derive the
+// verdict from `formatCountdown()`'s "resets soon"; that string is the bug.
+//
+// The ACTIVE account is the one documented exemption, and it is a fact about
+// MEASUREMENT rather than a styling choice: it is the one account the probe
+// WILL re-measure within seconds, so for it "the next snapshot will correct
+// it" is true. Each surface applies that exemption where it knows which
+// record is active -- the widget by excluding the active record from the
+// other-accounts list, the popup by passing `isActive` to `sessionLine`.
+//
 // Pure, total and NEVER THROWS: every function below runs, through
 // lib/widget.js, inside the operator's real claude.ai tab, over records that
 // came out of chrome.storage.local and may predate any field.
@@ -39,9 +55,28 @@ function finite(v) {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
-/** An object we are willing to read fields off. Rejects null (a property read
- * would THROW) and every primitive AND function (a callable carrying a
- * `.session` is not a stored record, and must not be read as a measurement). */
+/** An object we are willing to read fields off.
+ *
+ * 🔴 BOTH HALVES EXIST TO STOP A THROW, and this file must never throw -- it
+ * runs, through lib/widget.js, inside the operator's real claude.ai tab.
+ * MEASURED, one mutant at a time against `availability is TOTAL over garbage
+ * records` filtered to that test alone: drop `v !== null` and `null.session`
+ * throws; drop `typeof v === "object"` and `undefined.session` throws, since
+ * `undefined !== null` is true and the first half does not cover it.
+ *
+ * ⚠ THE OTHER PRIMITIVES DO NOT CARRY THIS GUARD, and an earlier draft of
+ * this comment said they did. `"nonsense"`, `42`, `true` and `NaN` all answer
+ * `undefined` to a `.session` read without throwing, so they reach UNKNOWN
+ * with or without the typeof half -- they are breadth in the fixture list,
+ * not the kill. `undefined` is the single input that carries it, which is why
+ * it may not be dropped from that list.
+ *
+ * ⚠ It also rejects a FUNCTION, but that is a side effect and not a reason:
+ * `chrome.storage.local` round-trips JSON and can never hand one back. A
+ * separate test asserting the callable case was deleted in round 3 -- it
+ * killed no mutant the garbage-record test does not already kill on its own
+ * (re-measured after the deletion), and it read as coverage of a hazard that
+ * cannot occur. */
 function isRecord(v) {
   return v !== null && typeof v === "object";
 }
@@ -61,18 +96,26 @@ function isRecord(v) {
  * shown beside the verdict either way).
  *
  * Always returns the full field set, so a caller never has to guard:
- *   state, resetsAt, resetElapsedMs, msUntilReset, sessionPct, asOf, ageMs
+ *   state, resetsAt, resetElapsedMs, sessionPct, asOf
  * Fields that do not apply to the state are null.
+ *
+ * ⚠ EVERY FIELD HERE HAS A CONSUMER, and that is the rule for adding one.
+ * `msUntilReset` and `ageMs` were returned for a round with zero references
+ * outside this file -- the caller recomputed both from the raw record through
+ * `formatCountdown()` and `stalenessLabel()` -- so they were deleted rather
+ * than wired up. Today: `state` (widget.js's `otherRow`, `orderForSwitch`,
+ * `nextFreeAt`), `resetsAt` (`otherRow`'s "reset 2h ago", the measured
+ * tiebreak, `nextFreeAt`), `resetElapsedMs` (the longest-free-first sort),
+ * `sessionPct` (`otherRow`, popup.js's `sessionLine`, the measured sort),
+ * `asOf` (`otherRow`'s "measured 6h ago").
  */
 export function availability(record, now) {
   const out = {
     state: UNKNOWN,
     resetsAt: null,
     resetElapsedMs: null,
-    msUntilReset: null,
     sessionPct: null,
     asOf: null,
-    ageMs: null,
   };
   if (!isRecord(record)) return out;
 
@@ -80,7 +123,6 @@ export function availability(record, now) {
   const session = isRecord(record.session) ? record.session : null;
   out.sessionPct = finite(session && session.utilization);
   out.asOf = finite(record.asOf);
-  out.ageMs = t !== null && out.asOf !== null ? t - out.asOf : null;
 
   const at = parseWhen(session && session.resetsAt);
   if (at === null || t === null) return out;
@@ -92,7 +134,6 @@ export function availability(record, now) {
     return out;
   }
   out.state = MEASURED;
-  out.msUntilReset = at - t;
   return out;
 }
 
@@ -100,31 +141,36 @@ export function availability(record, now) {
  * The accounts ordered MOST-AVAILABLE FIRST, for the in-page widget's
  * "other accounts" section.
  *
- * 🔴 THE ACTIVE ACCOUNT IS PINNED AT INDEX 0 and takes no part in the sort. It
- * is the one the operator is looking at; a row that reorders itself under them
- * as a countdown crosses a threshold is worse than a row in a boring place.
- * (popup.js's `orderAccounts` sorts by snapshot FRESHNESS, which is the exact
+ * Free before measured before unknown; within `measured`, lowest session
+ * percentage first, then soonest reset; within `free`, longest-elapsed reset
+ * first (it has been available longest, so its last measurement is the least
+ * likely to still bind). Every comparison ends in the record's index in the
+ * account map, so the order is TOTAL and DETERMINISTIC -- two records that tie
+ * on every visible field still have exactly one legal order.
+ *
+ * ⚠ IT DOES NOT KNOW ABOUT THE ACTIVE ACCOUNT, deliberately. It used to pin
+ * the active record at index 0 and exempt it from the sort, and that pinning
+ * was UNOBSERVABLE in the shipped UI: the sole caller (lib/widget.js's
+ * `buildOthers`) filters the active record out of the result on the very next
+ * line, because a widget whose card already shows that account must not list
+ * it again underneath. A contract nothing can observe is a contract nobody can
+ * get right, so it was removed rather than wired up. Removing it changes no
+ * output -- dropping one element from a sorted list leaves the others in the
+ * same relative order.
+ *
+ * (popup.js sorts its own rows by snapshot FRESHNESS, which is the exact
  * inverse of usefulness here -- the account worth switching to is by
- * construction the one measured longest ago.)
+ * construction the one measured longest ago. That is a deliberate difference
+ * of LAYOUT between the two surfaces, not of verdict; the verdict is
+ * `availability()`, which both read.)
  *
- * The rest: free before measured before unknown; within `measured`, lowest
- * session percentage first, then soonest reset; within `free`, longest-elapsed
- * reset first (it has been available longest, so its last measurement is the
- * least likely to still bind). Every comparison ends in the record's index in
- * the account map, so the order is TOTAL and DETERMINISTIC -- two records that
- * tie on every visible field still have exactly one legal order.
- *
- * Total over garbage: a non-object map, a null record, a missing active org.
+ * Total over garbage: a non-object map, a null record, an unusable `now`.
  */
-export function orderForSwitch(accounts, lastActiveOrg, now) {
+export function orderForSwitch(accounts, now) {
   const map = isRecord(accounts) ? accounts : {};
   const entries = Object.keys(map)
     .map((key, index) => ({ key, index, rec: map[key] }))
     .filter((e) => isRecord(e.rec));
-
-  const activeKey = typeof lastActiveOrg === "string" && lastActiveOrg ? lastActiveOrg : null;
-  const active = activeKey ? entries.find((e) => e.key === activeKey) : undefined;
-  const rest = entries.filter((e) => e !== active);
 
   const verdicts = new Map();
   const verdict = (e) => {
@@ -132,7 +178,7 @@ export function orderForSwitch(accounts, lastActiveOrg, now) {
     return verdicts.get(e);
   };
 
-  rest.sort((a, b) => {
+  entries.sort((a, b) => {
     const va = verdict(a);
     const vb = verdict(b);
     const byState = STATE_ORDER.indexOf(va.state) - STATE_ORDER.indexOf(vb.state);
@@ -153,7 +199,7 @@ export function orderForSwitch(accounts, lastActiveOrg, now) {
     return a.index - b.index;                           // total, deterministic
   });
 
-  return [...(active ? [active.rec] : []), ...rest.map((e) => e.rec)];
+  return entries.map((e) => e.rec);
 }
 
 /**

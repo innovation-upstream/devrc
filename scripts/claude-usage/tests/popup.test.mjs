@@ -8,8 +8,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const P = await import("../extension/popup.js");
-const { formatCountdown } = await import("../extension/lib/timefmt.js");
 const { accountLabel } = await import("../extension/lib/format.js");
+const W = await import("../extension/lib/widget.js");
 const { NAME_A, NAME_B, NOW, ORG_A, ORG_B, ORG_C, fullUsage } =
   await import("./fixtures.mjs");
 const { normalizeUsage } = await import("../extension/lib/normalize.js");
@@ -19,6 +19,8 @@ function rec(orgUuid, orgName, sessionUtil, asOf) {
   r.session.utilization = sessionUtil;
   return r;
 }
+
+const HOUR = 60 * 60 * 1000;
 
 // --- ordering ------------------------------------------------------------------ //
 
@@ -52,13 +54,96 @@ test("sessionLine renders the proposal's format", () => {
   assert.equal(P.sessionLine(r, NOW), "Session 9% · resets 4h46m");
 });
 
-test("sessionLine tolerates unknown and expired resets", () => {
+test("sessionLine tolerates an unknown reset", () => {
   const r = rec(ORG_A, NAME_A, null, NOW);
   r.session.resetsAt = null;
   assert.equal(P.sessionLine(r, NOW), "Session ? · resets unknown");
-  r.session.utilization = 9;
+});
+
+// --- 🔴 F2: the elapsed-reset verdict, on BOTH surfaces ------------------------ //
+//
+// 🔴 THE DEFECT, AND WHY IT IS HERE AND NOT ONLY IN widget.test.mjs. A stored
+// account can only be re-measured while you are logged INTO it
+// (content_probe.js fetches with the current session cookie), so once its
+// session reset passes, the snapshot describes a window that no longer
+// exists. The in-page widget was fixed to say AVAILABLE; the POPUP was not,
+// and went on rendering `formatCountdown()`'s "resets soon" beside the stale
+// percentage. Same storage, same `now`, two surfaces giving opposite answers
+// about one account -- a predicate duplicated across call sites, fixed at one
+// site. popup.js now reads lib/availability.js, the same and only rule the
+// widget reads.
+
+test("🔴 REGRESSION: an elapsed reset reads AVAILABLE in the POPUP, not 'resets soon' at 92%", () => {
+  // Watched RED at e3973dc9 (the widget-only fix): sessionLine returned
+  // "Session 92% · resets soon" there.
+  const r = rec(ORG_B, NAME_B, 92, NOW - 6 * HOUR);
+  r.session.resetsAt = new Date(NOW - 2 * HOUR).toISOString();
+
+  const line = P.sessionLine(r, NOW, false);
+  assert.ok(!/resets soon/.test(line), `the popup still reads "${line}"`);
+  assert.match(line, /AVAILABLE/, line);
+  // The inference is stated, and the last MEASURED reading stays beside it so
+  // it can never be mistaken for a fresh one. Never a fabricated 0%.
+  assert.match(line, /reset 2h ago/, line);
+  assert.match(line, /was 92%/, "the last MEASURED value must remain visible");
+  assert.ok(!/\b0%/.test(line), "never a fabricated 0%");
+
+  // ...and it reaches the row model the painter actually reads, not just the
+  // helper. A fix that stopped at sessionLine and never got wired in is the
+  // shape this project has already shipped once.
+  assert.equal(P.renderRow(r, NOW, false).session, line);
+});
+
+test("🔴 the popup and the widget give ONE answer for one stored record", () => {
+  // The seam guard. Each surface is separately tested and each was separately
+  // green while they disagreed on screen, because no fixture ever built the
+  // combined state. This one asks the RELATIONSHIP: over a record in each
+  // availability state, the popup's line and the widget's other-row must
+  // agree on the verdict -- both AVAILABLE or neither.
+  const active = rec(ORG_A, NAME_A, 37, NOW);
+  active.session.resetsAt = new Date(NOW + 3 * HOUR).toISOString();
+
+  const freed = rec(ORG_B, NAME_B, 92, NOW - 6 * HOUR);
+  freed.session.resetsAt = new Date(NOW - 2 * HOUR).toISOString();
+  const waiting = rec(ORG_C, "third", 62, NOW - HOUR);
+  waiting.session.resetsAt = new Date(NOW + HOUR).toISOString();
+  const murky = rec(ORG_C, "fourth", 23, NOW - HOUR);
+  murky.session.resetsAt = null;
+
+  for (const other of [freed, waiting, murky]) {
+    const model = W.widgetModel(active, NOW, {
+      accounts: { [ORG_A]: active, other_key: other },
+      lastActiveOrg: ORG_A,
+    });
+    assert.equal(model.others.length, 1, "precondition: the widget lists the other account");
+    const widgetSaysFree = model.others[0].state === "free";
+    const popupSaysFree = /AVAILABLE/.test(P.sessionLine(other, NOW, false));
+    assert.equal(popupSaysFree, widgetSaysFree,
+      `popup "${P.sessionLine(other, NOW, false)}" vs widget "`
+      + `${model.others[0].value} ${model.others[0].meta}"`);
+  }
+});
+
+test("INVARIANT GUARD: the ACTIVE account keeps its countdown -- it is re-measured", () => {
+  // ⚠ LABELLED, AND IT IS NOT REGRESSION COVERAGE. Watched at e3973dc9: this
+  // one PASSED there, because the active account's line never changed. It
+  // pins that the F2 fix did not over-reach, which is a different claim from
+  // pinning that the F2 fix happened. The two tests above are the regression
+  // pair (both watched RED at e3973dc9).
+  //
+  // availability.js's documented exemption, and the reason the popup's active
+  // row must NOT flip: the widget's own card still renders the active
+  // record's countdown, so flipping the popup here would introduce the very
+  // cross-surface disagreement this change removes. content_probe.js fetches
+  // with the CURRENT session cookie, so this is the one account for which
+  // "the next snapshot will correct it" is true.
+  const r = rec(ORG_A, NAME_A, 9, NOW);
   r.session.resetsAt = new Date(NOW - 1000).toISOString();
-  assert.equal(P.sessionLine(r, NOW), "Session 9% · resets soon");
+  assert.equal(P.sessionLine(r, NOW, true), "Session 9% · resets soon");
+  assert.equal(P.renderRow(r, NOW, true).session, "Session 9% · resets soon");
+
+  // The widget's own card agrees, on the same record and the same `now`.
+  assert.equal(W.widgetModel(r, NOW).rows.find((x) => x.key === "session").meta, "resets soon");
 });
 
 test("weeklyLine and the claude-code share", () => {

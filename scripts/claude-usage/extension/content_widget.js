@@ -93,6 +93,17 @@
     // --- the other-accounts section ---
     ".others{margin-top:8px;padding-top:7px;border-top:1px solid rgba(0,0,0,.10)}",
     ".otherhead{color:#8a9099;font-size:11px;margin-bottom:5px}",
+    // 🔴 THIS IS WHAT REPLACED THE `+N more` CAP, AND IT IS LOAD-BEARING.
+    // lib/widget.js used to hand over at most 4 rows plus a count of the
+    // rest; that count was TERMINAL -- no click in the card could reveal
+    // them -- and the operator's live profile has more candidates than the
+    // cap. Making the count clickable would have put a button inside this
+    // section, which content_widget.test.mjs forbids for the round-1
+    // pointer-events reason. So every row is painted and the height is
+    // bounded here instead: ~5 rows visible, the rest reachable by SCROLL.
+    // Drop the overflow and the card grows without limit over his composer,
+    // which is the hazard the cap existed for.
+    ".otherlist{max-height:170px;overflow-y:auto;overscroll-behavior:contain}",
     ".other{display:flex;align-items:baseline;gap:6px;margin-bottom:5px}",
     ".other.stale{opacity:.72}",
     ".other .dot{align-self:center}",
@@ -102,7 +113,7 @@
     ".ovalue{font-weight:600;font-variant-numeric:tabular-nums;flex:0 0 auto}",
     ".other.free .ovalue{color:#1e8e3e;font-size:11px;letter-spacing:.02em}",
     ".ometa{color:#8a9099;font-size:11px;margin-top:1px}",
-    ".more{color:#8a9099;font-size:11px}",
+    ".more{color:#8a9099;font-size:11px}",     // the next-free footer only
 
     ".note{color:#6b7280;padding:2px 0 6px}",
     ".locked{margin:6px 0 2px;padding:5px 7px;border-radius:7px;font-size:11px;",
@@ -344,6 +355,13 @@
     hd.textContent = "Other accounts";
     box.appendChild(hd);
 
+    // The rows live in their own scrolling box so the heading and the
+    // next-free footer stay put while a long list scrolls under them. See
+    // `.otherlist` in CSS for why the bound is here and not a row cap.
+    var list = document.createElement("div");
+    list.className = "otherlist";
+    box.appendChild(list);
+
     rows.forEach(function (row) {
       var el = document.createElement("div");
       el.className = "other " + row.state + (row.stale ? " stale" : "");
@@ -368,15 +386,9 @@
         body.appendChild(meta);
       }
       el.append(dot, body);
-      box.appendChild(el);
+      list.appendChild(el);
     });
 
-    if (model.othersMore > 0) {
-      var more = document.createElement("div");
-      more.className = "more";
-      more.textContent = "+" + model.othersMore + " more";
-      box.appendChild(more);
-    }
     if (model.nextFree) {
       var nf = document.createElement("div");
       nf.className = "more nextfree";

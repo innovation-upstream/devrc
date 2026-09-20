@@ -30,13 +30,21 @@ export { CRIT_PCT, WARN_PCT };
 // misspelling there is a silently unlabelled widget.
 export { ACCOUNT_LABELS_KEY };
 
-/** How many other-account rows the card will draw before collapsing the rest
- * into "+N more".
- *
- * 🔴 THE CARD SITS OVER HIS CHAT. An unbounded list is a UI hazard, not a
- * feature: five accounts is already 232px x ~180px of claude.ai covered, and
- * the rows past the first few are by construction the LEAST available ones. */
-export const OTHERS_MAX = 4;
+// 🔴 THERE IS NO `OTHERS_MAX` CAP ANY MORE, AND ADDING ONE BACK NEEDS AN
+// ANSWER TO THIS. The card showed at most 4 other rows and summarised the
+// rest as a "+N more" line -- which was TERMINAL: nothing in the card could
+// expand it, so those rows were unreachable by any click. The account map on
+// the operator's live profile holds more than four candidates, so it fired.
+//
+// The two ways out were "make +N more reachable" and "drop the cap". Making
+// it reachable means a BUTTON inside the other-accounts section, and
+// content_widget.test.mjs pins that there is none: round 1 shipped a widget
+// that swallowed clicks meant for claude.ai's composer, and "the only
+// clickable things in the card are the collapse button and the pill" is a
+// deliberate invariant, not an accident. So the cap went instead, and the
+// "card over his chat" constraint it existed for is now held by CSS --
+// `.otherlist` in content_widget.js scrolls past a fixed max-height. Scrolled
+// content is reachable; counted content is not.
 
 /** The host element's id. Also the handle content_widget.js uses to detect an
  * existing mount, so a double-injected content script cannot stack widgets. */
@@ -100,8 +108,8 @@ export function pillText(record) {
  * `ctx` is optional and carries everything the OTHER-ACCOUNTS section needs:
  *   { accounts, lastActiveOrg, labels }
  * Omit it and the model is exactly what it was before that section existed
- * (`others: []`, `othersMore: 0`, `nextFree: null`), so a caller that has only
- * one record -- and every pre-existing test -- keeps working unchanged.
+ * (`others: []`, `nextFree: null`), so a caller that has only one record --
+ * and every pre-existing test -- keeps working unchanged.
  */
 export function widgetModel(record, now, ctx) {
   const labels = ctx && typeof ctx === "object" ? ctx.labels : null;
@@ -127,7 +135,6 @@ export function widgetModel(record, now, ctx) {
       // pickRecord() returns the freshest of whatever is stored and only
       // yields null when the account map is empty.
       others: [],
-      othersMore: 0,
       nextFree: null,
     };
   }
@@ -203,13 +210,24 @@ export function widgetModel(record, now, ctx) {
 }
 
 /**
- * The "other accounts" section: the switch-to candidates, most available
- * first, capped, plus the one-line "next free" footer.
+ * The "other accounts" section: every switch-to candidate, most available
+ * first, plus the one-line "next free" footer.
  *
- * Returns `{ others, othersMore, nextFree }` and never throws over garbage.
+ * 🔴 THE FOOTER IS NOT REDUNDANT WITH THE FIRST MEASURED ROW, and the two
+ * disagree BY CONSTRUCTION. The list is ordered by how good a switch target
+ * an account is -- lowest session percentage first -- while the footer
+ * answers a different question, "how long until ANY of them frees up", which
+ * is ordered by TIME. An account at 23% resetting in 5h sorts above one at
+ * 62% resetting in 1h12m, so the first measured row is routinely not the next
+ * one to free up. It is also null exactly when there is nothing to wait for
+ * (everything else is already free, or unknown), which is information rather
+ * than an empty line. `the next-free line names the soonest account` pins
+ * both halves.
+ *
+ * Returns `{ others, nextFree }` and never throws over garbage.
  */
 function buildOthers(record, now, ctx) {
-  const none = { others: [], othersMore: 0, nextFree: null };
+  const none = { others: [], nextFree: null };
   const c = ctx && typeof ctx === "object" ? ctx : null;
   if (!c) return none;
   const accounts = c.accounts && typeof c.accounts === "object" ? c.accounts : null;
@@ -217,20 +235,26 @@ function buildOthers(record, now, ctx) {
   const labels = c.labels;
   const activeOrg = typeof c.lastActiveOrg === "string" && c.lastActiveOrg ? c.lastActiveOrg : null;
 
-  // orderForSwitch pins the active record at index 0; drop it here AND drop
-  // whatever record the card is already showing. Those are usually the same
-  // object, but not always: pickRecord() falls back to the freshest record
-  // when no active org is known yet, and listing the account already on
-  // screen a second time under "other accounts" would be a plain lie.
+  // orderForSwitch ranks every record it is given, active one included; drop
+  // the active record here AND drop whatever record the card is already
+  // showing. Those are usually the same object, but not always: pickRecord()
+  // falls back to the freshest record when no active org is known yet, and
+  // listing the account already on screen a second time under "other
+  // accounts" would be a plain lie.
+  //
+  // 🔴 THE ACTIVE ACCOUNT IS EXCLUDED HERE, and that exclusion is also what
+  // applies availability()'s documented active-account exemption on this
+  // surface: the widget's own card keeps rendering the active record's
+  // countdown (formatCountdown, above), because that is the one account the
+  // probe will re-measure in seconds. popup.js applies the same exemption
+  // through `sessionLine`'s `isActive`.
   const activeRec = activeOrg ? accounts[activeOrg] : null;
-  const rest = orderForSwitch(accounts, activeOrg, now)
+  const rest = orderForSwitch(accounts, now)
     .filter((r) => r !== record && r !== activeRec);
 
-  const shown = rest.slice(0, OTHERS_MAX);
   const next = nextFreeAt(accounts, activeOrg, now);
   return {
-    others: shown.map((r) => otherRow(r, labels, now)),
-    othersMore: rest.length - shown.length,
+    others: rest.map((r) => otherRow(r, labels, now)),
     nextFree: next
       ? `next free: ${accountLabel(next.record, labels)} in ${formatCountdown(next.at, now)}`
       : null,
@@ -263,21 +287,26 @@ function measuredPart(asOf, now) {
  * is the one measured longest ago. The availability verdict outranks
  * staleness for styling; `measured` and `unknown` rows still grey out, because
  * for those the stored percentage IS the claim being made.
+ *
+ * ⚠ AN OTHER-ROW HAS NO `bar` AND NO `key`, and neither is an oversight.
+ * `paintOthers` draws these rows as a dot, a name and a value -- no progress
+ * track -- so a `bar: clampPct(...)` on all three branches was computed for
+ * nobody but the test that asserted it; only the main card's rows are barred,
+ * and those still are. `key` was a list-diff id for a painter that rebuilds
+ * the whole section on every render and therefore diffs nothing. Add either
+ * back only with the reader that needs it in the same change.
  */
 function otherRow(rec, labels, now) {
   const v = availability(rec, now);
   const name = accountLabel(rec, labels);
-  const key = rec && typeof rec.orgUuid === "string" && rec.orgUuid ? rec.orgUuid : name;
 
   if (v.state === FREE) {
     return {
-      key,
       name,
       state: FREE,
       value: "AVAILABLE",
       meta: `reset ${stalenessLabel(v.resetsAt, now)}`
         + ` (was ${formatPct(v.sessionPct)}, ${measuredPart(v.asOf, now)})`,
-      bar: clampPct(v.sessionPct),
       tone: "ok",
       stale: false,
     };
@@ -287,23 +316,19 @@ function otherRow(rec, labels, now) {
     || !(rec && rec.staleSince === null);
   if (v.state === MEASURED) {
     return {
-      key,
       name,
       state: MEASURED,
       value: formatPct(v.sessionPct),
       meta: `resets ${formatCountdown(v.resetsAt, now)} · ${measuredPart(v.asOf, now)}`,
-      bar: clampPct(v.sessionPct),
       tone: stale ? "stale" : (percentTone(v.sessionPct, null) || "unknown"),
       stale,
     };
   }
   return {
-    key,
     name,
     state: "unknown",
     value: formatPct(v.sessionPct),
     meta: `reset time unknown · ${measuredPart(v.asOf, now)}`,
-    bar: clampPct(v.sessionPct),
     tone: stale ? "stale" : "unknown",
     stale,
   };

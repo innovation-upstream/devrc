@@ -297,7 +297,27 @@ SUITES=(
   # replacement of its own -- only the pytest one does):
   # 14 - min(50, max(1, 14/20)) = 13 files;
   # 213 - min(50, max(1, 213/20)) = 202.35 -> 203 tests.
-  "scripts/claude-usage/tests|13|203"
+  #
+  # Re-measured 2026-09-20 on the same branch after the round-0 audit fixes.
+  # The file COUNT did not move; the test count did, in both directions:
+  #   -1  `a CALLABLE carrying a session is not read as a measurement` was
+  #       DELETED. It killed no mutant that `availability is TOTAL over
+  #       garbage records` does not kill on its own, and chrome.storage.local
+  #       round-trips JSON so it pinned a shape that cannot occur. Both
+  #       halves of the guard it claimed to cover were re-measured killed
+  #       after the deletion.
+  #   +5  the F2 consolidation (popup.js now reads lib/availability.js rather
+  #       than re-deriving the elapsed-reset verdict from formatCountdown's
+  #       "resets soon") brings a regression pair plus a cross-surface seam
+  #       guard in popup.test.mjs, a two-way field-set pin in widget.test.mjs
+  #       replacing the deleted `bar`/`key` assertions, and a CSS mechanism
+  #       pin in content_widget.test.mjs for the scroll bound that replaced
+  #       the `+N more` cap.
+  # MEASURED by this runner: 14 files / 217 tests. Floors, by the formula at
+  # the top of this block:
+  # 14 - min(50, max(1, 14/20)) = 14 - min(50, 1) = 13 files (unchanged);
+  # 217 - min(50, max(1, 217/20)) = 217 - 10.85 = 206.15 -> 207 tests.
+  "scripts/claude-usage/tests|13|207"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree; js-source:

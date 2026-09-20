@@ -81,6 +81,24 @@ reset cannot un-happen — and the row never dresses it up as a fresh reading:
 `AVAILABLE — reset 2h ago (was 92%, measured 6h ago)` states the inference and
 keeps the last *measured* value and its age on screen. Nothing fabricates a 0%.
 
+🔴 **Both surfaces read that one predicate.** The in-page widget was fixed
+first and the popup was not, so for a round the same stored record at the same
+`now` read `AVAILABLE` on the card and `Session 92% · resets soon` in the
+popup — one rule, fixed at one of its two call sites. `popup.js`'s
+`sessionLine()` now calls `availability()` too; `formatCountdown()`'s
+`"resets soon"` is unreachable from it except for the **active** account,
+which is the one account the probe really does re-measure within seconds.
+The two surfaces still differ in *layout* (the widget lists switch candidates
+most-available-first; the popup keeps its own freshness ordering) — that is
+deliberate, and it is not a difference of verdict.
+
+⚠ **There is no `+N more` cap.** The widget drew at most four other-account
+rows and summarised the rest as a count that nothing could expand, so those
+rows were unreachable — and the cap fires on a real multi-account profile.
+Making the count clickable would have added a button inside the card, which
+is forbidden (see the pointer-events note below), so every row is painted and
+the height is bounded by CSS instead: `.otherlist` scrolls past ~170px.
+
 ⚠ **Staleness must not grey a `free` row**, and that is not a style
 preference. The account worth switching to is by construction the one measured
 longest ago, so the 6h staleness rule washes out precisely the most actionable

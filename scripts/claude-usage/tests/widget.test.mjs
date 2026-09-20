@@ -428,13 +428,15 @@ test("🔴 staleness does NOT grey a presumed-free row (it greys the others)", (
     accounts: { [ORG_A]: active, [ORG_B]: freed, [ORG_C]: waiting },
     lastActiveOrg: ORG_A,
   });
-  const byId = Object.fromEntries(m.others.map((r) => [r.key, r]));
+  // Rows are addressed by NAME: an other-row carries no `key`, because
+  // `paintOthers` rebuilds the whole section every render and diffs nothing.
+  const byName = Object.fromEntries(m.others.map((r) => [r.name, r]));
 
-  assert.equal(byId[ORG_B].stale, false, "the free row was greyed out");
-  assert.equal(byId[ORG_B].tone, "ok", "...and lost its colour with it");
-  assert.equal(byId[ORG_C].stale, true,
+  assert.equal(byName[NAME_B].stale, false, "the free row was greyed out");
+  assert.equal(byName[NAME_B].tone, "ok", "...and lost its colour with it");
+  assert.equal(byName[NAME_C].stale, true,
     "a stale MEASURED row must still grey -- there the percentage IS the claim");
-  assert.equal(byId[ORG_C].tone, "stale");
+  assert.equal(byName[NAME_C].tone, "stale");
 });
 
 test("a fresh measured row keeps its own percent band", () => {
@@ -445,11 +447,11 @@ test("a fresh measured row keeps its own percent band", () => {
     accounts: { [ORG_A]: active, [ORG_B]: hot, [ORG_C]: calm },
     lastActiveOrg: ORG_A,
   });
-  const byId = Object.fromEntries(m.others.map((r) => [r.key, r]));
-  assert.equal(byId[ORG_B].tone, "crit");
-  assert.equal(byId[ORG_C].tone, "ok");
-  assert.equal(byId[ORG_B].value, "97%");
-  assert.match(byId[ORG_B].meta, /^resets 1h0m · measured 1h ago$/);
+  const byName = Object.fromEntries(m.others.map((r) => [r.name, r]));
+  assert.equal(byName[NAME_B].tone, "crit");
+  assert.equal(byName[NAME_C].tone, "ok");
+  assert.equal(byName[NAME_B].value, "97%");
+  assert.match(byName[NAME_B].meta, /^resets 1h0m · measured 1h ago$/);
 });
 
 test("an other-account row with no reset time says so, and shows no countdown", () => {
@@ -476,18 +478,47 @@ test("every other-row carries the full field set the painter reads", () => {
   const m = W.widgetModel(active, NOW, { accounts, lastActiveOrg: ORG_A });
   assert.equal(m.others.length, 3);
   for (const row of m.others) {
-    assert.equal(typeof row.key, "string");
     assert.equal(typeof row.name, "string");
     assert.ok(["free", "measured", "unknown"].includes(row.state), row.state);
     assert.equal(typeof row.value, "string");
     assert.equal(typeof row.meta, "string");
     assert.equal(typeof row.stale, "boolean");
-    assert.ok(TONES.includes(row.tone), `${row.key} tone=${row.tone}`);
-    assert.ok(row.bar === null || (typeof row.bar === "number" && row.bar >= 0 && row.bar <= 100));
+    assert.ok(TONES.includes(row.tone), `${row.name} tone=${row.tone}`);
   }
 });
 
-test("🔴 the list is CAPPED, with the remainder counted -- the card sits over his chat", () => {
+test("an other-row carries NOTHING the painter does not read", () => {
+  // The inverse of the test above, and the one that would have caught the
+  // dead fields: `paintOthers` draws a dot, a name, a value and a meta line,
+  // and reads `state`/`tone`/`stale` for the classes. It never reads a `bar`
+  // (only the main card's rows are barred) and never reads a `key` (it
+  // rebuilds the whole section each render, so there is no list to diff).
+  // Both were computed on all three branches for a round with no reader.
+  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
+  const accounts = {
+    [ORG_A]: active,
+    [ORG_B]: acct(ORG_B, NAME_B, 91, iso(NOW - 2 * HOUR), 6),    // free
+    [ORG_C]: acct(ORG_C, NAME_C, 62, iso(NOW + HOUR), 1),        // measured
+    [ORG_D]: acct(ORG_D, NAME_D, 23, null, 1),                   // unknown
+  };
+  const m = W.widgetModel(active, NOW, { accounts, lastActiveOrg: ORG_A });
+  assert.equal(m.others.length, 3, "precondition: all three branches are exercised");
+  const EXPECTED = ["name", "state", "value", "meta", "tone", "stale"];
+  for (const row of m.others) {
+    assert.deepEqual(Object.keys(row).sort(), [...EXPECTED].sort(),
+      `the ${row.state} branch carries a field nothing paints`);
+  }
+});
+
+test("🔴 EVERY other account reaches the card -- no row is counted-but-unreachable", () => {
+  // This replaces a test that pinned OTHERS_MAX = 4 and `othersMore = 2`.
+  // The cap was real and it FIRED (the operator's live profile holds more
+  // than four candidates), and the "+N more" line it produced was TERMINAL:
+  // no click anywhere in the card could reveal those rows. A count of rows
+  // you cannot see is worse than either showing them or not mentioning them.
+  // The height bound moved into CSS (`.otherlist` scrolls), which keeps the
+  // "card over his chat" constraint without hiding anything; the painter's
+  // half is pinned in content_widget.test.mjs.
   const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
   const accounts = { [ORG_A]: active };
   // Six others, all measured, with distinct percentages so the order is the
@@ -499,18 +530,23 @@ test("🔴 the list is CAPPED, with the remainder counted -- the card sits over 
   });
   const m = W.widgetModel(active, NOW, { accounts, lastActiveOrg: ORG_A });
 
-  assert.equal(W.OTHERS_MAX, 4);
-  assert.equal(m.others.length, 4, "an unbounded list would cover his composer");
-  assert.equal(m.othersMore, 2, "the remainder is counted, not silently dropped");
-  assert.deepEqual(m.others.map((r) => r.value), ["23%", "31%", "42%", "53%"],
-    "the rows kept are the most available ones");
-
-  // At or below the cap there is nothing to count.
-  const two = { [ORG_A]: active, [ORG_B]: acct(ORG_B, NAME_B, 62, iso(NOW + HOUR), 1) };
-  assert.equal(W.widgetModel(active, NOW, { accounts: two, lastActiveOrg: ORG_A }).othersMore, 0);
+  assert.equal(m.others.length, 6, "an account was dropped from the card");
+  assert.deepEqual(m.others.map((r) => r.value), ["23%", "31%", "42%", "53%", "62%", "71%"],
+    "still most-available-first; the tail is appended, not truncated");
+  assert.equal(W.OTHERS_MAX, undefined,
+    "a row cap came back -- see lib/widget.js for why the next one needs an expand affordance");
+  assert.ok(!("othersMore" in m),
+    "the model still reports a hidden-row count, so something is hiding rows");
 });
 
-test("the next-free line names the soonest account and counts down to it", () => {
+test("the next-free footer names the soonest account -- which is NOT the first row", () => {
+  // 🔴 WHY THE FOOTER IS NOT REDUNDANT WITH THE LIST. The list ranks by how
+  // good a switch target an account is (lowest percentage first); the footer
+  // ranks by TIME. Here the first row is the 23% account resetting in 5h and
+  // the footer names the 62% one resetting in 1h12m -- two different
+  // questions with two different answers, on one card. Round 0 measured the
+  // footer null on a two-account fixture and read that as redundancy; it is
+  // null only when there is genuinely nothing to wait for.
   const active = acct(ORG_A, NAME_A, 37, iso(NOW + 30 * 60 * 1000), 0);
   const soon = acct(ORG_B, NAME_B, 62, iso(NOW + HOUR + 12 * 60 * 1000), 1);
   const later = acct(ORG_C, NAME_C, 23, iso(NOW + 5 * HOUR), 1);
@@ -519,6 +555,8 @@ test("the next-free line names the soonest account and counts down to it", () =>
   });
   assert.equal(m.nextFree, `next free: ${NAME_B} in 1h12m`,
     "the ACTIVE account's own sooner reset is not the answer");
+  assert.equal(m.others[0].name, NAME_C,
+    "precondition: the list's own first answer is a DIFFERENT account");
 
   // Nothing pending -> no line at all, rather than an empty one.
   const allFree = {
@@ -533,12 +571,12 @@ test("the account already ON the card never appears again under 'other accounts'
   const accounts = { [ORG_A]: a, [ORG_B]: b };
 
   assert.deepEqual(
-    W.widgetModel(a, NOW, { accounts, lastActiveOrg: ORG_A }).others.map((r) => r.key), [ORG_B]);
+    W.widgetModel(a, NOW, { accounts, lastActiveOrg: ORG_A }).others.map((r) => r.name), [NAME_B]);
   // pickRecord() falls back to the freshest record before any active org is
   // known; the shown record must still be excluded even though it is not the
   // "active" one.
   assert.deepEqual(
-    W.widgetModel(a, NOW, { accounts, lastActiveOrg: null }).others.map((r) => r.key), [ORG_B]);
+    W.widgetModel(a, NOW, { accounts, lastActiveOrg: null }).others.map((r) => r.name), [NAME_B]);
 });
 
 test("labels rename both the card's own header and the other rows", () => {
@@ -565,7 +603,6 @@ test("without a ctx the model is exactly what it was before this section existed
   const r = rec(ORG_A, NAME_A);
   for (const m of [W.widgetModel(r, NOW), W.widgetModel(r, NOW, undefined)]) {
     assert.deepEqual(m.others, []);
-    assert.equal(m.othersMore, 0);
     assert.equal(m.nextFree, null);
     assert.equal(m.name, NAME_A);
   }
@@ -586,7 +623,6 @@ test("the others section is TOTAL over garbage ctx -- it runs in his real tab", 
   for (const ctx of ctxs) {
     const m = W.widgetModel(r, NOW, ctx);
     assert.ok(Array.isArray(m.others), `ctx=${JSON.stringify(ctx)}`);
-    assert.equal(typeof m.othersMore, "number");
     assert.ok(m.nextFree === null || typeof m.nextFree === "string");
   }
 });
