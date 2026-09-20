@@ -149,11 +149,40 @@ test("every path the manifest names exists AND is git-tracked", () => {
 
   // `git ls-files` lists tracked paths only, so an added-but-not-`git add`ed
   // file is absent from it while sitting right there on disk.
-  const tracked = new Set(
-    execFileSync("git", ["ls-files", "--", "."], { cwd: EXT, encoding: "utf8" })
-      .split("\n").filter(Boolean).map((p) => p.replace(/\\/g, "/")),
-  );
-  assert.ok(tracked.size > 0, "git ls-files returned nothing — the check would be vacuous");
+  //
+  // 🔴 THIS RUNS IN TWO TIERS AND ONLY ONE OF THEM HAS A `.git`. The nix
+  // sandbox tier builds from a `cp -r ${./.}` STORE COPY with no git
+  // repository, so `git ls-files` there exits non-zero or returns nothing.
+  // The first version of this asserted `tracked.size > 0` unconditionally and
+  // went RED in CI while passing on every dev host — the exact two-tier trap
+  // CLAUDE.md names, walked into by a test written to close a different one.
+  //
+  // The skip is NOT vacuous, and that distinction is the whole point: the
+  // sandbox's source copy contains ONLY tracked files, so in that tier the
+  // existence assertion above IS the trackedness assertion — a manifest entry
+  // for an untracked file fails it there by construction. So each tier proves
+  // the property by the means available to it, and neither is silently
+  // skipping. What is NOT allowed is failing to notice which tier you are in.
+  let tracked = null;
+  try {
+    tracked = new Set(
+      execFileSync("git", ["ls-files", "--", "."],
+        { cwd: EXT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+        .split("\n").filter(Boolean).map((p) => p.replace(/\\/g, "/")),
+    );
+  } catch {
+    tracked = null;                       // no git here — sandbox tier
+  }
+
+  if (tracked === null || tracked.size === 0) {
+    // Prove we are actually in the no-git tier rather than in a checkout whose
+    // git invocation merely failed: a real checkout has a .git entry.
+    assert.equal(existsSync(join(EXT, "../../../.git")), false,
+      "git ls-files produced nothing INSIDE a real checkout — that is a broken "
+      + "instrument, not the sandbox tier, and this check must not be skipped");
+    return;
+  }
+
   const untracked = named.filter((p) => !tracked.has(p)).sort();
   assert.deepEqual(untracked, [],
     "manifest names a file that is NOT git-tracked — the flake ships only "
