@@ -47,6 +47,57 @@
     nixpkgs-playwright-1_57.url = "github:NixOS/nixpkgs/d61c78f4921b1622127584d67b2e9afddf588c92";
 
     # ------------------------------------------------------------------------
+    # THIRD, DELIBERATELY-FROZEN nixpkgs — the ONLY thing taken from it is
+    # `opencode` at 1.18.29. Do NOT `nix flake update` this input; like the
+    # playwright pin above it is a version pin, not a channel.
+    #
+    # 🔴 WHY IT EXISTS: opencode 1.18.30 IS BROKEN — every prompt fails, in the
+    # TUI and under `opencode run` alike, with
+    #     TypeError: undefined is not an object (evaluating 'a.name')
+    #       at resolve -> map -> map -> map -> SystemPrompt.environment
+    #         -> SessionPrompt.run
+    # It is an upstream build defect (bun 1.4.2 bundle-splitting drops a node
+    # out of an Effect layer tree, so a service layer resolves to `undefined`),
+    # NOT a config fault — https://github.com/anomalyco/opencode/issues/48645.
+    # Upstream fixed it in 1.18.31; nixpkgs-unstable still shipped 1.18.30 when
+    # this pin was added, so there was nothing to bump FORWARD to.
+    #
+    # MEASURED 2026-09-19, and the controls are what make this a version claim
+    # rather than a guess — both runs used the SAME empty working directory and
+    # the SAME pristine XDG config/data/cache/state dirs, so the version was the
+    # only variable:
+    #   1.18.30, pristine env, empty dir  -> crashes (also with `--pure`, also
+    #                                        against a fresh OPENCODE_DB, also
+    #                                        with the real config)
+    #   1.18.29, pristine env, empty dir  -> clean
+    #   1.18.29, REAL config + REAL db    -> completed a prompt end-to-end
+    # 1.18.29 also reads the legacy `opencode-stable.db` natively (all 10
+    # projects visible), so this pin costs no session history.
+    #
+    # WHY THIS EXACT REV: a32edd765451 (what the 2026-09-19 lock bump moved the
+    # main nixpkgs TO) carries 1.18.30; 42f17a57f4f6 (what it moved FROM)
+    # carries 1.18.29. Verified by evaluation, not by reading a changelog:
+    #   nix eval --raw github:NixOS/nixpkgs/42f17a57f4f6…#opencode.version
+    #     -> 1.18.29
+    #
+    # 🔴 THE PIN IS AN OVERLAY, NOT AN EXTRA ARGUMENT, AND THAT IS LOAD-BEARING.
+    # `pkgs.opencode` is read in TWO places — `nix/pkgs/tools/default.nix` (what
+    # the hosts deploy) and `checks.pytests`' nativeBuildInputs (what CI's
+    # version assertion measures). Both resolve from the `pkgs` set built below,
+    # so overriding the attribute there keeps those two in lockstep by
+    # construction. Threading a separate `pkgsOpencode` to one consumer would
+    # let CI certify a binary the hosts do not run.
+    #
+    # REMOVING THIS PIN: when nixpkgs ships >= 1.18.31, delete this input, the
+    # `opencodePinOverlay` below and its `overlays` entry, then re-derive
+    # PINNED_VERSION in scripts/tests/test_opencode_engine.py against the new
+    # binary — the header claims in scripts/opencode/opencode.jsonc are keyed to
+    # 1.18.29 and a version move is the prompt to re-measure them, not to
+    # re-spell them.
+    # ------------------------------------------------------------------------
+    nixpkgs-opencode-1_18_29.url = "github:NixOS/nixpkgs/42f17a57f4f6e33b3de3dca0a2a5ea5233169d02";
+
+    # ------------------------------------------------------------------------
     # `cairn` — the subsystem-store client, consumed as a PACKAGE instead of
     # being forked into `scripts/cairn`. The extracted OSS repo is now the one
     # copy of the reader; devrc keeps only what the OSS repo deliberately does
@@ -77,7 +128,7 @@
     cairn.url = "github:ZacxDev/cairn";
   };
 
-  outputs = { self, nixpkgs, home-manager, nixpkgs-playwright-1_57, cairn, ... }:
+  outputs = { self, nixpkgs, home-manager, nixpkgs-playwright-1_57, nixpkgs-opencode-1_18_29, cairn, ... }:
     let
       system = "x86_64-linux";
       # Explicit allowUnfree so unfree pkgs (elixir-ls, playwright browsers)
@@ -138,10 +189,33 @@
         mention-review = import ./nix/pkgs/tools/mention-review { pkgs = final; };
       };
 
+      # ---------------------------------------------------------------------
+      # opencode held at 1.18.29 because 1.18.30 cannot run a prompt at all.
+      # The full measurement, the upstream issue and the removal recipe are on
+      # the `nixpkgs-opencode-1_18_29` input above — read that before touching
+      # this.
+      #
+      # 🔴 AN OVERLAY ON PURPOSE: it makes `pkgs.opencode` resolve to 1.18.29
+      # for EVERY consumer at once — `nix/pkgs/tools/default.nix` (the deployed
+      # binary) and `checks.pytests` (the binary CI's version assertion reads).
+      # Those two are required to agree; an overlay is what makes that
+      # structural rather than something two call sites have to remember.
+      #
+      # `_prev.opencode` is deliberately not consulted: this is an unconditional
+      # replacement, so the attribute cannot silently fall back to the channel's
+      # broken build if the pinned eval ever changes shape.
+      # ---------------------------------------------------------------------
+      opencodePinOverlay = final: _prev: {
+        opencode = (import nixpkgs-opencode-1_18_29 {
+          inherit system;
+          config.allowUnfree = true;
+        }).opencode;
+      };
+
       pkgs = import nixpkgs {
         inherit system;
         config.allowUnfree = true;
-        overlays = [ mentionReviewOverlay ];
+        overlays = [ mentionReviewOverlay opencodePinOverlay ];
       };
       # Same allowUnfree treatment for the frozen 1.57 nixpkgs — the browser
       # bundle is unfree there too, and an --impure fallback would make the

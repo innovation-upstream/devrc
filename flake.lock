@@ -54,6 +54,22 @@
         "type": "github"
       }
     },
+    "nixpkgs-opencode-1_18_29": {
+      "locked": {
+        "lastModified": 1788746152,
+        "narHash": "sha256-RaKngusl5I8pNi8RfrVvsHq3NZe7eFWzDlb01+hEVqY=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "42f17a57f4f6e33b3de3dca0a2a5ea5233169d02",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "42f17a57f4f6e33b3de3dca0a2a5ea5233169d02",
+        "type": "github"
+      }
+    },
     "nixpkgs-playwright-1_57": {
       "locked": {
         "lastModified": 1773100628,
@@ -91,6 +107,7 @@
         "cairn": "cairn",
         "home-manager": "home-manager",
         "nixpkgs": "nixpkgs_2",
+        "nixpkgs-opencode-1_18_29": "nixpkgs-opencode-1_18_29",
         "nixpkgs-playwright-1_57": "nixpkgs-playwright-1_57"
       }
     }

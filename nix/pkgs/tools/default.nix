@@ -19,8 +19,23 @@ with pkgs; [
   # CARRIED FORWARD at an older version instead, each saying so on its own line.
   # Those claims were pinned to a version nothing pinned.
   #
-  # This entry pins them: at flake.lock's current nixpkgs rev, `pkgs.opencode`
-  # is 1.18.29 (re-derived 2026-09-08).
+  # This entry pins them: `pkgs.opencode` is 1.18.29 (re-derived 2026-09-08).
+  #
+  # 🔴 BUT NOT FROM THE MAIN nixpkgs REV ANY MORE — 2026-09-19. The version now
+  # comes from `opencodePinOverlay` in flake.nix, fed by the frozen
+  # `nixpkgs-opencode-1_18_29` input, because the main lock moved to a rev
+  # carrying opencode 1.18.30 and 1.18.30 CANNOT RUN A PROMPT: every request
+  # dies in `SystemPrompt.environment` with "undefined is not an object
+  # (evaluating 'a.name')", an upstream bun-bundling defect, not a config fault.
+  # The measurement, the controls behind it and the removal recipe are on that
+  # input in flake.nix — read them there rather than re-deriving here.
+  #
+  # ⚠ CONSEQUENCE FOR THE NEXT VERSION RED: it is no longer true that "a nixpkgs
+  # bump that moves it" is the only way this version changes, so the sentence
+  # below is now the OLD mechanism plus one. While the overlay stands, an
+  # ordinary `nix flake update` CANNOT move opencode at all — which is the point
+  # of the pin, and also means a green version assertion no longer tells you the
+  # main lock is where you left it.
   #
   # 🔴 THE REV AND THE STORE PATH ARE DELIBERATELY NOT SPELLED HERE. Only the
   # VERSION is, because only the version is guarded — `test_opencode_engine.py`'s
