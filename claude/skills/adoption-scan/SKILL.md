@@ -61,7 +61,15 @@ mechanically — no similarity heuristic, which `scripts/lib/handoff_doc.py:179`
 ⚠ Two caveats that survive the fix, because neither is a matching problem. **A session EDITING the
 artifact discusses it in assistant text** and is not a use, so split the count by project dir and
 report the confounder. And **COUNT SESSIONS, NOT BLOCKS** — one verbose agent restating something
-eight times is eight blocks and one use. Worked instrument:
+eight times is eight blocks and one use.
+
+🔴 **A THIRD, and it INFLATES a correctly-provenanced count: the same block appears in MANY files.**
+A resume or a compaction COPIES prior history into a new transcript, so one tool result is re-counted
+once per copy — the files are distinct, the event is not. **Dedupe by `tool_use_id`**, which is
+stable across every copy (the same field the provenance fix already reads, used as an identity
+rather than a class). MEASURED 2026-09-20 sweeping `handoff_doc.py` refusals over 1,328 transcripts:
+~8,500 raw matches → **5,095 distinct, i.e. 40% were copies**, and the per-status ranking moved.
+Provenance and dedup are INDEPENDENT — a sweep that fixes only the first still over-counts. Worked instrument:
 `scripts/audit-rule-firing-sweep.py` (+ `scripts/tests/test_audit_rule_firing_sweep.py`), which
 also carries the two traps that make such a sweep read a confident zero: an `rg` pre-pass reads RAW
 JSON while the matcher reads DECODED text, so an `ensure_ascii` transcript hides every non-ASCII
