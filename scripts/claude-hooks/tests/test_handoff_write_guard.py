@@ -398,6 +398,56 @@ def test_a_COMPUTED_ref_gets_the_exemption_too(home, empty_repo, spelling):
         str(empty_repo / "claudedocs" / DOC)], "spelling %r lost the exemption" % spelling
 
 
+@pytest.mark.parametrize("spelling", ['"${B}"', "'$B'", '"$(git rev-parse HEAD)"'])
+def test_a_QUOTED_computed_ref_loses_the_exemption(home, empty_repo, spelling):
+    """🔴 A DECLARED NARROWING, PINNED SO IT CANNOT DRIFT UNNOTICED.
+
+    `REF_PREFIX_RX`'s token class excludes `"'=(` to kill a quadratic (see the
+    constant). The cost is that a ref token ENDING in one of them — in practice the
+    QUOTED computed ref — no longer arms. The unquoted spellings still do, and
+    `test_a_COMPUTED_ref_gets_the_exemption_too` pins those.
+
+    🔴 THIS TEST EXISTS BECAUSE THE SUITE WAS GREEN EITHER WAY. Round 0 of #1811 found
+    the PR claiming it still accepts "every computed ref" while these five shapes had
+    silently flipped True -> False, invisible because every parametrized case was
+    UNQUOTED. A narrowing nothing asserts is a narrowing nobody can see.
+
+    Direction is fail-SAFE — a lost exemption makes the guard quieter, never blocking —
+    and corpus incidence is ZERO, which is why it is accepted rather than fixed.
+    """
+    cmd = "git -C %s show %s:claudedocs/%s" % (empty_repo, spelling, DOC)
+    assert guard.handoff_read_docs(bash(cmd, cwd="/nowhere/else")) == []
+
+
+@pytest.mark.parametrize("seg,armed", [
+    ("git -C /r show origin/t", True),      # the ordinary shape
+    ("git -C /r cat-file -e HEAD", True),   # the other verb
+    ("show git", False),                    # 🔴 verb BEFORE git — the order case
+    ("showcase git show x", True),          # `showcase` is not the verb; the later one is
+    ("git a cat-file", True),               # verb after git, words between
+    ("git log --oneline", False),           # git, no read verb
+    ("cat-file git", False),                # verb before git again
+])
+def test_the_git_verb_check_still_requires_the_VERB_AFTER_the_git(home, empty_repo,
+                                                                  seg, armed):
+    """🔴 PINS THE ONLY THING THE ORIGINAL `\\bgit\\b.*?\\b(?:show|cat-file)\\b` SAID.
+
+    That regex was replaced by two linear scans to delete `GIT_VERB_SCAN_CAP`. Its
+    entire semantic content was ORDER — a read verb must follow a `git` word — and the
+    replacement preserves it only because `GIT_VERB_RX.search(seg, g.end())` starts
+    after the `git`. Nothing asserted that: the equivalence was a throwaway probe, and
+    the constant's comment told the next reader to "re-run that comparison" against
+    something that existed in no test. Round 0 of #1811 called that out.
+
+    `show git` and `cat-file git` are the discriminating rows — a mutant that drops the
+    `g.end()` offset, or that tests the two predicates independently, goes green on
+    every other row and red only on these.
+    """
+    cmd = "%s foo:claudedocs/%s" % (seg, DOC)
+    got = guard.handoff_read_docs(bash(cmd, cwd=str(empty_repo)))
+    assert bool(got) is armed, "segment %r: expected armed=%s, got %r" % (seg, armed, got)
+
+
 def test_a_LATER_base_wins_when_the_earlier_one_lacks_the_doc(home, tmp_path, repo):
     """🔴 PINS THE SECOND, UNDECLARED BEHAVIOUR CHANGE round 1 found in `_resolve`.
 

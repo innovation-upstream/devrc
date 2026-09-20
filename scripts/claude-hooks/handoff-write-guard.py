@@ -323,21 +323,36 @@ DASH_C_RX = re.compile(r"(?:^|\s)-C\s*(\S+)")
 #
 # 🔴 THE TOKEN CLASS EXCLUDES THE DELIMITERS `"'=(` ON PURPOSE, AND "SIMPLIFYING" IT
 # BACK TO `[^\s:]+` REINTRODUCES A QUADRATIC. Those four characters are in the LEADING
-# class as well, so `[^\s:]+` overlaps it and the two runs can cover the same span:
-# on a head where the search GLOBALLY FAILS the matcher then retries every start.
-# MEASURED on a 32 KB head: `[^\s:]+` 752 ms, this class 0.35 ms, the original
-# enumerated class 0.35 ms — i.e. this is as fast as the pre-#1799 spelling while
-# accepting every computed ref the enumerated one rejected. Verified over the corpus:
-# 2 verdict differences in 21,252 real match sites, and both are this session's own
-# probe commands. It is why `GIT_VERB_SCAN_CAP` could be deleted; do not undo it.
+# class as well, so `[^\s:]+` overlaps it and the two runs can cover the same span: on
+# a head where the search GLOBALLY FAILS the matcher then retries every start.
+#
+# 🔴 THE SHAPE IS PART OF THE MEASUREMENT — a number without it reads as WRONG, and the
+# comment that said so was deleted in the same commit that reintroduced the defect.
+# On a GLOBAL-FAILURE head (a run of `"`, then a `:` blocker, then a tail containing
+# none of `"'=(`), 32 KB: `[^\s:]+` ~670 ms, this class ~0.35 ms. On an ORDINARY
+# quote-dense 32 KB head the two are within noise (~1.1 vs ~1.0 ms) — same size, same
+# regexes, 1,400x apart. Treat the milliseconds as load-dependent; the CLASS is the
+# claim. ⚠ A possessive `[^\s:]++` was tried and does NOT fix it (309 ms at 32 KB):
+# the outer alternation still retries at every position.
+#
+# ⚠ THE NARROWING THIS BUYS, DECLARED RATHER THAN DISCOVERED LATER: a ref token whose
+# LAST character is one of the excluded four loses the exemption. In practice that is
+# the QUOTED computed ref — `git show "${B}":`, `git show '$B':`,
+# `git show "$(git rev-parse HEAD)":` all go True -> False. The UNQUOTED spellings
+# (`$B`, `${B}`, `$(…)`, backticks) all still arm. Direction is fail-SAFE (a lost
+# exemption makes the guard quieter, never blocking) and corpus incidence is ZERO, so
+# this is accepted, not fixed — but it is PINNED by
+# `test_a_QUOTED_computed_ref_loses_the_exemption` so it cannot drift unnoticed. An
+# earlier draft of this note claimed "every computed ref" still works. It does not.
 #
 # ⚠ THIS IS A SHELL-WORD BOUNDARY, NOT "THE" BOUNDARY, and an earlier note overstated
 # it as "a ref cannot contain the `:` that terminates it". True of ref NAMES
 # (`git check-ref-format` forbids `:`); FALSE of the revision EXPRESSIONS `git show`
 # accepts — `:0:claudedocs/…` (index stage) and `:claudedocs/…` (stage shorthand) both
-# carry a `:` inside the token and so lose the exemption. Pre-existing and fail-SAFE,
-# since a lost exemption only makes the guard quieter.
-REF_PREFIX_RX = re.compile(r"(?:^|[\s\"'=(])([^\s:\"'=(]+):\Z")
+# carry a `:` inside the token and so lose the exemption. Pre-existing and fail-SAFE.
+#
+# No capture group: `_read_off_a_ref` reads this for truthiness only.
+REF_PREFIX_RX = re.compile(r"(?:^|[\s\"'=(])(?:[^\s:\"'=(]+):\Z")
 
 # …and a git object-read verb in the SAME command segment.
 #
@@ -370,17 +385,27 @@ SEGMENT_SPLIT_RX = re.compile(r"[;&|\n]")
 #
 # 🔴 TWO LINEAR SCANS, NOT ONE BACKTRACKING REGEX — AND THIS IS WHAT DELETED THE CAP.
 # The spelling was `\bgit\b.*?\b(?:show|cat-file)\b`, which anchors at EVERY `git` and
-# walks forward from each: O(k·n), measured at ~1.1 s on 32 KB of `"git "` with no verb
-# and ~16.9 s on 128 KB. A 4 KiB `GIT_VERB_SCAN_CAP` was added to bound it, then a test
-# was added to pin the cap, and settling that test's mutation verdict became a ranked
-# work item. All three are gone: find the first `git`, then look for a verb after it.
-# Same meaning, 0.68 ms at 128 KB.
+# walks forward from each: O(k·n), on the order of seconds for tens of KB of `"git "`
+# with no verb. A 4 KiB `GIT_VERB_SCAN_CAP` was added to bound it, then a test was
+# added to pin the cap, and settling that test's mutation verdict became a ranked work
+# item. All three are gone: find the first `git`, then look for a verb after it.
+#
+# 🔴 THE CAP WAS RETIRED ON THE WRONG OPERAND'S NUMBERS, AND THE CORRECT ONES ARE HERE.
+# The argument was "the largest SEGMENT ever scanned is 296 B against a 4096 B cap".
+# 296 B is exact — and irrelevant: the cap truncated the **HEAD**, which is what both
+# scans are quadratic in. MEASURED 2026-09-20 over all 6,626 transcripts on this host,
+# 21,291 match sites: head max **29,039 B**, p99 3,111 B, median 156 B, and **108
+# sites exceeded the deleted cap**. So the cap WAS reached, on a quantity 7x larger
+# than the one quoted to retire it. The deletion is still right — but because the two
+# scans above and `REF_PREFIX_RX` are now LINEAR, never because the input is small.
+# 🔴 As written before, the argument would have licensed deleting the cap WITHOUT those
+# changes, which measurement says is unsafe.
 #
 # 🔴 EQUIVALENCE WAS MEASURED, NOT ASSUMED — including the cases that distinguish
-# ORDER, which is the whole content of the original `.*?`: `show git` stays False,
-# `showcase git show x` stays True, `git a cat-file` stays True. 0 disagreements across
-# 14 shapes. If you change either pattern, re-run that comparison; a `.*?` between them
-# would restore the quadratic.
+# ORDER, which is the whole content of the original `.*?`. Those are pinned by
+# `test_the_git_verb_check_still_requires_the_VERB_AFTER_the_git`, because a comment
+# telling the next reader to "re-run the comparison" pointed at a throwaway probe that
+# existed in no test. A `.*?` between these two would restore the quadratic.
 GIT_WORD_RX = re.compile(r"\bgit\b")
 GIT_VERB_RX = re.compile(r"\b(?:show|cat-file)\b")
 
