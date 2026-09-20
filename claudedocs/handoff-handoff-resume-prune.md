@@ -29,10 +29,18 @@ bug, unrelated.
   APPEND share **below 70%**. P2–P4 merging does NOT close this arc.
 
 ## State now
-- Branch / PR: `handoff-resume-prune-proposal` @ `fcd0ad12`, **local only — not pushed, no PR**.
+- Branch: `handoff-resume-prune-proposal`, **pushed to `origin`** — three commits:
+  `fcd0ad12` (the proposal doc), `bea9138d` (an `adoption-scan` gotcha), `8d7a3bfd` (this
+  handoff doc, landed by `handoff_doc.py --confirm --push`). 🔴 **No PR is open** — opening
+  one was not requested and is an outward action left to the operator.
 - DONE: `claudedocs/proposal-handoff-resume-prune.md` written and committed (`fcd0ad12`).
   It carries the full measurement set, the four proposed changes P1–P4 and what is
   deliberately NOT proposed.
+- DONE: `claude/skills/adoption-scan/SKILL.md` gained the dedup-by-`tool_use_id` gotcha
+  (`bea9138d`) — the skill already owned the PROVENANCE half of transcript sweeps but not
+  the copy half. 7,306 B, within the 12,038 B skill budget, so no eviction was needed.
+  🔴 **Not deployed** — `~/.claude/skills/` is a nix-store symlink, so this needs a
+  `home-manager switch` (or `scripts/ship.sh` after merge) before any session loads it.
 - DONE: three measurements, each with controls (commands in "How to verify"):
   - **70% of the live corpus is in the three `APPEND_PREFIXES` buckets** — `gotchas`
     1,389,966 B (42.6%), `open investigations` 879,515 B (26.9%); APPEND total 2,279,835 B
@@ -43,9 +51,12 @@ bug, unrelated.
     **915× = 18.0% of runs**; budget-over 185 (3.6%); budget-near 28 (0.5%).
   - **82% of live docs (80 of 97) declare no `closing-condition`**, holding 73% of bytes;
     14 of the 20 biggest are undeclared. Of the 17 declared: 12 `check`, 5 `judgement`.
-- NOT DONE: no implementation of P1–P4. Nothing in `claude/skills/` or `scripts/lib/` changed.
-- Deploy/verify status: nothing deployed; no `home-manager switch` was run and none is needed
-  yet — this session wrote one `claudedocs/` file and nothing home-manager manages.
+- NOT DONE: no implementation of P1–P4. Nothing in `scripts/lib/` changed, and neither
+  `handoff/SKILL.md` nor `resume/SKILL.md` was touched.
+- Deploy/verify status: nothing deployed. No `home-manager switch` was run this session.
+- Subsystem index: BOTH windows read (`--session`, then `--commit` auto-run) — each
+  returned `status=no-match` with nothing nominated, so **no index write was proposed**.
+  The one durable lesson was routed to `adoption-scan` instead, per the skill's route rule.
 - No `clawgate-task:` field: `clawgate_handoff.sh resolve` exited **5** (nothing resolved).
   Its positive control showed the board answered 2 links for a DIFFERENT session, so the
   board is reachable — but a wrong id also answers 200 with an empty array, so this is a
