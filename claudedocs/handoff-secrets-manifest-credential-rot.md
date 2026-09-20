@@ -27,41 +27,43 @@ holds should appear in that manifest, and no row should assert something false a
 
 ## State now
 
-- ✅ **`devrc#1797` MERGED** (`12e6a10f`, squash) — verified by CONTENT with a negative
-  control: the corrected reasoning and the restored bootstrap step are on `origin/main`
-  and absent at `main~1`. (Unchanged from the previous session; kept because the rows
-  below build on it.)
-- 🔶 **RANK 1 IS IN FLIGHT, NOT DONE — `devrc#1805` is OPEN.**
-  `docs/secrets-opencode-auth-row`, head `0e74f435`, `MERGEABLE`/`UNSTABLE`. It adds the
-  missing `SECRETS.md` row for `~/.local/share/opencode/auth.json`, a pointer to it from
-  the `repo-cos/env` row, and a new bootstrap step 7 (list renumbered 1..10, no gaps).
-  As of 2026-09-20T03:38Z all **4** Tekton statuses on that sha are `pending` — nothing
-  has reported, so this carries NO verdict yet. 🔴 Read it SHA-pinned
-  (`gh api repos/innovation-upstream/devrc/commits/0e74f435.../status`), not with a bare
-  `gh pr checks` — a rollup resolves its sha at call time and can answer for the
-  pre-push head.
-- 🔴 **The finding rank 1 was filed on was UNDERSTATED, and the correction is the point.**
-  The undocumented key is not a spare — it is the one carrying the spend. Measured
-  2026-09-20 on workbench against the issuer's own free `/api/v1/key` endpoint:
-  `~/.local/share/opencode/auth.json` → HTTP 200, `is_free_tier: false`, `usage`
-  **71.27** of `limit` 50; `~/.config/repo-cos/env` → HTTP 200, `is_free_tier: false`,
-  `usage` **7.02** of 50. Different sha256 digests (deliberately NOT recorded in
-  `SECRETS.md` or here — devrc is public; re-derive them). So "rotate the OpenRouter
-  key" was not merely ambiguous: it was likely to resolve to the WRONG file, moving ~9%
-  of the traffic and leaving the rest on the old credential.
-- **Deploy/verify status:** nothing deployed; this is documentation. `#1805` is verified
-  by test run and by content in its own branch, and is **NOT merged** — do not report it
-  as landed.
-- ⚠ **No `clawgate-task:` field, again.** `clawgate_handoff.sh resolve` exited **5** with
-  its positive control passing (the same endpoint answered 2 links for a different
-  session, so the board is reachable and the token is accepted). That proves a CORRECT
-  id would have resolved; it does NOT prove the id under test is right. Not a clean bill
+- ✅ **RANK 1 IS CLOSED — `devrc#1805` MERGED** (squash `eaf4e99a`, 2026-09-20T04:51:13Z,
+  branch deleted). `SECRETS.md` now carries the row for
+  `~/.local/share/opencode/auth.json` at line 28, a pointer from the `repo-cos` row, and
+  bootstrap step 7 (list 1..10).
+  **Verified by CONTENT with a negative control, never by ancestry:** the row's unique
+  string is present once at `origin/main:SECRETS.md` and **0 times** at `origin/main~1`;
+  numbering re-derives to **10**; `grep -c 'sk-or-v1-'` on the merged file is **0**.
+  ⚠ The obvious control here is MUDDIED and the first run of it looked wrong: grepping for
+  the PATH `local/share/opencode/auth.json` gives **3 vs 1**, not 3 vs 0, because `#1797`
+  had already mentioned that path once inside the `repo-cos` row's rotation-coupling
+  sentence. **Grep a string unique to the NEW row**, not the path.
+- ✅ **`devrc#1797` MERGED** (`12e6a10f`) — unchanged, still verified by content.
+- 🔴 **THE GATE WENT RED ON THE PR AND IT WAS NOT THE KNOWN BASE-RED — the control is what
+  separated them.** At head `0e74f435`, `tekton/devrc-pytests` FAILED
+  (`24022 collected / 24017 passed / 1 failed`) on
+  `test_engine_is_the_version_every_measurement_is_keyed_to`, while `origin/main` at
+  `7ef01c05` was GREEN on the same selection (`24022 / 24018 / 0 failed`). Same collection
+  count, one extra failure. The branch simply predated **`#1804`**. Merging `origin/main`
+  into the branch (clean, no conflicts) produced head `24cdf34c`, all **4** statuses green,
+  and that is what was merged. **This arc merged `#1797` through a red gate; `#1805` was
+  NOT merged through one.**
+- ⚠ **ANOTHER SESSION IS EDITING `SECRETS.md` RIGHT NOW, UNCOMMITTED, AND IT IS REAL WORK
+  — DO NOT CLOBBER OR "RESCUE" IT.** The primary clone carries `M SECRETS.md` (+1 line, a
+  row for `~/.config/stt/env` / `STT_API_URL` + `STT_API_TOKEN`) and `M nix/home.nix`
+  (+8, a `.local/bin/stt` symlink). It differs from `origin/main` and that content appears
+  nowhere upstream, so it is genuine WIP, **not** the base-clone refresh hook. No
+  `claim-work` ref names it. Note what it means for this arc: a NEW credential is being
+  given a manifest row as a matter of course, which is the behaviour the arc exists to
+  produce.
+- ⚠ **No `clawgate-task:` field — re-resolved, same answer.** `clawgate_handoff.sh resolve`
+  exited **5** again with its positive control passing (the endpoint answered 2 links for a
+  different session). A correct id WOULD have resolved; that is narrower than a clean bill
   of health, and no field was written.
-- ⚠ **The two untracked `claudedocs/scope-chief-*.md` files are still in the primary
-  clone**, still another session's. Left alone.
-- **Claim state:** `secrets-manifest-credential-rot-1` is HELD by this session (rank 1,
-  released only when `#1805` merges or is abandoned). Rank 3 is held by a DIFFERENT
-  session under its own slug — see the investigation block.
+- ⚠ **The two untracked `claudedocs/scope-chief-*.md` files** are still present, still
+  another session's. Left alone.
+- **Claim state:** `secrets-manifest-credential-rot-1` was RELEASED on merge. Nothing in
+  this arc is claimed right now.
 
 ## Open investigations — live diagnosis state
 
@@ -172,51 +174,77 @@ block beside it.)
   (`fix/opencode-pin-1.18.30`) is OPEN**. The useful action is to hand the
   login-shell/dev-shell split above to that session, not to re-derive it.
 
+### RETRACTION — the opencode fix went the OPPOSITE way, and my own earlier block called the direction wrong
+- as-of: 2026-09-20
+
+🔴 **This RETRACTS one line of the block above it, "The opencode pin: the DISCRIMINATING
+check has now been RUN, and rank 3 is held by another session" (as-of 2026-09-20).** That
+block's MEASUREMENTS all stand. What is WRONG in it is its second "Ruled out" bullet —
+*"Ruled out — that the pin should be left at 1.18.29 … the pin must move to 1.18.30 for
+`main` to go green"* — and the "Consequence worth carrying" paragraph that follows from it.
+**Do not act on either.** (`Open investigations` appends and the tool cannot edit an earlier
+heading, so this paragraph is the retirement marker; grep that heading and read the two
+blocks together.)
+
+- **What actually happened:** **`#1804`** — *"fix(nix): pin opencode to 1.18.29 — 1.18.30
+  cannot run a single prompt"* — merged to `main` as `7ef01c05`. It added a dedicated
+  flake input `nixpkgs-opencode-1_18_29` and pinned the **BINARY** down, leaving
+  `PINNED_VERSION = "1.18.29"` untouched. Verified: that constant reads `1.18.29` at
+  `origin/main` and read `1.18.29` on my branch too — so the pin was never the difference.
+- **Why the wrong inference was reachable from correct data:** the measurement (login shell
+  1.18.29, dev shell 1.18.30, the gate runs in the dev shell) is true and reproducible, and
+  it does license "the assertion and the binary disagree". It does **not** license *which
+  one should move*. That question is decided by a fact no version comparison can see —
+  **opencode 1.18.30 cannot run a prompt at all.** `via: change` (`#1804`, read at
+  `origin/main`)
+- **Ruled out — that `#1803` fixed this.** `#1803` (`fix/opencode-pin-1.18.30`) is still
+  **OPEN** and proposes the direction `#1804` did not take. It is probably moot now; that
+  is its author's call, not this arc's. `via: measurement` (`gh pr view 1803`)
+- 🔴 **The reusable lesson, and it is the generalisable half:** a correct measurement plus a
+  plausible inference is still a guess. **The discriminating fact was behavioural (does the
+  new binary work?), not comparative (which version is newer?)** — and the check I ran
+  could not reach it. When two artefacts disagree about a version, ask whether either one
+  is BROKEN before deciding which to move.
+- **Next probe:** none for this arc. Rank 3 stays another session's.
+
 ## Next steps (ranked)
 
-1. **Merge `devrc#1805`** — the `SECRETS.md` row for
-   `~/.local/share/opencode/auth.json`. **Carried forward from the original rank 1, so
-   the values survive the replace:** measured 2026-09-19 and re-measured 2026-09-20 —
-   mode **600**, 131 bytes, one provider object `openrouter` with `type`/`key`, key
-   **73 chars**, a DIFFERENT value from `~/.config/repo-cos/env` (also 73 chars).
-   IN FLIGHT: `innovation-upstream/devrc#1805`,
-   head `0e74f435`. Gate was all-`pending` at 03:38Z; read it SHA-pinned before
-   merging. Consider `/audit-pr 1805` first — this arc's own history is that two of
-   three defects in the last ladder were INTRODUCED by the previous round's fix, and
-   both were prose. Merging this closes HALF the closing condition.
-   forcing: security — an undocumented live credential on the host
-2. **The drafter's Gmail/SMTP credential is documented NOWHERE in `SECRETS.md`.**
+1. ✅ **DONE — merged as `devrc#1805`** (squash `eaf4e99a`). The `SECRETS.md` row for
+   `~/.local/share/opencode/auth.json`. Kept numbered so released claim slugs still point
+   at what they were taken for.
+   forcing: security — satisfied; the credential is documented
+2. 🔴 **THE ONLY ITEM LEFT BEFORE THE CLOSING CONDITION — the drafter's Gmail/SMTP
+   credential is documented NOWHERE in `SECRETS.md`.**
    `REPO_COS_SMTP_USER` / `REPO_COS_SMTP_PASSWORD` (`scripts/task-spec-drafter/email_send.py:131-132`)
-   over SOPS `mailbox-gmail-imap` key `IMAP_APP_PASSWORD` (`:16`, `:46`). `grep -in
-   'gmail\|IMAP\|SMTP' SECRETS.md` returns **0**. Hole predates this arc (`bac41175`);
-   `SECRETS.md:33` already has the pattern for a credential with no local file.
-   **This is now the ONLY item between this arc and its closing condition.**
+   over SOPS `mailbox-gmail-imap` key `IMAP_APP_PASSWORD` (`:16`, `:46`).
+   Re-measured 2026-09-20 against the MERGED tree: `grep -ic 'gmail\|IMAP\|SMTP'` on
+   `origin/main:SECRETS.md` returns **0**. `SECRETS.md:33` already has the pattern for a
+   credential with no local file. ⚠ Coordinate with the live `stt` WIP noted in State now —
+   it is editing the same table.
    forcing: security — an undocumented credential, same class as rank 1
-3. **Re-key the opencode measurement pins — CLAIMED BY ANOTHER SESSION, DO NOT START.**
-   IN FLIGHT: `innovation-upstream/devrc#1803` (`fix/opencode-pin-1.18.30`); claim
-   `opencode-version-pin-1-18-30`. The discriminating check has been run — see the
-   investigation block — and the direction (pin → 1.18.30) is confirmed correct for the
-   gate. What is left for whoever holds it: relay the login-shell/dev-shell split so the
-   expected login-shell red is not misread as a regression.
-   forcing: gate — `tekton/devrc-pytests` is failing on `main`
+3. **The opencode pin — RESOLVED ON `main` BY ANOTHER SESSION, NOT BY THIS ARC.** `#1804`
+   pinned the binary to 1.18.29 and `main`'s pytests is green. `#1803` is still OPEN
+   proposing the opposite direction and is probably moot. **Read the RETRACTION block
+   before touching this.** Nothing here for this arc to do.
+   forcing: gate — satisfied; `main` is green
 4. **Three `test_analyze_service_index_escrow_verify.py` tests are base-red**
-   (`test_the_preflight_PASSES_when_every_module_resolves`, `…missing_bw…`,
-   `…missing_identity…`). Re-confirmed 2026-09-20 in the `#1805` worktree: the failure
-   is `AssertionError: 'DECRYPT-DEPS-MISSING' == 'IDENTITY-MISSING'`, and the selection
-   runs **897 passed / 3 failed**, identical to the count this doc recorded a day
-   earlier. Unrelated to this arc.
+   (`…PASSES_when_every_module_resolves`, `…missing_bw…`, `…missing_identity…`), failing
+   `AssertionError: 'DECRYPT-DEPS-MISSING' == 'IDENTITY-MISSING'`. ⚠ Re-check before
+   working: `main` ran **24018 passed / 0 failed** on 2026-09-20, which does NOT obviously
+   square with three base-red tests in that tier — the two readings may be scoped
+   differently (full suite vs the 8-file `SECRETS.md` selection). Establish which before
+   filing anything.
    forcing: gate — a red the pytests tier carries
 5. **`nix/agent-handles.nix:27` exports `CIVITAI_CLI` at a clone stuck at 2026-06-18**
    with no `scripts/dogfood/`, so a cross-repo reference written against that handle does
    not resolve. The live checkout is `~/workspace/civit/cli`.
    forcing: none
-6. **104 stale `.claude/worktrees/agent-*` checkouts in this clone.** Each is a full
-   working tree; together they poison every recursive grep here — measured, a
-   `grep -rn 'repo-cos/env'` returned **208 hits, all of them** in those worktrees, and
-   the tracked tree has none.
+6. **104 stale `.claude/worktrees/agent-*` checkouts in this clone** poison every recursive
+   grep here — measured, `grep -rn 'repo-cos/env'` returned **208 hits, all** inside those
+   worktrees, zero in the tracked tree.
    forcing: none
-7. **Decide whether any mechanical check on `SECRETS.md` claims is worth building** —
-   see the investigation block. Writing "not worth it" closes this.
+7. **Decide whether any mechanical check on `SECRETS.md` claims is worth building.**
+   Writing "not worth it" closes this.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -346,6 +374,41 @@ this update. They are history, not status, so they belong here.
   block naming the old heading verbatim so a grep joins them — weaker than an edit,
   because a reader going top-to-bottom still meets the old heading first.
 
+### Added 2026-09-20 (second session) — a right measurement, a wrong inference, and a stale branch
+
+- 🔴 **A CORRECT MEASUREMENT DOES NOT LICENSE THE INFERENCE DRAWN FROM IT, AND I SHIPPED
+  THE WRONG ONE INTO A HANDOFF.** Measuring that the login shell had opencode 1.18.29 and
+  the dev shell 1.18.30 is true, reproducible, and establishes only that the two disagree.
+  I reported that it established **which** should move. The deciding fact — 1.18.30 cannot
+  run a prompt — is BEHAVIOURAL and invisible to any version comparison, and `#1804` acted
+  on it by pinning the binary DOWN. **When two artefacts disagree about a version, ask
+  whether either is BROKEN before deciding which one to change.**
+- 🔴 **"IT IS THE KNOWN BASE-RED" IS THE MOST EXPENSIVE ASSUMPTION AVAILABLE ON A PR WHOSE
+  ARC HAS ALREADY MERGED THROUGH A RED GATE ONCE.** `#1805` went red on exactly the test
+  `#1797` was waved through on, which is precisely the shape that invites a second
+  override. It was NOT the same situation: `main` had gone green in between. The control
+  cost two API calls — read the failing status description for its counts, read `main`'s
+  for the same — and returned `24017/1` against `24018/0`, same collection count. **A
+  precedent for overriding a red is not a licence; re-run the control every time.**
+- 🔴 **A PR BRANCH IS NOT THE MERGED TREE, AND HERE THE GAP WAS THE ENTIRE DEFECT.** The
+  branch was green-able only after taking upstream: `main` carried the fix (`#1804`) for
+  the very red the branch was showing. **MERGE upstream in rather than rebasing** (a rebase
+  destroys an audit ladder's range boundary), then let the gate run on the merge commit —
+  the resulting head is the thing that will actually land.
+- ⚠ **A path-based negative control can be muddied by an EARLIER commit in the same arc.**
+  Verifying `#1805` by grepping for `local/share/opencode/auth.json` gives **3 vs 1**, not
+  3 vs 0, because `#1797` already mentioned that path once in the `repo-cos` row. The first
+  read of that looks like a failed control. **Pick a string unique to the new content**,
+  not the identifier the arc has been discussing all along.
+- ⚠ **`gh pr list --repo ZacxDev/devrc` fails with `Could not resolve to a Repository`** —
+  this repo is `innovation-upstream/devrc`. The error reads like auth or network.
+  `git -C "$DEVRC" remote get-url origin` settles it in one command.
+- ⚠ **`handoff_doc.py` cannot retire a superseded heading in an APPEND section.**
+  `Open investigations` appends by design and no flag edits an existing block, so a
+  correction must open with a retirement paragraph naming the old heading verbatim. That is
+  weaker than an edit: a reader going top-to-bottom still meets the stale heading first.
+  This doc now contains two such markers.
+
 ## How to verify
 
 **The closing condition — enumerate credentials, then check each has a row:**
@@ -357,47 +420,57 @@ find ~/.config ~/.claude ~/.local/share -maxdepth 4 -type f -print0 2>/dev/null 
 # 2. for each hit that is NOT a transcript, confirm SECRETS.md has a row for it
 grep -n 'repo-cos/env\|opencode/auth.json' "$DEVRC/SECRETS.md"
 ```
-Measured 2026-09-20 the enumeration returns **7** hits: 4 transcripts
-(`~/.claude/history.jsonl` + 3 `projects/*.jsonl`), the 2 real credential files, and
-**one false positive** — a `memory/*.md` file holding a 17-char TRUNCATED prefix, ruled
-out by length (see Gotchas). Condition is met when every non-transcript hit that holds a
-FULL key has a row. 🔴 Use `find | xargs grep`, NOT `grep -r` — `grep` here is a ugrep
-function that honours `.gitignore`, and this clone's 104 agent worktrees make a
-recursive search actively misleading.
-🔴 **After `#1805` merges, step 2 returns rows for BOTH files and rank 1 is closed. The
-condition is still NOT met until rank 2 (the SMTP pair) has a row.**
+Measured 2026-09-20 **after** `#1805` merged: the enumeration returns **7** hits — 4
+transcripts, the 2 real credential files (**both now have rows**, `SECRETS.md:27` and
+`:28`), and **one false positive**, a `memory/*.md` file holding a 17-char TRUNCATED prefix
+against 73 for a real key. Rule that one out by token LENGTH, never by looks.
+🔴 Use `find | xargs grep`, NOT `grep -r` — `grep` here is a ugrep function that honours
+`.gitignore`, and this clone's 104 agent worktrees make a recursive search misleading.
 
-**Both keys are live — re-derive rather than trusting the figures above.** Ask the
-issuer's own free endpoint with each key in an `Authorization: Bearer` header:
+🔴 **The OpenRouter half of the condition is MET. The condition as frozen is NOT**, because
+it names the drafter's SMTP pair too. The one command that grades what is left:
+
+```bash
+git -C "$DEVRC" show origin/main:SECRETS.md | grep -ic 'gmail\|IMAP\|SMTP'   # 0 today; non-zero closes the arc
+```
+
+**The merge of `#1805`, by CONTENT with a negative control** — never by ancestry, and NOT
+by the path (see the muddied-control note in Gotchas):
+
+```bash
+git -C "$DEVRC" show origin/main:SECRETS.md   | grep -c 'A SECOND, DIFFERENT live OpenRouter key'  # 1
+git -C "$DEVRC" show origin/main~1:SECRETS.md | grep -c 'A SECOND, DIFFERENT live OpenRouter key'  # 0
+git -C "$DEVRC" show origin/main:SECRETS.md   | grep -cE '^[0-9]+\. \*\*'                          # 10
+git -C "$DEVRC" show origin/main:SECRETS.md   | grep -c 'sk-or-v1-'                                # 0
+```
+⚠ `origin/main~1` is only the right control while `main` has not moved past the squash;
+pin `eaf4e99a^` instead once it has.
+
+**Both keys live — re-derive rather than trusting any figure here.** Ask the issuer's own
+free endpoint with each key in an `Authorization: Bearer` header:
 `https://openrouter.ai/api/v1/key` returns `label`, `limit`, `usage`, `is_free_tier`.
-Compare the two `usage` values; do not print or record the keys or their digests.
+Compare the two `usage` values. Do not print or record the keys or their digests.
 
-**The corrected `repo-cos/env` row's own claims, re-derived (each must hold):**
+**Row claims, re-derived (each must hold):**
 
 ```bash
 stat -c '%a %s' ~/.config/repo-cos/env                     # 600, 215
 grep -c '^[A-Z_]*=' ~/.config/repo-cos/env                 # 1  (the ONLY assignment)
-git -C "$DEVRC" show bac41175 -- SECRETS.md | grep -c 'NO CREDENTIAL FILE ANY MORE'   # 1
-git -C "$DEVRC" grep -n 'OPENROUTER_API_KEY' -- scripts/mail-actions   # the in-repo consumer
-grep -cE '^[0-9]+\. \*\*' "$DEVRC/SECRETS.md"              # 9 before #1805, 10 after
-```
-
-**The new `auth.json` row's own claims:**
-
-```bash
 stat -c '%a %s' ~/.local/share/opencode/auth.json          # 600, 131
-python3 -c 'import json;d=json.load(open("'"$HOME"'/.local/share/opencode/auth.json"));print(sorted(d))'   # ['openrouter']
-grep -c 'sk-or-v1-' "$DEVRC/SECRETS.md"                    # 0 — no key material in the doc
+git -C "$DEVRC" show bac41175 -- SECRETS.md | grep -c 'NO CREDENTIAL FILE ANY MORE'   # 1
+git -C "$DEVRC" grep -n 'OPENROUTER_API_KEY' origin/main -- scripts/mail-actions       # the in-repo consumers
 ```
 
-**Every test that reads this file (expect 897 passed / 3 failed, the 3 base-red):**
+**Every test that reads this file:**
 
 ```bash
 python3 -m pytest $(git -C "$DEVRC" grep -ln 'SECRETS\.md' -- scripts/tests \
   | sed "s|^|$DEVRC/|" | tr '\n' ' ') -q
 ```
-🔴 In zsh that `$(...)` does NOT word-split — the whole list arrives as ONE argument and
-pytest collects nothing while exiting 0. Use `${=FILES}` or a real array, and **read the
-file count** (it must be **8**) before believing the result.
+🔴 In zsh that `$(...)` does **not** word-split — the whole list arrives as ONE argument,
+pytest collects nothing and exits 0. Use `${=FILES}` or a real array, and **read the file
+count (it must be 8)** before believing the result. Measured 2026-09-20 in the `#1805`
+worktree: **897 passed / 3 failed**, the 3 being the base-red `escrow_verify` tests.
 🔴 Before attributing ANY failure here to a change, re-run the same selection in a clean
-worktree at `origin/main`. Four pre-existing failures live in this tier.
+worktree at `origin/main` — and read the FULL-suite counts from the Tekton status
+description too, which is what separated `#1805`'s real red from the assumed base-red.
