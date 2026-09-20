@@ -524,18 +524,30 @@ def test_unresolved_paths_are_reported_separately_from_both_verdicts(tmp_path):
     assert any(ln.startswith("  UNMEASURED paths     : 1") for ln in lines)
 
 
-def test_the_warn_header_names_the_mechanism_that_applies(tmp_path):
+def test_the_warn_header_names_the_mechanism_that_applies(tmp_path, capsys):
     """The header asserted "`opencode run` AUTO-REJECTS an `ask`" even when every
-    row was a `deny` — a claim about a mechanism that did not fire."""
+    row was a `deny` — a claim about a mechanism that did not fire.
+
+    🔴 The ask half is driven in-process through a synthetic report since
+    2026-09-20: the real config carries zero ask rules (the auto-approve
+    decision), so no brief can produce an ask row through the CLI any more, and
+    `_run_cli` is a subprocess a monkeypatch cannot reach. The property pinned —
+    the header names the mechanism its rows actually meet — is unchanged.
+    """
     d = tmp_path / "proj"
     d.mkdir()
     deny_only = "```bash\ngit stash push -m wip\n```\n"
     p = _run_cli(["preflight", "--dir", str(d)], deny_only)
     assert "[deny]" in p.stdout, p.stdout
     assert "AUTO-REJECTS an `ask`" not in p.stdout
-    ask_case = "```bash\nkubectl -n d exec p -- sh\n```\n"
-    q = _run_cli(["preflight", "--dir", str(d)], ask_case)
-    assert "AUTO-REJECTS an `ask`" in q.stdout
+    ask_rep = {
+        "dir": str(d), "paths_examined": 0, "attachments_examined": 0,
+        "commands_examined": 1, "external_paths": [], "unresolved_paths": [],
+        "command_warnings": [{"action": "ask", "rule": "*kubectl*exec*",
+                              "command": "kubectl exec", "guard": None}],
+    }
+    D.print_report(ask_rep)
+    assert "AUTO-REJECTS an `ask`" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------- #
@@ -597,8 +609,13 @@ def test_scan_commands_positive_control_names_the_glob(tmp_path):
 
     `kubectl exec … psql` was auto-rejected mid-run and the dispatch abandoned.
     A warning that cannot name the glob is not actionable.
+
+    🔴 Driven through a SYNTHETIC config since 2026-09-20: the real config
+    carries zero ask rules (the auto-approve decision deleted them), so the
+    scanner must be handed the rule it is proving it can name.
     """
-    warnings = brief_scan.scan_commands(KUBECTL_BRIEF, tmp_path)
+    synthetic = {"permission": {"bash": {"*": "allow", "*kubectl*exec*": "ask"}}}
+    warnings = brief_scan.scan_commands(KUBECTL_BRIEF, tmp_path, config=synthetic)
     asks = [w for w in warnings if w.action == "ask"]
     assert asks, "the ask scanner produced ZERO on a brief that must produce one"
     assert any(w.pattern == "*kubectl*exec*" for w in asks), [w.pattern for w in asks]
@@ -653,12 +670,17 @@ def test_the_command_scanner_uses_guard_cores_splitter_not_its_own():
 
 def test_the_splitter_really_reaches_a_wrapped_command(tmp_path):
     """Behavioural proof of the line above: a `VAR=… sudo …` prefix and a `&&`
-    chain are exactly what a hand-rolled splitter gets wrong."""
+    chain are exactly what a hand-rolled splitter gets wrong.
+
+    🔴 Synthetic config since 2026-09-20 — the real config has no ask rules
+    left, so the rule the splitter must reach is supplied by the fixture.
+    """
     brief = ("```bash\n"
              "cd /x && KUBECONFIG=$KC_HOMELAB kubectl -n ns exec pod -- sh\n"
              "```\n")
+    synthetic = {"permission": {"bash": {"*": "allow", "*kubectl*exec*": "ask"}}}
     assert any(w.pattern == "*kubectl*exec*"
-               for w in brief_scan.scan_commands(brief, tmp_path))
+               for w in brief_scan.scan_commands(brief, tmp_path, config=synthetic))
 
 
 # --------------------------------------------------------------------------- #
@@ -771,7 +793,22 @@ def test_the_base_ruleset_prepends_the_builtin_catch_all():
 
 
 def test_the_base_ruleset_reads_the_real_config_file():
-    assert ("*kubectl*exec*", "ask") in oc_permissions.base_bash_rules()
+    """🔴 The seam test: base_bash_rules() with NO config reads the REAL file.
+
+    Since 2026-09-20 the real config carries NO ask rules — the auto-approve
+    decision deleted all 52 — so the pin changed shape: the wildcard allow
+    leads, nothing in the config block asks, and the deny backstop is present.
+    (The synthetic-fixture half of the old shape lives in
+    test_the_base_ruleset_prepends_the_builtin_catch_all above.)
+    """
+    rules = oc_permissions.base_bash_rules()
+    assert rules[0] == ("*", "allow")
+    actions = {a for _, a in rules[1:]}
+    assert "ask" not in actions, (
+        f"the real config grew an ask rule again: "
+        f"{[p for p, a in rules[1:] if a == 'ask']}"
+    )
+    assert "deny" in actions, "the deny backstop vanished from the real config"
 
 
 # --------------------------------------------------------------------------- #

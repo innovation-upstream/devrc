@@ -568,13 +568,21 @@ def _pipe_truncating_opencode(tmp: Path) -> str:
     """
     doc_path = tmp / "dump.json"
     doc = _realistic_debug_dump()
-    # If the repo's bash block ever shrinks below the cut the fixture would stop
-    # reproducing anything and every assertion below would pass vacuously.
-    assert len(doc.encode()) > PIPE_CUT + 512, (
-        f"the fixture document is only {len(doc.encode())} bytes, which a "
-        f"{PIPE_CUT}-byte cut barely truncates — this fixture can no longer "
-        f"reproduce the race it exists for. Pad it, do not lower PIPE_CUT."
+    # The cut is the MEASURED 8192 prefix clamped to the document: the fixture
+    # must truncate MID-STRUCTURE whatever the config's real size is. The clamp
+    # exists because the config legitimately shrank on 2026-09-20 (the ask
+    # layer's 52 rules were deleted by operator decision), which brought the
+    # real dump under the measured cut — the guard below used to demand
+    # `> PIPE_CUT + 512` and would have red-flagged a legitimate config change.
+    # PIPE_CUT is deliberately NOT lowered: it stays the measured constant and
+    # is the cut whenever the document is big enough.
+    n = len(doc.encode())
+    assert n > 2048, (
+        f"the fixture document is only {n} bytes — below it the cut cannot "
+        f"land mid-structure and this fixture reproduces nothing. Investigate "
+        f"before touching anything here."
     )
+    cut = min(PIPE_CUT, n - 512)
     doc_path.write_text(doc)
 
     # The behaviour, as a plain module — no shebang, never executed directly.
@@ -586,7 +594,7 @@ def _pipe_truncating_opencode(tmp: Path) -> str:
         "# file it writes everything. Exit 0 and say nothing on stderr either\n"
         "# way — that silence is the whole reason the bug was hard to see.\n"
         "if stat.S_ISFIFO(os.fstat(1).st_mode):\n"
-        f"    payload = payload[:{PIPE_CUT}]\n"
+        f"    payload = payload[:{cut}]\n"
         "os.write(1, payload)\n"
         "sys.exit(0)\n"
     )
@@ -621,9 +629,10 @@ def test_the_pipe_truncating_fixture_really_truncates():
         "exit or a stderr message would be caught by the harness's existing "
         f"asserts, got rc={piped.returncode} stderr={piped.stderr[:200]!r}"
     )
-    assert len(piped.stdout) == PIPE_CUT < len(full), (
+    cut = min(PIPE_CUT, len(full) - 512)   # same clamp the fixture computes
+    assert len(piped.stdout) == cut < len(full), (
         f"piped capture returned {len(piped.stdout)} B of a {len(full)} B "
-        f"document; expected exactly {PIPE_CUT}"
+        f"document; expected exactly {cut} (min(PIPE_CUT, len-512))"
     )
     with pytest.raises(json.JSONDecodeError):
         json.loads(piped.stdout)
@@ -1288,7 +1297,8 @@ def test_engine_and_model_agree_on_every_pinned_command(engine_name, model_agent
     separate control with its own tests, and is not what a version bump moves.
     """
     rules = engine_bash_rules(engine_name)
-    commands = model.MUST_DENY + model.MUST_ASK + model.MUST_ALLOW + model.GLOB_BLIND_SPOTS
+    commands = (model.MUST_DENY + model.FORMERLY_ASKED_NOW_ALLOWED
+                + model.MUST_ALLOW + model.GLOB_BLIND_SPOTS)
     mismatches = [
         (c, resolve(rules, c), model.effective_bash_action(c, model_agent))
         for c in commands

@@ -9,31 +9,40 @@
 // 🔴 TWO LAYERS, AND ONLY ONE OF THEM IS A SAFETY CONTROL.
 // ==========================================================================
 //
-//   LAYER 1 — this file's `permission.bash` globs: FRICTION. Broad `ask` on
-//     mutation-ish families so a human sees the command. Cheap, readable, and
-//     STRUCTURALLY UNABLE to be airtight (see below).
+//   LAYER 1 — this file's `permission.bash` block: a leading wildcard `allow`
+//     plus a short DENY backstop, and NOTHING else. It used to also carry a
+//     third verdict — broad `ask` on mutation families: FRICTION, so a human
+//     saw the command — but `ask` is structurally a KILL SWITCH under
+//     `opencode run` (auto-reject → mid-run abandonment; it killed real
+//     dispatches), and on 2026-09-20 the operator chose auto-approve-everything
+//     for unattended dispatch instead. ALL 52 ask rules were deleted that day.
+//     There is no prompt layer any more: the only things standing between an
+//     agent and an action are the denies below and layer 2.
 //
 //   LAYER 2 — ~/.config/opencode/plugin/guard.js -> guard_core.py: ENFORCEMENT.
 //     It PARSES: splits on `;`/`&&`/`||`/`|`/`&`, strips `VAR=…` prefixes and
 //     `sudo`/`doas`/`env`/`timeout`/… wrappers, recurses into `bash -c '…'`,
 //     and reasons about argv. It throws from `tool.execute.before`, which hard-
-//     blocks the call. This is what actually stands between an agent and an
-//     irreversible action.
+//     blocks the call. Since 2026-09-20 this is the ONLY enforcement layer.
 //
-// WHY THE SPLIT. Globs match a command node's FULL TEXT, so "this command wipes
-// a node" is not expressible — the set of spellings is unbounded. Two rounds of
+// WHY LAYER 2 EXISTS AT ALL (history — the reason guard_core exists, kept
+// because the next "add a glob and feel safe" temptation is the same one).
+// Globs match a command node's FULL TEXT, so "this command wipes a node" is not
+// expressible — the set of spellings is unbounded. Two rounds of
 // pattern-patching each closed the spellings we thought of and left the ones we
 // did not. MEASURED at c1e4c02, all resolving ALLOW on the primary agent:
 //     talosctl -n 192.168.50.94 reset          (a node wipe, no prompt)
 //     talosctl --nodes=192.168.50.94 reset
 //     rm -f -r /        rm --recursive --force /
 //     mke2fs /dev/sdc   mkswap /dev/sdd
-// because `"*talosctl reset*"` requires the tool and the verb to be ADJACENT,
-// and `"*rm -rf*"`/`"*mkfs*"` only knew one flag order and one binary name.
-// The DENY block had been given infix wildcards; the ASK block had not.
+// Those families are now held by guard_core (talosctl reset, recursive rm of
+// critical targets, dd to a block device, git stash/reset/add -A/clean) — and
+// the REST (kubectl mutations, sudo, systemctl, secrets decryption) is covered
+// by NOTHING, by explicit operator decision.
 //
 // 🔴 SO: DO NOT ADD A NEW DANGEROUS FAMILY HERE AND CONSIDER IT HANDLED. A glob
-// added here buys a prompt for the spelling you thought of. If the action is
+// added here buys NOTHING: an `allow` row is a no-op under the leading
+// wildcard, and an `ask` row kills unattended runs mid-task. If the action is
 // irreversible, add a check to guard_core.py's "opencode" policy — that is the
 // layer with a parser and the layer with a test matrix over nine prefixes.
 //
@@ -50,103 +59,40 @@
 // 🔴 PERMISSION ORDERING IS LOAD-BEARING AND IS THE INVERSE OF CLAUDE CODE.
 // opencode evaluates permission globs with LAST-MATCH-WINS over a FLAT ORDERED
 // ARRAY (`opencode debug agent <name>` prints that array — it is the authority,
-// not this file). So `"*": "allow"` must come FIRST and every deny/ask AFTER
-// it, and THE BLOCK IS ORDERED: `"*": "allow"`, then every ASK, then every
-// DENY. Deny-last is what makes a narrow deny beat a broad ask. Do not
-// interleave them. If someone "tidies" these keys alphabetically, `"*"` (0x2A)
-// still sorts to the front — so the obvious first-key assertion does NOT catch
-// it — but the specific patterns reorder among themselves. scripts/tests/
-// test_opencode_config.py pins the EFFECTIVE RESOLVED OUTCOME for exactly this
-// reason; a key-order assertion alone is vacuous.
+// not this file). So `"*": "allow"` must come FIRST and every deny AFTER it.
+// Do not interleave or "tidy" these keys. scripts/tests/test_opencode_config.py
+// pins the EFFECTIVE RESOLVED OUTCOME for exactly this reason; a key-order
+// assertion alone is vacuous.
 //
 // 🔴 EVERY PATTERN IS LEADING-`*` AND INFIX-`*`. opencode matches a command
 // node's FULL TEXT, so a bare `"git stash*"` is bypassed by any prefix
-// (`FOO=1 git stash`, `sudo -n git stash`, `git -C /tmp stash` all MISSED it),
-// and a `"kubectl delete*"` is bypassed by any INTERLEAVED FLAG
-// (`kubectl -n foo delete pod`). Both bypassing forms are the house style
-// (`KUBECONFIG=$KC_HOMELAB kubectl -n ns …`, `git -C <path> …`). `*` crosses
-// spaces, `/` and `-`, so `*kubectl*delete*` catches every ordering. The
-// deliberate cost is over-matching — `git log | grep push` prompts. An `ask`
-// that fires too often on a mutation family is a far better failure than an
-// `ask` that never fires on the spelling an operator actually types.
+// (`FOO=1 git stash`, `sudo -n git stash`, `git -C /tmp stash`) and a
+// `"kubectl delete*"` by any INTERLEAVED FLAG (`kubectl -n foo delete pod`).
+// `*` crosses spaces, `/` and `-`, so `*git*stash*` catches every ordering.
+// The deny block keeps that style for exactly the reason the asks once did.
 //
-// 🔴 TWO DELIBERATE EXCEPTIONS — the only rules ever narrowed AWAY from a
-// working infix form (several rules, e.g. `*chmod -R*`, `*dd if=*`, `*sudo *`,
-// were written binary-plus-literal-flag from the start; this is not a claim
-// that every other pattern is infix). Both were narrowed for the SAME measured
-// reason, one day apart, and the second is why this heading says TWO:
-//
-//   (a) the two `age` decrypt rules, `*age -d*` / `*age --decrypt*` —
-//       leading-`*` but NOT infix. The infix form `*age*-d*` matched any text
-//       with "age" followed LATER by "-d", and "age" is a substring of package,
-//       packages, image, message, storage and manage while "-d" covers -db-,
-//       --dir, --debug and --dry-run. Measured 2026-08-21; two real dispatches
-//       died on it, one on `grep`, one on `ls`.
-//
-//   (b) the two `rm` recursive rules, `*rm -r*` / `*rm --recursive*`. The infix
-//       form `*rm*-r*` was the identical defect: "rm" is a substring of format,
-//       terraform, firmware, confirm and platform, and "-r" covers --reverse,
-//       --refresh, --reporter, --repo and --recursive. Measured 2026-08-22:
-//       `git log --format=oneline --reverse`, `terraform plan -refresh=false`,
-//       `rg '…format…' src/ --replace ''` and `pnpm run format --reporter=…`
-//       all resolved ASK. The first three are pinned as MUST_ALLOW rows in
-//       test_opencode_config.py and were watched to FAIL before the narrowing.
-//       It needed a SECOND rule, not just a narrowing: "rm --recursive" does not
-//       contain the literal "rm -r", so dropping the inner `*` alone would have
-//       released an ordinary recursive delete that the guard layer does not
-//       backstop — measured by deleting that row: it drops to plain ALLOW.
-//
-// WHY THESE TWO AND NOT THE REST. Because `opencode run` AUTO-REJECTS an ask
-// rather than prompting, an over-match on a family an agent types CONSTANTLY
-// does not "fire too often" — it KILLS the run mid-task. That inverts the trade
-// argued above, but only for patterns whose binary name is a substring of
-// ordinary English/flag text. `kubectl` and `sops` are not, which is why they
-// stay infix. (The *rules named* `*talosctl*` and `*sudoedit*` are single-token
-// wildcards with no middle `*` at all, so they are not evidence either way —
-// but do not read that as "there is no infix talosctl rule": `*talosctl*reset*`
-// in the deny block below is one.)
-//
-// 🔴 THE TRADE IS REAL, IS NOT FREE, AND THE TARGET NEED NOT BE DISPOSABLE.
-// A narrowed rule knows exactly one argument order, so `age -i k.txt -d f` and
-// `rm -f -r <path>` now resolve ALLOW. State the `rm` cost at its WORST, not its
-// mildest — the examples in the tests use `/repo/build`, but nothing restricts
-// it to a build dir. MEASURED at both layers on this config:
-//     rm -f -r ~/.ssh                        ALLOW   (was ask before the narrowing)
-//     rm -f -r /etc/nixos                    ALLOW   (was ask)
-//     rm --force --recursive /var/lib/…      ALLOW   (was ask)
-//     rm /repo/build -rf                     ALLOW   (was ask — flags AFTER the operand)
-// 🔴 But read the counterfactual before treating the narrowing as the cause:
-// `rm -fr ~/.ssh`, `rm -Rf ~/.ssh` and `rm -R ~/.ssh` were ALREADY plain ALLOW
-// at both layers BEFORE this change (measured on `main`). So this glob was never
-// a RELIABLE control for that target — three ordinary spellings already walked
-// around it — and the narrowing WIDENS an already-open hole rather than opening
-// one. Do not overstate that in either direction: the old glob DID gate
-// `rm -f -r ~/.ssh` (it is `ask` on `main`, per the table above), so this is a
-// partial control being made weaker, not a no-op being blamed. The honest
-// summary is: layer 1 does not reliably protect `$HOME` from a recursive delete
-// and never did; if you want that, it belongs in guard_core.py, per this
-// header's own rule about irreversible families.
-// guard_core.py has NO age/sops check at all, and its `rm`
-// check has a deliberately narrow TARGET set — `/`, `~`/`$HOME`, `.`/`..` and
-// top-level system dirs — that a SUBPATH like `~/.ssh` never reaches.
-// Both gaps are pinned as characterization tests —
-// `test_age_glob_misses_these_reordered_decrypt_spellings` and
-// `test_rm_glob_misses_these_recursive_spellings` — so they stay visible. Do NOT
-// "restore consistency" by re-widening any of these four rules to infix without
-// reading those tests first.
+// 🔴 HISTORY OF THE ASK LAYER (deleted 2026-09-20; the measurements live in git
+// history and in test_opencode_config.py's characterization tests):
+//   * `ask` SEMANTICS (NOT re-derived at the pin, v1.18.16; observing needs a
+//     run that EXECUTES, which the engine tests refuse to do): `opencode run`
+//     AUTO-REJECTS an `ask` (prints "auto-rejecting"); only the interactive TUI
+//     turns one into a prompt, and `opencode debug agent --tool` AUTO-APPROVES
+//     it. So `ask` was "friction for a human", never a control on an
+//     unattended agent — and for `run` it was pure mid-run abandonment.
+//   * The narrowing sagas: `*age*-d*` and `*rm*-r*` were infix rules whose
+//     substring collisions ("age" ⊂ package/message/storage…, "rm" ⊂
+//     format/terraform/confirm…) auto-rejected ordinary read-only commands and
+//     killed real dispatches (2026-08-21/22). They were narrowed to the literal
+//     `*age -d*` / `*rm -r*` forms, each narrowing opening known gaps that were
+//     pinned as characterization tests rather than closed. All of that is gone
+//     with the layer: the families are either guard-held or ungated by design.
 //
 // Other measured facts baked into this file (v1.18.29, EXCEPT where a bullet
 // says otherwise — the 2026-08-19 re-derivation could not reach three of them,
 // and a claim relabelled to a version nothing measured it on is worse than a
 // stale one, because it looks fresh):
-//   * `ask` SEMANTICS (NOT re-derived at the pin — last measured on v1.18.16;
-//     observing it needs a run that EXECUTES, which the engine tests refuse to
-//     do): `opencode run` AUTO-REJECTS an `ask` (it prints "auto-rejecting");
-//     only the interactive TUI turns one into a prompt. `opencode debug agent
-//     --tool` AUTO-APPROVES it. So `ask` means "friction for a human", never
-//     "a control on an unattended agent".
 //   * only a `"*": "deny"` removes a tool from the request schema; a narrow
-//     deny does not, and `"ask"` costs exactly what `"allow"` costs.
+//     deny does not, and `"ask"`/`"allow"` cost exactly what each other costs.
 //   * `small_model` SCOPE (NOT re-derived at the pin, v1.18.16): it drives
 //     TITLE GENERATION ONLY — not compaction. The real cheap-model lever is
 //     pinning the hidden title/summary/compaction agents in the `agent` block
@@ -167,7 +113,10 @@
 {
   "$schema": "https://opencode.ai/config.json",
 
-  "model": "openrouter/xiaomi/mimo-v2.5",
+  // 2026-09-20: default moved from openrouter/xiaomi/mimo-v2.5 (default since
+  // 2026-08) to z-ai/glm-5.3-flash. opencode-dispatch takes NO default alias —
+  // with no `-m` it omits the flag entirely and lands here.
+  "model": "openrouter/z-ai/glm-5.3-flash",
   // Title generation only. Compaction is pinned via the `agent` block.
   "small_model": "openrouter/deepseek/deepseek-v4-flash",
 
@@ -262,185 +211,31 @@
     "task": "allow",
     "skill": "allow",
 
-    // Ask before burning a long unproductive loop, and before reaching outside
-    // the project directory.
-    "doom_loop": "ask",
+    // 🔴 2026-09-20, operator decision: the prompt layer is OFF — every
+    // permission request is auto-approved. `doom_loop` and `external_directory`
+    // were the last non-bash `ask`s; both flipped to `allow` in the same
+    // decision that deleted the 52 bash `ask` rules (see the bash block).
+    // Consequences, stated plainly: an agent can loop on one call without a
+    // prompt, and can read/write ANY path outside the project directory.
+    "doom_loop": "allow",
 
-    // 🔴 `external_directory` stays `ask` for EVERYTHING except this host's own
-    // skills tree. MEASURED 2026-08-23: a dispatch loaded the `clawgate` skill,
-    // followed the skill's OWN pointer to `reference/task-api.md`, and was
-    // auto-rejected — `~/.config/opencode/skills/` is outside `--dir` for every
-    // dispatch, by construction. The run then DIED mid-task. This is not a
-    // clawgate quirk: it hits EVERY skill that keeps detail in `reference/` or
-    // `flows/`, which is the shape `prune-skill` actively pushes skills toward.
-    //
-    // 🔴 preflight CANNOT catch this, structurally. It scans the BRIEF for
-    // external paths; the brief named none and it correctly reported
-    // "external paths: NOT EXAMINED". The offending path came from the SKILL the
-    // agent loaded, which preflight never sees. So a clean preflight is not
-    // evidence a run is safe from an `external_directory` auto-reject.
-    //
-    // The carve-out is deliberately the narrowest thing that fixes the class:
-    // read-only, devrc-managed, nix-store-backed content the agent is already
-    // meant to have — the same skill bodies opencode itself injects. It does NOT
-    // widen access to the repo, to $HOME, or to anything the operator writes.
-    // Verified by A/B on the identical read: without the map the read is
-    // auto-rejected and the run dies; with it the read succeeds.
-    "external_directory": {
-      "*": "ask",
-      "/home/zach/.config/opencode/skills/**": "allow"
-    },
+    // Was {"*": "ask", "/home/zach/.config/opencode/skills/**": "allow"} — the
+    // 2026-08-23 carve-out that stopped a skill's own reference/ read from
+    // auto-rejecting and killing a dispatch mid-task (#761; preflight gained a
+    // config-state line for it in #789). The map is gone with the decision:
+    // EVERY path outside --dir is now reachable without a prompt. Reversing
+    // this means restoring the map AND re-checking
+    // `opencode-dispatch preflight`'s skill-reference verdict line.
+    "external_directory": "allow",
 
     "bash": {
+      // 🔴 2026-09-20: the 52 `ask` rules that used to sit between this
+      // wildcard and the deny block were DELETED — auto-approve-everything was
+      // chosen so unattended dispatches stop dying on auto-rejected prompts.
+      // Re-adding one is a mid-run kill switch under `opencode run`. The deny
+      // block below is the only layer-1 control left, and it is defence in
+      // depth, not the control (see the header).
       "*": "allow",
-
-      // ================= ASK: friction on mutation families ================ //
-      // Every pattern is leading-`*` AND infix-`*`, so no prefix (`VAR=…`,
-      // `sudo`, `git -C <path>`) and no interleaved flag (`kubectl -n ns …`)
-      // slips past. Over-matching is deliberate — see the header.
-      //
-      // 🔴 These are FRICTION, not enforcement, and `opencode run` auto-rejects
-      // rather than prompting. Anything irreversible belongs in guard_core.py.
-
-      // --- git ---
-      "*git*push*": "ask",
-      "*git*commit*": "ask",
-      "*git*rebase*": "ask",
-      "*git*checkout*": "ask",
-      "*git*restore*": "ask",
-      "*git*branch -D*": "ask",
-      "*git*worktree remove*": "ask",
-      "*gh*pr merge*": "ask",
-
-      // --- kubernetes / gitops ---
-      "*kubectl*delete*": "ask",
-      "*kubectl*apply*": "ask",
-      "*kubectl*patch*": "ask",
-      "*kubectl*scale*": "ask",
-      "*kubectl*drain*": "ask",
-      "*kubectl*edit*": "ask",
-      "*kubectl*replace*": "ask",
-      "*kubectl*exec*": "ask",
-      "*kubectl*cp*": "ask",
-      "*kubectl*rollout undo*": "ask",
-      // `get secret -o yaml` prints every value base64-encoded, i.e. plaintext.
-      "*kubectl*secret*": "ask",
-      "*helm*upgrade*": "ask",
-      "*helm*uninstall*": "ask",
-      "*helm*rollback*": "ask",
-      "*flux*suspend*": "ask",
-      "*flux*resume*": "ask",
-      "*flux*delete*": "ask",
-
-      // --- talos --- (the RESET verb is enforced by guard_core.py, which is
-      // the only layer that catches `talosctl -n <ip> reset`. This broad ask is
-      // friction for every other node-level verb.)
-      "*talosctl*": "ask",
-
-      // --- secrets to plaintext ---
-      // sops stays INFIX on purpose, unlike its age neighbours below: "sops" is
-      // not a substring of ordinary words or paths, so the over-match that
-      // forced the age narrowing does not arise here, and the infix form buys a
-      // real spelling — `sops --config .sops.yaml -d f`, which the narrowed form
-      // would let through. That spelling is pinned as the CONTRAST case inside
-      // `test_age_glob_misses_these_reordered_decrypt_spellings` (not in
-      // MUST_ASK — do not go looking for it there), and independently by
-      // `test_every_ask_rule_is_individually_pinned`, which also goes red if
-      // these are narrowed. Do not narrow them for symmetry with age.
-      "*sops*-d*": "ask",
-      "*sops*--decrypt*": "ask",
-      "*sops*exec-env*": "ask",
-      // 🔴 NO `*` BETWEEN "age" AND THE FLAG — it must stay `*age -d*`, not
-      // `*age*-d*`. The inner `*` made this match any command text containing
-      // "age" followed LATER by "-d", and "age" is a substring of package,
-      // packages, image, message, storage and manage while "-d" covers -db-,
-      // --dir, --debug and --dry-run. MEASURED 2026-08-21: `ls packages/…-db-…`
-      // and `grep … packages/…-db/…` both resolved ASK, and since `opencode run`
-      // auto-rejects an ask rather than prompting, two real dispatches were
-      // killed mid-task by it. The leading `*` is still required and still
-      // correct — it catches `/nix/store/…/bin/age -d` and `FOO=1 age -d`.
-      // Pinned by three MUST_ALLOW rows in test_opencode_config.py.
-      "*age -d*": "ask",
-      "*age --decrypt*": "ask",
-
-      // --- whole-system state ---
-      "*nixos-rebuild*": "ask",
-      "*home-manager*switch*": "ask",
-      // 🔴 LOAD-BEARING — do not delete it as "already covered".
-      // `"*age -d*"` DOES match some spellings of this command by pure
-      // coincidence ("nix-collect-gar(BAGE) -d" CONTAINS the literal "age -d" —
-      // it need not end with it, `… -d --max-freed 1G` matches too),
-      // but ONLY those spelling the flag immediately after the word ending in
-      // "age". MEASURED: with this rule deleted, `nix-collect-garbage`
-      // and `nix-collect-garbage --max-freed 1G` both resolve ALLOW at both
-      // layers. Two things follow, and they point opposite ways: this rule is
-      // the real gate for the no-`-d` spellings, AND `"*age -d*"` must not be
-      // deleted on the reasoning that GC is separately gated for the rest.
-      "*nix-collect-garbage*": "ask",
-      "*nix*profile remove*": "ask",
-      // The mutating systemctl verbs SEEN SO FAR — this list is NOT exhaustive
-      // and must not be read as "the mutating verbs are handled". MEASURED:
-      // `mask`, `unmask`, `kill`, `isolate`, `set-property` and `edit` all
-      // resolve ALLOW today. Read-only, high-frequency verbs (`status`,
-      // `list-timers`) are deliberately absent — gating those is pure prompt
-      // fatigue, which trains the operator to click through the ones that
-      // matter. Adding a verb here buys a prompt for that spelling only.
-      "*systemctl*start*": "ask",
-      "*systemctl*stop*": "ask",
-      "*systemctl*restart*": "ask",
-      "*systemctl*enable*": "ask",
-      "*systemctl*disable*": "ask",
-      "*systemctl*daemon-reload*": "ask",
-
-      // --- privilege escalation: gate the WRAPPER itself ---
-      // 🔴 ALL THREE `sudo` ROWS ARE LOAD-BEARING — none is a duplicate, and
-      // each was found unpinned by a separate mutation sweep.
-      //   `"*sudo *"`   needs the LITERAL "sudo " (space) -> misses `sudoedit`
-      //   `"sudo*"`     is ANCHORED -> misses sudo in non-leading position
-      //                 (`FOO=1 sudo …`, which IS the house style)
-      //   `"*sudoedit*"` covers their INTERSECTION, which neither had:
-      //                 MEASURED ALLOW at both layers before this rule —
-      //                 `FOO=1 sudoedit /etc/nixos/configuration.nix`,
-      //                 `EDITOR=vim sudoedit …` (the NORMAL invocation, since
-      //                 sudoedit needs $EDITOR) and
-      //                 `/run/wrappers/bin/sudoedit …` (the NixOS path).
-      // Unlike a flag spelling, `sudoedit` is a fixed BINARY NAME, so a single
-      // leading-and-infix `*` genuinely closes the family rather than buying
-      // one more spelling. Delete any row and the others do NOT cover it.
-      "sudo*": "ask",
-      "*sudo *": "ask",
-      "*sudoedit*": "ask",
-      "*doas *": "ask",
-
-      // --- filesystem blast radius ---
-      "*chmod -R*": "ask",
-      "*chown -R*": "ask",
-      // 🔴 NOT INFIX, ON PURPOSE — exception (b) in the header. `*rm*-r*` matched
-      // "rm" followed LATER by "-r" ANYWHERE in the command text — note the
-      // ORDER: the "rm" substring must come FIRST, so it took `git log
-      // --format=oneline --reverse` and `terraform plan -refresh=false` but not
-      // `grep -r 'format' src/`. That still auto-rejected ordinary read-only
-      // work wherever a format/terraform/firmware/confirm/platform token
-      // preceded a --reverse/--refresh/--reporter/--repo/--replace flag.
-      // BOTH ROWS ARE LOAD-BEARING and neither covers the other: "rm --recursive"
-      // does NOT contain the literal "rm -r", so deleting the second row releases
-      // `rm --recursive <path>` — which guard_core does not backstop on an
-      // ordinary path. Each is pinned individually in MUST_ASK.
-      // Known gap, pinned by test_rm_glob_misses_these_recursive_spellings, in
-      // THREE classes: `-R` bundles (pre-existing), any flag placed BEFORE `-r`
-      // (`rm -f -r <path>`, opened here), and flags placed AFTER the operand
-      // (`rm <path> -rf`, opened here — GNU rm permutes options, so it works).
-      // 🔴 And the target is not restricted to a build dir: `rm -f -r ~/.ssh` is
-      // ALLOW at both layers. See the header for the counterfactual — `rm -fr
-      // ~/.ssh` was already ALLOW before this change, so layer 1 never gated it.
-      "*rm -r*": "ask",
-      "*rm --recursive*": "ask",
-      // `dd` stays ANCHORED / operand-scoped on purpose: a leading-`*` `"*dd *"`
-      // also matches `git add src/` (…"add "…), and gating every `git add` is
-      // exactly the prompt fatigue that trains an operator to click through.
-      "dd *": "ask",
-      "*dd if=*": "ask",
-      "*dd of=*": "ask",
 
       // ================= DENY: naive-spelling backstop ONLY ================ //
       // 🔴 READ THE HEADER. These are NOT airtight and are NOT the control.

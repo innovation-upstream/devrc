@@ -44,14 +44,20 @@ thing that destroys a config someone had edited.
 
 ## 🔴 Two layers, and only one of them is a safety control
 
-**Layer 1 — the `permission.bash` globs in `opencode.jsonc`: FRICTION.** Broad
-`ask` on mutation families so a human sees the command.
+**Layer 1 — the `permission.bash` block in `opencode.jsonc`: a leading
+wildcard `allow` plus a short DENY backstop, and nothing else.** It used to
+also carry broad `ask` rules on mutation families — FRICTION, so a human saw
+the command — but on **2026-09-20** the operator deleted all 52 of them (plus
+`doom_loop` and `external_directory`) and chose **auto-approve every permission
+request** instead: `opencode run` auto-rejects an `ask` rather than prompting,
+so the friction layer was killing unattended dispatches mid-run. There is no
+prompt layer any more.
 
 **Layer 2 — `plugin/guard.js` → `guard_core.py`: ENFORCEMENT.** It parses:
 splits on `;`/`&&`/`||`/`|`/`&`, strips `VAR=…` prefixes and
 `sudo`/`doas`/`env`/`timeout`/… wrappers, recurses into `bash -c '…'`, and
 reasons about **argv**. It throws from `tool.execute.before`, which hard-blocks
-the call.
+the call. Since 2026-09-20 it is the only enforcement layer there is.
 
 ### Why the split
 
@@ -102,14 +108,20 @@ re-measured by either. Treat them as last confirmed on 1.18.4.
   hard-blocks** — opencode surfaces the thrown message to the model as a tool
   error and the command never runs.
 
-**DENY is expressible from a plugin; ASK is not.** Ask-grade families therefore
-stay as globs. Globs are acceptable for friction and unacceptable as the only
-thing guarding an irreversible action.
+**DENY is expressible from a plugin; ASK is not.** That measured fact is one
+reason the 2026-08-era design put the ask-grade families in globs. It did not
+make them safe — and on **2026-09-20** the ask layer was deleted entirely
+(auto-approve decision), so the ask-grade families (kubectl mutations, sudo,
+systemctl, secrets decryption) are now **ungated by explicit operator choice**;
+only guard_core's hard-deny subset still refuses anything. The mechanism notes
+below are kept because they are what bounds any future attempt to re-add a
+prompt layer from a plugin.
 
 Also measured: **`opencode run` AUTO-REJECTS an `ask`** (it prints
 `auto-rejecting`); only the interactive TUI turns one into a prompt, and
 `opencode debug agent --tool` auto-**approves** it. So `ask` means "friction for
-a human", never "a control on an unattended agent".
+a human", never "a control on an unattended agent" — and for `run` it was pure
+mid-run abandonment, which is what killed it.
 
 ### What the deny globs are still for
 
@@ -237,13 +249,13 @@ existence guard**, and defined a `KC_PROD` that zsh did not have. Add a handle i
 
 - **Permission ordering is the INVERSE of Claude Code: LAST match wins**, over a
   single FLAT array. `"*": "allow"` must be the FIRST key of the `bash` block,
-  then every `ask`, then every `deny` — deny-last is what lets a narrow deny
-  (`*talosctl reset*`) beat a broad ask (`*talosctl*`).
+  then every `deny` — deny-last is what lets a narrow deny (`*talosctl reset*`)
+  survive. (Until 2026-09-20 there was also an `ask` block between them; it was
+  deleted with the auto-approve decision.)
   A key-order assertion alone is **not** enough: `"*"` (0x2A) sorts to the front,
   so an alphabetical "tidy-up" keeps the wildcard looking correct while
-  reordering everything else, and a broad ask can overtake the deny it should
-  lose to. The suite therefore pins the **effective resolved outcome** for a
-  matrix of dangerous commands on every agent.
+  reordering everything else. The suite therefore pins the **effective resolved
+  outcome** for a matrix of dangerous commands on every agent.
 - 🔴 **An agent-level `bash: {"*": allow}` NULLIFIES the entire global block.**
   Agent rules are appended AFTER the global ones, so an agent wildcard wins over
   all of them. `k8s` shipped with one: only its own 4 rules survived, leaving
@@ -336,9 +348,10 @@ That matrix immediately caught a real bug in the first draft of the parser
 set for `nice -n 5`).
 
 `test_opencode_config.py` asserts the **layered** verdict (`layered_verdict`)
-for "must not run", and the glob-only model (`effective_bash_action`) only for
-claims about the config file's own structure and for `ask`, which the guard
-cannot express.
+for "must not run" (the deny block + the guard), and the glob-only model
+(`effective_bash_action`) for claims about the config file's own structure and
+for the 2026-09-20 allow-by-decision pool (`FORMERLY_ASKED_NOW_ALLOWED`). The
+per-rule ask ledger was deleted with the ask layer; the deny ledger remains.
 
 Part of the hermetic set run by `scripts/run-tests.sh` and the flake check.
 Two tests shell out to `nix-instantiate --eval` to pin the generated handle
