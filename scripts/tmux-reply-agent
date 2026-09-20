@@ -1649,11 +1649,27 @@ def menu_answer_records_for_this_ask(captured: str, before: list[str] | None) ->
     plain absence rule, not the record, is what the common correct case rests on.
     It is stated as unestablished rather than argued away: nothing here closes it.
 
-    ⚠ THE OTHER COST, STATED: an ask whose answer happens to render a record
-    IDENTICAL to the one already on screen — the same question re-asked and
-    re-answered the same way — reads as unattributable, so the verdict falls back
-    to the plain absence rule. That is the weaker of the two claims and never the
-    wrong one.
+    ⚠ THE OTHER COST, STATED — AND THIS PARAGRAPH STATED IT TOO WEAKLY. An ask
+    whose answer happens to render a record IDENTICAL to the one already on screen
+    — the same question re-asked and re-answered the same way — reads as
+    unattributable, so no verdict is available from the record. The sentence here
+    then said "the verdict falls back to the plain absence rule. That is the weaker
+    of the two claims and never the wrong one", which is TRUE ONLY WHERE THE ASK IS
+    SIMPLY GONE. Below a DIFFERENT MENU the fall-through reaches `menu_settled`'s
+    chain arm instead, and that arm REFUSES. MEASURED in process, `before ==
+    ['Flatfile']` with the same record still on screen beneath a different
+    single-question ask, against the no-menu control on the same frames:
+
+        no menu on screen   (True,  'the menu is no longer on screen')
+        a different menu    (False, '…and no answered record here is attributable
+                                     to this ask, which is also what answering the
+                                     first question of a CHAIN looks like')
+
+    So the cost there is a `failed` audit row over what may be a correct delivery —
+    the direction this whole file chooses, and it cannot cost a second keypress
+    because nothing on this path retries. It is not always the weaker claim. See
+    `test_the_CHAIN_accusation_never_denies_a_record_this_function_read` for the
+    enumeration of every place this same falsity was written.
     """
     if before is None:
         return None
@@ -2191,9 +2207,23 @@ def menu_settled(pane: str, labels: list[str], text: str = "",
     second keypress, because nothing on this path retries. The plain "menu gone"
     case keeps the absence rule precisely because it is the common correct one.
 
-    ⚠ `text` DEFAULTS TO EMPTY AND THAT DISABLES ONLY THE UPGRADE, never a
-    refusal: with no reply to compare against, a record cannot be said to hold it,
-    so `menu_answer_verdict` is not consulted and the absence rule stands alone.
+    ⚠ `text` DEFAULTS TO EMPTY, AND THAT DISABLES THE VERDICT BUT NOT THE RECORD —
+    THIS PARAGRAPH SAID "the absence rule stands alone" AND THAT IS FALSE. With no
+    reply to compare against a record cannot be said to hold it, so
+    `menu_answer_verdict` is genuinely not consulted and neither the `match` upgrade
+    nor the `mismatch` refusal can fire. But `menu_answer_records_for_this_ask`
+    still runs, and the DIFFERENT-MENU arm below branches on ITS result rather than
+    on the verdict, so there a record differing from `before` still refuses.
+    MEASURED in process with `text == ""`, `before == []` and one record drawn
+    beneath a different single-question ask, against the no-menu control on the same
+    frames:
+
+        no menu on screen   (True,  'the menu is no longer on screen')
+        a different menu    (False, '…the answered record here differs from the
+                                     pre-keypress baseline, but it was not read
+                                     TWICE holding this option…')
+
+    The absence rule stands alone only where the ask is GONE.
 
     🔴 AND SO DOES `before`, WHICH IS THE RECORD SET READ **BEFORE** THE KEYPRESS.
     A bottom-most block is not evidence about THIS ask on its own — 19 live panes

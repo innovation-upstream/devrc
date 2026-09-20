@@ -4632,13 +4632,33 @@ OTHER_SINGLE_MENU_CAPTURE = (
 def test_the_CHAIN_accusation_never_denies_a_record_this_function_read(monkeypatch):
     """🔴 THE ARM BELOW A DIFFERENT MENU SAID "records no answer" AFTER READING ONE.
 
-    The round that made the match arm require the record TWICE
-    (`test_the_UPGRADE_needs_the_RECORD_read_twice_not_only_the_PANE`) wrote the same
-    false thing in three places and three WORDINGS, so no single grep finds them
-    together: `menu_settled`'s docstring said a record failing the second read "does not
-    cost the delivery", the comment on the arm said it "costs nothing, because control
-    falls through to the absence rule below", and that test's docstring said "The fix
-    costs no delivery — it costs the CLAIM".
+    🔴 THE SAME FALSE THING — "the fall-through reaches the absence rule" — WAS WRITTEN
+    IN FIVE PLACES AND FIVE WORDINGS, AND THIS PARAGRAPH SAID THREE. The five share no
+    phrase, so THE SET IS NOT GREPPABLE and no count written here is verifiable by
+    anyone reading it; it is ENUMERATED instead, and a sixth is ruled out by nothing.
+    Every one of them was found by reading `menu_settled`'s arms against its prose, not
+    by grepping for a wording:
+
+      1. `menu_settled`'s docstring — requiring the second read costs "NOT THE
+         DELIVERY".
+      2. the comment on the different-menu arm — it "costs nothing, because control
+         falls through to the absence rule below".
+      3. `test_the_UPGRADE_needs_the_RECORD_read_twice_not_only_the_PANE`'s docstring —
+         "The fix costs no delivery — it costs the CLAIM".
+      4. `menu_answer_records_for_this_ask`'s docstring — a record identical to the one
+         already on screen means "the verdict falls back to the plain absence rule …
+         never the wrong one".
+      5. `menu_settled`'s docstring, the `text`-defaults-to-empty paragraph — with no
+         reply "`menu_answer_verdict` is not consulted and the absence rule stands
+         alone".
+
+    1-3 were corrected earlier in this same range (`3feed80d..285e25b8`); 4 and 5 were
+    still live on `285e25b8`, were measured false in process — each against a no-menu
+    control on the same frames, which DOES reach the absence rule — and are corrected
+    at their own sites. This paragraph is where the enumeration lives because a count
+    kept being written here and kept being wrong: FOUR successive rounds each produced
+    a fresh completeness claim about this falsity, so do not replace the list with a
+    number.
 
     IT DOES NOT ALWAYS FALL THROUGH TO THE ABSENCE RULE. When the pane is a DIFFERENT
     MENU the fall-through reaches the chain arm, which both reported `failed` AND said
@@ -5878,6 +5898,39 @@ def test_the_bundle_STALENESS_ALARM_still_exists():
     exists but no longer greps for the `lo` composition path is the same loss with a
     filename.
 
+    🔴 IT READS THE ALARM'S `FOOTER_SITE_PROBES` TUPLE, NOT ITS SOURCE TEXT, BECAUSE THE
+    SUBSTRING VERSION WAS WALKED BY THE ALARM'S OWN DOCUMENTATION. It used to assert one
+    FRAGMENT PER PATH `in` the whole file body, and a commit that added a prose
+    measurement table to that file's header — the per-bundle probe-count table — took the
+    fragment `chord:"enter",action:"select"` from ONE occurrence to TWO. The second one
+    is a table cell, so the needle stayed satisfied by the PROSE DESCRIBING the probe
+    after the probe itself had been neutered. MEASURED on `285e25b8` (the substring
+    guard) and on this tree, rotting each probe INSIDE THE TUPLE ALONE so the header
+    prose is untouched, with every mutation diffed before its run:
+
+        probe                             substring guard   this guard
+        chord:"enter",action:"select"     SURVIVED          KILLED
+        fallback:"Enter",…"select"        KILLED            KILLED
+        ===void 0?"select":               KILLED            KILLED
+        Enter to select                   SURVIVED          KILLED
+        the whole tuple ENTRY deleted     SURVIVED          KILLED
+        the whole alarm FILE deleted      KILLED            KILLED
+
+    `Enter to select` had the same weakness and it was PRE-EXISTING: it occurs FOUR
+    times in the alarm file and only ONE of those is the probe. Deleting probe 1's tuple
+    entry outright also survived, which is the failure scenario in full — the 14-site
+    chord/action probe is the one whose own description says two of those sites are the
+    AskUserQuestion renderers, and nothing else pins the probe set (the alarm file only
+    ITERATES it). Reading the VALUE closes the whole class: no sentence anyone writes
+    about a probe can satisfy it. That is the same lesson `_load_collector`'s docstring
+    records one file over — the value, not the source text.
+
+    ⚠ PATTERNS ONLY, NOT THE EXPECTED COUNTS. The counts are the alarm's own to own and
+    they move on nearly every Claude Code bump — its header's table measures all four
+    probes across six bundles and concludes a red there is the EXPECTED outcome of one —
+    so pinning them here would red this on every bump and put the same number in two
+    places. What this pins is that each composition path is still PROBED.
+
     ⚠ ONE FRAGMENT IS NO LONGER SPELLED THE WAY THE SITE IS, AND THAT IS ON PURPOSE. The
     alarm's probes for paths 2 and 3 used to be keyed on the MINIFIER-GENERATED names
     `lo` and `qJl`/`hfw`, which are build artifacts: a rebuild can rename them without
@@ -5891,18 +5944,34 @@ def test_the_bundle_STALENESS_ALARM_still_exists():
         f"the dev-host staleness alarm is gone ({FOOTER_SITE_ALARM}). "
         "ASK_FOOTER_LEDGER's per-site attributions are then checked by nothing: "
         "re-add it, or delete the attributions it was checking and say so")
-    body = FOOTER_SITE_ALARM.read_text()
-    # One fragment per composition path, so a probe cannot be dropped quietly. These
-    # are the four the ledger's header names; the alarm owns their expected counts.
-    for probe in ('chord:"enter",action:"select"',
-                  'fallback:"Enter",description:"select"',
-                  '===void 0\\?"select":',
-                  "Enter to select"):
-        assert probe in body, (
-            f"{FOOTER_SITE_ALARM.name} no longer probes for {probe!r}, so one of the "
-            "composition paths ASK_FOOTER_LEDGER names is unchecked against the "
-            "bundle. Every path dropped here is a path the next reader will believe "
-            "is still measured")
+    # 🔴 THE VALUE, BY IMPORT. The module is stdlib-only and has no import-time side
+    # effects — `_bundle()` is a function, and nothing at module level touches the
+    # binary — so loading it costs nothing in this tier. It is NOT registered in
+    # sys.modules: pytest collects this same file under its own name in the `all` set,
+    # and a pre-seeded entry there is an import-file-mismatch waiting to happen.
+    name = "claude_footer_sites_seamcheck"
+    loader = importlib.machinery.SourceFileLoader(name, str(FOOTER_SITE_ALARM))
+    spec = importlib.util.spec_from_file_location(name, str(FOOTER_SITE_ALARM),
+                                                  loader=loader)
+    alarm = importlib.util.module_from_spec(spec)
+    loader.exec_module(alarm)
+    # One pattern per composition path, so a probe cannot be dropped or neutered
+    # quietly. These are the four the ledger's header names; the alarm owns their
+    # expected counts. Element 0 only, so adding a FIFTH field to a probe row is not
+    # a red — dropping or rewording a PATTERN is.
+    want = ('chord:"enter",action:"select"',
+            r'\{action:"[^"]*",context:"[^"]*",fallback:"Enter",description:"select"\}',
+            r'===void 0\?"select":',
+            "Enter to select")
+    got = tuple(probe[0] for probe in alarm.FOOTER_SITE_PROBES)
+    assert got == want, (
+        f"{FOOTER_SITE_ALARM.name}'s FOOTER_SITE_PROBES no longer match this seam's "
+        f"ledger.\n  dropped or reworded: {[p for p in want if p not in got]}\n"
+        f"  new or unexpected:   {[p for p in got if p not in want]}\n"
+        "Each pattern is one composition path ASK_FOOTER_LEDGER attributes a footer "
+        "to. Every path dropped here is a path the next reader will believe is still "
+        "measured against the bundle: re-add it, or delete the attribution it was "
+        "checking and update this tuple in the same commit")
 
 
 def test_the_ask_footer_survives_the_WRAP_at_every_measured_WIDTH():
