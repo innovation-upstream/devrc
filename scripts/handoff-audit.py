@@ -66,10 +66,37 @@ def _load_sibling(path=_SIBLING):
 
 SA = _load_sibling()
 
-# 🔴 BORROWED, NOT RE-DECLARED, AND NOT ENFORCED ANYWHERE.
-# skill-audit reads these from the gate that owns them. A handoff doc has NO gate:
-# nothing in this repo measures one, so these are a REFERENCE the reader may argue
-# with, never a verdict. The target is defensible rather than arbitrary — the
+
+def _load_budget(path=Path(__file__).resolve().parent / "lib" / "handoff_budget.py"):
+    """The ENFORCED per-doc ceiling, read from the module that owns it.
+
+    🔴 Returns None rather than raising: the ceiling is a devrc gate, and this
+    tool runs against other repos' corpora too (the population block takes any
+    root). A missing module there is the normal case, not an error — the banner
+    then simply omits the enforced-ceiling line rather than quoting a number
+    this repo would have supplied for a tree it does not govern.
+    """
+    if not path.is_file():
+        return None
+    loader = importlib.machinery.SourceFileLoader("_handoff_budget", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+BUDGET = _load_budget()
+
+# 🔴 BORROWED, NOT RE-DECLARED, AND THESE TWO ARE NOT ENFORCED.
+# skill-audit reads these from the gate that owns them, so there is one copy.
+# ⚠ CORRECTED 2026-09-20: this block used to say "A handoff doc has NO gate:
+# nothing in this repo measures one." That was TRUE when written (2026-09-01) and
+# FALSE from 2026-09-13, when #1648 shipped `handoff_budget.MAX_BYTES` and
+# `test_handoff_doc_size.py` — a real per-doc ceiling over
+# `claudedocs/**/handoff-*.md` that goes red on `main` for everyone. The TARGET
+# below is still unenforced and still a reference; the 64 KB ceiling is not, and a
+# reader told "nothing measures this" would have skipped the one gate that bites.
+# These are a REFERENCE the reader may argue with. The target is defensible — the
 # corpus p50 measured 12,159 B on 2026-08-29, i.e. half the corpus already meets
 # it — but every line this tool prints must keep saying it binds nothing.
 TARGET = SA.TARGET
@@ -494,10 +521,17 @@ def render(audits, show_all, n_detail, n_sections, out=sys.stdout, per_root=(),
         for u in unreadable:
             p(f"  🔴 UNREADABLE, so its docs are NOT in any number above: {u}")
     p(f"\ntarget {TARGET:,} B   ·   hard cap {HARD:,} B")
-    p("  🔴 NOT ENFORCED. No gate in this repo measures a handoff doc, so every")
-    p("     verdict below is a REFERENCE you may argue with, not a rejection. The")
-    p("     numbers are borrowed from the SKILL.md gate via skill-audit.py rather")
-    p("     than re-declared here, so there is only ever one copy of them.")
+    p("  🔴 THESE TWO NUMBERS ARE NOT ENFORCED — but a HIGHER one is, and it is a")
+    p("     different threshold, so read the verdicts below as a REFERENCE you may")
+    p("     argue with. The numbers are borrowed from the SKILL.md gate via")
+    p("     skill-audit.py rather than re-declared here, so there is one copy.")
+    if BUDGET is not None:
+        p(f"  ⚠ BUT scripts/tests/test_handoff_doc_size.py DOES enforce "
+          f"{BUDGET.MAX_BYTES:,} B per doc")
+        p("     (plus a grandfather ledger) over claudedocs/**/handoff-*.md in")
+        p("     THIS repo, and it fails on `main` for everyone. A doc can sit far")
+        p("     over the target above and still pass it — they are different")
+        p("     thresholds, and only that one can go red.")
 
     sizes = sorted(a["size"] for a in audits)
     if sizes:
