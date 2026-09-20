@@ -3641,7 +3641,11 @@ def test_a_NEW_menu_after_the_answer_counts_as_an_advance_ONLY_WITH_A_RECORD(
         ["send-keys", "-t", "%12", "-l", "--", "2"]], tmux_stub.send_keys_calls()
     body = json.loads([r for r in server.requests if r["path"].endswith("/result")][0]["body"])
     assert body["state"] == "failed", body
-    assert "records no answer" in body["detail"], body
+    assert "no answered record here is attributable to this ask" in body["detail"], body
+    # 🔴 AND THE CHAIN CLAUSE IS ONLY LICENSED HERE, where there really is no record.
+    # The same arm used to emit it after reading one, which is what
+    # test_the_CHAIN_accusation_never_denies_a_record_this_function_read pins.
+    assert "CHAIN" in body["detail"], body
 
 
 def test_the_menu_detail_never_carries_the_reply_text(server, tmux_stub, tmp_path):
@@ -4553,10 +4557,14 @@ def test_the_UPGRADE_needs_the_RECORD_read_twice_not_only_the_PANE(monkeypatch):
     `match`, so no accusation is at stake; what is at stake is whether the strong
     detail is emitted off a record nobody watched hold still.
 
-    ⚠ BOTH OUTCOMES ARE `delivered`, AND THAT IS THE POINT RATHER THAN A WEAKNESS. The
-    fix costs no delivery — it costs the CLAIM. A record that fails the second read
-    falls through to the absence rule, which says what it saw ("the menu is no longer
-    on screen") instead of asserting a measurement it made once.
+    ⚠ BOTH OUTCOMES ARE `delivered` **IN THIS FIXTURE**, and the unqualified version of
+    that sentence was false. It read "The fix costs no delivery — it costs the CLAIM",
+    generalising from a fixture whose pane is NOT a menu: there the second read costs
+    only the claim, because control reaches the absence rule and says what it saw ("the
+    menu is no longer on screen"). Where a DIFFERENT MENU is on screen the fall-through
+    reaches the chain arm instead and the delivery IS lost —
+    `test_the_CHAIN_accusation_never_denies_a_record_this_function_read` drives that
+    case, and it is where the cost actually lands.
     """
     monkeypatch.setattr(AGENT, "MENU_SETTLE_SECONDS", 0.0)
     monkeypatch.setattr(AGENT, "MENU_VERIFY_ATTEMPTS", 6)
@@ -4600,6 +4608,217 @@ def test_the_UPGRADE_needs_the_RECORD_read_twice_not_only_the_PANE(monkeypatch):
     assert got == (True, "the pane records this option as the answer"), (
         "a record that IS stable across two reads no longer reaches the upgrade, so "
         f"the strong claim is now unreachable rather than better-founded: {got}")
+
+
+#: A DIFFERENT single-question ask: different question, different option labels, the
+#: same measured single-question footer. `SINGLE_MENU_CAPTURE.replace(...)` is what the
+#: rest of this file uses for "another ask"; this one is spelled out because the
+#: `menu_settled` arm below turns on the pane being a MENU whose labels are not ours,
+#: and a fixture built by substring replacement can stop being that silently.
+OTHER_SINGLE_MENU_CAPTURE = (
+    "● Which region should it run in?\n"
+    "\n"
+    "  ☐ Region\n"
+    "\n"
+    "  ❯ 1. us-east\n"
+    "    2. eu-west\n"
+    "    3. Type something.\n"
+    "    4. Chat about this\n"
+    "\n"
+    + MENU_FOOTER_SINGLE + "\n"
+)
+
+
+def test_the_CHAIN_accusation_never_denies_a_record_this_function_read(monkeypatch):
+    """🔴 THE ARM BELOW A DIFFERENT MENU SAID "records no answer" AFTER READING ONE.
+
+    The round that made the match arm require the record TWICE
+    (`test_the_UPGRADE_needs_the_RECORD_read_twice_not_only_the_PANE`) wrote, in three
+    places, that failing the second read "costs nothing, because control falls through
+    to the absence rule". It does not always: when the pane is a DIFFERENT MENU the
+    fall-through reaches the chain arm, which both reported `failed` AND said `the pane
+    records no answer to this one` — in the very iteration that had computed
+    `verdict == "match"`. A denial of a record the same iteration had just read.
+
+    MEASURED head-vs-base on the sequence below, in process, with fixture controls on
+    every frame:
+
+        fc464f0e   (True,  'the pane records this option as the answer')
+        3feed80d   (False, 'a different menu is now on screen and the pane records no
+                            answer to this one, …CHAIN…')
+
+    ⚠ WHAT IS FIXED HERE IS THE SENTENCE, NOT THE VERDICT, AND THAT IS DELIBERATE. The
+    refusal stays: the record was read on ONE frame, so it was not established, and a
+    `failed` row over a good delivery is the direction this whole file chooses (nothing
+    on this path retries, so it cannot cost a second keypress). What it may no longer
+    do is call the observation chain-shaped, because a chain prints no answered line at
+    all until Submit — the absence IS the chain signature, and asserting it while
+    holding a record destroys the one thing that arm knows.
+
+    🔴 BOTH DIRECTIONS. A genuine different-menu-with-NO-record must still get the
+    chain sentence, or this fix has simply deleted the guard that catches a clipped
+    chain.
+    """
+    monkeypatch.setattr(AGENT, "MENU_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(AGENT, "MENU_VERIFY_ATTEMPTS", 6)
+    labels = ["Ledger", "Flatfile", "Type something.", "Chat about this"]
+    other = OTHER_SINGLE_MENU_CAPTURE
+
+    # Fixture controls. Each one is a premise of the arm under test; if any stops
+    # holding, the sequence exercises a different branch and passes vacuously.
+    assert AGENT.classify_pane(other)[0] == AGENT.PANE_MENU, (
+        "the second ask no longer classifies as a MENU, so `kind == PANE_MENU` is "
+        f"false and the arm under test is never reached: {AGENT.classify_pane(other)}")
+    assert AGENT.classify_pane(other)[1] != labels, (
+        "the second ask now carries OUR labels, so `seen != want` is false and this "
+        "measures 'the menu did not move' instead")
+    assert AGENT.classify_pane(other)[:2] == AGENT.classify_pane(ANSWERED_CAPTURE + other)[:2], (
+        "the two frames classify differently, so `seen == prev` never holds")
+    assert AGENT.menu_answer_records(other) == [], (
+        f"frame 1 already carries a record, so `new` is not None on it: "
+        f"{AGENT.menu_answer_records(other)}")
+    assert AGENT.menu_answer_verdict(ANSWERED_CAPTURE + other, "Flatfile", []) == "match", (
+        "frame 2's record no longer holds the reply, so `verdict == \"match\"` is false "
+        "and this test measures the no-record arm twice")
+
+    seq = [other, ANSWERED_CAPTURE + other]
+
+    def fake(pane):
+        return (seq.pop(0) if len(seq) > 1 else seq[0]), ""
+    monkeypatch.setattr(AGENT, "capture_pane", fake)
+
+    # ⚠ CAPTURED ONCE — `fake` consumes `seq`.
+    got = AGENT.menu_settled("%12", labels, "Flatfile", [])
+    assert got == (False, "a different menu is now on screen and the answered record here "
+                          "differs from the pre-keypress baseline, but it was not read TWICE "
+                          "holding this option, so it was not established as this ask's "
+                          "answer"), (
+        "the arm below a DIFFERENT MENU is not saying what this iteration observed. It "
+        "read a record that HOLDS the reply (verdict `match`, asserted above) on one "
+        f"frame, and the detail must not deny it or call the frame chain-shaped: {got}")
+    assert "CHAIN" not in got[1], (
+        "a chain prints NO answered line until Submit, so an observation carrying a "
+        f"record is not what a chain looks like and must not say it is: {got}")
+
+    # 🔴 THE OTHER DIRECTION: no record at all, which is the chain signature, must
+    # still be accused — otherwise the clipped-chain guard is gone.
+    seq[:] = [other]
+    got = AGENT.menu_settled("%12", labels, "Flatfile", [])
+    assert got == (False, "a different menu is now on screen and no answered record here is "
+                          "attributable to this ask, which is also what answering the first "
+                          "question of a CHAIN looks like"), (
+        "a different menu with NO record is what a half-answered chain looks like, and "
+        f"it is no longer being refused as one: {got}")
+
+    # 🔴 ALL THREE WAYS THE OLD SENTENCE WAS FALSE, because the comment on that arm
+    # claims three and a test pinning two would be the same defect one layer up. The
+    # `match` one is above; these are the other two.
+    #
+    # (2) A record naming a DIFFERENT option, read on one frame. The mismatch arm needs
+    # two agreeing reads too, so control reaches here — and a record IS on screen.
+    wrong = ANSWERED_CAPTURE.replace("→ Flatfile", "→ Postgres")
+    assert AGENT.menu_answer_verdict(wrong + other, "Flatfile", []) == "mismatch", (
+        "the fixture no longer looks like a WRONG answer, so this drives the no-record "
+        "arm a second time instead of the mismatch one")
+    seq[:] = [other, wrong + other]
+    got = AGENT.menu_settled("%12", labels, "Flatfile", [])
+    assert "no answered record" not in got[1], (
+        "a record naming a DIFFERENT option was read here; the detail asserts there is "
+        f"none: {got}")
+    assert "CHAIN" not in got[1], (
+        f"a frame carrying a record is not what a chain looks like: {got}")
+
+    # (3) No reply to compare against at all — `verdict` is never computed, but the
+    # record was still read.
+    seq[:] = [ANSWERED_CAPTURE + other]
+    got = AGENT.menu_settled("%12", labels, "", [])
+    assert "no answered record" not in got[1], (
+        "with `text` empty the record is never compared, but it WAS read — the detail "
+        f"must not assert its absence: {got}")
+    assert "CHAIN" not in got[1], (
+        f"a frame carrying a record is not what a chain looks like: {got}")
+
+
+def test_a_record_read_ACROSS_an_unreadable_frame_is_not_an_AGREEING_PAIR(monkeypatch):
+    """🔴 `prev_new = None` IN THE UNREADABLE-PANE BRANCH, WHICH NO TEST REACHED.
+
+    `prev = None` there has a test; the `prev_new = None` beside it did not. MEASURED
+    with that line deleted: 199 of this file's 200 tests PASS and only this one fails —
+    so nothing else in here reaches it. Unlike the two clauses this file labels GRAMMAR
+    it is KILLABLE, and what it needs is four frames with an `err` in the MIDDLE, which
+    no other sequence here has.
+
+    WHAT THE MUTANT DOES. `prev_new` then carries a record across a frame that was not
+    an observation at all, so the mismatch arm can fire on two NON-CONSECUTIVE reads —
+    exactly the defect `test_a_record_seen_while_our_menu_was_UP_is_not_half_of_an_
+    AGREEING_PAIR` exists to prevent, reached by the other door. The sibling `prev =
+    None` does not cover it: the arm it guards (`seen == prev`) is a different arm.
+
+    THE SEQUENCE, and why each frame is needed:
+
+        1  a STALE record, our ask already gone      -> prev_new = ['Postgres']
+        2  capture_pane FAILS                        -> HEAD clears prev_new; mutant does not
+        3  the SAME stale record                     -> mutant: new == prev_new, ACCUSES
+        4  our OWN record, bottom-most               -> HEAD: pane stable, record moved,
+                                                        so the absence rule answers
+
+    MEASURED: HEAD `(True, 'the menu is no longer on screen')`; the mutant
+    `(False, 'the pane records a DIFFERENT option as the answer to this ask')` — a
+    correct delivery reported as a wrong answer, off a pair straddling an unreadable
+    frame. The `continue` -> `break` mutant in the same branch dies here too (it stops
+    reading at frame 2 and returns "never held one state long enough").
+    """
+    monkeypatch.setattr(AGENT, "MENU_SETTLE_SECONDS", 0.0)
+    monkeypatch.setattr(AGENT, "MENU_VERIFY_ATTEMPTS", 6)
+    labels = ["Ledger", "Flatfile", "Type something.", "Chat about this"]
+
+    stale = ANSWERED_CAPTURE.replace("→ Flatfile", "→ Postgres")
+    mine = stale + ANSWERED_CAPTURE
+
+    # Fixture controls: frames 1/3/4 must classify IDENTICALLY (and not as our menu),
+    # frames 1 and 3 must carry the SAME record, and frame 4 a DIFFERENT one holding
+    # the reply — or the mutant is not distinguishable from HEAD here.
+    assert AGENT.classify_pane(stale)[:2] == AGENT.classify_pane(mine)[:2], (
+        f"the frames classify differently: {AGENT.classify_pane(stale)[:2]} vs "
+        f"{AGENT.classify_pane(mine)[:2]}")
+    assert AGENT.classify_pane(stale)[1] != labels, (
+        "a frame carries OUR labels, so `seen != want` is false")
+    assert AGENT.menu_answer_records(stale) == ["Postgres"], (
+        f"the stale frame no longer carries the record the pair is built from: "
+        f"{AGENT.menu_answer_records(stale)}")
+    assert AGENT.menu_answer_records(mine) == ["Flatfile"], (
+        f"frame 4 no longer records OUR answer bottom-most: "
+        f"{AGENT.menu_answer_records(mine)}")
+    assert AGENT.menu_answer_verdict(stale, "Flatfile", []) == "mismatch", (
+        "the stale record no longer looks like a WRONG answer, so the arm the mutant "
+        "reaches is not the mismatch arm")
+
+    reads = {"n": 0}
+
+    def fake(pane):
+        reads["n"] += 1
+        if reads["n"] == 2:
+            return "", "no such pane"
+        return (stale if reads["n"] < 4 else mine), ""
+    monkeypatch.setattr(AGENT, "capture_pane", fake)
+
+    got = AGENT.menu_settled("%12", labels, "Flatfile", [])
+    # 🔴 THE VERDICT IS ASSERTED FIRST, AND THE READ COUNT SECOND, DELIBERATELY. With
+    # the count first both mutants died on IT — "the sequence stopped after 3 reads" —
+    # which is a true statement about the run and says nothing about the defect, so the
+    # test would have been red for a reason that does not name what broke. The count
+    # stays as a VACUITY control below: a HEAD that reached the right answer in two
+    # reads never executed the straddle this test is for.
+    assert got == (True, "the menu is no longer on screen"), (
+        "the unreadable frame is no longer breaking the chain of observations. Either a "
+        "record read BEFORE it is being used as half of the agreeing pair the mismatch "
+        "arm requires — a correct delivery reported as answering a DIFFERENT option — "
+        "or the loop stopped reading at the error instead of skipping it. The read "
+        f"count separates them: {reads['n']} reads, verdict {got}")
+    assert reads["n"] >= 4, (
+        f"the verdict was reached in {reads['n']} reads, so the frame that straddles "
+        "the unreadable one was never taken and this test passed without exercising "
+        "the branch it exists for")
 
 
 def test_the_settle_verdict_is_driven_directly_through_EVERY_outcome(monkeypatch):
@@ -4695,8 +4914,9 @@ def test_the_settle_verdict_is_driven_directly_through_EVERY_outcome(monkeypatch
 
     feed(other)
     assert AGENT.menu_settled("%12", labels) == (
-        False, "a different menu is now on screen and the pane records no answer to this "
-               "one, which is also what answering the first question of a CHAIN looks like")
+        False, "a different menu is now on screen and no answered record here is "
+               "attributable to this ask, which is also what answering the first question "
+               "of a CHAIN looks like")
     # The record turns the same frame into a delivery.
     feed(ANSWERED_CAPTURE + other)
     assert AGENT.menu_settled("%12", labels, "Flatfile", []) == (
@@ -5392,8 +5612,11 @@ ASK_FOOTER_LEDGER = [
      "decides it"),
 ]
 
-#: The ledger's size at the commit that introduced the floor — MEASURED, not chosen:
-#: 22 rows, 20 of them footers taken from the bundle and 2 labelled GRAMMAR. It is a
+#: The number of DISTINCT footers on the ledger at the commit that introduced the floor
+#: — MEASURED, not chosen: 22 rows, all 22 footers distinct, 20 of them taken from the
+#: bundle and 2 labelled GRAMMAR. ⚠ IT IS COMPARED AGAINST THE DISTINCT COUNT, NOT THE
+#: ROW COUNT, because a row count is cardinality and a corpus can rot while keeping it
+#: (drop one row, duplicate another — 22 rows, 2 GRAMMAR, every verdict green). It is a
 #: RATCHET, not a derived quantity: see
 #: `test_the_footer_reader_resolves_EVERY_LEDGERED_FOOTER` for why a row count has no
 #: arithmetic relationship to the producing-site count, and what lowering this number
@@ -5588,12 +5811,23 @@ def test_the_footer_reader_resolves_EVERY_LEDGERED_FOOTER():
     # which one and why. The site counts live in the dev-host tier
     # (`scripts/devhost-tests/test_claude_footer_sites.py`), which is where a number
     # derived from the binary belongs — and where it can be re-derived on demand.
-    assert len(ASK_FOOTER_LEDGER) >= ASK_FOOTER_LEDGER_FLOOR, (
-        f"the ledger SHRANK: {len(ASK_FOOTER_LEDGER)} rows against a floor of "
-        f"{ASK_FOOTER_LEDGER_FLOOR}. Every row is a footer whose verdict was measured "
-        "once; dropping one removes that measurement from the record. If a row was "
-        "genuinely wrong, say so in the commit message and lower the floor in the "
-        "same change — do not adjust the floor to make a deletion quiet")
+    #
+    # 🔴 AND IT COUNTS DISTINCT FOOTERS, NOT ROWS — a row count is CARDINALITY and a
+    # corpus can rot while keeping it. Constructed: drop the `n to add notes` row and
+    # duplicate row 0, and the ledger still has 22 rows, still exactly 2 GRAMMAR rows,
+    # and every per-row verdict above still passes — a measured footer silently gone.
+    # All 22 footers are distinct today, so deduplicating before the compare closes it
+    # and costs nothing. (A duplicate row is not merely harmless-but-useless: it is how
+    # a deletion pays for itself.)
+    footers = [row[0] for row in ASK_FOOTER_LEDGER]
+    assert len(set(footers)) >= ASK_FOOTER_LEDGER_FLOOR, (
+        f"the ledger SHRANK: {len(set(footers))} DISTINCT footers over "
+        f"{len(footers)} rows, against a floor of {ASK_FOOTER_LEDGER_FLOOR}. Every row "
+        "is a footer whose verdict was measured once; dropping one removes that "
+        "measurement from the record, and re-adding a footer already on the ledger does "
+        "not replace it. If a row was genuinely wrong, say so in the commit message and "
+        "lower the floor in the same change — do not adjust the floor to make a deletion "
+        "quiet, and do not pad the count with a duplicate")
     # And the two SYNTHETIC rows stay distinguishable from the measured ones, because
     # a grammar row is what a rule forbids rather than what a pane shows.
     assert sum(1 for r in ASK_FOOTER_LEDGER if r[2].startswith("GRAMMAR")) == 2, (
@@ -5636,7 +5870,17 @@ def test_the_bundle_STALENESS_ALARM_still_exists():
     file is invisible to the hermetic tier, so deleting it would cost nothing visible
     here and the ledger's attributions would silently stop being checked against
     anything. This asserts the alarm exists AND still names each probe — a file that
-    exists but no longer greps for `lo` is the same loss with a filename.
+    exists but no longer greps for the `lo` composition path is the same loss with a
+    filename.
+
+    ⚠ ONE FRAGMENT IS NO LONGER SPELLED THE WAY THE SITE IS, AND THAT IS ON PURPOSE. The
+    alarm's probes for paths 2 and 3 used to be keyed on the MINIFIER-GENERATED names
+    `lo` and `qJl`/`hfw`, which are build artifacts: a rebuild can rename them without
+    touching a renderer, and the alarm would then red for a reason that has nothing to do
+    with footers. Both probes were de-minified — same counts, MEASURED both ways on
+    2.1.232 and on five older bundles — so the `hfw` half of the third fragment went with
+    it. What the fragments still identify is the PATH (a keybinding FALLBACK for 2, a
+    DEFAULTED select prop for 3), which is the property this seam is about.
     """
     assert FOOTER_SITE_ALARM.is_file(), (
         f"the dev-host staleness alarm is gone ({FOOTER_SITE_ALARM}). "
@@ -5647,7 +5891,7 @@ def test_the_bundle_STALENESS_ALARM_still_exists():
     # are the four the ledger's header names; the alarm owns their expected counts.
     for probe in ('chord:"enter",action:"select"',
                   'fallback:"Enter",description:"select"',
-                  'hfw===void 0',
+                  '===void 0\\?"select":',
                   "Enter to select"):
         assert probe in body, (
             f"{FOOTER_SITE_ALARM.name} no longer probes for {probe!r}, so one of the "
@@ -5740,9 +5984,12 @@ def test_the_ANSWERED_RENDER_is_read_with_the_NBSPs_the_pane_really_uses():
         AGENT.menu_answer_records(chain))
     assert AGENT.menu_answer_verdict(CLIPPED_CHAIN_CAPTURE, "Flatfile", []) == ""
 
-    # 🔴 THE BOTTOM-MOST BLOCK ONLY. 18 of the 57 live panes on this host carry an
-    # answered record from an EARLIER ask, so a reader that took any match would
-    # read a stale row as evidence about THIS delivery.
+    # 🔴 THE BOTTOM-MOST BLOCK ONLY. Panes on this host carry an answered record from
+    # an EARLIER ask in their SCROLLBACK, so a reader that took any match would read a
+    # stale row as evidence about THIS delivery. ⚠ NO FIGURE HERE: this comment said
+    # `18 of the 57 live panes` — a second copy of the fraction MENU_ANSWERED_HEADING
+    # retracts, and the numerator was superseded too. That block states the number
+    # once, with what a scrollback count does and does not license.
     stale = ("●\xa0User answered Claude's questions:\n"
              "  ⎿\xa0·\xa0An older ask → Ledger\n"
              "\n"

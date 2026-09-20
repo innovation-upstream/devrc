@@ -1040,8 +1040,8 @@ FOOTER_UNKNOWN = "unknown"
 #: its confirm wording is, so a constant naming one such wording would be a guard
 #: that guards nothing. The measured render stays written down, right here.
 
-#: The render the pane leaves once an ask has been ANSWERED. MEASURED byte-exact
-#: in live scrollback on 18 of 57 panes, and again by answering a scratch modal
+#: The render the pane leaves once an ask has been ANSWERED. MEASURED byte-exact in
+#: live scrollback on this host, and again by answering a scratch modal
 #: with a digit: `●\xa0User answered Claude's questions:` then
 #: `  ⎿\xa0·\xa0<question> → <chosen label>` (NBSPs, and the question/answer wrap
 #: across continuation lines). ⚠ THE QUOTE AT THE TOP OF THIS SECTION WRITES
@@ -1049,6 +1049,11 @@ FOOTER_UNKNOWN = "unknown"
 #: this is a heading substring plus a joined-and-normalised read rather than a
 #: literal, and why `normalise_label` is what does the joining (`str.split()`
 #: treats `\xa0` as whitespace).
+#:
+#: ⚠ NO PREVALENCE FIGURE IN THAT FIRST SENTENCE, DELIBERATELY. It read "on 18 of 57
+#: panes" for a round after the block below had retracted that fraction AND superseded
+#: its numerator — a few lines above its own correction. The figure is stated ONCE,
+#: below, and the same fraction in `test_tmux_reply_agent.py` was removed with this one.
 #:
 #: 🔴 AND THE PREVALENCE FIGURE IS A **SCROLLBACK** ONE. `capture_pane` reads the
 #: VIEWPORT (`capture-pane -p`, no `-S`), so a scrollback count is not a count of
@@ -2211,9 +2216,21 @@ def menu_settled(pane: str, labels: list[str], text: str = "",
     ⚠ THAT IS A DIFFERENT CHECK FROM `seen == prev` — the classification is
     identical across both halves of a half-drawn record, so the stability that
     matters is the RECORD's, not the pane kind's — and `seen == prev` was the only
-    STABILITY the upgrade used to require. A record that fails the second read does not
-    cost the delivery: the arm falls through to the absence rule, which is the
-    weaker claim and the true one.
+    STABILITY the upgrade used to require.
+
+    🔴 WHAT REQUIRING THE SECOND READ COSTS, AND THIS PARAGRAPH SAID "NOT THE
+    DELIVERY" WHILE THE CODE SAID OTHERWISE. Where the ask is simply GONE it costs
+    only the CLAIM: control reaches the absence rule, which is the weaker statement
+    and the true one. Where a DIFFERENT MENU is on screen it costs the DELIVERY,
+    because the arm below is what control reaches there, not the absence rule —
+    MEASURED head-vs-base on the interleaving the record helper's own docstring
+    argues does occur (our ask closed, another single-question ask
+    already up, our record drawn between the two reads): `fc464f0e` returned
+    `(True, 'the pane records this option as the answer')` and this code reports
+    `failed`. That is a `failed` audit row over a good delivery — the direction this
+    whole file chooses, and it cannot cause a second keypress because nothing on this
+    path retries. What the arm below no longer does is DENY a record it has just
+    read; see its own comment.
 
     ⚠ THE RESIDUAL THAT SURVIVES, STATED. "no menu on screen AND no record" is
     still also what a pane that had ALREADY moved on before the keypress looks
@@ -2265,15 +2282,33 @@ def menu_settled(pane: str, labels: list[str], text: str = "",
             # the wrong stability for this question: the classification is identical
             # across both halves of a half-drawn record, so a one-frame record was
             # enough to make the strongest claim this function emits while the
-            # mismatch arm beside it already required two. Symmetry is the fix — and
-            # failing the second read costs nothing, because control falls through to
-            # the absence rule below, which is the weaker claim and the true one.
+            # mismatch arm beside it already required two. Symmetry is the fix, and
+            # the docstring above says what it costs — NOT "nothing", which is what
+            # the sentence here used to say: below a DIFFERENT MENU the fall-through
+            # reaches the arm beneath this one, not the absence rule.
             if verdict == "match" and new == prev_new:
                 return True, "the pane records this option as the answer"
             if kind == PANE_MENU:
-                return False, ("a different menu is now on screen and the pane records no "
-                               "answer to this one, which is also what answering the first "
-                               "question of a CHAIN looks like")
+                # 🔴 THE CHAIN READING NEEDS THE RECORD TO BE **ABSENT**, AND THIS ARM
+                # ASSERTED THE ABSENCE WHETHER OR NOT ONE HAD BEEN READ. A chain
+                # prints no answered line at all until Submit, so "no record" is the
+                # whole of what makes this observation chain-shaped — while the
+                # sentence it emitted, `the pane records no answer to this one`, was
+                # also emitted after a record had been read and found to HOLD the
+                # reply (one frame short of the pair above), to name a DIFFERENT
+                # option, or with no reply to compare it against at all. Three ways
+                # to deny a record this function had just read. The refusal stays in
+                # every case — it is the safe direction and nothing here retries —
+                # but only the first of them may call itself chain-shaped. Pinned by
+                # test_the_CHAIN_accusation_never_denies_a_record_this_function_read.
+                if new is None:
+                    return False, ("a different menu is now on screen and no answered record "
+                                   "here is attributable to this ask, which is also what "
+                                   "answering the first question of a CHAIN looks like")
+                return False, ("a different menu is now on screen and the answered record "
+                               "here differs from the pre-keypress baseline, but it was not "
+                               "read TWICE holding this option, so it was not established "
+                               "as this ask's answer")
             return True, "the menu is no longer on screen"
         prev = seen
         prev_new = new

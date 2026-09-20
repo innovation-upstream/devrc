@@ -26,12 +26,45 @@ these attributions out of date and the delivered BEHAVIOUR safe (FOOTER_UNKNOWN,
 named refusal, nothing typed). A red here means "go re-read the renderers and correct
 the ledger", never "the agent is unsafe".
 
-🔴 KEYED ON THE COUNTS, NOT ON THE VERSION STRING, deliberately. Pinning
-`2.1.232` would make this red on every unrelated Claude Code bump — a permanently-red
-gate, which is worse than no gate because it trains everyone to ignore it. Keying on
-the counts means a bump that leaves the producing sites alone stays green, and one
-that adds or removes a producer goes red. The version IS printed in the failure, so
-the reader knows which bundle to go and read.
+🔴 IT WILL RED ON MOST CLAUDE CODE BUMPS, AND THIS BLOCK USED TO CLAIM OTHERWISE. It
+said pinning `2.1.232` would be "a permanently-red gate" while keying on the counts
+means "a bump that leaves the producing sites alone stays green" — implying the counts
+survive bumps the version string does not. MEASURED over the five other Claude Code
+bundles on this host (1.0.128, 2.0.75, 2.0.76, 2.1.4, 2.1.9), with this file's own
+probes:
+
+    probe                          1.0.128  2.0.75  2.0.76  2.1.4  2.1.9  2.1.232
+    chord:"enter",action:"select"        0       0       0      0      0       14
+    {…fallback:"Enter",…"select"}        0       0       0      0      0        6
+    ===void 0?"select":                  0       0       0      0      0        1
+    Enter to select                     10       9       9      4      4        2
+
+Bare `chord:"enter"` occurs 0 times in every one of those and 107 in 2.1.232, so the
+footer component is new WITHIN 2.1.x — and the plain user-visible literal moved
+10 -> 9 -> 9 -> 4 -> 4 -> 2. Every probe would red on every bundle above. So a red
+here is the EXPECTED outcome of a bump, not a rare one, and the honest reading of one
+is "the ledger is stale, go re-derive it" — which is what the failure message says and
+what the block below already promises. What keying on counts buys is the RE-DERIVATION
+INSTRUCTION, not immunity to bumps; the version is printed in the failure so the reader
+knows which bundle to read.
+
+⚠ AND IT IS NOT A PERMANENTLY-RED GATE IN THE SENSE THAT PHRASE NAMES, because it does
+not gate: `scripts/gate.sh` defaults to `--set hermetic` and `flake.nix`'s check
+derivation passes it explicitly, and `run-tests.sh` adds `DEVHOST_TARGETS` to the
+target list only when the set is `all` — so neither collects this file. The one
+caller that does is
+`githooks/tests-on-push.sh` (`--set all`), so an INSTALLED pre-push gate would block
+every push until the ledger is re-derived. `core.hooksPath` measured unset — local and
+global — when this was written, and CLAUDE.md records that the value is volatile, so do
+not read that as a property of the repo.
+
+🔴 NO PROBE MAY BE KEYED ON A MINIFIER-GENERATED IDENTIFIER. Two of the four were
+(`lo,` on the second, `qJl=hfw`/`:hfw` on the third): those names are BUILD ARTIFACTS,
+so a rebuild that leaves the renderer untouched can still rename them and red this file
+for a reason that has nothing to do with the footers. Dropping them leaves both counts
+identical on 2.1.232 (6 and 1, MEASURED both ways) and on all five bundles above (0),
+so the de-minified forms are what is pinned. The prose below still NAMES `lo` and the
+defaulted prop, because that is how a reader finds the sites again.
 
 ⚠ AND THE PROBES ARE A FLOOR, NOT A CLOSURE — this is the whole F1 lesson, kept where
 it can be read. Two of the four below exist only because someone read `lo`/`WT` and
@@ -60,14 +93,17 @@ FOOTER_SITE_PROBES = (
     (r'chord:"enter",action:"select"', 14,
      "literal chord/action pairs — the only path the original grep could see. TWO of "
      "these are the AskUserQuestion renderers; the other 12 are other choosers"),
-    (r'lo,\{action:"[^"]*",context:"[^"]*",fallback:"Enter",description:"select"\}', 6,
-     "`lo` sites whose keybinding FALLBACK is `Enter` and whose action prop is "
+    (r'\{action:"[^"]*",context:"[^"]*",fallback:"Enter",description:"select"\}', 6,
+     "the `lo` sites whose keybinding FALLBACK is `Enter` and whose action prop is "
      "`select`. All six resolve FOOTER_UNKNOWN, every one of them on the LAST-field "
-     "rule — their terminator is `Esc to go back`"),
-    (r'qJl=hfw===void 0\?"select":hfw', 1,
+     "rule — their terminator is `Esc to go back`. ⚠ the `lo,` prefix is DROPPED from "
+     "this probe: it is a minifier-generated name, and the count is 6 with or without "
+     "it"),
+    (r'===void 0\?"select":', 1,
      "the generic scrollable picker's DEFAULTED select action. FOOTER_UNKNOWN in both "
      "width-dependent shapes: the FIRST-field rule at >= 120 columns, the NAV-COUNT "
-     "rule below it (`↑/↓ to nav`)"),
+     "rule below it (`↑/↓ to nav`). ⚠ the `qJl=hfw` spelling is DROPPED for the same "
+     "reason as above; the count is 1 either way"),
     (r'Enter to select', 2,
      "whole literals — the `/sandbox` and `/permissions` footers, both of which were "
      "DRIVEN BY DIGIT at `c8cf7b15e`"),
