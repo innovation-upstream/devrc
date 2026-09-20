@@ -156,7 +156,27 @@ measurement).
 
 ### F4 — the guard stack is defended; the unanswerable *warning* is not
 
-Deduped firings over 7,023 invocations — every refusal has fired:
+🔴 **READ THE DENOMINATOR BEFORE THE TABLE — an earlier wording got it wrong.** The `%`
+column is over the **5,095 distinct status-bearing tool results**, NOT over the 7,023
+invocations named above: `written` is 1788/5095 = 35.1%, and 1788/7023 = 25.5%. This line
+previously read "deduped firings over 7,023 invocations" directly above the table, so a
+reader recomputing any row from the stated denominator got a different number
+(round 0 of #1815, F5). The two counts differ because not every invocation prints a
+`status=` line a transcript captured.
+
+⚠ **SCOPE OF THIS SWEEP, which an independent re-run will NOT reproduce:** population =
+the **1,328 transcripts whose text names `handoff_doc.py`**, not all 6,607 on the host;
+matched on the literal `status=<token>` in tool output only, deduped by `tool_use_id`.
+A wider sweep returns **higher** counts (round 0 measured ~2,080 `durable-drop` against
+this doc's 915), and the direction is **not** a clean population effect in either
+direction: a `Read` of any document QUOTING these warning strings — including this
+proposal and its handoff — is itself a tool result carrying the text, so a corpus-wide
+literal sweep counts document reads as firings. **Neither figure is clean.** What both
+agree on, and what the argument below rests on, is the ORDER OF MAGNITUDE and the
+ranking — every refusal has fired, and `durable-drop` fires far more often than the rate
+the investigations design rejected.
+
+Firings by status — see the two paragraphs above for the denominator and the scope:
 
 | status | n | % | | status | n | % |
 |---|---:|---:|---|---|---:|---:|
@@ -180,8 +200,14 @@ The finding is the other column:
 | warning | n | % of runs | answerable? |
 |---|---:|---:|---|
 | `DROPS N line(s) that look DURABLE` | **915** | **18.0%** | **no** |
-| over/at the size budget | 185 | 3.6% | only by hand, at 64 KB |
+| over/at the size budget¹ | 185 | 3.6% | only by hand, at 64 KB |
 | near the size budget | 28 | 0.5% | as above |
+
+⚠ Same sweep, same scope caveat as the status table above — these are a FLOOR from the
+1,328-transcript population, and a corpus-wide literal sweep returns higher numbers it also
+cannot clean (document reads count as firings). ¹ This row matched **both** the gated
+(`OVER ITS SIZE BUDGET`) and ungated (`SIZE ONLY, NO GATE`) arms, so it is not comparable to
+a gated-only count.
 
 **Nearly one run in five is told it is dropping durable content, by a warning that is
 explicitly "a WARNING, never a refusal" and explicitly "a FLOOR".** `claude/RULES.md`:
