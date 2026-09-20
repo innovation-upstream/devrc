@@ -94,6 +94,12 @@ three such cards, complete for over a week, two auto-tagged `stale` by the reten
 three closed on a read. **Before working a `ready_for_review` card, read its last comment** — a
 refusal-to-self-grade says so in as many words.
 
+🔴 **THE WRITE-BACK GUARD CAN BE RIGHT THAT SOMETHING IS MISSING AND WRONG ABOUT WHAT TO WRITE — and the wrong half is the STATUS FLIP.** Its Stop-hook text prescribes a comment *and* `task status <id> ready_for_review`. When the card's work is still IN FLIGHT — an implementation subagent running, no PR open, no criterion validated — that flip asserts something false, and `ready_for_review` is the one transition that **notifies Zach** (`notifyTaskDone`, per the status table above). So the literal instruction can manufacture a notification for work that does not exist.
+
+Read what the guard is actually protecting against: a card sitting `open` with **no comment**, silently re-dispatched and paid for twice (the two cards named in its own message shipped that way). That hazard is discharged by the COMMENT alone. **So on an in-flight pickup: post an interim comment and leave the status untouched.** Make it carry what a duplicate-dispatcher needs — the claim slug, the branch and worktree, the measured baseline, and anything about the card that turned out to be wrong — and **say in as many words that nothing shipped and no criterion is validated**. Then flip the status in the turn the work actually lands.
+
+⚠ **Do not answer it with a throwaway either.** A comment permanently silences the guard for that card, so a junk one buys the silence without buying the protection — strictly worse than the gap it filled. The rule that covers both failure modes: **answer the guard's PURPOSE, not its command text**, and never let a bookkeeping hook talk you into a claim you have not earned. (Dismissal is the right move only when the session's work was not for that card at all — the guard spells that path out itself.)
+
 🔴 **That gate is LOCAL-pickup only, structurally.** The in-devpod agent route
 `PATCH /agent/task/status` **forbids `complete`** (`notes.StatusAllowedForAgent`), so a dispatched
 devpod agent ends at `ready_for_review` regardless of what this skill says. Only the machine route
