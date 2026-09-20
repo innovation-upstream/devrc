@@ -30,14 +30,14 @@ bug, unrelated.
 
 ## State now
 - Branch: `handoff-resume-prune-proposal`, **pushed to `origin`** — three commits:
-  `fcd0ad12` (the proposal doc), `bea9138d` (an `adoption-scan` gotcha), `8d7a3bfd` (this
+  `fcd0ad12` (the proposal doc), `19e5849e` (an `adoption-scan` gotcha), `8d7a3bfd` (this
   handoff doc, landed by `handoff_doc.py --confirm --push`). 🔴 **No PR is open** — opening
   one was not requested and is an outward action left to the operator.
 - DONE: `claudedocs/proposal-handoff-resume-prune.md` written and committed (`fcd0ad12`).
   It carries the full measurement set, the four proposed changes P1–P4 and what is
   deliberately NOT proposed.
 - DONE: `claude/skills/adoption-scan/SKILL.md` gained the dedup-by-`tool_use_id` gotcha
-  (`bea9138d`) — the skill already owned the PROVENANCE half of transcript sweeps but not
+  (`19e5849e`) — the skill already owned the PROVENANCE half of transcript sweeps but not
   the copy half. 7,306 B, within the 12,038 B skill budget, so no eviction was needed.
   🔴 **Not deployed** — `~/.claude/skills/` is a nix-store symlink, so this needs a
   `home-manager switch` (or `scripts/ship.sh` after merge) before any session loads it.
