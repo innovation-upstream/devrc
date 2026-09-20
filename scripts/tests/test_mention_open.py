@@ -1956,7 +1956,8 @@ class _FakeTerminal:
             def answer():
                 # The four MEASURED endings — see the class docstring.
                 if self.hard_abort:
-                    return                  # Ctrl-C: fzf writes NOTHING
+                    return    # ctrl-c / ctrl-g / ctrl-q / empty ctrl-d:
+                              # fzf writes NOTHING for any of them
                 if self.esc and not _ESC_PRINTS_QUERY:
                     return                  # ESC before the bind: also NOTHING
                 if MO.PICKER_QUERY_LINE is not None:
@@ -2587,8 +2588,15 @@ def _fzf_interactive_first_row(rows: list[str], query: str) -> str:
         # and a NON-ZERO numerator means the query has actually been applied.
         # BOTH halves are load-bearing: fzf reads and filters concurrently, so
         # the denominator can be complete while the numerator is still 0.
-        # MEASURED: prompt-only readiness fails 11-12 of 20 runs; gating on the
-        # settled counter, 0 of 25.
+        # 🔴 MEASURED ON #1813's TREE, NOT THIS ONE, AND THE SCOPE IS THE
+        # POINT. Prompt-only readiness failed 11-12 of 20 runs there, where
+        # the corpus rows carry a marker; gating on the settled counter, 0
+        # of 25. On THIS tree `/audit-pr` round 2 re-derived it over 80
+        # prompt-only observations and got ZERO failures — so the rate does
+        # NOT reproduce here and an earlier version of this comment stated
+        # it unscoped, beside this corpus, as though it did. The race is a
+        # property of how long the rows take to load; the gate is cheap and
+        # correct either way, but do not read the number as this file's.
         total = len(rows)
         drawn = _drain(master,
                        lambda b: (_PTY_PROMPT.encode() in b
@@ -2656,7 +2664,7 @@ def _counter(drawn: bytes) -> tuple[int, int]:
 
 
 def _fzf_interactive_abort(rows: list[str], query: str,
-                           key: bytes) -> tuple[bytes, int]:
+                           key: bytes) -> tuple[bytes, int, bool]:
     """Drive a REAL interactive fzf to an ABORT and return `(stdout, status)`.
 
     🔴 THE ONE THING THE FAKE CANNOT DO. Every other guard on the ESC contract
@@ -2670,8 +2678,19 @@ def _fzf_interactive_abort(rows: list[str], query: str,
     is filed as a selection and then as `unmapped-row`.
 
     Same pty machinery and the same `_picker_flags()` as
-    `_fzf_interactive_first_row`, including its `<matched>/<total>` readiness
-    gate — a key sent before the list has loaded measures nothing.
+    `_fzf_interactive_first_row`, and it reuses that helper's
+    `<matched>/<total>` readiness gate.
+
+    ⚠ THE GATE IS INHERITED, NOT LOAD-BEARING HERE, and this docstring claimed
+    otherwise. It said "a key sent before the list has loaded measures nothing"
+    — true of `_fzf_interactive_first_row`, whose key SELECTS A ROW and so
+    depends on the match set. An abort's bytes do not: `/audit-pr` round 2
+    measured 15 ESC and 15 Ctrl-C runs with NO readiness wait at all and got 0
+    deviations. The gate is kept for symmetry and because it makes a genuinely
+    broken spawn fail fast, but it is not what makes this measurement valid —
+    the `ended` flag is. Copied prose inherits the ORIGINAL's justification,
+    which is how a sentence ends up true of the function it came from and false
+    of the one it now sits in.
     """
     import fcntl     # noqa: PLC0415
     import pty       # noqa: PLC0415
@@ -2712,6 +2731,7 @@ def _fzf_interactive_abort(rows: list[str], query: str,
 
     status = -1
     out = b""
+    ended = False      # did the CHILD end, or did we give up?
     try:
         total = len(rows)
         drawn = _drain(master,
@@ -2737,18 +2757,17 @@ def _fzf_interactive_abort(rows: list[str], query: str,
             r, _w, _x = select.select([r_out, master], [], [], 0.2)
             if not r:
                 continue
-            done = False
             for fd in r:
                 try:
                     chunk = os.read(fd, 65536)
                 except OSError:            # pty hangup — the child is gone
-                    done = True
+                    ended = True
                     continue
                 if not chunk:
-                    done = True
+                    ended = True
                 elif fd == r_out:
                     out += chunk
-            if done:
+            if ended:
                 break
     finally:
         os.close(r_out)
@@ -2757,7 +2776,7 @@ def _fzf_interactive_abort(rows: list[str], query: str,
             _pid, status = os.waitpid(pid, 0)
         except (ChildProcessError, OSError):  # pragma: no cover
             status = -1
-    return out, (os.WEXITSTATUS(status) if status >= 0 else -1)
+    return out, (os.WEXITSTATUS(status) if status >= 0 else -1), ended
 
 
 def test_REAL_INTERACTIVE_fzf_writes_the_QUERY_on_an_ESC_abort():
@@ -2768,24 +2787,52 @@ def test_REAL_INTERACTIVE_fzf_writes_the_QUERY_on_an_ESC_abort():
     claim, not evidence, by this file's own standard. This drives the real
     binary with the real `PICKER_SH` flags.
 
-    The Ctrl-C arm is the POSITIVE CONTROL in the strict sense: it proves the
-    harness can observe a zero-byte ending, so the `b"nimbus\\n"` above is a
-    fact about ESC and not about a reader that returns whatever it likes."""
+    The Ctrl-C arm is the control: it proves the harness can observe a
+    zero-byte ending, so the `b"nimbus\\n"` above is a fact about ESC and not
+    about a reader that returns whatever it likes.
+
+    🔴 AND THAT CONTROL HAS TO ASSERT THE CHILD ENDED, OR IT PASSES ON A
+    TIMEOUT. MEASURED by `/audit-pr` round 2: sending a key that does not abort
+    at all (`b"z"`) yields the IDENTICAL `(b"", 130)` tuple — 130 because the
+    harness closing the pty is itself what kills fzf — and the only difference
+    is wall time, 8.6s against 0.5s, which nothing checked. So a Ctrl-C arm
+    asserting bytes alone would still pass if fzf stopped treating Ctrl-C as
+    `abort`, and the docstring's "it proves the harness can observe a zero-byte
+    ending" would be satisfied by a harness that observed no ending. The helper
+    now reports whether the drain ended on EOF, and both arms assert it."""
     _require_fzf()
     rows, _target = _eponymous_corpus()
 
-    out, rc = _fzf_interactive_abort(rows, "nimbus", b"\x1b")
+    out, rc, ended = _fzf_interactive_abort(rows, "nimbus", b"\x1b")
+    assert ended, (
+        f"the ESC arm hit the drain deadline instead of the child exiting "
+        f"(bytes={out!r}, rc={rc}) — fzf did not abort, so this measured a "
+        f"timeout rather than the ESC contract")
     assert out == b"nimbus\n", (
         f"a real ESC abort wrote {out!r} at rc={rc}. The shipped bind is "
         f"`esc:print-query+abort`, so it must write the query line and nothing "
         f"else — a SECOND line would make `row` the operator's typed text and "
         f"file every ESC as a selection")
 
-    ctrl_c, rc_c = _fzf_interactive_abort(rows, "nimbus", b"\x03")
+    ctrl_c, rc_c, ended_c = _fzf_interactive_abort(rows, "nimbus", b"\x03")
+    assert ended_c, (
+        f"CONTROL FAILED: Ctrl-C hit the drain deadline (bytes={ctrl_c!r}, "
+        f"rc={rc_c}) — a key that does NOT abort produces the same empty bytes "
+        f"and the same rc 130, so without this the arm would pass while "
+        f"proving only that fzf ignored the key")
     assert ctrl_c == b"", (
-        f"POSITIVE CONTROL FAILED: Ctrl-C wrote {ctrl_c!r} at rc={rc_c}, so "
-        f"this harness cannot distinguish a writing ending from a silent one "
-        f"and the ESC assertion above is not evidence")
+        f"CONTROL FAILED: Ctrl-C wrote {ctrl_c!r} at rc={rc_c}, so this "
+        f"harness cannot distinguish a writing ending from a silent one and "
+        f"the ESC assertion above is not evidence")
+
+    # 🔴 THE CONTROL'S OWN CONTROL: a key that aborts nothing must be caught by
+    # the `ended` assertion, or the two arms above are agreeing about a flag
+    # that is always True.
+    noop, _rc_n, ended_n = _fzf_interactive_abort(rows, "nimbus", b"z")
+    assert not ended_n, (
+        f"a non-aborting key ended the child (bytes={noop!r}) — then `ended` "
+        f"cannot separate 'fzf aborted silently' from 'fzf ignored the key', "
+        f"and both assertions above rest on a flag that is always True")
 
 
 def test_REAL_INTERACTIVE_fzf_opens_on_the_FIRST_INPUT_ROW_with_no_query():

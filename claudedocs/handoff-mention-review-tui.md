@@ -41,10 +41,17 @@ notifications and repo browse are dropped.
   alphabet would decide) and `#5000`+ (class `BELOW`). ⚠ Conservative: Tier B's score never
   reaches the gate, so a tie it *would* have broken reads as "not separated".
 - ✅ **`#1781` MERGED (`8d0984ba`)** — this doc's previous update, after round 0 found a 🔴 in it.
-- 🔴 **THE ONE OBJECTIVE THIS ARC DID NOT CLOSE: SYMPTOM 1 WAS NEVER DECIDED.** Four options
-  were put to the operator; they chose *"chase the workbench gap first"* — a decision about
-  SEQUENCING, not about symptom 1. The chase completed (no defect; see Gotchas) and the session
-  went to symptom 3 and never returned. **An omission, not an ambiguity in the ask.** Rank 1.
+- ✅ **SYMPTOM 1 IS DECIDED — operator, 2026-09-20: (D) then (A), (B) refused.** This bullet
+  used to read *"THE ONE OBJECTIVE THIS ARC DID NOT CLOSE: SYMPTOM 1 WAS NEVER DECIDED …
+  Rank 1"*, and that is no longer true. History, because it explains why the arc closed with
+  it open: four options were put to the operator, who chose *"chase the workbench gap first"*
+  — a decision about SEQUENCING, not about symptom 1 — the chase completed with no defect,
+  and the session went to symptom 3 and never returned. **An omission, not an ambiguity in
+  the ask.** In flight as `#1812` (D) and `#1813` (A, rank-only); see Next steps rank 1.
+  ⚠ **This is the bullet `/resume` reads FIRST.** The ranked item below was corrected one
+  round earlier and this one was not, so for a round the doc answered "decided" in one
+  section and "never decided, rank 1" in the section a resuming session opens with — which
+  is exactly the re-opening that correction existed to prevent.
 - **CARRIED FORWARD — durable, would otherwise be dropped by the next replace:**
   - **2026-09-18 PR → squash sha:** `#1772` → `2b131bf2` (Phase 4, `nvim-octo` retired) ·
     `#1773` → `97c20d06` (cold open, `1,212 ms → 735 ms`) · `#1775` → `66e51d90` (picker

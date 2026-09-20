@@ -2469,7 +2469,9 @@ PICKER_LINES = 22
 # MEASURED at 0.74.4: `--bind="esc:abort+print-query"` is ACCEPTED by fzf — no
 # parse error, no warning — and writes **0 bytes at rc 130**, i.e. exactly the
 # pre-change behaviour. `abort` terminates, so anything after it never runs.
-# The two guards happen to catch it (the whole-string `EXPECTED_PICKER_SH` pin,
+# THREE guards catch it — measured by mutating the bind, not counted by eye;
+# an earlier wording said TWO and understated its own round's coverage (the
+# whole-string `EXPECTED_PICKER_SH` pin,
 # and `_ESC_PRINTS_QUERY` keying on the substring `esc:print-query`, which a
 # reorder breaks), but neither was CHOSEN for that. Do not "simplify"
 # `_ESC_PRINTS_QUERY` to test for `"print-query"` alone: that would pass on the
