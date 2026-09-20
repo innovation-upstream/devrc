@@ -230,6 +230,53 @@ loss when Tier A is UNKNOWN for the rows involved. The suite currently bans this
 was no pre-sort; now there is one, so the flag means "our ranking wins" rather than "no
 ranking". **It is a genuine trade and it should be decided on data, not on the old ban.**
 
+🔴 **REFUSED — operator, 2026-09-20, on the data the paragraph above asked for.** The
+trade is not neutral: it is **backwards** for the modal click.
+
+The sort key is `(klass, distance, -score)`, so every `PLAUSIBLE` row sorts ahead of every
+`BELOW` row. Measured over the click telemetry (n=71 picks carrying both dims), the class
+of the row the operator **actually chose** was:
+
+| class of the picked row | picks |
+|---|---|
+| `below` | **54** |
+| `plausible` | 17 |
+
+Stable across eras (52/68 before `#1775`, 2/3 after), and **not** a stale-table artifact —
+`known_ranges.json` is refreshed by a daily timer (394 entries, last run within 5h of the
+measurement). So three times in four, the wanted row is one our own primary sort term ranks
+*behind* every plausible row. **fzf's match score is currently rescuing the operator from
+the class term; `--no-sort` removes the rescue.**
+
+⚠ **Why this was not visible before:** the replayed top-1 figures (`62.6% → 73.0%`) say
+where the correct repo *would* rank. They are not where the operator *clicked*. Derived
+from the same rows (`rank − pinned_above + 1`), the observed landing position is:
+
+| the pick landed on | picks |
+|---|---|
+| our 1st row | 9 (12.7%) |
+| our **2nd** row | **38 (53.5%)** |
+| our 3rd row | 14 |
+| 6th / 49th+ | 6 / 4 |
+
+⚠ **The derivation is checked against this arc's own published figures, and it agrees to
+within one pick rather than exactly** — said precisely because the gap is the kind of thing
+a later reader would otherwise treat as a contradiction. The handoff records the modal pick
+under the replaced key as the **second**-ranked row at **29** against **8** for the first;
+the same derivation over the table today gives **30** against **8**. The log only grows, so
+one further pick landing on the second row between the two readings accounts for it. The
+`pinned_above` correction is what makes the derivation work at all: `rank` is 0-indexed and
+counts the pinned rows, so reading it raw reports the modal pick as "rank 3" and hides that
+it is our *second* universe row.
+
+⚠ **NOT DIAGNOSED, and it should be before anything acts on it:** *why* `below` dominates.
+One untested mechanism is that many clicked `#N` are clawgate or ClickUp ids rather than
+GitHub numbers, so no repository's range is relevant to them and `below` is the honest
+class — in which case the defect is that such clicks are ranked by a range term at all.
+**This is a bigger finding than symptom 1 and it has a cheap mechanical test**: the causal
+replay harness already exists, so re-running it with the class term demoted and reading
+top-1 answers it without an operator judgement.
+
 **(C) Do nothing yet, and read the `queried` rate first.**
 The instrumentation in this PR now records, per click, whether a query was typed. If most
 picks are made with an **empty** query, symptom 1 is rare and A/B are not worth their
@@ -272,6 +319,21 @@ it works** — Esc then writes `<query>\n` (Ctrl-C still writes nothing), the pi
 exactly as before, and nothing on screen changes. It was **not** taken in this PR because
 it rebinds a key on the live click path, and that is the operator's call. It is one flag,
 reversible, and the pinned-string/metacharacter guards already cover `PICKER_SH`.
+
+🔴 **DECIDED — operator, 2026-09-20: take (D) now, then (A). (B) is REFUSED on the data
+below.** Shipped as `--bind="esc:print-query+abort"` in `PICKER_SH`. Re-measured at fzf
+**0.74.4** (the note above was taken at 0.74.3) with both flag states side by side and the
+four untouched endings as the probe's own positive control: Esc writes `<query>\n` exit 0,
+an Esc on an untouched picker writes a bare `\n` (so **`False` is now reachable on the
+dismissal arm**, which retires that arm's "True by construction" caveat), and Ctrl-C is
+unchanged at 0 bytes / exit 130.
+
+⚠ **And this doc's claim that Ctrl-C cannot be closed was never measured, and is FALSE.**
+`--bind="ctrl-c:print-query+abort"` is accepted at 0.74.4 and makes Ctrl-C write
+`<query>\n` too, verified against a control where the shipping config leaves it at 0 bytes.
+It was **not** taken: the operator approved the Esc bind specifically, and rebinding the
+universal cancel is a separate call. One flag, same shape, whenever the arm should be
+complete.
 
 **Recommendation: (C) then (A).** (C) because the question is now measurable and was not
 before; (A) because it is additive, reversible, and helps *both* while the operator
@@ -445,6 +507,35 @@ WHERE source='tool' AND kind='invocation' AND text='mention-open'
   AND JSONExtractString(payload,'outcome')='picked'
   AND ts > '<the deploy date>'
 ```
+
+### ✅ CLOSED — the rate, measured 2026-09-20
+
+This section's closing condition was *"it is closed when this section carries a measured
+`queried` rate"*. Run verbatim against `ts > '2026-09-19 00:09:29'` (the `#1775` deploy):
+
+| typed | measured | picked_rows |
+|---|---|---|
+| **3** | 3 | 3 |
+
+**3 of 3 post-fix picks were typed**, all on the laptop. Controls, because each of these
+numbers is small enough to be an artifact: *positive* — 92 `mention-open` rows exist
+across all time, so the emitter fires; *negative* — dropping the `outcome='picked'` filter
+returns 4, not 3, so the filter is not inert. The one `dismissed` row carries **no**
+`queried`, exactly as §3.1 predicts for an abort — which is the gap (D) has now closed.
+
+🔴 **n=3 IS A DIRECTION, NOT A RATE, AND THE ARM IS FILLING ~10× SLOWER THAN PROJECTED.**
+This section predicted ~100+ picked rows within a week; the actual is 3 in 29 hours, with
+daily picked volume running 20 → 2 → 1 across 09-18/19/20. That drop is **usage, not a
+dead source** — checked rather than assumed: laptop human-presence telemetry is healthy
+(3,252 rows on 09-19) and `deadman.py` reports `laptop/tool` **ok** (2.0h silent against a
+15.2h budget). Why the operator clicked less was **not** determined.
+
+⚠ **What decided (B) was a different number in the same rows — see the note on (B) above.**
+
+⚠ **The query STRING is deliberately dropped** at `_PICK_QUERIED`, so how many rows a
+typed query leaves is **unmeasurable by design**. If queries usually narrow to one row,
+symptom 1 is harmless whatever the typed rate says. That is the one measurement that would
+settle this, and nothing here can take it.
 
 ⚠ **The two arms fill at very different rates — measured, so the week-later reader does
 not mistake a 10-row sample for an answer.** Over the 6.7 days to 2026-09-18 the sink took

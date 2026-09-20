@@ -1468,29 +1468,37 @@ def click_dims(repo: str = "", platform: str = "",
     query text is dropped where it is read — see `_PICK_QUERIED`; three-valued,
     so an unmeasured picker omits it rather than claiming the operator scrolled.
 
-    🔴 WHICH CLICKS ACTUALLY CARRY IT, MEASURED RATHER THAN CLAIMED — AND IT IS
-    NARROWER THAN THE FIRST DRAFT OF THIS PARAGRAPH SAID. fzf writes the query
-    line only on the two endings where it has a result to print (see
-    `PICKER_SH`):
-      * PICKED                      -> present. This is the dominant case and
+    🔴 WHICH CLICKS ACTUALLY CARRY IT, MEASURED RATHER THAN CLAIMED — AND THE
+    ESC BIND WIDENED THIS, SO A READER OF THE OLD TABLE WILL UNDER-COUNT. fzf
+    writes the query line on every ending except one (see `PICKER_SH`):
+      * PICKED                       -> present. This is the dominant case and
         the one symptom 1 is about.
       * dismissed by ENTER, NO MATCH -> present, and it is the most diagnostic
         dismissal there is.
-      * dismissed by ESC / Ctrl-C    -> **ABSENT**. fzf writes nothing at all on
-        an abort, so the dim is NOT MEASURED, not `False`.
+      * dismissed by ESC             -> present SINCE 2026-09-20, via
+        `--bind="esc:print-query+abort"`. It wrote nothing before that.
+      * dismissed by Ctrl-C          -> **ABSENT**. Still zero bytes, so the dim
+        is NOT MEASURED, not `False`.
     So "a dismissal after typing is distinguishable from one after scrolling" is
-    TRUE of the Enter ending and FALSE of the abort ending. The three-valued
-    design is what keeps that honest instead of filing every abort under
-    "scrolled".
+    now TRUE of every ending but Ctrl-C. The three-valued design is what keeps
+    that honest instead of filing a Ctrl-C under "scrolled".
 
-    🔴 AND WHERE `reason == "dismissed"`, `queried` IS NOT A RATE — DO NOT
-    AVERAGE IT. Under that reason the dim is present only for the
-    Enter-with-no-match ending (an abort writes nothing), and there it is `True`
-    BY CONSTRUCTION: the picker always holds rows, so an EMPTY query always
-    matches something and always yields a selection — a non-empty query is the
-    only way to reach Enter-with-no-match at all. Averaging it therefore returns
-    ~100% however the operator behaves: a self-selected sub-population read as a
-    rate, which is worse than an absent number because it looks like an answer.
+    🔴 AND THE ESC BIND CHANGED WHAT `reason == "dismissed"` MEANS — THE OLD
+    "NOT A RATE, TRUE BY CONSTRUCTION" ARGUMENT NO LONGER HOLDS, AND DELETING IT
+    WITHOUT SAYING SO WOULD HIDE THE CHANGE. It ran: under that reason the dim
+    was present only for Enter-with-no-match, where it is `True` BY CONSTRUCTION
+    (the picker always holds rows, so an EMPTY query always matches something
+    and yields a selection — only a non-empty query reaches that ending), so
+    averaging returned ~100% however the operator behaved.
+    That was right, and the bind refutes its premise: an ESC with an EMPTY query
+    writes a bare `\n` and records **`False`**, so both values are now reachable
+    under `dismissed` and the population is no longer self-selected.
+    🔴 IT IS STILL NOT "THE DISMISSAL RATE", for two reasons that do not cancel:
+    Ctrl-C contributes nothing at all, and Enter-with-no-match remains `True` by
+    construction, so it SKEWS any average upward by however often it happens.
+    Scope by `reason` before averaging — `no-match` is structurally `True` and
+    belongs in its own bucket — and read what is left as "of ESC dismissals",
+    never "of all dismissals".
 
     ⚠ SCOPED TO THE REASON, NOT TO THE ARM — AND AN EARLIER DRAFT SAID "THE
     DISMISSAL ARM", WHICH IS WIDER THAN THE TRUTH. That arm emits TWO outcomes
@@ -2373,44 +2381,69 @@ PICKER_LINES = 22
 # reach a sink. A length, a prefix or a hash would each be a weaker version of
 # the same leak; a bool answers the question completely.
 #
-# 🔴 THE OUTPUT CONTRACT, MEASURED AGAINST fzf 0.74.3 RATHER THAN ASSUMED — AND
-# THE ASSUMPTION WAS WRONG. Driven through a pty, three samples per ending:
-#   * a SELECTION        -> `<query>\n<row>\n`   (2 lines; the query may be empty)
+# 🔴 THE OUTPUT CONTRACT, MEASURED AGAINST fzf 0.74.4 RATHER THAN ASSUMED — AND
+# THE ASSUMPTION WAS WRONG. Driven through a pty, both flag states per ending:
+#   * a SELECTION        -> `<query>\n<row>\n`   (2 lines, exit 0; query may be "")
 #   * ENTER, NO MATCH    -> `<query>\n`          (1 line, exit 1)
-#   * ESC / Ctrl-C ABORT -> **NOTHING AT ALL**   (0 bytes, exit 130)
-# ⚠ THIS TABLE HAS BEEN WRONG TWICE, IN THE SAME FOUR PLACES. Draft 1 said an
-# abort "writes the query ALONE" — it writes nothing. Draft 2 then asserted
-# `exit 0` for the NO-MATCH row, which was never measured (the probe that
-# corrected the abort row captured its BYTES and not its status); fzf returns
-# **1** when it has no selection, and 0 only when it does. Re-measured, two
-# samples per ending. Nothing branches on the status — `run_picker` reads only
-# `proc.poll() is not None`, and alacritty masks the child's code anyway (see
-# `PICKED_NEVER_SHOWN`) — so this is provenance, which is exactly why it has to
-# be right: it is the corrected claim that replaced a wrong one.
+#   * ESC ABORT          -> `<query>\n`          (1 line, exit 0)  <- the bind
+#   * Ctrl-C ABORT       -> **NOTHING AT ALL**   (0 bytes, exit 130)
+# ⚠ THIS TABLE HAS BEEN WRONG TWICE, IN THE SAME FOUR PLACES, AND THAT HISTORY
+# IS WHY IT CARRIES ITS fzf VERSION. Draft 1 said an abort "writes the query
+# ALONE" — without the bind it writes nothing. Draft 2 then asserted `exit 0`
+# for the NO-MATCH row, which was never measured (the probe that corrected the
+# abort row captured its BYTES and not its status); fzf returns **1** when it
+# has no selection, and 0 only when it does. Nothing branches on the status —
+# `run_picker` reads only `proc.poll() is not None`, and alacritty masks the
+# child's code anyway (see `PICKED_NEVER_SHOWN`) — so this is provenance, which
+# is exactly why it has to be right: it is the corrected claim that replaced a
+# wrong one. Re-measured at **0.74.4** when the bind was added, both states side
+# by side, with the four unchanged rows as the probe's own positive control: a
+# probe that sent the query and its terminator in ONE write raced fzf's filter
+# and reported a no-match query as a SELECTION of the first unfiltered row.
 #
-# `--print-query` covers the two exits where fzf has a result to print, and
-# an abort is not one of them. Nothing downstream breaks (0 bytes is what the
-# pre-change loop already saw on a dismissal), but the CAPABILITY is narrower
-# than it was written to be: see `click_dims`' `queried` paragraph for exactly
-# which clicks carry the dim.
+# 🔴 ESC AND ENTER-WITH-NO-MATCH ARE NOW BYTE-IDENTICAL ON STDOUT (`<query>\n`),
+# and nothing here tells them apart — only the exit status differs, which this
+# module never reads. That is deliberate and costs nothing: both endings mean
+# "no row was chosen", both record the same `queried` verdict, and `run_picker`
+# returns "" for each. Do not add a status read to separate them without a
+# reason that needs separating.
+#
+# 🔴 THE RESIDUAL GAP IS Ctrl-C, NOT "ABORTS". It still writes zero bytes, so a
+# Ctrl-C click carries NO `queried` dim at all — see `click_dims`' `queried`
+# paragraph. Read the dismissal arm as "ESC and Enter-no-match", never as
+# "every dismissal".
+#
+# ⚠ AND THAT GAP IS CLOSABLE — MEASURED, CORRECTING THIS COMMENT'S OWN FIRST
+# DRAFT, which asserted fzf "has no `ctrl-c:` binding (the key is handled below
+# the keymap)". It was never measured and it is FALSE: `--bind="ctrl-c:print-
+# query+abort"` is accepted at 0.74.4 and makes Ctrl-C write `<query>\n` with
+# exit 0, verified beside a control where the shipping config leaves Ctrl-C at
+# 0 bytes / exit 130. It is NOT taken here only because the operator approved
+# the Esc bind specifically, and rebinding Ctrl-C — the universal cancel — is a
+# separate call for them to make, not a detail to fold in. One flag, same shape,
+# same reversibility, whenever they want the arm complete.
 #
 # ⚠ SO THE READ LOOP WAITS FOR TWO LINES AND TAKES THE SECOND AS THE ROW. Taking
 # the first — which is what the pre-change loop did — would open whatever the
 # operator typed, or nothing. The one-line and zero-line endings both fall
 # through to the `proc.poll()` arm, exactly as a dismissal always did.
 #
-# ⚠ `--bind 'esc:print-query+abort'` WOULD close the abort gap — MEASURED, it
-# makes Esc write `<query>\n` (Ctrl-C still writes nothing). It is NOT taken
-# here: it rebinds a key on the operator's live click path, and that is their
-# call. It is written up as an option in
-# `claudedocs/proposal-mention-picker-visibility.md`.
+# 🔴 `--bind="esc:print-query+abort"` IS AN OPERATOR DECISION, TAKEN 2026-09-20,
+# and it REBINDS A KEY ON THE LIVE CLICK PATH — that is the whole of its cost.
+# Esc still closes the picker and still opens nothing; it now writes the query
+# on the way out. It was held back when `--print-query` landed precisely because
+# it is the operator's call to make, and they made it: the abort-shaped hole was
+# the reason the dismissal arm's rate could not be read. Rationale and the
+# options it was chosen over: `claudedocs/proposal-mention-picker-visibility.md`.
 #
-# ⚠ NOTHING ON SCREEN MOVES. `--print-query` is a stdout contract; the prompt,
-# the pointer, the colours, the header and the match ORDER are untouched. The
-# picker UX decision the operator still owns is a separate question — see
+# ⚠ NOTHING ON SCREEN MOVES — MEASURED, not assumed. `--print-query` and the
+# bind are both stdout contracts; the prompt, the pointer, the colours, the
+# header and the match ORDER are untouched. The picker UX decision the operator
+# still owns is a separate question — see
 # `claudedocs/proposal-mention-picker-visibility.md`.
 PICKER_SH = (
     'fzf -i --tiebreak=end --layout=reverse --info=inline --print-query '
+    '--bind="esc:print-query+abort" '
     '--prompt="mention > " --pointer=">" --color=16 '
     '--header-lines="$3" <"$1" >"$2"'
 )
@@ -2733,17 +2766,28 @@ def run_picker(payload: str, header_lines: int) -> tuple[str, str]:
         # row — `row_to_url` maps that to nothing, every pick becomes
         # `unmapped-row`, and the picker opens nothing at all.
         #
-        # ⚠ THE SHORT ENDINGS ARE UNCHANGED, AND THERE ARE TWO OF THEM. ENTER
-        # WITH NO MATCH writes one line (the query); an ESC/Ctrl-C ABORT writes
-        # ZERO BYTES — measured, see `PICKER_SH`. Neither reaches the second
-        # newline, so both fall through to the `proc.poll()` arm below exactly as
-        # a dismissal always did, and `row` comes out "" either way.
+        # ⚠ THE SHORT ENDINGS ARE UNCHANGED, AND THERE ARE THREE OF THEM NOW.
+        # ENTER WITH NO MATCH and an ESC ABORT each write one line (the query);
+        # a Ctrl-C ABORT writes ZERO BYTES — measured, see `PICKER_SH`. None
+        # reaches the second newline, so all three fall through to the
+        # `proc.poll()` arm below exactly as a dismissal always did, and `row`
+        # comes out "" either way.
         #
-        # 🔴 THE CONSEQUENCE IS A REAL LIMIT, NOT A DETAIL: an ABORT carries no
-        # query line, so `queried` stays NOT MEASURED there. What the flag does
-        # buy on this arm is the ENTER-WITH-NO-MATCH ending — "I typed the repo
-        # name and the list went empty", which is the exact case `pick()`'s
-        # docstring has always named as indistinguishable from a change of mind.
+        # 🔴 NO CODE CHANGED HERE WHEN THE ESC BIND LANDED, AND THAT IS A
+        # PROPERTY WORTH KNOWING RATHER THAN A COINCIDENCE. A one-line ending
+        # arrives as `["<query>", ""]` after the split below — which already
+        # satisfies the `> PICKER_QUERY_LINE + 1` terminator check, so the
+        # verdict records — while `row` reads index 1 and comes out "", so the
+        # click still opens nothing. The parser was total over the endings
+        # before the flag existed; the bind moved an ending from the zero-line
+        # column to the one-line column and the loop did not notice.
+        #
+        # 🔴 THE RESIDUAL LIMIT IS Ctrl-C ALONE: it carries no query line, so
+        # `queried` stays NOT MEASURED there. What the bind bought on this arm
+        # is the ESC ending, which is the common one; what `--print-query`
+        # already bought is ENTER-WITH-NO-MATCH — "I typed the repo name and the
+        # list went empty", the exact case `pick()`'s docstring has always named
+        # as indistinguishable from a change of mind.
         out = b""
         outcome = PICKED_DISMISSED
         while out.count(b"\n") < PICKER_OUT_LINES:
