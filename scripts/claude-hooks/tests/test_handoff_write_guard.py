@@ -371,6 +371,64 @@ def test_a_doc_read_OFF_A_REF_still_arms_though_it_is_not_on_disk(home, empty_re
         str(empty_repo / "claudedocs" / DOC)]
 
 
+@pytest.mark.parametrize("spelling", [
+    "origin/zach/topic",            # a literal ref — the only one that used to work
+    "$B",                           # a bare shell variable
+    "${B}",                         # 🔴 THE SPELLING claude/RULES.md MANDATES under zsh
+    "$(git rev-parse HEAD)",        # a command substitution
+    "`git rev-parse HEAD`",         # the backtick form of the same
+    "refs/heads/docs/handoff-x",    # slashes and hyphens in the ref itself
+])
+def test_a_COMPUTED_ref_gets_the_exemption_too(home, empty_repo, spelling):
+    """🔴 THE ENUMERATED CHARACTER SET ADMITTED ONLY LITERAL REFS.
+
+    `REF_PREFIX_RX` was `[A-Za-z0-9_./~^@{}\\[\\]-]+` behind `[\\s"'=(]`, so every
+    COMPUTED ref — `$B`, `${B}`, `$(...)`, backticks — failed to match and silently
+    lost the exemption. Round 1 of #1799 measured it over the transcript corpus: of
+    3,888 ref-prefixed handoff tokens 166 were denied and 32 changed outcome, 27 of
+    them `$VAR`/`${VAR}`.
+
+    🔴 THE `${B}` CASE IS THE ONE THAT MATTERS MOST: `claude/RULES.md` REQUIRES the
+    braced spelling, because zsh eats `$B:path` as a history modifier. The guard was
+    blind to exactly the spelling this repo mandates — an enumerated set encodes the
+    examples its author thought of, not the boundary.
+    """
+    cmd = "git -C %s show %s:claudedocs/%s" % (empty_repo, spelling, DOC)
+    assert guard.handoff_read_docs(bash(cmd, cwd="/nowhere/else")) == [
+        str(empty_repo / "claudedocs" / DOC)], "spelling %r lost the exemption" % spelling
+
+
+def test_a_LINE_CONTINUATION_does_not_strand_the_git_verb(home, empty_repo):
+    """🔴 SPLITTING ON `\\n` MAKES THE SEGMENT ONE LINE, NOT ONE COMMAND. A
+    `git … show \\` whose ref-prefixed path lands on the next line had its verb on the
+    previous segment and lost the exemption. Continuations are joined before the split;
+    a genuinely separate line is still a separate command and still loses it — the
+    negative half is the `git show HEAD; cat host:` case in the table below."""
+    cmd = "git -C %s show \\\n  origin/zach/topic:claudedocs/%s" % (empty_repo, DOC)
+    assert guard.handoff_read_docs(bash(cmd, cwd="/nowhere/else")) == [
+        str(empty_repo / "claudedocs" / DOC)]
+
+
+def test_a_LATER_base_wins_when_the_earlier_one_lacks_the_doc(home, tmp_path, repo):
+    """🔴 PINS THE SECOND, UNDECLARED BEHAVIOUR CHANGE round 1 found in `_resolve`.
+
+    The loop used to `return` at the FIRST candidate whose DIRECTORY existed; it now
+    skips one whose FILE is absent and tries the remaining bases. A command naming two
+    repos therefore resolves to the one that HAS the doc, not to the first that merely
+    has a `claudedocs/`. Measured corpus effect: 24 payloads arm that were silent, 47
+    arm a different doc — a widening on a hook that can BLOCK a turn, so it is pinned
+    rather than left to be rediscovered.
+
+    `other` is a REAL repo with a REAL `claudedocs/` and NO copy of the doc, so the
+    first base is rejected on the file and not on the directory — which is the whole
+    distinction. Without the fallthrough this returns `other`'s path and fails."""
+    other = tmp_path / "other" / "claudedocs"
+    other.mkdir(parents=True)
+    cmd = "git -C %s -C %s log -- claudedocs/%s" % (other.parent, repo, DOC)
+    assert guard.handoff_read_docs(bash(cmd, cwd="/nowhere/else")) == [
+        str(repo / "claudedocs" / DOC)]
+
+
 @pytest.mark.parametrize("cmd", [
     # No ref prefix — an ordinary read of an absent doc. The gate's whole point.
     "cat claudedocs/%s" % DOC,

@@ -279,10 +279,11 @@ HANDOFF_TOOL = "scripts/lib/handoff_doc.py"
 # to read a handoff that lives on an unmerged branch — MEASURED at 1,272 distinct such
 # commands across the transcript corpus — and excluding `:` makes the match start
 # cleanly at `claudedocs/` instead of swallowing the ref.
-# ⚠ THIS SENTENCE CITED `CLAUDE.md` AND THAT WAS FALSE: that file contains no `git
-# show` at all. Round 0 of #1799 caught it, and a LINE-BASED grep did not — the claim
-# wrapped across these comment lines, so only a sweep over normalised text found it. The remaining leading run is what carries a `-C`-less
-# absolute or `~`-prefixed path.
+# The remaining leading run is what carries a `-C`-less absolute or `~`-prefixed path.
+#
+# ⚠ THIS NOTE CITED `CLAUDE.md` AND THAT WAS FALSE: that file contains no `git show`
+# at all. Round 0 of #1799 caught it, and a LINE-BASED grep did NOT — the claim wrapped
+# across these comment lines, so only a sweep over normalised text found it.
 HANDOFF_PATH_RX = re.compile(r"[A-Za-z0-9_.~@%+/-]*claudedocs/[A-Za-z0-9_.%+-]+\.md")
 
 # 🔴 TWO BASENAME SHAPES, because `/resume` resolves in exactly this order and the
@@ -308,7 +309,19 @@ DASH_C_RX = re.compile(r"(?:^|\s)-C\s*(\S+)")
 # (see its own note), which is what leaves the ref sitting in the text BEFORE the
 # match for this to find. `\Z` anchors it there: a `:` anywhere else in the command
 # is not a ref prefix for THIS token.
-REF_PREFIX_RX = re.compile(r"(?:^|[\s\"'=(])([A-Za-z0-9_./~^@{}\[\]-]+):\Z")
+#
+# 🔴 THE REF TOKEN IS `[^\s:]+`, NOT AN ENUMERATED CHARACTER SET, AND THE ENUMERATION
+# IS WHY. It was `[A-Za-z0-9_./~^@{}\[\]-]+` with a leading class of `[\s"'=(]`, which
+# admits a LITERAL ref and rejects every computed one: `$B:`, `${B}:`, `$(git rev-parse
+# HEAD):` and a backtick substitution all failed, because `$`, `)` and `` ` `` are in
+# neither class. MEASURED by round 1 of #1799 over the transcript corpus: of 3,888
+# ref-prefixed handoff tokens, 166 were denied the exemption and 32 changed outcome —
+# 27 of them `$VAR`/`${VAR}`. 🔴 AND `claude/RULES.md` PRESCRIBES THE BRACED SPELLING:
+# zsh eats `$B:path` as a history modifier, so the rules mandate `${B}:path` — the guard
+# was blind to precisely the spelling this repo requires. An enumerated set encodes the
+# examples its author thought of; `[^\s:]+` encodes the actual boundary, which is that
+# a ref is one shell word and cannot contain the `:` that terminates it.
+REF_PREFIX_RX = re.compile(r"(?:^|[\s\"'=(])([^\s:]+):\Z")
 
 # …and a git object-read verb in the SAME command segment.
 #
@@ -320,8 +333,26 @@ REF_PREFIX_RX = re.compile(r"(?:^|[\s\"'=(])([A-Za-z0-9_./~^@{}\[\]-]+):\Z")
 # `test_the_ref_exemption_does_NOT_widen_into_a_hole`, which is in the diff that
 # introduced the bug — the case was written because the hole was imaginable, and it
 # turned out to be real.
+#
+# ⚠ SPLITTING ON `\n` MAKES THE SEGMENT ONE **LINE**, so a `git … show \` whose
+# ref-prefixed path sits on the next line would lose its verb. Line continuations are
+# therefore JOINED before the split (`_read_off_a_ref`), which is the shape that
+# actually occurs; a genuinely separate line is a separate command and SHOULD lose it.
 SEGMENT_SPLIT_RX = re.compile(r"[;&|\n]")
-GIT_OBJECT_READ_RX = re.compile(r"\bgit\b.*?\b(?:show|cat-file)\b")
+LINE_CONTINUATION_RX = re.compile(r"\\\n")
+
+# 🔴 THE NEGATED CLASS IS BACK, AND THE SCAN IS LENGTH-CAPPED — both for COST, not
+# correctness. `\bgit\b.*?\b(?:show|cat-file)\b` anchors at every `git` and walks
+# forward from each, i.e. O(k·n): round 1 of #1799 measured 924 ms on 32 KB of `"git "`
+# with no verb, 13.9 s on 128 KB, against 0.8 ms at base. This hook runs after EVERY
+# tool call and can block a Stop, so a pathological command is a turn-level hang.
+# ⚠ REPORTED WITH ITS BOUND: the largest segment ever scanned across 20,670 real
+# corpus commands was 296 BYTES and the worst real delta +1.41 ms — there is no
+# adversary here, the operator writes his own commands. The cap is 4 KiB, an order of
+# magnitude above anything observed, so it bounds the hazard without reaching any real
+# command.
+GIT_OBJECT_READ_RX = re.compile(r"\bgit\b[^;&|\n]*?\b(?:show|cat-file)\b")
+GIT_VERB_SCAN_CAP = 4096
 
 # Tool calls that ARE work, by name. Also the tools whose `file_path` can SATISFY,
 # when it names a handoff doc.
@@ -778,11 +809,16 @@ def _read_off_a_ref(cmd, start):
     a hook that fires after EVERY tool call of every session, to reject a shape nobody
     writes by accident.
     """
-    head = cmd[:start]
+    # Line continuations joined FIRST: `\<newline>` is one command, not two, and the
+    # segment split below would otherwise strand the git verb on the previous line.
+    head = LINE_CONTINUATION_RX.sub(" ", cmd[:start])
     if not head.endswith(":") or not REF_PREFIX_RX.search(head):
         return False
-    # The command segment this token belongs to — everything since the last separator.
-    return bool(GIT_OBJECT_READ_RX.search(SEGMENT_SPLIT_RX.split(head)[-1]))
+    # The command segment this token belongs to — everything since the last separator,
+    # and only its last `GIT_VERB_SCAN_CAP` bytes (see the constant for the measured
+    # cost that bound exists for, and for why no real command reaches it).
+    seg = SEGMENT_SPLIT_RX.split(head)[-1][-GIT_VERB_SCAN_CAP:]
+    return bool(GIT_OBJECT_READ_RX.search(seg))
 
 
 def _resolve(raw, bases, off_a_ref=False):
@@ -814,6 +850,24 @@ def _resolve(raw, bases, off_a_ref=False):
     The directory check is kept as well as, not instead of: it is what keeps a
     dispatch-hub session naming a repo this host does not have from resolving at all,
     and it is the only gate left for the `off_a_ref` case.
+
+    🔴 A SECOND, SEPARATE BEHAVIOUR CHANGE LIVES IN THIS LOOP AND IT SHIPPED
+    UNDECLARED — named here because round 1 of #1799 found it, not because it was
+    intended. The loop used to `return` at the FIRST candidate whose dirname existed;
+    it now `continue`s past one whose file is absent and tries the remaining bases. So
+    a command carrying several bases resolves to the one that HAS the doc rather than
+    to the first that merely has a `claudedocs/`:
+
+        git -C A -C B log -- claudedocs/handoff-z.md   # the doc exists only in B
+        before: A/claudedocs/handoff-z.md  (a path that is not there)
+        after:  B/claudedocs/handoff-z.md  (the real one)
+
+    MEASURED over the transcript corpus: 24 payloads arm here that were silent before,
+    and 47 arm a DIFFERENT doc. That is a widening on a hook that can block a turn, so
+    it is stated rather than left to be rediscovered. It is also the right answer —
+    it is what fixes the wrong-base resolution behind most of the latched-but-absent
+    records on this host — and it is pinned by
+    `test_a_LATER_base_wins_when_the_earlier_one_lacks_the_doc`.
     """
     p = os.path.expanduser(raw)
     cands = [p] if os.path.isabs(p) else [os.path.join(b, p) for b in bases]
@@ -853,14 +907,22 @@ def handoff_read_docs(data):
             v = ti.get(k)
             # ⚠ THE ARMS ARE ASYMMETRIC ON `claudedocs/` AND THAT IS LEFT ALONE HERE.
             # The Bash arm requires the literal segment (`HANDOFF_PATH_RX` is built
-            # around it) and so do two of `is_handoff_write`'s routes; this arm takes
+            # around it) and so does ONE of `is_handoff_write`'s two routes — the
+            # Write/Edit one; the `handoff_doc.py` route does not. This arm takes
             # `file_path` on basename alone. Narrowing it was tried in this PR and
-            # REMOVED after round 0 measured the cost: 39 reads of REAL documents
-            # outside `claudedocs/` (`containers/clawgate/HANDOFF.md` across 8 homelab
-            # checkouts, `~/taxes/2026/HANDOFF.md`), one of which has armed AND FIRED
-            # in production. Which arm is WRONG is an open question; narrowing the
-            # wider one makes both consistently blind to a doc class this guard was
-            # demonstrably working on. Decide it on the numbers, in its own change.
+            # REMOVED: reads of REAL documents outside `claudedocs/` exist and at
+            # least one has armed AND FIRED in production
+            # (`containers/clawgate/HANDOFF.md`; `~/taxes/2026/HANDOFF.md` is another).
+            # Which arm is WRONG is an open question; narrowing the wider one makes
+            # both consistently blind to a doc class this guard was demonstrably
+            # working on. Decide it on fresh numbers, in its own change.
+            #
+            # ⚠ NO COUNT IS QUOTED HERE ON PURPOSE. This comment carried "39 reads …
+            # across 8 homelab checkouts"; round 1 re-derived over the same corpus and
+            # got 82 distinct, 23 still on disk, ONE clawgate `HANDOFF.md`. Both
+            # numbers are probably honest — worktrees come and go — but a count with
+            # no method and no date cannot be re-checked, and this one is load-bearing
+            # for a decision. Re-measure when you take it; do not inherit a number.
             if isinstance(v, str) and v:
                 raws.append((v, False))
         # 🔴 `cwd` IS A BASE HERE TOO, EVEN THOUGH THE TOOL ASKS FOR AN ABSOLUTE PATH.
