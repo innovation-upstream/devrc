@@ -3100,6 +3100,14 @@ in
   home.file.".local/bin/dl-route".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/dl-route";
 
+  # stt — send an audio file to the self-hosted ASR endpoint on the homelab
+  # cluster (Cohere transcribe, ns `stt`). Reaches it over the nebula mesh via
+  # the gateway's nginx route (10.42.0.10:8118), so the same URL works from
+  # workbench AND laptop. Token lives in ~/.config/stt/env (0600, manual — see
+  # SECRETS.md; source of truth: k8s secret `stt-api-token` in ns `stt`).
+  home.file.".local/bin/stt".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/stt";
+
   # Laptop-only SOCKS5 tunnel to the homelab kube API via the workbench. The
   # homelab API server (192.168.50.94:6443) is LAN-only and the laptop is
   # nebula-only, so it cannot reach the API directly. This holds an `ssh -D`
