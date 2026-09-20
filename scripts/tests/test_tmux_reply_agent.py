@@ -4633,11 +4633,16 @@ def test_the_CHAIN_accusation_never_denies_a_record_this_function_read(monkeypat
     """🔴 THE ARM BELOW A DIFFERENT MENU SAID "records no answer" AFTER READING ONE.
 
     The round that made the match arm require the record TWICE
-    (`test_the_UPGRADE_needs_the_RECORD_read_twice_not_only_the_PANE`) wrote, in three
-    places, that failing the second read "costs nothing, because control falls through
-    to the absence rule". It does not always: when the pane is a DIFFERENT MENU the
-    fall-through reaches the chain arm, which both reported `failed` AND said `the pane
-    records no answer to this one` — in the very iteration that had computed
+    (`test_the_UPGRADE_needs_the_RECORD_read_twice_not_only_the_PANE`) wrote the same
+    false thing in three places and three WORDINGS, so no single grep finds them
+    together: `menu_settled`'s docstring said a record failing the second read "does not
+    cost the delivery", the comment on the arm said it "costs nothing, because control
+    falls through to the absence rule below", and that test's docstring said "The fix
+    costs no delivery — it costs the CLAIM".
+
+    IT DOES NOT ALWAYS FALL THROUGH TO THE ABSENCE RULE. When the pane is a DIFFERENT
+    MENU the fall-through reaches the chain arm, which both reported `failed` AND said
+    `the pane records no answer to this one` — in the very iteration that had computed
     `verdict == "match"`. A denial of a record the same iteration had just read.
 
     MEASURED head-vs-base on the sequence below, in process, with fixture controls on
