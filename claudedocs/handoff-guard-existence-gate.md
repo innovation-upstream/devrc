@@ -22,29 +22,16 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   🔴 FROZEN AT ROUND 1.
 
 ## State now
-- ✅ **MERGED AND SHIPPED. `#1799` → squash `a371da4e`.** Four commits of ladder
-  (`0ac60ad1` fix · `f7ccbfce` r0 · `be12c7ae` r1 · `1a2943ad` r2 · `d7af847c` r3).
-- ✅ **DEPLOYED TO BOTH HOSTS AND VERIFIED AT THE CONSUMER, not just at the deploy.**
-  `ship.sh` converged both to `a371da4e` (`✅ VERIFIED` on each per-host line, cross-host
-  agreement on ONE sha). The deployed copy moved
-  `6pjq8jidyb3ihnc8ravpwmk9lc5w5g0c` → `py0j13ikwakwmibp1k0k3wrpimg1kxhv`, identical on both
-  hosts, `_read_off_a_ref` 0 → 6 occurrences. `readlink -f` was the arbiter, never a diff.
-- ✅ **ORIGINAL SYMPTOM REPRODUCED AND GONE, with the pair reported rather than the zero:**
-  positive control `cat claudedocs/handoff-find-session-arc-resolution.md` → returns a path;
-  `grep -rn "claudedocs/handoff-x-y.md" .` and `…handoff-same.md` → **`[]`**. A bare zero from
-  a probe that might be wired to nothing would not have been evidence.
-- 🔴 **THE SANDBOX TIER WAS THE GAP EVERY ROUND NAMED, AND IT IS NOW CLOSED.** All three
-  audit rounds verified only the dev-host tier. `tekton/devrc-pytests` on `d7af847c`:
-  **`collected=24037 passed=24032 skipped=4 failed=1`**. The single failure is
-  `test_engine_is_the_version_every_measurement_is_keyed_to` — the opencode version pin,
-  INHERITED FROM `main` and unreachable from a diff touching only `scripts/claude-hooks/**`.
-  `cairn-client-runs`, `gotests`, `nodetests` all `success`.
-- ⚠ **STILL TRUE AND NOT FIXED BY SHIPPING: already-latched records keep firing.** The gate
-  runs at ARM time. This session watched the deployed-OLD guard fire twice more on strings
-  (`handoff-x.md`, and `handoff-skill-chain-usage-audit.md`) while the fix sat unmerged.
-- ⚠ **The `handoff-x.md` firing would have survived this fix** — it carried a `<ref>:` prefix,
-  so it is the DECLARED residual over-match, not the bug that was fixed. That is rank 2 below,
-  and it stopped being hypothetical within hours of being written down.
+- ✅ **`#1799` MERGED (`a371da4e`) AND DEPLOYED TO BOTH HOSTS**, verified at the consumer:
+  store path moved, `_read_off_a_ref` 0 → 6, and the original symptom reproduced-and-gone
+  with a positive control beside it. Sandbox tier on the merged head:
+  `collected=24037 passed=24032 skipped=4 failed=1`, that one failure inherited.
+- **`#1811` OPEN** — `/the-algorithm` steps 1–3 applied to what the ladder left behind.
+  DELETES `GIT_VERB_SCAN_CAP`, its truncation and its test; makes `REF_PREFIX_RX` and the
+  git-verb check linear. Net −77 lines before round 0's fixes. Round 0 ran: 7 findings,
+  no 🔴, verdict *deletion candidate* — all addressed.
+- ⚠ **`#1811` is NOT merged and NOT deployed.** The hook is a `home.file` copy: merge →
+  pull → `home-manager switch`/`ship.sh`, or both hosts keep running `#1799`'s version.
 
 ## Open investigations — live diagnosis state
 
@@ -108,27 +95,37 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   using a real existing repo dir for `-C` so `_resolve` is actually reached. Whichever stage
   dominates is the answer, and it decides whether the cap's comment is understated.
 
+### ✅ RESOLVED — "The cap-inert mutant hangs the suite instead of failing it"
+- as-of: 2026-09-20
+- **The block above this one is CLOSED and its leading hypothesis was WRONG.** It guessed
+  at "something on the arming path other than the two regexes is superlinear in head
+  length — `COMMENT_PAT`/`QUOTED_PAT` or `_bases` — which would mean the cap buys MORE
+  than the comment claims". Round 0 of `#1811` found the real cause and it is much dumber.
+- **Answer:** `test_the_scan_cap_BOUNDS_the_search` built its padding as
+  `"A" * (guard.GIT_VERB_SCAN_CAP * 3 + 7)`. Under the mutant `GIT_VERB_SCAN_CAP = 10**9`
+  that is a **3,000,000,007-byte string**. The hang was the FIXTURE allocating 3 GB, not
+  the code under test. Nothing in the hook is superlinear the way the block supposed.
+- 🔴 **THE CLASS, WHICH IS THE PART WORTH KEEPING:** a fixture parameterised on the very
+  constant being mutated can never observe that mutation — it scales with it. This is
+  `claude/RULES.md`'s "ISOLATE THE MUTATION" trap, and it produced a result that looked
+  like a deep finding (an unexplained hang) rather than like a broken harness.
+- **Why it no longer matters either way:** `#1811` deletes `GIT_VERB_SCAN_CAP`, its
+  truncation and that test outright, so there is no cap left to pin and no mutant left to
+  settle. The question was retired by deleting its subject.
+
 ## Next steps (ranked)
-1. **Settle the unresolved mutant** — `GIT_VERB_SCAN_CAP = 10**9` hangs the suite instead of
-   failing it, so the cap's pin is established in ONE direction only (cap-DELETED is killed).
-   The open investigation below names the next probe. One narrow, terminating question.
-   forcing: gate — the ladder's only surviving guard has an unestablished mutation verdict,
-   now live on both hosts.
-2. **Operator call: lift `test_the_hook_spawns_no_subprocess_on_any_path`?** It is an
-   OBSERVATION from `#1092`'s body frozen into a prohibition, and wider than the `shutil`
-   standard the same file uses for the same hot path. Lifting it allows
-   `git cat-file -e <ref>:<path>`, making the exemption VERIFIED instead of shape-matched —
-   which would have prevented the `handoff-x.md` firing this session actually hit.
+1. **Merge `#1811`, then `scripts/ship.sh` both hosts.** Read every per-host line, then
+   confirm the deployed copy has NO `GIT_VERB_SCAN_CAP` constant — `readlink -f` is the
+   arbiter, never a diff.
+   forcing: gate — a fleet-wide Stop hook whose deployed copy carries a cap, a truncation
+   and a test that this repo has decided should not exist.
+2. **Operator call: lift `test_the_hook_spawns_no_subprocess_on_any_path`?** An OBSERVATION
+   from `#1092`'s body frozen into a prohibition, and wider than the `shutil` standard the
+   same file uses for the same hot path. Lifting it allows `git cat-file -e <ref>:<path>`,
+   making the ref exemption VERIFIED instead of shape-matched — which would have prevented
+   the `handoff-x.md` false firing this arc actually hit. 🔴 Round 0 of `#1811` independently
+   named this as the one requirement it would drop, and noted no round has escalated it.
    forcing: user — reopens the fix shape the operator originally chose; not mine to take.
-3. **Re-key the three `v1.18.29` claims.** 🔴 NOW BLOCKING EVERY PR IN THE REPO: it is the
-   sole failure in the sandbox tier on `main` and on every branch, so CI cannot be read as
-   green by anyone until it is fixed. The dual-binary control is AVAILABLE NOW AND DECAYS —
-   `1.18.29` is still realised at `/nix/store/6pw7n475…`; after a GC the strong control is
-   gone. Both hosts are on `1.18.30` at one store path; the cheap control already passes
-   (`1 failed, 24 passed`, the failure being exactly the version assertion — identical to
-   both prior re-derivations). Protocol: seven-agent dual dump + the two controls, in the
-   header of `scripts/tests/test_opencode_engine.py`. Do NOT loosen the assertion.
-   forcing: regression — `main-green-check` rc 10, RED and REPRODUCED.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **THE APPROVED FIX WAS NARROWED AFTER AN EXISTING GUARD FORBADE IT, AND THE
@@ -206,6 +203,38 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   warned `DROPS 1 line(s) that look DURABLE` on the very next update. **A measurement that
   justifies a decision belongs under an APPEND heading the moment it is made** — status goes
   in `State now`, evidence does not.
+
+- 🔴 **RANK 3 IS DELETED AND THE PREMISE WAS BACKWARDS.** It read "re-key the three
+  `v1.18.29` claims — NOW BLOCKING EVERY PR IN THE REPO". `opencode 1.18.30` is a BROKEN
+  upstream build (every prompt dies in `SystemPrompt.environment`; fixed upstream in
+  1.18.31), and `flake.nix` pins 1.18.29 through a deliberate overlay to avoid it. The red
+  was the pin WORKING: the branch predated `#1804`, so its sandbox built the broken binary.
+  Re-keying would have edited 33 sites to assert that the deployed binary is the one that
+  cannot run a prompt — which `HISTORICAL_VERSION_CLAIMS` warns about in those words.
+  `main` is green on all four checks and both hosts run 1.18.29.
+  ⚠ **The trap was a STALE SELF-OBSERVATION**: both hosts genuinely read 1.18.30 when
+  measured early in the session, and this session's own `ship.sh` is what deployed the pin.
+  A fact gathered hours earlier by me was treated as current at the moment of acting.
+- 🔴 **A DELETION PR IS A GOOD PLACE TO HIDE A FALSE CLAIM, AND ITS TITLE IS WHERE IT
+  HID.** `#1811`'s title said it deleted "the scan cap, its test **and its ranked
+  follow-up**". The diff touched two code files and never this document, so rank 1 survived
+  on `main` pointing at a constant the same PR removed. Found by round 0, not by the author.
+  **A claim in a title is a claim.**
+- ⚠ **The cap was retired on the WRONG OPERAND'S numbers.** The argument was "the largest
+  SEGMENT ever scanned is 296 B against a 4096 B cap" — 296 B is exact, and irrelevant: the
+  cap truncated the HEAD. Re-derived 2026-09-20 over all 6,626 transcripts, 21,291 match
+  sites: head max **29,039 B**, p99 3,111 B, and **108 sites exceeded the cap**. The
+  deletion is still right, but because the scans are now linear — never because the input
+  is small. As first written the argument would have licensed deleting the cap WITHOUT the
+  changes that make it safe.
+- 🔴 **THE SANDBOX TIER WAS THE GAP EVERY AUDIT ROUND NAMED, AND CLOSING IT IS WHAT THE
+  MERGE RESTED ON — carried here because it is EVIDENCE, and `State now` is a REPLACE
+  heading that had already been warned for dropping it once.** All three rounds of
+  `#1799` verified the dev-host tier only and each said so. `tekton/devrc-pytests` on
+  `d7af847c`: **`collected=24037 passed=24032 skipped=4 failed=1`**, the single failure
+  being the inherited opencode pin, unreachable from a diff touching only
+  `scripts/claude-hooks/**`. `cairn-client-runs`, `gotests` and `nodetests` all success.
+  Waiting ~20 minutes for that verdict is the only reason the merge was not blind.
 
 ## How to verify
 ```bash
