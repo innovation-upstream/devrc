@@ -7,13 +7,41 @@
 // after the last snapshot still shows a live countdown.
 
 import { formatCountdown, isStale, stalenessLabel } from "./lib/timefmt.js";
-import { creditsLine, formatPct } from "./lib/format.js";
+import { ACCOUNT_LABELS_KEY, accountLabel, creditsLine, formatPct } from "./lib/format.js";
 
 // formatPct/creditsLine moved to lib/format.js when the injected widget needed
 // the same rules (2026-09-19). Re-exported rather than relocated outright: the
 // popup's tests and renderRow() address them here, and one implementation with
 // two names beats two implementations.
-export { creditsLine, formatPct };
+export { ACCOUNT_LABELS_KEY, accountLabel, creditsLine, formatPct };
+
+/**
+ * The label map after one edit. Pure, so the editor's RULE is testable
+ * without a DOM: the popup's click handler does nothing but call this and
+ * hand the result to storage.
+ *
+ * Clearing the box REMOVES the override (the row falls back to the API's org
+ * name) rather than storing an empty string, which would render a nameless
+ * account everywhere. Whitespace is trimmed first, so a box holding one space
+ * is a clear, not a rename.
+ *
+ * 🔴 THE POPUP IS THE ONLY WRITER. The in-page widget reads this map and
+ * never edits it: a text input in a card floating over claude.ai's composer
+ * is both the wrong affordance and a direct route back to the pointer-events
+ * bug that shipped in round 1.
+ */
+export function nextLabels(labels, orgUuid, text) {
+  const src = labels !== null && typeof labels === "object" ? labels : {};
+  const out = {};
+  for (const k of Object.keys(src)) {
+    if (typeof src[k] === "string" && src[k].trim()) out[k] = src[k];
+  }
+  if (typeof orgUuid !== "string" || !orgUuid) return out;
+  const t = typeof text === "string" ? text.trim() : "";
+  if (t) out[orgUuid] = t;
+  else delete out[orgUuid];
+  return out;
+}
 
 /**
  * Popup order: the ACTIVE account first, then by snapshot freshness
@@ -64,13 +92,17 @@ export function sparkline(history) {
   return out.join(" ");
 }
 
-/** One row's display model. Pure; the DOM paint is init()'s only job. */
-export function renderRow(rec, now, isActive) {
+/** One row's display model. Pure; the DOM paint is init()'s only job.
+ *
+ * `labels` is optional: omitted, every row falls back to the API's org name,
+ * which is what this returned before per-account renaming existed. */
+export function renderRow(rec, now, isActive, labels) {
   const stale = isStale(rec.asOf, now) || rec.staleSince !== null;
   const credits = creditsLine(rec.credits);
   const points = sparkline(rec.history);
   return {
-    name: rec.orgName,
+    name: accountLabel(rec, labels),
+    orgUuid: typeof rec.orgUuid === "string" ? rec.orgUuid : null,
     isActive: Boolean(isActive),
     session: sessionLine(rec, now),
     weekly: weeklyLine(rec),
@@ -88,18 +120,69 @@ export const EMPTY_STATE_TEXT = "No accounts yet — open claude.ai once and thi
 
 // --- DOM paint (not under test) ---------------------------------------------- //
 
+/**
+ * The per-account rename affordance. Clicking it swaps the name for a text
+ * box; Enter or blur saves, Escape cancels, an empty box clears the override.
+ *
+ * The RULE it applies is `nextLabels()`, which is pure and tested. Everything
+ * here is glue: read the current map, call it, write the result back, repaint.
+ * `paint()` re-runs from the storage change anyway, but it is called directly
+ * too so the edit lands even if the onChanged round-trip is slow.
+ */
+function renameButton(row) {
+  const btn = document.createElement("button");
+  btn.className = "rename";
+  btn.type = "button";
+  btn.title = `Rename ${row.name}`;
+  btn.setAttribute("aria-label", `Rename ${row.name}`);
+  btn.textContent = "✎";
+  btn.addEventListener("click", () => {
+    const input = document.createElement("input");
+    input.className = "labelinput";
+    input.type = "text";
+    input.value = row.name;
+    input.setAttribute("aria-label", "Account label");
+    let done = false;
+    const commit = (save) => {
+      if (done) return;
+      done = true;
+      if (!save) { paint(); return; }
+      const text = input.value;
+      try {
+        chrome.storage.local.get([ACCOUNT_LABELS_KEY]).then((got) => {
+          const next = nextLabels(got[ACCOUNT_LABELS_KEY], row.orgUuid, text);
+          return chrome.storage.local.set({ [ACCOUNT_LABELS_KEY]: next });
+        }).then(paint).catch(() => { /* storage gone; nothing to save into */ });
+      } catch { /* worker unreachable */ }
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") commit(true);
+      else if (e.key === "Escape") commit(false);
+    });
+    input.addEventListener("blur", () => commit(true));
+    const parent = btn.parentElement;
+    if (!parent) return;
+    parent.textContent = "";
+    parent.append(input);
+    if (typeof input.focus === "function") input.focus();
+    if (typeof input.select === "function") input.select();
+  });
+  return btn;
+}
+
 function paint() {
   const host = document.getElementById("accounts");
   const empty = document.getElementById("empty");
   if (!host || !empty) return;
-  chrome.storage.local.get(["accounts", "lastActiveOrg"]).then((got) => {
+  chrome.storage.local.get(["accounts", "lastActiveOrg", ACCOUNT_LABELS_KEY]).then((got) => {
     const accounts = got.accounts && typeof got.accounts === "object" ? got.accounts : {};
     const now = Date.now();
+    const labels = got[ACCOUNT_LABELS_KEY];
     const ordered = orderAccounts(accounts, got.lastActiveOrg);
     empty.hidden = ordered.length > 0;
     host.textContent = "";
     for (const rec of ordered) {
-      const row = renderRow(rec, now, rec.orgUuid === got.lastActiveOrg);
+      const row = renderRow(rec, now, rec.orgUuid === got.lastActiveOrg, labels);
       const div = document.createElement("div");
       div.className = `account${row.isActive ? " active" : ""}${row.stale ? " stale" : ""}`;
 
@@ -111,7 +194,8 @@ function paint() {
       const asof = document.createElement("span");
       asof.className = "asof";
       asof.textContent = row.asOf;
-      row1.append(name, asof);
+      if (row.orgUuid) row1.append(name, renameButton(row), asof);
+      else row1.append(name, asof);
 
       const metrics = document.createElement("div");
       metrics.className = "metrics";

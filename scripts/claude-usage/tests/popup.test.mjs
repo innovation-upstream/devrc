@@ -9,7 +9,8 @@ import assert from "node:assert/strict";
 
 const P = await import("../extension/popup.js");
 const { formatCountdown } = await import("../extension/lib/timefmt.js");
-const { NAME_A, NAME_B, NOW, ORG_A, ORG_B, fullUsage } =
+const { accountLabel } = await import("../extension/lib/format.js");
+const { NAME_A, NAME_B, NOW, ORG_A, ORG_B, ORG_C, fullUsage } =
   await import("./fixtures.mjs");
 const { normalizeUsage } = await import("../extension/lib/normalize.js");
 
@@ -141,6 +142,77 @@ test("sparkline maps history to a 100x24 box, y inverted, nulls skipped", () => 
     [NOW + 2000, 100, 7],
   ]);
   assert.equal(pts, "0.0,24.0 100.0,0.0");
+});
+
+// --- per-account labels ------------------------------------------------------------ //
+//
+// The API's org names are long and near-identical ("user@example.com's
+// Organization"), which is useless for deciding which account to switch to.
+// The POPUP is the only writer: the in-page widget reads this map and never
+// edits it, because a text input in a card floating over claude.ai's composer
+// is the wrong affordance and a direct route back to round 1's
+// pointer-events bug.
+
+test("renderRow shows the operator's label, falling back to the org name", () => {
+  const r = rec(ORG_A, NAME_A, 10, NOW);
+  assert.equal(P.renderRow(r, NOW, false, { [ORG_A]: "personal" }).name, "personal");
+  assert.equal(P.renderRow(r, NOW, false, { [ORG_B]: "work" }).name, NAME_A,
+    "another account's label is not mine");
+  assert.equal(P.renderRow(r, NOW, false).name, NAME_A, "no labels at all");
+  assert.equal(P.renderRow(r, NOW, false, { [ORG_A]: "   " }).name, NAME_A,
+    "a whitespace label is a REMOVE, not a nameless row");
+  assert.equal(P.renderRow(r, NOW, false, { [ORG_A]: "  work  " }).name, "work", "trimmed");
+});
+
+test("renderRow carries the orgUuid the editor needs to address the account", () => {
+  // The rename button writes labels[orgUuid]; a row without one gets no
+  // button rather than an edit that lands nowhere.
+  assert.equal(P.renderRow(rec(ORG_A, NAME_A, 10, NOW), NOW, false).orgUuid, ORG_A);
+  const anon = rec(ORG_A, NAME_A, 10, NOW);
+  anon.orgUuid = null;
+  assert.equal(P.renderRow(anon, NOW, false).orgUuid, null);
+});
+
+test("nextLabels: an edit sets one account's label and touches no other", () => {
+  const before = { [ORG_A]: "personal", [ORG_B]: "work" };
+  const after = P.nextLabels(before, ORG_B, "client");
+  assert.deepEqual(after, { [ORG_A]: "personal", [ORG_B]: "client" });
+  assert.deepEqual(before, { [ORG_A]: "personal", [ORG_B]: "work" },
+    "the stored map was mutated in place");
+});
+
+test("nextLabels: clearing the box REMOVES the override rather than storing ''", () => {
+  // An empty string would render a nameless account everywhere it is read.
+  for (const blank of ["", "   ", "\t\n", null, undefined, 42]) {
+    assert.deepEqual(P.nextLabels({ [ORG_A]: "personal" }, ORG_A, blank), {},
+      `text=${JSON.stringify(blank)}`);
+  }
+  assert.deepEqual(P.nextLabels({ [ORG_A]: "personal", [ORG_B]: "work" }, ORG_A, ""),
+    { [ORG_B]: "work" }, "the other account survives the clear");
+});
+
+test("nextLabels trims, and drops junk it finds in the stored map", () => {
+  assert.deepEqual(P.nextLabels({}, ORG_A, "  personal  "), { [ORG_A]: "personal" });
+  assert.deepEqual(
+    P.nextLabels({ [ORG_A]: 7, [ORG_B]: "  ", [ORG_C]: "keep" }, ORG_A, "personal"),
+    { [ORG_C]: "keep", [ORG_A]: "personal" },
+    "a non-string and a blank left by an older write are not carried forward");
+});
+
+test("nextLabels is total over garbage -- it feeds chrome.storage directly", () => {
+  assert.deepEqual(P.nextLabels(null, ORG_A, "personal"), { [ORG_A]: "personal" });
+  assert.deepEqual(P.nextLabels("nonsense", ORG_A, "personal"), { [ORG_A]: "personal" });
+  assert.deepEqual(P.nextLabels(undefined, undefined, undefined), {});
+  assert.deepEqual(P.nextLabels({ [ORG_A]: "personal" }, null, "x"), { [ORG_A]: "personal" },
+    "no account named -> the map comes back unchanged");
+  assert.deepEqual(P.nextLabels({ [ORG_A]: "personal" }, "", "x"), { [ORG_A]: "personal" });
+});
+
+test("the popup and the widget resolve a label through ONE implementation", () => {
+  // popup.js re-exports lib/format.js's accountLabel rather than owning a
+  // second copy; two copies is how the same fallback bug gets fixed once.
+  assert.equal(P.accountLabel, accountLabel);
+  assert.equal(P.ACCOUNT_LABELS_KEY, "accountLabels");
 });
 
 // --- empty state ------------------------------------------------------------------ //

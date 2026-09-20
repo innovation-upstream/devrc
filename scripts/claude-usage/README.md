@@ -61,7 +61,39 @@ silently reports a bogus `# tests 1`.
 | countdowns, staleness | `extension/lib/timefmt.js` |
 | percent/credits display strings | `extension/lib/format.js` |
 | **how bad is this usage** (badge + widget) | `extension/lib/severity.js` |
+| **which account can I switch to** | `extension/lib/availability.js` |
 | in-page widget display model | `extension/lib/widget.js` |
+
+## The `free` verdict, and why the inference is safe
+
+`content_probe.js` fetches `/api/organizations` with the **current session
+cookie**, so a stored account can only ever be re-measured while you are
+logged into it. `formatCountdown()` renders an already-elapsed reset as
+`resets soon` on the strength of "the next snapshot will correct it" — true
+of the active account, false of every other one. A second account therefore
+sat forever displaying `Session 92% · resets soon` at exactly the moment it
+had freed up: the one state the switch-accounts workflow depends on, backwards.
+
+`lib/availability.js` reads the reset time as **evidence** instead: once
+`session.resetsAt` is in the past, the window it described has closed, so the
+account is presumed **free**. The inference runs in one direction only — a
+reset cannot un-happen — and the row never dresses it up as a fresh reading:
+`AVAILABLE — reset 2h ago (was 92%, measured 6h ago)` states the inference and
+keeps the last *measured* value and its age on screen. Nothing fabricates a 0%.
+
+⚠ **Staleness must not grey a `free` row**, and that is not a style
+preference. The account worth switching to is by construction the one measured
+longest ago, so the 6h staleness rule washes out precisely the most actionable
+row. The availability verdict outranks staleness for styling; `measured` and
+`unknown` rows still grey, because for those the stored percentage *is* the
+claim. The mechanism is a CSS one: `.card.stale` dims the active account's own
+elements rather than the card, because `opacity` on an ancestor cannot be
+undone by a descendant.
+
+Per-account labels (`accountLabels` in `chrome.storage.local`) are **written by
+the popup only**. The in-page widget reads them and has no editor: a text input
+in a card floating over claude.ai's composer is the wrong affordance, and a
+direct route back to the `pointer-events` bug that shipped in round 1.
 
 `lib/severity.js` is the one both the toolbar badge and the in-page widget
 read. They each decided it independently until a round-0 audit found they

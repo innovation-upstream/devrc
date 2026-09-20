@@ -77,7 +77,8 @@ if (typeof FakeElement.prototype.append !== "function") {
     for (const n of nodes) this.appendChild(n);
   };
 }
-const { NOW, ORG_A, NAME_A, fullUsage } = await import("./fixtures.mjs");
+const { NOW, ORG_A, ORG_B, ORG_C, ORG_D, NAME_A, NAME_B, NAME_C, NAME_D, fullUsage } =
+  await import("./fixtures.mjs");
 const { normalizeUsage } = await import("../extension/lib/normalize.js");
 
 const WIDGET_URL = new URL("../extension/lib/widget.js", import.meta.url).href;
@@ -262,4 +263,220 @@ test("with no stored account the card is an instruction, not zeroes", async () =
   assert.ok(note, "no waiting state rendered");
   assert.equal(m.shadow.querySelectorAll(".fill").length, 0,
     "fabricated bars before the first snapshot");
+});
+
+// --- 🔴 the other-accounts section, WHERE IT LIVES --------------------------- //
+//
+// The model half of this is pinned in widget.test.mjs. These are the painter's
+// half, for the reason the header of this file records: round 2's finding was
+// a model that was already correct and a PAINTER that dropped the value, and
+// the first guard written for it passed at the broken tip because it asserted
+// on the model. The defect lives in the DOM, so the guard lives in the DOM.
+
+const HOUR = 60 * 60 * 1000;
+
+/** A stored-shaped record for a NON-active account, built through the real
+ * normalizer. `resetsAtMs`/`ageH` are relative to Date.now(), which is what
+ * render() reads. */
+function acct(uuid, name, pct, resetsAtMs, ageH) {
+  const r = normalizeUsage(fullUsage(), uuid, name, Date.now() - ageH * HOUR);
+  r.session.utilization = pct;
+  r.session.resetsAt = resetsAtMs === null ? null : new Date(resetsAtMs).toISOString();
+  return r;
+}
+
+const textOf = (el) => (el ? el.textContent : "");
+
+test("🔴 REGRESSION: the widget SHOWS a freed-up account, as available and not as 92%", async () => {
+  // THE defect. He logs into A; B's snapshot says 91% and its five-hour window
+  // closed two hours ago. B has actually freed up -- and cannot be
+  // re-measured, because content_probe.js fetches with A's session cookie.
+  // Before this change the widget painted A alone and the only surface
+  // showing B said "Session 91% · resets soon".
+  const now = Date.now();
+  const m = await mount({
+    storage: {
+      accounts: {
+        [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0),
+        [ORG_B]: acct(ORG_B, NAME_B, 91, now - 2 * HOUR, 6),
+      },
+      lastActiveOrg: ORG_A,
+    },
+  });
+
+  const rows = m.shadow.querySelectorAll(".other");
+  assert.equal(rows.length, 1,
+    "the freed-up account is not on the card at all — the operator has to guess");
+  const text = textOf(rows[0]);
+  assert.match(text, /AVAILABLE/, `the row reads "${text}"`);
+  assert.ok(!/resets soon/.test(text), `the row still reads "${text}"`);
+  assert.match(text, new RegExp(NAME_B.replace(/[.*+?^${}()|[\]\\<>]/g, "\\$&")),
+    "the row does not name the account");
+  // The inference is stated and the last measured reading stays beside it.
+  assert.match(text, /reset 2h ago/, text);
+  assert.match(text, /was 91%/, "the last MEASURED value must remain on screen");
+  assert.match(text, /measured 6h ago/, "...with its age");
+});
+
+test("🔴 the presumed-free row is NOT painted as stale", async () => {
+  // A 9h-old snapshot is stale by the 6h rule, and the free row is stale BY
+  // CONSTRUCTION. Greying it washes out the most actionable thing on the card.
+  const now = Date.now();
+  const m = await mount({
+    storage: {
+      accounts: {
+        [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0),
+        [ORG_B]: acct(ORG_B, NAME_B, 91, now - 2 * HOUR, 9),
+        [ORG_C]: acct(ORG_C, NAME_C, 62, now + 4 * HOUR, 9),
+      },
+      lastActiveOrg: ORG_A,
+    },
+  });
+  const freeRow = find(m.shadow, ".other.free");
+  assert.ok(freeRow, "no presumed-free row was painted");
+  assert.ok(!/\bstale\b/.test(cls(freeRow)),
+    `the free row is class "${cls(freeRow)}" — greyed out`);
+  assert.match(cls(find(m.shadow, ".other.free .dot")), /\bt-ok\b/,
+    "the free row lost its colour");
+
+  const measuredRow = find(m.shadow, ".other.measured");
+  assert.ok(measuredRow, "no measured row was painted");
+  assert.match(cls(measuredRow), /\bstale\b/,
+    "a stale MEASURED row must still grey — there the percentage IS the claim");
+});
+
+test("🔴 the stale dim is scoped to the active account, never to the whole card", async () => {
+  // A SOURCE-LEVEL MECHANISM PIN, not a behavioural assertion, and labelled as
+  // one: `opacity` on an ancestor cannot be undone by a descendant, so a bare
+  // `.card.stale{opacity:...}` rule would grey the presumed-free row no matter
+  // what class the painter gives it — and the shadow-DOM harness has no
+  // cascade, so no DOM assertion above can see that. The test directly above
+  // would stay green while the operator's card was uniformly washed out.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../extension/content_widget.js", import.meta.url), "utf8");
+  const bare = src.match(/"\.card\.stale\{[^"]*opacity/);
+  assert.equal(bare, null,
+    `content_widget.js dims the whole card (${bare && bare[0]}), which greys the `
+    + "other-account rows including the presumed-free one");
+  assert.match(src, /\.card\.stale>\.row/,
+    "the scoped dim rule is gone — the active account no longer greys at all");
+});
+
+test("the card counts the accounts it could not fit", async () => {
+  const now = Date.now();
+  const accounts = { [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0) };
+  [23, 31, 42, 53, 62, 71].forEach((p, i) => {
+    const id = `9${i}999999-9999-4999-8999-999999999999`;
+    accounts[id] = acct(id, `acct ${i}`, p, now + (i + 1) * HOUR, 1);
+  });
+  const m = await mount({ storage: { accounts, lastActiveOrg: ORG_A } });
+  assert.equal(m.shadow.querySelectorAll(".other").length, 4,
+    "an unbounded list would cover his composer");
+  assert.match(textOf(find(m.shadow, ".more")), /\+2 more/);
+});
+
+test("the next-free footer is painted when something is pending", async () => {
+  const now = Date.now();
+  const m = await mount({
+    storage: {
+      accounts: {
+        [ORG_A]: acct(ORG_A, NAME_A, 37, now + 30 * 60 * 1000, 0),
+        [ORG_B]: acct(ORG_B, NAME_B, 62, now + HOUR + 12 * 60 * 1000, 1),
+      },
+      lastActiveOrg: ORG_A,
+    },
+  });
+  assert.match(textOf(find(m.shadow, ".nextfree")), /next free: .* in 1h1[12]m/);
+});
+
+test("with a single account there is no empty 'Other accounts' heading", async () => {
+  const m = await mount({
+    storage: { accounts: { [ORG_A]: rec() }, lastActiveOrg: ORG_A },
+  });
+  assert.equal(find(m.shadow, ".others"), null, "an empty section was painted");
+});
+
+test("a per-account LABEL renames the row the widget paints", async () => {
+  const now = Date.now();
+  const m = await mount({
+    storage: {
+      accounts: {
+        [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0),
+        [ORG_B]: acct(ORG_B, NAME_B, 62, now + HOUR, 1),
+      },
+      lastActiveOrg: ORG_A,
+      accountLabels: { [ORG_A]: "personal", [ORG_B]: "work" },
+    },
+  });
+  assert.equal(textOf(find(m.shadow, ".name")), "personal");
+  assert.equal(textOf(find(m.shadow, ".oname")), "work");
+});
+
+test("🔴 the other-accounts section adds NO interactive target over the page", async () => {
+  // Round 1 shipped a widget that swallowed clicks meant for claude.ai's
+  // composer. The host stays pointer-events:none and the new rows are static
+  // divs: the only clickable things in the card remain the collapse button
+  // and (when collapsed) the pill. Editing a label is the POPUP's job.
+  const now = Date.now();
+  const m = await mount({
+    storage: {
+      accounts: {
+        [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0),
+        [ORG_B]: acct(ORG_B, NAME_B, 91, now - 2 * HOUR, 6),
+        [ORG_C]: acct(ORG_C, NAME_C, 62, now + HOUR, 1),
+      },
+      lastActiveOrg: ORG_A,
+    },
+  });
+  assert.ok(m.shadow.querySelectorAll(".other").length >= 2, "precondition: rows are painted");
+  assert.equal(m.host.style.getPropertyValue("pointer-events"), "none",
+    "the host takes clicks that miss the drawn card");
+  assert.equal(m.shadow.querySelectorAll(".others button").length, 0,
+    "a button inside the other-accounts section");
+  assert.equal(m.shadow.querySelectorAll("input").length, 0,
+    "a text input floating over claude.ai's composer");
+  const buttons = m.shadow.querySelectorAll("button");
+  assert.deepEqual(buttons.map((b) => cls(b)), ["collapse"],
+    "an unexpected click target was added to the card");
+});
+
+test("collapsing still works, and the collapsed pill hides the other rows", async () => {
+  const now = Date.now();
+  const store = {
+    accounts: {
+      [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0),
+      [ORG_B]: acct(ORG_B, NAME_B, 91, now - 2 * HOUR, 6),
+    },
+    lastActiveOrg: ORG_A,
+  };
+  const m = await mount({ storage: store });
+  assert.ok(find(m.shadow, ".other"), "precondition: expanded, with other rows");
+
+  find(m.shadow, ".collapse").dispatchEvent({ type: "click" });
+  for (let i = 0; i < 12; i += 1) await Promise.resolve();
+  await new Promise((r) => setTimeout(r, 0));
+  for (let i = 0; i < 12; i += 1) await Promise.resolve();
+
+  assert.equal(m.store.widgetCollapsed, true, "the preference was not persisted");
+  assert.ok(find(m.shadow, ".pill"), "the collapsed pill is not painted");
+  assert.equal(find(m.shadow, ".other"), null,
+    "the other-account rows survived the collapse");
+});
+
+test("a widget booted COLLAPSED stays collapsed even with other accounts to show", async () => {
+  const now = Date.now();
+  const m = await mount({
+    storage: {
+      accounts: {
+        [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0),
+        [ORG_B]: acct(ORG_B, NAME_B, 91, now - 2 * HOUR, 6),
+        [ORG_D]: acct(ORG_D, NAME_D, 62, now + HOUR, 1),
+      },
+      lastActiveOrg: ORG_A,
+      widgetCollapsed: true,
+    },
+  });
+  assert.ok(find(m.shadow, ".pill"), "the collapse preference was ignored");
+  assert.equal(find(m.shadow, ".others"), null,
+    "a new section re-expanded a widget the operator had shrunk");
 });

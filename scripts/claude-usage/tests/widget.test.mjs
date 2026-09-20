@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 
 const W = await import("../extension/lib/widget.js");
 const { TONE_ORDER: TONES } = await import("../extension/lib/severity.js");
-const { NAME_A, NAME_B, NOW, ORG_A, ORG_B, fullUsage, nullUsage } =
+const { NAME_A, NAME_B, NAME_C, NAME_D, NOW, ORG_A, ORG_B, ORG_C, ORG_D, fullUsage, nullUsage } =
   await import("./fixtures.mjs");
 const { normalizeUsage } = await import("../extension/lib/normalize.js");
 
@@ -365,6 +365,230 @@ test("the MODEL keeps a record tone distinct from the per-window tones", () => {
   const f = rec(ORG_A, NAME_A);            // severity "medium", 9% / 47%
   assert.equal(W.widgetModel(f, NOW).tone, "warn",
     "an API severity the percentages do not justify must still reach the card");
+});
+
+// --- the OTHER-ACCOUNTS section ------------------------------------------------- //
+//
+// 🔴 WHY THIS SECTION EXISTS. He runs several accounts and switches when one
+// hits its session cap. A stored account can only be re-measured while logged
+// INTO it (content_probe.js fetches with the current session cookie), so the
+// account worth switching to is by construction the one with the STALEST
+// snapshot -- and the old widget showed one account, the active one, with
+// `formatCountdown()` reporting an elapsed reset as "resets soon". The freest
+// account read as still-at-92%, forever.
+
+const HOUR = 60 * 60 * 1000;
+const iso = (ms) => new Date(ms).toISOString();
+
+/** A record whose session window resets at `resetsAt`, last measured `ageH`
+ * hours ago at `pct`. Percentages are pairwise distinct and distinct from
+ * WARN_PCT/CRIT_PCT so a mutant hardcoding a band cannot hide. */
+function acct(uuid, name, pct, resetsAt, ageH) {
+  const r = rec(uuid, name, NOW - ageH * HOUR);
+  r.session.utilization = pct;
+  r.session.resetsAt = resetsAt;
+  return r;
+}
+
+test("🔴 REGRESSION: a stored account whose reset has ELAPSED reads as AVAILABLE, not 92%", () => {
+  // The defect, at the model level. Account B was at 91% six hours ago and
+  // its five-hour window closed two hours ago. Before this change the widget
+  // had no `others` at all, and the only surface that showed B said
+  // "Session 91% · resets soon" -- the one state his workflow depends on,
+  // inverted.
+  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
+  const freed = acct(ORG_B, NAME_B, 91, iso(NOW - 2 * HOUR), 6);
+  const m = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: freed },
+    lastActiveOrg: ORG_A,
+  });
+
+  assert.equal(m.others.length, 1, "the other account is not on the card at all");
+  const row = m.others[0];
+  assert.equal(row.state, "free");
+  assert.equal(row.value, "AVAILABLE");
+  assert.ok(!/resets soon/.test(row.meta),
+    `the freed account still reads "${row.meta}"`);
+  // The inference is STATED, and the last measured reading stays visible so
+  // it can never be mistaken for a fresh one.
+  assert.match(row.meta, /reset 2h ago/, `meta was "${row.meta}"`);
+  assert.match(row.meta, /was 91%/, "the last MEASURED value must remain visible");
+  assert.match(row.meta, /measured 6h ago/, "...with its age");
+  assert.ok(!/\b0%/.test(row.value + row.meta), "never a fabricated 0%");
+});
+
+test("🔴 staleness does NOT grey a presumed-free row (it greys the others)", () => {
+  // The 6h staleness rule washes out precisely the most actionable row, and
+  // does so BY CONSTRUCTION: an account you are not logged into cannot be
+  // re-measured, so every good switch target is stale.
+  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
+  const freed = acct(ORG_B, NAME_B, 91, iso(NOW - 2 * HOUR), 9);     // 9h old
+  const waiting = acct(ORG_C, NAME_C, 62, iso(NOW + 4 * HOUR), 9);   // also 9h old
+  const m = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: freed, [ORG_C]: waiting },
+    lastActiveOrg: ORG_A,
+  });
+  const byId = Object.fromEntries(m.others.map((r) => [r.key, r]));
+
+  assert.equal(byId[ORG_B].stale, false, "the free row was greyed out");
+  assert.equal(byId[ORG_B].tone, "ok", "...and lost its colour with it");
+  assert.equal(byId[ORG_C].stale, true,
+    "a stale MEASURED row must still grey -- there the percentage IS the claim");
+  assert.equal(byId[ORG_C].tone, "stale");
+});
+
+test("a fresh measured row keeps its own percent band", () => {
+  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
+  const hot = acct(ORG_B, NAME_B, 97, iso(NOW + HOUR), 1);
+  const calm = acct(ORG_C, NAME_C, 23, iso(NOW + HOUR), 1);
+  const m = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: hot, [ORG_C]: calm },
+    lastActiveOrg: ORG_A,
+  });
+  const byId = Object.fromEntries(m.others.map((r) => [r.key, r]));
+  assert.equal(byId[ORG_B].tone, "crit");
+  assert.equal(byId[ORG_C].tone, "ok");
+  assert.equal(byId[ORG_B].value, "97%");
+  assert.match(byId[ORG_B].meta, /^resets 1h0m · measured 1h ago$/);
+});
+
+test("an other-account row with no reset time says so, and shows no countdown", () => {
+  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
+  const murky = acct(ORG_B, NAME_B, 62, null, 1);
+  const m = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: murky }, lastActiveOrg: ORG_A,
+  });
+  assert.equal(m.others[0].state, "unknown");
+  assert.equal(m.others[0].value, "62%", "the percentage is still known");
+  assert.match(m.others[0].meta, /reset time unknown/);
+  assert.ok(!/resets soon|unknown · /.test(m.others[0].meta.replace("reset time unknown", "")),
+    `no second "unknown" in "${m.others[0].meta}"`);
+});
+
+test("every other-row carries the full field set the painter reads", () => {
+  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
+  const accounts = {
+    [ORG_A]: active,
+    [ORG_B]: acct(ORG_B, NAME_B, 91, iso(NOW - 2 * HOUR), 6),
+    [ORG_C]: acct(ORG_C, NAME_C, 62, iso(NOW + HOUR), 1),
+    [ORG_D]: acct(ORG_D, NAME_D, 23, null, 1),
+  };
+  const m = W.widgetModel(active, NOW, { accounts, lastActiveOrg: ORG_A });
+  assert.equal(m.others.length, 3);
+  for (const row of m.others) {
+    assert.equal(typeof row.key, "string");
+    assert.equal(typeof row.name, "string");
+    assert.ok(["free", "measured", "unknown"].includes(row.state), row.state);
+    assert.equal(typeof row.value, "string");
+    assert.equal(typeof row.meta, "string");
+    assert.equal(typeof row.stale, "boolean");
+    assert.ok(TONES.includes(row.tone), `${row.key} tone=${row.tone}`);
+    assert.ok(row.bar === null || (typeof row.bar === "number" && row.bar >= 0 && row.bar <= 100));
+  }
+});
+
+test("🔴 the list is CAPPED, with the remainder counted -- the card sits over his chat", () => {
+  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
+  const accounts = { [ORG_A]: active };
+  // Six others, all measured, with distinct percentages so the order is the
+  // rule's and not the map's.
+  const pcts = [23, 31, 42, 53, 62, 71];
+  pcts.forEach((p, i) => {
+    const id = `9${i}999999-9999-4999-8999-999999999999`;
+    accounts[id] = acct(id, `acct ${i}`, p, iso(NOW + (i + 1) * HOUR), 1);
+  });
+  const m = W.widgetModel(active, NOW, { accounts, lastActiveOrg: ORG_A });
+
+  assert.equal(W.OTHERS_MAX, 4);
+  assert.equal(m.others.length, 4, "an unbounded list would cover his composer");
+  assert.equal(m.othersMore, 2, "the remainder is counted, not silently dropped");
+  assert.deepEqual(m.others.map((r) => r.value), ["23%", "31%", "42%", "53%"],
+    "the rows kept are the most available ones");
+
+  // At or below the cap there is nothing to count.
+  const two = { [ORG_A]: active, [ORG_B]: acct(ORG_B, NAME_B, 62, iso(NOW + HOUR), 1) };
+  assert.equal(W.widgetModel(active, NOW, { accounts: two, lastActiveOrg: ORG_A }).othersMore, 0);
+});
+
+test("the next-free line names the soonest account and counts down to it", () => {
+  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 30 * 60 * 1000), 0);
+  const soon = acct(ORG_B, NAME_B, 62, iso(NOW + HOUR + 12 * 60 * 1000), 1);
+  const later = acct(ORG_C, NAME_C, 23, iso(NOW + 5 * HOUR), 1);
+  const m = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: soon, [ORG_C]: later }, lastActiveOrg: ORG_A,
+  });
+  assert.equal(m.nextFree, `next free: ${NAME_B} in 1h12m`,
+    "the ACTIVE account's own sooner reset is not the answer");
+
+  // Nothing pending -> no line at all, rather than an empty one.
+  const allFree = {
+    [ORG_A]: active, [ORG_B]: acct(ORG_B, NAME_B, 91, iso(NOW - HOUR), 6),
+  };
+  assert.equal(W.widgetModel(active, NOW, { accounts: allFree, lastActiveOrg: ORG_A }).nextFree, null);
+});
+
+test("the account already ON the card never appears again under 'other accounts'", () => {
+  const a = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
+  const b = acct(ORG_B, NAME_B, 62, iso(NOW + HOUR), 1);
+  const accounts = { [ORG_A]: a, [ORG_B]: b };
+
+  assert.deepEqual(
+    W.widgetModel(a, NOW, { accounts, lastActiveOrg: ORG_A }).others.map((r) => r.key), [ORG_B]);
+  // pickRecord() falls back to the freshest record before any active org is
+  // known; the shown record must still be excluded even though it is not the
+  // "active" one.
+  assert.deepEqual(
+    W.widgetModel(a, NOW, { accounts, lastActiveOrg: null }).others.map((r) => r.key), [ORG_B]);
+});
+
+test("labels rename both the card's own header and the other rows", () => {
+  const a = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
+  const b = acct(ORG_B, NAME_B, 62, iso(NOW + HOUR), 1);
+  const m = W.widgetModel(a, NOW, {
+    accounts: { [ORG_A]: a, [ORG_B]: b },
+    lastActiveOrg: ORG_A,
+    labels: { [ORG_A]: "personal", [ORG_B]: "  work  " },
+  });
+  assert.equal(m.name, "personal");
+  assert.equal(m.others[0].name, "work", "trimmed");
+
+  // A blank override is a REMOVE, not a nameless row.
+  const blank = W.widgetModel(a, NOW, {
+    accounts: { [ORG_A]: a, [ORG_B]: b }, lastActiveOrg: ORG_A,
+    labels: { [ORG_A]: "   ", [ORG_B]: "" },
+  });
+  assert.equal(blank.name, NAME_A);
+  assert.equal(blank.others[0].name, NAME_B);
+});
+
+test("without a ctx the model is exactly what it was before this section existed", () => {
+  const r = rec(ORG_A, NAME_A);
+  for (const m of [W.widgetModel(r, NOW), W.widgetModel(r, NOW, undefined)]) {
+    assert.deepEqual(m.others, []);
+    assert.equal(m.othersMore, 0);
+    assert.equal(m.nextFree, null);
+    assert.equal(m.name, NAME_A);
+  }
+  const empty = W.widgetModel(null, NOW, { accounts: { [ORG_A]: rec(ORG_A, NAME_A) } });
+  assert.deepEqual(empty.others, []);
+  assert.equal(empty.nextFree, null);
+});
+
+test("the others section is TOTAL over garbage ctx -- it runs in his real tab", () => {
+  const r = rec(ORG_A, NAME_A);
+  const ctxs = [
+    "nonsense", 42, [], null,
+    { accounts: "nonsense" }, { accounts: null }, { accounts: [] },
+    { accounts: { [ORG_B]: null }, lastActiveOrg: 5 },
+    { accounts: { [ORG_B]: "nope" }, lastActiveOrg: ORG_A, labels: "nope" },
+    { accounts: { [ORG_B]: rec(ORG_B, NAME_B) }, labels: 7 },
+  ];
+  for (const ctx of ctxs) {
+    const m = W.widgetModel(r, NOW, ctx);
+    assert.ok(Array.isArray(m.others), `ctx=${JSON.stringify(ctx)}`);
+    assert.equal(typeof m.othersMore, "number");
+    assert.ok(m.nextFree === null || typeof m.nextFree === "string");
+  }
 });
 
 test("the widget's warn threshold matches the service worker's toast threshold", async () => {

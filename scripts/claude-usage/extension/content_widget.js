@@ -60,7 +60,17 @@
     ".card{width:232px;background:#fffefb;border:1px solid rgba(0,0,0,.12);",
     "border-radius:12px;padding:10px 12px 8px;box-shadow:0 4px 16px rgba(0,0,0,.13);",
     "pointer-events:auto}",
-    ".card.stale{opacity:.72}",
+
+    // 🔴 THE STALE DIM IS SCOPED TO THE ACTIVE ACCOUNT'S OWN ELEMENTS, never
+    // to `.card` itself. `opacity` on an ancestor cannot be undone by a
+    // descendant, so a bare `.card.stale{opacity:.72}` would wash out the
+    // OTHER-ACCOUNTS rows along with the card -- and the row it would wash
+    // out hardest is the presumed-free one, which is the most actionable
+    // thing on the card and is stale BY CONSTRUCTION (an account you are not
+    // logged into cannot be re-measured). Each other-account row carries its
+    // own `.stale`, decided by lib/widget.js per row.
+    ".card.stale>.head,.card.stale>.row,.card.stale>.locked,",
+    ".card.stale>.credits,.card.stale>.foot{opacity:.72}",
     ".card.dead,.pill.dead{opacity:.6}",
     ".pill.dead{cursor:default;padding:5px 10px}",
     ".pill.dead .note{padding:0;color:inherit}",
@@ -79,6 +89,20 @@
     ".track{height:5px;border-radius:3px;background:rgba(0,0,0,.09);overflow:hidden;margin-top:4px}",
     ".fill{height:100%;border-radius:3px;transition:width .3s ease}",
     ".meta{color:#8a9099;font-size:11px;margin-top:3px}",
+
+    // --- the other-accounts section ---
+    ".others{margin-top:8px;padding-top:7px;border-top:1px solid rgba(0,0,0,.10)}",
+    ".otherhead{color:#8a9099;font-size:11px;margin-bottom:5px}",
+    ".other{display:flex;align-items:baseline;gap:6px;margin-bottom:5px}",
+    ".other.stale{opacity:.72}",
+    ".other .dot{align-self:center}",
+    ".otherbody{flex:1 1 auto;min-width:0}",
+    ".othertop{display:flex;align-items:baseline;justify-content:space-between;gap:6px}",
+    ".oname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+    ".ovalue{font-weight:600;font-variant-numeric:tabular-nums;flex:0 0 auto}",
+    ".other.free .ovalue{color:#1e8e3e;font-size:11px;letter-spacing:.02em}",
+    ".ometa{color:#8a9099;font-size:11px;margin-top:1px}",
+    ".more{color:#8a9099;font-size:11px}",
 
     ".note{color:#6b7280;padding:2px 0 6px}",
     ".locked{margin:6px 0 2px;padding:5px 7px;border-radius:7px;font-size:11px;",
@@ -126,6 +150,9 @@
     ".label,.note,.credits{color:#9aa0a6}",
     ".meta,.foot{color:#7e848c}",
     ".track{background:rgba(255,255,255,.13)}",
+    ".others{border-top-color:rgba(255,255,255,.14)}",
+    ".otherhead,.ometa,.more{color:#7e848c}",
+    ".other.free .ovalue{color:#81c995}",
     ".collapse{color:#9aa0a6}",
     ".collapse:hover{background:rgba(255,255,255,.10)}",
     ".locked{background:rgba(217,48,37,.20);color:#f2b8b5}",
@@ -292,8 +319,71 @@
       foot.className = "foot";
       foot.textContent = model.asOf;
       card.appendChild(foot);
+
+      paintOthers(card, model);
     }
     root.appendChild(card);
+  }
+
+  /**
+   * The "other accounts" section: which account to switch to next.
+   *
+   * Maps lib/widget.js's `others` array one-to-one and decides nothing. In
+   * particular the per-row `stale` flag comes from the MODEL, because whether
+   * a row may be greyed is an availability question (a presumed-free row must
+   * not be) and every display rule in this feature lives in lib/.
+   */
+  function paintOthers(card, model) {
+    var rows = model.others || [];
+    if (!rows.length && !model.nextFree) return;
+
+    var box = document.createElement("div");
+    box.className = "others";
+    var hd = document.createElement("div");
+    hd.className = "otherhead";
+    hd.textContent = "Other accounts";
+    box.appendChild(hd);
+
+    rows.forEach(function (row) {
+      var el = document.createElement("div");
+      el.className = "other " + row.state + (row.stale ? " stale" : "");
+      var dot = document.createElement("span");
+      dot.className = "dot t-" + row.tone;
+      var body = document.createElement("div");
+      body.className = "otherbody";
+      var top = document.createElement("div");
+      top.className = "othertop";
+      var nm = document.createElement("span");
+      nm.className = "oname";
+      nm.textContent = row.name;
+      var val = document.createElement("span");
+      val.className = "ovalue";
+      val.textContent = row.value;
+      top.append(nm, val);
+      body.appendChild(top);
+      if (row.meta) {
+        var meta = document.createElement("div");
+        meta.className = "ometa";
+        meta.textContent = row.meta;
+        body.appendChild(meta);
+      }
+      el.append(dot, body);
+      box.appendChild(el);
+    });
+
+    if (model.othersMore > 0) {
+      var more = document.createElement("div");
+      more.className = "more";
+      more.textContent = "+" + model.othersMore + " more";
+      box.appendChild(more);
+    }
+    if (model.nextFree) {
+      var nf = document.createElement("div");
+      nf.className = "more nextfree";
+      nf.textContent = model.nextFree;
+      box.appendChild(nf);
+    }
+    card.appendChild(box);
   }
 
   // --- state ----------------------------------------------------------------- //
@@ -357,13 +447,22 @@
     if (!mod) return;
     var getting;
     try {
-      getting = c.storage.local.get(["accounts", "lastActiveOrg", mod.COLLAPSE_KEY]);
+      getting = c.storage.local.get(
+        ["accounts", "lastActiveOrg", mod.ACCOUNT_LABELS_KEY, mod.COLLAPSE_KEY]);
     } catch (e) { retire(); return; }
     if (!getting || typeof getting.then !== "function") return;
     getting.then(function (got) {
       var now = Date.now();
       var rec = mod.pickRecord(got.accounts, got.lastActiveOrg);
-      var model = mod.widgetModel(rec, now);
+      // The whole account map goes in, not just the shown record: the card's
+      // other-accounts section is the point of this widget for an operator
+      // running several accounts. Labels are READ here and written only by
+      // the popup (see lib/format.js's ACCOUNT_LABELS_KEY).
+      var model = mod.widgetModel(rec, now, {
+        accounts: got.accounts,
+        lastActiveOrg: got.lastActiveOrg,
+        labels: got[mod.ACCOUNT_LABELS_KEY],
+      });
       var collapsed = got[mod.COLLAPSE_KEY] === true;
       var sh = ensureShadow(mod.WIDGET_HOST_ID);
       var root = sh.querySelector(".root");
@@ -387,7 +486,8 @@
       try {
         c.storage.onChanged.addListener(function (changes, area) {
           if (area !== "local") return;
-          if (changes.accounts || changes.lastActiveOrg || changes[mod.COLLAPSE_KEY]) render();
+          if (changes.accounts || changes.lastActiveOrg
+            || changes[mod.ACCOUNT_LABELS_KEY] || changes[mod.COLLAPSE_KEY]) render();
         });
       } catch (e) { /* no live updates; the tick still refreshes */ }
       if (timer === null) timer = setInterval(render, TICK_MS);

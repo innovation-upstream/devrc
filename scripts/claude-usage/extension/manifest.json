@@ -29,7 +29,8 @@
         "lib/widget.js",
         "lib/timefmt.js",
         "lib/format.js",
-        "lib/severity.js"
+        "lib/severity.js",
+        "lib/availability.js"
       ],
       "matches": ["https://claude.ai/*"]
     }

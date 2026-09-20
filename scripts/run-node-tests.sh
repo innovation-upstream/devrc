@@ -283,7 +283,21 @@ SUITES=(
   # concurrency.test.mjs). Both sides added files AND tests, so this floor
   # is the GATE'S OWN printed number for the merged tree, never arithmetic
   # on the two sides -- which is how an eleven-value MIN_TESTS happened.
-  "scripts/claude-usage/tests|12|152"
+  #
+  # Re-measured 2026-09-20 on feat/claude-usage-account-availability. The
+  # widget grew an OTHER-ACCOUNTS section: a stored account can only be
+  # re-measured while you are logged INTO it, so once its session reset
+  # elapses the extension was reporting the freest account as still-at-92%
+  # ("resets soon", forever). lib/availability.js turns the elapsed reset into
+  # a verdict and brings availability.test.mjs; widget/content_widget/popup/
+  # manifest each grew pins for the section, the cap, the label overrides and
+  # the rule that staleness must NOT grey a presumed-free row.
+  # MEASURED by this runner on that branch: 14 files / 213 tests. Floors,
+  # by the formula at the top of this block (this runner prints no
+  # replacement of its own -- only the pytest one does):
+  # 14 - min(50, max(1, 14/20)) = 13 files;
+  # 213 - min(50, max(1, 213/20)) = 202.35 -> 203 tests.
+  "scripts/claude-usage/tests|13|203"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree; js-source:

@@ -15,14 +15,28 @@
 // correctly once the 30s tick re-renders it.
 
 import { formatCountdown, isStale, stalenessLabel } from "./timefmt.js";
-import { creditsLine, formatPct } from "./format.js";
+import { ACCOUNT_LABELS_KEY, accountLabel, creditsLine, formatPct } from "./format.js";
 import { CRIT_PCT, WARN_PCT, percentTone, toneForRecord } from "./severity.js";
+import { FREE, MEASURED, availability, nextFreeAt, orderForSwitch } from "./availability.js";
 
 // Re-exported so the widget's own callers and tests keep addressing them here
 // while there is ONE implementation, in lib/severity.js, shared with the
 // badge. They were local to this file until the round-0 audit showed the badge
 // and the widget were deciding severity by two different rules.
 export { CRIT_PCT, WARN_PCT };
+
+// The storage key the labels live under, re-exported for the same reason:
+// content_widget.js reads it to build its `storage.local.get` list, and one
+// misspelling there is a silently unlabelled widget.
+export { ACCOUNT_LABELS_KEY };
+
+/** How many other-account rows the card will draw before collapsing the rest
+ * into "+N more".
+ *
+ * 🔴 THE CARD SITS OVER HIS CHAT. An unbounded list is a UI hazard, not a
+ * feature: five accounts is already 232px x ~180px of claude.ai covered, and
+ * the rows past the first few are by construction the LEAST available ones. */
+export const OTHERS_MAX = 4;
 
 /** The host element's id. Also the handle content_widget.js uses to detect an
  * existing mount, so a double-injected content script cannot stack widgets. */
@@ -82,8 +96,15 @@ export function pillText(record) {
 /**
  * Full display model for the expanded card. Pure; content_widget.js maps this
  * to nodes one-to-one and computes nothing of its own.
+ *
+ * `ctx` is optional and carries everything the OTHER-ACCOUNTS section needs:
+ *   { accounts, lastActiveOrg, labels }
+ * Omit it and the model is exactly what it was before that section existed
+ * (`others: []`, `othersMore: 0`, `nextFree: null`), so a caller that has only
+ * one record -- and every pre-existing test -- keeps working unchanged.
  */
-export function widgetModel(record, now) {
+export function widgetModel(record, now, ctx) {
+  const labels = ctx && typeof ctx === "object" ? ctx.labels : null;
   if (!record || typeof record !== "object") {
     return {
       empty: true,
@@ -102,6 +123,12 @@ export function widgetModel(record, now) {
       pill: "?",
       locked: null,
       credits: null,
+      // There is no record at all, so there are no OTHER records either:
+      // pickRecord() returns the freshest of whatever is stored and only
+      // yields null when the account map is empty.
+      others: [],
+      othersMore: 0,
+      nextFree: null,
     };
   }
   const stale = isStale(record.asOf, now) || record.staleSince !== null;
@@ -158,9 +185,11 @@ export function widgetModel(record, now) {
     || (record.weekly && record.weekly.lockedReason)
     || null;
 
+  const others = buildOthers(record, now, ctx);
+
   return {
     empty: false,
-    name: record.orgName || "unknown account",
+    name: accountLabel(record, labels),
     note: null,
     tone: toneFor(record, now),
     stale,
@@ -169,6 +198,114 @@ export function widgetModel(record, now) {
     pill: pillText(record),
     locked,
     credits: creditsLine(record.credits),
+    ...others,
+  };
+}
+
+/**
+ * The "other accounts" section: the switch-to candidates, most available
+ * first, capped, plus the one-line "next free" footer.
+ *
+ * Returns `{ others, othersMore, nextFree }` and never throws over garbage.
+ */
+function buildOthers(record, now, ctx) {
+  const none = { others: [], othersMore: 0, nextFree: null };
+  const c = ctx && typeof ctx === "object" ? ctx : null;
+  if (!c) return none;
+  const accounts = c.accounts && typeof c.accounts === "object" ? c.accounts : null;
+  if (!accounts) return none;
+  const labels = c.labels;
+  const activeOrg = typeof c.lastActiveOrg === "string" && c.lastActiveOrg ? c.lastActiveOrg : null;
+
+  // orderForSwitch pins the active record at index 0; drop it here AND drop
+  // whatever record the card is already showing. Those are usually the same
+  // object, but not always: pickRecord() falls back to the freshest record
+  // when no active org is known yet, and listing the account already on
+  // screen a second time under "other accounts" would be a plain lie.
+  const activeRec = activeOrg ? accounts[activeOrg] : null;
+  const rest = orderForSwitch(accounts, activeOrg, now)
+    .filter((r) => r !== record && r !== activeRec);
+
+  const shown = rest.slice(0, OTHERS_MAX);
+  const next = nextFreeAt(accounts, activeOrg, now);
+  return {
+    others: shown.map((r) => otherRow(r, labels, now)),
+    othersMore: rest.length - shown.length,
+    nextFree: next
+      ? `next free: ${accountLabel(next.record, labels)} in ${formatCountdown(next.at, now)}`
+      : null,
+  };
+}
+
+/** "measured 6h ago", or an honest admission when the snapshot carries no
+ * timestamp at all. Never the bare word "unknown", which in this position
+ * reads as "the percentage is unknown" rather than "its age is". */
+function measuredPart(asOf, now) {
+  return typeof asOf === "number" && Number.isFinite(asOf)
+    ? `measured ${stalenessLabel(asOf, now)}`
+    : "never measured";
+}
+
+/**
+ * One other-account row.
+ *
+ * 🔴 A `free` ROW IS AN INFERENCE, AND IT SAYS SO. The state is derived from a
+ * reset time that has passed since the last snapshot, NOT from a fresh
+ * reading -- a stored account cannot be re-measured without logging into it.
+ * So the row shows the verdict, when the reset landed, AND the last measured
+ * percentage with its age: "AVAILABLE — reset 2h ago (was 92%, measured 6h
+ * ago)". It must never be reducible to a bare "0%", which would be a
+ * fabricated measurement.
+ *
+ * 🔴 STALENESS DOES NOT GREY A `free` ROW. The existing 6h staleness rule
+ * greys everything, which washes out precisely the most actionable row on the
+ * card -- and it does so BY CONSTRUCTION, since the account worth switching to
+ * is the one measured longest ago. The availability verdict outranks
+ * staleness for styling; `measured` and `unknown` rows still grey out, because
+ * for those the stored percentage IS the claim being made.
+ */
+function otherRow(rec, labels, now) {
+  const v = availability(rec, now);
+  const name = accountLabel(rec, labels);
+  const key = rec && typeof rec.orgUuid === "string" && rec.orgUuid ? rec.orgUuid : name;
+
+  if (v.state === FREE) {
+    return {
+      key,
+      name,
+      state: FREE,
+      value: "AVAILABLE",
+      meta: `reset ${stalenessLabel(v.resetsAt, now)}`
+        + ` (was ${formatPct(v.sessionPct)}, ${measuredPart(v.asOf, now)})`,
+      bar: clampPct(v.sessionPct),
+      tone: "ok",
+      stale: false,
+    };
+  }
+
+  const stale = isStale(rec && rec.asOf, now)
+    || !(rec && rec.staleSince === null);
+  if (v.state === MEASURED) {
+    return {
+      key,
+      name,
+      state: MEASURED,
+      value: formatPct(v.sessionPct),
+      meta: `resets ${formatCountdown(v.resetsAt, now)} · ${measuredPart(v.asOf, now)}`,
+      bar: clampPct(v.sessionPct),
+      tone: stale ? "stale" : (percentTone(v.sessionPct, null) || "unknown"),
+      stale,
+    };
+  }
+  return {
+    key,
+    name,
+    state: "unknown",
+    value: formatPct(v.sessionPct),
+    meta: `reset time unknown · ${measuredPart(v.asOf, now)}`,
+    bar: clampPct(v.sessionPct),
+    tone: stale ? "stale" : "unknown",
+    stale,
   };
 }
 
