@@ -129,10 +129,58 @@ def home(tmp_path, monkeypatch):
     return h
 
 
+# Docs the `repo` fixture puts ON DISK. Arming requires the FILE, not merely its
+# directory, so every doc an arming case names has to be really there.
+#
+# 🔴 `handoff-y.md` IS HERE FOR A REASON AND DELETING IT SILENTLY GUTS A TEST.
+# `test_a_path_after_a_hash_is_a_comment_not_a_read` discriminates by RESULT: it names
+# two docs, one after a `#`, so a mutant that skips comment-stripping returns TWO.
+# If `handoff-y.md` were absent from disk the existence gate would reject it anyway and
+# that mutant would return one — the test would pass with the comment strip deleted,
+# i.e. go green while testing nothing. The fixture must make the commented doc REAL so
+# that the comment strip is the only thing standing between it and the result.
+REAL_DOCS = (
+    "handoff-skill-chain-usage-audit.md",   # DOC — the ordinary case
+    "SESSION-HANDOFF.md",                   # the second HANDOFF_BASENAME_RX arm
+    "handoff-x.md",
+    "handoff-y.md",                         # 🔴 see above — a mutation-visibility fixture
+    "notes.md",                             # a non-handoff `.md`, for the non-match table
+)
+
+
 @pytest.fixture()
 def repo(tmp_path):
-    """A repo with a real `claudedocs/` dir. The DIRECTORY is what arming requires."""
+    """A repo with a real `claudedocs/` dir holding REAL docs.
+
+    🔴 THE FILES, NOT JUST THE DIRECTORY — this fixture created the directory alone
+    until 2026-09-19, which matched a `_resolve` that required only the directory. Both
+    moved together: a doc-shaped string that names nothing must no longer arm, so a
+    fixture that expects arming has to name a doc that is actually there.
+    """
     d = tmp_path / "repo" / "claudedocs"
+    d.mkdir(parents=True)
+    for name in REAL_DOCS:
+        p = d / name
+        p.write_text("# fixture handoff\n")
+        # 🔴 STAMPED BEFORE THE READ, AND THIS IS NOT COSMETIC. `doc_state`'s third
+        # satisfaction route is the doc's OWN mtime (`getmtime(doc) >= read_at`), so a
+        # doc written at test time is a doc written AFTER the read — every Stop-gate
+        # case would silently satisfy itself and go green for the wrong reason. Six
+        # tests went `block` -> `silent` on exactly that before this line existed.
+        # `BEFORE_READ_EPOCH` is an hour before `READ_TS`; a test that wants the mtime
+        # route sets its own, visibly.
+        os.utime(p, (BEFORE_READ_EPOCH, BEFORE_READ_EPOCH))
+    return d.parent
+
+
+@pytest.fixture()
+def empty_repo(tmp_path):
+    """A repo with a real, EMPTY `claudedocs/` — the false-positive fixture.
+
+    🔴 THIS IS THE SHAPE THE EXISTENCE GATE EXISTS FOR, and it is the ordinary state of
+    any session writing tests about handoff docs: the directory is right there, and the
+    doc named in the command is not."""
+    d = tmp_path / "bare" / "claudedocs"
     d.mkdir(parents=True)
     return d.parent
 
@@ -264,6 +312,94 @@ def test_a_path_after_a_hash_is_a_comment_not_a_read(home, repo):
     cmd = "cat claudedocs/handoff-x.md  # and see claudedocs/handoff-y.md"
     got = guard.handoff_read_docs(bash(cmd, cwd=str(repo)))
     assert got == [str(repo / "claudedocs" / "handoff-x.md")]
+
+
+def test_a_doc_shaped_STRING_that_names_no_real_doc_does_NOT_arm(home, empty_repo):
+    """🔴 THE NEGATIVE CONTROL FOR THE EXISTENCE GATE — the false positive itself.
+
+    MEASURED 2026-09-18: the Stop guard fired TWICE in one session demanding a handoff
+    for `handoff-x-y.md` and then `handoff-same.md`. Neither has ever existed in any
+    repo — both are synthetic strings in `scripts/tests/test_find_session_arc.py`,
+    which is a test ABOUT handoff docs. `claudedocs/` was real (the session was
+    standing in this repo), the doc was not, and the old `_resolve` asked only about
+    the directory.
+
+    🔴 THE CONTROL IS LOAD-BEARING BECAUSE THE GUARD'S NORMAL STATE IS SILENCE. Without
+    a case that must NOT arm, "the fix works" is unfalsifiable — deleting the arming
+    code entirely would pass any test that only checks for absence elsewhere. The
+    positive half is asserted in the SAME breath below: the identical command naming a
+    doc that IS on disk still arms, so this asserts the existence gate rather than a
+    guard that stopped working.
+    """
+    for name in ("handoff-x-y.md", "handoff-same.md"):
+        cmd = 'grep -rn "claudedocs/%s" scripts/tests/' % name
+        assert guard.handoff_read_docs(bash(cmd, cwd=str(empty_repo))) == []
+
+
+def test_the_SAME_command_naming_a_doc_that_IS_there_still_arms(home, repo):
+    """The positive half of the control above — same command shape, real doc. Without
+    this, the case above is also satisfied by a guard that arms on nothing at all.
+
+    ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE — say which, because they are
+    different claims. MEASURED: this passes at `cee56910` (pre-change) too. It pins
+    behaviour the fix must not break; it is not evidence the fix does anything."""
+    cmd = 'grep -rn "claudedocs/%s" scripts/tests/' % DOC
+    assert guard.handoff_read_docs(bash(cmd, cwd=str(repo))) == [
+        str(repo / "claudedocs" / DOC)]
+
+
+def test_a_doc_read_OFF_A_REF_still_arms_though_it_is_not_on_disk(home, empty_repo):
+    """🔴 THE ONE EXEMPTION FROM THE EXISTENCE GATE, AND THE CASE IT PROTECTS.
+
+    A handoff that lives only on an unmerged branch is read as
+    `git -C <repo> show <ref>:claudedocs/<doc>` — this repo's CLAUDE.md prescribes
+    exactly that — and is legitimately ABSENT from the working tree. The existence gate
+    must not make that read silent: `/handoff` will write into that `claudedocs/`, and
+    the guard can measure it. The fixture repo's `claudedocs/` is EMPTY on purpose, so
+    this passes only via the ref exemption and not by the file happening to be there.
+
+    ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE — it passes at `cee56910` too, where
+    the directory-only `_resolve` admitted it for a different reason. What proves it is
+    REACHABLE at HEAD is the mutation: forcing `_read_off_a_ref` to return False turns
+    exactly this test red and nothing else (M1, measured), so at HEAD it is the ref
+    exemption and only the ref exemption keeping this case alive.
+    """
+    cmd = ("git -C %s show origin/zach/topic:claudedocs/%s" % (empty_repo, DOC))
+    assert guard.handoff_read_docs(bash(cmd, cwd="/nowhere/else")) == [
+        str(empty_repo / "claudedocs" / DOC)]
+
+
+@pytest.mark.parametrize("cmd", [
+    # No ref prefix — an ordinary read of an absent doc. The gate's whole point.
+    "cat claudedocs/%s" % DOC,
+    # A `:` that is not a ref prefix for THIS token: the path is a fresh argument.
+    "git show HEAD:some/other.txt claudedocs/%s" % DOC,
+    # 🔴 THE SEGMENT BOUNDARY. The `git` belongs to a DIFFERENT command, so the
+    # exemption must not be borrowed across the `;`.
+    "git show HEAD; cat host:claudedocs/%s" % DOC,
+    # A ref prefix with no git object-read verb anywhere.
+    "scp host:claudedocs/%s ." % DOC,
+])
+def test_the_ref_exemption_does_NOT_widen_into_a_hole(home, empty_repo, cmd):
+    """🔴 BOTH HALVES OF THE EXEMPTION ARE REQUIRED, one shape per case. An exemption
+    that admits any of these has re-opened the directory-only behaviour under a new
+    name — which is how a fix becomes a rename."""
+    assert guard.handoff_read_docs(bash(cmd, cwd=str(empty_repo))) == []
+
+
+def test_a_handoff_shaped_Read_OUTSIDE_claudedocs_does_NOT_arm(home, tmp_path):
+    """🔴 THE ARMS WERE ASYMMETRIC AND THIS IS THE SIDE THAT WAS WRONG. The Bash arm's
+    own non-match table already declares `cat docs/handoff-format.md` a non-read
+    ("handoff-shaped, wrong directory"), and `is_handoff_write` requires `claudedocs/`
+    before a Write can SATISFY. Only the Read arm took `file_path` on basename alone —
+    so a document ABOUT the handoff format armed a guard that no write could ever
+    satisfy. The file is REAL here, so this pins the `claudedocs/` requirement and not
+    the existence gate."""
+    d = tmp_path / "repo" / "docs"
+    d.mkdir(parents=True)
+    doc = d / "handoff-format.md"
+    doc.write_text("# about the format\n")
+    assert guard.handoff_read_docs(read_tool(str(doc))) == []
 
 
 def test_a_path_whose_directory_does_not_exist_does_NOT_arm(home, tmp_path):
@@ -680,6 +816,13 @@ def test_a_subagent_call_skips_the_arming_regex_entirely(home, monkeypatch):
     seen = []
 
     class _Spy:
+        # `finditer` is what the arming path calls (the ref exemption needs each
+        # match's POSITION); `findall` is kept so the spy still records a caller that
+        # reverts to it rather than going quietly blind.
+        def finditer(self, s):
+            seen.append(s)
+            return iter(())
+
         def findall(self, s):
             seen.append(s)
             return []
