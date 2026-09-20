@@ -319,16 +319,25 @@ DASH_C_RX = re.compile(r"(?:^|\s)-C\s*(\S+)")
 # 27 of them `$VAR`/`${VAR}`. 🔴 AND `claude/RULES.md` PRESCRIBES THE BRACED SPELLING:
 # zsh eats `$B:path` as a history modifier, so the rules mandate `${B}:path` — the guard
 # was blind to precisely the spelling this repo requires. An enumerated set encodes the
-# examples its author thought of; `[^\s:]+` encodes the shell-word boundary instead.
-# ⚠ THAT IS NOT THE SAME AS "THE BOUNDARY", and this note claimed it was: it read that
-# "a ref cannot contain the `:` that terminates it". True of ref NAMES
+# examples its author thought of; this encodes the shell-word boundary instead.
+#
+# 🔴 THE TOKEN CLASS EXCLUDES THE DELIMITERS `"'=(` ON PURPOSE, AND "SIMPLIFYING" IT
+# BACK TO `[^\s:]+` REINTRODUCES A QUADRATIC. Those four characters are in the LEADING
+# class as well, so `[^\s:]+` overlaps it and the two runs can cover the same span:
+# on a head where the search GLOBALLY FAILS the matcher then retries every start.
+# MEASURED on a 32 KB head: `[^\s:]+` 752 ms, this class 0.35 ms, the original
+# enumerated class 0.35 ms — i.e. this is as fast as the pre-#1799 spelling while
+# accepting every computed ref the enumerated one rejected. Verified over the corpus:
+# 2 verdict differences in 21,252 real match sites, and both are this session's own
+# probe commands. It is why `GIT_VERB_SCAN_CAP` could be deleted; do not undo it.
+#
+# ⚠ THIS IS A SHELL-WORD BOUNDARY, NOT "THE" BOUNDARY, and an earlier note overstated
+# it as "a ref cannot contain the `:` that terminates it". True of ref NAMES
 # (`git check-ref-format` forbids `:`); FALSE of the revision EXPRESSIONS `git show`
 # accepts — `:0:claudedocs/…` (index stage) and `:claudedocs/…` (stage shorthand) both
-# carry a `:` inside the token and so lose the exemption here. Pre-existing (the
-# enumerated class failed them too) and fail-SAFE, since a lost exemption only makes
-# the guard quieter. Recorded rather than fixed: arguing a boundary while overstating
-# it is what this very paragraph criticises.
-REF_PREFIX_RX = re.compile(r"(?:^|[\s\"'=(])([^\s:]+):\Z")
+# carry a `:` inside the token and so lose the exemption. Pre-existing and fail-SAFE,
+# since a lost exemption only makes the guard quieter.
+REF_PREFIX_RX = re.compile(r"(?:^|[\s\"'=(])([^\s:\"'=(]+):\Z")
 
 # …and a git object-read verb in the SAME command segment.
 #
@@ -357,40 +366,23 @@ REF_PREFIX_RX = re.compile(r"(?:^|[\s\"'=(])([^\s:]+):\Z")
 # liability, not coverage. Do not re-add it without a case that reproduces.
 SEGMENT_SPLIT_RX = re.compile(r"[;&|\n]")
 
-# 🔴 THE SCAN IS LENGTH-CAPPED, AND THE CAP IS THE WHOLE FIX — PINNED BY
-# `test_the_scan_cap_BOUNDS_the_search` (both directions; see its docstring for why
-# that test had to exist).
-# `\bgit\b.*?\b(?:show|cat-file)\b` anchors at every `git` and walks forward from each,
-# i.e. O(k·n). MEASURED on 32/64/128 KB of `"git "` with no verb: ~0.9 s / 3.5 s /
-# 14.2 s uncapped, ~15 ms capped. This hook runs after EVERY tool call and can block a
-# Stop, so an unbounded scan is a turn-level hang.
-# ⚠ "~15 ms" IS PER CALL, NOT PER COMMAND, and the distinction matters on a hook that
-# can block a Stop: `_read_off_a_ref` runs once per `finditer` match, so a command with
-# many matches stays LINEAR in its length (~10 ms/KB measured). What the cap buys is
-# the complexity CLASS — quadratic to linear, 89 s to 2.7 s on a 264 KB command — not
-# a constant per-command cost.
+# …and a git object-read verb AFTER a `git` word in the same segment.
 #
-# 🔴 THE NEGATED CLASS `[^;&|\n]*?` WAS ALSO RE-ADDED HERE AND IS ALSO DELETED. It was
-# justified as a COST measure and that was FALSE IN BOTH HALVES: `seg` is a segment
-# `SEGMENT_SPLIT_RX` already split, so by construction it contains none of those
-# characters and the class is EXACTLY equivalent to `.` there — and measured, it was
-# consistently the SLOWER of the two once capped (30.7 vs 17.6 ms at 32 KB). The
-# comment above `SEGMENT_SPLIT_RX` had already recorded that the class does not scope a
-# match to a segment; re-adding it on a cost rationale contradicted the same file.
+# 🔴 TWO LINEAR SCANS, NOT ONE BACKTRACKING REGEX — AND THIS IS WHAT DELETED THE CAP.
+# The spelling was `\bgit\b.*?\b(?:show|cat-file)\b`, which anchors at EVERY `git` and
+# walks forward from each: O(k·n), measured at ~1.1 s on 32 KB of `"git "` with no verb
+# and ~16.9 s on 128 KB. A 4 KiB `GIT_VERB_SCAN_CAP` was added to bound it, then a test
+# was added to pin the cap, and settling that test's mutation verdict became a ranked
+# work item. All three are gone: find the first `git`, then look for a verb after it.
+# Same meaning, 0.68 ms at 128 KB.
 #
-# ⚠ THE CAP'S OWN COST, NAMED: >4 KiB between the git verb and the path loses the
-# exemption, and fail-SAFE when it does — a lost exemption makes the guard SILENT,
-# never blocking (proved at the consumer: `docs` only ever feeds `record_read`).
-# Never reached in practice. 🔴 TWO NUMBERS, BECAUSE ONE OF THEM WAS QUOTED WITHOUT ITS
-# QUALIFIER AND WENT FALSE: the largest segment EVER SCANNED — i.e. at sites where the
-# ref-prefix half passed and this regex actually ran — is 296 B (n=4,449); the largest
-# across ALL match sites is 1,681 B. An earlier wording dropped "ever scanned" and so
-# stated a precise, reproducible number that was wrong by 5.7x. Both are far under the
-# cap, so the conclusion holds either way — which is exactly why the slip survived.
-# There is no adversary here; the operator writes his own commands. This bounds a
-# complexity regression, it does not defend against an attack.
-GIT_OBJECT_READ_RX = re.compile(r"\bgit\b.*?\b(?:show|cat-file)\b")
-GIT_VERB_SCAN_CAP = 4096
+# 🔴 EQUIVALENCE WAS MEASURED, NOT ASSUMED — including the cases that distinguish
+# ORDER, which is the whole content of the original `.*?`: `show git` stays False,
+# `showcase git show x` stays True, `git a cat-file` stays True. 0 disagreements across
+# 14 shapes. If you change either pattern, re-run that comparison; a `.*?` between them
+# would restore the quadratic.
+GIT_WORD_RX = re.compile(r"\bgit\b")
+GIT_VERB_RX = re.compile(r"\b(?:show|cat-file)\b")
 
 # Tool calls that ARE work, by name. Also the tools whose `file_path` can SATISFY,
 # when it names a handoff doc.
@@ -847,36 +839,14 @@ def _read_off_a_ref(cmd, start):
     a hook that fires after EVERY tool call of every session, to reject a shape nobody
     writes by accident.
     """
-    # 🔴 THE CAP IS APPLIED TO THE HEAD, NOT TO THE SEGMENT, AND THAT IS A FIX.
-    # It bounded `seg` only, leaving `REF_PREFIX_RX.search(head)` running on the FULL
-    # head — real heads reach tens of KB here. The widened `[^\s:]+` is super-linear on
-    # a head where the search GLOBALLY FAILS, because `"`/`'`/`=`/`(` are in BOTH its
-    # leading class and its token class, so the runs overlap. Round 1 capped one regex
-    # and moved the cost onto the other; capping the head covers both.
-    #
-    # 🔴 THE SHAPE IS PART OF THE MEASUREMENT AND WAS MISSING, WHICH MADE THE NUMBER
-    # LOOK WRONG. Three ordinary "quote-dense 32 KB head" shapes show the NEW class
-    # ~4x FASTER than the old — the opposite sign. The cost appears only on a
-    # global-failure shape: a run of `"`, then a `:` blocker, then a blocker-free tail
-    # containing none of `"'=(`. There it is ~2.7 s at 32 KB and ~10 s at 64 KB against
-    # ~0.4/0.8 ms for the old enumerated class.
-    # ⚠ THE 2,312 ms FIGURE THIS COMMENT ONCE CARRIED WAS INHERITED, NOT REPRODUCED —
-    # asserted under the word MEASURED in the very commit whose own message disclaimed
-    # it. What is stated above is the CLASS (quadratic, on a named shape), re-derived;
-    # treat the milliseconds as load-dependent, not as a constant.
-    #
-    # ⚠ TRUNCATION'S DIRECTION, STATED CORRECTLY: it can let `(?:^|…)` match mid-token
-    # and so ADMIT a token the untruncated head rejects. That is the ARMING direction —
-    # the same false-positive class this whole change exists to remove — NOT a
-    # "harmless" one, which is what this note used to call it. Measured reachability:
-    # 114 real match sites have a head past the cap and ZERO of them admit where the
-    # uncapped head rejects; a synthetic case confirms the counter can see one. So it
-    # is bounded and currently unreached, which is a different claim from harmless.
-    head = cmd[:start][-GIT_VERB_SCAN_CAP:]
+    head = cmd[:start]
     if not head.endswith(":") or not REF_PREFIX_RX.search(head):
         return False
     # The command segment this token belongs to — everything since the last separator.
-    return bool(GIT_OBJECT_READ_RX.search(SEGMENT_SPLIT_RX.split(head)[-1]))
+    seg = SEGMENT_SPLIT_RX.split(head)[-1]
+    # A `git` word, then a read verb AFTER it. Two linear scans; see the constants.
+    g = GIT_WORD_RX.search(seg)
+    return bool(g) and bool(GIT_VERB_RX.search(seg, g.end()))
 
 
 def _resolve(raw, bases, off_a_ref=False):
