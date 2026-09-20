@@ -16,6 +16,13 @@
 
 import { formatCountdown, isStale, stalenessLabel } from "./timefmt.js";
 import { creditsLine, formatPct } from "./format.js";
+import { CRIT_PCT, WARN_PCT, toneForRecord } from "./severity.js";
+
+// Re-exported so the widget's own callers and tests keep addressing them here
+// while there is ONE implementation, in lib/severity.js, shared with the
+// badge. They were local to this file until the round-0 audit showed the badge
+// and the widget were deciding severity by two different rules.
+export { CRIT_PCT, WARN_PCT };
 
 /** The host element's id. Also the handle content_widget.js uses to detect an
  * existing mount, so a double-injected content script cannot stack widgets. */
@@ -23,13 +30,6 @@ export const WIDGET_HOST_ID = "claude-usage-tracker-widget";
 
 /** chrome.storage.local key holding the collapsed/expanded preference. */
 export const COLLAPSE_KEY = "widgetCollapsed";
-
-/** Percent at which the widget turns amber, then red. These mirror the
- * service worker's ALERT_THRESHOLD_PCT (80) for the warn step so the widget
- * and the toast agree about what "high" means; 95 is the widget-only "almost
- * out" step, which has no toast because the 80 crossing already fired one. */
-export const WARN_PCT = 80;
-export const CRIT_PCT = 95;
 
 /** 0..100, or null when unknown. Values outside the range are clamped rather
  * than dropped: a bar cannot render -3% or 140%, but the LABEL still shows the
@@ -59,22 +59,14 @@ export function pickRecord(accounts, lastActiveOrg) {
 }
 
 /**
- * The widget's colour band. Stale wins over everything: a grey widget showing
- * an old number is honest, whereas a green one showing an old number is not.
- * Otherwise the HIGHER of session/weekly decides -- the binding constraint is
- * whichever runs out first, and showing "ok" while the weekly window is at 97%
- * would be the widget lying by omission.
+ * The widget's colour band -- delegated to lib/severity.js, which the toolbar
+ * badge reads too, so the two surfaces cannot disagree about one record. This
+ * wrapper exists only to supply `isStale` (timefmt's, so the staleness line is
+ * also decided once) and to keep the widget's own callers addressing a
+ * widget-shaped name.
  */
 export function toneFor(record, now) {
-  if (!record || typeof record !== "object") return "stale";
-  if (isStale(record.asOf, now) || record.staleSince !== null) return "stale";
-  const s = clampPct(record.session && record.session.utilization);
-  const w = clampPct(record.weekly && record.weekly.utilization);
-  const worst = Math.max(s === null ? -1 : s, w === null ? -1 : w);
-  if (worst < 0) return "unknown";
-  if (worst >= CRIT_PCT) return "crit";
-  if (worst >= WARN_PCT) return "warn";
-  return "ok";
+  return toneForRecord(record, now, isStale);
 }
 
 /**

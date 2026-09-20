@@ -1,9 +1,21 @@
 <!-- icon.svg is the SOURCE OF TRUTH for the toolbar/notification icons.
-     The PNGs beside it are generated: scripts/claude-usage/make-icons.sh.
-     Edit this, re-run that, `git add` all four files (the flake only ships
-     TRACKED files; an untracked icon is silently omitted, no error).
-     NB: a literal double-hyphen is illegal inside an XML comment and makes
-     librsvg refuse the whole file, so this block uses none. -->
+     The PNGs beside it are generated. Edit this, re-render, then `git add`
+     all four files: the flake ships only TRACKED files, so an untracked PNG
+     is silently omitted from the deployed tree, no error anywhere.
+
+     THE REGENERATION COMMAND LIVES IN scripts/claude-usage/README.md, not
+     here, and that is forced rather than chosen: the command contains a
+     literal double hyphen (the nix-shell run flag), which is ILLEGAL inside
+     an XML comment and makes librsvg refuse this whole file. Measured twice,
+     both times while writing this very comment. So a README carries it, the
+     way scripts/browser-bridge/README.md carries the same command for the
+     same job.
+
+     A round-0 audit cut the 59-line generator script that used to stand
+     beside this file: nothing invoked it, no gate checked its output, and the
+     silent-failure mode its verify step defended against had been introduced
+     by that generator's own first draft. A hand-run rsvg-convert fails
+     loudly to the terminal. -->
 <!--
 
      Design constraints, in order:

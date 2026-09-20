@@ -48,10 +48,19 @@ test("pickRecord is total over garbage and empty input", () => {
 
 // --- the colour band ------------------------------------------------------------- //
 
+// 🔴 These two set `severity = null` on purpose, to isolate the PERCENT half
+// of the rule. They did not, at first, and both failed the moment toneFor
+// started consulting the API severity as well: fullUsage() carries a
+// `weekly_all` limit row with severity "medium", so the fixture's API signal
+// says "warn" while its percentages say "ok". That disagreement is exactly
+// what the consolidation exists to surface -- it was previously invisible
+// because the widget read one side and the badge read the other. The
+// interaction between the two halves is pinned separately below.
 test("toneFor: the WORSE of session and weekly decides the band", () => {
   // The binding constraint is whichever window runs out first. A green widget
   // while the weekly window sits at 97% would be a lie by omission.
   const r = rec(ORG_A, NAME_A);
+  r.severity = null;
   r.session.utilization = 5;
   r.weekly.utilization = 97;
   assert.equal(W.toneFor(r, NOW), "crit");
@@ -63,6 +72,7 @@ test("toneFor: the WORSE of session and weekly decides the band", () => {
 
 test("toneFor: thresholds are inclusive at exactly 80 and 95", () => {
   const r = rec(ORG_A, NAME_A);
+  r.severity = null;
   r.weekly.utilization = null;
   r.session.utilization = 79.4;
   assert.equal(W.toneFor(r, NOW), "ok", "79.4 is below the warn line");
@@ -72,6 +82,25 @@ test("toneFor: thresholds are inclusive at exactly 80 and 95", () => {
   assert.equal(W.toneFor(r, NOW), "warn");
   r.session.utilization = W.CRIT_PCT;
   assert.equal(W.toneFor(r, NOW), "crit");
+});
+
+test("toneFor: the API severity and the percent band, worst of the two", () => {
+  const r = rec(ORG_A, NAME_A);
+  r.session.utilization = 5;
+  r.weekly.utilization = 5;
+
+  r.severity = "critical";
+  assert.equal(W.toneFor(r, NOW), "crit", "a loud API severity escalates a calm percentage");
+  r.severity = "low";
+  assert.equal(W.toneFor(r, NOW), "ok");
+
+  r.session.utilization = 99;
+  r.weekly.utilization = 99;
+  assert.equal(W.toneFor(r, NOW), "crit",
+    "a 'low' severity must NOT calm a 99% percentage");
+  r.severity = null;
+  assert.equal(W.toneFor(r, NOW), "crit",
+    "and neither may an ABSENT one -- the badge's old green-at-99% hole");
 });
 
 test("toneFor: stale outranks every percentage", () => {
