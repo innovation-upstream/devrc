@@ -24,7 +24,8 @@ dialog that is not an `AskUserQuestion`.
 - **closing-condition:** `check` — tap a non-first option on a clawgate card against a
   **real blocking `AskUserQuestion`** and observe Claude Code record *that* option
   (`● User answered Claude's questions:` / `⎿ · <q> → <chosen label>`), with the card
-  reporting `delivered`. **Not yet met** — see Open investigations.
+  reporting `delivered`. 🔴 **MET 2026-09-20 12:05 CDT** — a real trusted click on the
+  **second** option of a live card delivered that option; evidence in State now.
 
 ## State now
 - Branch: devrc `main` at `62d83a08`, clean but for two untracked `claudedocs/scope-chief-*.md` (they are in PR **#1783**, open).
@@ -35,18 +36,33 @@ dialog that is not an `AskUserQuestion`.
   - workbench `2388761 → 1420991`, laptop `2222420 → 2227340`, both `active`/`running`, `NRestarts=0`.
 - **Audit ladder on #1795: 5 rounds**, ending `no high-severity findings`. Payload trajectory **171 → 218 → 107 → 22 → 0** (the last verified by `ast`: 753 statements / 45 docstrings / **708 executable, identical both sides**).
 - CI at the merged head: `nodetests` 1536/1536, `gotests` 386/386, `cairn-client-runs` pass; **`pytests` red on one pre-existing test** (below).
+- 🔴 **THE CLOSING CONDITION, MEASURED — 2026-09-20 12:05 CDT.** Six links, each observed, none inferred:
+  1. **A real blocking `AskUserQuestion`** in scratch pane `%205` (120×40, inside the measured-correct 79+ cols / 16–40 rows region): footer `Enter to select · ↑/↓ to navigate · Esc to cancel`, cursor on `❯ 1. Apricot`, `2. Blackcurrant` unselected.
+  2. **A real card**: `/api/attention` entry **17800**, `kind=question`, `tmuxPane=%205`, `host=workbench`, `options=[Apricot, Blackcurrant]`.
+  3. **A real tap on the NON-FIRST option** — trusted CDP mouse click (`trusted:true`, `via:mouse`) on `#reply-attention-17800 [data-reply-option-label="Blackcurrant"]`, `data-reply-option=1`. The card's own `hx-confirm` fired and read **`Send “Blackcurrant” to workbench %205 and press Enter?`**, and the button's `hx-vals` carried `{"text":"Blackcurrant","idempotencyKey":"ui-reply:17800:workbench:%205:2595882f54e531dd"}` — the LABEL, verbatim, never an index.
+  4. **The browser tier, not a machine shortcut**: `POST /ui/term/send-keys` → **200**; queue row `tier=browser actor=browser-session entry=17800 text="Blackcurrant"`, and the card reported **`state=delivered`**.
+  5. **The deployed agent did it**: `claimedBy=workbench:1420991` — the PID verified at session start as the unit's `MainPID`, cgroup leaf `tmux-reply-agent.service`, script sha `ac8e88ae960b18c5` == `origin/main`'s.
+  6. **The right answer landed, by the right mechanism**: the agent's own journal reads `delivered … (pane %205): menu row 2 was sent and the pane records this option as the answer`, and the pane reads
+     `● User answered Claude's questions:` / `⎿ · Which fruit should the probe record? → Blackcurrant`.
+  ⚠ **Scope of this claim, stated rather than implied:** ONE ask, ONE host (workbench), a single-question non-multiSelect modal at one size, cursor on row 1 and the tap on row 2. It is the discriminating case — the defect delivered row 1 for every tap — but it is one point, not a range. The laptop agent was never exercised.
 
 ## Open investigations — live diagnosis state
 
-### The original symptom has never been reproduced-then-confirmed-gone against a live ask
-as-of: 2026-09-20
+### CLOSED — the symptom was reproduced-then-confirmed-gone against a live ask
+as-of: 2026-09-20 (closed; kept for the evidence, not as open work)
 - **Symptom + exact repro:** before the fix, tapping *any* option on a clawgate attention card delivered **option 1** while the card reported `Delivered`. Repro then: raise a real `AskUserQuestion`, tap a non-first option on the card, read what Claude Code records.
-- **Observed (with values):** the defect was reproduced *in process* — `tmux send-keys -t %176 -l -- 'SQLite'` then `send-keys Enter` → `⎿ · Which database should the queue use? → Postgres`. The **fix** is verified at classification level only: a paired 57-pane sweep classified by both revisions gave `text 53 → 53`, **drivable menu 0 → 1**, refused `4 → 3`, every after-verdict structurally checked; 19 of 22 new test ids red at base and all green at HEAD; 27-mutant and 19-mutant sweeps with sentinels and controls.
+- **Observed (with values):** the defect was reproduced *in process* — `tmux send-keys -t %176 -l -- 'SQLite'` then `send-keys Enter` → `⎿ · Which database should the queue use? → Postgres`. The fix was then verified at classification level — a paired 57-pane sweep gave `text 53 → 53`, **drivable menu 0 → 1**, refused `4 → 3`; 19 of 22 new test ids red at base and green at HEAD; 27- and 19-mutant sweeps with sentinels and controls.
+- 🔴 **AND NOW END-TO-END, WHICH IS WHAT WAS MISSING.** See "the closing condition, measured" in State now for the six-link chain. The recorded answer was **Blackcurrant** — row **2**, the option tapped — not `Apricot`, the row the cursor sat on and the row the defect delivered every time.
 - **Ruled out:** that the classifier's `0` drivable menus meant no menus were up — it meant `MENU_ROW_GAP = 4` could not span a real render's described options (measured inter-row spans 7/4/5/2, 5/3/3/4/2, 6/5/3/2 on three live modals). `via: measurement`
 - **Ruled out:** that the ordinary text-prompt path was also broken — pinned across four pane states (shell prompt, Claude text prompt, transcript, blank), green at base and HEAD. `via: command`
-- **Leading hypothesis:** the fix is correct; what is missing is the end-to-end observation. Nobody has tapped an option on a card and watched the right answer land.
-- **Next probe:** raise a two-option ask in a scratch tmux session, find its pane in clawgate, tap the **second** option on the card, then
-  `tmux capture-pane -p -t <pane> | grep -A2 'User answered'` — the recorded label must be the one tapped.
+
+### A browser-bridge tab's CREDENTIALED requests stall a few seconds after load
+as-of: 2026-09-20
+- **Symptom + exact repro:** open a bridge-owned tab on `http://192.168.50.250:30302/attention`, let it settle ~4s, then issue any same-origin request carrying the session cookie. It never completes — and the server never logs it, so it is not reaching clawgate.
+- **Observed (with values):** on one wedged tab, `fetch` with `credentials:"omit"` → **401 in ms**; `fetch` with `credentials:"same-origin"` to the same route and to `GET /ui/notifications` → both stuck at `state:"start"` past 6s. The tab's OWN htmx polling also froze: `/ui/requests` resource-timing entries stayed at **1** across a 6s window. Fired within ~1s of `open`, the identical credentialed GET returned **200**. `nextHopProtocol` is `http/1.1` and the page holds `/events` SSE streams. The successful tap was made with `open --wake=300` followed immediately by the click.
+- 🔴 **Ruled out:** that this is the reply route, htmx, the trusted click, or `hx-confirm` — a bare `fetch` stalls identically, and an uncredentialed POST to the same route answers instantly. `via: measurement`
+- **NOT ruled out, and the reason this is not filed as a clawgate defect:** Zach's own foreground tab on the same origin polled normally throughout, logged server-side the whole time. So the stall may be an artifact of a hidden/CDP-driven tab rather than anything a phone would hit. **Two mechanisms, one observable** — do not pick between them from the stall alone.
+- **Next probe:** count the tab's live SSE streams against Chrome's 6-per-host HTTP/1.1 budget (`/events` over `sse.js`, i.e. XHR-backed), and re-run the same credentialed GET in a FOREGROUND tab to see whether visibility is the variable. If a real phone tab can wedge this way, a tap silently does nothing — which would be worth a card of its own.
 
 ### `main` is red on a test nothing in this arc can reach
 as-of: 2026-09-20
@@ -57,8 +73,7 @@ as-of: 2026-09-20
 - **Next probe:** `nix build .#checks.x86_64-linux.pytests 2>&1 | grep -A20 test_engine_is_the_version` — read the assertion's expected-vs-actual, then decide whether the pin or the environment moved.
 
 ## Next steps (ranked)
-1. **Close the closing condition — tap a non-first option against a real blocking ask and read the recorded label.** Repo `devrc`, no code change; the probe is in Open investigations. Until this runs, the arc's central claim is verified by tests and classification sweeps but not by the symptom.
-   forcing: gate — the verification-honesty gate in `claude/RULES.md`: the exact failing path has not been exercised since the fix.
+1. ~~**Close the closing condition.**~~ ✅ **DONE 2026-09-20 12:05 CDT** — a real tap on the second option of card 17800 delivered `Blackcurrant`; the six-link chain is in State now. **The arc's central claim is no longer inference.** Nothing remains on it except the scope caveat recorded there (one ask, one host, one modal shape).
 2. **Cut a clawgate release so #855's scroll fix reaches the pod.** `ZacxDev/homelab-infra` `edefd679f` is on `trunk`; the image pin in `clusters/workbench/apps/clawgate/deployment.yaml` has NOT moved, so `/tmux` on the phone still runs the old code. Load the `clawgate` skill's `deploy.md` first. ⚠ That release also ships #855's behaviour change across **seven** panels.
    forcing: user — the operator reported the mobile scroll symptom and cannot confirm the fix until it is on the pod; the audit was explicit that the downward direction is covered "by argument yes, by measurement no."
 3. **Unbreak `main`'s red `test_engine_is_the_version_every_measurement_is_keyed_to`.** Repo `devrc`, `scripts/tests/test_opencode_engine.py`. Diagnosis block above.
@@ -112,8 +127,35 @@ nix develop /home/zach/workspace/devrc -c python3 -m pytest \
   scripts/tests/test_tmux_reply_agent.py scripts/devhost-tests/test_claude_footer_sites.py \
   -q -p no:cacheprovider          # 201 passed
 
-# the closing condition — NOT YET RUN
-# raise a 2-option ask in a scratch tmux session, tap the SECOND option on its clawgate card, then:
-#   tmux capture-pane -p -t <pane> | grep -A2 'User answered'
-# the recorded label must be the one tapped.
+# the closing condition — RUN 2026-09-20 12:05 CDT, MET. To re-run it:
+#  1. tmux new-session -d -s replyprobe -x 120 -y 40      # 79+ cols / 16-40 rows, the measured-good box
+#     then launch `claude` in it and ask for a 2-option AskUserQuestion.
+#     🔴 tear down with `tmux kill-pane -t <pane>` — `kill-session` on the default socket is BANNED.
+#  2. HOOK=$(grep '^CLAWGATE_HOOK_TOKEN=' ~/.claude/clawgate.env | cut -d= -f2)
+#     curl -sf $API/api/attention -H "Authorization: Bearer $HOOK" | jq '.[] | select(.tmuxPane=="<pane>")'
+#     ⚠ /api/attention returns a bare ARRAY — `.entries[]` errors.
+#  3. tap the SECOND option (see the browser gotcha below), then:
+#     tmux capture-pane -p -t <pane> | grep -A2 'User answered'   # must name the option you tapped
+#     journalctl --user -u tmux-reply-agent --since '5 min ago'   # must say `menu row N was sent`
 ```
+
+🔴 **To drive the tap from a bridge-owned tab, the timing is the whole trick** — two windows that
+barely overlap, and missing either fails SILENTLY in a different way:
+```bash
+BB=~/workspace/devrc/scripts/browser-bridge/browser
+$BB --instance work open 'http://192.168.50.250:30302/attention' --wake=300   # NOT plain open, NOT --wake (1500ms default)
+$BB --instance work js '(function(){window.__c=[];window.confirm=function(m){window.__c.push(String(m));return true;};return "shim"})()'
+$BB --instance work click '#reply-attention-<id> [data-reply-option-label="<LABEL>"]'
+```
+- **Too early / not woken → the click is INERT**: htmx has not bound the button, `window.confirm`
+  is never called, `__c` stays `[]` and nothing reaches the network. It looks like a refused reply.
+- **Too late (~4s+) → the request HANGS**: see the credentialed-stall investigation above. `net:[]`,
+  no server log line, and `hx-disabled-elt` leaves the button permanently `disabled` so every
+  later click is dropped at `htmx:confirm` with no confirm call — which reads exactly like the
+  inert case but is not.
+- **The confirm shim is REQUIRED, not a convenience.** The card carries `hx-confirm` and clawgate
+  registers no `htmx:confirm` handler, so it is the NATIVE `window.confirm`. Without the shim the
+  dialog blocks the renderer and every later bridge op dies `cdp_timeout:Runtime.evaluate`. A
+  reload WIPES the shim — reinstall after any `nav`, and confirm `__c` is non-empty afterwards.
+- Auto-accepting that dialog is the operator's "OK", not a bypass of a guard: the server-side
+  check is `requireArmedTerminalUI`, and the reply still had to carry a real session cookie.
