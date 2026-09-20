@@ -492,9 +492,10 @@ MUTANTS: list[tuple] = [
     ("K47", "widening", "the universe is PREPENDED rather than appended, so the "
                         "common case opens on a fuzzy-matched stranger instead "
                         "of the clawgate task",
-     "            candidates = candidates + extra\n",
-     "            candidates = extra + candidates\n",
-     "the MEASURED rows must stay on top"),
+     "                candidates = (candidates[:promote_at] + [extra[0]]\n"
+     "                              + candidates[promote_at:] + extra[1:])\n",
+     "                candidates = extra + candidates\n",
+     "the clawgate row keeps row 1"),
     # ---- F14: the fzf picker (rofi's replacement, 2026-09-09) ---------------
     # 🔴 THE WHOLE POINT OF THE SWAP IS ONE FLAG, AND ITS LOSS IS SILENT: the
     # picker still opens, still matches, still returns the right URL — it just
@@ -673,14 +674,14 @@ MUTANTS: list[tuple] = [
      "FILTERED, not ranked"),
     ("K66", "widening", "Tier B is compared BEFORE the Tier A class, so a learned "
                         "preference can float an IMPOSSIBLE repository to the top",
-     "        return (klass, distance, -scores.get(low, 0.0))\n",
-     "        return (-scores.get(low, 0.0), klass, distance)\n",
+     "        return (klass, distance, -scores.get(full.lower(), 0.0))\n",
+     "        return (-scores.get(full.lower(), 0.0), klass, distance)\n",
      "promoted an IMPOSSIBLE"),
     ("K67", "widening", "the sort key regains a NAME, so it ALPHABETISES instead "
                         "of refining — a cold-start host silently loses the "
                         "order repo_universe gave it",
-     "        return (klass, distance, -scores.get(low, 0.0))\n",
-     "        return (klass, distance, -scores.get(low, 0.0), low)\n",
+     "        return (klass, distance, -scores.get(full.lower(), 0.0))\n",
+     "        return (klass, distance, -scores.get(full.lower(), 0.0), full.lower())\n",
      "COLD START REGRESSION"),
     ("K68", "deletion", "a STALE range table is trusted and ordered on anyway — "
                         "its two misclassifications point in OPPOSITE directions, "
@@ -841,16 +842,16 @@ MUTANTS += [
                         "bias, restored: `rank` then mixes ordered rows with "
                         "rows that were never placed",
      "    picked_ordered = (pinned_above is not None and picked_rank is not None\n"
-     "                      and picked_rank >= pinned_above)\n",
+     "                      and url in ordered_urls)\n",
      "    picked_ordered = True\n",
      "but the row claims it was"),
     ("K89", "operand swap", "`pinned_above` is reported as 0 on the arms that "
                             "APPEND the universe, so `rank - pinned_above` "
                             "silently treats a pinned row as ranked",
      "        pinned_above = len(candidates)\n"
-     "        candidates = candidates + universe_rows()\n",
+     "        _dead_end_2_rows = universe_rows()\n",
      "        pinned_above = 0\n"
-     "        candidates = candidates + universe_rows()\n",
+     "        _dead_end_2_rows = universe_rows()\n",
      # ⚠ SAME STORY AS K87: this row SURVIVED its first sweep because the F3
      # test drove the GUESSED arm and this mutant is on DEAD END 2. The token
      # belongs to the test written to cover that second arm.

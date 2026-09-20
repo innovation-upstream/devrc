@@ -880,6 +880,43 @@ def pick_scores(picks: list[dict], num: str,
     return scores
 
 
+def measured_rank_key(full: str, num: str,
+                      ranges: dict[str, int]) -> tuple[int, int]:
+    """`(class, distance)` — the MEASURED half of `order_universe`'s sort key.
+
+    🔴 EXTRACTED SO THE SORT AND THE PROMOTION GATE CANNOT DISAGREE. The
+    guessed-offer arm promotes a universe row above the pane guess and calls it
+    "this host's best-ranked repository"; that claim is only true when the
+    ordering actually SEPARATED that row from the others. Re-deriving the key
+    at the gate would be the same predicate open-coded twice, which is how a
+    predicate ends up wrong at one of its two sites.
+
+    🔴 IT IS THE MEASURED HALF ONLY — Tier B's `-score` is deliberately absent.
+    The gate has no access to the pick scores (they are computed inside
+    `_ordered_universe` and do not travel back), so a gate built on this pair
+    is CONSERVATIVE: it refuses to promote some rows that Tier B would in fact
+    have separated. That direction is the safe one — it under-promotes rather
+    than making a false claim — and it is stated here so nobody "fixes" the
+    asymmetry by guessing a score.
+
+    `distance` is 0 for every row outside `PLAUSIBLE`, exactly as in
+    `order_universe`, so it can never reorder a class whose members were never
+    compared on it.
+    """
+    low = full.lower()
+    max_ref = ranges.get(low)
+    klass = plausibility_class(num, max_ref)
+    try:
+        target = int(num)
+    except (TypeError, ValueError):
+        target = None
+    distance = (max_ref - target
+                if klass == CLASS_PLAUSIBLE and target is not None
+                   and max_ref is not None
+                else 0)
+    return (klass, distance)
+
+
 def order_universe(universe: list[str], num: str, ranges: dict[str, int],
                    scores: dict[str, float] | None = None) -> list[str]:
     """The picker's universe rows, ordered by whether each repo could plausibly
@@ -955,24 +992,14 @@ def order_universe(universe: list[str], num: str, ranges: dict[str, int],
     construction rather than by a branch.
     """
     scores = scores or {}
-    try:
-        target = int(num)
-    except (TypeError, ValueError):
-        target = None
-
     def key(full: str):
-        low = full.lower()
-        max_ref = ranges.get(low)
-        klass = plausibility_class(num, max_ref)
-        # Only meaningful for PLAUSIBLE, and 0 everywhere else so it cannot
-        # reorder a class whose members were never compared on it.
-        distance = (max_ref - target
-                    if klass == CLASS_PLAUSIBLE and target is not None
-                       and max_ref is not None
-                    else 0)
+        # 🔴 THE MEASURED HALF COMES FROM `measured_rank_key`, NOT A SECOND
+        # COPY. The promotion gate reads the same function, so the sort and the
+        # gate cannot drift apart.
+        klass, distance = measured_rank_key(full, num, ranges)
         # 🔴 DISTANCE BEFORE SCORE — see the docstring. Tier B breaks ties Tier A
         # leaves; it does not overrule Tier A's first choice.
-        return (klass, distance, -scores.get(low, 0.0))
+        return (klass, distance, -scores.get(full.lower(), 0.0))
 
     return sorted(universe, key=key)
 
@@ -1381,6 +1408,18 @@ def click_dims(repo: str = "", platform: str = "",
     position WITHIN it. **A consumer measuring the ordering must filter
     `ordered = true`.**
 
+    🔴 ONE EXCEPTION, AND IT IS EXACTLY ONE ROW: the `guessed_offer` arm
+    PROMOTES the top-ranked universe row above the pane guess, so that row sits
+    at a `rank` BELOW `pinned_above` and the subtraction goes NEGATIVE. Its
+    position within the ordering is **0** by construction — it is the row the
+    ordering put first. The promoted row is identifiable with no new dim:
+    `ordered = true AND rank < pinned_above` can be true of nothing else, since
+    a row above the pinned count was never in the ordered block before. Every
+    OTHER ordered row still satisfies `rank - pinned_above`, because the
+    promotion removes exactly one row from the tail and the guess takes its
+    place. Pinned by `test_the_WITHIN_block_rank_is_derivable_from_the_emitted_
+    dims`, which carries both the general case and this exception.
+
     This is the same argument as the auto-path's missing `rank`, one arm over:
     a number that is only meaningful for some rows must carry the field that
     says which rows those are.
@@ -1467,9 +1506,17 @@ def click_dims(repo: str = "", platform: str = "",
     under `dismissed`, "this click was a typed query that matched nothing" —
     and never as a denominator.
 
-    ⚠ NO `ordered_rank` DIM, DELIBERATELY. The chosen row's position WITHIN the
+    ⚠ NO `ordered_rank` DIM, DELIBERATELY — RE-EXAMINED 2026-09-19 WHEN THE
+    PROMOTION MADE THE SUBTRACTION WRONG FOR ONE ROW, AND THE ANSWER IS STILL
+    NO. The chosen row's position WITHIN the
     ranked block is `rank - pinned_above`, and both of those are already emitted
     beside the `ordered` flag that says whether the subtraction means anything.
+    The promoted row is the single exception (position 0, `rank < pinned_above`
+    — see the `ordered` paragraph), and it is DERIVABLE from the three dims
+    already emitted, so adding a field would still be a second source of truth.
+    ⚠ The dim cap was MEASURED before deciding, not assumed: `_MAX_DIMS` leaves
+    room for two more click dims today (drops begin at the 17th), so this is a
+    design call and not a budget one.
     A fourth field carrying the difference would be a second source of truth
     that can disagree with the first, for a value a consumer computes in one
     subtraction. `test_the_WITHIN_block_rank_is_derivable_from_the_emitted_dims`
@@ -3078,7 +3125,8 @@ def universe_note(subject: str, offered: int, path: Path | None = None) -> str:
             f"scripts/regen-known-repos.py")
 
 
-def guessed_note(subject: str, below: int = 0, rank: int = 1) -> str:
+def guessed_note(subject: str, below: int = 0, rank: int = 1,
+                 promoted: bool = False) -> str:
     """The line shown ABOVE the picker when one of the rows on offer was GUESSED
     — `repo_source == "default"`, i.e. the tmux pane rather than anything the
     clicked text said.
@@ -3086,6 +3134,25 @@ def guessed_note(subject: str, below: int = 0, rank: int = 1) -> str:
     `rank` is that row's 1-based position, and `below` is how many SEARCHABLE
     repository rows sit UNDER it. Both are measured by `main()` from the list it
     is about to hand `pick()`; neither is inferred from the shape of the text.
+
+    🔴 `promoted` SAYS A REPOSITORY ROW SITS **ABOVE** THE GUESS, and it exists
+    because `below` alone cannot say so. Since 2026-09-19 the top-ranked
+    universe row is promoted above the pane guess, so the guess is no longer the
+    topmost repository row and the older wording's "the N rows below it are
+    every repository this host knows" became FALSE by one row. `below` counts
+    DOWNWARDS only, so a caller passing the reduced count would produce a
+    sentence that is arithmetically right and still misdescribes the list. It is
+    a separate parameter rather than an inference.
+
+    ⚠ ITS FIRST-DRAFT JUSTIFICATION WAS FALSE AND IS RECORDED AS SUCH RATHER
+    THAN REPLACED WITH A BETTER-SOUNDING ONE. It said `rank > 1` would be
+    ambiguous "because `rank > 1` is ALSO true of a bare `#N` with the clawgate
+    row on top and nothing promoted" — but that picker never calls this
+    function (`main()` keeps `""` for it), so at every REACHABLE call site
+    `promoted` and `rank > 1` are exactly equivalent. The honest reason to keep
+    the parameter is narrower: tests call `guessed_note` directly, and an
+    explicit contract beats a coincidence that holds only because of which
+    shapes happen to reach here today.
 
     🔴 A PICKER WITH NO EXPLANATION READS AS A BUG. Suppressing the auto-open is
     the safety property; saying WHY is what stops the operator concluding the
@@ -3139,6 +3206,30 @@ def guessed_note(subject: str, below: int = 0, rank: int = 1) -> str:
     `test_the_GUESSED_note_reaches_the_picker_and_no_other_surface` hold that
     line, with BOTH token guards.
     """
+    if promoted:
+        # 🔴 THE PROMOTION PUT A REPOSITORY ROW **ABOVE** THE GUESS, SO "the N
+        # rows below it are every repository this host knows" IS NOW FALSE —
+        # one of them is above. Saying it anyway would point the operator away
+        # from the row the ordering thinks is the ANSWER, which is the exact
+        # defect `rank` was added to fix, one row along. The row above is named
+        # explicitly rather than described, because "best-ranked" is the only
+        # reason it is up there.
+        # 🔴 "BELOW IT" — THE ANTECEDENT IS LOAD-BEARING AND THE FIRST DRAFT
+        # DROPPED IT. Reworded to "… and the N rows below are the rest", the
+        # nearest antecedent became the PROMOTED row rather than the guess, so
+        # the sentence read as counting below row {rank-1} — off by one against
+        # the list on screen. `below` is measured UNDER THE GUESS; the wording
+        # has to say so. Reported by `/audit-pr` round 1.
+        above = f"row {rank - 1} is this host's best-ranked repository"
+        if below <= 0:
+            return (f"{subject} names no repository. Row {rank} is a guess "
+                    f"from the tmux pane, which may not be the pane you "
+                    f"clicked in — {above}, and the only one it knows. "
+                    f"Type to search, or dismiss.")
+        return (f"{subject} names no repository. Row {rank} is a guess from "
+                f"the tmux pane, which may not be the pane you clicked in — "
+                f"{above}, and the {below} rows below it are the rest. Type "
+                f"to search, or dismiss.")
     if below <= 0:
         return (f"{subject} names no repository — the GitHub row offered was "
                 "measured from the tmux pane, which may not be the pane you "
@@ -3519,7 +3610,19 @@ def main(argv: list[str] | None = None) -> int:
     # what a picker holding no universe rows at all should report: there is no
     # ordered block for a position to be relative to. The three arms that append
     # universe rows each set it.
+    #
+    # 🔴 `candidates` IS NO LONGER `[evidence] + [ordered tail]` ON EVERY ARM.
+    # The `guessed_offer` arm PROMOTES the top-ranked universe row above the
+    # pane guess, so the ordered rows are SPLIT and a threshold test
+    # (`rank >= pinned_above`) reports the promoted row and the demoted guess
+    # with their flags INVERTED. `ordered_urls` is the structural answer — it is
+    # the SET the ordering actually placed, so it cannot be wrong about a row's
+    # position because it does not read one. Every arm that sets `pinned_above`
+    # MUST set this too; `test_every_arm_that_sets_pinned_above_also_sets_
+    # ordered_urls` is the guard, because an arm that forgets reports a genuinely
+    # ordered row as `ordered=False` and nothing else would notice.
     pinned_above: int | None = None
+    ordered_urls: set[str] = set()
     may_offer_universe = (not args.print_only and not args.no_discovery
                           and not colour)
     num = span["id"] if (span is not None and span["id"].isdigit()) else offer_num
@@ -3597,6 +3700,7 @@ def main(argv: list[str] | None = None) -> int:
         # Nothing is pinned above: the whole list IS the ordered block.
         pinned_above = 0
         candidates = universe_rows()
+        ordered_urls = {c["url"] for c in candidates}
     elif (span is not None and span["ambiguous"] and universe_repos
             and not any(c["platform"] == PLATFORM_GITHUB for c in candidates)):
         # Dead end 2 — a bare `#N` nothing could attribute. The clawgate
@@ -3605,7 +3709,9 @@ def main(argv: list[str] | None = None) -> int:
         # The clawgate row stays on top and was never ranked — so the ordered
         # block starts below it. See `click_dims`' `ordered` paragraph.
         pinned_above = len(candidates)
-        candidates = candidates + universe_rows()
+        _dead_end_2_rows = universe_rows()
+        ordered_urls = {c["url"] for c in _dead_end_2_rows}
+        candidates = candidates + _dead_end_2_rows
         universe_shown = True
 
     if not candidates:
@@ -3708,24 +3814,190 @@ def main(argv: list[str] | None = None) -> int:
     # append added nothing, and `guessed_note` needs that rather than a row
     # count — see its docstring.
     below = 0
+    # Whether the top-ranked universe row was promoted above the guess.
+    promoted = False
     if guessed_offer and universe_repos:
-        seen = {c["url"] for c in candidates}
+        # 🔴 CASE-INSENSITIVE, BECAUSE `repo_universe` IS. Its docstring says
+        # `acme/Widget` and `acme/widget` are "one repository on GitHub and two
+        # identical-looking rows in the picker", and it dedupes on `.lower()`.
+        # An exact-match `seen` here re-opens that hole one rung along: a pane
+        # repo spelled with different case survives this dedup, so the universe
+        # row for the SAME repository is offered again — and, since the
+        # promotion reads this set, can be spliced directly ABOVE the guess as
+        # its own duplicate. Reported by `/audit-pr` round 1. One rule, one
+        # place: the comparison key is the lowercased URL on both sides.
+        seen = {c["url"].lower() for c in candidates}
         # Deduped: the pane's repo is usually IN the universe too, and offering
         # it twice makes the recommended row look like a rendering bug rather
         # than a recommendation.
-        extra = [c for c in universe_rows() if c["url"] not in seen]
+        ordered_rows = universe_rows()
+        extra = [c for c in ordered_rows if c["url"].lower() not in seen]
+        # 🔴 IF THE ORDERING'S OWN TOP ROW *IS* THE PANE GUESS, PROMOTE NOTHING.
+        # Reported by `/audit-pr` round 0. The pane repo is usually in the
+        # universe too and is deduped out above, so when the ordering ranked it
+        # FIRST, `extra[0]` is the RUNNER-UP — and promoting that above the
+        # guess would demote the ordering's actual first pick beneath its second
+        # while `guessed_note` calls the second "this host's best-ranked
+        # repository". Tier B learns from picks, so a frequently-picked pane
+        # repo ranking first is an ordinary state, not an exotic one. Checked on
+        # the PRE-dedup list, which is the only place the answer still exists.
+        top_is_the_guess = (bool(ordered_rows)
+                            and ordered_rows[0]["url"].lower() in seen)
+        # 🔴 THE ORDERING BEING "APPLIED" DOES NOT MEAN IT RANKED ANYTHING, AND
+        # THE GATE ABOVE IS NECESSARY BUT NOT SUFFICIENT. `sorted` is STABLE, so
+        # a range table that is present, fresh and complete but UNINFORMATIVE
+        # reproduces the incoming order exactly — and the incoming order is
+        # `repo_universe`'s ALPHABETICAL sort. `order_universe`'s own docstring
+        # says it: "A TABLE THAT ANSWERS NOTHING IS A NO-OP".
+        #
+        # MEASURED on the operator's laptop (the host where clicks happen), 394
+        # rows, 117 picks, Tier B loaded: rows TIED with row 1 were 28 for `#1`,
+        # 5 for `#3`, 6 for `#10` — so an ordinary low-numbered click promoted
+        # an ALPHABETICAL ACCIDENT above the pane guess and the note called it
+        # "this host's best-ranked repository". Tier B separated `#5000`
+        # (163 -> 1) and did nothing for the low numbers.
+        #
+        # 🔴 SO THE CLAIM IS GATED ON WHAT MAKES IT TRUE: the top row must be
+        # PLAUSIBLE (class 0 — this repository demonstrably has references that
+        # high) AND the ordering must have separated it from every other row IT
+        # RANKED — `ordered_rows[1:]`, the universe. ⚠ That is NOT "every row on
+        # offer", which an earlier draft of this comment said: the compared set
+        # INCLUDES rows deduped out of the offer (the pane repo's own universe
+        # row) and EXCLUDES offered rows the ordering never saw (the clawgate
+        # row, and the guess when it is absent from the universe). The ranked
+        # set is the right one — the claim being gated is about the RANKING —
+        # but a reader reproducing the old sentence would not find it.
+        #
+        # Operator decision 2026-09-19, choosing the narrower of two
+        # options: it fires less often, and every time it fires "best-ranked" is
+        # unambiguously true.
+        #
+        # ⚠ CONSERVATIVE BY CONSTRUCTION — see `measured_rank_key`. Tier B's
+        # score is not available here, so a tie Tier B would have broken reads
+        # as "not separated" and the promotion is skipped. It under-promotes
+        # rather than over-claims; that asymmetry is deliberate.
+        top_key = (measured_rank_key(repo_of_github_url(ordered_rows[0]["url"]),
+                                     num, order_ranges)
+                   if ordered_rows else None)
+        top_is_separated = bool(
+            top_key is not None
+            and top_key[0] == CLASS_PLAUSIBLE
+            and not any(
+                measured_rank_key(repo_of_github_url(c["url"]), num,
+                                  order_ranges) == top_key
+                for c in ordered_rows[1:]))
         # 🔴 GUARDED ON `extra`, NOT ON `universe`. A host whose whole universe
         # is the pane's own repo dedupes to nothing, and setting
         # `offered_universe` there would claim rows that are not in the list —
         # both to the auto-open guard below and to the note.
         if extra:
-            # The measured rows (the clawgate task, the pane's guess) stay on
-            # top and were never ranked — same as dead end 2.
+            # 🔴 THE TOP-RANKED UNIVERSE ROW IS PROMOTED ABOVE THE PANE GUESS —
+            # AND ONLY ABOVE THE PANE GUESS. Operator decision 2026-09-19,
+            # proposal §"Symptom 3" option (2). The clawgate row KEEPS row 1: it
+            # is evidence about the reference, while the pane guess is evidence
+            # about the WINDOW — the module already refuses to auto-open the
+            # guess for exactly that reason, so demoting it by one row is the
+            # smallest change that makes the list LOOK ranked.
+            #
+            # ⚠ THE SUPPORTING MEASUREMENT IS WEAKER THAN IT FIRST READ, and the
+            # honest version belongs here rather than in a commit nobody reruns.
+            # Of 73 recorded picks the PINNED rows took 5 (6.8%) while occupying
+            # the top two slots, and the clawgate row took 1 — that is the part
+            # that justifies this. But those 73 predate #1775's sort-key fix, so
+            # they describe the OLD, degrading key; under it the modal pick was
+            # the SECOND-ranked row, not the first. Whether promoting the FIRST
+            # row is the right one to promote is therefore a PREDICTION from the
+            # new key's top-1 rate (62.6% -> 73.0%), not a measurement. n=1 post-fix
+            # at the time of writing. If the post-fix data says otherwise, this
+            # is one line to change.
             pinned_above = len(candidates)
-            candidates = candidates + extra
+            ordered_urls = {c["url"] for c in extra}
+            # 🔴 GATED ON THE ORDERING HAVING ACTUALLY RUN, AND THE UNGATED
+            # VERSION SHIPPED IN THE FIRST DRAFT OF THIS CHANGE — caught by
+            # `/audit-pr` round 0. `_ordered_universe` RETURNS THE INPUT
+            # UNTOUCHED whenever the state is not `applied` (its own docstring
+            # says so, and `repo_universe` returns its union SORTED), so on a
+            # stale or missing range table `extra[0]` is merely the
+            # alphabetically first repository. Promoting it demotes the pane
+            # guess — a measured, weak, but REAL signal — beneath a row chosen
+            # by nothing, and `guessed_note` then calls it "this host's
+            # best-ranked repository".
+            #
+            # 🔴 THE TELL WAS IN THE TEST, NOT THE CODE: the whole-string pin
+            # asserted "row 2 is this host's best-ranked repository … · rows
+            # unordered — no reference-range table on this host yet" — a
+            # sentence that contradicts itself in its own second clause, pinned
+            # as correct. The entire justification for this change is ranking
+            # quality; where there is no ranking there is no justification.
+            # 🔴 `order_state == ORDER_APPLIED` IS REDUNDANT TODAY — MEASURED,
+            # AND KEPT DELIBERATELY RATHER THAN QUIETLY. Deleting it leaves the
+            # whole suite green (484 passed), because `_ordered_universe`
+            # returns `ranges={}` in EVERY degraded state, so every
+            # `measured_rank_key` is `(CLASS_UNKNOWN, 0)`, so `top_is_separated`
+            # is already False. Reported by `/audit-pr` round 2.
+            #
+            # It stays as defence in depth, and the reason is nameable rather
+            # than vague: the PLAUSIBLE requirement below it is the NARROWER of
+            # two options the operator chose between, so a later widening can
+            # re-arm the need for this clause — and a widening made after
+            # someone deleted it as dead weight would silently restore round 0's
+            # defect, with a green suite in both directions.
+            #
+            # 🔴 THE RE-ARMING WIDENING, MEASURED RATHER THAN IMAGINED —
+            # AND QUALIFIED, BECAUSE IT DOES NOT HOLD EVERYWHERE. Replacing the
+            # PLAUSIBLE test with `top_key is not None`, with this clause gone,
+            # PROMOTES on a degraded table **whose universe dedupes to a SINGLE
+            # ranked row**, captioned "best-ranked repository"; it does NOT
+            # promote while the clause is kept. MEASURED at three universe
+            # sizes: 1 row PROMOTES, 2 rows and 6 rows do not.
+            #
+            # The mechanism, so nobody has to re-derive it: with `ranges == {}`
+            # every `measured_rank_key` is `(CLASS_UNKNOWN, 0)`, so the
+            # uniqueness half of `top_is_separated` can only hold when
+            # `ordered_rows[1:]` is EMPTY.
+            #
+            # ⚠ TWO EARLIER DRAFTS OF THIS PARAGRAPH WERE WRONG, IN THE SAME
+            # DIRECTION — claiming more than measured — AND BOTH ARE RECORDED
+            # RATHER THAN QUIETLY REPLACED. (a) "allow `BELOW`" was offered as a
+            # second example and is FALSE: a degraded row is `CLASS_UNKNOWN`
+            # (2), never `CLASS_BELOW` (1). (b) The surviving example was then
+            # stated UNQUALIFIED, so a maintainer testing it on the nearest
+            # degraded fixture in the suite (6 rows) would see NO promotion and
+            # conclude this example was false too.
+            #
+            # 🔴 THAT IS THE WHOLE HAZARD: the paragraph BELOW says no test can
+            # pin this clause, so this comment is what stands between it and a
+            # future deletion — and an example a reader checks and finds false
+            # discredits the rest. An unqualified true claim fails the same way
+            # a false one does.
+            #
+            # ⚠ SO DO NOT LOOK FOR A TEST THAT PINS THIS CLAUSE ALONE: there
+            # cannot be one while it is redundant. The guard that matters is
+            # the OBSERVABLE property — a degraded table promotes nothing and
+            # claims nothing — and that is what the tests assert.
+            if (order_state == ORDER_APPLIED and not top_is_the_guess
+                    and top_is_separated):
+                # `guess_rank` is 1-BASED (`enumerate(candidates, 1)` above)
+                # while `picked_rank` is 0-BASED — two conventions in one file,
+                # which is why this converts rather than reusing either name.
+                promote_at = guess_rank - 1
+                candidates = (candidates[:promote_at] + [extra[0]]
+                              + candidates[promote_at:] + extra[1:])
+                promoted = True
+                # 🔴 BOTH OF THESE MOVE, AND THE NOTE IS WRONG IF EITHER DOES
+                # NOT. The guess was pushed down exactly one row, and exactly
+                # one universe row is now ABOVE it rather than below — so the
+                # count the note quotes is `len(extra) - 1`. Quoting the
+                # unreduced count would overstate what is searchable underneath
+                # and contradict the list on screen.
+                guess_rank += 1
+                below = len(extra) - 1
+            else:
+                # The pre-promotion layout, unchanged: measured rows on top.
+                candidates = candidates + extra
+                below = len(extra)
             offered_universe = True
             universe_shown = True
-            below = len(extra)
 
     # 🔴 `and not offered_universe`: see PASS 3. One candidate is enough to open
     # only when that candidate is EVIDENCE about the reference — an explicit
@@ -3790,9 +4062,15 @@ def main(argv: list[str] | None = None) -> int:
     # two branches and the picker still works, so no behavioural test catches
     # it: the guard is
     # `test_a_guessed_picker_is_NOT_described_as_nothing_here_knows`.
-    mesg = (guessed_note(span["raw"], below, guess_rank)
+    # 🔴 `or promoted` IS LOAD-BEARING, NOT DEFENSIVE. `below` is now the count
+    # UNDER the guess, and the promotion moves one row out from under it — so a
+    # host with exactly ONE universe row lands on `below == 0` with a three-row
+    # picker, and without this clause the explanation for why the guess was not
+    # auto-opened would VANISH on precisely the shape that most needs it. The
+    # guard is `test_a_guessed_picker_with_ONE_universe_row_still_EXPLAINS`.
+    mesg = (guessed_note(span["raw"], below, guess_rank, promoted)
             if guessed_offer and span is not None
-               and (below or len(candidates) == 1)
+               and (below or promoted or len(candidates) == 1)
             else universe_note(span["raw"] if span is not None else text,
                                len(candidates)) if offered_universe
             else "")
@@ -3912,8 +4190,16 @@ def main(argv: list[str] | None = None) -> int:
     # 🔴 WAS THIS ROW ACTUALLY PLACED BY THE ORDERING? The pinned rows above the
     # universe block were never ranked, so a `rank` without this is a number
     # that means two different things — see `click_dims`.
+    # 🔴 SET MEMBERSHIP, NOT A THRESHOLD. This read `picked_rank >=
+    # pinned_above` while the ordered rows were a contiguous tail. They are not
+    # any more: the `guessed_offer` arm promotes the top-ranked row ABOVE the
+    # pane guess, so under the old test the promoted row (genuinely ordered)
+    # reported `ordered=False` and the demoted guess (never ranked) reported
+    # `ordered=True` — both INVERTED, in the one dim that says whether the
+    # ordering placed the row. `ordered_urls` is what the ordering actually
+    # returned, so it answers without reading a position at all.
     picked_ordered = (pinned_above is not None and picked_rank is not None
-                      and picked_rank >= pinned_above)
+                      and url in ordered_urls)
     # ...and the class is reported only for a row the ordering actually placed.
     # It used to be emitted whenever the ordering RAN, which made a pinned pane
     # repo indistinguishable from a universe row ranked at the same position.
