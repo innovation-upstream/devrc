@@ -13,7 +13,20 @@ stack**, deletion on the table, changes land **inside the two existing skills** 
 > at the 14-day window used for investigations **55% of bullets would flag** — against the 3%
 > that design accepted and the 18% it rejected as "a gate everybody clicks through".
 > The archive rule that already exists keeps live docs young, so P2 would have duplicated a
-> working mechanism. **P1 and P3 stand.**
+> working mechanism.
+>
+> 🔴 **P1 AS WRITTEN IS RETRACTED; P1′ SHIPPED** (`97fee3d0`). `claudedocs/refs/` is
+> measurably outside the `handoff_search` corpus, and the authoritative playbook forbids
+> moving gotchas or open threads there for exactly that reason — so "demote the APPEND
+> buckets" meant "delete, for retrieval". The corrected item is the playbook's own step 1:
+> `budget_warning()` now prints THIS doc's evictable backlog. Verified live.
+>
+> 🔴 **P3 IS DELETED TOO** — see its section. The remedy and the exact paste-ready syntax are
+> ALREADY printed by the `DOD` block at the right moment; the only increment left is
+> auto-filling the arc's finish line, which is the judgement that defines the arc.
+>
+> **ALL FOUR ITEMS ARE CLOSED. Nothing in §4 remains to build.** Final tally: one shipped as
+> specified, one shipped corrected, two deleted by measurement.
 
 ---
 
@@ -255,7 +268,42 @@ presented in the present tense is the failure `resume` step 3 already warns abou
 
 </details>
 
-### P3 — Make the DoD field reachable on the 82%
+### P3 — ~~Make the DoD field reachable on the 82%~~ 🔴 DELETED, 2026-09-20
+
+**Probe run, hypothesis confirmed, item deleted anyway — and the two facts are compatible.**
+
+The pre-registered probe asked whether grandfathering explains the 82%. It does, decisively:
+
+| cohort (live docs, by first-commit date) | n | declare a closing-condition |
+|---|---:|---:|
+| born **before** rule (m) landed (2026-09-14, #1646) | 84 | **6%** |
+| born **on/after** | 14 | **93%** |
+
+And the legacy cohort does NOT self-heal: **92 of 98 docs were touched within 30 days while
+only 18 declare one**, because the grandfather arm is `NEITHER had one → ""` forever, however
+many updates follow. So ~21 actively-worked docs are permanently exempt. That is a real
+target, and it is why the hypothesis is recorded as CONFIRMED.
+
+**P3 is deleted on a different ground, found by looking at what the tool already prints:**
+
+```
+  🔴 this handoff declares NO closing-condition — … UNANSWERABLE here …
+     Written before rule (m). Add one in a `## Goal` delta:
+     `closing-condition: check|judgement — <the thing itself>`.
+```
+
+The fact, the remedy, the exact syntax and the vocabulary are **already on screen at the
+moment of the decision** (verified live against `handoff-cross-host-routing.md`). The only
+increment P3 could add is pre-filling the *detail* from the doc's `## Goal` — and that detail
+IS the arc's finish line, the one judgement rule (m) exists to make a human state. Generating
+it would mint a finish line nobody asserted, the same failure `/handoff` step 1 already
+forbids for `clawgate-task:` ("a task minted to fill a blank field is a fact nobody
+asserted"). **There is nothing left here that can be honestly automated.**
+
+⚠ And the grandfathering is CORRECT, not a defect to close: refusing every pre-rule document
+would go red on the first update to all 84, which `claude/RULES.md` calls worse than no gate.
+
+<details><summary>the original P3 text, for the record</summary>
 *From `prune-memory` ("archive the moment it ships") — but F3 says the trigger must be built
 before the archival it would drive.*
 
@@ -266,6 +314,8 @@ emit the exact `closing-condition:` line to paste, pre-filled from the doc's `##
 `/handoff` step 5 accept it as an ordinary update. Measure the coverage figure again in two
 weeks; **if it has not moved, the prose was never the problem and the offer should be deleted
 rather than strengthened.**
+
+</details>
 
 ### P4 — Route the two skills to the auditor that already exists
 *From `prune-memory` §1 / `prune-skill` §1 — audit first, deterministically, before any cut.*
@@ -291,10 +341,19 @@ makes P1 auditable rather than felt.
 |---|---|---|---|---|
 | P4 | routing line (handoff only) | `handoff/SKILL.md`, `handoff-audit.py` | none | **MERGED `b50709ca`** |
 | P2 | stamp + age APPEND buckets | — | — | 🔴 **REFUTED, deleted** |
-| P3 | paste-ready DoD offer | `resume-state.sh` | low | open, gated on the probe |
-| P1 | slice-and-demote | `handoff_doc.py`, `handoff/SKILL.md` | **rewrites docs** | open — the closing condition |
+| P3 | paste-ready DoD offer | — | — | 🔴 **DELETED** — remedy already printed |
+| P1′ | per-doc evictable backlog in `budget_warning()` | `handoff_doc.py`, `handoff-audit.py` | none (prints only) | **MERGED `97fee3d0`**, verified live |
 
-Order: ~~P4 → P2 → P3~~ → **P1**, then P3. Each is its own PR with test coverage; P1 gets a mutation battery
+**Nothing remains to build.** One shipped as specified (P4), one shipped corrected (P1′), two
+deleted by measurement (P2, P3).
+
+🔴 **This arc's closing condition cannot be met as written and should not be re-aimed.** It
+was frozen at round 1 as "P1 merged AND the APPEND share below 70%" — but the demotion is
+forbidden, and the APPEND-share metric can only fall by moving searchable content into an
+unsearchable sink. **A byte-share target selected the harmful action as the cheapest way to
+satisfy it.** The honest verdict is NOT ADDRESSED-as-written; the work that replaced it
+belongs to a new arc. When freezing a closing condition, ask which action most cheaply
+satisfies the metric, and whether you would accept that action. Each is its own PR with test coverage; P1 gets a mutation battery
 in the shape of `mutation_battery_handoff_archive_and_cap.py`, since its reassuring answer is
 a zero ("0 lines lost"), and a zero is indistinguishable from a detector wired to nothing.
 
