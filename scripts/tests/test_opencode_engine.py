@@ -880,6 +880,40 @@ _VERSION_RE = re.compile(
 # nothing and reads as an orphan. Snippets carry no version literal of their own,
 # or they would match themselves when this file is scanned.
 HISTORICAL_VERSION_CLAIMS = (
+    # 🔴 Added 2026-09-19 by the DEFECT pin. These are a DIFFERENT species from
+    # every other entry below, and the difference is what justifies them: the
+    # rest are measurements taken at a version that has since moved on, whereas
+    # these name (a) the release the pin exists to AVOID and (b) the upstream
+    # release that fixes it. Re-keying either to the pinned version would not be
+    # relabelling a stale measurement — it would make the sentence say the
+    # opposite of what is true, e.g. asserting that the version we deploy is the
+    # one that cannot run a prompt.
+    #
+    # So the usual reflex — "re-derive it against the pinned binary" — is not
+    # available here: there is nothing to re-derive, because the claim is about
+    # a binary this repo deliberately does not run. These entries retire when
+    # the pin retires, which flake.nix's removal recipe spells out.
+    # (No version literals in this comment: it is scanned like every other line
+    # in this file.)
+    ("flake.nix", "IS BROKEN — every prompt fails, in the",
+     "names the defective release the pin exists to avoid; re-keying it to the "
+     "pinned version would assert the deployed binary is the broken one"),
+    ("flake.nix", "nixpkgs-unstable still shipped",
+     "the upstream FIX release, plus the channel's release at pin time — a "
+     "statement about what was NOT available to bump forward to"),
+    ("flake.nix", "pristine env, empty dir  -> crashes",
+     "the failing arm of the A/B that established the defect; its whole content "
+     "is that this version, not the pinned one, crashes"),
+    ("flake.nix", "main nixpkgs TO) carries",
+     "identifies which nixpkgs rev carries the defective release — the fact that "
+     "motivated freezing a second input"),
+    ("flake.nix", "REMOVING THIS PIN: when nixpkgs ships",
+     "the forward-looking exit condition; it names the upstream fix release, "
+     "which by construction is not the pinned one"),
+    ("flake.nix", "cannot run a prompt at all",
+     "the overlay's one-line restatement of why it exists"),
+    ("nix/pkgs/tools/default.nix", "CANNOT RUN A PROMPT: every request",
+     "the same avoid-this-release claim at the consumer that deploys the binary"),
     # 🔴 Added by the 2026-09-08 re-derivation pass. Each of
     # these is a line in the PRIOR pass's own record — a statement about what was
     # measured THEN, which does not become false when the pin moves and must not
