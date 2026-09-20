@@ -298,18 +298,36 @@ positive control:
 | ENTER, query matched nothing | `<query>\n`, exit **1** | **present** |
 | ESC / Ctrl-C abort | **nothing at all**, 0 bytes, exit 130 | **absent — NOT MEASURED** |
 
-`--print-query` covers the two endings where fzf has a result to print; an abort is not
+🔴 **THE ESC ROW OF THAT TABLE IS OUT OF DATE, AND THE `--bind` SECTION BELOW SUPERSEDES
+IT.** Left in place rather than edited because the paragraph under it is a record of a
+correction, and silently rewriting the table would leave that record describing a table
+that no longer says what it was correcting. **Current contract, measured at fzf 0.74.4:**
+
+| ending | what fzf writes | `queried` |
+|---|---|---|
+| a selection (PICKED) | `<query>\n<row>\n` | **present** |
+| ENTER, query matched nothing | `<query>\n`, exit **1** | **present** |
+| **ESC abort** (since `--bind="esc:print-query+abort"`) | `<query>\n`, exit **0** | **present** |
+| **any other abort** — `ctrl-c`, `ctrl-g`, `ctrl-q`, `ctrl-d` on an empty query | **nothing at all**, 0 bytes, exit 130 | **absent — NOT MEASURED** |
+
+⚠ **`abort` is FOUR keys, not one** — fzf's keymap reads `abort  ctrl-c  ctrl-g  ctrl-q
+esc`. An earlier version of this section, and the code comments it fed, said the residual
+gap was "Ctrl-C alone"; that was an exclusivity claim nobody had measured. Caught by
+`/audit-pr` round 0 on #1812.
+
+`--print-query` covers the endings where fzf has a result to print; a non-ESC abort is not
 one of them. **The first draft of this work asserted that an abort writes the query
 alone, in three code comments and the PR body. It does not.** Corrected, and pinned by
-`test_a_real_ABORT_records_NO_query_verdict_at_all`.
+`test_an_ESC_abort_RECORDS_a_verdict_and_the_OTHER_aborts_do_not`.
 
 Consequences for reading the data:
 
 * The **picked** rate — which is what symptom 1 is actually about — is complete.
-* The **dismissal** arm's `queried` rate covers the Enter-with-no-match ending only. That
-  ending is the most diagnostic dismissal there is ("I typed the repo name and the list
-  went empty" — the exact case `pick()`'s docstring has always named as unanswerable), so
-  it is not a trivial slice; but do **not** read it as "of all dismissals".
+* The **dismissal** arm's `queried` covers the Enter-with-no-match **and ESC** endings.
+  🔴 **It is not a rate over that arm and cannot be made into one**: `pick()` files every
+  dismissal under one `reason`, and ESC and Enter-with-no-match are byte-identical on
+  stdout, so "of ESC dismissals" is not computable. ✅ **The one clean cell** is
+  `queried == False`, which only an ESC on an untouched picker can produce. Count that.
 * Three-valued is what keeps this honest. A `False` default would file every abort under
   "the operator scrolled", which is the population the whole question is measured from —
   wrong in the reassuring direction.
@@ -335,11 +353,12 @@ It was **not** taken: the operator approved the Esc bind specifically, and rebin
 universal cancel is a separate call. One flag, same shape, whenever the arm should be
 complete.
 
-**Recommendation: (C) then (A).** (C) because the question is now measurable and was not
-before; (A) because it is additive, reversible, and helps *both* while the operator
-scrolls and after they type. (B) is worth keeping on the table but should not be taken
-before the `queried` rate is known — it trades away the fuzzy narrowing that makes a
-394-row picker usable at all.
+~~**Recommendation: (C) then (A).**~~ ⚠ **SUPERSEDED — this was the recommendation BEFORE
+the operator decided.** Kept struck rather than deleted so the decision above reads as a
+choice made against a stated alternative, not as the only option anyone offered. The
+operator took **(D) then (A)** and refused (B) on 2026-09-20; see those sections. The
+original reasoning: (C) because the question was now measurable and was not before; (A)
+because it is additive and reversible; (B) not before the `queried` rate is known.
 
 ### Symptom 2 — DECIDED: optimise for top-1. The sort key changed.
 

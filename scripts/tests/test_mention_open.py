@@ -1851,7 +1851,7 @@ ONE_CANDIDATE = [{"platform": "github", "id": "7",
 # abort writes the query line is a property of a FLAG, so the fake below reads
 # the flag: drop `esc:print-query` from `PICKER_SH` and every ESC fixture goes
 # back to writing zero bytes, which is what makes
-# `test_an_ESC_abort_RECORDS_a_verdict_and_only_Ctrl_C_does_not` a regression
+# `test_an_ESC_abort_RECORDS_a_verdict_and_the_OTHER_aborts_do_not` a regression
 # test rather than a restatement of the fake. Keyed on the ACTION, not the whole
 # flag string, so reordering `abort`/`print-query` inside the bind does not
 # silently flip the fixture — the whole-string pin on `PICKER_SH` is what
@@ -9398,7 +9398,7 @@ def test_the_picker_OUTPUT_LINE_count_is_DERIVED_from_the_flag_not_spelled():
     assert MO.PICKER_QUERY_LINE != MO.PICKER_ROW_LINE
 
 
-def test_an_ESC_abort_RECORDS_a_verdict_and_only_Ctrl_C_does_not(monkeypatch):
+def test_an_ESC_abort_RECORDS_a_verdict_and_the_OTHER_aborts_do_not(monkeypatch):
     """🔴 WHAT `--bind="esc:print-query+abort"` BOUGHT, AND WHAT IT DID NOT.
     This test REPLACES `test_a_real_ABORT_records_NO_query_verdict_at_all`,
     which pinned the pre-bind contract where EVERY abort wrote zero bytes. That
@@ -9411,7 +9411,20 @@ def test_an_ESC_abort_RECORDS_a_verdict_and_only_Ctrl_C_does_not(monkeypatch):
 
         without the bind:  ESC -> 0 bytes, exit 130
         with the bind:     ESC -> `<query>\\n`, exit 0   (empty query -> `\\n`)
-        either way:     Ctrl-C -> 0 bytes, exit 130
+        either way, EVERY OTHER ABORT -> 0 bytes, exit 130
+
+    🔴 "EVERY OTHER ABORT" IS FOUR KEYS, NOT ONE, AND THIS TEST WAS NAMED
+    `..._and_only_Ctrl_C_does_not` UNTIL /audit-pr ROUND 0. fzf's keymap reads
+    `abort  ctrl-c  ctrl-g  ctrl-q  esc`, and `ctrl-d` aborts too on an empty
+    query; all four write zero bytes, measured at 0.74.4 with the ESC rows as
+    the positive control. The old name asserted EXCLUSIVITY nobody had measured.
+
+    ⚠ WHAT THIS TEST CAN AND CANNOT SEE, because the rename might suggest
+    otherwise: it drives `_FakeTerminal`, which models ENDINGS and not KEYS, so
+    `hard_abort=True` stands for "the ending that writes zero bytes" — it cannot
+    tell ctrl-c from ctrl-g, and nothing downstream of `run_picker` can either,
+    which is exactly why they share one arm. The key-level fact lives in
+    `PICKER_SH`'s comment, measured out of band.
 
     and is recorded in `PICKER_SH`'s comment. The probe carried its own positive
     control: the four endings the bind does NOT touch reproduced byte-for-byte,
@@ -9458,15 +9471,17 @@ def test_an_ESC_abort_RECORDS_a_verdict_and_only_Ctrl_C_does_not(monkeypatch):
         f"{MO.last_pick_queried()!r} — a bare newline is a MEASUREMENT that the "
         f"operator scrolled, not an absence of one")
 
-    # Ctrl-C — still zero bytes, so still NOT MEASURED. The surviving half of
-    # the test this replaces, and the residual gap named in `click_dims`.
+    # Any OTHER abort (ctrl-c / ctrl-g / ctrl-q / empty-query ctrl-d) — still
+    # zero bytes, so still NOT MEASURED. The surviving half of the test this
+    # replaces, and the residual gap named in `click_dims`.
     MO.set_pick_queried(None)
     _term3, url3 = _drive_picker(monkeypatch, choose=None, hard_abort=True)
-    assert url3 == "", f"a Ctrl-C abort opened something: {url3!r}"
+    assert url3 == "", f"a zero-byte abort opened something: {url3!r}"
     assert MO.last_pick_queried() is None, (
-        f"a Ctrl-C abort recorded {MO.last_pick_queried()!r} — fzf writes ZERO "
-        f"BYTES there whatever the bind says, so any verdict is invented, and "
-        f"`False` would file the click under 'the operator scrolled'")
+        f"a zero-byte abort recorded {MO.last_pick_queried()!r} — ctrl-c, "
+        f"ctrl-g, ctrl-q and empty-query ctrl-d write NOTHING whatever the "
+        f"bind says, so any verdict is invented, and `False` would file the "
+        f"click under 'the operator scrolled'")
 
 
 def test_a_TORN_query_line_is_NOT_MEASURED_rather_than_read_half_written(
