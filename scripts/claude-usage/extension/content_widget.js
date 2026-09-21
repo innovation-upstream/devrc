@@ -464,25 +464,56 @@
         ["accounts", "lastActiveOrg", mod.ACCOUNT_LABELS_KEY, mod.COLLAPSE_KEY]);
     } catch (e) { retire(); return; }
     if (!getting || typeof getting.then !== "function") return;
+    // 🔴 THE THREE FAILURES BELOW ARE NOT ONE FAILURE, AND ONE CATCH USED TO
+    // CLAIM THEY WERE. The whole model-build-and-paint chain sat inside the
+    // trailing `.catch` commented "storage unreadable" -- while
+    // `root.textContent = ""` ran BEFORE the paint, so ANY throw anywhere in
+    // here produced a blank card byte-indistinguishable from a storage
+    // failure, under a comment that named only one of the causes. lib/ is
+    // required never to throw and content_widget must not lie about it if it
+    // ever does, so each stage now fails on its own terms:
+    //
+    //   model    lib/ broke its NEVER THROW contract. Leave the last good
+    //            card on screen (nothing has been cleared yet) and log once.
+    //   paint    the painter broke. The root IS cleared by then, so the card
+    //            goes blank -- but the log says which stage did it.
+    //   storage  the trailing catch, and now ONLY that: a rejected
+    //            storage.local.get, which is an ordinary page-teardown race.
     getting.then(function (got) {
-      var now = Date.now();
-      var rec = mod.pickRecord(got.accounts, got.lastActiveOrg);
-      // The whole account map goes in, not just the shown record: the card's
-      // other-accounts section is the point of this widget for an operator
-      // running several accounts. Labels are READ here and written only by
-      // the popup (see lib/format.js's ACCOUNT_LABELS_KEY).
-      var model = mod.widgetModel(rec, now, {
-        accounts: got.accounts,
-        lastActiveOrg: got.lastActiveOrg,
-        labels: got[mod.ACCOUNT_LABELS_KEY],
-      });
-      var collapsed = got[mod.COLLAPSE_KEY] === true;
+      var model, collapsed;
+      try {
+        var now = Date.now();
+        var rec = mod.pickRecord(got.accounts, got.lastActiveOrg);
+        // The whole account map goes in, not just the shown record: the card's
+        // other-accounts section is the point of this widget for an operator
+        // running several accounts. Labels are READ here and written only by
+        // the popup (see lib/format.js's ACCOUNT_LABELS_KEY).
+        model = mod.widgetModel(rec, now, {
+          accounts: got.accounts,
+          lastActiveOrg: got.lastActiveOrg,
+          labels: got[mod.ACCOUNT_LABELS_KEY],
+        });
+        collapsed = got[mod.COLLAPSE_KEY] === true;
+      } catch (e) {
+        try {
+          console.warn("[claude-usage] lib/widget.js threw building the model —"
+            + " it is required never to throw; the card on screen is now stale:", e);
+        } catch (_) { /* console gone during teardown */ }
+        return;
+      }
       var sh = ensureShadow(mod.WIDGET_HOST_ID);
       var root = sh.querySelector(".root");
       if (!root) return;
       root.textContent = "";
-      if (collapsed) paintCollapsed(root, model);
-      else paintExpanded(root, model);
+      try {
+        if (collapsed) paintCollapsed(root, model);
+        else paintExpanded(root, model);
+      } catch (e) {
+        try {
+          console.warn("[claude-usage] the painter threw —"
+            + " the card is blank because of this, not because storage failed:", e);
+        } catch (_) { /* console gone during teardown */ }
+      }
     }).catch(function () { /* storage unreadable; leave whatever is on screen */ });
   }
 

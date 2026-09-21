@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Claude Usage Tracker",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Snapshots every Claude account's usage when claude.ai is open, shows it in-page and on the toolbar badge, and lists all known accounts with reset countdowns. Local-only, personal automation.",
   "permissions": [
     "storage",

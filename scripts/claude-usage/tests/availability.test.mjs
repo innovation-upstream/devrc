@@ -19,26 +19,42 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const A = await import("../extension/lib/availability.js");
+const { isStale } = await import("../extension/lib/timefmt.js");
 const { accountLabel } = await import("../extension/lib/format.js");
 const { NAME_A, NAME_B, NAME_C, NOW, ORG_A, ORG_B, ORG_C } =
   await import("./fixtures.mjs");
 
 const H = 60 * 60 * 1000;
+const DAY = 24 * H;
 
 /** A minimal stored-shaped record. Written out rather than normalized, so the
- * fields the verdict reads are visible in the test. */
+ * fields the verdict reads are visible in the test.
+ *
+ * ⚠ THE WEEKLY WINDOW IS PART OF THE DEFAULT, and it did not used to be
+ * enough: `weekly` carried a percentage but no reset time, which is the one
+ * shape in which the weekly window can never be shown to have expired. Every
+ * weekly value below is distinct from the session one beside it and from
+ * every constant the assertions name (WARN_PCT 80, CRIT_PCT 95,
+ * WEEKLY_EXHAUSTED_PCT 100, 0), so a mutant hardcoding a literal cannot
+ * survive by landing on a fixture's own number. */
 function rec(over) {
   return Object.assign({
     orgUuid: ORG_A,
     orgName: NAME_A,
+    severity: null,
     session: { utilization: 37, resetsAt: new Date(NOW + 3 * H).toISOString(), lockedReason: null },
-    weekly: { utilization: 23, resetsAt: null, lockedReason: null },
+    weekly: { utilization: 26, resetsAt: new Date(NOW + 4 * DAY).toISOString(), lockedReason: null },
     asOf: NOW - 2 * H,
     staleSince: null,
   }, over || {});
 }
 
 const at = (ms) => new Date(ms).toISOString();
+
+/** The weekly window, spelled out. Defaults are a healthy window four days
+ * out, so a test naming only what it cares about gets a non-blocking rest. */
+const wk = (over) => Object.assign(
+  { utilization: 26, resetsAt: at(NOW + 4 * DAY), lockedReason: null }, over || {});
 
 // --- the verdict ------------------------------------------------------------- //
 
@@ -163,13 +179,18 @@ test("every verdict carries the full field set, whatever the state", () => {
   // this module -- both callers recompute them from the raw record through
   // formatCountdown()/stalenessLabel() -- and were deleted rather than wired
   // up. Every name below has a named consumer in availability.js's header.
-  const keys = ["state", "resetsAt", "resetElapsedMs", "sessionPct", "asOf"];
+  const keys = ["state", "resetsAt", "resetElapsedMs", "sessionPct", "weeklyPct",
+    "asOf", "lockedReason", "freesAt"];
   const cases = [
     A.availability(rec(), NOW),
     A.availability(rec({ session: { utilization: 91, resetsAt: at(NOW - H) } }), NOW),
     A.availability(rec({ session: { resetsAt: null } }), NOW),
+    A.availability(rec({ weekly: wk({ lockedReason: "Weekly limit reached." }) }), NOW),
     A.availability(null, NOW),
   ];
+  const seen = new Set(cases.map((v) => v.state));
+  assert.deepEqual([...seen].sort(), ["blocked", "free", "measured", "unknown"],
+    "precondition: every state is exercised, or the field set is pinned for only some");
   for (const v of cases) {
     for (const k of keys) assert.ok(k in v, `${v.state} verdict is missing ${k}`);
     // ...and NOTHING ELSE. Pinned both ways deliberately: the one-way version
@@ -177,6 +198,139 @@ test("every verdict carries the full field set, whatever the state", () => {
     assert.deepEqual(Object.keys(v).sort(), [...keys].sort(),
       `the ${v.state} verdict carries a field with no consumer`);
   }
+});
+
+test("INVARIANT GUARD: a FREE verdict always carries a NUMERIC resetElapsedMs", () => {
+  // ⚠ LABELLED. This passed at b97190c8 too -- it is not regression coverage,
+  // it is what makes a DELETION safe. `orderForSwitch`'s longest-free-first
+  // comparison used to read `va.resetElapsedMs === null ? 0 : ...` on both
+  // sides, and that ternary was dead: the FREE branch is the only writer of
+  // the field and it always writes a number. Removing both ternaries was
+  // MEASURED to survive all 217 tests, so nothing pinned the invariant they
+  // stood in for. This does; the sort now reads the field bare.
+  const cases = [
+    rec({ session: { utilization: 91, resetsAt: at(NOW - 2 * H) } }),
+    rec({ session: { utilization: 62, resetsAt: at(NOW) } }),              // boundary
+    rec({ session: { utilization: null, resetsAt: at(NOW - 5 * DAY) } }),  // no percentage
+    rec({ session: { utilization: 91, resetsAt: NOW - H }, asOf: undefined }),
+  ];
+  for (const r of cases) {
+    const v = A.availability(r, NOW);
+    assert.equal(v.state, A.FREE, "precondition: this fixture is free");
+    assert.equal(typeof v.resetElapsedMs, "number",
+      "a FREE verdict with a null resetElapsedMs would make the free sort compare against null");
+    assert.ok(Number.isFinite(v.resetElapsedMs));
+  }
+});
+
+// --- 🔴 F1: the verdict is not a SESSION-window verdict ---------------------- //
+//
+// 🔴 THE DEFECT. `availability()` read `session.resetsAt` and nothing else, so
+// the one state a heavy operator lives in for days -- five-hour window reset,
+// SEVEN-DAY window spent -- was reported as the best account to switch to.
+// MEASURED at b97190c8: session 95% with the reset 3h elapsed, weekly 100%
+// and `weekly.lockedReason: "Weekly limit reached."` resetting in 4 days
+// rendered `AVAILABLE — reset 3h ago (was 95%, measured 8h ago)`, tone "ok",
+// not stale, sorted FIRST. Adding `session.lockedReason: "account_suspended"`
+// and a `staleSince` produced a BYTE-IDENTICAL row.
+
+test("🔴 REGRESSION: a spent WEEKLY window blocks, however long ago the session reset", () => {
+  // Watched RED at b97190c8: state was "free" for all three.
+  const freed = { utilization: 95, resetsAt: at(NOW - 3 * H) };
+  const cases = [
+    ["a weekly LOCK", wk({ utilization: 62, lockedReason: "Weekly limit reached." })],
+    ["an EXHAUSTED weekly window with no lock string", wk({ utilization: 100 })],
+    ["both at once", wk({ utilization: 100, lockedReason: "Weekly limit reached." })],
+  ];
+  for (const [why, weekly] of cases) {
+    const v = A.availability(rec({ session: freed, weekly, asOf: NOW - 8 * H }), NOW);
+    assert.equal(v.state, A.BLOCKED, `${why} still read as ${v.state}`);
+    // The evidence stays visible -- the verdict never replaces the readings.
+    assert.equal(v.sessionPct, 95, "the last MEASURED session value is carried");
+    assert.equal(v.weeklyPct, weekly.utilization, "...and the weekly one");
+    assert.equal(v.freesAt, Date.parse(at(NOW + 4 * DAY)),
+      "the operator has to be told WHEN it frees up, and that is the weekly reset");
+    assert.equal(v.lockedReason, weekly.lockedReason,
+      "the API's own words, and never an invented sentence for the unlocked case");
+  }
+});
+
+test("🔴 REGRESSION: a SESSION lock blocks while its own window is open", () => {
+  // Watched RED at b97190c8: "measured", rendered as a plain 62% row.
+  const v = A.availability(rec({
+    session: { utilization: 62, resetsAt: at(NOW + 90 * 60 * 1000),
+      lockedReason: "Session limit reached." },
+  }), NOW);
+  assert.equal(v.state, A.BLOCKED);
+  assert.equal(v.lockedReason, "Session limit reached.");
+  assert.equal(v.freesAt, NOW + 90 * 60 * 1000, "a session lock ends at the session reset");
+});
+
+test("🔴 a SESSION lock is SPENT by its own reset -- it does not outlive the window", () => {
+  // The mirror of the rule above, and the one that would have re-created this
+  // module's founding defect one field over: a lock recorded during a window
+  // that has since closed is stale evidence, exactly as the percentage is.
+  const v = A.availability(rec({
+    session: { utilization: 95, resetsAt: at(NOW - 2 * H), lockedReason: "Session limit reached." },
+  }), NOW);
+  assert.equal(v.state, A.FREE, "a five-hour lock survived its five-hour window");
+  assert.equal(v.lockedReason, null);
+});
+
+test("🔴 a WEEKLY lock is spent by the WEEKLY reset, not by the session one", () => {
+  // Both windows elapsed -> nothing binds.
+  const v = A.availability(rec({
+    session: { utilization: 95, resetsAt: at(NOW - 2 * H) },
+    weekly: wk({ utilization: 100, resetsAt: at(NOW - 60 * 1000),
+      lockedReason: "Weekly limit reached." }),
+  }), NOW);
+  assert.equal(v.state, A.FREE, "an expired weekly block still blocked");
+
+  // ...and one minute the other way it still binds, so the assertion above
+  // cannot be satisfied by ignoring the weekly window altogether.
+  const still = A.availability(rec({
+    session: { utilization: 95, resetsAt: at(NOW - 2 * H) },
+    weekly: wk({ utilization: 100, resetsAt: at(NOW + 60 * 1000),
+      lockedReason: "Weekly limit reached." }),
+  }), NOW);
+  assert.equal(still.state, A.BLOCKED);
+  assert.equal(still.freesAt, NOW + 60 * 1000);
+});
+
+test("a lock whose reset cannot be parsed blocks with an UNKNOWN end, never optimistically", () => {
+  // The inference is safe in one direction only: a reset we cannot read has
+  // not been shown to have happened.
+  const v = A.availability(rec({
+    session: { utilization: 95, resetsAt: at(NOW - 2 * H) },
+    weekly: wk({ utilization: 62, resetsAt: null, lockedReason: "Weekly limit reached." }),
+  }), NOW);
+  assert.equal(v.state, A.BLOCKED);
+  assert.equal(v.freesAt, null, "a block with no knowable end must not name a time");
+
+  // And when TWO windows block with different ends, the later one decides --
+  // the account is usable only once every blocker has cleared.
+  const both = A.availability(rec({
+    session: { utilization: 95, resetsAt: at(NOW + 2 * H), lockedReason: "Session limit reached." },
+    weekly: wk({ utilization: 100, resetsAt: at(NOW + 3 * DAY) }),
+  }), NOW);
+  assert.equal(both.freesAt, Date.parse(at(NOW + 3 * DAY)), "the SOONER reset was taken");
+  assert.equal(both.lockedReason, "Session limit reached.",
+    "session first -- it is the one named on screen when both apply");
+});
+
+test("the exhaustion boundary is WEEKLY_EXHAUSTED_PCT, inclusive, and below it nothing blocks", () => {
+  const atPct = (p) => A.availability(rec({
+    session: { utilization: 37, resetsAt: at(NOW - H) },
+    weekly: wk({ utilization: p }),
+  }), NOW).state;
+  assert.equal(A.WEEKLY_EXHAUSTED_PCT, 100);
+  assert.equal(atPct(99.4), A.FREE, "99.4% of your weekly allowance is not out");
+  assert.equal(atPct(A.WEEKLY_EXHAUSTED_PCT), A.BLOCKED, "inclusive at the endpoint");
+  assert.equal(atPct(140), A.BLOCKED, "an over-100 reading is not a reason to unblock");
+  assert.equal(atPct(null), A.FREE, "an unknown weekly reading is not an exhausted one");
+  // CRIT_PCT is a colour band and must NOT be a state boundary: a 95% weekly
+  // window is alarming and still usable.
+  assert.equal(atPct(95), A.FREE, "the crit BAND became a blocking threshold");
 });
 
 // --- the ordering ------------------------------------------------------------ //
@@ -193,6 +347,14 @@ const pending = (uuid, name, pct, inH) => ({
 const murky = (uuid, name) => ({
   orgUuid: uuid, orgName: name, staleSince: null, asOf: NOW - H,
   session: { utilization: null, resetsAt: null },
+});
+/** Session window long since reset, WEEKLY window spent -- the state the
+ * verdict used to call the best switch target on the card. */
+const blocked = (uuid, name, pct, weeklyInDays) => ({
+  orgUuid: uuid, orgName: name, staleSince: null, asOf: NOW - 8 * H,
+  session: { utilization: pct, resetsAt: at(NOW - 3 * H) },
+  weekly: { utilization: 100, resetsAt: at(NOW + weeklyInDays * DAY),
+    lockedReason: "Weekly limit reached." },
 });
 
 test("🔴 orderForSwitch is most-available-first: free, then measured, then unknown", () => {
@@ -263,10 +425,48 @@ test("within 'free': the one that has been free LONGEST comes first", () => {
   assert.deepEqual(A.orderForSwitch(accounts, NOW).map((r) => r.orgUuid), [ORG_B, ORG_A]);
 });
 
-test("🔴 the order is TOTAL and DETERMINISTIC when every visible field ties", () => {
-  // Two records that are indistinguishable to every rule above still have
-  // exactly one legal order, and the same one every call -- a list that
-  // reshuffles itself on a 30s re-render is unusable.
+test("🔴 REGRESSION: a weekly-BLOCKED account never outranks a usable one", () => {
+  // Watched RED at b97190c8: the blocked account read "free" and therefore
+  // sorted FIRST -- the single best switch target on the card was the one
+  // that rejects you at the login screen.
+  const accounts = {
+    [ORG_A]: blocked(ORG_A, NAME_A, 95, 4),
+    [ORG_B]: pending(ORG_B, NAME_B, 91, 4),      // usable, and nearly out
+    [ORG_C]: murky(ORG_C, NAME_C),               // usable for all we know
+  };
+  assert.deepEqual(
+    A.orderForSwitch(accounts, NOW).map((r) => r.orgUuid),
+    [ORG_B, ORG_C, ORG_A],
+    "blocked must rank below even an UNKNOWN account: unknown might be usable, "
+    + "blocked is known not to be");
+  assert.deepEqual(A.STATE_ORDER, ["free", "measured", "unknown", "blocked"]);
+});
+
+test("within 'blocked': the one that frees up SOONEST comes first, unknown ends last", () => {
+  const accounts = {
+    [ORG_A]: blocked(ORG_A, NAME_A, 91, 5),
+    [ORG_B]: blocked(ORG_B, NAME_B, 62, 1),
+    [ORG_C]: Object.assign(blocked(ORG_C, NAME_C, 37, 2),
+      { weekly: { utilization: 100, resetsAt: null, lockedReason: "Weekly limit reached." } }),
+  };
+  assert.deepEqual(A.orderForSwitch(accounts, NOW).map((r) => r.orgUuid),
+    [ORG_B, ORG_A, ORG_C],
+    "'blocked until we cannot say' is the worst thing to be waiting on");
+});
+
+test("INVARIANT GUARD: the order is TOTAL and DETERMINISTIC when every visible field ties", () => {
+  // ⚠ LABELLED, AND THE MECHANISM IS NOT WHAT THIS FILE USED TO CLAIM. The
+  // comparator ended in `a.index - b.index`, documented as what made the
+  // order total, and this test was cited as the pin for it. It is not, and
+  // cannot be: `Array.prototype.sort` has been stable by spec since ES2019,
+  // so `return 0` produces the identical order and was MEASURED to survive
+  // all 217 tests. The tiebreak and the `index` field it read have therefore
+  // been DELETED rather than re-justified.
+  //
+  // What remains is worth keeping and is exactly this: the OUTPUT property,
+  // guarded against a comparator that is ever made non-deterministic. It is
+  // an invariant guard on the engine's guarantee, not regression coverage for
+  // any defect, and it passed at b97190c8 unchanged.
   const same = (uuid) => pending(uuid, `acct ${uuid.slice(0, 2)}`, 62, 2);
   const accounts = { [ORG_A]: same(ORG_A), [ORG_B]: same(ORG_B), [ORG_C]: same(ORG_C) };
   const first = A.orderForSwitch(accounts, NOW).map((r) => r.orgUuid);
@@ -327,6 +527,165 @@ test("nextFreeAt is null when nothing is pending", () => {
     "the only pending account is the active one");
   assert.equal(A.nextFreeAt({ [ORG_A]: pending(ORG_A, NAME_A, 62, 2) }, null, NaN), null,
     "an unusable clock answers nothing rather than guessing");
+});
+
+test("INVARIANT GUARD: two accounts freeing at the SAME instant -- the first in map order wins", () => {
+  // ⚠ LABELLED: this passed at b97190c8, so it is not regression coverage.
+  // It closes a SURVIVED mutant instead. `nextFreeAt`'s comparison is
+  // documented as load-bearing ("on an exact tie the first in map order
+  // wins, so the answer does not depend on comparison order") and was
+  // UNPINNED: relaxing the strict `<` to `<=` -- which hands the tie to the
+  // LAST record instead -- was MEASURED to survive all 217 tests. A comment
+  // claiming a property nothing checks is the shape this project keeps
+  // finding, so the claim now has a guard rather than a better sentence.
+  const tie = at(NOW + 2 * H);
+  const accounts = {
+    [ORG_A]: { orgUuid: ORG_A, orgName: NAME_A, staleSince: null, asOf: NOW - H,
+      session: { utilization: 62, resetsAt: tie } },
+    [ORG_B]: { orgUuid: ORG_B, orgName: NAME_B, staleSince: null, asOf: NOW - H,
+      session: { utilization: 23, resetsAt: tie } },
+  };
+  assert.equal(A.nextFreeAt(accounts, null, NOW).record.orgUuid, ORG_A,
+    "the tie went to the LAST record -- the comparison is no longer strict");
+  // Reversed insertion order gives the other answer, so the assertion above
+  // cannot be satisfied by always returning ORG_A.
+  const flipped = { [ORG_B]: accounts[ORG_B], [ORG_A]: accounts[ORG_A] };
+  assert.equal(A.nextFreeAt(flipped, null, NOW).record.orgUuid, ORG_B);
+});
+
+test("🔴 nextFreeAt counts a BLOCKED account -- its weekly reset is the wait", () => {
+  // Watched RED at b97190c8: every other account blocked meant `state !==
+  // MEASURED` for all of them, so the footer was null and the card said
+  // nothing at all while the operator had four days to wait.
+  const accounts = {
+    [ORG_A]: pending(ORG_A, NAME_A, 37, 1),                   // active, excluded
+    [ORG_B]: blocked(ORG_B, NAME_B, 95, 4),
+  };
+  const n = A.nextFreeAt(accounts, ORG_A, NOW);
+  assert.ok(n, "no wait time offered for an account that is blocked, not free");
+  assert.equal(n.record.orgUuid, ORG_B);
+  assert.equal(n.at, Date.parse(at(NOW + 4 * DAY)), "the WEEKLY reset is what unblocks it");
+  assert.equal(n.inMs, 4 * DAY);
+
+  // A block with no knowable end offers nothing rather than guessing.
+  const opaque = { [ORG_B]: Object.assign(blocked(ORG_B, NAME_B, 95, 4),
+    { weekly: { utilization: 100, resetsAt: null, lockedReason: "Weekly limit reached." } }) };
+  assert.equal(A.nextFreeAt(opaque, null, NOW), null);
+});
+
+// --- 🔴 F2: ONE predicate for "which record is active" ----------------------- //
+//
+// 🔴 THE SEAM. The widget identified the active account by MAP KEY
+// (`accounts[lastActiveOrg]`) and the popup by the record's own `orgUuid`
+// FIELD (`rec.orgUuid === lastActiveOrg`). service_worker.js writes
+// `lastActiveOrg` whether or not the /usage fetch produced a record, so a
+// non-401/403 failure on a first-seen org leaves the key naming nothing --
+// and the two spellings then answered differently on one storage read.
+
+test("🔴 REGRESSION: an active key naming NO stored record is not active at all", () => {
+  // Watched RED at b97190c8 -- there was no predicate to be red, which is the
+  // finding: both surfaces open-coded their own.
+  const GHOST = "99999999-9999-4999-8999-999999999999";
+  const b = pending(ORG_B, NAME_B, 92, 2);
+  const accounts = { [ORG_B]: b };
+  assert.equal(A.activeRecord(accounts, GHOST), null,
+    "a key with no record must not promote SOME OTHER account to active");
+  assert.equal(A.isActiveRecord(b, accounts, GHOST), false);
+  // ...and it still names the real one when there is one.
+  assert.equal(A.activeRecord(accounts, ORG_B), b);
+  assert.equal(A.isActiveRecord(b, accounts, ORG_B), true);
+});
+
+test("activeRecord is the MAP KEY, not the record's own orgUuid field", () => {
+  // The worker writes `accounts[uuid]` and `lastActiveOrg = uuid` from one
+  // value in one writeState, so the key is the claim and the field is a copy
+  // an older or partial write can disagree with.
+  const stray = pending(ORG_B, NAME_B, 62, 2);
+  stray.orgUuid = ORG_C;                              // the copy disagrees
+  const accounts = { [ORG_B]: stray };
+  assert.equal(A.activeRecord(accounts, ORG_B), stray);
+  assert.equal(A.activeRecord(accounts, ORG_C), null,
+    "the FIELD spelling would have matched here, and it is the wrong record");
+});
+
+test("activeRecord is total over garbage, junk records and prototype keys", () => {
+  const b = pending(ORG_B, NAME_B, 62, 2);
+  assert.equal(A.activeRecord({ [ORG_A]: "junk", [ORG_B]: b }, ORG_A), null,
+    "a junk value under the active key is not a record");
+  assert.equal(A.activeRecord({ [ORG_A]: null }, ORG_A), null);
+  assert.equal(A.activeRecord(null, ORG_A), null);
+  assert.equal(A.activeRecord("nonsense", ORG_A), null);
+  assert.equal(A.activeRecord({}, ""), null);
+  assert.equal(A.activeRecord({}, 5), null);
+  assert.equal(A.activeRecord({}, null), null);
+  // The Object.prototype hole severity.js's SEVERITY_TONES lookup documents:
+  // a bare read of `accounts["constructor"]` answers a truthy FUNCTION.
+  assert.equal(A.activeRecord({}, "constructor"), null);
+  assert.equal(A.activeRecord({}, "toString"), null);
+  assert.equal(A.isActiveRecord(null, { [ORG_A]: null }, ORG_A), false,
+    "null === null must not read as 'this record is the active one'");
+});
+
+// --- the row tone ------------------------------------------------------------- //
+
+test("🔴 REGRESSION: a free row is coloured by the WEEKLY window, not by its spent session %", () => {
+  // Watched RED at b97190c8: `otherRow` hardcoded `tone: "ok"` on this branch,
+  // so a weekly window at 100% painted green. The mirror half matters just as
+  // much -- the SESSION percentage is spent evidence and must not redden it.
+  const v = (weeklyPct) => A.availability(rec({
+    session: { utilization: 95, resetsAt: at(NOW - 3 * H) },
+    weekly: wk({ utilization: weeklyPct }),
+  }), NOW);
+  const tone = (weeklyPct) => A.toneForRow(
+    rec({ session: { utilization: 95, resetsAt: at(NOW - 3 * H) },
+      weekly: wk({ utilization: weeklyPct }) }), v(weeklyPct), isStale, NOW);
+  assert.equal(v(26).state, A.FREE, "precondition");
+  assert.equal(tone(26), "ok", "a 95% session window that has RESET is not red");
+  assert.equal(tone(84), "warn", "the weekly window is the one that still binds");
+  assert.equal(tone(97), "crit");
+  assert.equal(tone(null), "ok", "an unknown weekly reading leaves the verdict standing");
+});
+
+test("a free row does not grey, and a blocked row is crit and does not grey either", () => {
+  const old = { asOf: NOW - 9 * H, staleSince: NOW - 1000 };     // stale twice over
+  const freeRec = rec(Object.assign({
+    session: { utilization: 91, resetsAt: at(NOW - 2 * H) }, weekly: wk({ utilization: 33 }),
+  }, old));
+  assert.equal(A.toneForRow(freeRec, A.availability(freeRec, NOW), isStale, NOW), "ok",
+    "the account worth switching to is stale BY CONSTRUCTION; greying it hides it");
+
+  const blockedRec = rec(Object.assign({
+    session: { utilization: 91, resetsAt: at(NOW - 2 * H) },
+    weekly: wk({ utilization: 100, lockedReason: "Weekly limit reached." }),
+  }, old));
+  assert.equal(A.toneForRow(blockedRec, A.availability(blockedRec, NOW), isStale, NOW), "crit");
+});
+
+test("a measured row takes the WORSE of session, weekly and the API severity", () => {
+  // The rule severity.js already owned and `otherRow` was not applying: it
+  // passed `percentTone(sessionPct, null)` -- weekly literally null -- so the
+  // weekly window could not colour an other-account row at all.
+  const tone = (over) => {
+    const r = rec(Object.assign({
+      session: { utilization: 23, resetsAt: at(NOW + 2 * H) }, asOf: NOW - 60 * 1000,
+    }, over));
+    return A.toneForRow(r, A.availability(r, NOW), isStale, NOW);
+  };
+  assert.equal(tone({}), "ok", "23% session / 26% weekly / no severity");
+  assert.equal(tone({ weekly: wk({ utilization: 84 }) }), "warn", "the WEEKLY window binds");
+  assert.equal(tone({ weekly: wk({ utilization: 97 }) }), "crit");
+  assert.equal(tone({ severity: "critical" }), "crit", "the API severity still escalates");
+  assert.equal(tone({ staleSince: NOW - 1000 }), "stale",
+    "here the stored percentage IS the claim, so staleness greys it");
+});
+
+test("toneForRow is total over garbage -- it runs in his real tab", () => {
+  for (const bad of [null, undefined, "nonsense", 42, true, NaN, []]) {
+    const tone = A.toneForRow(bad, A.availability(bad, NOW), isStale, NOW);
+    assert.equal(typeof tone, "string", `record=${String(bad)}`);
+  }
+  assert.equal(typeof A.toneForRow(rec(), null, isStale, NOW), "string", "no verdict at all");
+  assert.equal(typeof A.toneForRow(rec(), undefined, isStale, NOW), "string");
 });
 
 // --- labels -------------------------------------------------------------------- //

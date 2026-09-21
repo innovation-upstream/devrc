@@ -8,7 +8,7 @@
 
 import { formatCountdown, isStale, stalenessLabel } from "./lib/timefmt.js";
 import { ACCOUNT_LABELS_KEY, accountLabel, creditsLine, formatPct } from "./lib/format.js";
-import { FREE, availability } from "./lib/availability.js";
+import { BLOCKED, FREE, activeRecord, availability, isActiveRecord } from "./lib/availability.js";
 
 // formatPct/creditsLine moved to lib/format.js when the injected widget needed
 // the same rules (2026-09-19). Re-exported rather than relocated outright: the
@@ -52,8 +52,13 @@ export function nextLabels(labels, orgUuid, text) {
 export function orderAccounts(accounts, lastActiveOrg) {
   const map = accounts && typeof accounts === "object" ? accounts : {};
   const list = Object.values(map);
-  const active = lastActiveOrg && map[lastActiveOrg] ? [map[lastActiveOrg]] : [];
-  const rest = list.filter((r) => r !== map[lastActiveOrg]);
+  // `activeRecord()` -- the one predicate lib/widget.js reads too. A bare
+  // `map[lastActiveOrg]` hands back whatever sits under the key, so a junk
+  // value would be pinned to the top of the dashboard as "the active
+  // account", and an Object.prototype key would pin a function.
+  const rec = activeRecord(map, lastActiveOrg);
+  const active = rec !== null ? [rec] : [];
+  const rest = list.filter((r) => r !== rec);
   const byFreshness = (a, b) => (b.asOf || 0) - (a.asOf || 0);
   return [...active, ...rest.sort(byFreshness)];
 }
@@ -81,6 +86,19 @@ export function orderAccounts(accounts, lastActiveOrg) {
  */
 export function sessionLine(rec, now, isActive) {
   const v = availability(rec, now);
+  if (v.state === BLOCKED) {
+    // 🔴 THE EXEMPTION DOES NOT REACH A BLOCK, and that is not an oversight.
+    // It exists because an elapsed reset on the ACTIVE account is a pending
+    // correction the next probe will make. A lock or an exhausted weekly
+    // window is not an inference from an elapsed reset at all -- it is a
+    // stored fact that the next probe will confirm, not overturn. The widget's
+    // card renders the same lock in its `locked` banner, so both surfaces
+    // report it for the active account too.
+    const because = v.lockedReason || `weekly ${formatPct(v.weeklyPct)}`;
+    const until = v.freesAt === null
+      ? "frees up: unknown" : `frees up in ${formatCountdown(v.freesAt, now)}`;
+    return `BLOCKED · ${because} · ${until} (session was ${formatPct(v.sessionPct)})`;
+  }
   if (v.state === FREE && isActive !== true) {
     // The verdict, then the evidence for it. The last MEASURED percentage
     // stays visible so an inference can never read as a fresh reading, and
@@ -157,11 +175,25 @@ export const EMPTY_STATE_TEXT = "No accounts yet — open claude.ai once and thi
  * box; Enter or blur saves, Escape cancels, an empty box clears the override.
  *
  * The RULE it applies is `nextLabels()`, which is pure and tested. Everything
- * here is glue: read the current map, call it, write the result back, repaint.
- * `paint()` re-runs from the storage change anyway, but it is called directly
- * too so the edit lands even if the onChanged round-trip is slow.
+ * here is glue: apply it to the map this render already read, write the
+ * result back, repaint. `paint()` re-runs from the storage change anyway, but
+ * it is called directly too so the edit lands even if the onChanged
+ * round-trip is slow.
+ *
+ * 🔴 ONE ASYNC HOP, NOT TWO, AND IT STARTS SYNCHRONOUSLY. This used to
+ * `storage.get()` the label map and only then `set()` the result, so a save
+ * begun on `blur` had to survive TWO round-trips -- and a popup dismissed by
+ * clicking outside it is torn down mid-flight. The map is already in hand:
+ * `paint()` read it to build this row, and a storage change repaints (and so
+ * rebuilds these buttons) before it can go stale. The popup is the only
+ * writer of that key, so there is no concurrent edit to merge with.
+ *
+ * ⚠ NOT VERIFIED AGAINST A REAL DISMISS. Whether `blur` even fires when a
+ * Chrome popup is dismissed by an outside click needs a browser, and the node
+ * harness does not paint this file at all. What was done is to make the save
+ * as short as it can be, not to demonstrate that the lossy path is closed.
  */
-function renameButton(row) {
+function renameButton(row, labels) {
   const btn = document.createElement("button");
   btn.className = "rename";
   btn.type = "button";
@@ -179,13 +211,21 @@ function renameButton(row) {
       if (done) return;
       done = true;
       if (!save) { paint(); return; }
-      const text = input.value;
       try {
-        chrome.storage.local.get([ACCOUNT_LABELS_KEY]).then((got) => {
-          const next = nextLabels(got[ACCOUNT_LABELS_KEY], row.orgUuid, text);
-          return chrome.storage.local.set({ [ACCOUNT_LABELS_KEY]: next });
-        }).then(paint).catch(() => { /* storage gone; nothing to save into */ });
-      } catch { /* worker unreachable */ }
+        const next = nextLabels(labels, row.orgUuid, input.value);
+        const setting = chrome.storage.local.set({ [ACCOUNT_LABELS_KEY]: next });
+        if (setting && typeof setting.then === "function") {
+          setting.then(paint).catch(() => { /* storage gone; nothing to save into */ });
+        } else {
+          paint();
+        }
+      } catch {
+        // 🔴 REPAINT ANYWAY. The row has already been replaced by the input
+        // box at this point, so swallowing the throw and returning leaves the
+        // account PERMANENTLY truncated to a text field with no name and no
+        // way back. Losing the edit is bad; losing the row is worse.
+        paint();
+      }
     };
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") commit(true);
@@ -214,7 +254,12 @@ function paint() {
     empty.hidden = ordered.length > 0;
     host.textContent = "";
     for (const rec of ordered) {
-      const row = renderRow(rec, now, rec.orgUuid === got.lastActiveOrg, labels);
+      // 🔴 `isActiveRecord`, NOT `rec.orgUuid === lastActiveOrg`. That field
+      // spelling was the popup's half of a predicate the widget spelled by
+      // MAP KEY, and with a `lastActiveOrg` naming an org that has no stored
+      // record the two surfaces named different active accounts on one
+      // storage read. One predicate, in lib/availability.js.
+      const row = renderRow(rec, now, isActiveRecord(rec, accounts, got.lastActiveOrg), labels);
       const div = document.createElement("div");
       div.className = `account${row.isActive ? " active" : ""}${row.stale ? " stale" : ""}`;
 
@@ -226,7 +271,7 @@ function paint() {
       const asof = document.createElement("span");
       asof.className = "asof";
       asof.textContent = row.asOf;
-      if (row.orgUuid) row1.append(name, renameButton(row), asof);
+      if (row.orgUuid) row1.append(name, renameButton(row, labels), asof);
       else row1.append(name, asof);
 
       const metrics = document.createElement("div");
