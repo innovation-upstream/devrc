@@ -48,6 +48,16 @@ notifications and repo browse are dropped.
   doc had that wrong, and a kickoff line propagated it.** Its branch predated three of the
   parent's newest commits (`b17cf93f`, `26228216`, `17b6ff96`), so it conflicted against its own
   base before `main` ever entered it. Merged parent-tip-then-`main` in a throwaway worktree.
+- ✅ **SHIPPED AND VERIFIED ON BOTH HOSTS (2026-09-21) — SYMPTOM 1 IS CLOSED, AND SO IS THE ARC'S
+  LAST OPEN OBJECTIVE.** `ship.sh` rc=0, both hosts at `8f95c342`, cross-host agreement asserted
+  (`2 hosts compared, both at 8f95c342`); **every per-host line read**, both `✅ VERIFIED`,
+  `0 dangling` / `0 stale` managed artifacts on each. ⚠ Both hosts print the prefix **`[nixos]`**
+  — a grep for `^\[workbench\]`/`^\[laptop\]` matches NOTHING and reads exactly like a clean run.
+  Verified by CONTENT, not `--version`: wrapped binary
+  `/nix/store/al42…-mention-review-0.3.0/bin/.mention-review-wrapped`, positive control
+  `usage: mention-review` = **1**, `ReadIntents` = **2**; and the picker is live from the WORKING
+  TREE (`~/.config/alacritty` wrapper execs `$DEVRC/scripts/mention-open.py`, which carries
+  `picker_marker`, `PICKER_MARKER_RANK_W` and 10 `--nth=2..` hits).
 - ✅ **Merged tree verified locally: `648 passed, 2 skipped`** across `test_mention_open` +
   `test_mention_scan` + `test_mutation_battery_anchors`, at base `6ee5ff68`. That is **7 above
   the `641 passed, 2 skipped` the pre-`#1813` tree gives** — a number that did not move would
@@ -161,36 +171,29 @@ notifications and repo browse are dropped.
   at constant digits AND width ⇒ it is in fzf's scorer, worth reporting upstream.
 
 ## Next steps (ranked)
-1. **SHIP symptom 1 to both hosts and verify it by CONTENT.** ✅ The merge half is CLOSED —
-   `#1813` merged as `7f39fda7` off head `8c5fda78` with all four Tekton legs green
-   (`pytests` collected **23,831**, up 28 from `#1812`'s 23,803, so the branch's own tests
-   demonstrably ran). What REMAINS is `scripts/ship.sh` and the verification, which had not been
-   done when this was written. Repo: devrc. 🔴 **Read every per-host line, never the final
-   verdict** — one skip hides among greens. 🔴 **`--version` cannot answer "is it deployed"**:
-   `bin/mention-review` is a `makeWrapper` script, so follow `exec -a` to
-   `bin/.mention-review-wrapped` and grep THAT, positive control first. ⚠ The picker half
-   (`scripts/mention-open.py`) is live with **no switch** — the Alacritty wrapper execs the
-   working tree — so a `git pull` of the primary clone already activates it; the switch is for
-   the Go binary. ⚠ Do not ship while an agent is mid-run in this repo: a switch blanks
-   `~/.nix-profile` for ~31–35 s and every bare-command invocation dies "command not found".
-   forcing: user — the operator chose (D) then (A) on 2026-09-20; shipping is that decision
-   reaching the machine they actually use.
+1. **Decide whether `below`-dominance is the real defect.** The picked row's class is `below` 56 /
+   `plausible` 17, and the proposal flags that NOT DIAGNOSED and *"a bigger finding than symptom
+   1"*. Cheap mechanical test already exists: re-run the causal replay with the class term demoted
+   below distance/score and read top-1 against the 12.7% observed. Untested mechanism worth trying
+   first: many clicked `#N` are clawgate/ClickUp ids, not GitHub numbers, so no repo's range is
+   relevant. Repo: devrc.
+   ⚠ **This was rank 3 until symptom 1 closed; it is rank 1 because it is the only item carrying
+   an external forcing function, not because anything new happened to it.** Renumbered against a
+   MEASURED empty claim set — `claim-work --list` showed `mention-review-tui-1` released and no
+   other `mention-review-tui-*` claim live at that moment.
+   forcing: regression — the shipped sort key ranks by a term that disagrees with 77% of real
+   picks; #1813 makes that disagreement visible without fixing it.
 2. **Round 3 delta audit of `#1813`, scoped to round 2's fixes plus the two merge commits.**
    Round 2 returned findings, so the ladder's rule says another round follows; a clean round
    ends it. Range is now `2f9af4f8..8c5fda78` (was `..9c4bb252`) and **includes `b116179f` +
    `8c5fda78`, which are merges** — a delta audit over a merge range reads differently, so state
    the range you actually gave it. Post the `audit-claims` block BEFORE dispatching: a delta with
    no parseable block is REFUSED, and a MISSING INTERMEDIATE one does NOT refuse — it silently
-   anchors older and widens the range. Repo: devrc.
-   forcing: none — advisory; nothing external waits on it.
-3. **Decide whether `below`-dominance is the real defect.** The picked row's class is `below` 56 /
-   `plausible` 17, and the proposal flags that NOT DIAGNOSED and *"a bigger finding than symptom
-   1"*. Cheap mechanical test already exists: re-run the causal replay with the class term demoted
-   below distance/score and read top-1 against the 12.7% observed. Untested mechanism worth trying
-   first: many clicked `#N` are clawgate/ClickUp ids, not GitHub numbers, so no repo's range is
-   relevant. Repo: devrc.
-   forcing: regression — the shipped sort key ranks by a term that disagrees with 77% of real
-   picks; #1813 makes that disagreement visible without fixing it.
+   anchors older and widens the range. ⚠ **`#1813` IS MERGED** (`7f39fda7`), so this audits
+   shipped code — a finding here is a follow-up PR, not a change to a pending one. Repo: devrc.
+   forcing: none — advisory; nothing external waits on it. **Ranked BELOW an item with a real
+   forcing function deliberately**: a `forcing: none` item is not eligible to be worked, so
+   putting it first would have pointed the next session's `claim-work` at a non-workable rank.
 ## Defects (batched)
 - 🔴 **NO `LICENSE` FILE WHILE THE DERIVATION CLAIMS MIT** —
   `nix/pkgs/tools/mention-review/default.nix:146` declares `licenses.mit` with nothing backing
