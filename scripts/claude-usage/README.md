@@ -115,8 +115,26 @@ weekly one is its twin and was missing from the row *colour* for a round.
 account whose seven-day window had reset an hour ago still painted crit off
 that spent 100%: `AVAILABLE`, in red, with nothing in the row explaining the
 colour. `availability()` now returns `weeklyBindingPct` — the weekly reading
-with the rule already applied — and the tone reads only that, so the rule
-lives in one place rather than at each consumer.
+with the rule already applied.
+
+🔴 **The rule lives in one place; two consumers are exempt from it BY NAME,
+and for a round a third was exempt by accident.** This paragraph used to end
+"the tone reads only that, so the rule lives in one place rather than at each
+consumer", which was false as implemented: it was true of the other-account
+rows and of nothing else. The CARD went on banding the raw record in two
+places — its headline `tone`, which paints the collapsed pill *and* the header
+dot, and its weekly row's colour. Measured at `3f0a5506` on a record with the
+session window reset 2h ago at 95% and the weekly window reset 30m ago at
+100%, shown as the fallback because `lastActiveOrg` named an org with no
+stored record: the card's verdict was `free`, its session row read
+`AVAILABLE` in green, and its headline was **`crit`** — a red pill for a free
+account — while the same record's other-account row, same storage and same
+`now`, was `ok`. Both card reads now go through the verdict for a non-exempt
+record. The two consumers that still read the record raw are the ones the
+exemption names: the card of the **active** account (the probe re-measures it
+within seconds) and the **toolbar badge**, which reads
+`accounts[lastActiveOrg]` and nothing else, so it is only ever about that same
+active account.
 
 ⚠ **There is no `+N more` cap.** The widget drew at most four other-account
 rows and summarised the rest as a count that nothing could expand, so any row

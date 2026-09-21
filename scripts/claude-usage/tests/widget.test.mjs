@@ -680,6 +680,86 @@ test("🔴 REGRESSION: an other-account row is not reddened by a weekly window t
   assert.equal(row.tone, "ok", `an AVAILABLE row painted "${row.tone}": ${row.meta}`);
 });
 
+test("🔴 REGRESSION: the CARD's headline tone is not reddened by evidence its own verdict calls SPENT", () => {
+  // Watched RED at 3f0a5506, on the fixture below:
+  //   card    tone "crit"  -- a red collapsed pill and a red header dot
+  //   others  tone "ok"    -- the SAME record, same storage, same `now`
+  // `widgetModel` returned `tone: toneFor(record, now)`, which is
+  // severity.js's `toneForRecord` reading `record.session.utilization` and
+  // `record.weekly.utilization` RAW. Both windows here have turned over, so
+  // both readings are spent evidence and `availability()` already says so --
+  // the verdict is `free` with `weeklyBindingPct: null`. The card was the one
+  // surface still banding the raw record, and it is the surface the operator
+  // sees first.
+  //
+  // 🔴 THE ASSERTION IS THE COLOUR, and the pair of colours specifically. A
+  // single-sided check ("the card is ok") would be satisfied by painting
+  // every non-exempt card ok, which the weekly-still-binds case below forbids.
+  const spentBoth = acct(ORG_B, NAME_B, 93, 97, iso(NOW - 2 * HOUR), 1, (r) => {
+    r.weekly.resetsAt = iso(NOW - 30 * 60 * 1000);   // the weekly window turned over too
+  });
+  const card = ghostCard(spentBoth, ORG_B);
+  assert.equal(card.rows[0].value, "AVAILABLE", "precondition: the verdict is free");
+  assert.equal(card.tone, "ok",
+    `the card headline painted "${card.tone}" off a session and a weekly reading `
+    + "its own verdict calls spent");
+
+  // The relationship, not just the value: one record at one instant may not
+  // get two colours from two surfaces of one widget.
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+  const asOther = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: spentBoth }, lastActiveOrg: ORG_A,
+  }).others[0];
+  assert.equal(asOther.name, NAME_B, "precondition: the row under test is the same record");
+  assert.equal(card.tone, asOther.tone,
+    `card "${card.tone}" vs other-account row "${asOther.tone}" for one record at one now`);
+
+  // The WEEKLY ROW's own colour, which was the second raw read on this card.
+  // "unknown" and not "ok": a window that has turned over leaves NO current
+  // reading, and the row still displays the stored number beside the colour.
+  assert.equal(card.rows[1].key, "weekly");
+  assert.equal(card.rows[1].tone, "unknown",
+    `the weekly row painted "${card.rows[1].tone}" off a 97% that reset 30 minutes ago`);
+  // ⚠ INVARIANT GUARD (green at 3f0a5506): the VALUE was never the defect.
+  assert.equal(card.rows[1].value, "97%",
+    "the last MEASURED weekly reading must stay on screen; only the colour is withdrawn");
+
+  // Each half separately, so a fix that reads only one of the two windows
+  // through the verdict cannot pass. Session spent, weekly UNSPENT and calm:
+  // red at 3f0a5506 as "warn" off the spent 93%.
+  const spentSession = acct(ORG_C, NAME_C, 93, 12, iso(NOW - 2 * HOUR), 1);
+  assert.equal(ghostCard(spentSession, ORG_C).tone, "ok",
+    "a spent session percentage still decides the card headline");
+
+  // ⚠ INVARIANT GUARD (green at 3f0a5506, and it must stay green): a weekly
+  // window that has NOT reset is live evidence and must keep reddening the
+  // card. This is what stops the fix from being "paint every non-exempt card
+  // ok" -- 97% here is the same number as the spent fixture above, so only
+  // the reset time distinguishes them.
+  const weeklyStillBinds = acct(ORG_D, NAME_D, 93, 97, iso(NOW - 2 * HOUR), 1);
+  assert.equal(ghostCard(weeklyStillBinds, ORG_D).tone, "crit",
+    "a weekly window that has not reset stopped colouring the card");
+
+  // ⚠ INVARIANT GUARD (green at 3f0a5506): the ACTIVE account keeps the raw
+  // read. It is the one account content_probe.js re-measures within seconds,
+  // and the toolbar badge shares that rule -- changing it here would split
+  // the two surfaces the other way.
+  const activeSpent = acct(ORG_A, NAME_A, 93, 97, iso(NOW - 2 * HOUR), 1, (r) => {
+    r.weekly.resetsAt = iso(NOW - 30 * 60 * 1000);
+  });
+  assert.equal(
+    W.widgetModel(activeSpent, NOW,
+      { accounts: { [ORG_A]: activeSpent }, lastActiveOrg: ORG_A }).tone,
+    "crit", "the earned exemption was deleted along with the defect");
+
+  // ⚠ INVARIANT GUARD (green at 3f0a5506): this fix is the COLOUR only. The
+  // weekly row's "resets soon" is a separately-named residue (see
+  // `weeklyMeta`), and round 3 measured this row as the one remaining place
+  // that string renders. If this assertion moves, that sweep needs re-running.
+  assert.equal(card.rows[1].meta, "resets soon",
+    "the weekly row's string residue changed; re-derive the sweep rather than editing it");
+});
+
 test("🔴 REGRESSION: a weekly-blocked account is sorted BELOW a usable one", () => {
   // Watched RED at b97190c8: the blocked account read "free" and took row 1,
   // above an account at 12% that actually works.

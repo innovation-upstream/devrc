@@ -109,11 +109,32 @@ export function pickRecord(accounts, lastActiveOrg) {
 }
 
 /**
- * The widget's colour band -- delegated to lib/severity.js, which the toolbar
- * badge reads too, so the two surfaces cannot disagree about one record. This
- * wrapper exists only to supply `isStale` (timefmt's, so the staleness line is
- * also decided once) and to keep the widget's own callers addressing a
+ * The widget's colour band for an EXEMPT (active) record -- delegated to
+ * lib/severity.js, which the toolbar badge reads too, so the two surfaces
+ * cannot disagree about the account claude.ai is operating as. This wrapper
+ * exists only to supply `isStale` (timefmt's, so the staleness line is also
+ * decided once) and to keep the widget's own callers addressing a
  * widget-shaped name.
+ *
+ * 🔴 IT READS THE RECORD RAW, WITH NO SPENT-EVIDENCE RULE, AND THAT IS WHY IT
+ * IS NOT THE CARD'S TONE FOR A NON-EXEMPT RECORD. `toneForRecord` bands
+ * `record.session.utilization` and `record.weekly.utilization` as stored --
+ * the same raw read `toneForRow` exists to avoid. For the ACTIVE account that
+ * is the earned exemption (the probe re-measures it in seconds, so a stored
+ * percentage describing a window that just turned over is about to be
+ * replaced); for the fallback record `pickRecord` shows when `lastActiveOrg`
+ * names no stored record it is not earned. MEASURED at 3f0a5506 on
+ * `{session 95%, reset 2h ago; weekly 100%, reset 30m ago; asOf 10m}` with
+ * `lastActiveOrg` naming a ghost org: `widgetModel().tone` was `crit` -- a red
+ * pill and a red header dot over a `free` verdict -- while the SAME record as
+ * an other-account row, same storage and same `now`, was `ok`. One record, one
+ * instant, two colours, one surface apart.
+ *
+ * 🔴 DO NOT "FIX" THAT INSIDE `toneForRecord`. The toolbar badge shares it
+ * (service_worker.js's `badgeFor`, which reads `accounts[lastActiveOrg]` and
+ * nothing else, so it is only ever about the active account and shows an empty
+ * grey badge when there is none). Applying the non-exempt rule there would
+ * change what the badge means for the one account that has the exemption.
  */
 export function toneFor(record, now) {
   return toneForRecord(record, now, isStale);
@@ -234,6 +255,12 @@ export function widgetModel(record, now, ctx) {
   // was critical, i.e. the bar misreported the very window it measures.
   // Staleness still greys everything, since no individual number is
   // trustworthy once the snapshot is old.
+  //
+  // 🔴 WHAT YOU PASS IN MUST ALREADY HAVE THE SPENT-EVIDENCE RULE APPLIED.
+  // This bands whatever number it is given; it does not know which window the
+  // number came from or whether that window has since turned over. The weekly
+  // row passes `verdict.weeklyBindingPct` for a non-exempt record for exactly
+  // that reason -- see the row below.
   const rowTone = (v) => (stale ? "stale" : (percentTone(v, null) || "unknown"));
 
   // The session row's three readings, spelled once each. `blockedBecause` and
@@ -267,7 +294,30 @@ export function widgetModel(record, now, ctx) {
       label: "Weekly",
       value: formatPct(wkPct),
       bar: clampPct(wkPct),
-      tone: rowTone(wkPct),
+      // 🔴 THE COLOUR READS `weeklyBindingPct` FOR A NON-EXEMPT RECORD; THE
+      // VALUE AND THE BAR STILL READ THE RAW NUMBER. Those are different
+      // claims: the number is the last thing that was MEASURED and hiding it
+      // would fabricate an absence, while the colour is a claim about now.
+      // Once `weekly.resetsAt` has passed, the stored percentage describes a
+      // window that no longer exists, so `availability()` nulls
+      // `weeklyBindingPct` and this row bands nothing rather than banding
+      // spent evidence. MEASURED at 3f0a5506 on `{weekly 100%, reset 30m
+      // ago}`: this row was `crit` on a card whose session row read
+      // `AVAILABLE` and whose verdict was `free`.
+      //
+      // ⚠ NULL HERE HAS TWO CAUSES AND THIS DELIBERATELY DOES NOT TELL THEM
+      // APART: a weekly window shown to have reset (the case above), and a
+      // record that carried no usable weekly reading at all. Both land on
+      // "unknown" (amber) -- which is what the second case already rendered at
+      // 3f0a5506, so that half is unchanged. Mapping null to "ok" instead
+      // would paint an absent reading green, which is why it is not done.
+      //
+      // ⚠ RESIDUE, NOT A CLOSED ARGUMENT: the header dot for this same record
+      // is `toneForRow`'s free-branch "ok", so a card can show a green header
+      // over an amber weekly row. That is the header stating the VERDICT and
+      // the row stating that it has no current reading. Nobody has looked at
+      // it on screen.
+      tone: rowTone(exempt ? wkPct : verdict.weeklyBindingPct),
       meta: weeklyMeta(record, now),
     },
   ];
@@ -312,7 +362,23 @@ export function widgetModel(record, now, ctx) {
     empty: false,
     name: accountLabel(record, labels),
     note: null,
-    tone: toneFor(record, now),
+    // 🔴 THE HEADLINE TONE IS PART OF THE EXEMPTION TOO -- the lock banner and
+    // the session row already were, and this field was the one left reading
+    // the record raw. It paints the collapsed pill AND the card's header dot
+    // (content_widget.js's `paintCollapsed` and `paintExpanded`), so a
+    // non-exempt record reddened by its own SPENT session percentage showed a
+    // red pill for an account the list underneath was calling AVAILABLE in
+    // green -- one record, one `now`, two colours. `toneForRow` is the SAME
+    // call `otherRow` makes, so the two cannot come apart by construction
+    // rather than by agreement.
+    //
+    // ⚠ WHAT THIS DOES NOT COVER: `pill` below is still `pillText(record)`,
+    // the RAW session percentage, so the collapsed pill of a non-exempt free
+    // record now reads "95%" in green. The number is the last measurement and
+    // showing it is deliberate (the same reason the rows keep their raw
+    // values); whether a percentage is the right thing for the pill to show
+    // when the verdict is `free` has not been decided and is not decided here.
+    tone: exempt ? toneFor(record, now) : toneForRow(record, verdict, isStale, now),
     stale,
     asOf: stale ? `${stalenessLabel(record.asOf, now)} · stale` : stalenessLabel(record.asOf, now),
     rows,
@@ -532,17 +598,30 @@ function blockedUntil(v, now) {
  * the earned exemption and it is fine; for the FALLBACK record the card shows
  * when `lastActiveOrg` names no stored record it is not earned.
  *
+ * 🔴 THIS RESIDUE IS THE STRING ONLY. It used to be the string AND the
+ * COLOUR, and its closing condition did not say so -- "`weeklyMeta` takes the
+ * same `exempt` predicate the session row does" would have replaced
+ * "resets soon" with a countdown and left the row RED, because the row's tone
+ * was a second, separate raw read. That half is closed: the tone above now
+ * bands `verdict.weeklyBindingPct` for a non-exempt record, so a spent weekly
+ * percentage no longer colours anything. Reading this note as covering the
+ * colour is what made it look shut; it never did.
+ *
  * NOT FIXED HERE, deliberately. A previous round left the weekly window's
  * elapsed-reset shape alone reasoning that "a weekly countdown renders only
  * on the active card"; that premise is now half-expired -- `weekly.resetsAt`
- * additionally decides whether a weekly block is spent (availability.js) --
- * but the DISPLAY claim it rests on is still true, and closing this needs the
- * weekly reset threaded through the verdict with a consumer, which is a
- * change to `availability()`'s field set rather than a tweak here. It is
- * narrow: a seven-day boundary must have crossed AND the card must be showing
- * a non-active record. Closing condition: `weeklyMeta` takes the same
- * `exempt` predicate the session row does, with a test watched red on that
- * two-condition fixture. */
+ * additionally decides whether a weekly block is spent (availability.js), and
+ * now also whether this row is coloured -- but the DISPLAY claim it rests on
+ * is still true, and closing it needs the weekly reset threaded through the
+ * verdict with a consumer, which is a change to `availability()`'s field set
+ * rather than a tweak here. It is narrow: a seven-day boundary must have
+ * crossed AND the card must be showing a non-active record. Closing
+ * condition, STRING ONLY: `weeklyMeta` takes the same `exempt` predicate the
+ * session row does, so this row states the weekly verdict instead of
+ * "resets soon", with a test watched red on that two-condition fixture. Round
+ * 3 measured this row as the one remaining place the string renders (3600 of
+ * 9000 swept shapes); closing it should re-derive that sweep, not edit the
+ * number. */
 function weeklyMeta(record, now) {
   const at = record.weekly && record.weekly.resetsAt;
   if (!at) return "";
