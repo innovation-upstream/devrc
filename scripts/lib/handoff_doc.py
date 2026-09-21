@@ -2963,6 +2963,17 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         # 🔴 NET, and the shortfall is stated rather than implied. Quoting a gross
         # number that does not actually clear the overage sends an author cutting
         # and leaves them still red — the one outcome worse than saying nothing.
+        # 🔴 SCOPED TO THE `over_by > 0` CALLERS, which since #1826 means the
+        # GATED over-budget arm alone. The two `over_by=0` callers — the near
+        # arm, and the UNGATED over-budget arm — deliberately take the `else`
+        # branch and state no relation to any overage. For the near arm there
+        # is no overage to relate to. For the ungated arm it is a choice: no
+        # gate will go red there, so "still red" cannot happen, and the arm's
+        # own comment explains why it declines to assert a deficit against a
+        # ceiling nothing enforces. ⚠ The COST is real and is recorded there:
+        # 12 of the 13 docs that arm newly reaches have `net < over_by`, and
+        # it is the reader who must subtract. Round 1 of #1826 found this
+        # comment asserting, unscoped, a rule that its newest caller breaks.
         # 🔴 NO POINTER TO THE PLAYBOOK OR THE LADDER ON THESE LINES, and their
         # removal is what let this note reach the UNGATED arms at all. Both were
         # decoration on a number — "steps 2-4 of the playbook cover the rest" on
@@ -3034,16 +3045,27 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
         # (measured across the other repos' corpora), so the number stays.
         #
         # 🔴 THE NOTE PRINTS HERE, BY THE OPERATOR'S REVERSAL — but with
-        # `over_by=0`, which is the whole of what keeps this arm a REPORT.
-        # Passing the real overage makes the note render "does NOT clear the
-        # N B you are over by": a DEFICIT against a ceiling this very block
-        # says nothing enforces. That is the civitai/cli#618 pressure shape
-        # with the prescription removed and the false-consequence framing
-        # kept, and #618's own record attributes the damage to exactly that
-        # framing — read `gate_enforces_budget` above, and note it and the
-        # paragraph above DISAGREE about which half did it. Neither is
-        # settled; this arm assumes the worse case. `0` renders "N B net
-        # already closed in this document" — numbers, no threshold.
+        # `over_by=0`, so that THE NOTE names no threshold. Scope that claim
+        # to the NOTE and nothing wider: the head line three lines below
+        # states the overage outright (`over by {N} B`), deliberately and
+        # unchanged, and `test_EVERY_branch_that_names_the_gate_is_repo_aware`
+        # pins it (`assert "over by 1 B" in ungated_over`). An earlier
+        # wording of THIS comment said the arm names no threshold, which that
+        # test falsifies twelve hundred lines away — round 1 of #1826.
+        # What `over_by=0` buys is that the note does not ADD a second,
+        # louder deficit ("does NOT clear the N B you are over by") on top of
+        # it: that is the civitai/cli#618 pressure shape with the
+        # prescription removed and the false-consequence framing kept.
+        # ⚠ `gate_enforces_budget` above and the paragraph above DISAGREE
+        # about which half of #618 did the damage, and #618's own body
+        # settles neither. This arm assumes the worse case.
+        # ⚠ CONSEQUENCE, STATED BECAUSE IT IS A REAL COST: with `0` the note
+        # reports what has closed without relating it to the overage, and on
+        # the corpus this change was justified by, 12 of the 13 docs that now
+        # print a note have `net < over_by`. The reader must subtract the two
+        # numbers themselves. See the NET comment above `evictable_note`'s
+        # three-way branch, which is scoped to the `over_by > 0` callers for
+        # exactly this reason.
         which = ("its grandfathered allowance" if grandfathered
                  else "the handoff-document ceiling")
         note = evictable_note(merged_text, 0)
@@ -3105,10 +3127,14 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
                 f"({sign}{delta:,} B this update) — {headroom:,} B left. The next "
                 f"update or two will go over; {tail}")
         # 🔴 UNCONDITIONAL, by the operator's reversal. Already `over_by=0`
-        # here, so this arm has always rendered numbers without a threshold —
-        # which is why it needed no change when the ungated OVER arm was
-        # corrected to match it. The gated/ungated split survives where it is
-        # still about a gate: `tail` above, and the GRANDFATHERED arm below.
+        # here, so THE NOTE has always named no threshold — which is why it
+        # needed no change when the ungated OVER arm was corrected to match
+        # it. ⚠ Scoped to the note: this arm's own head line does state one
+        # (`{after} B of {allowance} B … {headroom} B left`), and an earlier
+        # wording of this comment claimed the arm rendered "numbers without a
+        # threshold" outright, which that line falsifies — round 1 of #1826.
+        # The gated/ungated split survives where it is still about a gate:
+        # `tail` just above, and the GRANDFATHERED arm ABOVE this one.
         # ⚠ NO PROHIBITION HERE. One was added in round 4 and is removed by the
         # /the-algorithm pass: the eviction ladder — including "do NOT satisfy
         # this by deleting an open investigation, a gotcha or a ruled-out

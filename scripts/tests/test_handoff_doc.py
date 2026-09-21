@@ -7643,9 +7643,18 @@ def test_the_UNGATED_over_budget_note_asserts_NO_DEFICIT_against_the_ceiling():
 
     The operator's ask was "print numbers everywhere" — satisfied by `over_by=0`,
     which renders "N B net already closed in this document". So the invariant is
-    NOT sameness; it is that this arm names no threshold. Pinned as the absence of
-    the shortfall wording plus the presence of the neutral wording, because the
-    absence alone would pass on an empty note."""
+    NOT sameness; it is that **the NOTE** names no threshold.
+
+    🔴 SCOPED TO THE NOTE, AND THE SCOPE IS LOAD-BEARING — the assertion below
+    slices at "Evictable in THIS doc" for exactly that reason. This arm's HEAD
+    line states the overage outright (`over by {N} B`) and must keep doing so;
+    `test_EVERY_branch_that_names_the_gate_is_repo_aware` pins it with
+    `assert "over by 1 B" in ungated_over`. An earlier version of this docstring
+    said "this arm names no threshold" unscoped — which that test falsifies in
+    this same file, while this test went on passing. Round 1 of #1826.
+
+    Pinned as the absence of the shortfall wording plus the presence of the
+    neutral wording, because the absence alone would pass on an empty note."""
     doc, base = _EVICTABLE_DOC + "z" * 70_000, "z" * 100
     ungated = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
                                 doc, base, gated=False)
@@ -7672,10 +7681,20 @@ def _near_text():
 
 def test_the_NEAR_budget_arm_carries_the_note_when_gated():
     """🔴 REACHABILITY, and this test exists because its absence let a mutant live.
-    `test_the_note_is_withheld_from_the_UNGATED_arm` drives the OVER-budget arm,
-    which returns before the near arm's `if gated` is ever evaluated — so deleting
-    that guard changed nothing any test could see, and the mutant SURVIVED a green
-    suite. These two cases execute the guard itself, in both directions."""
+    Its sibling drives the OVER-budget arm, which returns before the near arm's
+    note call is ever evaluated — so when that call was still guarded by
+    `if gated`, deleting the guard changed nothing any test could see and the
+    mutant SURVIVED a green suite.
+
+    ⚠ UPDATED by #1826 round 1: the guard those two cases used to execute in
+    both directions IS GONE — the near arm's note call is unconditional now, so
+    this test and `…_when_UNGATED_TOO` pin identical expectations and neither
+    executes a gated/ungated branch. What still makes the pair worth keeping is
+    the REACHABILITY argument above: they are the only cases that reach the near
+    arm at all. The gated/ungated branch that survives in this arm is the `tail`
+    sentence, pinned by `…_NEAR_arms_gate_specific_TAIL_still_differs_by_gatedness`.
+    ⚠ This docstring also named `test_the_note_is_withheld_from_the_UNGATED_arm`,
+    which no longer exists — grepping that name returns nothing."""
     w = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
                           _near_text(), "z" * 100, gated=True)
     assert w.startswith("⚠ Size:"), w
