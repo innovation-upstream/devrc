@@ -7516,7 +7516,11 @@ def test_evictable_note_reports_each_closed_class_with_its_own_count():
     note = hd.evictable_note(_EVICTABLE_DOC, 0)
     assert "resolved investigations" in note, note
     assert "completed ranked items" in note, note
-    assert "retracted / dead-ends" in note, note
+    # 🔴 The step-2 buckets are not reported at all: the playbook owns that advice,
+    # and copying it here is what made it wrong four times (/the-algorithm pass).
+    for gone in ("retracted / dead-ends", "work-status headings", "step 1", "step 2",
+                 "MOVE to", "JUDGEMENT"):
+        assert gone not in note, f"{gone!r} is advice this function no longer gives:\n{note}"
     # the live gotcha and the open investigation must NOT be counted
     assert "2 blocks" not in note, (
         "an OPEN investigation was counted as resolved — the whole point is that "
@@ -7647,13 +7651,14 @@ def test_the_rank_charge_explainer_is_WITHHELD_when_no_rank_is_offered():
     up: a line that prints every time is a line nobody reads by the third one.
 
     RED at the pre-fix tip, GREEN at HEAD."""
-    only_retracted = (
+    no_rank = (
         "# Handoff: x — 2026-09-20\n\n## Goal\ng\n\n"
-        "## Gotchas / decisions / dead-ends\n"
-        "- 🔴 RETRACTED — this reasoning was wrong. " + "R" * 900 + "\n"
+        "## Open investigations — live diagnosis state\n"
+        "### RESOLVED — the thing that was wrong\n"
+        "- **Observed (with values):** " + "E" * 900 + "\n"
     )
-    note = hd.evictable_note(only_retracted, 0)
-    assert "retracted / dead-ends" in note, note
+    note = hd.evictable_note(no_rank, 0)
+    assert "resolved investigations" in note, note
     assert "completed ranked items" not in note, note
     assert "200 B per evicted rank" not in note, (
         "the rank-charge explainer printed on a note that offers no ranks:\n" + note
@@ -7749,89 +7754,6 @@ def test_the_span_indices_match_each_buckets_tuple_shape():
     assert checked, "the fixture produced no ranges, so this test proved nothing"
 
 
-def test_evictable_note_does_not_DOUBLE_COUNT_a_block_in_two_buckets():
-    """🔴 REGRESSION TEST (round 1 of #1815, F5). An H3 can match RESOLVED_HEAD
-    and WORK_STATUS at once, so the auditor's `gross` adds the same bytes twice;
-    this note turns that number into the promise "CLEARS the N B you are over
-    by", where an overstatement means the author evicts everything named and is
-    still red. Measured on the real corpus: 7 of 851 docs overlap, worst 42.6%.
-
-    The heading below is the live shape from
-    `claudedocs/handoff-agent-overguarding.md` (✅/CLOSED and the word history)."""
-    doc = (
-        "# Handoff: x — 2026-09-20\n\n## Goal\ng\n\n"
-        "## Open investigations — live diagnosis state\n"
-        "### ✅ CLOSED 2026-09-14 — history exposure sized and left to the operator\n"
-        "- **Observed (with values):** " + "E" * 900 + "\n"
-    )
-    note = hd.evictable_note(doc, 0)
-    import re as _re
-    # 🔴 Parsed from the ARROW, not positionally: round 2 moved the `ALSO` rows
-    # BELOW the net line, so `shown[-1]` silently became a step-2 bucket's bytes
-    # and the assertion compared a number with itself (round 3, F3).
-    arrow = _re.search(r"→ ([\d,]+) B", note)
-    assert arrow, note
-    net = int(arrow.group(1).replace(",", ""))
-    counted = [int(m.replace(",", "")) for m in
-               _re.findall(r"^(?!\s+ALSO).*?([\d,]+) B  \(", note, _re.M)]
-    assert counted, note
-    assert net <= sum(counted), (
-        f"net {net:,} exceeds the counted buckets {sum(counted):,}:\n{note}"
-    )
-    # the overlapping block must be NAMED as a duplicate rather than silently
-    # itemised twice (round 3, F5)
-    assert "the SAME block already counted above" in note, (
-        "an overlapping step-2 row was itemised without saying it duplicates a "
-        f"counted row:\n{note}"
-    )
-
-
-def test_each_bucket_carries_the_PLAYBOOK_STEP_that_actually_applies():
-    """🔴 PINS THE FIX FOR F4, which a mutant walked through: relabelling the
-    step-2 buckets as step 1 changed nothing any other test could see.
-
-    `test_handoff_doc_size.py`'s ladder is step 1 EVICT WHAT HAS CLOSED, step 2
-    DEMOTE DATED EVIDENCE to `refs/` LEAVING A POINTER — and then, in terms, "DO
-    NOT satisfy this by deleting an open investigation, a gotcha or a ruled-out
-    theory". `retracted` is BY CONSTRUCTION bullets inside a Gotchas section, so
-    labelling it "step 1 — do this first" told the author to delete exactly what
-    the playbook forbids, in a block that then quotes the prohibition.
-
-    Asserts the pairing per bucket, not merely that the words appear somewhere."""
-    doc = (
-        "# Handoff: x — 2026-09-20\n\n## Goal\ng\n\n"
-        "## Open investigations — live diagnosis state\n"
-        "### RESOLVED — the thing that was wrong\n"
-        "- **Observed (with values):** " + "E" * 900 + "\n\n"
-        "## Next steps (ranked)\n1. DONE — shipped as abc1234. " + "D" * 900 + "\n"
-        "   forcing: none\n\n"
-        "## Gotchas / decisions / dead-ends\n"
-        "- 🔴 RETRACTED — this reasoning was wrong. " + "R" * 900 + "\n"
-    )
-    note = hd.evictable_note(doc, 0)
-    for label in ("resolved investigations", "completed ranked items"):
-        row = next((l for l in note.splitlines() if label in l), None)
-        assert row and "step 1, evict" in row, (
-            f"{label!r} must be a COUNTED step-1 row: {row!r}\n{note}"
-        )
-    row = next((l for l in note.splitlines() if "retracted / dead-ends" in l), None)
-    assert row, f"the retracted row vanished:\n{note}"
-    assert "ALSO" in row and "step 2, NOT counted above" in row, (
-        "retracted bullets are Gotchas by construction: the playbook keeps them in the "
-        f"doc, so they must be REPORTED and not promised: {row!r}\n{note}"
-    )
-    # 🔴 The step-2 advice is PER BUCKET — a single trailer necessarily mis-states
-    # one of the two, which is how round 2 came to tell authors to move the very
-    # gotchas the playbook keeps (round 3, F1).
-    assert "JUDGEMENT: the playbook calls retracted reasoning demotable" in note, (
-        "the retracted row must state the tension, not prescribe a move:\n" + note
-    )
-    # The prohibition lives on the WARNING, one copy per arm — asserted in
-    # test_each_arm_carries_exactly_one_prohibition rather than here, because
-    # carrying it inside the note made the over-budget arm print it twice
-    # (round 4, 🟢-3).
-
-
 def test_a_heading_matching_BOTH_step1_detectors_is_not_double_counted():
     """🔴 REGRESSION TEST for the defect round 3's own fix re-opened, and the one
     its sibling above structurally CANNOT see.
@@ -7869,21 +7791,3 @@ def test_a_heading_matching_BOTH_step1_detectors_is_not_double_counted():
     assert "does NOT clear" in note, (
         "a document smaller than the overage was reported as clearing it:\n" + note
     )
-
-
-def test_each_arm_carries_exactly_one_prohibition():
-    """🔴 ONE COPY PER ARM (round 4, 🟢-3). The over-budget arm states the
-    prohibition in its own block; round 3 added a second copy inside the note, so
-    that arm printed two near-identical 🔴 lines two lines apart. The near arm had
-    none at all after round 2 moved it. Both directions are asserted: exactly one,
-    never zero, never two."""
-    doc = (REPO_ROOT / "claudedocs" / "handoff-audit-pr-ladder.md").read_text(
-        encoding="utf-8", errors="replace")
-    near = hd.budget_warning("claudedocs/handoff-audit-pr-ladder.md", doc, doc[:100],
-                             gated=True)
-    over = hd.budget_warning("claudedocs/handoff-not-grandfathered.md", doc, doc[:100],
-                             gated=True)
-    assert near.startswith("⚠ Size:") and over.startswith("🔴 THIS UPDATE"), (near[:60], over[:60])
-    for name, text in (("near-headroom", near), ("over-budget", over)):
-        n = text.count("Do NOT satisfy")
-        assert n == 1, f"the {name} arm carries {n} copies of the prohibition, not 1:\n{text}"
