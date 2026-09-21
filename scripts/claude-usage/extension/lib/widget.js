@@ -340,7 +340,9 @@ export function widgetModel(record, now, ctx) {
  * already free, or unknown)", and that was incomplete in BOTH directions once
  * `nextFreeAt` started reading `freesAt` instead of `resetsAt`. It is null
  * when every other account's `freesAt` is null -- free, unknown, or BLOCKED
- * WITH NO KNOWABLE END -- or when there are no other accounts. And it is
+ * WITH NO KNOWABLE END -- when there are no other accounts, and when `now`
+ * itself is unusable (nothing time-relative is knowable then, including
+ * this). And it is
  * non-null for a blocked account with a knowable end, which is emphatically
  * something to wait for: `next free: <label> in 4d0h` is pinned for exactly
  * that record. `the next-free line names the soonest account` pins the

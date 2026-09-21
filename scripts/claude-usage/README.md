@@ -92,6 +92,32 @@ The two surfaces still differ in *layout* (the widget lists switch candidates
 most-available-first; the popup keeps its own freshness ordering) — that is
 deliberate, and it is not a difference of verdict.
 
+🔴 **The exemption is withdrawn for every STATE, not just `free`.** For a
+round the widget's card applied it as `!exempt && state === FREE`, so the
+state that most needed saying was the one it missed: with `lastActiveOrg`
+naming an org that has no stored record — a real state, `service_worker.js`
+writes the key whether or not the `/usage` fetch produced a record —
+`pickRecord()` falls back to the freshest one, and a weekly-blocked fallback
+rendered `95% · resets soon` on the card while the popup read `BLOCKED ·
+Weekly limit reached. · frees up in 4d0h`. With no lock *string* on the
+record the card said nothing about the block at all. The card now states the
+verdict for `blocked` too, through the same `blockedBecause`/`blockedUntil`
+helpers the other-account rows use, and its lock **banner** reads the verdict
+rather than the raw record for a non-exempt account — a session lock spent by
+its own five-hour reset was painting red under an `AVAILABLE` row. The active
+account keeps its live countdown and its raw banner, which is what the
+exemption is for.
+
+🔴 **Evidence is spent by its OWN window's reset — including the weekly
+percentage.** The session rule is this module's founding inference; the
+weekly one is its twin and was missing from the row *colour* for a round.
+`toneForRow()` read the stored weekly percentage unconditionally, so an
+account whose seven-day window had reset an hour ago still painted crit off
+that spent 100%: `AVAILABLE`, in red, with nothing in the row explaining the
+colour. `availability()` now returns `weeklyBindingPct` — the weekly reading
+with the rule already applied — and the tone reads only that, so the rule
+lives in one place rather than at each consumer.
+
 ⚠ **There is no `+N more` cap.** The widget drew at most four other-account
 rows and summarised the rest as a count that nothing could expand, so any row
 past the fourth was unreachable by any click. Making the count clickable
