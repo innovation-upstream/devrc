@@ -60,7 +60,17 @@
     ".card{width:232px;background:#fffefb;border:1px solid rgba(0,0,0,.12);",
     "border-radius:12px;padding:10px 12px 8px;box-shadow:0 4px 16px rgba(0,0,0,.13);",
     "pointer-events:auto}",
-    ".card.stale{opacity:.72}",
+
+    // 🔴 THE STALE DIM IS SCOPED TO THE ACTIVE ACCOUNT'S OWN ELEMENTS, never
+    // to `.card` itself. `opacity` on an ancestor cannot be undone by a
+    // descendant, so a bare `.card.stale{opacity:.72}` would wash out the
+    // OTHER-ACCOUNTS rows along with the card -- and the row it would wash
+    // out hardest is the presumed-free one, which is the most actionable
+    // thing on the card and is stale BY CONSTRUCTION (an account you are not
+    // logged into cannot be re-measured). Each other-account row carries its
+    // own `.stale`, decided by lib/widget.js per row.
+    ".card.stale>.head,.card.stale>.row,.card.stale>.locked,",
+    ".card.stale>.credits,.card.stale>.foot{opacity:.72}",
     ".card.dead,.pill.dead{opacity:.6}",
     ".pill.dead{cursor:default;padding:5px 10px}",
     ".pill.dead .note{padding:0;color:inherit}",
@@ -79,6 +89,32 @@
     ".track{height:5px;border-radius:3px;background:rgba(0,0,0,.09);overflow:hidden;margin-top:4px}",
     ".fill{height:100%;border-radius:3px;transition:width .3s ease}",
     ".meta{color:#8a9099;font-size:11px;margin-top:3px}",
+
+    // --- the other-accounts section ---
+    ".others{margin-top:8px;padding-top:7px;border-top:1px solid rgba(0,0,0,.10)}",
+    ".otherhead{color:#8a9099;font-size:11px;margin-bottom:5px}",
+    // 🔴 THIS IS WHAT REPLACED THE `+N more` CAP, AND IT IS LOAD-BEARING.
+    // lib/widget.js used to hand over at most 4 rows plus a count of the
+    // rest; that count was TERMINAL -- no click in the card could reveal
+    // them. Making it clickable would have put a button inside this section,
+    // which content_widget.test.mjs forbids for the round-1 pointer-events
+    // reason. So every row is painted and the height is bounded here
+    // instead: ~5 rows visible, the rest reachable by SCROLL. Drop the
+    // overflow and the card grows without limit over his composer, which is
+    // the hazard the cap existed for. Drop the max-height and the overflow
+    // never engages. The full argument is in lib/widget.js, where the cap
+    // used to live.
+    ".otherlist{max-height:170px;overflow-y:auto;overscroll-behavior:contain}",
+    ".other{display:flex;align-items:baseline;gap:6px;margin-bottom:5px}",
+    ".other.stale{opacity:.72}",
+    ".other .dot{align-self:center}",
+    ".otherbody{flex:1 1 auto;min-width:0}",
+    ".othertop{display:flex;align-items:baseline;justify-content:space-between;gap:6px}",
+    ".oname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+    ".ovalue{font-weight:600;font-variant-numeric:tabular-nums;flex:0 0 auto}",
+    ".other.free .ovalue{color:#1e8e3e;font-size:11px;letter-spacing:.02em}",
+    ".ometa{color:#8a9099;font-size:11px;margin-top:1px}",
+    ".more{color:#8a9099;font-size:11px}",     // the next-free footer only
 
     ".note{color:#6b7280;padding:2px 0 6px}",
     ".locked{margin:6px 0 2px;padding:5px 7px;border-radius:7px;font-size:11px;",
@@ -126,6 +162,9 @@
     ".label,.note,.credits{color:#9aa0a6}",
     ".meta,.foot{color:#7e848c}",
     ".track{background:rgba(255,255,255,.13)}",
+    ".others{border-top-color:rgba(255,255,255,.14)}",
+    ".otherhead,.ometa,.more{color:#7e848c}",
+    ".other.free .ovalue{color:#81c995}",
     ".collapse{color:#9aa0a6}",
     ".collapse:hover{background:rgba(255,255,255,.10)}",
     ".locked{background:rgba(217,48,37,.20);color:#f2b8b5}",
@@ -292,8 +331,72 @@
       foot.className = "foot";
       foot.textContent = model.asOf;
       card.appendChild(foot);
+
+      paintOthers(card, model);
     }
     root.appendChild(card);
+  }
+
+  /**
+   * The "other accounts" section: which account to switch to next.
+   *
+   * Maps lib/widget.js's `others` array one-to-one and decides nothing. In
+   * particular the per-row `stale` flag comes from the MODEL, because whether
+   * a row may be greyed is an availability question (a presumed-free row must
+   * not be) and every display rule in this feature lives in lib/.
+   */
+  function paintOthers(card, model) {
+    var rows = model.others || [];
+    if (!rows.length && !model.nextFree) return;
+
+    var box = document.createElement("div");
+    box.className = "others";
+    var hd = document.createElement("div");
+    hd.className = "otherhead";
+    hd.textContent = "Other accounts";
+    box.appendChild(hd);
+
+    // The rows live in their own scrolling box so the heading and the
+    // next-free footer stay put while a long list scrolls under them. See
+    // `.otherlist` in CSS for why the bound is here and not a row cap.
+    var list = document.createElement("div");
+    list.className = "otherlist";
+    box.appendChild(list);
+
+    rows.forEach(function (row) {
+      var el = document.createElement("div");
+      el.className = "other " + row.state + (row.stale ? " stale" : "");
+      var dot = document.createElement("span");
+      dot.className = "dot t-" + row.tone;
+      var body = document.createElement("div");
+      body.className = "otherbody";
+      var top = document.createElement("div");
+      top.className = "othertop";
+      var nm = document.createElement("span");
+      nm.className = "oname";
+      nm.textContent = row.name;
+      var val = document.createElement("span");
+      val.className = "ovalue";
+      val.textContent = row.value;
+      top.append(nm, val);
+      body.appendChild(top);
+      if (row.meta) {
+        var meta = document.createElement("div");
+        meta.className = "ometa";
+        meta.textContent = row.meta;
+        body.appendChild(meta);
+      }
+      el.append(dot, body);
+      list.appendChild(el);
+    });
+
+    if (model.nextFree) {
+      var nf = document.createElement("div");
+      nf.className = "more nextfree";
+      nf.textContent = model.nextFree;
+      box.appendChild(nf);
+    }
+    card.appendChild(box);
   }
 
   // --- state ----------------------------------------------------------------- //
@@ -357,20 +460,73 @@
     if (!mod) return;
     var getting;
     try {
-      getting = c.storage.local.get(["accounts", "lastActiveOrg", mod.COLLAPSE_KEY]);
+      getting = c.storage.local.get(
+        ["accounts", "lastActiveOrg", mod.ACCOUNT_LABELS_KEY, mod.COLLAPSE_KEY]);
     } catch (e) { retire(); return; }
     if (!getting || typeof getting.then !== "function") return;
+    // 🔴 THE THREE FAILURES BELOW ARE NOT ONE FAILURE, AND ONE CATCH USED TO
+    // CLAIM THEY WERE. The whole model-build-and-paint chain sat inside the
+    // trailing `.catch` commented "storage unreadable" -- while
+    // `root.textContent = ""` ran BEFORE the paint, so ANY throw anywhere in
+    // here produced a blank card byte-indistinguishable from a storage
+    // failure, under a comment that named only one of the causes. lib/ is
+    // required never to throw and content_widget must not lie about it if it
+    // ever does, so each stage now fails on its own terms:
+    //
+    //   model    lib/ broke its NEVER THROW contract. Leave the last good
+    //            card on screen (nothing has been cleared yet) and log once.
+    //   paint    the painter broke. The root IS cleared by then, so the card
+    //            goes blank -- but the log says which stage did it.
+    //   storage  the trailing catch: a rejected storage.local.get, which is
+    //            an ordinary page-teardown race.
+    //
+    // ⚠ THE TRAILING CATCH IS NOT "ONLY THAT", and saying it was is what this
+    // note replaces. Three statements sit between the two inner try blocks --
+    // `ensureShadow(...)`, `sh.querySelector(".root")` and
+    // `root.textContent = ""` -- and a throw in any of them still lands in a
+    // catch labelled "storage unreadable". They are DOM calls against a node
+    // this file created, in a shadow root it owns, so a throw there means the
+    // page tore the host out from under us mid-render, which is the same
+    // teardown race the label describes; the label is wrong about the
+    // mechanism and right about the cause. Not wrapped in a fourth stage,
+    // because a third `console.warn` for a case that produces no user-visible
+    // difference buys nothing. The three stages above are the ones that name
+    // DIFFERENT bugs.
     getting.then(function (got) {
-      var now = Date.now();
-      var rec = mod.pickRecord(got.accounts, got.lastActiveOrg);
-      var model = mod.widgetModel(rec, now);
-      var collapsed = got[mod.COLLAPSE_KEY] === true;
+      var model, collapsed;
+      try {
+        var now = Date.now();
+        var rec = mod.pickRecord(got.accounts, got.lastActiveOrg);
+        // The whole account map goes in, not just the shown record: the card's
+        // other-accounts section is the point of this widget for an operator
+        // running several accounts. Labels are READ here and written only by
+        // the popup (see lib/format.js's ACCOUNT_LABELS_KEY).
+        model = mod.widgetModel(rec, now, {
+          accounts: got.accounts,
+          lastActiveOrg: got.lastActiveOrg,
+          labels: got[mod.ACCOUNT_LABELS_KEY],
+        });
+        collapsed = got[mod.COLLAPSE_KEY] === true;
+      } catch (e) {
+        try {
+          console.warn("[claude-usage] lib/widget.js threw building the model —"
+            + " it is required never to throw; the card on screen is now stale:", e);
+        } catch (_) { /* console gone during teardown */ }
+        return;
+      }
       var sh = ensureShadow(mod.WIDGET_HOST_ID);
       var root = sh.querySelector(".root");
       if (!root) return;
       root.textContent = "";
-      if (collapsed) paintCollapsed(root, model);
-      else paintExpanded(root, model);
+      try {
+        if (collapsed) paintCollapsed(root, model);
+        else paintExpanded(root, model);
+      } catch (e) {
+        try {
+          console.warn("[claude-usage] the painter threw —"
+            + " the card is blank because of this, not because storage failed:", e);
+        } catch (_) { /* console gone during teardown */ }
+      }
     }).catch(function () { /* storage unreadable; leave whatever is on screen */ });
   }
 
@@ -387,7 +543,8 @@
       try {
         c.storage.onChanged.addListener(function (changes, area) {
           if (area !== "local") return;
-          if (changes.accounts || changes.lastActiveOrg || changes[mod.COLLAPSE_KEY]) render();
+          if (changes.accounts || changes.lastActiveOrg
+            || changes[mod.ACCOUNT_LABELS_KEY] || changes[mod.COLLAPSE_KEY]) render();
         });
       } catch (e) { /* no live updates; the tick still refreshes */ }
       if (timer === null) timer = setInterval(render, TICK_MS);

@@ -7,8 +7,12 @@
 
 export const ORG_A = "11111111-1111-4111-8111-111111111111";
 export const ORG_B = "22222222-2222-4222-8222-222222222222";
+export const ORG_C = "33333333-3333-4333-8333-333333333333";
+export const ORG_D = "44444444-4444-4444-8444-444444444444";
 export const NAME_A = "user@example.com's Organization";
 export const NAME_B = "Work Org <work@example.com>";
+export const NAME_C = "third@example.com's Organization";
+export const NAME_D = "fourth@example.com's Organization";
 
 const ISO = "2026-09-19T18:00:00Z";
 

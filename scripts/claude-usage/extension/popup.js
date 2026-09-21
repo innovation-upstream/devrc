@@ -7,13 +7,42 @@
 // after the last snapshot still shows a live countdown.
 
 import { formatCountdown, isStale, stalenessLabel } from "./lib/timefmt.js";
-import { creditsLine, formatPct } from "./lib/format.js";
+import { ACCOUNT_LABELS_KEY, accountLabel, creditsLine, formatPct } from "./lib/format.js";
+import { BLOCKED, FREE, activeRecord, availability, isActiveRecord } from "./lib/availability.js";
 
 // formatPct/creditsLine moved to lib/format.js when the injected widget needed
 // the same rules (2026-09-19). Re-exported rather than relocated outright: the
 // popup's tests and renderRow() address them here, and one implementation with
 // two names beats two implementations.
-export { creditsLine, formatPct };
+export { ACCOUNT_LABELS_KEY, accountLabel, creditsLine, formatPct };
+
+/**
+ * The label map after one edit. Pure, so the editor's RULE is testable
+ * without a DOM: the popup's click handler does nothing but call this and
+ * hand the result to storage.
+ *
+ * Clearing the box REMOVES the override (the row falls back to the API's org
+ * name) rather than storing an empty string, which would render a nameless
+ * account everywhere. Whitespace is trimmed first, so a box holding one space
+ * is a clear, not a rename.
+ *
+ * 🔴 THE POPUP IS THE ONLY WRITER. The in-page widget reads this map and
+ * never edits it: a text input in a card floating over claude.ai's composer
+ * is both the wrong affordance and a direct route back to the pointer-events
+ * bug that shipped in round 1.
+ */
+export function nextLabels(labels, orgUuid, text) {
+  const src = labels !== null && typeof labels === "object" ? labels : {};
+  const out = {};
+  for (const k of Object.keys(src)) {
+    if (typeof src[k] === "string" && src[k].trim()) out[k] = src[k];
+  }
+  if (typeof orgUuid !== "string" || !orgUuid) return out;
+  const t = typeof text === "string" ? text.trim() : "";
+  if (t) out[orgUuid] = t;
+  else delete out[orgUuid];
+  return out;
+}
 
 /**
  * Popup order: the ACTIVE account first, then by snapshot freshness
@@ -23,18 +52,67 @@ export { creditsLine, formatPct };
 export function orderAccounts(accounts, lastActiveOrg) {
   const map = accounts && typeof accounts === "object" ? accounts : {};
   const list = Object.values(map);
-  const active = lastActiveOrg && map[lastActiveOrg] ? [map[lastActiveOrg]] : [];
-  const rest = list.filter((r) => r !== map[lastActiveOrg]);
+  // `activeRecord()` -- the one predicate lib/widget.js reads too. A bare
+  // `map[lastActiveOrg]` hands back whatever sits under the key, so a junk
+  // value would be pinned to the top of the dashboard as "the active
+  // account", and an Object.prototype key would pin a function.
+  const rec = activeRecord(map, lastActiveOrg);
+  const active = rec !== null ? [rec] : [];
+  const rest = list.filter((r) => r !== rec);
   const byFreshness = (a, b) => (b.asOf || 0) - (a.asOf || 0);
   return [...active, ...rest.sort(byFreshness)];
 }
 
-/** Session/weekly headline for one record, e.g. "Session 9% · resets 4h46m". */
-export function sessionLine(rec, now) {
+/**
+ * Session headline for one record, e.g. "Session 9% · resets 4h46m".
+ *
+ * 🔴 THE ELAPSED-RESET VERDICT IS `availability()`, NOT `formatCountdown()`.
+ * This line rendered "Session 92% · resets soon" for an account whose window
+ * had already closed -- the single state the switch-accounts workflow depends
+ * on, reported backwards -- and it kept doing so for a round AFTER the in-page
+ * widget was fixed, so the two surfaces showed opposite answers for the same
+ * stored record at the same `now`. One rule, one place: lib/availability.js
+ * decides, both surfaces read it, and nothing here re-derives it from a
+ * countdown string. `formatCountdown()`'s "resets soon" branch is now
+ * unreachable from this function, which is the point.
+ *
+ * `isActive` is availability.js's documented exemption, applied here because
+ * this is where the popup knows which row is the active one. content_probe.js
+ * fetches with the CURRENT session cookie, so the active account is the one
+ * account that really will be re-measured within seconds; for it an elapsed
+ * reset is a pending correction and the countdown stays. The in-page widget
+ * applies the same exemption by keeping the active record on its own card and
+ * off the other-accounts list, so the two surfaces agree row for row.
+ */
+export function sessionLine(rec, now, isActive) {
+  const v = availability(rec, now);
+  if (v.state === BLOCKED) {
+    // 🔴 THE EXEMPTION DOES NOT REACH A BLOCK, and that is not an oversight.
+    // It exists because an elapsed reset on the ACTIVE account is a pending
+    // correction the next probe will make. A lock or an exhausted weekly
+    // window is not an inference from an elapsed reset at all -- it is a
+    // stored fact that the next probe will confirm, not overturn. The widget's
+    // card renders the same lock in its `locked` banner, so both surfaces
+    // report it for the active account too.
+    const because = v.lockedReason || `weekly ${formatPct(v.weeklyPct)}`;
+    const until = v.freesAt === null
+      ? "frees up: unknown" : `frees up in ${formatCountdown(v.freesAt, now)}`;
+    return `BLOCKED · ${because} · ${until} (session was ${formatPct(v.sessionPct)})`;
+  }
+  if (v.state === FREE && isActive !== true) {
+    // The verdict, then the evidence for it. The last MEASURED percentage
+    // stays visible so an inference can never read as a fresh reading, and
+    // there is never a fabricated 0%. Its AGE is already on the row (renderRow
+    // puts stalenessLabel(rec.asOf) in `asOf`), which is the one thing the
+    // widget's longer meta adds and this one does not need to repeat.
+    return `Session AVAILABLE · reset ${stalenessLabel(v.resetsAt, now)}`
+      + ` (was ${formatPct(v.sessionPct)})`;
+  }
   const s = rec.session && rec.session.utilization;
   const cd = formatCountdown(rec.session && rec.session.resetsAt, now);
   // "resets soon" already carries the verb; everything else (a real
-  // countdown, or "unknown") gets it.
+  // countdown, or "unknown") gets it. It survives only for the active
+  // account, where it is true.
   const resetPart = cd === "resets soon" ? cd : `resets ${cd}`;
   return `Session ${formatPct(s)} · ${resetPart}`;
 }
@@ -64,15 +142,19 @@ export function sparkline(history) {
   return out.join(" ");
 }
 
-/** One row's display model. Pure; the DOM paint is init()'s only job. */
-export function renderRow(rec, now, isActive) {
+/** One row's display model. Pure; the DOM paint is init()'s only job.
+ *
+ * `labels` is optional: omitted, every row falls back to the API's org name,
+ * which is what this returned before per-account renaming existed. */
+export function renderRow(rec, now, isActive, labels) {
   const stale = isStale(rec.asOf, now) || rec.staleSince !== null;
   const credits = creditsLine(rec.credits);
   const points = sparkline(rec.history);
   return {
-    name: rec.orgName,
+    name: accountLabel(rec, labels),
+    orgUuid: typeof rec.orgUuid === "string" ? rec.orgUuid : null,
     isActive: Boolean(isActive),
-    session: sessionLine(rec, now),
+    session: sessionLine(rec, now, Boolean(isActive)),
     weekly: weeklyLine(rec),
     codeWeekly: typeof rec.codeWeeklyPercent === "number"
       ? `Claude Code ${formatPct(rec.codeWeeklyPercent)}` : null,
@@ -88,18 +170,96 @@ export const EMPTY_STATE_TEXT = "No accounts yet — open claude.ai once and thi
 
 // --- DOM paint (not under test) ---------------------------------------------- //
 
+/**
+ * The per-account rename affordance. Clicking it swaps the name for a text
+ * box; Enter or blur saves, Escape cancels, an empty box clears the override.
+ *
+ * The RULE it applies is `nextLabels()`, which is pure and tested. Everything
+ * here is glue: apply it to the map this render already read, write the
+ * result back, repaint. `paint()` re-runs from the storage change anyway, but
+ * it is called directly too so the edit lands even if the onChanged
+ * round-trip is slow.
+ *
+ * 🔴 ONE ASYNC HOP, NOT TWO, AND IT STARTS SYNCHRONOUSLY. This used to
+ * `storage.get()` the label map and only then `set()` the result, so a save
+ * begun on `blur` had to survive TWO round-trips -- and a popup dismissed by
+ * clicking outside it is torn down mid-flight. The map is already in hand:
+ * `paint()` read it to build this row, and a storage change repaints (and so
+ * rebuilds these buttons) before it can go stale. The popup is the only
+ * writer of that key, so there is no concurrent edit to merge with.
+ *
+ * ⚠ NOT VERIFIED AGAINST A REAL DISMISS. Whether `blur` even fires when a
+ * Chrome popup is dismissed by an outside click needs a browser, and the node
+ * harness does not paint this file at all. What was done is to make the save
+ * as short as it can be, not to demonstrate that the lossy path is closed.
+ */
+function renameButton(row, labels) {
+  const btn = document.createElement("button");
+  btn.className = "rename";
+  btn.type = "button";
+  btn.title = `Rename ${row.name}`;
+  btn.setAttribute("aria-label", `Rename ${row.name}`);
+  btn.textContent = "✎";
+  btn.addEventListener("click", () => {
+    const input = document.createElement("input");
+    input.className = "labelinput";
+    input.type = "text";
+    input.value = row.name;
+    input.setAttribute("aria-label", "Account label");
+    let done = false;
+    const commit = (save) => {
+      if (done) return;
+      done = true;
+      if (!save) { paint(); return; }
+      try {
+        const next = nextLabels(labels, row.orgUuid, input.value);
+        const setting = chrome.storage.local.set({ [ACCOUNT_LABELS_KEY]: next });
+        if (setting && typeof setting.then === "function") {
+          setting.then(paint).catch(() => { /* storage gone; nothing to save into */ });
+        } else {
+          paint();
+        }
+      } catch {
+        // 🔴 REPAINT ANYWAY. The row has already been replaced by the input
+        // box at this point, so swallowing the throw and returning leaves the
+        // account PERMANENTLY truncated to a text field with no name and no
+        // way back. Losing the edit is bad; losing the row is worse.
+        paint();
+      }
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") commit(true);
+      else if (e.key === "Escape") commit(false);
+    });
+    input.addEventListener("blur", () => commit(true));
+    const parent = btn.parentElement;
+    if (!parent) return;
+    parent.textContent = "";
+    parent.append(input);
+    if (typeof input.focus === "function") input.focus();
+    if (typeof input.select === "function") input.select();
+  });
+  return btn;
+}
+
 function paint() {
   const host = document.getElementById("accounts");
   const empty = document.getElementById("empty");
   if (!host || !empty) return;
-  chrome.storage.local.get(["accounts", "lastActiveOrg"]).then((got) => {
+  chrome.storage.local.get(["accounts", "lastActiveOrg", ACCOUNT_LABELS_KEY]).then((got) => {
     const accounts = got.accounts && typeof got.accounts === "object" ? got.accounts : {};
     const now = Date.now();
+    const labels = got[ACCOUNT_LABELS_KEY];
     const ordered = orderAccounts(accounts, got.lastActiveOrg);
     empty.hidden = ordered.length > 0;
     host.textContent = "";
     for (const rec of ordered) {
-      const row = renderRow(rec, now, rec.orgUuid === got.lastActiveOrg);
+      // 🔴 `isActiveRecord`, NOT `rec.orgUuid === lastActiveOrg`. That field
+      // spelling was the popup's half of a predicate the widget spelled by
+      // MAP KEY, and with a `lastActiveOrg` naming an org that has no stored
+      // record the two surfaces named different active accounts on one
+      // storage read. One predicate, in lib/availability.js.
+      const row = renderRow(rec, now, isActiveRecord(rec, accounts, got.lastActiveOrg), labels);
       const div = document.createElement("div");
       div.className = `account${row.isActive ? " active" : ""}${row.stale ? " stale" : ""}`;
 
@@ -111,7 +271,8 @@ function paint() {
       const asof = document.createElement("span");
       asof.className = "asof";
       asof.textContent = row.asOf;
-      row1.append(name, asof);
+      if (row.orgUuid) row1.append(name, renameButton(row, labels), asof);
+      else row1.append(name, asof);
 
       const metrics = document.createElement("div");
       metrics.className = "metrics";

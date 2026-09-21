@@ -7602,14 +7602,80 @@ def test_the_over_budget_warning_CARRIES_the_note_and_still_refuses_nothing():
     assert "Evictable in THIS doc" in w, w
 
 
-def test_the_note_is_withheld_from_the_UNGATED_arm():
-    """🔴 The ungated arm REPORTS THE NUMBER AND PRESCRIBES NOTHING, deliberately:
-    outside devrc the ladder cites a playbook the repo does not ship, so a
-    breakdown keyed to its step 1 would be prescribing where that arm must not."""
+def test_the_UNGATED_over_budget_arm_CARRIES_the_note_and_still_prescribes_nothing():
+    """🔴 THE ARM STILL PRESCRIBES NOTHING — that property is what this test pins,
+    and it is NOT the same claim as "the note is absent". This test replaces
+    `test_the_note_is_withheld_from_the_UNGATED_arm`, whose withholding was
+    specified when `evictable_note` also carried the eviction ladder; #1821
+    deleted that surface, so the note is now a measurement of `merged_text` and
+    names no remedy. Asserting the ABSENCE of the note was therefore asserting a
+    proxy for "no prescription" that stopped tracking it.
+
+    So both halves are checked explicitly: the numbers are present, and the
+    ladder's own words are not. The negative list is the ladder's distinctive
+    vocabulary from the GATED arm above — if a future edit reintroduces
+    prescription here, one of these fires."""
     w = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
                           _EVICTABLE_DOC + "z" * 70_000, "z" * 100, gated=False)
-    assert "SIZE ONLY, NO GATE" in w
-    assert "Evictable in THIS doc" not in w, w
+    assert "SIZE ONLY, NO GATE" in w, w
+    assert "Evictable in THIS doc" in w, w
+    # 🔴 THE BARE WORDS, NOT A PHRASE. An earlier draft of this list named four
+    # PHRASES and passed while the note still ended "steps 2-4 of the playbook
+    # cover the rest" — a pointer to a test only devrc ships, leaking into the
+    # one arm that may not prescribe, through a negative assertion written
+    # specifically to catch that. A phrase-list only ever catches the wordings
+    # you thought of; `playbook` and `ladder` cannot be said at all here.
+    for prescription in ("will go RED on `main`", "demote dated evidence",
+                         "Do NOT satisfy it by deleting", "claudedocs/refs/",
+                         "playbook", "ladder"):
+        assert prescription not in w, (prescription, w)
+
+
+def test_the_UNGATED_over_budget_note_asserts_NO_DEFICIT_against_the_ceiling():
+    """🔴 THIS REPLACES `…_is_the_SAME_TEXT_the_gated_arm_prints`, WHICH PINNED A
+    REQUIREMENT NOBODY ASKED FOR AND WHICH DID HARM. That test demanded both arms
+    render an identical note, which is the ONLY thing that forced this arm to pass
+    the real overage into `evictable_note` — making it print "does NOT clear the
+    N B you are over by": a DEFICIT against a ceiling the same warning says
+    nothing enforces. Round 0 of #1826 named it: that is the `civitai/cli#618`
+    pressure shape with the prescription stripped out and the false-consequence
+    framing kept, and #618 is the incident the withholding was built from.
+
+    The operator's ask was "print numbers everywhere" — satisfied by `over_by=0`,
+    which renders "N B net already closed in this document". So the invariant is
+    NOT sameness; it is that **the NOTE** names no threshold.
+
+    This arm's HEAD line states the overage outright (`over by {N} B`) and must
+    keep doing so; `test_EVERY_branch_that_names_the_gate_is_repo_aware` pins
+    that with `assert "over by 1 B" in ungated_over`. An earlier version of this
+    docstring said "this arm names no threshold" unscoped, which that test
+    falsifies.
+
+    🔴 WHAT ACTUALLY KILLS THE REVERT IS LINE 1 OF THE PAIR BELOW, NOT THE LOOP.
+    `assert "already closed in this document"` can only pass when `over_by == 0`,
+    and with `over_by == 0` `evictable_note` cannot emit any of the three
+    forbidden strings — so the loop CANNOT fail while the assertion above it
+    passes. It is unreachable in practice, which is `claude/RULES.md`'s "an
+    earlier check always wins so the guard never executes". Round 1 of #1826
+    wrote "THE SCOPE IS LOAD-BEARING" here; round 2 measured it and that was
+    false. The `.split()` is kept only because the sibling test's negative list
+    is meant to widen to the bare words, at which point the slice starts doing
+    work — today it does none. **Do not trim the first assertion on the strength
+    of the loop; the loop is the decoration and the assertion is the guard.**"""
+    doc, base = _EVICTABLE_DOC + "z" * 70_000, "z" * 100
+    ungated = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
+                                doc, base, gated=False)
+    assert "Evictable in THIS doc" in ungated, ungated
+    assert "already closed in this document" in ungated, ungated
+    for threshold in ("does NOT clear", "you are over by", "which CLEARS"):
+        assert threshold not in ungated.split("Evictable in THIS doc")[1], (
+            threshold, ungated)
+    # …and the GATED arm still gets the shortfall: this is a split, not a
+    # tree-wide deletion. Without this the fix could be satisfied by making
+    # `evictable_note` incapable of ever naming an overage.
+    gated = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
+                              doc, base, gated=True)
+    assert "does NOT clear" in gated or "which CLEARS" in gated, gated
 
 
 def _near_text():
@@ -7622,22 +7688,76 @@ def _near_text():
 
 def test_the_NEAR_budget_arm_carries_the_note_when_gated():
     """🔴 REACHABILITY, and this test exists because its absence let a mutant live.
-    `test_the_note_is_withheld_from_the_UNGATED_arm` drives the OVER-budget arm,
-    which returns before the near arm's `if gated` is ever evaluated — so deleting
-    that guard changed nothing any test could see, and the mutant SURVIVED a green
-    suite. These two cases execute the guard itself, in both directions."""
+    `test_the_UNGATED_over_budget_arm_CARRIES_the_note_and_still_prescribes_nothing`
+    drives the OVER-budget arm, which returns before the near arm's note call is
+    ever evaluated — so when that call was still guarded by `if gated`, deleting
+    the guard changed nothing any test could see and the mutant SURVIVED a green
+    suite.
+
+    ⚠ That guard IS GONE (#1826): the near arm's note call is unconditional now,
+    so this test and `…_when_UNGATED_TOO` pin identical expectations. (Both
+    still EXECUTE the `tail` ternary, in opposite directions; neither ASSERTS
+    on it.) The
+    gated/ungated branch surviving in this arm is the `tail` ternary, pinned by
+    `…_NEAR_arms_gate_specific_TAIL_still_differs_by_gatedness`; these two assert
+    on the note instead.
+
+    ⚠ NO CLAIM IS MADE HERE ABOUT WHAT ELSE REACHES THIS ARM. Round 1 wrote that
+    these were "the only cases that reach the near arm at all"; round 2 measured
+    five, one of them a test round 1 had named itself. Rather than swap in a
+    freshly-counted number that the next edit stales, this says nothing — measure
+    it when you need it."""
     w = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
                           _near_text(), "z" * 100, gated=True)
     assert w.startswith("⚠ Size:"), w
     assert "Evictable in THIS doc" in w, w
 
 
-def test_the_NEAR_budget_arm_withholds_the_note_when_UNGATED():
-    """The other direction of the guard the mutant walked through."""
+def test_the_NEAR_budget_arm_carries_the_note_when_UNGATED_TOO():
+    """🔴 REACHABILITY IS STILL THE POINT, and it is why this test survives the
+    guard it was written to check. Its sibling above drives the near arm gated;
+    this one drives the SAME arm ungated, with `_near_text()` sized under the
+    ceiling on purpose — `test_the_UNGATED_over_budget_arm_…` returns from the
+    OVER arm and can never execute this line. That asymmetry is exactly how a
+    mutant deleting the old `if gated` survived a green suite (round 4 of
+    #1815), so the near arm keeps a test in every state it can be in.
+
+    What changed is the expectation, not the coverage: the guard is gone by the
+    operator's decision, so the note now prints here as well. The gate-specific
+    half of this arm is the `tail` sentence, pinned separately below."""
     w = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
                           _near_text(), "z" * 100, gated=False)
     assert w.startswith("⚠ Size:"), w
-    assert "Evictable in THIS doc" not in w, w
+    assert "Evictable in THIS doc" in w, w
+
+
+def test_the_NEAR_arms_gate_specific_TAIL_still_differs_by_gatedness():
+    """🔴 THE GUARD WAS DROPPED FROM THE NOTE, NOT FROM THE ARM. Without this,
+    deleting the remaining `if gated` — the one choosing the tail sentence —
+    would be invisible: every other near-arm assertion now holds in both
+    directions. Pins the two tails against each other rather than against a
+    spelling, so a reword of either fails loudly instead of silently passing.
+
+    ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE — say so rather than counting
+    it. It is GREEN on pre-change code, because the behaviour it pins is the
+    half of this arm that did NOT change; the tests around it are the regression
+    ones (red at `origin/main` 3fa77f49, green at HEAD). Its value is
+    forward-looking: MUTATION-TESTED by collapsing `tail` to the gated wording,
+    which it kills.
+
+    ⚠ It dies on the FIRST assertion below (the `red main` one), not the second.
+    An earlier version of this docstring named the `no gate enforces it here`
+    assertion as the killer — both would catch that mutant, but only one runs
+    first, and a maintainer trimming an assertion on the strength of a false
+    record of which is load-bearing is exactly the harm. Round 0 of #1826 ran
+    the mutant and read which line fired."""
+    doc, base = _near_text(), "z" * 100
+    g = hd.budget_warning("claudedocs/handoff-not-grandfathered.md", doc, base,
+                          gated=True)
+    u = hd.budget_warning("claudedocs/handoff-not-grandfathered.md", doc, base,
+                          gated=False)
+    assert "red `main`" in g and "red `main`" not in u, (g, u)
+    assert "no gate enforces it here" in u and "no gate enforces it here" not in g, (g, u)
 
 
 def test_the_rank_charge_explainer_is_WITHHELD_when_no_rank_is_offered():

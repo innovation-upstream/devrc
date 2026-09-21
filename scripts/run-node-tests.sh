@@ -283,7 +283,152 @@ SUITES=(
   # concurrency.test.mjs). Both sides added files AND tests, so this floor
   # is the GATE'S OWN printed number for the merged tree, never arithmetic
   # on the two sides -- which is how an eleven-value MIN_TESTS happened.
-  "scripts/claude-usage/tests|12|152"
+  #
+  # Re-measured 2026-09-20 on feat/claude-usage-account-availability. The
+  # widget grew an OTHER-ACCOUNTS section: a stored account can only be
+  # re-measured while you are logged INTO it, so once its session reset
+  # elapses the extension was reporting the freest account as still-at-92%
+  # ("resets soon", forever). lib/availability.js turns the elapsed reset into
+  # a verdict and brings availability.test.mjs; widget/content_widget/popup/
+  # manifest each grew pins for the section, the cap, the label overrides and
+  # the rule that staleness must NOT grey a presumed-free row.
+  # MEASURED by this runner on that branch: 14 files / 213 tests. Floors,
+  # by the formula at the top of this block (this runner prints no
+  # replacement of its own -- only the pytest one does):
+  # 14 - min(50, max(1, 14/20)) = 13 files;
+  # 213 - min(50, max(1, 213/20)) = 202.35 -> 203 tests.
+  #
+  # Re-measured 2026-09-20 on the same branch after the round-0 audit fixes.
+  # The file COUNT did not move; the test count did, in both directions:
+  #   -1  `a CALLABLE carrying a session is not read as a measurement` was
+  #       DELETED. It killed no mutant that `availability is TOTAL over
+  #       garbage records` does not kill on its own, and chrome.storage.local
+  #       round-trips JSON so it pinned a shape that cannot occur. Both
+  #       halves of the guard it claimed to cover were re-measured killed
+  #       after the deletion.
+  #   +5  the F2 consolidation (popup.js now reads lib/availability.js rather
+  #       than re-deriving the elapsed-reset verdict from formatCountdown's
+  #       "resets soon") brings a regression pair plus a cross-surface seam
+  #       guard in popup.test.mjs, a two-way field-set pin in widget.test.mjs
+  #       replacing the deleted `bar`/`key` assertions, and a CSS mechanism
+  #       pin in content_widget.test.mjs for the scroll bound that replaced
+  #       the `+N more` cap.
+  # MEASURED by this runner: 14 files / 217 tests. Floors, by the formula at
+  # the top of this block:
+  # 14 - min(50, max(1, 14/20)) = 14 - min(50, 1) = 13 files (unchanged);
+  # 217 - min(50, max(1, 217/20)) = 217 - 10.85 = 206.15 -> 207 tests.
+  #
+  # Re-measured 2026-09-20 on the same branch after the round-1 audit fixes.
+  # The file COUNT did not move (no new test file); the test count went
+  # 217 -> 251, +34, all of it coverage the suite was structurally unable to
+  # provide before:
+  #   +25 F1 -- `availability()` read `session.resetsAt` and NOTHING else, so
+  #       an account whose five-hour window had reset while its SEVEN-DAY
+  #       window sat at 100% and locked was reported as the single best
+  #       account to switch to. The verdict grew a BLOCKED state and the row
+  #       colour moved onto one shared rule (`toneForRow`), which needed
+  #       pins for the state, the spent-evidence rule in both directions,
+  #       the exhaustion boundary, the ordering, the next-free footer and
+  #       the per-state tone -- on the model AND in the DOM.
+  #   +7  F2 -- "which record is active" was spelled two ways (map key in the
+  #       widget, `orgUuid` field in the popup) and disagreed whenever
+  #       `lastActiveOrg` named an org with no stored record. One predicate,
+  #       plus a widened cross-surface seam guard that now walks every
+  #       availability state against BOTH an active key that names a record
+  #       and one that names nothing.
+  #   +2  two SURVIVED mutants that had documented claims and no guard:
+  #       `nextFreeAt`'s strict `<`, and the invariant the deleted
+  #       `resetElapsedMs` ternaries stood in for. Both labelled INVARIANT
+  #       GUARD -- they pass at b97190c8, so neither is regression coverage.
+  # MEASURED by this runner: 14 files / 251 tests. Floors, by the formula at
+  # the top of this block (this runner prints no replacement of its own --
+  # only the pytest one does):
+  # files: 14 - min(50, max(1, 14/20)) = 14 - min(50, max(1, 0.7))
+  #           = 14 - min(50, 1) = 14 - 1 = 13 (unchanged);
+  # tests: 251 - min(50, max(1, 251/20)) = 251 - min(50, max(1, 12.55))
+  #           = 251 - min(50, 12.55) = 251 - 12.55 = 238.45 -> 239.
+  #
+  # Re-measured 2026-09-20 on the same branch after the round-2 delta audit.
+  # The file COUNT did not move; 251 -> 256, +5:
+  #   +2  R2-1 -- `toneForRow` read `verdict.weeklyPct` unconditionally, so a
+  #       weekly reading that had ALREADY reset still coloured the row: an
+  #       AVAILABLE account painted crit off spent evidence, which is this
+  #       module's founding defect one window over. One pin on the verdict
+  #       (free AND measured, both directions, plus the new
+  #       `weeklyBindingPct`) and one on the rendered other-account row.
+  #   +2  R2-2 -- the active-account exemption was withdrawn for `free`
+  #       alone, so a non-exempt CARD rendered `95% · resets soon` for a
+  #       record the popup called BLOCKED, and its lock banner painted a
+  #       session lock its own window had already spent. One pin per half,
+  #       each also asserting the exemption still applies to the ACTIVE
+  #       record so the fix cannot degrade into a deletion.
+  #   +1  R2-3 -- the unparseable-reset rule was pinned for the WEEKLY window
+  #       only; the SESSION mutant survived all 251 tests. Walked over both
+  #       windows rather than instantiated for one. Labelled MUTATION GUARD:
+  #       it PASSES at 38bbc1f1 and is not regression coverage.
+  # The R2-8 `__proto__` pin and the widened popup seam guard added
+  # assertions to existing tests, so they move no count.
+  # MEASURED by this runner: 14 files / 256 tests. Floors, by the formula at
+  # the top of this block (this runner prints no replacement of its own --
+  # only the pytest one does):
+  # files: 14 - min(50, max(1, 14/20)) = 14 - min(50, max(1, 0.7))
+  #           = 14 - min(50, 1) = 14 - 1 = 13 (unchanged);
+  # tests: 256 - min(50, max(1, 256/20)) = 256 - min(50, max(1, 12.8))
+  #           = 256 - min(50, 12.8) = 256 - 12.8 = 243.2 -> 244.
+  #
+  # Re-measured 2026-09-20 on the same branch after the round-3 delta audit.
+  # The file COUNT did not move; 256 -> 257, +1:
+  #   +1  R3-F1 -- the CARD's headline tone (`widgetModel`'s `tone`, which
+  #       paints the collapsed pill AND the card's header dot) and its weekly
+  #       row's tone both read the record RAW through severity.js's
+  #       `toneForRecord`, with no spent-evidence rule. On a non-exempt
+  #       record that made the card `crit` while the SAME record's
+  #       other-account row, same storage and same `now`, was `ok` -- the
+  #       R2-1 shape one surface over. One test, carrying four regression
+  #       assertions (the card tone, the card-vs-row relationship, the weekly
+  #       row tone, and the spent-SESSION half on its own) plus four
+  #       assertions labelled INVARIANT GUARD in place: a weekly window that
+  #       has NOT reset still reddens the card, the ACTIVE card keeps the raw
+  #       read, the row's VALUE is unchanged, and the row's meta is still the
+  #       literal "resets soon" (the separately-named string residue).
+  # R3-F2 (the stale-dim CSS guard now catching the bare `.stale{...}` shape)
+  # and R3-F3 (`nextFreeAt`'s own null enumeration) added assertions and
+  # prose to existing tests, so they move no count.
+  # MEASURED by this runner: 14 files / 257 tests. Floors, by the formula at
+  # the top of this block (this runner prints no replacement of its own --
+  # only the pytest one does):
+  # files: 14 - min(50, max(1, 14/20)) = 14 - min(50, max(1, 0.7))
+  #           = 14 - min(50, 1) = 14 - 1 = 13 (unchanged);
+  # tests: 257 - min(50, max(1, 257/20)) = 257 - min(50, max(1, 12.85))
+  #           = 257 - min(50, 12.85) = 257 - 12.85 = 244.15 -> 245.
+  #
+  # Re-measured 2026-09-20 after round 4. The file COUNT did not move;
+  # 257 -> 258, +1:
+  #   +1  R4-1 -- routing the non-exempt card headline through `toneForRow`
+  #       also transferred that function's rule that the VERDICT outranks
+  #       STALENESS (availability.js returns "crit" for BLOCKED and the free
+  #       band for FREE, both before its stale check). That is what makes the
+  #       card agree with the row, but no test pinned it: the R3-F1 test's
+  #       card-vs-row pair uses a fixture measured 1h ago, so staleness was a
+  #       pinned constant and the suite was structurally blind to it.
+  #       MEASURED: the mutant `tone: exempt ? toneFor(...) : (stale ?
+  #       "stale" : toneForRow(...))` -- the "fix" a maintainer writes on
+  #       seeing a saturated dot on a dimmed card -- passed all 257 tests,
+  #       silently re-opening the card-vs-row colour split. One test, carrying
+  #       the same colour-pair assertion on a FREE and on a BLOCKED record
+  #       measured 8h ago against the 6h STALE_AFTER_MS, plus one INVARIANT
+  #       GUARD that the exempt card still greys on staleness.
+  # The three prose corrections in the same commit (widget.js's "no longer
+  # colours anything", README's "two consumers", content_widget.test.mjs's
+  # "nothing else is on that element") are reword-only and move no count.
+  # MEASURED by this runner: 14 files / 258 tests. Floors, by the formula at
+  # the top of this block (this runner prints no replacement of its own --
+  # only the pytest one does):
+  # files: 14 - min(50, max(1, 14/20)) = 14 - min(50, max(1, 0.7))
+  #           = 14 - min(50, 1) = 14 - 1 = 13 (unchanged);
+  # tests: 258 - min(50, max(1, 258/20)) = 258 - min(50, max(1, 12.9))
+  #           = 258 - min(50, 12.9) = 258 - 12.9 = 245.1 -> 246.
+  "scripts/claude-usage/tests|13|246"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree; js-source:
