@@ -376,6 +376,15 @@ export function toneForRow(record, verdict, isStaleFn, now) {
  * That output property is still worth pinning, and is -- as an invariant
  * guard on the engine's guarantee, labelled as one in the test.
  *
+ * ⚠ AND NO GUARD COULD HAVE KILLED THAT MUTANT, which is why writing one
+ * would have been the wrong answer. Re-measured after the deletion: the tie
+ * `return 0` below mutated to `return 1` produces BYTE-IDENTICAL output at
+ * every fully-tied run length from 2 to 33 records, because V8's insertion
+ * sort only moves an element when the comparator answers NEGATIVE. It is an
+ * EQUIVALENT mutant, so its survival is correct rather than a coverage hole
+ * -- the distinction the "either guard it or delete the claim" instruction
+ * turns on, and the reason the claim went.
+ *
  * ⚠ IT DOES NOT KNOW ABOUT THE ACTIVE ACCOUNT, deliberately. It used to pin
  * the active record at index 0 and exempt it from the sort, and that pinning
  * was UNOBSERVABLE in the shipped UI: the sole caller (lib/widget.js's

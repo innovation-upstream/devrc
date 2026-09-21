@@ -852,10 +852,15 @@ test("🔴 REGRESSION: the card does not hand the active-account exemption to a 
   assert.ok(!/\b0%/.test(sess.value + sess.meta), "never a fabricated 0%");
 });
 
-test("🔴 the ACTIVE account keeps its countdown -- the exemption still applies where it is earned", () => {
-  // The other direction, and the reason the exemption exists at all:
-  // content_probe.js fetches with the CURRENT session cookie, so this is the
-  // one account "the next snapshot will correct it" is true of.
+test("INVARIANT GUARD: the ACTIVE account keeps its countdown -- the exemption is still earned", () => {
+  // ⚠ LABELLED: watched at b97190c8 and it PASSED there, because the active
+  // account's card never changed. It pins that the F2 fix did not OVER-reach,
+  // which is a different claim from pinning that the F2 fix happened -- the
+  // regression pair for that is the two tests around it, both watched red.
+  //
+  // The reason the exemption exists at all: content_probe.js fetches with the
+  // CURRENT session cookie, so this is the one account "the next snapshot
+  // will correct it" is true of.
   const a = acct(ORG_A, NAME_A, 92, 8, iso(NOW - 2 * HOUR), 0);
   const accounts = { [ORG_A]: a };
   const m = W.widgetModel(a, NOW, { accounts, lastActiveOrg: ORG_A });

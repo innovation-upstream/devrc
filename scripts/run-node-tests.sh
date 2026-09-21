@@ -317,7 +317,37 @@ SUITES=(
   # the top of this block:
   # 14 - min(50, max(1, 14/20)) = 14 - min(50, 1) = 13 files (unchanged);
   # 217 - min(50, max(1, 217/20)) = 217 - 10.85 = 206.15 -> 207 tests.
-  "scripts/claude-usage/tests|13|207"
+  #
+  # Re-measured 2026-09-20 on the same branch after the round-1 audit fixes.
+  # The file COUNT did not move (no new test file); the test count went
+  # 217 -> 251, +34, all of it coverage the suite was structurally unable to
+  # provide before:
+  #   +25 F1 -- `availability()` read `session.resetsAt` and NOTHING else, so
+  #       an account whose five-hour window had reset while its SEVEN-DAY
+  #       window sat at 100% and locked was reported as the single best
+  #       account to switch to. The verdict grew a BLOCKED state and the row
+  #       colour moved onto one shared rule (`toneForRow`), which needed
+  #       pins for the state, the spent-evidence rule in both directions,
+  #       the exhaustion boundary, the ordering, the next-free footer and
+  #       the per-state tone -- on the model AND in the DOM.
+  #   +7  F2 -- "which record is active" was spelled two ways (map key in the
+  #       widget, `orgUuid` field in the popup) and disagreed whenever
+  #       `lastActiveOrg` named an org with no stored record. One predicate,
+  #       plus a widened cross-surface seam guard that now walks every
+  #       availability state against BOTH an active key that names a record
+  #       and one that names nothing.
+  #   +2  two SURVIVED mutants that had documented claims and no guard:
+  #       `nextFreeAt`'s strict `<`, and the invariant the deleted
+  #       `resetElapsedMs` ternaries stood in for. Both labelled INVARIANT
+  #       GUARD -- they pass at b97190c8, so neither is regression coverage.
+  # MEASURED by this runner: 14 files / 251 tests. Floors, by the formula at
+  # the top of this block (this runner prints no replacement of its own --
+  # only the pytest one does):
+  # files: 14 - min(50, max(1, 14/20)) = 14 - min(50, max(1, 0.7))
+  #           = 14 - min(50, 1) = 14 - 1 = 13 (unchanged);
+  # tests: 251 - min(50, max(1, 251/20)) = 251 - min(50, max(1, 12.55))
+  #           = 251 - min(50, 12.55) = 251 - 12.55 = 238.45 -> 239.
+  "scripts/claude-usage/tests|13|239"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree; js-source:

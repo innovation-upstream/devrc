@@ -441,7 +441,14 @@ function dimsTheWholeCard(src) {
     .filter((sel) => /^(\.card\.stale|\.stale\.card)$/.test(sel));
 }
 
-test("🔴 the stale dim is scoped to the active account, never to the whole card", async () => {
+test("INVARIANT GUARD: the stale dim is scoped to the active account, never to the whole card", async () => {
+  // ⚠ LABELLED TWICE OVER, because it is tempting to count as regression
+  // coverage and is not. It passed at b97190c8 -- the hazard is not present
+  // in the source and never was; what was wrong is that the GUARD could not
+  // have seen it in the shape anyone would write. So this closes a hole in a
+  // guard, not a hole in the product, and the thing that demonstrates the
+  // fix is the positive control below rather than a red-to-green transition.
+  //
   // A SOURCE-LEVEL MECHANISM PIN, not a behavioural assertion, and labelled as
   // one: `opacity` on an ancestor cannot be undone by a descendant, so a bare
   // `.card.stale{opacity:...}` rule would grey the presumed-free row no matter
