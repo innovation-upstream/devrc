@@ -107,25 +107,35 @@ client stopped waiting and the card was destroyed · **6** nothing reached the s
 
 ## 🔴 What chief CANNOT do — measured, and pinned by a test
 
-Criterion 4 of task 521 asks chief to list tmux windows, read a transcript,
-raise/resolve an attention entry, manage a layout, and write to a pane. **Only the
-last one is reachable on a credential a pod holds.** The other four are behind
-`requireHookToken`, which compares against the server's SHARED secret — and what a pod
-carries under the NAME `CLAWGATE_HOOK_TOKEN` is its OWN row token, a different value
-from a different source. The name collision is why this was believed to work.
+🔴 **THIS SECTION WAS WRONG IN FOUR OF SIX ROWS UNTIL 2026-09-20, AND ITS HEADING
+OVERSTATED THE CASE.** It said criterion 4's five capabilities were all unreachable
+bar the pane write — *"The other four are behind `requireHookToken`"*. **Task 607
+moved four routes onto `requireHookOrAgentToken` and this table was never updated.**
+Re-measured below with chief's own agent-row token, using the shared hook token as a
+positive control on the same routes.
+
+🔴 **THE LEDGER IS ASYMMETRIC BY METHOD — do not read a path, read a METHOD.** Chief
+may RAISE and RESOLVE an attention entry but may not LIST the queue: `POST
+/api/attention` is `requireHookOrAgentToken` while `GET /api/attention` was
+deliberately left on `requireHookToken` (reading the operator's queue was not moved).
+A 401 on the GET says NOTHING about the POSTs, and a table keyed on
+`/api/attention` alone cannot express that.
 
 | capability | route | gate | from inside chief's pod |
 |---|---|---|---|
 | send a message to a pane | `POST /api/term/chief/send-keys` | `requireChiefToken` | ✅ **when armed** |
-| read the bound task | `GET /agent/task` | `requireAgentToken` | ✅ always |
-| list tmux windows | `GET /api/tmux/snapshot` | — | ✅ **200 — this row said ❌ 401 and was WRONG** |
-| read a transcript | `GET /api/transcripts/{id}` | `requireHookToken` | ❌ 401 |
-| raise / resolve attention | `POST /api/attention[/{id}/resolve]` | `requireHookToken` | ❌ 401 |
+| read the bound task | `GET /agent/task` | `requireAgentToken` | ✅ always (answers "no task assigned" — expected) |
+| list tmux windows | `GET /api/tmux/snapshot` | `requireHookOrAgentToken` | ✅ **200** — was ❌ 401 here |
+| read a transcript | `GET /api/transcripts/{id}` | `requireHookOrAgentToken` | ✅ **404 on a bogus id = auth PASSED** — was ❌ 401 here |
+| raise an attention entry | `POST /api/attention` | `requireHookOrAgentToken` | ✅ — was ❌ 401 here |
+| resolve an attention entry | `POST /api/attention/{id}/resolve` | `requireHookOrAgentToken` | ✅ — was ❌ 401 here |
+| **read** the attention queue | `GET /api/attention` | `requireHookToken` | ❌ **401** — not moved, on purpose |
+| the task board | `GET /api/tasks` | `requireHookToken` | ❌ 401 |
 | manage a layout | `POST /api/layout/views` | `requireHookToken` | ❌ 401 |
 
-🔴 **"CHIEF CANNOT ENUMERATE A PANE" WAS FALSE — MEASURED 2026-09-20, AND THE TWO-WAY
-TEST DID NOT CATCH IT.** Probed with chief's own agent-row token against the live pod,
-with the shared hook token as a positive control on the same three routes:
+🔴 **"CHIEF CANNOT ENUMERATE A PANE" WAS FALSE — MEASURED 2026-09-20.** Probed with
+chief's own agent-row token against the live pod, with the shared hook token as a
+positive control on the same three routes:
 
 | route | chief token | hook token (control) |
 |---|---|---|
@@ -140,14 +150,26 @@ fleet recap needs. 0.8.47's `chiefFleetSkill` tells it so; before that it had no
 know the route existed. The remaining 401s are still a privilege decision, not an
 oversight to route around.
 
-⚠ **The table is claimed to be machine-checked by
-`<homelab-infra>/containers/clawgate/cmd/clawgatectl/chief_capability_reach_test.go`,
-reddening in BOTH directions so that a capability becoming reachable is reviewed as the
-privilege grant it is. It did not fire for this row.** Whether the grant predates the
-test, the test does not cover that route, or it is not run, is **NOT yet diagnosed** —
-so treat this table as prose you must re-probe, not as a machine-checked ledger, until
-someone does. A two-way pin that is believed and has silently stopped firing is worse
-than no pin, because it stops anyone looking.
+🔴 **RETRACTION — "the two-way test did not fire" was FALSE, and the pin is healthy.**
+An earlier draft of this section said `chief_capability_reach_test.go` had silently
+stopped firing and left it "NOT yet diagnosed". Diagnosed 2026-09-20, and the opposite
+is true. The ledger row reads `route: "GET /api/tmux/snapshot", wantReachable: true`
+with `why: "requireHookOrAgentToken since task 607"`, and the file's own comment records
+the firing: *"Before task 607: moving `GET /api/tmux/snapshot` from requireHookToken to
+requireAgentToken redded `list tmux windows` … Task 607 then made that arm real, and it
+fired: all four routes moved, all four rows had to be edited."*
+`TestTheChiefCapabilityReachLedger` and `TestTheChiefReachLedgerCanSeeBothVerdicts` both
+run and PASS. **The pin did its job; THIS DOCUMENT was the thing that went stale**, for
+four rows, for however long task 607 has been in.
+
+⚠ **The reading that produced the false claim was a `-run` filter matching nothing.**
+`go test -run TestChiefCapabilityReach` prints `ok … [no tests to run]` and exits 0 —
+indistinguishable from a pass — because the real names begin `TestTheChief…`. Count the
+`--- PASS` lines, never the `ok`. Same trap the deploy runbook names for the pin guard.
+
+⚠ So the table above IS machine-checked, and the honest caveat is narrower than the one
+it replaces: the test pins clawgate's ROUTE TIERS, not this markdown. Nothing reds when
+this file drifts from it. Re-probe before quoting a row.
 
 ⚠ **You, the operator's Claude Code, are not in a pod** — you hold the shared hook
 token in `~/.claude/clawgate.env`, so `tmux windows`, `transcript`, `attention` and the
