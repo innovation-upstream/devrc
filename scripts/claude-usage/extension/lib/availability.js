@@ -524,9 +524,19 @@ export function orderForSwitch(accounts, now) {
 
 /**
  * The soonest instant at which SOME non-active account becomes usable -- the
- * widget's "next free: <label> in 1h12m" line. Null when nothing is pending:
- * every other account is already free, or blocked with no knowable end, or
- * unknown, or there are none.
+ * widget's "next free: <label> in 1h12m" line.
+ *
+ * ⚠ WHEN IT IS NULL, STATED FROM THE CODE RATHER THAN FROM THE INTENT, and
+ * this is the AUTHORITATIVE copy of that enumeration. It is null when every
+ * other account's `freesAt` is null -- already free, unknown, or blocked with
+ * no knowable end -- when there are no other accounts, AND when `now` itself
+ * is unusable: the `finite(now)` check on the first line returns null before
+ * any account is read, because nothing time-relative is knowable then and
+ * this is time-relative. That last case was missing from this sentence for a
+ * round. Its MIRROR in widget.js's `buildOthers` -- the caller's paraphrase
+ * of this list -- was corrected on its own, so the copy nobody is meant to
+ * trust became the complete one and the authoritative one stayed wrong.
+ * Correcting a paraphrase is not correcting the claim.
  *
  * 🔴 IT READS `freesAt`, NOT `resetsAt`, AND THAT IS WHY A BLOCKED ACCOUNT
  * COUNTS. A weekly-blocked account is exactly the case where the operator

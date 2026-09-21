@@ -438,13 +438,42 @@ function cssRules(src) {
   return out;
 }
 
-/** Does any rule set `opacity` on `.card.stale` ITSELF (rather than on a
- * descendant of it)? A selector that continues past `.card.stale` with a
+/** Every class content_widget.js puts on the CARD element itself when the
+ * snapshot is stale: `card.className = "card" + (model.stale ? " stale" : "")`.
+ * Nothing else is on that element, which is what makes the subset test below
+ * a statement about the card rather than about a spelling. */
+const CARD_CLASSES = ["card", "stale"];
+
+/** Would this selector match the stale CARD ELEMENT itself?
+ *
+ * 🔴 IT IS A SUBSET TEST, NOT A LIST OF SPELLINGS, and that is the whole
+ * point. A class-only compound with no combinator, no element type, no pseudo
+ * and no id selects an element by its classes alone, so it matches the card
+ * exactly when every class it names is on the card and it names `stale` (an
+ * unconditional dim is a different bug and the `.card.dead` rule beside this
+ * one is a legitimate use of it). That covers `.card.stale`, `.stale.card`
+ * AND the bare `.stale` in one rule instead of enumerating them -- and the
+ * bare form is the likeliest edit of the three, since "dim anything stale" is
+ * the obvious way to write the intent.
+ *
+ * It must NOT match `.other.stale`, the real rule two lines down in
+ * content_widget.js that greys a stale other-account ROW: `other` is not a
+ * class on the card, so the subset test rejects it. That rule is the reason
+ * this cannot simply be "any selector mentioning .stale". */
+function matchesTheStaleCardItself(sel) {
+  const s = sel.trim();
+  if (!/^(?:\.[-\w]+)+$/.test(s)) return false;
+  const classes = s.slice(1).split(".");
+  return classes.includes("stale") && classes.every((c) => CARD_CLASSES.includes(c));
+}
+
+/** Does any rule set `opacity` on the stale card ITSELF (rather than on a
+ * descendant of it)? A selector that continues past the card with a
  * combinator or a space is targeting a child and is the SCOPED form. */
 function dimsTheWholeCard(src) {
   return cssRules(src).filter((r) => /(^|[^-\w])opacity\s*:/.test(r.body))
     .flatMap((r) => r.selectors)
-    .filter((sel) => /^(\.card\.stale|\.stale\.card)$/.test(sel));
+    .filter(matchesTheStaleCardItself);
 }
 
 test("INVARIANT GUARD: the stale dim is scoped to the active account, never to the whole card", async () => {
@@ -473,17 +502,27 @@ test("INVARIANT GUARD: the stale dim is scoped to the active account, never to t
   // sets opacity.
   //
   // ⚠ IT IS NOT UNDODGEABLE, AND THIS COMMENT SAID IT WAS ("which no
-  // rewording can dodge"). `dimsTheWholeCard` matches the selector against
-  // `/^(\.card\.stale|\.stale\.card)$/`, so it CATCHES `.card.stale{…}` and
-  // any selector LIST containing it, and MISSES every equivalent written
-  // differently: `.root .card.stale`, `.root>.card.stale`, `div.card.stale`,
-  // `.card.stale:not(.x)` -- plus anything single-quoted or in a template
-  // literal, which `cssRules` cannot see at all. Each of those greys the
-  // whole card exactly as the caught form does. Practical coverage is
-  // adequate because this file's CSS is entirely unprefixed, double-quoted
-  // fragments with no descendant-scoped card rules; the absolute was the
-  // defect, not the guard. Widening it means matching any selector whose
-  // LAST compound contains both classes, which nobody has needed yet.
+  // rewording can dodge"). What it COVERS: any class-only compound selector
+  // whose classes are all on the stale card and which names `stale` -- so
+  // `.card.stale`, `.stale.card`, the bare `.stale`, and any selector LIST
+  // containing one of them. What it MISSES, unchanged: every equivalent
+  // written with something the subset test rejects -- `.root .card.stale`,
+  // `.root>.card.stale`, `div.card.stale`, `.card.stale:not(.x)`, `#x.stale`,
+  // `[class~=stale]` -- plus anything single-quoted or in a template literal,
+  // which `cssRules` cannot see at all. Each of those greys the whole card
+  // exactly as the caught forms do. This is a statement of coverage and not a
+  // new absolute; the absolute was the defect, not the guard.
+  //
+  // 🔴 THE BARE `.stale{…}` WAS IN THE MISSED COLUMN AND NOT IN THE LIST,
+  // which is worse than either. The predicate was
+  // `/^(\.card\.stale|\.stale\.card)$/`, and `card.className = "card" +
+  // (model.stale ? " stale" : "")`, so `.stale{opacity:.6}` -- the obvious
+  // way to write "dim anything stale", and the likeliest of the three caught
+  // forms to actually get typed -- walked straight past a guard whose comment
+  // named four misses and implied the rest were covered. It is now caught,
+  // and the predicate is a subset test over the card's own class list rather
+  // than an enumeration of spellings, so a fourth equivalent compound needs
+  // no new branch.
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../extension/content_widget.js", import.meta.url), "utf8");
 
@@ -496,16 +535,28 @@ test("INVARIANT GUARD: the stale dim is scoped to the active account, never to t
     '".card.dead,.card.stale{opacity:.6}"',
     '".card.stale , .other{opacity:.72}"',
     '".card.stale{opacity:.72}"',
+    // The bare form, which the enumerated predicate missed while its own
+    // comment listed four misses that did not include it.
+    '".stale{opacity:.6}"',
+    '".stale.card{opacity:.6}"',
   ];
   for (const h of hazards) {
     assert.ok(dimsTheWholeCard(`var CSS = [${h}].join("");`).length > 0,
       `the detector cannot see the hazard written as ${h}`);
   }
-  // ...and a NEGATIVE control: the scoped form must NOT trip it, or the guard
-  // is merely permanently red and says nothing.
-  assert.deepEqual(
-    dimsTheWholeCard('var CSS = [".card.stale>.head,.card.stale>.row{opacity:.72}"].join("");'),
-    [], "the detector flags the SCOPED rule, so it cannot distinguish the two");
+  // ...and NEGATIVE controls: neither the scoped form nor the row-scoped
+  // `.other.stale` rule may trip it, or the guard is merely permanently red
+  // and says nothing. `.other.stale` is a REAL rule in content_widget.js, so
+  // this is the control that stops the widening above from being "anything
+  // mentioning .stale".
+  for (const ok of [
+    '".card.stale>.head,.card.stale>.row{opacity:.72}"',
+    '".other.stale{opacity:.72}"',
+    '".card.dead,.pill.dead{opacity:.6}"',
+  ]) {
+    assert.deepEqual(dimsTheWholeCard(`var CSS = [${ok}].join("");`), [],
+      `the detector flags ${ok}, so it cannot distinguish the two`);
+  }
 
   // Only now is the real reading worth anything.
   assert.deepEqual(dimsTheWholeCard(src), [],
