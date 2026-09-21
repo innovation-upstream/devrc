@@ -49,45 +49,45 @@ docs**; note the relationship and leave both.
   ```
 
 ## State now
-- **Branch / PR: `fix/evictable-note-ungated` → [devrc#1826](https://github.com/innovation-upstream/devrc/pull/1826), OPEN.** Commit `27ca55be`, pushed. Two files: `scripts/lib/handoff_doc.py`, `scripts/tests/test_handoff_doc.py` (+113/−14).
-- **DONE — the guard is dropped in both numbers-only arms of `budget_warning`:** the
-  ungated OVER arm now computes `evictable_note(merged_text, after - allowance)` and appends
-  it; the NEAR arm's `note = evictable_note(merged_text, 0) if gated else ""` became
-  unconditional.
-- **DONE — two ladder-pointers deleted from `evictable_note` itself.** The shortfall line
-  ended *"steps 2-4 of the playbook cover the rest"*; the zero case read *"before you need
-  the ladder at all"*. See the gotcha below — this is the part worth reading.
-- **DONE — measured, through the function, not asserted:** against homelab-talos's **70**
-  live handoff docs, **31 now print a note, surfacing 289,805 B** of already-closed content
-  their authors could not see.
-- **IN FLIGHT: CI.** At hand-off time all four legs (`tekton/devrc-{pytests,nodetests,gotests,cairn-client-runs}`)
-  were **pending**, and `gh pr view 1826 --json mergeable` still answered `UNKNOWN`.
-- **IN FLIGHT: `/audit-pr 1826` has NOT been run.** Offered, not dispatched. Round 0 is the
-  only round that can conclude *close this PR*, and that is actionable only while the merge
-  decision is open — so it is rank 1 below.
-- **NOT DEPLOYED, and deliberately stated separately from merged.** Both host clones are
-  behind `origin/main` (workbench `98aa7b06`, laptop `8f95c342`, origin `3fa77f49`); nothing
-  of this change runs anywhere until it merges and `ship.sh` converges.
-- **No `clawgate-task:` field.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
-  this session. Its positive control passed (the same endpoint answered 1 link for another
-  session), so the board is reachable and the token accepted; that narrows the reading but
-  does NOT prove this session's id is right, because a wrong id also answers 200 with an
-  empty array. Not a clean bill of health, and no task was created.
+- 🔴 **devrc#1826 is MERGED** — squash `62e811e9`, 2026-09-21T07:28:55Z, verified by CONTENT on
+  `origin/main` (both `over_by=0` call sites present at `handoff_doc.py:3073` and `:3146`); a
+  squash never makes the head an ancestor, so ancestry is not the check. All four Tekton legs
+  green at the final head `a1f59620`.
+- **The arc's closing condition is NOT yet met**: clause (a) is satisfied, clause (b) —
+  `ship.sh` converging both hosts — is not. Nothing of this change runs on either machine until
+  it does.
+- **Shipped behaviour:** the ungated over-budget arm passes `over_by=0`, so its note reports what
+  has closed and asserts no shortfall against a ceiling that block says nothing enforces. The
+  gated arm keeps its shortfall. Two ladder-pointers deleted from `evictable_note` itself.
+- 🔴 **REACH IS 13 DOCS, NOT 31 — the figure that decided this arc was wrong.** Measured through
+  `budget_warning`, the only caller: **13 of homelab-talos's 70** live handoff docs. `31` is the
+  `evictable_note`-non-empty set; the other 18 are UNDER budget, so `budget_warning` returns `""`
+  for them before and after. The operator approved F2 on a brief quoting **370,563 B**; the
+  withheld set was 13 documents. No byte total is recorded in the source — it is corpus-volatile
+  (218,883 B at one reading, 198,483 B an hour earlier).
+- **Audited rounds 0–2, ladder CLOSED on the attribution gate** (not on a clean round). Round 0
+  corrected the reach figure and found the deficit assertion. Rounds 1 and 2 each found only
+  false claims in the previous round's own prose and changed **zero executable payload lines** —
+  two consecutive, which is the gate. No round found a 🔴. The payload was correct from round 1
+  and never moved again.
 
 ## Next steps (ranked)
-1. **Audit, then merge devrc#1826, then `scripts/ship.sh`.** In that order: `/audit-pr 1826`
-   worked as its ROUND 0 section first (requirements & deletion — it can conclude *close
-   this PR*), then the nine correctness axes, then merge, then converge both hosts and run
-   the closing-condition check above. Files: `scripts/lib/handoff_doc.py`,
-   `scripts/tests/test_handoff_doc.py`. IN FLIGHT: devrc#1826.
-   forcing: user — the operator decided F2 explicitly (ratify/reverse prompt, 2026-09-21)
-   and this is the delivery of that decision.
-2. **Sweep for the SAME leak class elsewhere: what other text does an UNGATED repo's author
-   see, and does any of it name a devrc-only artifact?** This change found one instance by
-   reading a diff; the question of whether `budget_warning`'s other branches, or any sibling
-   warning on the `/handoff` write path, carry a second one was never asked. Start:
-   `git -C $DEVRC grep -n "playbook\|refs/\|ladder" -- scripts/lib/handoff_doc.py` and check
-   each hit against which `gated` arm can reach it.
+1. **`scripts/ship.sh` both hosts, then run the closing-condition check in `## Goal`.** Read every
+   per-host line, not the final verdict — one skip hides among greens. Both hosts were behind at
+   hand-off (workbench `98aa7b06`, laptop `8f95c342`). This is the only thing between here and
+   ADDRESSED.
+   forcing: user — the operator decided F2 explicitly (ratify/reverse prompt, 2026-09-21,
+   answer "Drop the gate — print numbers everywhere"), and this is its delivery. ⚠ That
+   decision was taken on a brief quoting 370,563 B; the real withheld set was 13 docs.
+2. **One corpus pass, at the ~2026-10-04 deletion trigger**, covering both open questions — they
+   need the same measurement and are one item, not two. (a) Feed the rank-3 trigger inherited from
+   `handoff-handoff-resume-prune.md`: *"if neither moves, P1′ informed nobody and should be
+   deleted."* 🔴 **Evaluate it against 13 docs, not 31** — round 0 flagged that this PR widened
+   `evictable_note`'s blast radius before its own deletion trigger fired. (b) While the corpus is
+   loaded, sweep for the same leak class elsewhere: what other text does an UNGATED repo's author
+   see, and does any of it name a devrc-only artifact?
+   `git -C $DEVRC grep -n "playbook\|refs/\|ladder" -- scripts/lib/handoff_doc.py`, then check each
+   hit against which `gated` arm reaches it.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -140,6 +140,52 @@ docs**; note the relationship and leave both.
 - **Mutation sweeps run under `PYTHONDONTWRITEBYTECODE=1`**, and both swapped files were
   restored from a `cp -a` copy and confirmed **byte-identical with `cmp`** — the
   same-second/same-length `.pyc` trap otherwise scores a mutant SURVIVED without executing it.
+
+- 🔴 **THE MEASUREMENT THAT DECIDED THE ARC WAS TAKEN THROUGH THE WRONG FUNCTION, AND THE COMMENT
+  CLAIMED OTHERWISE.** I looped `evictable_note()` directly over the corpus, then wrote a source
+  comment saying *"MEASURED HERE, through this very function"* — meaning `budget_warning`. 2.4×
+  overstatement (31 → 13), caught by round 0 re-deriving it. **When a comment names the function
+  it measured through, that is a CLAIM — check the loop actually called it.**
+- 🔴 **THE DEFICIT WAS THE REAL DEFECT, AND MY OWN NEGATIVE ASSERTION PASSED OVER IT.** The first
+  implementation passed the true overage, rendering *"does NOT clear the 260,108 B you are over
+  by"* — a shortfall against a ceiling the same block says nothing enforces. That is the
+  `civitai/cli#618` pressure shape with the prescription removed and the false-consequence framing
+  kept. My test forbade four PHRASES and was green throughout, because the text names no playbook
+  and no ladder. **Forbid the bare WORDS; a phrase-list only catches the wordings you imagined.**
+- 🔴 **A REQUIREMENT I INVENTED CAUSED IT.** *"Both arms print the SAME measurement"*, justified by
+  "one rule, one place" — a rule about a predicate duplicated across call sites, not about two
+  rendering arms. It was the only thing forcing the overage through. Deleted with its test.
+  **Round 0's highest-value question is "who authored this requirement"; mine had no author.**
+- 🔴 **I CITED A RULES.md TRAP IN A DOCSTRING AND THEN WALKED INTO IT.** I wrote
+  *"🔴 SCOPED TO THE NOTE, AND THE SCOPE IS LOAD-BEARING"* over a negative loop that **cannot fail
+  while the assertion above it passes** — that assertion only passes at `over_by == 0`, and at
+  `over_by == 0` the forbidden strings cannot be emitted. RULES.md's *"an earlier check always
+  wins so the guard never executes"*. A reviewer trusting the 🔴 would trim the assertion that
+  actually kills a revert and keep the decoration. The docstring now says which line is the guard.
+- 🔴 **THREE OF MY COMMENTS ASSERTED THE OPPOSITE OF A PASSING TEST IN THE SAME FILE.** They said
+  the ungated arm *"names no threshold"*; its head line renders `over by {N} B`, and
+  `test_EVERY_branch_that_names_the_gate_is_repo_aware` has always pinned that with
+  `assert "over by 1 B" in ungated_over`. Both kept passing. **A comment is a claim: grep the
+  suite for what it asserts before writing the invariant down.**
+- 🔴 **FIX BY CLAIMING LESS, NOT BY CLAIMING DIFFERENTLY.** Rounds 1 and 2 each found only defects
+  in the previous round's prose — five separate over-claims about coverage, reachability and
+  position. The ones that ended it were deletions: a docstring that now asserts **nothing** about
+  what reaches an arm beats one carrying a freshly-counted number the next edit stales. Four
+  non-reproducing positional/volume counts were produced across three rounds.
+- 🔴 **THE ATTRIBUTION GATE'S UNIT IS EXECUTABLE LINES, AND GETTING IT WRONG DISARMS THE GATE.** My
+  round-1 claims block recorded `payload=54`, counting COMMENT lines in the payload file. Under
+  that unit every prose fix round scores non-zero forever and the gate can never fire — which is
+  how these ladders reach 12 and 24 rounds. The honest count was **0 for both rounds 1 and 2**.
+  Recorded as a correction on the PR rather than re-decided silently mid-ladder.
+- ⚠ **`NO CAPACITY` is the `error` class, not a failure.** #1827's four legs came back
+  *"the gate never started (queued past its deadline). Not a code failure."* Do not debug a diff
+  against it.
+- ⚠ **A squash merge takes its message from the PR BODY.** The retracted 31 / 289,805 B figure
+  would have landed in `main`'s history with the correction living only in a discarded commit. The
+  body was struck through and annotated, and the squash body written explicitly.
+- ⚠ **`scoped-tests.sh` refuses this diff by design** (`scripts/lib/**` is a shared surface, exit
+  4). Blast radius was established directly instead: `budget_warning` has one non-test caller;
+  the other two repo hits for these names are an unrelated function and a comment.
 
 ## How to verify
 ```bash
