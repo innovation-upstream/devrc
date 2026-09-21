@@ -347,7 +347,35 @@ SUITES=(
   #           = 14 - min(50, 1) = 14 - 1 = 13 (unchanged);
   # tests: 251 - min(50, max(1, 251/20)) = 251 - min(50, max(1, 12.55))
   #           = 251 - min(50, 12.55) = 251 - 12.55 = 238.45 -> 239.
-  "scripts/claude-usage/tests|13|239"
+  #
+  # Re-measured 2026-09-20 on the same branch after the round-2 delta audit.
+  # The file COUNT did not move; 251 -> 256, +5:
+  #   +2  R2-1 -- `toneForRow` read `verdict.weeklyPct` unconditionally, so a
+  #       weekly reading that had ALREADY reset still coloured the row: an
+  #       AVAILABLE account painted crit off spent evidence, which is this
+  #       module's founding defect one window over. One pin on the verdict
+  #       (free AND measured, both directions, plus the new
+  #       `weeklyBindingPct`) and one on the rendered other-account row.
+  #   +2  R2-2 -- the active-account exemption was withdrawn for `free`
+  #       alone, so a non-exempt CARD rendered `95% · resets soon` for a
+  #       record the popup called BLOCKED, and its lock banner painted a
+  #       session lock its own window had already spent. One pin per half,
+  #       each also asserting the exemption still applies to the ACTIVE
+  #       record so the fix cannot degrade into a deletion.
+  #   +1  R2-3 -- the unparseable-reset rule was pinned for the WEEKLY window
+  #       only; the SESSION mutant survived all 251 tests. Walked over both
+  #       windows rather than instantiated for one. Labelled MUTATION GUARD:
+  #       it PASSES at 38bbc1f1 and is not regression coverage.
+  # The R2-8 `__proto__` pin and the widened popup seam guard added
+  # assertions to existing tests, so they move no count.
+  # MEASURED by this runner: 14 files / 256 tests. Floors, by the formula at
+  # the top of this block (this runner prints no replacement of its own --
+  # only the pytest one does):
+  # files: 14 - min(50, max(1, 14/20)) = 14 - min(50, max(1, 0.7))
+  #           = 14 - min(50, 1) = 14 - 1 = 13 (unchanged);
+  # tests: 256 - min(50, max(1, 256/20)) = 256 - min(50, max(1, 12.8))
+  #           = 256 - min(50, 12.8) = 256 - 12.8 = 243.2 -> 244.
+  "scripts/claude-usage/tests|13|244"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree; js-source:

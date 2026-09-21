@@ -618,10 +618,25 @@ test("activeRecord is total over garbage, junk records and prototype keys", () =
   assert.equal(A.activeRecord({}, ""), null);
   assert.equal(A.activeRecord({}, 5), null);
   assert.equal(A.activeRecord({}, null), null);
-  // The Object.prototype hole severity.js's SEVERITY_TONES lookup documents:
-  // a bare read of `accounts["constructor"]` answers a truthy FUNCTION.
+  // ⚠ THESE TWO DO NOT EXERCISE THE `hasOwnProperty` GUARD, and reading them
+  // as though they did is why that guard went untested for a round. A bare
+  // read of `accounts["constructor"]` answers a truthy FUNCTION, which
+  // `isRecord` rejects two lines later -- so DELETING the guard leaves both
+  // of these green (MEASURED at 38bbc1f1: the deletion SURVIVED all 251
+  // tests). They are breadth over prototype-shaped keys, nothing more.
   assert.equal(A.activeRecord({}, "constructor"), null);
   assert.equal(A.activeRecord({}, "toString"), null);
+  // 🔴 THIS is the key the guard decides, and the only one. `{}["__proto__"]`
+  // answers Object.prototype -- an ordinary object `isRecord` ACCEPTS -- so
+  // without the guard Object.prototype is handed back as the active record
+  // and the widget renders the page's prototype as an account. MEASURED both
+  // ways at 38bbc1f1: null with the guard, Object.prototype without it.
+  // ⚠ NOT REACHABLE IN PRODUCTION -- `lastActiveOrg` is an API UUID written
+  // by service_worker.js. Pinned because a guard whose only reachable case is
+  // untested reads as coverage while providing none.
+  assert.equal(A.activeRecord({}, "__proto__"), null,
+    "Object.prototype was returned as the active record");
+  assert.equal(A.isActiveRecord(Object.prototype, {}, "__proto__"), false);
   assert.equal(A.isActiveRecord(null, { [ORG_A]: null }, ORG_A), false,
     "null === null must not read as 'this record is the active one'");
 });
@@ -644,6 +659,126 @@ test("🔴 REGRESSION: a free row is coloured by the WEEKLY window, not by its s
   assert.equal(tone(84), "warn", "the weekly window is the one that still binds");
   assert.equal(tone(97), "crit");
   assert.equal(tone(null), "ok", "an unknown weekly reading leaves the verdict standing");
+});
+
+test("🔴 REGRESSION: the WEEKLY reading is SPENT by the weekly reset -- free rows and measured ones", () => {
+  // Watched RED at 38bbc1f1. `toneForRow` read `verdict.weeklyPct`
+  // unconditionally, so a weekly window that had ALREADY reset still coloured
+  // the row -- the mirror of the defect the previous round fixed, one window
+  // over. MEASURED there on {session 50% reset 3h ago, weekly 100% reset 1h
+  // ago, asOf 8d}:
+  //   {"state":"free","value":"AVAILABLE",
+  //    "meta":"reset 3h ago (was 50%, measured 8d ago)","tone":"crit"}
+  // AVAILABLE, painted red, with nothing on the row explaining the colour.
+  // It needs only the seven-day boundary to have crossed on a non-active
+  // account -- i.e. any account not logged into for over a week, which is the
+  // population the other-accounts list exists for.
+  const tone = (r) => A.toneForRow(r, A.availability(r, NOW), isStale, NOW);
+  const old = { asOf: NOW - 8 * DAY };
+
+  const freeSpent = rec(Object.assign({
+    session: { utilization: 50, resetsAt: at(NOW - 3 * H) },
+    weekly: wk({ utilization: 100, resetsAt: at(NOW - H) }),
+  }, old));
+  const fv = A.availability(freeSpent, NOW);
+  assert.equal(fv.state, A.FREE, "precondition: the weekly block is spent, so nothing binds");
+  // 🔴 THE BEHAVIOURAL ASSERTION COMES FIRST, ON PURPOSE. The two field
+  // assertions under it name `weeklyBindingPct`, which does not EXIST at
+  // 38bbc1f1 -- so had they run first this test would have gone red at base
+  // for a missing field rather than for the colour, and its red would have
+  // been evidence of nothing.
+  assert.equal(tone(freeSpent), "ok", "an AVAILABLE row painted red off a reset window");
+  assert.equal(fv.weeklyPct, 100,
+    "the RAW reading stays reportable -- it is what a blocked row states");
+  assert.equal(fv.weeklyBindingPct, null,
+    "...and it no longer binds, which is the field the colour is allowed to read");
+
+  // The mirror, so the assertion above cannot be satisfied by ignoring the
+  // weekly window altogether: the same reading, one hour the other way, still
+  // binds. 84% rather than 100%, because a LIVE 100% is BLOCKED and would
+  // take the crit branch without consulting a percentage at all.
+  const binds = rec(Object.assign({
+    session: { utilization: 50, resetsAt: at(NOW - 3 * H) },
+    weekly: wk({ utilization: 84, resetsAt: at(NOW + H) }),
+  }, old));
+  const spent = rec(Object.assign({
+    session: { utilization: 50, resetsAt: at(NOW - 3 * H) },
+    weekly: wk({ utilization: 84, resetsAt: at(NOW - H) }),
+  }, old));
+  assert.equal(A.availability(binds, NOW).state, A.FREE, "precondition");
+  assert.equal(tone(binds), "warn", "a LIVE 84% weekly window still colours a free row");
+  assert.equal(tone(spent), "ok", "the SAME 84% two hours earlier must not");
+
+  // ...and the same rule on a MEASURED row, which a fix scoped to `free`
+  // would have left one state short. The session window is open so its
+  // percentage binds; a weekly reading whose own window turned over does not.
+  const mkMeasured = (weeklyResetsAt) => rec({
+    session: { utilization: 62, resetsAt: at(NOW + 2 * H) },
+    weekly: wk({ utilization: 97, resetsAt: weeklyResetsAt }),
+  });
+  const mSpent = mkMeasured(at(NOW - H));
+  assert.equal(A.availability(mSpent, NOW).state, A.MEASURED, "precondition");
+  assert.equal(tone(mSpent), "ok", "a spent 97% weekly reading reddened a measured row");
+  assert.equal(tone(mkMeasured(at(NOW + H))), "crit",
+    "a LIVE 97% weekly window still reddens a measured row");
+
+  // The unspent direction of the field itself, and the no-clock case: a reset
+  // that cannot be TIMED has not been shown to have happened, so the reading
+  // still binds. (The spent direction is the first assertion in this test.)
+  assert.equal(A.availability(mkMeasured(at(NOW + H)), NOW).weeklyBindingPct, 97);
+  assert.equal(A.availability(mkMeasured(null), NOW).weeklyBindingPct, 97,
+    "an unparseable weekly reset must not silently un-bind the reading");
+  assert.equal(A.availability(mkMeasured(at(NOW - H)), NaN).weeklyBindingPct, 97,
+    "with no usable clock nothing has been shown to have reset");
+});
+
+test("MUTATION GUARD: an UNPARSEABLE reset leaves its OWN window open -- swept over BOTH windows", () => {
+  // ⚠ LABELLED. This PASSES at 38bbc1f1 -- the behaviour was already right
+  // and only the weekly half was pinned, so this is not regression coverage.
+  // What it closes is a SURVIVED mutant: `session.at === null || session.at >
+  // t` mutated to `session.at !== null && session.at > t` survived all 251
+  // tests at 38bbc1f1. MEASURED there on {session 62%, resetsAt null,
+  // lockedReason "Session limit reached.", weekly healthy}:
+  //   HEAD    state=blocked  "Session limit reached."  frees up: unknown
+  //   MUTANT  state=unknown  "62% · reset time unknown"
+  // -- a live lock dismissed because its end could not be read, which is the
+  // one direction this module's inference is NOT safe in.
+  //
+  // 🔴 SWEPT OVER BOTH WINDOWS RATHER THAN FIXED FOR ONE. The previous two
+  // rounds each closed this same defect class a single window at a time, so
+  // the rule is walked here instead of instantiated.
+  const mk = {
+    session: (over) => rec({
+      session: Object.assign({ utilization: 62, resetsAt: null }, over),
+      weekly: wk(),
+    }),
+    weekly: (over) => rec({
+      session: { utilization: 62, resetsAt: at(NOW + 2 * H) },
+      weekly: wk(Object.assign({ resetsAt: null }, over)),
+    }),
+  };
+  for (const [name, build] of Object.entries(mk)) {
+    const v = A.availability(build({ lockedReason: "Limit reached." }), NOW);
+    assert.equal(v.state, A.BLOCKED,
+      `a ${name} lock whose end cannot be read was dismissed as expired`);
+    assert.equal(v.lockedReason, "Limit reached.", `${name}: the API's own words`);
+    assert.equal(v.freesAt, null,
+      `a ${name} block with no knowable end must not name a time`);
+  }
+  // The EXHAUSTION half exists for the weekly window only, and carries the
+  // same rule: an unreadable weekly reset must not un-exhaust a spent
+  // allowance.
+  const out = A.availability(mk.weekly({ utilization: A.WEEKLY_EXHAUSTED_PCT }), NOW);
+  assert.equal(out.state, A.BLOCKED);
+  assert.equal(out.lockedReason, null, "no lock string -- the row states the number instead");
+  assert.equal(out.freesAt, null);
+  // ⚠ NOTHING HERE TOUCHES `weeklyBindingPct`, deliberately. Every assertion
+  // above holds at 38bbc1f1 -- CONFIRMED by running this exact test against
+  // that tree -- which is what makes the MUTATION GUARD label honest. One
+  // assertion on a field that did not exist there would have turned it red
+  // at base for a reason that has nothing to do with the rule it pins, and
+  // it would then have read as regression coverage. The unspent-window half
+  // of `weeklyBindingPct` is pinned in the spent-weekly regression above.
 });
 
 test("a free row does not grey, and a blocked row is crit and does not grey either", () => {

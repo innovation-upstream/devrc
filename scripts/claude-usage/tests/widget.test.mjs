@@ -578,6 +578,108 @@ test("a LIVE session lock is named ahead of a weekly one; a SPENT one is not nam
     "a spent session lock must change nothing -- if it does, this decision has drifted");
 });
 
+/** The card the widget renders when `lastActiveOrg` names an org with no
+ * stored record: `pickRecord` falls back to the freshest one, so the card is
+ * showing a record that has NOT earned the active-account exemption. This is
+ * a real stored state -- service_worker.js writes `lastActiveOrg` whether or
+ * not the /usage fetch produced a record. */
+const GHOST_ORG = "99999999-9999-4999-8999-999999999999";
+const ghostCard = (r, orgUuid) => {
+  const accounts = { [orgUuid]: r };
+  return W.widgetModel(W.pickRecord(accounts, GHOST_ORG), NOW,
+    { accounts, lastActiveOrg: GHOST_ORG });
+};
+
+test("🔴 REGRESSION: the exemption is withdrawn for EVERY state -- a non-exempt card says BLOCKED", () => {
+  // Watched RED at 38bbc1f1: `shownFree = !exempt && verdict.state === FREE`
+  // withdrew the exemption for `free` alone, so the state that most needed
+  // saying was the one it missed. MEASURED there, both columns:
+  //   with a lock string     card session row `95% · resets soon`
+  //   with NO lock string    card session row `95% · resets soon`, and a
+  //                          NULL lock banner -- the card said nothing at all
+  //                          about being blocked
+  // while popup.js, same record and same `now`, read
+  // `BLOCKED · Weekly limit reached. · frees up in 4d0h` and
+  // `BLOCKED · weekly 100% · frees up in 4d0h`. "resets soon" is the string
+  // lib/availability.js's own header calls "the bug", on a record that will
+  // never be re-measured.
+  for (const lock of ["Weekly limit reached.", null]) {
+    const trap = weeklyBlocked(ORG_B, NAME_B, 95, 100, lock);
+    const row = ghostCard(trap, ORG_B).rows[0];
+    assert.equal(row.value, "BLOCKED", `lock=${lock}: the card read "${row.value}"`);
+    assert.ok(!/resets soon/.test(row.meta), `lock=${lock}: "${row.meta}"`);
+    assert.match(row.meta, /frees up in 4d0h/, `lock=${lock}: "${row.meta}"`);
+    assert.match(row.meta, /session was 95%/,
+      "the last MEASURED percentage must stay visible");
+    assert.equal(row.tone, "crit", `lock=${lock}`);
+    assert.equal(row.bar, null,
+      "a track under a BLOCKED value is a percentage claim with no label");
+  }
+  // The reason comes from the record when there is one and from the weekly
+  // number when there is not -- never an invented sentence, and worded by the
+  // SAME helpers the other-account rows use.
+  assert.match(ghostCard(weeklyBlocked(ORG_B, NAME_B, 95, 100), ORG_B).rows[0].meta,
+    /^Weekly limit reached\. · /);
+  assert.match(ghostCard(weeklyBlocked(ORG_B, NAME_B, 95, 100, null), ORG_B).rows[0].meta,
+    /^weekly 100% · /);
+
+  // 🔴 AND THE EXEMPTION ITSELF SURVIVES, or this is a deletion rather than a
+  // fix. The ACTIVE account keeps its live countdown over an elapsed reset,
+  // because content_probe.js will re-measure it within seconds.
+  const active = weeklyBlocked(ORG_A, NAME_A, 95, 100);
+  const exempt = W.widgetModel(active, NOW,
+    { accounts: { [ORG_A]: active }, lastActiveOrg: ORG_A }).rows[0];
+  assert.equal(exempt.value, "95%", "the active card lost its own reading");
+  assert.equal(exempt.meta, "resets soon", "the earned exemption was deleted with the defect");
+});
+
+test("🔴 REGRESSION: a lock SPENT by its own reset is not painted over an AVAILABLE card", () => {
+  // The mirror half of the same defect, MEASURED at 38bbc1f1: the lock BANNER
+  // read the raw record while the session row read the verdict, so a session
+  // lock whose five-hour window had since closed produced
+  //   session row  {"value":"AVAILABLE","tone":"ok",
+  //                 "meta":"reset 2h ago (was 95%, measured 8h ago)"}
+  //   banner       "Session limit reached."
+  // -- green and red on one card, disagreeing about the same record.
+  const spentLock = acct(ORG_B, NAME_B, 95, 33, iso(NOW - 2 * HOUR), 8, (r) => {
+    r.session.lockedReason = "Session limit reached.";
+  });
+  const card = ghostCard(spentLock, ORG_B);
+  assert.equal(card.rows[0].value, "AVAILABLE", "precondition: the verdict is free");
+  assert.equal(card.locked, null, `the card still banners "${card.locked}"`);
+
+  // The exemption survives here too: for the ACTIVE account the banner keeps
+  // its raw read, because the next probe is seconds away.
+  const active = acct(ORG_A, NAME_A, 95, 33, iso(NOW - 2 * HOUR), 8, (r) => {
+    r.session.lockedReason = "Session limit reached.";
+  });
+  assert.equal(
+    W.widgetModel(active, NOW, { accounts: { [ORG_A]: active }, lastActiveOrg: ORG_A }).locked,
+    "Session limit reached.");
+  // ...and a LIVE lock on a non-exempt card is still bannered, so the branch
+  // above cannot be satisfied by dropping the banner for every other record.
+  const liveLock = acct(ORG_C, NAME_C, 95, 33, iso(NOW + 2 * HOUR), 8, (r) => {
+    r.session.lockedReason = "Session limit reached.";
+  });
+  assert.equal(ghostCard(liveLock, ORG_C).locked, "Session limit reached.");
+});
+
+test("🔴 REGRESSION: an other-account row is not reddened by a weekly window that has RESET", () => {
+  // The model-level half of availability.test.mjs's spent-weekly regression.
+  // MEASURED at 38bbc1f1 -- tone "crit" on a row reading
+  // `AVAILABLE — reset 3h ago (was 50%, measured 8d ago)`, with nothing on
+  // the row that could explain the colour.
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+  const freed = acct(ORG_B, NAME_B, 50, 100, iso(NOW - 3 * HOUR), 8 * 24, (r) => {
+    r.weekly.resetsAt = iso(NOW - HOUR);       // the seven-day boundary crossed
+  });
+  const row = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: freed }, lastActiveOrg: ORG_A,
+  }).others[0];
+  assert.equal(row.state, "free", "precondition: the weekly block is spent too");
+  assert.equal(row.tone, "ok", `an AVAILABLE row painted "${row.tone}": ${row.meta}`);
+});
+
 test("🔴 REGRESSION: a weekly-blocked account is sorted BELOW a usable one", () => {
   // Watched RED at b97190c8: the blocked account read "free" and took row 1,
   // above an account at 12% that actually works.

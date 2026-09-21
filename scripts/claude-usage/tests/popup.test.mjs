@@ -175,6 +175,16 @@ test("🔴 the seam holds across EVERY availability state, active and ghost alik
   // The relationship guard, widened. For each state, and for both an active
   // key that names a record and one that names nothing, the popup's line and
   // the widget's row must agree about the verdict.
+  //
+  // 🔴 AND ITS CARD, NOT ONLY ITS ROWS. For a round this walked
+  // `model.others[0]` alone -- so the one surface the active-account
+  // exemption actually applies to was the one surface it never compared, and
+  // a defect written for exactly this class walked past it: the card's
+  // session row was rendering `95% · resets soon` for a record the popup
+  // was calling BLOCKED (MEASURED at 38bbc1f1). Every record below is now
+  // read three ways -- as a popup line, as an other-account ROW, and as the
+  // CARD the widget renders when that record is the one `pickRecord`
+  // selects -- and all three must give one verdict.
   const GHOST = "99999999-9999-4999-8999-999999999999";
   const mk = (uuid, name, pct, resetsAtMs, over) => {
     const r = rec(uuid, name, pct, NOW - HOUR);
@@ -209,9 +219,21 @@ test("🔴 the seam holds across EVERY availability state, active and ghost alik
         : (/AVAILABLE/.test(line) ? "free" : "not-free");
       const widgetVerdict = row.state === "blocked" ? "blocked"
         : (row.state === "free" ? "free" : "not-free");
+      const where = `${expected}/${activeKey === GHOST ? "ghost" : "active"}`;
       assert.equal(popupVerdict, widgetVerdict,
-        `${expected}/${activeKey === GHOST ? "ghost" : "active"}: `
-        + `popup "${line}" vs widget "${row.value} ${row.meta}"`);
+        `${where}: popup "${line}" vs widget row "${row.value} ${row.meta}"`);
+
+      // ...and the CARD for the same record, non-exempt on both keys (the
+      // record lives under `other_key`, which neither key names). This is the
+      // surface `pickRecord` falls back to when `lastActiveOrg` names no
+      // stored record, so it is the one the operator actually reads.
+      const card = W.widgetModel(other, NOW, { accounts, lastActiveOrg: activeKey }).rows[0];
+      const cardVerdict = card.value === "BLOCKED" ? "blocked"
+        : (card.value === "AVAILABLE" ? "free" : "not-free");
+      assert.equal(cardVerdict, popupVerdict,
+        `${where}: popup "${line}" vs widget CARD "${card.value} · ${card.meta}"`);
+      assert.ok(!/resets soon/.test(card.meta),
+        `${where}: the non-exempt card renders the defect string: "${card.meta}"`);
     }
   }
 });
