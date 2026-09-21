@@ -22,95 +22,111 @@ Scope + live recon (API schema, endpoints): `claudedocs/proposal-claude-usage-tr
   Verdict rule: ADDRESSED ⇒ arc CLOSED; NOT ⇒ name the one item.
 
 ## State now
-- **#1801 MERGED** — squash `52571758`, `mergedAt: 2026-09-20T06:13:30Z`. All four
-  Tekton checks were `SUCCESS` on head `37f45c9d` (`cairn-client-runs`, `gotests`,
-  `nodetests`, `pytests`), `mergeStateStatus: CLEAN` — no red to adjudicate.
-  🔴 Verified **by CONTENT, not by rc** (the #1803 trap): `state: MERGED`, a real
-  `mergedAt`, and `git cat-file -e origin/main:scripts/claude-usage/extension/content_widget.js`
-  succeeds. ⚠ The head had MOVED since the last doc — `eda25023` → `37f45c9d`, a
-  merge of `origin/main` taking #1806's toast suppression alongside the widget. The
-  round-3 anchor `d2c68d20..eda25023` is therefore stale; the PR is merged and the
-  ladder is moot, but any retrospective read of it must re-anchor to `37f45c9d`.
-- **Base clone `~/workspace/devrc` SYNCED** — `merge --ff-only` advanced
-  `7739ba9e..52571758`, 18 files / +2146. Still `main`, ↑0↓0, carrying only the two
-  untracked `claudedocs/scope-chief-*` files that belong to another session.
-- **Earlier arc, unchanged:** #1792 MERGED (`da695960`) and shipped to both hosts;
-  #1806 MERGED (`7d323b48`) — the duplicate-notification fix; #1803 CLOSED unmerged,
-  superseded by #1804, which fixed the same red the other way: **it pins opencode back
-  to 1.18.29 via a frozen input, because 1.18.30 cannot run a prompt.** That pin is
-  durable — do not "modernise" the input without re-testing `test_opencode_engine.py`.
-- **Load-path pre-flight PASSED** at
-  `/home/zach/workspace/devrc/scripts/claude-usage/extension`: manifest is **v0.2.0**
-  and **all 11 files it names resolve on disk** — `content_probe.js`,
-  `content_widget.js`, `service_worker.js`, `popup.html`, `icons/icon-{16,48,128}.png`,
-  and `lib/{widget,timefmt,format,severity}.js`. 🔴 `lib/severity.js` IS in
-  `web_accessible_resources` — that omission is what made the widget dead on arrival
-  in round 1, so this is the specific check worth keeping.
-- 🔴 **THE EXTENSION IS STILL NOT REGISTERED IN BRAVE — re-measured AFTER the merge, and
-  this remains what invalidates every "reload and check" instruction.**
-  `grep -l 'claude-usage' ~/.config/BraveSoftware/Brave-Browser/*/Preferences` returns
-  nothing. The earlier, wider measurement stands: absent from **all four profiles**
-  (`Default`, `Profile 2/3/4`), searched **by path AND by manifest name**, while the
-  same search finds the 9 other unpacked extensions in `Default`. Positive-controlled
-  again here: the identical search for `browser-bridge-ext` returns
-  `Default/Preferences` and `Profile 2/Preferences`. So the zero is a real reading, not
-  a search wired to nothing — and step 2's "remove any existing `claude-usage-ext`
-  entry" is a **no-op**, there is nothing to remove.
-- **Deploy/verify status, honestly:** the code is merged, tested and sitting at a load
-  path that resolves. **Nothing has still ever been observed working in a browser.**
-  The closing condition is **NOT met**, and the one unmet clause is the click path.
-- **Why this session could not close it:** registering an unpacked extension goes
-  through a native GTK file dialog — outside anything browser-bridge can drive (its
-  CDP surface is eval/screenshot/input/emulate), and driving it by hand would take the
-  operator's screen. Handed over with exact steps; see `## How to verify`.
+- **Earlier arc, carried forward:** #1792 MERGED (`da695960`); #1806 MERGED
+  (`7d323b48`) — the duplicate-notification fix; **#1803 CLOSED unmerged**, superseded
+  by #1804, which fixed the same red the other way: **it pins opencode back to 1.18.29
+  via a frozen input, because 1.18.30 cannot run a prompt.** That pin is durable — do
+  not "modernise" the input without re-running `test_opencode_engine.py`.
+- **#1801 MERGED** (squash `52571758`) — the in-page widget + real icon.
+- **#1808 MERGED** (squash `62bd4d9a`) — the prior handoff update.
+- **#1817 MERGED** (squash `4487d2dd`, `2026-09-21T05:05:45Z`) — the all-accounts
+  availability section. Verified by CONTENT, never by `gh pr merge`'s rc:
+  `lib/availability.js` present on `origin/main`, manifest reads **0.3.0**.
+- **SHIPPED to both hosts.** `scripts/ship.sh` → both at `4487d2dd`, each per-host
+  line read individually (not just the final verdict): `✅ VERIFIED — on branch main
+  at origin/main + switched`, 0 dangling, 0 stale, no skips, no dirty path read by
+  nix. The laptop's earlier `scripts/opencode/opencode.jsonc`-in-the-artifact warning
+  is gone.
+- **Laptop load path is live at v0.3.0**: `content_scripts: [content_probe.js,
+  content_widget.js]`, WAR carries all five `lib/*.js` including `availability.js`
+  (31,375 B). Registration survived both `home-manager switch`es.
+- 🔴 **THE CLOSING CONDITION IS STILL NOT MET, AND ONE ITEM IS LEFT: the real click
+  path.** Brave is still running the **0.2.0** code it read at load time — unpacked
+  extensions do not hot-reload. Nothing in this feature has EVER been observed working
+  in a browser.
+- 🔴 **Scope of every verification claim on this arc: MODEL-LEVEL ONLY.** ~4,200 lines
+  and 258 tests, five audit rounds, a dozen mutation batteries — all `node --test`
+  against the pure model, plus CSS guards that read `content_widget.js` as TEXT. The
+  shadow-DOM harness has **no CSS cascade**, and audit rounds 3 and 4 were *entirely
+  about colour*. Nothing here is evidence about pixels.
+- **Audit ladder on #1817 is CLOSED at round 4** — rounds 0/1/2/3/4, each producing
+  real findings, stopped on the attribution gate's own logic: the final fix changed
+  **zero payload lines** (one test assertion + comments), so a round 5 would audit
+  scaffolding the ladder itself wrote. Three `audit-claims` blocks are posted on the PR
+  (rounds 1, 2, 3) as ISSUE comments — the only surface `audit-dispatch.py` reads.
+- **Tier verdicts at the final head `74a9f1b5`:** all four Tekton checks `success`
+  (`pytests`, `nodetests`, `gotests`, `cairn-client-runs`), read off
+  `/commits/<sha>/status`; `check-runs` is 0, which is normal for this repo.
+  Independently re-measured by the dispatching session: 14 files / **258 tests, 258
+  pass, 0 fail**; floor `13|246` reproduces the runner's formula.
+- **Base clone has moved well past the merge** (`b84745f2` at time of writing) — other
+  sessions are active in `~/workspace/devrc`. It sits on `main`, so this doc was landed
+  from a worktree.
 
 ## Next steps (ranked)
-1. **RUN THE REAL CLICK PATH — the arc's closing condition, never yet run.**
-   `brave://extensions` → Developer mode on → **Load unpacked** → in the file chooser
-   press **Ctrl+L** and paste
-   `/home/zach/workspace/devrc/scripts/claude-usage/extension` → open/reload a
-   `claude.ai` tab. Three things must be true: widget card bottom-right with
-   Session/Weekly bars and a header tone dot · toolbar badge showing session % ·
-   popup listing accounts. Capture the service-worker console from
-   `brave://extensions` on any misbehaviour BEFORE diagnosing.
-   `forcing: user` — no test can prove an MV3 content script mounts, and the load
-   step needs a human at the file dialog.
-2. Give `mkUnpackedExtensionDeploy` the `RENAME_EXCHANGE` swap that browser-bridge
-   uses (`nix/home.nix`), so `.local` stops unloading extensions; **or** delete the
-   `.local` claim from the manifest comment and `scripts/claude-usage/README.md` and
-   say "load from the repo". Today those files document a path that unloads itself —
-   and that is no longer theoretical, see the 0.1.0 measurement in Gotchas.
-   `forcing: regression` — the current helper actively breaks a loaded extension.
-3. Re-propose the probe-dedup cut from #1806 (one page load still costs
+1. **RELOAD THE EXTENSION AND RUN THE REAL CLICK PATH — the arc's closing condition,
+   still never run.** On the laptop: `brave://extensions` → **Reload** on *Claude Usage
+   Tracker* in the **Default** profile → confirm the card reads **0.3.0** (the only
+   signal Brave took the new code; `getManifest()` describes the DIRECTORY, so a version
+   string alone proves the directory is right, not that the code was re-evaluated) →
+   open/reload `claude.ai`. Check: widget card bottom-right, other-accounts section
+   ranked most-available-first, a freed-up account reading `AVAILABLE` not its stale
+   percentage, badge %, popup lists accounts. Capture the service-worker console on any
+   misbehaviour BEFORE diagnosing.
+   ⚠ Expect a **dimmed card with a saturated green or red dot** for a stale record. That
+   is correct — it is what makes the card agree with the list — and "fixing" it by
+   restoring the grey re-opens the defect four audit rounds closed.
+   `forcing: user` — no test can prove an MV3 content script mounts, and only a human
+   can click Reload.
+2. **Remove the `Profile 1` registration** pointing at `~/.local/share/claude-usage-ext`
+   (`brave://extensions` in that profile), **and delete the `.local` load-path claim**
+   from `scripts/claude-usage/extension/manifest.json`'s comment and
+   `scripts/claude-usage/README.md`. Two instances = two independent stores, so whichever
+   popup is open can only ever show accounts visited in that profile.
+   `forcing: user` — this is a live cause of the symptom the operator reported
+   ("only showing the currently logged in one").
+3. **`SCOPE: FULL` is printed on a run that did not complete.** MEASURED 2026-09-20 on
+   the dev-host pytest tier: `SCOPE: FULL (30 of 30 hermetic target(s))` alongside
+   `RESULT: FAIL (exit=143)` on a run that finished **21 of 30** targets (22,275 passed,
+   0 failed; killed by `timeout --kill-after=30s 3600`). The `SCOPE:` line reports the
+   INTENDED target set, not what finished. `gate.sh` exits **91 = PARTIAL** precisely
+   when a tier does not report `SCOPE: FULL`, so a killed run that still claims it
+   defeats that mechanism; only `RESULT:` distinguishes them. Fix in
+   `scripts/run-tests.sh`.
+   `forcing: gate` — it is a false-green surface in the gate's own stop mechanism.
+4. Re-propose the probe-dedup cut from #1806 (one page load still costs
    `2x(/api/organizations + one /usage per org)`), on its own PR with its own
    justification.
    `forcing: none`
 
 ## Defects (batched)
 <!-- This heading REPLACES, it does not append — carry prior rounds forward. -->
-- #1792 review round 1 (all fixed in `7e1bc585`, suites re-run green): stale
-  proposal status line → IMPLEMENTED; `weekly.lockedReason` unconsumed →
-  weekly-lock alert added + pinned (the reviewer's premise that the API lacks
-  the field was WRONG — recon shows `locked_reason` on every window);
-  `badgeFor(null, truthy-org)` TypeError → guarded + pinned; `pickActiveOrg`
-  ran on the RAW org list (could pick an org validation then drops) → now picks
-  from the validated list, `isActive` carried through `validateOrgs`, F4 pin
-  added; `normalizeUsage` docstring narrowed to write+read paths. One follow-on
-  test bug (missing `ORG_C`) fixed same session — 87/87.
-- Round 0 on #1801: `make-icons.sh` cut (unrun, and the silent failure its
-  verify step defended against was created by its own first draft); the
-  badge/widget severity predicates consolidated into `lib/severity.js`.
-- Round 1 on #1801: 🔴 the widget was **dead on arrival** — `lib/severity.js`
-  missing from `web_accessible_resources`, the rejection swallowed by a catch.
-  Plus: silent `import()` failure, frozen-forever card on a dead context,
-  `pointer-events` over claude.ai's composer, `severityTone` returning
-  `Object`'s constructor, `severityColor` deleted, `action.default_icon` added.
-- Round 2 on #1801: 🔴 the record tone vanished from the card (red badge above
-  three green bars); `retire()` force-expanded a collapsed widget; the manifest
-  guard was blind to dynamic imports; its `existsSync` claimed trackedness it
-  could not see; a vacuous positive-control assertion removed.
+- #1792 review round 1 (all fixed in `7e1bc585`): stale proposal status line;
+  `weekly.lockedReason` unconsumed → weekly-lock alert added (the reviewer's premise
+  that the API lacks the field was WRONG — `locked_reason` is on every window);
+  `badgeFor(null, truthy-org)` TypeError; `pickActiveOrg` ran on the RAW org list;
+  `normalizeUsage` docstring narrowed.
+- Rounds 0–2 on #1801: `make-icons.sh` cut; badge/widget severity predicates
+  consolidated into `lib/severity.js`; 🔴 the widget was **dead on arrival** —
+  `lib/severity.js` missing from `web_accessible_resources`, the rejection swallowed by
+  a catch; silent `import()` failure; frozen-forever card on a dead context;
+  `pointer-events` over claude.ai's composer; `severityTone` returning `Object`'s
+  constructor; the record tone vanished from the card; `retire()` force-expanded a
+  collapsed widget; the manifest guard blind to dynamic imports.
 - Round 0 on #1806: the whole diagnosis was fitted to a COUNT; `reportsSettled()`
   deleted as measured-redundant; the probe-dedup half reverted as unasked-for.
+- **#1817, audit ladder rounds 0–4 — all fixed; full per-round detail is in the three
+  `audit-claims` ISSUE comments on the PR.** Headlines: round 0 questioned the premise
+  and found the popup already listed all accounts; round 1 found the availability
+  verdict read the SESSION window alone, so a weekly-blocked account ranked first in
+  green as the top switch target, and found the cross-surface seam still open on a
+  `lastActiveOrg` naming no stored record; round 2 found a REGRESSION round 1's own fix
+  introduced (`toneForRow` colouring a FREE row from a SPENT weekly reading) plus the
+  unparseable-reset rule pinned for one window only; round 3 found the card's headline
+  colour still painting red off spent weekly evidence — pre-existing code that new
+  prose made read as closed; round 4 found the staleness dimension unpinned (a
+  `stale ? "stale" : …` edit passed all 257 tests while silently re-opening the
+  card-vs-row split).
 
 ## Gotchas / decisions / dead-ends
 - The opencode dispatch (GLM-5.3-Flash) died at a PERMISSION REJECTION: its mutation
@@ -202,38 +218,92 @@ Scope + live recon (API schema, endpoints): `claudedocs/proposal-claude-usage-tr
   `handoff_doc.py` commits wherever the checkout sits. Worktree
   `~/workspace/devrc-handoff-cu`, branch `docs/handoff-cu-widget-merged`.
 
+- 🔴 **`error` is not `failure`, and it saved a false alarm here.** Tekton posted RED on
+  all four legs of `6e5cdcef`; reading the raw statuses showed `state=error` with
+  `NO CAPACITY: <leg> — the gate never started (queued past its deadline). Not a code
+  failure.` `origin/main`'s own `devrc-main-*` checks were green throughout. **Read
+  `state` and `description` from `/commits/<sha>/status`, never the bucket colour.**
+- 🔴 **We starved our own CI.** This ladder ran local dev-host and sandbox tiers
+  continuously for hours; the box hit load average 23–33 on 24 cores; Tekton then could
+  not schedule a single leg. `NO CAPACITY` is documented as rare here (once in 80
+  heads) and we took it on all four at once. The same contention killed the dev-host
+  pytest tier at its 3600s cap (`scripts/tests` 296s → 2,276s, ~7.7× on the same tree).
+  **For a small delta, run the change-scoped subset, not the full tiers.**
+- 🔴 **A subagent's Monitor does NOT survive the agent stopping.** One fix agent ended
+  with "both monitors are armed, waiting for the tier verdicts" — those verdicts were
+  delivered to nobody and its report was lost. Its commits were safe; only the report
+  died. Arm CI monitors in the parent session.
+- 🔴 **`node --test <dir>` yields a bogus `tests 1`, and an unquoted `$FILES` in zsh is
+  passed as ONE argument** — the second produced a run that printed NOTHING and greps
+  as "no failures". **Assert the file count before believing a suite result**: a run
+  that reported `files: 1` instead of 14 measured nothing, and was caught only by
+  checking the count, not the verdict.
+- 🔴 **A digest comparison that cannot fail is not an instrument.** A fix round ran a
+  9,600-shape sweep across base and HEAD comparing every rendered string, got
+  byte-identical digests, and offered that as proof a count could not have moved. The
+  conclusion was right but the evidence was the DIFF (only two `tone:` expressions
+  changed, no rendered string) — the digest match was equally consistent with "the sweep
+  observed everything" and "the sweep observed nothing", because it carried no positive
+  control. A tone digest, which MUST differ, would have made it one.
+- 🔴 **A test-name filter that matches nothing reports `tests 1 / pass 1`** — identical
+  to a real pass. One mutation result was scored SURVIVED that way (an `^…$` anchor on a
+  truncated test name); a non-matching negative control exposed it. The tell is the
+  runner printing the FILE PATH where a test name belongs.
+- **An equivalent mutant is a legitimate outcome — delete the claim, do not invent a
+  guard.** `orderForSwitch`'s `index` tiebreak was documented as what makes the order
+  total; `return 1` produces byte-identical output at every tied run length 2→33 because
+  V8 only reorders on a negative comparator. Independently re-derived over 4,709
+  orderings, 0 diffs. The claim was deleted rather than guarded.
+- **A PR's head can move under a handoff.** #1801 was written up at `eda25023` and
+  merged at `37f45c9d` (a merge taking `origin/main`). Re-read `headRefOid` before
+  quoting any audit anchor or check result from a previous session's doc.
+- **`git merge-base` matters for attribution.** `main` ran 2–4 commits ahead of the PR's
+  merge base throughout; a two-dot `main..head` diff shows unrelated main-side deletions
+  (`scripts/stt`) as the PR's. Diff against the merge base.
+- **The registration check needs a positive control, and its SCOPE is per-host.** A bare
+  zero from `grep -l 'claude-usage' ~/.config/BraveSoftware/Brave-Browser/*/Preferences`
+  is what let "the extension has never been registered" be stated as an arc-wide fact
+  when it was true of the workbench and FALSE of the laptop, where it had been
+  registered and recording all along. Pair it with `browser-bridge-ext`, and name the
+  host in the claim.
+
 ## How to verify
-- The widget is at the load path Brave will read:
+- **#1817 landed (by CONTENT, never by `gh pr merge`'s rc):**
   ```bash
-  ls /home/zach/workspace/devrc/scripts/claude-usage/extension/content_widget.js
+  gh pr view 1817 --repo innovation-upstream/devrc --json state,mergedAt,mergeCommit
+  git -C ~/workspace/devrc cat-file -e origin/main:scripts/claude-usage/extension/lib/availability.js && echo present
   ```
-- Every manifest-declared file resolves there (the round-1 `severity.js` class):
+- **Both hosts carry it** — read every per-host line, not the final verdict:
   ```bash
-  cd /home/zach/workspace/devrc/scripts/claude-usage/extension && python3 -c "
-  import json,os
-  m=json.load(open('manifest.json'))
-  for p in m['content_scripts'][0]['js']+[m['background']['service_worker'],m['action']['default_popup']]+m['web_accessible_resources'][0]['resources']+list(m['icons'].values()):
-      print(('OK  ' if os.path.exists(p) else 'MISS'),p)"
+  bash ~/workspace/devrc/scripts/drift-check.sh     # READ-ONLY; ship.sh is the fixer
   ```
-- **Is it actually REGISTERED?** — the check this arc keeps needing:
+- **The load path is v0.3.0 with the new module:**
   ```bash
-  grep -l 'claude-usage' ~/.config/BraveSoftware/Brave-Browser/*/Preferences
+  python3 -c "import json;m=json.load(open('/home/zach/workspace/devrc/scripts/claude-usage/extension/manifest.json'));print(m['version'], m['content_scripts'][0]['js'], [r for w in m['web_accessible_resources'] for r in w['resources']])"
+  ```
+- **Is it REGISTERED, and in which profile** (run on the host you are actually using —
+  this answer differs per host, and the zero is meaningless without the control):
+  ```bash
+  grep -l 'claude-usage'      ~/.config/BraveSoftware/Brave-Browser/*/Preferences
   grep -l 'browser-bridge-ext' ~/.config/BraveSoftware/Brave-Browser/*/Preferences   # positive control
   ```
-  🔴 Never quote the first zero without the second line returning hits — a bare zero
-  from an unvalidated search is what let "reload it" be said three times.
-- #1801 really merged (by CONTENT, never by `gh pr merge`'s rc):
+- **Node subset** (prefer this over the full tiers — see the contention gotcha).
+  🔴 Use an EXPLICIT file list and assert the count is 14 first:
   ```bash
-  gh pr view 1801 --repo innovation-upstream/devrc --json state,mergedAt,mergeCommit
-  git -C /home/zach/workspace/devrc cat-file -e origin/main:scripts/claude-usage/extension/content_widget.js && echo present
+  files=("${(@f)$(find ~/workspace/devrc/scripts/claude-usage/tests -name '*.test.mjs' | sort)}")
+  [ "${#files[@]}" -eq 14 ] && nix develop ~/workspace/devrc -c node --test "${files[@]}"
   ```
-- Node tier (dev-host): `nix develop ~/workspace/devrc -c bash scripts/run-node-tests.sh`
-  → read the runner's own `RESULT:` / `SCOPE:` lines, never a piped exit code.
-- Sandbox tier (the one Tekton runs):
-  `nix build ~/workspace/devrc#checks.x86_64-linux.nodetests --no-link -L`.
-  A build that prints NOTHING is the CACHED case, not a pass.
-- **Closing condition (the only clause left):** claude.ai open → card bottom-right,
-  header tone dot, Session/Weekly bars, live countdowns; badge %; popup lists accounts.
+  Expect `tests 258 · pass 258 · fail 0`; floor in `scripts/run-node-tests.sh` is `13|246`.
+- **CI, on BOTH surfaces** — neither is a superset of the other, and read `state` not colour:
+  ```bash
+  SHA=$(gh pr view <n> --repo innovation-upstream/devrc --json headRefOid --jq .headRefOid)
+  gh api "repos/innovation-upstream/devrc/commits/$SHA/status"     --jq '[.statuses[]|"\(.context)=\(.state)"]'
+  gh api "repos/innovation-upstream/devrc/commits/$SHA/check-runs" --jq .total_count
+  ```
+- 🔴 **CLOSING CONDITION (the only clause left):** claude.ai open → widget card
+  bottom-right with the other-accounts section, header tone dot, Session/Weekly bars,
+  live countdowns; badge %; popup lists accounts. **Requires a Brave Reload first** —
+  unpacked extensions do not hot-reload.
 ## Open investigations — live diagnosis state
 
 ### The `.local` deploy UNLOADS the extension from Brave on every home-manager switch
@@ -276,3 +346,48 @@ Scope + live recon (API schema, endpoints): `claudedocs/proposal-claude-usage-tr
   `lastToast` is permanently `{}` and `withinDedup` is permanently false.
 - **Next probe:** open that profile's service-worker console and run
   `chrome.storage.local.get(null)`.
+
+### SUPERSEDED — "The `.local` deploy UNLOADS the extension from Brave on every home-manager switch"
+- as-of: 2026-09-21
+- **This retires the block of that name above. Do not act on its "Next probe".**
+- **Observed (with values):** its own next probe was run. The extension was loaded from
+  the base-clone repo path and survived **two** `home-manager switch`es (#1801's ship
+  and #1817's ship). MEASURED after each, on the laptop, with a validated instrument
+  (`browser-bridge-ext` positive control returning 2 both times): `Default` →
+  `/home/zach/workspace/devrc/scripts/claude-usage/extension` still registered, AND
+  `Profile 1` → `~/.local/share/claude-usage-ext` **also still registered**.
+- **Ruled out:** the leading hypothesis — *"Brave drops an unpacked extension whose
+  directory vanishes, even briefly"* — `via: measurement`. The `.local` copy is the one
+  `mkUnpackedExtensionDeploy` swaps with the weak non-atomic `mv -T`, and it survived
+  both switches while being rewritten (0.1.0 → 0.2.0 → 0.3.0). If the weak swap dropped
+  extensions, that registration would be gone. It is not.
+- **What was REAL in the original block:** the `.local` copy goes **stale**, which is a
+  different defect and is confirmed. Measured 2026-09-20: it read `version 0.1.0`,
+  `content_scripts: ["content_probe.js"]`, `web_accessible_resources: []` while the repo
+  path read 0.2.0 with both — because a `home.file` target moves on `home-manager
+  switch` ALONE.
+- **Next probe:** none — the arc moved to the repo path, which makes this moot. The
+  remaining actionable half is ranked item 2 (delete the `.local` load-path claim from
+  the docs).
+
+### RESOLVED — "`chrome.storage.local` is 0 bytes on the laptop"
+- as-of: 2026-09-21
+- **This retires the block of that name above.**
+- **Root cause: there are TWO extension instances in TWO Brave profiles, each with its
+  own independent `chrome.storage.local`.** The 0-byte reading was the `Profile 1`
+  instance loaded from `~/.local/share/claude-usage-ext` (id `doiabid…`). The `Default`
+  instance loaded from the repo path (id `onglbmc…`) has been recording all along.
+- **Observed (with values),** laptop, 2026-09-20:
+  - `Default/Local Extension Settings/onglbmcagkpoaapfeeoepblcbeanfanl` → **644,913 B**,
+    `000003.log` 644,913 B, last written 17:15:35, **266** `resetsAt` occurrences,
+    **6** distinct UUID-shaped values, 9 `lastActiveOrg` writes.
+  - `Profile 1/…/doiabidngiihgfkpgdcmeccjohjgfmoe` → 811 B total, `000003.log` **0 B**.
+  - Positive control, same enumeration: sibling stores in `Default` run 14 MB–33 MB.
+- **Ruled out:** "no report has ever finished on that host" — `via: measurement`; 266
+  `resetsAt` and a 645 KB store say otherwise for the `Default` instance.
+- ⚠ **6 UUID-shaped strings is an INDICATOR, not a verified account count** — some may
+  be other identifiers. Do not quote it as "6 accounts"; a fix round was made to retract
+  exactly that claim in five places.
+- **Next probe:** none for the diagnosis. The consequence is ranked item 2 — remove the
+  `Profile 1` registration, or the two stores keep splitting the data and no popup can
+  ever show all accounts.
