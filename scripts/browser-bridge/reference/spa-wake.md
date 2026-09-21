@@ -36,7 +36,8 @@ every `open`ed heavy app starts throttled.
   **MEASURED EXCEPTION (2026-09-21): Slack client-v2 gates its message-list
   render on REAL document visibility, which `wake`'s emulation does not
   satisfy — `activate --focus` (the one screen steal, record/restore) is the
-  only escape there, measured on a tab `wake` had left rail-only through
+  only MEASURED escape there (one tab, one host, one day — not a survey of
+  the surface), measured on a tab `wake` had left rail-only through
   every retry. The tab-level contract:
   `~/workspace/devrc/scripts/browser-bridge/flows/app.slack.com.md`.**
 - 🔴 **"Is this page broken for REAL users?" is not a browser question.** Answer it
