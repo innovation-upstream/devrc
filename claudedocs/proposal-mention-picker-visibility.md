@@ -326,8 +326,13 @@ Consequences for reading the data:
 * The **dismissal** arm's `queried` covers the Enter-with-no-match **and ESC** endings.
   🔴 **It is not a rate over that arm and cannot be made into one**: `pick()` files every
   dismissal under one `reason`, and ESC and Enter-with-no-match are byte-identical on
-  stdout, so "of ESC dismissals" is not computable. ✅ **The one clean cell** is
-  `queried == False`, which only an ESC on an untouched picker can produce. Count that.
+  stdout, so "of ESC dismissals" is not computable. ✅ **The cleanest cell** is
+  `queried == False`, which means an ESC whose query was **empty after stripping**. Count
+  that. ⚠ **This line used to say "only an ESC on an UNTOUCHED picker can produce it", and
+  that is measured FALSE** — a query of two spaces writes `"  \n"` and type-then-delete
+  writes `"\n"`, both of which strip to empty with the picker very much touched. Read it as
+  "nothing typed, or nothing left after typing" — still the population symptom 1 wants,
+  since they did not narrow the list, but not the sentence that was written.
 * Three-valued is what keeps this honest. A `False` default would file every abort under
   "the operator scrolled", which is the population the whole question is measured from —
   wrong in the reassuring direction.
@@ -354,7 +359,10 @@ unchanged at 0 bytes / exit 130.
 
 ⚠ **And the claim that Ctrl-C cannot be closed was never measured, and is FALSE.** ⚠ An
 earlier wording of this line said *"this doc's claim"* — **wrong, and checked**: this
-document never said it. Its only Ctrl-C sentence is *"(Ctrl-C still writes nothing)"*,
+document never said it. ⚠ An earlier wording added "its ONLY Ctrl-C sentence is …",
+which is also false — there are seven-plus, and the one it cited sits inside the Option (D)
+paragraph struck as superseded above. The sentence that was retracted is *"(Ctrl-C still
+writes nothing)"*,
 which is true and is not an impossibility claim. The retracted assertion lived in
 `scripts/mention-open.py` (*"has no `ctrl-c:` binding … handled below the keymap"*). A
 misattributed retraction sends the next reader looking for a sentence nobody wrote.
@@ -572,16 +580,25 @@ not mistake a 10-row sample for an answer.** Over the 6.7 days to 2026-09-18 the
 **85** click rows: **71 picked · 9 auto-open · 5 dismissed**, rising from 3/day to ~21/day.
 
 * **Picked arm** — ~100+ rows within a week of deploying. **This is where the rate lives.**
-* **Dismissal arm** — ~5 per week, and `queried` covers only the Enter-with-no-match subset
-  of those (§3.1). At this rate it needs **roughly two months** before it says anything.
+* **Dismissal arm** — ~5 per week. ⚠ **The rest of this bullet is SUPERSEDED**: it said
+  `queried` covers "only the Enter-with-no-match subset" and so needs *"roughly two months
+  before it says anything"*. Since `--bind="esc:print-query+abort"` an **ESC also records**,
+  which is the common dismissal — so the arm fills far faster than two months, and a reader
+  following the old sentence defers a decision that is already answerable.
 
-🔴 **AND UNDER `reason = 'dismissed'`, `queried` IS NOT A RATE AT ALL — DO NOT AVERAGE IT.**
-There the dim is present only for the Enter-with-no-match ending (an abort writes nothing),
-and on that ending it is `True` **by construction**: the picker always holds rows, so an
-empty query always matches something and always yields a selection — a non-empty query is
-the only way to reach that ending. Averaging it returns ~100% however the operator behaves.
-That is a self-selected sub-population read as a rate, which is **worse than an absent
-number**, because it looks like an answer.
+🔴 **AND UNDER `reason = 'dismissed'`, `queried` IS STILL NOT A RATE — BUT NOT FOR THE
+REASON THIS PARAGRAPH GAVE.** ⚠ **Superseded, kept so the change is visible rather than
+silently rewritten.** It ran: *"the dim is present only for the Enter-with-no-match ending
+(an abort writes nothing), and on that ending it is `True` by construction … averaging it
+returns ~100% however the operator behaves."* The bind refutes the premise — an ESC with an
+empty query records **`False`**, so both values are reachable and the population is no
+longer self-selected.
+
+**What is true now:** it is still not "the dismissal rate", for two reasons that do not
+cancel — every abort key except `esc` (`ctrl-c`, `ctrl-g`, `ctrl-q`, empty-query `ctrl-d`)
+contributes nothing at all, and Enter-with-no-match remains `True` by construction and so
+skews any average upward. Scope by `reason`, and read the `queried == False` cell above
+rather than averaging the arm.
 
 ⚠ **Scoped to the REASON, not to the arm.** That arm emits two outcomes (`dismissed` and
 `no-selection`) across seven reasons, and `unmapped-row` is a counter-example — fzf wrote
