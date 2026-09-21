@@ -93,7 +93,9 @@ grow by use.
 ## Validation / acceptance
 
 1. Every documented flow is driven **once as written** against the live tab —
-   the doc is a runnable procedure, not lore.
+   the doc is a runnable procedure, not lore. Exempt by rule: send flows
+   (`key Enter` in a composer) are never driven without the operator asking —
+   they close when the operator approves one send, not by driving.
 2. Ledger green: registry keys ↔ `*.md` sets identical
    (`test_site_flows.py`).
 3. Byte gates green (`test_skill_size.py`), node tier green.
