@@ -276,7 +276,6 @@ test("with no stored account the card is an instruction, not zeroes", async () =
 // on the model. The defect lives in the DOM, so the guard lives in the DOM.
 
 const HOUR = 60 * 60 * 1000;
-const DAY = 24 * HOUR;
 
 /** A stored-shaped record for a NON-active account, built through the real
  * normalizer. `resetsAtMs`/`ageH` are relative to Date.now(), which is what
