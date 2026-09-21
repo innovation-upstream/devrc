@@ -2546,7 +2546,18 @@ TARGET_FLOORS=(
   #   _suggested_floor 296 = 296 - min(50, max(1, 296/20 = 14)) = 296 - 14 = 282.
   #
   # 2026-09-21, the `muster` widening (Phase 0 step 1 of the clawgate->muster
-  # extraction): 296 -> 374 collected. The +75 exist because both arming patterns
+  # extraction): 334 -> 374 collected, +40.
+  #
+  # 🔴 THE DELTA WAS RE-MEASURED AND IT MOVED — this line first read "296 -> 374,
+  # +75", taken from the 2026-08-20 entry ABOVE rather than from the tree. That
+  # number was 13 months of other people's growth out of date. Measured by checking
+  # the base-ref test file out and counting it (334), and CHECKED against the gate's
+  # own total: +40 here plus +48 on the interview target is +88, and the gate went
+  # 23828 -> 23916 = +88 on the nose, so nothing else in the suite moved. Read a
+  # recorded count on these lines as history, never as the base you are adding to.
+  # The FLOOR was never wrong (it is measured from the new count, not the delta).
+  #
+  # The +40 exist because both arming patterns
   # in this hook spelled `clawgatectl` literally, so the rename alone would have
   # left `tracked_ids` empty and the Stop path reaching NO VERDICT — silent, which
   # is also what a correctly-written-back session looks like. RED at 23b898d5: 20
@@ -2588,7 +2599,10 @@ TARGET_FLOORS=(
   # ZERO new skips, so EXPECTED_SKIPS is untouched. If this line conflicts with a
   # sibling branch, re-run the gate on the MERGED tree and copy what it prints.
   #
-  # 2026-09-21, the same `muster` widening on this gate: 300 -> 361 collected. This
+  # 2026-09-21, the same `muster` widening on this gate: 313 -> 361 collected, +48.
+  # (First recorded as "300 -> 361" off the stale 2026-08-20 count above; re-measured
+  # against the base-ref file and cross-checked against the gate's own total — see the
+  # writeback entry.) This
   # hook breaks by NAME only — `PREFILTER`, `basename(argv[0])`, `CREATE_PATHS` —
   # and the failure is a silent ALLOW of every criteria-less create. RED at
   # 23b898d5: 41 of the new cases. The `clawgatectl` twin of every parametrized row
