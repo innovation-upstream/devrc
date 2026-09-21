@@ -3046,12 +3046,14 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
         #
         # 🔴 THE NOTE PRINTS HERE, BY THE OPERATOR'S REVERSAL — but with
         # `over_by=0`, so that THE NOTE names no threshold. Scope that claim
-        # to the NOTE and nothing wider: the head line three lines below
-        # states the overage outright (`over by {N} B`), deliberately and
+        # to the NOTE and nothing wider: the head line in this arm's own
+        # `return` states the overage outright (`over by {N} B`), deliberately and
         # unchanged, and `test_EVERY_branch_that_names_the_gate_is_repo_aware`
         # pins it (`assert "over by 1 B" in ungated_over`). An earlier
         # wording of THIS comment said the arm names no threshold, which that
-        # test falsifies twelve hundred lines away — round 1 of #1826.
+        # test falsifies — round 1 of #1826. (No line number here: this
+        # ladder has now produced three non-reproducing counts, so the test
+        # is named and nothing else is claimed about where it sits.)
         # What `over_by=0` buys is that the note does not ADD a second,
         # louder deficit ("does NOT clear the N B you are over by") on top of
         # it: that is the civitai/cli#618 pressure shape with the
