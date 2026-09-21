@@ -5,16 +5,6 @@ Reads `~/.cache/bar-remote/<host>.json` (written by `bar-remote-snapshot
 --pull`) and renders a single i3status-rust `custom` pill. Click it to open
 `remote-host-detail`, which shows every relayed block in full.
 
-TWO RENDERINGS, ONE SNAPSHOT
-----------------------------
-Default (no `--block`): the ROLLUP — worst state wins, alarming tokens only.
-`--block NAME`: a MIRROR of one relayed block as its own pill, verdict
-relayed verbatim (text, state and icon). It exists because the rollup shows
-a block only while it is ALARMING, and `i3status-airvpn`'s steady states are
-icon-only — inside the rollup a down tunnel was invisible, so the laptop
-carried no airvpn item at all in the steady state. `--block i3status-airvpn`
-is wired by nix next to the `wb` pill, laptop-only like it.
-
 WHY THIS IS ALWAYS VISIBLE, UNLIKE EVERY COUNT PILL ON THIS BAR
 ---------------------------------------------------------------
 The count pills are hide-at-zero: measured-and-quiet renders as nothing. That
@@ -157,95 +147,8 @@ def rollup(blocks: list) -> str:
     return worst
 
 
-def short_name(name: str) -> str:
-    """A relayed block's name as the rollup's no-text fallback spells it."""
-    return (name or "?").replace("i3status-", "").replace("i3blocks-", "")
-
-
-def find_block(blocks: list, name: str):
-    """The one relayed entry matching `name`, or None."""
-    if not isinstance(blocks, list):
-        return None
-    for b in blocks:
-        if isinstance(b, dict) and b.get("name") == name:
-            return b
-    return None
-
-
-def render_block(payload, now: int, name: str) -> dict:
-    """Mirror ONE relayed block VERBATIM as its own pill.
-
-    WHY THIS EXISTS: the rollup shows a block only when it is ALARMING, and
-    `i3status-airvpn`'s steady states are icon-only (`text: ""` — off is a dim
-    glyph, stale a soft-yellow one). Inside the rollup, a down tunnel
-    contributed nothing visible at all, so the laptop showed the workbench's
-    tunnel state only in the moments it went wrong. `--block` gives one
-    classified block a dedicated pill that renders the remote verdict —
-    text, STATE and ICON — exactly as the observed bar renders it.
-
-    THE RULES ARE THE ROLLUP'S, unchanged:
-      🔴 the verdict is relayed, never recomputed — no threshold grows here;
-      🔴 an outage may make a reading less trusted, never quieter — the
-        snapshot's `ts` gates, `last_good` is read through an unreachable
-        pull, and a neutral reading behind that gate gets the trailing `?`
-        and at least Warning (the alarm-carry composition: a frozen `LEAK`
-        renders `LEAK?`, still Critical);
-      🔴 a readable snapshot that did not carry this block is a NAMED `?`,
-        not a quiet tunnel — the silent zero by another door;
-      🔴 never empty: an icon-only reading mirrors its glyph, and a pill with
-        neither glyph nor text names the block instead.
-    """
-    short = short_name(name)
-    if payload is None:
-        # Never heard from the peer: named, visible, not current.
-        return {"text": f"{short} ?", "state": "Warning"}
-
-    # `unmeasured` raises if the sibling failed to load; __main__ catches it.
-    stale = fresh.unmeasured(payload, now)
-    unreachable = payload.get("state") == "unreachable"
-    body = payload
-    if unreachable and isinstance(payload.get("last_good"), dict):
-        body = payload["last_good"]
-
-    entry = find_block(body.get("blocks"), name)
-    if entry is None:
-        # A readable snapshot without the block means the gather asked
-        # nothing for it — the same silent zero `render` refuses to call ok.
-        return {"text": f"{short} ?", "state": "Warning"}
-
-    state = entry.get("state", "Idle")
-    if entry.get("error") and _SEVERITY.get(state, 0) < _SEVERITY["Warning"]:
-        state = "Warning"
-
-    text = plain(entry.get("text", ""))
-    if not text and entry.get("error"):
-        # An alarming-looking entry with no text still needs a name.
-        text = f"{short}: {entry['error']}"
-
-    icon = entry.get("icon") or ""
-
-    not_current = stale or unreachable
-    if not_current:
-        # Only an ALARM is carried behind the `?` (the neutral reading just
-        # gets the marker): a day-old `CA` is noise, a frozen `LEAK` is not.
-        text = (text + "?") if text else "?"
-        if _SEVERITY.get(state, 0) < _SEVERITY["Warning"]:
-            state = "Warning"
-
-    if not text and not icon:
-        return {"text": f"{short} ?", "state": "Warning"}
-
-    out = {"text": text, "state": state}
-    if icon:
-        out["icon"] = icon
-    return out
-
-
 def render(payload, now: int, label: str, host: str,
-           max_tokens: int = 3, block: str | None = None) -> dict:
-    if block:
-        return render_block(payload, now, block)
-
+           max_tokens: int = 3) -> dict:
     colour = _HOST_COLOURS.get(host, _HOST_COLOUR_FALLBACK)
     tag = f'<span foreground="{colour}" weight="bold">{html.escape(label)}</span>'
 
@@ -316,20 +219,16 @@ def main(argv=None) -> int:
                     help="snapshot label to read (default: %(default)s)")
     ap.add_argument("--label", default=None,
                     help="short text shown on the pill (default: the host name)")
-    ap.add_argument("--block", default=None, metavar="NAME",
-                    help="mirror ONE relayed block verbatim instead of the rollup")
     args = ap.parse_args(argv)
 
     label = args.label or args.host
     try:
         payload = load(args.host)
-        out = render(payload, int(time.time()), label, args.host, MAX_TOKENS,
-                     block=args.block)
+        out = render(payload, int(time.time()), label, args.host, MAX_TOKENS)
     except Exception:
         # 🔴 Built from literals so it cannot depend on whatever just failed --
         # including the sibling module, `payload`, or `html`.
-        name = short_name(args.block or "")
-        out = {"text": (name or label) + " ?", "state": "Warning"}
+        out = {"text": label + " ?", "state": "Warning"}
     json.dump(out, sys.stdout)
     sys.stdout.write("\n")
     return 0
