@@ -27,6 +27,7 @@ Legend for "seeded by HM?":
 | `~/.config/repo-cos/env` | `OPENROUTER_API_KEY` — measured 2026-09-19, that is the file's ONLY assignment | workbench only | manual (chmod 600) | 🔴 **DO NOT DELETE.** Corrected 2026-09-19: this row used to say the file was dead and safe to `rm` (`git show bac41175 -- SECRETS.md`), and it is not — the key is live. 🔴 **The trap, stated exactly, because the obvious reading of it is wrong:** *"nothing reads that file"* was **TRUE** — `bac41175` deleted the only thing that ever sourced it (`scripts/repo-cos/run-weekly.sh`), and nothing sources it today. **That is what made `rm` dangerous, not what made it safe.** No consumer opens the file, so deleting it breaks nothing *loudly*; the key simply stops existing, and the failure surfaces later as a human who cannot find a credential. Readers of `OPENROUTER_API_KEY` are separate from readers of this file and do not protect it: `scripts/mail-actions/` (`extract.py`, `llm.py`) and `<civitai/cli>/scripts/dogfood/runner.py` all take it from the **environment**, which someone populates by hand. **An unreferenced credential file is the one you must not delete on an unreferenced-ness argument.** Source of truth: the OpenRouter dashboard. 🔴 **Rotation coupling:** this host holds **more than one** OpenRouter key — at least this file and `~/.local/share/opencode/auth.json` (`openrouter.key`), measured 2026-09-19 as DIFFERENT values — so "rotate the OpenRouter key" is ambiguous and rotating this one covers only its own consumers. Rotation of THIS key is an open item recorded with its decision in `claudedocs/close-the-loop/STATE.md`. The other key now has its own row, directly below. |
 | `~/.local/share/opencode/auth.json` | JSON, not shell: one provider object `openrouter` with `type` (`"api"`) and `key`. Measured 2026-09-20: 131 bytes, mode 600, that one provider and nothing else | any host that runs `opencode` — measured on **workbench**; `scripts/browser-bridge/README.md` asserts the key is in this store on **both** hosts, which was not re-derived here | manual — written by **`opencode auth login`**, never by home-manager, and by nothing in this repo (`scripts/browser-bridge/browser-agent` says so in-line: *"this script adds NO key"*) | 🔴 **A SECOND, DIFFERENT live OpenRouter key — not a copy of `~/.config/repo-cos/env`.** Measured 2026-09-20 against the issuer's own free `/api/v1/key` endpoint: **both** keys answer HTTP 200, both are paid (`is_free_tier: false`), and their sha256 digests differ. Digests are deliberately **not** recorded here — this repo is public; re-derive them yourself if you need to tell two keys apart. 🔴 **This is the key that carries the spend:** same $50 limit on both, `usage` **71.27** here against **7.02** on `repo-cos/env` — so an operator who rotates "the OpenRouter key" and picks the other file has moved ~9% of the traffic and left the rest on the old credential. **Consumers:** `opencode` itself, hence every model alias in `scripts/opencode/opencode-dispatch` (`flash` / `mimo` / `pro` are all `openrouter/*`), every `/opencode` dispatch, and `scripts/browser-bridge/browser-agent`. 🔴 **Note the contrast with the row above, because the two files fail in opposite ways:** that one is sourced by nothing, so deleting it breaks nothing *loudly*; **this** one is read by the tool that owns it, so losing it fails at the next dispatch with a provider-auth error — loud, immediate, and recoverable by re-running `opencode auth login`. Source of truth: the OpenRouter dashboard. 🔴 **Rotation coupling:** the two keys have **disjoint** consumers. Rotating this one does not touch `scripts/mail-actions/` or `<civitai/cli>/scripts/dogfood/runner.py` (they read `OPENROUTER_API_KEY` from the **environment**, which step 6 seeds from `repo-cos/env`); rotating that one does not touch opencode or the browser bridge. **Name which key you mean before rotating either.** |
 | `~/.config/bar/media.env` | `PROWLARR_URL`, `PROWLARR_KEY`, `STASH_URL`, `STASH_KEY`, `WHISPARR_URL`, `WHISPARR_KEY`, `QBIT_URL` | workbench (graphical) | manual (0600) | API keys from each self-hosted service's own admin UI (Prowlarr / Stash / Whisparr → Settings → General/API key). **source: UNKNOWN for exact service endpoints — verify** the URLs against the current homelab/media deployment. Consumed by `scripts/media-detail`, `media-menu`, `deep-search`, `bar-status-poll`. |
+| `~/.config/stt/env` | `STT_API_URL`, `STT_API_TOKEN` | any mesh host running `stt` (added 2026-09-20) | manual (0600) | Bearer token for the self-hosted ASR endpoint (Cohere transcribe, homelab ns `stt`, served via the nebula gateway at `http://10.42.0.10:8118`). Source of truth: k8s secret `stt-api-token` in ns `stt` (read with `KUBECONFIG=$KC_HOMELAB kubectl -n stt get secret stt-api-token -o jsonpath='{.data.token}' \| base64 -d`). Consumed by `scripts/stt`. |
 | `~/.config/bar/airvpn.env` | `AIRVPN_API`, `AIRVPN_COUNTRY`, `AIRVPN_FWD_PORT`, `AIRVPN_WG_PORT`, `AIRVPN_MANIFEST`, `AIRVPN_SIGNAL_ICON`, `AIRVPN_SUDO`, `AIRVPN_SUDO_HELPER` | workbench (graphical) | manual (0600) | `AIRVPN_API` = AirVPN client-area API key (airvpn.org account → Client Area → API). Remaining keys are non-secret tuning. Consumed by `scripts/airvpn-menu`, `bar-status-poll`. |
 | `~/.claude/audit-on-push.env` | `AUDIT_ON_PUSH`, `TESTS_ON_PUSH`, `AUDIT_MIN_LINES`, `AUDIT_TIMEOUT`, `AUDIT_LOG_FILE`; optional `CLAWGATE_API_URL`, `CLAWGATE_HOOK_TOKEN` | any host running the git pre-push hooks | manual (copy from `githooks/audit-on-push.env.example`) | Config only — **no standalone secret**. The optional clawgate keys are overrides; by default the hook reuses `~/.claude/clawgate.env`. Installed via `githooks/install.sh` (sets global `core.hooksPath`). |
 | `~/.claude/task-spec-drafter.env` | `DRAFTER_MODE`, `DRAFTER_MODEL`, `DRAFTER_MAX_TICKETS`, `DRAFTER_TIMEOUT`, `DRAFTER_OUT_DIR`, `CLICKUP_VIEW_ID`; optional `DRAFTER_STATE_FILE`, `CIVITAI_REPO`, `PROD_KUBECONFIG`, `CLAWGATE_API_URL`, `CLAWGATE_HOOK_TOKEN` | wherever the drafter runs (homelab CronJob primarily) | manual (copy from `scripts/task-spec-drafter/task-spec-drafter.env.example`) | Config only — **no standalone secret**. LLM pass uses ambient Claude Code auth (`claude -p`); clawgate keys reuse `~/.claude/clawgate.env` unless overridden. |
@@ -43,6 +44,40 @@ completeness:
 | Postgres `mail` DSN | k8s secret `mailbox-postgres-auth`, key `pg-dsn`, ns `mailbox` (or env `MAILBOX_PG_DSN`) | homelab cluster (`_db.py`) |
 | MinIO invoice archiver | k8s secret `minio-archive-config`, key `config.env` → `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`, ns `minio-archive` (or env `MINIO_ARCHIVE_ENDPOINT`/`_ACCESS_KEY`/`_SECRET_KEY`) | homelab cluster (`_minio.py`) |
 | LLM extraction (Stage 2) | `OPENROUTER_API_KEY` (env) | OpenRouter dashboard |
+
+### task-spec-drafter email — no local env file, and the DEFAULT send path needs NO credential
+
+`scripts/task-spec-drafter/email_send.py` sends the drafter digest. It has **two**
+send paths, chosen by `REPO_COS_SEND` (default **`relay`**), and only one of them
+uses a credential at all — so "the drafter's mail credential" is ambiguous until
+you say which path you mean:
+
+- **`relay` — the DEFAULT — has NO SMTP AUTH.** It reaches the postfix relay over a
+  `kubectl port-forward` to `service/postfix-relay` in ns `nebula` of the
+  production cluster, and that relay trusts `MYNETWORKS` (`127.0.0.0/8`). What this
+  path needs is a working `REPO_COS_PROD_KUBECONFIG` (see the Kubeconfigs table
+  below) — **not** a secret. 🔴 A rotation that "fixes the drafter's mail" by
+  touching the Gmail password changes nothing on this path.
+- **`gmail` — the FALLBACK** (`REPO_COS_SEND=gmail`) — uses a Gmail app password.
+  Kept so a relay or cluster hiccup still delivers.
+
+| what | key / secret (names only) | source of truth |
+|---|---|---|
+| Gmail SMTP user | SOPS `<homelab-talos>/clusters/homelab/apps/mailbox/secrets-imap.enc.yaml` → k8s Secret `mailbox-gmail-imap`, `stringData.IMAP_USER`. Env `REPO_COS_SMTP_USER` OVERRIDES it | the homelab repo; decrypt with `SOPS_AGE_KEY_FILE=~/workspace/homelab-talos/.secrets/age.key` |
+| Gmail SMTP app password | same file and Secret, `stringData.IMAP_APP_PASSWORD`. Env `REPO_COS_SMTP_PASSWORD` OVERRIDES it | Google account → Security → App passwords |
+
+🔴 **Rotation coupling — this app password is SHARED, and its OTHER consumer is not
+in this repo.** The same `mailbox-gmail-imap` / `IMAP_APP_PASSWORD` is read by the
+mailbox **sent-poller** (`<homelab-talos>/clusters/homelab/apps/mailbox/sent-poller.yaml`
+and `.../src/sent_poller.py`). Rotating it therefore breaks the sent-poller as well
+as the drafter's fallback, and `git grep` inside devrc will never show you that —
+measured 2026-09-20, `email_send.py` is the **only** file in this repo that names
+the key. Rotate by updating the SOPS file, then reconciling homelab.
+
+⚠ **`REPO_COS_SMTP_USER` / `REPO_COS_SMTP_PASSWORD` are an OVERRIDE, not the source
+of truth** (`email_send.py:129-132` — they win "so a caller can supply creds").
+Nothing on this host sets them, and there is no local env file for them: an
+operator who exports them is bypassing the SOPS lookup for that run only.
 
 ### analyze-service index backup — no new secret, REUSES the SOPS age key
 

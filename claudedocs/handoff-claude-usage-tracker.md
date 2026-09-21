@@ -22,55 +22,66 @@ Scope + live recon (API schema, endpoints): `claudedocs/proposal-claude-usage-tr
   Verdict rule: ADDRESSED ⇒ arc CLOSED; NOT ⇒ name the one item.
 
 ## State now
-- **#1792 MERGED** (`da695960`) and shipped to both hosts; **#1806 MERGED**
-  (`7d323b48`) — the duplicate-notification fix; **#1803 CLOSED unmerged**,
-  superseded by #1804 which fixed the same red the other way (pins opencode
-  back to 1.18.29 via a frozen input, because 1.18.30 cannot run a prompt).
-  `main` is GREEN — measured at `7ef01c05`: `opencode --version` 1.18.29,
-  `test_opencode_engine.py` 25 passed.
-- **#1801 OPEN** — in-page widget + real icon, head `eda25023`, worktree
-  `~/workspace/devrc-cu-widget` (branch `feat/claude-usage-widget`). Audit
-  ladder at **round 2 complete, round 3 NOT run**. Both of its CI reds are
-  fixed (stale base predating #1804; my own sandbox-blind `git ls-files`
-  test). Node tier on the merged tree: 12 files / 149 tests, floor `11|142`,
-  TOTAL 1598/1598, `RESULT: PASS`, `SCOPE: FULL`.
-- 🔴 **THE EXTENSION HAS NEVER BEEN REGISTERED IN BRAVE — and this invalidates
-  every "reload and check" instruction given this session.** MEASURED: absent
-  from all four profiles (`Default`, `Profile 2/3/4`), searched by path AND by
-  manifest name. Instrument validated — the same search finds the 9 other
-  unpacked extensions in `Default`, whose `Preferences` was written minutes
-  before the read. So the click path has never run, and the arc's closing
-  condition is **NOT met**.
-- **Deploy/verify status, honestly:** the code is merged-or-ready and tested;
-  **nothing has ever been observed working in a browser.**
-- Base clone `~/workspace/devrc` was behind 2 with two untracked
-  `claudedocs/scope-chief-*` files (another session's — leave them).
+- **#1801 MERGED** — squash `52571758`, `mergedAt: 2026-09-20T06:13:30Z`. All four
+  Tekton checks were `SUCCESS` on head `37f45c9d` (`cairn-client-runs`, `gotests`,
+  `nodetests`, `pytests`), `mergeStateStatus: CLEAN` — no red to adjudicate.
+  🔴 Verified **by CONTENT, not by rc** (the #1803 trap): `state: MERGED`, a real
+  `mergedAt`, and `git cat-file -e origin/main:scripts/claude-usage/extension/content_widget.js`
+  succeeds. ⚠ The head had MOVED since the last doc — `eda25023` → `37f45c9d`, a
+  merge of `origin/main` taking #1806's toast suppression alongside the widget. The
+  round-3 anchor `d2c68d20..eda25023` is therefore stale; the PR is merged and the
+  ladder is moot, but any retrospective read of it must re-anchor to `37f45c9d`.
+- **Base clone `~/workspace/devrc` SYNCED** — `merge --ff-only` advanced
+  `7739ba9e..52571758`, 18 files / +2146. Still `main`, ↑0↓0, carrying only the two
+  untracked `claudedocs/scope-chief-*` files that belong to another session.
+- **Earlier arc, unchanged:** #1792 MERGED (`da695960`) and shipped to both hosts;
+  #1806 MERGED (`7d323b48`) — the duplicate-notification fix; #1803 CLOSED unmerged,
+  superseded by #1804, which fixed the same red the other way: **it pins opencode back
+  to 1.18.29 via a frozen input, because 1.18.30 cannot run a prompt.** That pin is
+  durable — do not "modernise" the input without re-testing `test_opencode_engine.py`.
+- **Load-path pre-flight PASSED** at
+  `/home/zach/workspace/devrc/scripts/claude-usage/extension`: manifest is **v0.2.0**
+  and **all 11 files it names resolve on disk** — `content_probe.js`,
+  `content_widget.js`, `service_worker.js`, `popup.html`, `icons/icon-{16,48,128}.png`,
+  and `lib/{widget,timefmt,format,severity}.js`. 🔴 `lib/severity.js` IS in
+  `web_accessible_resources` — that omission is what made the widget dead on arrival
+  in round 1, so this is the specific check worth keeping.
+- 🔴 **THE EXTENSION IS STILL NOT REGISTERED IN BRAVE — re-measured AFTER the merge, and
+  this remains what invalidates every "reload and check" instruction.**
+  `grep -l 'claude-usage' ~/.config/BraveSoftware/Brave-Browser/*/Preferences` returns
+  nothing. The earlier, wider measurement stands: absent from **all four profiles**
+  (`Default`, `Profile 2/3/4`), searched **by path AND by manifest name**, while the
+  same search finds the 9 other unpacked extensions in `Default`. Positive-controlled
+  again here: the identical search for `browser-bridge-ext` returns
+  `Default/Preferences` and `Profile 2/Preferences`. So the zero is a real reading, not
+  a search wired to nothing — and step 2's "remove any existing `claude-usage-ext`
+  entry" is a **no-op**, there is nothing to remove.
+- **Deploy/verify status, honestly:** the code is merged, tested and sitting at a load
+  path that resolves. **Nothing has still ever been observed working in a browser.**
+  The closing condition is **NOT met**, and the one unmet clause is the click path.
+- **Why this session could not close it:** registering an unpacked extension goes
+  through a native GTK file dialog — outside anything browser-bridge can drive (its
+  CDP surface is eval/screenshot/input/emulate), and driving it by hand would take the
+  operator's screen. Handed over with exact steps; see `## How to verify`.
 
 ## Next steps (ranked)
-1. Merge **#1801** once its four checks are green. Read the failing test's name
-   before believing any red — measured ~42% noise on this repo.
-   `forcing: user` — the operator asked for it merged.
-2. Sync the base clone and LOAD FROM IT:
-   `git -C ~/workspace/devrc fetch origin && git -C ~/workspace/devrc merge --ff-only origin/main`,
-   then `brave://extensions` → remove any `claude-usage-ext` entry → Load
-   unpacked → **`/home/zach/workspace/devrc/scripts/claude-usage/extension`**.
-   Verify the manifest resolves there BEFORE telling the operator it is ready.
-   `forcing: user` — he chose the base clone as the load path.
-3. VERIFY THE REAL CLICK PATH — the arc's closing condition, never yet run:
-   claude.ai open → widget card bottom-right with Session/Weekly bars + header
-   tone dot → badge % → popup lists accounts. Capture the SW console on any
-   misbehaviour before diagnosing.
-   `forcing: user` — no test can prove an MV3 content script mounts.
-4. Give `mkUnpackedExtensionDeploy` the `RENAME_EXCHANGE` swap browser-bridge
-   uses (`nix/home.nix`), so `.local` stops unloading extensions; or delete the
-   `.local` claim from the manifest comment and README and say "load from the
-   repo". Today those files document a path that unloads itself.
+1. **RUN THE REAL CLICK PATH — the arc's closing condition, never yet run.**
+   `brave://extensions` → Developer mode on → **Load unpacked** → in the file chooser
+   press **Ctrl+L** and paste
+   `/home/zach/workspace/devrc/scripts/claude-usage/extension` → open/reload a
+   `claude.ai` tab. Three things must be true: widget card bottom-right with
+   Session/Weekly bars and a header tone dot · toolbar badge showing session % ·
+   popup listing accounts. Capture the service-worker console from
+   `brave://extensions` on any misbehaviour BEFORE diagnosing.
+   `forcing: user` — no test can prove an MV3 content script mounts, and the load
+   step needs a human at the file dialog.
+2. Give `mkUnpackedExtensionDeploy` the `RENAME_EXCHANGE` swap that browser-bridge
+   uses (`nix/home.nix`), so `.local` stops unloading extensions; **or** delete the
+   `.local` claim from the manifest comment and `scripts/claude-usage/README.md` and
+   say "load from the repo". Today those files document a path that unloads itself —
+   and that is no longer theoretical, see the 0.1.0 measurement in Gotchas.
    `forcing: regression` — the current helper actively breaks a loaded extension.
-5. Round 3 delta audit on #1801 if it has not merged: round 2 returned findings
-   that needed fixing, so the ladder is not finished. Anchor
-   `d2c68d20..eda25023`; claims blocks for rounds 1 and 2 are posted on the PR.
-   `forcing: gate` — the ladder's own stop rule.
-6. Re-propose the probe-dedup cut from #1806 (one page load still costs
+3. Re-propose the probe-dedup cut from #1806 (one page load still costs
    `2x(/api/organizations + one /usage per org)`), on its own PR with its own
    justification.
    `forcing: none`
@@ -161,24 +172,68 @@ Scope + live recon (API schema, endpoints): `claudedocs/proposal-claude-usage-tr
   reachable but NOT that this session's id is right — a wrong id also answers
   200 with an empty array. Not a clean bill of health.
 
+- 🔴 **The `.local` deploy was STALE AT 0.1.0 — loading from it would have registered
+  the pre-widget extension and produced a "the widget is broken" that had nothing to
+  do with the widget.** MEASURED 2026-09-20 after #1801 merged:
+  `~/.local/share/claude-usage-ext/manifest.json` reads `version 0.1.0`,
+  `content_scripts[0].js == ["content_probe.js"]` (no `content_widget.js`) and
+  `web_accessible_resources == []`, while the repo path reads 0.2.0 with both. It is a
+  `home.file`-class copy, so **`git pull` and a merge change it not at all** — only a
+  `home-manager switch` does. This is the concrete cost of the open `.local`
+  investigation and the reason the operator's choice of the base-clone repo path as
+  the load path was the right one.
+- **A merged PR's head can differ from the head the last handoff recorded.** #1801 was
+  written up at `eda25023` and merged at `37f45c9d` — a merge commit taking
+  `origin/main`. Re-read `headRefOid` before quoting any audit anchor or check result
+  from a previous session's doc; a green recorded against the old head says nothing
+  about the one that merged.
+- **`getManifest()` describes the DIRECTORY, not the running code** — recalled from
+  `claudedocs/archive/handoff-browser-bridge-emulate-and-staleness.md` and directly
+  relevant to the click path: after loading unpacked, a version reading 0.2.0 proves
+  the directory is right, NOT that Brave re-evaluated the code. Use observed widget
+  behaviour, not a version string, as the evidence the load took.
+- **The clawgate board has no task for this session.** `clawgate_handoff.sh resolve`
+  exited **5** (nothing resolved), so no `clawgate-task:` field is recorded. Its
+  positive control answered 11 links for a DIFFERENT session id, proving the board is
+  reachable and the token accepted — but a wrong id also answers 200 with an empty
+  array, so this is NOT a clean bill of health.
+- **This doc was landed from a worktree, not the base clone.** `~/workspace/devrc` sits
+  on `main` and `CLAUDE.md` forbids committing there in either host checkout, while
+  `handoff_doc.py` commits wherever the checkout sits. Worktree
+  `~/workspace/devrc-handoff-cu`, branch `docs/handoff-cu-widget-merged`.
+
 ## How to verify
-- Node tier (dev-host): `nix develop ~/workspace/devrc -c bash scripts/run-node-tests.sh`
-  → `RESULT: PASS`, `SCOPE: FULL`, claude-usage row `tests=149 floor=142`.
-  Read the runner's own `RESULT:` line, never a piped exit code.
-- Sandbox tier (the one Tekton gates on):
-  `nix build ~/workspace/devrc#checks.x86_64-linux.nodetests --no-link -L`.
-  A build that prints NOTHING is the CACHED case, not a pass.
-- The widget is deployed where Brave can load it:
-  `ls /home/zach/workspace/devrc/scripts/claude-usage/extension/content_widget.js`
-- Is it actually REGISTERED? (the check this session lacked):
+- The widget is at the load path Brave will read:
+  ```bash
+  ls /home/zach/workspace/devrc/scripts/claude-usage/extension/content_widget.js
+  ```
+- Every manifest-declared file resolves there (the round-1 `severity.js` class):
+  ```bash
+  cd /home/zach/workspace/devrc/scripts/claude-usage/extension && python3 -c "
+  import json,os
+  m=json.load(open('manifest.json'))
+  for p in m['content_scripts'][0]['js']+[m['background']['service_worker'],m['action']['default_popup']]+m['web_accessible_resources'][0]['resources']+list(m['icons'].values()):
+      print(('OK  ' if os.path.exists(p) else 'MISS'),p)"
+  ```
+- **Is it actually REGISTERED?** — the check this arc keeps needing:
   ```bash
   grep -l 'claude-usage' ~/.config/BraveSoftware/Brave-Browser/*/Preferences
+  grep -l 'browser-bridge-ext' ~/.config/BraveSoftware/Brave-Browser/*/Preferences   # positive control
   ```
-  Positive-control it with `browser-bridge-ext`, which IS loaded — a bare zero
+  🔴 Never quote the first zero without the second line returning hits — a bare zero
   from an unvalidated search is what let "reload it" be said three times.
-- Real click path (closing condition): claude.ai open → card bottom-right,
-  header tone dot, Session/Weekly bars, live countdowns; badge %; popup lists
-  accounts.
+- #1801 really merged (by CONTENT, never by `gh pr merge`'s rc):
+  ```bash
+  gh pr view 1801 --repo innovation-upstream/devrc --json state,mergedAt,mergeCommit
+  git -C /home/zach/workspace/devrc cat-file -e origin/main:scripts/claude-usage/extension/content_widget.js && echo present
+  ```
+- Node tier (dev-host): `nix develop ~/workspace/devrc -c bash scripts/run-node-tests.sh`
+  → read the runner's own `RESULT:` / `SCOPE:` lines, never a piped exit code.
+- Sandbox tier (the one Tekton runs):
+  `nix build ~/workspace/devrc#checks.x86_64-linux.nodetests --no-link -L`.
+  A build that prints NOTHING is the CACHED case, not a pass.
+- **Closing condition (the only clause left):** claude.ai open → card bottom-right,
+  header tone dot, Session/Weekly bars, live countdowns; badge %; popup lists accounts.
 ## Open investigations — live diagnosis state
 
 ### The `.local` deploy UNLOADS the extension from Brave on every home-manager switch
