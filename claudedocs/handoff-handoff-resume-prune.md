@@ -45,25 +45,26 @@ retractions are exactly what #1815 carries. If the operator disagrees, the remed
 close this doc as NOT ADDRESSED and open a new one, not to restore an unrunnable check.
 
 ## State now
-- **PR devrc#1815 — OPEN, 20 commits, 0 behind `main`, 9 files.**
-  Branch `handoff-resume-prune-proposal` @ `05c7f9bc`. ⚠ Not merged, not deployed.
-- 🔴 **THE BRANCH WAS CONTAMINATED BY A CONCURRENT SESSION AND HAS BEEN REBUILT.** Twice in
-  one hour another session committed its own work onto this branch in the shared clone:
-  `e1ed617d` (16:55 — `SECRETS.md`, `nix/home.nix`, `scripts/stt`, 7 `browser-bridge`
-  renames) and `3c290bec` (17:36 — its own handoff doc). **Both are preserved on origin**:
-  `rescued-stt-and-browser-flows` and `rescued-shared-branch-20260920` (the full pre-rewrite
-  tip). The PR branch was rebuilt in a throwaway worktree off `origin/main` by cherry-picking
-  only this session's 19 commits, then force-pushed **with `--force-with-lease`**.
-- **The rule that prevents it is now IN THIS REPO** (`CLAUDE.md` → Git discipline,
-  `05c7f9bc`), ported from `datapacket-talos` rule #10 and sharpened for devrc: every
-  `mkOutOfStoreSymlink` path resolves INTO this working tree, so a checkout here swaps the
-  deployed `browser`/`dl-router` skills for every session on the box with no `switch`.
-- **Audit: round 0 and round 1 (blind) both run; every finding fixed or surfaced.**
-  Round 1's two 🔴 were real: a banner claiming an enforced gate for repos that have none
-  (fixed per audited root), and a **merged-tree break with open PR #1798** — test-merged at
-  20,355 B against a 20,300 B budget, gate RED. Now 20,294 B, **FITS by 6 B**, re-verified
-  against current `main`.
-- 1,763 tests green in the clean worktree; 4 mutants killed under `PYTHONDONTWRITEBYTECODE=1`.
+- 🔴 **THIS ARC IS CLOSED. Verdict: ADDRESSED.** Its closing condition was verified
+  clause by clause at `b1bee35b`: (a) **devrc#1815 MERGED**; (b) workbench, laptop and
+  `origin/main` **all at `b1bee35b`**; (c) `readlink -f ~/.claude/skills/handoff/SKILL.md`
+  resolves into `/nix/store` at **20,176 B on BOTH machines**, matching `origin/main`.
+  Nothing below re-opens it.
+- **Shipped and live:** P4 (step 5 routes to `handoff-audit.py`; that tool's stale
+  "no gate measures a handoff doc" banner corrected, then made per-audited-root) and
+  P1′ (`budget_warning()` prints THIS doc's closed-byte backlog). Plus the `CLAUDE.md`
+  worktree rule ported from `datapacket-talos` #10 and sharpened for devrc.
+- **Deleted by measurement, not by preference:** P2 (gotcha staleness — max age 39d, the
+  14d window would flag 55%), P1-as-written (`refs/` is measurably outside the
+  `handoff_search` corpus), P3 (the `DOD` block already prints the remedy and the only
+  increment left is the judgement itself).
+- **Audit:** round 0 + four adversarial rounds, 2🔴 → 0 → 0 → 0, payload 289 → 195 → 81
+  → 64. Stopped on round 4's own recommendation and its stated reason.
+- ✅ **The rescued branches are NO LONGER LOAD-BEARING.** `#1819` landed the
+  `browser-bridge` `flows/` rename that existed nowhere else, so
+  `origin/rescued-stt-and-browser-flows` and `origin/rescued-shared-branch-20260920` are
+  superseded — every path they protected is on `main`. They are harmless refs; deleting
+  them is the operator's call, not mine.
 
 ## Open investigations — live diagnosis state
 
@@ -138,18 +139,22 @@ close this doc as NOT ADDRESSED and open a new one, not to restore an unrunnable
   which of the four detectors actually fires per-doc rather than corpus-wide.
 
 ## Next steps (ranked)
-1. **Merge #1815, then `scripts/ship.sh`** — read every per-host line, not the verdict. The
-   `handoff/SKILL.md` line is inert on both hosts until a `home-manager switch`.
-   forcing: user — the operator asked for this shipped.
-2. **Decide the two open questions surfaced by the audit, both recorded on the PR:**
-   (a) round 0 F2 — should the evictable note print NUMBERS in ungated repos? `homelab-talos`
-   holds 370,563 B of evictable content the current withholding hides. (b) whether correcting
-   this arc's frozen closing-condition was right, or whether the doc should be closed NOT
-   ADDRESSED and a new arc opened.
-   forcing: user — both reverse a decision an agent took; neither is an agent's to settle.
-3. **Land the two rescued branches**, or tell that session they are there. They are not mine
-   to merge. ⚠ They are BRANCH REFS on origin, so they are not garbage-collected — an
-   earlier wording said they were, which overstated the urgency.
+🔴 **NONE OF THESE BELONG TO THIS ARC — it is CLOSED and FROZEN.** They are recorded here
+so they are not lost, and a session picking one up is starting a NEW arc.
+1. **Merge devrc#1821** — the `/the-algorithm` pass over what this arc shipped: deletes the
+   advice surface from `evictable_note` (−178/+42), because 7 of this arc's 10 audit
+   findings were caused by it and the eviction ladder is already owned by
+   `test_handoff_doc_size.py`. CI was pending at close.
+   forcing: user — the operator asked for the pass and approved merging it.
+2. **Decide round 0's F2, which #1821 has SIMPLIFIED to one line.** F2 argued: withhold the
+   PRESCRIPTION from ungated repos, print the NUMBERS. #1821 deletes the prescription
+   entirely, so the objection it rested on is gone — what remains is whether to drop the
+   `if gated` on a numbers-only note. `homelab-talos` holds **370,563 B** of closed content
+   the withholding currently hides.
+   forcing: user — it reverses a requirement whose author is a measured incident
+   (`civitai/cli#618`), which is not an agent's call.
+3. Re-measure the corpus in ~2 weeks: evictable backlog (468,110 B at round 0) and docs over
+   the hard cap (28). If neither moves, P1′ informed nobody and should be deleted.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -327,6 +332,22 @@ close this doc as NOT ADDRESSED and open a new one, not to restore an unrunnable
 - ⚠ **`gh pr view --json files` served a STALE file list** for minutes after a successful
   force-push, still showing the contaminated set. `git diff --name-only origin/main...origin/<branch>`
   is the authority; do not re-fix a PR on the API's word.
+
+- ✅ **A CORRECTED CLOSING CONDITION CAN STILL CLOSE — and this one did.** The round-1
+  condition ("P1 merged AND the APPEND share below 70%") was unsatisfiable: the demotion is
+  forbidden and the metric could only fall by doing it. It was re-aimed at the arc's actual
+  deliverable and is now MET on all three clauses. 🔴 **That re-aim is still an unratified
+  judgement of an agent's** — the strict reading of frozen-at-round-1 says close the doc NOT
+  ADDRESSED and open a new one instead. Recorded as a decision the operator may reverse; if
+  reversed, the work is unaffected and only this verdict changes.
+- 🔴 **THE METRIC SELECTED THE HARMFUL ACTION, and that is the transferable lesson.** A
+  byte-share target made the one forbidden action the cheapest way to satisfy it. **When
+  freezing a closing condition, ask which action most cheaply satisfies the metric, and
+  whether you would accept that action.**
+- **The concurrent-session contamination resolved itself correctly.** Another session
+  committed onto this branch twice; both commits were preserved on origin BEFORE any
+  rewrite, and that session then landed its own work as `#1819`. Preserving the TIP rather
+  than the commit you noticed is what made the second one survivable.
 
 ## How to verify
 Re-derive every number in the proposal:
