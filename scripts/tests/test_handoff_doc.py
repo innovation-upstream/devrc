@@ -7631,35 +7631,35 @@ def test_the_UNGATED_over_budget_arm_CARRIES_the_note_and_still_prescribes_nothi
         assert prescription not in w, (prescription, w)
 
 
-def test_the_UNGATED_over_budget_note_is_the_SAME_TEXT_the_gated_arm_prints():
-    """🔴 ONE MEASUREMENT, NOT TWO. The point of dropping the guard is that both
-    arms report the same fact about the same document; a second code path that
-    computed it differently would be the "one rule, one place" defect the note's
-    own header argues against. Compared as text, so a divergence in the numbers,
-    the rows or the net line fails here rather than being discovered by a reader.
+def test_the_UNGATED_over_budget_note_asserts_NO_DEFICIT_against_the_ceiling():
+    """🔴 THIS REPLACES `…_is_the_SAME_TEXT_the_gated_arm_prints`, WHICH PINNED A
+    REQUIREMENT NOBODY ASKED FOR AND WHICH DID HARM. That test demanded both arms
+    render an identical note, which is the ONLY thing that forced this arm to pass
+    the real overage into `evictable_note` — making it print "does NOT clear the
+    N B you are over by": a DEFICIT against a ceiling the same warning says
+    nothing enforces. Round 0 of #1826 named it: that is the `civitai/cli#618`
+    pressure shape with the prescription stripped out and the false-consequence
+    framing kept, and #618 is the incident the withholding was built from.
 
-    ⚠ The two warnings as a WHOLE still differ, and must — the gated arm names a
-    red `main` and the ungated one says nothing will go red. Only the note is
-    compared."""
+    The operator's ask was "print numbers everywhere" — satisfied by `over_by=0`,
+    which renders "N B net already closed in this document". So the invariant is
+    NOT sameness; it is that this arm names no threshold. Pinned as the absence of
+    the shortfall wording plus the presence of the neutral wording, because the
+    absence alone would pass on an empty note."""
     doc, base = _EVICTABLE_DOC + "z" * 70_000, "z" * 100
-    gated = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
-                              doc, base, gated=True)
     ungated = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
                                 doc, base, gated=False)
-    marker = "  Evictable in THIS doc"
-    assert marker in gated and marker in ungated, (gated, ungated)
-    # The note runs to the end of each warning in the gated arm's case only, so
-    # slice from the marker and compare the shared prefix of full lines.
-    note_g = [ln for ln in gated[gated.index(marker):].splitlines()
-              if ln.startswith("  ")]
-    note_u = [ln for ln in ungated[ungated.index(marker):].splitlines()
-              if ln.startswith("    ") or ln == marker]
-    assert note_u == [ln for ln in note_g if ln.startswith("    ") or ln == marker], (
-        "the ungated arm printed a DIFFERENT eviction measurement than the gated "
-        "arm for the same document:\n gated=%r\n ungated=%r" % (note_g, note_u))
-    assert gated != ungated, (
-        "the two arms became identical — the gate-specific sentences (red `main` "
-        "vs nothing will go red) are load-bearing and must still differ")
+    assert "Evictable in THIS doc" in ungated, ungated
+    assert "already closed in this document" in ungated, ungated
+    for threshold in ("does NOT clear", "you are over by", "which CLEARS"):
+        assert threshold not in ungated.split("Evictable in THIS doc")[1], (
+            threshold, ungated)
+    # …and the GATED arm still gets the shortfall: this is a split, not a
+    # tree-wide deletion. Without this the fix could be satisfied by making
+    # `evictable_note` incapable of ever naming an overage.
+    gated = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
+                              doc, base, gated=True)
+    assert "does NOT clear" in gated or "which CLEARS" in gated, gated
 
 
 def _near_text():
@@ -7709,10 +7709,17 @@ def test_the_NEAR_arms_gate_specific_TAIL_still_differs_by_gatedness():
 
     ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE — say so rather than counting
     it. It is GREEN on pre-change code, because the behaviour it pins is the
-    half of this arm that did NOT change; the three tests around it are the
-    regression ones (red at `origin/main` 3fa77f49, green at HEAD). Its value is
+    half of this arm that did NOT change; the tests around it are the regression
+    ones (red at `origin/main` 3fa77f49, green at HEAD). Its value is
     forward-looking: MUTATION-TESTED by collapsing `tail` to the gated wording,
-    which it killed on its own `no gate enforces it here` assertion."""
+    which it kills.
+
+    ⚠ It dies on the FIRST assertion below (the `red main` one), not the second.
+    An earlier version of this docstring named the `no gate enforces it here`
+    assertion as the killer — both would catch that mutant, but only one runs
+    first, and a maintainer trimming an assertion on the strength of a false
+    record of which is load-bearing is exactly the harm. Round 0 of #1826 ran
+    the mutant and read which line fired."""
     doc, base = _near_text(), "z" * 100
     g = hd.budget_warning("claudedocs/handoff-not-grandfathered.md", doc, base,
                           gated=True)

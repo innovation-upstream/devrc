@@ -2902,9 +2902,6 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         rows = [r for r in rows if r[1] > 0]
         if not rows:
             return ""
-        rows = [r for r in rows if r[1] > 0]
-        if not rows:
-            return ""
         out = ["  Evictable in THIS doc, measured:"]
         for label, b, n, unit in rows:
             out.append(f"    {label:<24}{b:>9,} B  ({n} {unit}{'' if n == 1 else 's'})")
@@ -3036,30 +3033,20 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
         # playbook in a test the repo does not ship. The SIZE still transfers
         # (measured across the other repos' corpora), so the number stays.
         #
-        # 🔴 THE NOTE IS NO LONGER WITHHELD HERE, AND THAT IS A REVERSAL THE
-        # OPERATOR MADE, NOT A DRIFT. The withholding was specified when this
-        # function ALSO carried the ladder — prescription and numbers travelled
-        # together, so suppressing one suppressed both. #1821 deleted the
-        # prescription surface from `evictable_note` outright (7 of 10 audit
-        # findings in that arc were caused by it), leaving a measurement of THIS
-        # document and nothing else: how many bytes of it have already closed.
-        # That number is a fact about the text, not a claim about any repo's
-        # gates — `evictable_note` reads `merged_text` and never touches a
-        # checkout — so the civitai/cli#618 argument, which is entirely about
-        # being TOLD to move bytes into `refs/`, no longer reaches it.
-        # MEASURED HERE, through this very function, against homelab-talos's 70
-        # live handoff docs: 31 of them now print a note, surfacing 289,805 B of
-        # already-closed content that this branch was hiding from their authors.
-        # ⚠ NOT the 370,563 B the deciding handoff quoted — that figure is the
-        # auditor's gross over ALL FOUR buckets, and this note deliberately
-        # reports only step 1 (`resolved` + `done`). Both are right about
-        # different things; this is the one this code can actually print, so it
-        # is the one recorded here. Re-derive rather than copy either forward.
-        # The sentence below still says nothing will go red; that is what keeps
-        # this a report.
+        # 🔴 THE NOTE PRINTS HERE, BY THE OPERATOR'S REVERSAL — but with
+        # `over_by=0`, which is the whole of what keeps this arm a REPORT.
+        # Passing the real overage makes the note render "does NOT clear the
+        # N B you are over by": a DEFICIT against a ceiling this very block
+        # says nothing enforces. That is the civitai/cli#618 pressure shape
+        # with the prescription removed and the false-consequence framing
+        # kept, and #618's own record attributes the damage to exactly that
+        # framing — read `gate_enforces_budget` above, and note it and the
+        # paragraph above DISAGREE about which half did it. Neither is
+        # settled; this arm assumes the worse case. `0` renders "N B net
+        # already closed in this document" — numbers, no threshold.
         which = ("its grandfathered allowance" if grandfathered
                  else "the handoff-document ceiling")
-        note = evictable_note(merged_text, after - allowance)
+        note = evictable_note(merged_text, 0)
         return "\n".join([
             f"⚠ SIZE ONLY, NO GATE: {after:,} B against {which} of "
             f"{allowance:,} B, over by {after - allowance:,} B "
@@ -3117,16 +3104,11 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
         head = (f"⚠ Size: {after:,} B of {allowance:,} B "
                 f"({sign}{delta:,} B this update) — {headroom:,} B left. The next "
                 f"update or two will go over; {tail}")
-        # 🔴 UNCONDITIONAL, and the `if gated` it replaces was removed by the
-        # operator, not by an agent's reading. The guard's stated reason was that
-        # a breakdown keyed to the ladder's step 1 would be PRESCRIBING where
-        # this arm may only report — true while `evictable_note` carried the
-        # ladder, and false since #1821 deleted that surface. What is left counts
-        # closed bytes in `merged_text`; it names no remedy and consults no
-        # checkout, so it is the same KIND of fact as the size already printed
-        # two lines above. The gated/ungated split survives where it is still
-        # about a gate: `tail` above, and the GRANDFATHERED arm below, which
-        # tells you to edit a ledger that really does live only in devrc.
+        # 🔴 UNCONDITIONAL, by the operator's reversal. Already `over_by=0`
+        # here, so this arm has always rendered numbers without a threshold —
+        # which is why it needed no change when the ungated OVER arm was
+        # corrected to match it. The gated/ungated split survives where it is
+        # still about a gate: `tail` above, and the GRANDFATHERED arm below.
         # ⚠ NO PROHIBITION HERE. One was added in round 4 and is removed by the
         # /the-algorithm pass: the eviction ladder — including "do NOT satisfy
         # this by deleting an open investigation, a gotcha or a ruled-out
