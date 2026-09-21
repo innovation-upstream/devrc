@@ -62,7 +62,10 @@ CSP. The deterministic alternatives, in order:
 - Thread CONTENT is not in the main channel DOM — the drawer is its own flow.
   Measured 2026-09-21 in a hydrated owned tab: the rail is the entry point —
   `Threads` is a `DIV[role=treeitem]` with the stable id `#Vall_threads`
-  (`data-qa=virtual-list-item`); a trusted click opens the Threads list, and
+  (`data-qa=virtual-list-item` — a DIFFERENT token from the retired
+  `virt-list-item` two chars shorter at :14; do not confuse the pair when
+  re-verifying, only the long form is live here); a trusted click opens the
+  Threads list, and
   a trusted click on a list row opens THAT thread's drawer: header with
   channel + participants, every reply with author + timestamp, a
   `Show N more replies` expander, and the reply composer with the

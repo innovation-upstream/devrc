@@ -75,8 +75,9 @@ read above, one layer deeper.
   (readback via `js` `textContent`); clearing is bounded `key Backspace`
   presses — a cleared Slate editor reads back as ONLY the U+FEFF zero-width
   marker. Composer-area buttons carry `aria-label`s (`Add Emoji`,
-  `Open GIF picker`, `Open sticker picker`, `More message options`, `Apps` —
-  all with `aria-expanded` except `Send a gift`); a trusted click toggles
+  `Open GIF picker`, `Open sticker picker`, `More message options`, `Apps`,
+  `Send a gift` — all with `aria-expanded` except `Send a gift`); a trusted
+  click toggles
   `aria-expanded` true↔false and a second click closes what the first
   opened (measured on two). There is no right-click op, so per-message
   context menus stay out of reach.

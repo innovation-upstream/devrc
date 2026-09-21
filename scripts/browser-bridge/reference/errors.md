@@ -17,10 +17,16 @@ should strand you.
    error. Fix: ↻ **in the profile you are driving**. A STALE BUILD is a DIFFERENT
    failure — Remove + Load unpacked, not a restart. → `reference/errors.md`
 2. **Empty / half-built / `data.hidden:true` read** → throttled: `wake`, re-read.
+   Slack client-v2's message pane ignores wake's emulation — its one measured
+   escape is `activate --focus`: `flows/app.slack.com.md`, and the wake-vs-
+   activate exception in `reference/spa-wake.md`.
 3. **`null` from `js`/`eval`** → traps 1 then 2; fall back to `text`/`html` before
    concluding the bridge is down. **`unknown_op`** → stale extension (1). Any other
    error string → `reference/errors.md`.
-4. **Never diagnose a site OUTAGE from a browser read** — "broken for real users?"
+4. **Injections (`text`/`js`) refused on EVERY host while messaging ops answer
+   fine** → NOT a stale build, NOT a drop: Brave's per-extension Site access →
+   the section below ("Injections refused on EVERY host").
+5. **Never diagnose a site OUTAGE from a browser read** — "broken for real users?"
    needs server-side evidence (RUM, metrics, pod health, an anonymous `curl`).
 
 (Moved from SKILL.md 2026-08-21 to restore its working headroom: #669 added
@@ -120,7 +126,7 @@ neither.
 - **Recovery (operator, ~30 s, on the host you are driving):**
   `brave://extensions` → Browser Bridge (command channel) → `Details` →
   **Site access** → **On all sites**. If still refused: reload ↻ the
-  extension (it may re-prompt the `debugger` permission), then `$BB health`
+  extension (it may re-prompt the `debugger` permission), then `browser health`
   → `extension_connected:true`, then probe `text` on a real tab. A fix on
   one host does NOT carry to the other.
 
