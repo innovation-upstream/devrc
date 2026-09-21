@@ -1,13 +1,13 @@
-"""Per-site reference docs: the registry, the suffix match, and the envelope field.
+"""Per-site flow docs: the registry, the suffix match, and the envelope field.
 
 WHAT IS UNDER TEST
 ------------------
 `server.py` already extracted the bare hostname of every completed command for
 telemetry (`_domain_from_result`). This feature routes that host through a
-registry — `reference/sites/_index.json` — and, on a hit, adds ONE advisory
+registry — `flows/_index.json` — and, on a hit, adds ONE advisory
 field to the result envelope:
 
-    "site_notes": "reference/sites/civitai.com.md"
+    "site_flows": "flows/civitai.com.md"
 
 so `SKILL.md` can name the DIRECTORY once and never grow again as sites are
 added.
@@ -20,12 +20,12 @@ THE THREE THINGS THAT CAN GO SILENTLY WRONG, and the tests that pin them
    the suffix-matching block, especially
    `test_a_host_merely_containing_the_key_does_not_match`. (That block uses
    reserved-TLD hosts on purpose — see the 🔴 note above it.)
-2. **A miss that is not silent.** A `"site_notes": null` or `""` on every
+2. **A miss that is not silent.** A `"site_flows": null` or `""` on every
    unregistered host would put a field on the wire for every command on the
    internet. The test asserts the key is ABSENT, not falsy — `not in`, never
    `.get(...) is None`, because the latter passes for both shapes.
 3. **A registry that can break a browser op.** A doc registry is not allowed to
-   take the bridge down. Every malformed shape must degrade to "no site_notes"
+   take the bridge down. Every malformed shape must degrade to "no site_flows"
    AND leave the command working — so those tests drive a REAL round trip, not
    just the loader.
 
@@ -47,13 +47,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import server as S  # noqa: E402
 from test_server import FakeExtension, _req, _serve, _wait_connected  # noqa: E402
 
-SITES_DIR = Path(__file__).resolve().parent.parent / "reference" / "sites"
-INDEX = SITES_DIR / "_index.json"
+FLOWS_DIR = Path(__file__).resolve().parent.parent / "flows"
+INDEX = FLOWS_DIR / "_index.json"
 
 
 @pytest.fixture(autouse=True)
-def _pin_sites_dir_to_this_checkout(monkeypatch):
-    """Pin `_SITES_DIR` to THIS checkout's reference/sites, hermetically.
+def _pin_flows_dir_to_this_checkout(monkeypatch):
+    """Pin `_FLOWS_DIR` to THIS checkout's flows, hermetically.
 
     🔴 Load-bearing, not hygiene. The production default is the stable ABSOLUTE
     repo path under `Path.home()` (server.py is deployed as a flat /nix/store
@@ -65,23 +65,23 @@ def _pin_sites_dir_to_this_checkout(monkeypatch):
     would parse to {} and every "does not match" assertion would pass vacuously.
     Mirrors `pinned_manifest` in test_server.py, for the same class of reason.
     """
-    monkeypatch.setattr(S, "_SITES_DIR", SITES_DIR)
-    monkeypatch.setattr(S, "_site_index_cache", None)
+    monkeypatch.setattr(S, "_FLOWS_DIR", FLOWS_DIR)
+    monkeypatch.setattr(S, "_flows_index_cache", None)
 
 
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
 def _point_at(monkeypatch, directory):
-    """Repoint the server's sites dir and drop the parsed-index cache.
+    """Repoint the server's flows dir and drop the parsed-index cache.
 
     The cache is keyed on the directory, so repointing is normally enough — but
     a test that REWRITES a directory it already pointed at would otherwise read
     the stale parse. Clearing is the honest thing; a test that silently reused a
     cached registry would pass without exercising the file it just wrote.
     """
-    monkeypatch.setattr(S, "_SITES_DIR", Path(directory))
-    monkeypatch.setattr(S, "_site_index_cache", None)
+    monkeypatch.setattr(S, "_FLOWS_DIR", Path(directory))
+    monkeypatch.setattr(S, "_flows_index_cache", None)
 
 
 def _write_index(directory, payload, files=()):
@@ -124,7 +124,7 @@ def test_the_real_registry_is_not_empty():
     `notcivitai.com.evil.test` alike, and the suite goes green while measuring
     nothing. This is the test that makes the zeros mean something.
     """
-    index = S._load_site_index()
+    index = S._load_flows_index()
     assert index, (
         f"the real registry at {INDEX} parsed to ZERO entries — every "
         "non-match assertion in this module is vacuous until this passes."
@@ -133,7 +133,7 @@ def test_the_real_registry_is_not_empty():
 
 
 def test_the_real_index_parses_as_json():
-    """Guard the guard: `_load_site_index` swallows every exception by design, so
+    """Guard the guard: `_load_flows_index` swallows every exception by design, so
     a syntactically broken checked-in `_index.json` would degrade to {} and be
     invisible to the loader tests. Parse it the strict way, here, once."""
     raw = json.loads(INDEX.read_text(encoding="utf-8"))
@@ -155,7 +155,7 @@ def test_the_real_index_parses_as_json():
 # nothing here depends on which sites happen to be registered today.
 # --------------------------------------------------------------------------- #
 KEY = "example.test"
-DOC = f"reference/sites/{KEY}.md"
+DOC = f"flows/{KEY}.md"
 
 
 @pytest.fixture
@@ -168,18 +168,18 @@ def synthetic(tmp_path, monkeypatch):
 def test_exact_host_matches_in_the_real_registry():
     """The one assertion that must run against the REAL registry: an apex, which
     the client-host gate permits."""
-    assert S._site_notes_path("civitai.com") == "reference/sites/civitai.com.md"
+    assert S._flows_doc_path("civitai.com") == "flows/civitai.com.md"
 
 
 def test_unregistered_host_returns_empty_in_the_real_registry():
-    assert S._site_notes_path("example.com") == ""
+    assert S._flows_doc_path("example.com") == ""
 
 
 @pytest.mark.parametrize("host", ["www.example.test", "a.b.example.test"])
 def test_subdomain_matches(host, synthetic):
     """A subdomain and the apex must BOTH resolve — that is the whole reason the
     match is a suffix and not an equality."""
-    assert S._site_notes_path(host) == DOC
+    assert S._flows_doc_path(host) == DOC
 
 
 @pytest.mark.parametrize("host", [
@@ -193,7 +193,7 @@ def test_subdomain_matches(host, synthetic):
     "evil-example.test",
 ])
 def test_a_host_merely_containing_the_key_does_not_match(host, synthetic):
-    assert S._site_notes_path(host) == "", (
+    assert S._flows_doc_path(host) == "", (
         f"{host!r} must NOT match the {KEY!r} entry — matching is on label "
         "boundaries (host == key, or host endswith '.'+key), never a substring."
     )
@@ -204,12 +204,12 @@ def test_a_host_merely_containing_the_key_does_not_match(host, synthetic):
 ])
 def test_host_is_normalised_before_matching(host, synthetic):
     """Case, a trailing root dot, and surrounding whitespace are not identity."""
-    assert S._site_notes_path(host) == DOC
+    assert S._flows_doc_path(host) == DOC
 
 
 @pytest.mark.parametrize("host", ["other.invalid", "", None, 0, [], "test"])
 def test_unregistered_or_junk_host_returns_empty(host, synthetic):
-    assert S._site_notes_path(host) == ""
+    assert S._flows_doc_path(host) == ""
 
 
 def test_longest_matching_suffix_wins(tmp_path, monkeypatch):
@@ -223,38 +223,38 @@ def test_longest_matching_suffix_wins(tmp_path, monkeypatch):
         d = tmp_path / ("order-" + order[0])
         _write_index(d, json.dumps({"sites": {k: k + ".md" for k in order}}))
         _point_at(monkeypatch, d)
-        assert S._site_notes_path("foo.example.test") == \
-            "reference/sites/foo.example.test.md"
-        assert S._site_notes_path("bar.example.test") == \
-            "reference/sites/example.test.md"
+        assert S._flows_doc_path("foo.example.test") == \
+            "flows/foo.example.test.md"
+        assert S._flows_doc_path("bar.example.test") == \
+            "flows/example.test.md"
 
 
 # --------------------------------------------------------------------------- #
 # The envelope
 # --------------------------------------------------------------------------- #
-def test_registered_host_gets_site_notes_on_the_envelope():
+def test_registered_host_gets_site_flows_on_the_envelope():
     result = _roundtrip("https://civitai.com/models/1")
-    assert result["site_notes"] == "reference/sites/civitai.com.md"
+    assert result["site_flows"] == "flows/civitai.com.md"
 
 
-def test_unregistered_host_gets_NO_site_notes_KEY():
+def test_unregistered_host_gets_NO_site_flows_KEY():
     """ABSENT, not empty and not null.
 
-    `assert result.get("site_notes") is None` would pass for a literal
-    `"site_notes": null` on the wire — i.e. for the exact defect this asserts
+    `assert result.get("site_flows") is None` would pass for a literal
+    `"site_flows": null` on the wire — i.e. for the exact defect this asserts
     against. `not in` is the only spelling that distinguishes them.
     """
     result = _roundtrip("https://example.com/whatever")
-    assert "site_notes" not in result, (
-        f"an unregistered host must add NO field; got {result.get('site_notes')!r}"
+    assert "site_flows" not in result, (
+        f"an unregistered host must add NO field; got {result.get('site_flows')!r}"
     )
 
 
-def test_a_containing_host_gets_no_site_notes_on_the_wire():
+def test_a_containing_host_gets_no_site_flows_on_the_wire():
     """The substring bug, asserted at the SEAM rather than on the helper — the
     helper being right does not prove the call site passes it the right host."""
     result = _roundtrip("https://notcivitai.com/x")
-    assert "site_notes" not in result
+    assert "site_flows" not in result
 
 
 def test_existing_envelope_fields_are_untouched():
@@ -266,8 +266,8 @@ def test_existing_envelope_fields_are_untouched():
         assert env["ok"] is True
         assert env["data"]["text"] == "hi"
         assert "id" in env and "instanceId" in env
-    assert set(hit) - set(miss) == {"site_notes"}, (
-        "a hit must differ from a miss by EXACTLY the site_notes key — "
+    assert set(hit) - set(miss) == {"site_flows"}, (
+        "a hit must differ from a miss by EXACTLY the site_flows key — "
         f"hit={sorted(hit)} miss={sorted(miss)}"
     )
 
@@ -276,7 +276,7 @@ def test_a_screenshot_style_data_url_envelope_is_unaffected():
     """`_domain_from_result` returns "" for a data: URL. That must be a miss, not
     a crash and not a match on a zero-length host."""
     result = _roundtrip("data:image/png;base64,iVBORw0KGgo=")
-    assert "site_notes" not in result
+    assert "site_flows" not in result
 
 
 # --------------------------------------------------------------------------- #
@@ -297,29 +297,29 @@ MALFORMED = {
 
 
 @pytest.mark.parametrize("case", sorted(MALFORMED))
-def test_malformed_registry_degrades_to_no_site_notes(case, tmp_path, monkeypatch):
+def test_malformed_registry_degrades_to_no_site_flows(case, tmp_path, monkeypatch):
     _point_at(monkeypatch, _write_index(tmp_path / case, MALFORMED[case]))
-    assert S._load_site_index() == {}
-    assert S._site_notes_path("civitai.com") == ""
+    assert S._load_flows_index() == {}
+    assert S._flows_doc_path("civitai.com") == ""
 
 
 @pytest.mark.parametrize("case", sorted(MALFORMED))
 def test_malformed_registry_does_not_break_a_browser_op(case, tmp_path,
                                                         monkeypatch):
     """The load-bearing half. Degrading the LOOKUP is not enough — the command
-    must still complete, with its payload intact and no site_notes."""
+    must still complete, with its payload intact and no site_flows."""
     _point_at(monkeypatch, _write_index(tmp_path / case, MALFORMED[case]))
     result = _roundtrip("https://civitai.com/models/1")
     assert result["ok"] is True
     assert result["data"]["text"] == "hi"
-    assert "site_notes" not in result
+    assert "site_flows" not in result
 
 
 def test_missing_directory_entirely_degrades(tmp_path, monkeypatch):
     _point_at(monkeypatch, tmp_path / "does" / "not" / "exist")
-    assert S._load_site_index() == {}
+    assert S._load_flows_index() == {}
     result = _roundtrip("https://civitai.com/models/1")
-    assert result["ok"] is True and "site_notes" not in result
+    assert result["ok"] is True and "site_flows" not in result
 
 
 @pytest.mark.parametrize("bad_value", [
@@ -338,7 +338,7 @@ def test_registry_rejects_a_value_that_is_not_a_bare_filename(bad_value, tmp_pat
     d = _write_index(tmp_path / "bad", json.dumps(
         {"sites": {"civitai.com": bad_value}}))
     _point_at(monkeypatch, d)
-    assert S._site_notes_path("civitai.com") == ""
+    assert S._flows_doc_path("civitai.com") == ""
 
 
 @pytest.mark.parametrize("bad_key", [
@@ -350,7 +350,7 @@ def test_registry_rejects_a_key_that_is_not_a_bare_host(bad_key, tmp_path,
     d = _write_index(tmp_path / "badkey", json.dumps(
         {"sites": {bad_key: "x.md"}}))
     _point_at(monkeypatch, d)
-    assert S._load_site_index() == {}
+    assert S._load_flows_index() == {}
 
 
 def test_one_junk_entry_does_not_discard_the_good_ones(tmp_path, monkeypatch):
@@ -362,8 +362,8 @@ def test_one_junk_entry_does_not_discard_the_good_ones(tmp_path, monkeypatch):
         "also/broken": "ok.md",
     }}))
     _point_at(monkeypatch, d)
-    assert S._load_site_index() == {"civitai.com": "civitai.com.md"}
-    assert S._site_notes_path("civitai.com") == "reference/sites/civitai.com.md"
+    assert S._load_flows_index() == {"civitai.com": "civitai.com.md"}
+    assert S._flows_doc_path("civitai.com") == "flows/civitai.com.md"
 
 
 def test_the_index_is_parsed_once_per_directory(tmp_path, monkeypatch):
@@ -373,9 +373,9 @@ def test_the_index_is_parsed_once_per_directory(tmp_path, monkeypatch):
     d = _write_index(tmp_path / "cached", json.dumps(
         {"sites": {"cached.test": "cached.test.md"}}))
     _point_at(monkeypatch, d)
-    assert S._site_notes_path("cached.test") == "reference/sites/cached.test.md"
+    assert S._flows_doc_path("cached.test") == "flows/cached.test.md"
     (d / "_index.json").unlink()
-    assert S._site_notes_path("cached.test") == "reference/sites/cached.test.md"
+    assert S._flows_doc_path("cached.test") == "flows/cached.test.md"
 
 
 def test_a_CHANGED_index_is_re_read_in_the_SAME_process(tmp_path, monkeypatch):
@@ -405,18 +405,18 @@ def test_a_CHANGED_index_is_re_read_in_the_SAME_process(tmp_path, monkeypatch):
     d = _write_index(tmp_path / "mutating", json.dumps(
         {"sites": {"before.test": "before.test.md"}}))
     _point_at(monkeypatch, d)
-    assert S._site_notes_path("before.test") == "reference/sites/before.test.md"
+    assert S._flows_doc_path("before.test") == "flows/before.test.md"
 
     # Rewrite in place — NO cache clear, NO repoint. This is the running bridge.
     (d / "_index.json").write_text(json.dumps(
         {"sites": {"after.test": "a-considerably-longer-name.after.test.md"}}),
         encoding="utf-8")
 
-    assert S._site_notes_path("after.test") == (
-        "reference/sites/a-considerably-longer-name.after.test.md"), (
+    assert S._flows_doc_path("after.test") == (
+        "flows/a-considerably-longer-name.after.test.md"), (
         "a registry entry added while the process was running stayed invisible — "
         "the index cache did not notice the file had changed")
-    assert S._site_notes_path("before.test") == "", (
+    assert S._flows_doc_path("before.test") == "", (
         "the re-read merged into the old mapping instead of replacing it; a key "
         "REMOVED from the registry must stop resolving too"
     )
@@ -426,7 +426,7 @@ def test_a_CHANGED_index_is_re_read_in_the_SAME_process(tmp_path, monkeypatch):
 # THE LEDGER — the registry's key set and the directory's *.md set are identical
 # --------------------------------------------------------------------------- #
 def _ledger_diff(directory):
-    """(orphan_entries, unregistered_files) for a sites directory.
+    """(orphan_entries, unregistered_files) for a flows directory.
 
     An ORPHAN is a registry key naming a file that is not there — an agent is
     told to read a doc that does not exist. An UNREGISTERED file is a doc nobody
@@ -442,13 +442,13 @@ def _ledger_diff(directory):
 
 
 def test_index_and_files_are_the_same_set():
-    orphans, unregistered = _ledger_diff(SITES_DIR)
+    orphans, unregistered = _ledger_diff(FLOWS_DIR)
     assert not orphans, (
         f"{INDEX} registers file(s) that do not exist: {orphans}. An agent "
-        "following `site_notes` would be sent to a missing doc."
+        "following `site_flows` would be sent to a missing doc."
     )
     assert not unregistered, (
-        f"{SITES_DIR} holds *.md file(s) no registry entry names: "
+        f"{FLOWS_DIR} holds *.md file(s) no registry entry names: "
         f"{unregistered}. Nothing can ever route to them — add a `sites` entry "
         "or delete the file."
     )
@@ -482,7 +482,7 @@ def test_every_registered_file_is_non_trivial():
     the ledger — the set check is about names, not content."""
     raw = json.loads(INDEX.read_text(encoding="utf-8"))
     for name in raw["sites"].values():
-        body = (SITES_DIR / name).read_text(encoding="utf-8")
+        body = (FLOWS_DIR / name).read_text(encoding="utf-8")
         assert len(body) > 500, f"{name} is {len(body)} bytes — is it a stub?"
         assert body.lstrip().startswith("# "), f"{name} has no H1 title"
         assert "**Load this when:**" in body, (
@@ -498,17 +498,17 @@ def test_skill_md_names_the_directory_and_no_individual_site():
     """🔴 THE INVARIANT: SKILL.md does not grow as sites are added.
 
     It is loaded on every browser task and has a hard byte ceiling
-    (test_skill_size.py). One row naming `reference/sites/<host>.md` is the
+    (test_skill_size.py). One pointer naming `flows/<host>.md` is the
     whole contract; a per-site row would make the always-loaded body grow
     linearly with the registry.
     """
     skill = (Path(__file__).resolve().parent.parent / "SKILL.md").read_text(
         encoding="utf-8")
-    assert "`reference/sites/<host>.md`" in skill, (
-        "SKILL.md must carry the directory-level pointer row.")
+    assert "`flows/<host>.md`" in skill, (
+        "SKILL.md must carry the directory-level pointer.")
     raw = json.loads(INDEX.read_text(encoding="utf-8"))
     for host, name in raw["sites"].items():
-        assert f"reference/sites/{name}" not in skill, (
+        assert f"flows/{name}" not in skill, (
             f"SKILL.md names the individual site file {name}. Sites are routed "
-            "at runtime via the `site_notes` envelope field — SKILL.md names "
+            "at runtime via the `site_flows` envelope field — SKILL.md names "
             "only the directory, so it never grows as sites are added.")

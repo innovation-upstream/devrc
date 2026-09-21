@@ -1071,7 +1071,7 @@ def _domain_from_result(result) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Per-site reference docs
+# Per-site flow docs
 #
 # Some sites carry hard-won operating facts that are true of THAT SITE ONLY (an
 # identity endpoint that must be re-read, a rail that renders stale entries, a
@@ -1080,29 +1080,30 @@ def _domain_from_result(result) -> str:
 # SKILL.md, which is loaded on every browser task and has a hard byte ceiling
 # (tests/test_skill_size.py). Putting a per-site ROW in SKILL.md would make the
 # always-loaded body grow linearly with the number of sites, so SKILL.md names
-# only the DIRECTORY and the bridge names the FILE, here, when it applies.
+# only the DIRECTORY (`flows/`) and the bridge names the FILE, here, when it
+# applies.
 #
 # The emission is deterministic and free of judgement: `_domain_from_result`
 # already extracts the bare hostname of a completed command (it has been doing so
 # for telemetry), and this looks that host up in a registry. A hit adds ONE
 # string field to the result envelope; a miss adds NOTHING AT ALL — the field is
 # ABSENT, not empty or null, so the common case costs zero bytes on the wire and
-# a consumer's `"site_notes" in result` is a true predicate.
+# a consumer's `"site_flows" in result` is a true predicate.
 #
 # server.py is deployed as a FLAT single-file /nix/store symlink by home-manager,
-# so Path(__file__) does NOT sit next to reference/ — this resolves the directory
+# so Path(__file__) does NOT sit next to flows/ — this resolves the directory
 # by the same stable ABSOLUTE repo path the spool emitter above uses, for exactly
-# the same reason. BROWSER_BRIDGE_SITES_DIR overrides it (tests).
-_SITES_DIR = Path(
-    os.environ.get("BROWSER_BRIDGE_SITES_DIR")
+# the same reason. BROWSER_BRIDGE_FLOWS_DIR overrides it (tests).
+_FLOWS_DIR = Path(
+    os.environ.get("BROWSER_BRIDGE_FLOWS_DIR")
     or (Path.home() / "workspace" / "devrc" / "scripts" / "browser-bridge"
-        / "reference" / "sites")
+        / "flows")
 )
-# The doc path a consumer is told to read is REPO-RELATIVE, matching how every
-# other reference file is named in SKILL.md's table.
-_SITES_REL_PREFIX = "reference/sites"
+# The doc path a consumer is told to read is REPO-RELATIVE, matching how the
+# flows directory is named in SKILL.md's FLOWS section.
+_FLOWS_REL_PREFIX = "flows"
 # (resolved_dir, stamp, {host_suffix: filename}) — re-parsed only when the file
-# CHANGES. Keyed on the directory so a test that repoints BROWSER_BRIDGE_SITES_DIR
+# CHANGES. Keyed on the directory so a test that repoints BROWSER_BRIDGE_FLOWS_DIR
 # gets a fresh load without needing a reset hook.
 #
 # 🔴 THE STAMP IS THE WHOLE POINT — keyed on the directory ALONE, this cache made
@@ -1115,31 +1116,31 @@ _SITES_REL_PREFIX = "reference/sites"
 # expensive rather than merely stale. A registry that is only ever added to is
 # exactly the shape that hides it: the entries already cached keep resolving, so
 # the feature looks alive while the new half is dead.
-_site_index_cache = None
+_flows_index_cache = None
 
 
-def _site_index_stamp():
+def _flows_index_stamp():
     """A cheap change-stamp for `_index.json`: (mtime_ns, size), or None.
 
     One `stat` per lookup — not a re-parse, and not a re-read. None means the
     stat itself failed (absent/unreadable), and the caller deliberately KEEPS
     whatever it already had rather than discarding it: this whole path is
     best-effort, and a registry that momentarily cannot be stat'd is not a
-    reason to start answering "no site notes" to every command.
+    reason to start answering "no flows" to every command.
     """
     try:
-        st = (_SITES_DIR / "_index.json").stat()
+        st = (_FLOWS_DIR / "_index.json").stat()
         return (st.st_mtime_ns, st.st_size)
     except Exception:  # noqa: BLE001 — an unreadable registry is not an error.
         return None
 
 
-def _load_site_index() -> dict:
-    """The host-suffix → filename registry from `<sites dir>/_index.json`.
+def _load_flows_index() -> dict:
+    """The host-suffix → filename registry from `<flows dir>/_index.json`.
 
     STRICTLY BEST-EFFORT, like every other optional input this server reads: a
     missing file, unreadable file, malformed JSON, wrong top-level shape, or a
-    junk entry degrades to "no site notes" and can never raise into a browser
+    junk entry degrades to "no flows" and can never raise into a browser
     op. A browser command must not start failing because a doc registry got a
     trailing comma.
 
@@ -1149,18 +1150,18 @@ def _load_site_index() -> dict:
     file inside this directory. Junk entries are dropped individually; one bad
     row does not discard the good ones.
     """
-    global _site_index_cache
-    cached = _site_index_cache
-    stamp = _site_index_stamp()
-    if cached is not None and cached[0] == _SITES_DIR:
+    global _flows_index_cache
+    cached = _flows_index_cache
+    stamp = _flows_index_stamp()
+    if cached is not None and cached[0] == _FLOWS_DIR:
         # A None stamp (the file cannot be stat'd right now) REUSES the cache
-        # rather than re-reading — see _site_index_stamp. Only an observed,
+        # rather than re-reading — see _flows_index_stamp. Only an observed,
         # DIFFERENT stamp forces the re-parse.
         if stamp is None or cached[1] == stamp:
             return cached[2]
     mapping = {}
     try:
-        raw = json.loads((_SITES_DIR / "_index.json").read_text("utf-8"))
+        raw = json.loads((_FLOWS_DIR / "_index.json").read_text("utf-8"))
         sites = raw.get("sites") if isinstance(raw, dict) else None
         if isinstance(sites, dict):
             for key, val in sites.items():
@@ -1177,12 +1178,12 @@ def _load_site_index() -> dict:
                 mapping[host] = name
     except Exception:  # noqa: BLE001 — an absent/broken registry is not an error.
         mapping = {}
-    _site_index_cache = (_SITES_DIR, stamp, mapping)
+    _flows_index_cache = (_FLOWS_DIR, stamp, mapping)
     return mapping
 
 
-def _site_notes_path(host: str) -> str:
-    """The reference-doc path for `host`, or "" when the host has none.
+def _flows_doc_path(host: str) -> str:
+    """The flow-doc path for `host`, or "" when the host has none.
 
     🔴 HOST-SUFFIX matching, on LABEL BOUNDARIES — never a substring test. A key
     A key `example.test` matches `example.test` and any subdomain of it, and
@@ -1199,7 +1200,7 @@ def _site_notes_path(host: str) -> str:
     h = host.strip().lower().rstrip(".")
     if not h:
         return ""
-    index = _load_site_index()
+    index = _load_flows_index()
     best = ""
     best_name = ""
     for suffix, name in index.items():
@@ -1208,11 +1209,11 @@ def _site_notes_path(host: str) -> str:
                 best, best_name = suffix, name
     if not best:
         return ""
-    return f"{_SITES_REL_PREFIX}/{best_name}"
+    return f"{_FLOWS_REL_PREFIX}/{best_name}"
 
 
-def _annotate_site_notes(result, host: str) -> None:
-    """Add `site_notes` to a result ENVELOPE when the host has a reference doc.
+def _annotate_site_flows(result, host: str) -> None:
+    """Add `site_flows` to a result ENVELOPE when the host has a flow doc.
 
     Additive and single-field, in the spirit of the extension's advisory `note:`
     on a hidden-tab read. On a miss it does nothing whatsoever — no key, no
@@ -1221,9 +1222,9 @@ def _annotate_site_notes(result, host: str) -> None:
     """
     if not isinstance(result, dict):
         return
-    path = _site_notes_path(host)
+    path = _flows_doc_path(host)
     if path:
-        result["site_notes"] = path
+        result["site_flows"] = path
 
 
 def _session_hash(session_id) -> str:
@@ -3723,12 +3724,12 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 domain = _domain_from_result(result)
                 # The host is already in hand — `_domain_from_result` has been
                 # computing it here for telemetry — so routing to a per-site
-                # reference doc costs one dict lookup and no extra parsing on
-                # the completion path. Adds `site_notes` ONLY when
+                # flow doc costs one dict lookup and no extra parsing on
+                # the completion path. Adds `site_flows` ONLY when
                 # this host is registered; an unregistered host gets no field at
                 # all, which is why SKILL.md can name the directory once and
-                # never grow again as sites are added. See _annotate_site_notes.
-                _annotate_site_notes(result, domain)
+                # never grow again as sites are added. See _annotate_site_flows.
+                _annotate_site_flows(result, domain)
                 log("cmd_ok", op=op)
                 if op == "activate":
                     # Chrome-side activate only set the tab active WITHIN its

@@ -1,13 +1,14 @@
 # civitai.com — identity, account switching, and the reads that lie
 
-**Load this when:** a result envelope named this file in `site_notes` · you are
+**Load this when:** a result envelope named this file in `site_flows` · you are
 about to act on civitai.com **as a particular user** · you need to know WHICH
 account a Brave profile holds · a `/apps` read looks empty, stale, or shows
 entries that 404 · you are about to conclude civitai "leaked scope" or "is
 broken" from a browser read · you are checking whether a change that shipped in
 the last hour is live (read `buildId` — a negative read mid-rollout is worthless).
 
-Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md`.
+Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md` (`reference/…` paths
+below resolve from that bridge dir).
 Mechanism files stay authoritative for mechanism: throttling and `wake` →
 `reference/spa-wake.md`; hit-testing and stripped `data-testid` →
 `reference/css-hit-test.md`; frames/OOPIFs → `reference/frames-cdp.md`;

@@ -45,6 +45,40 @@ completeness:
 | MinIO invoice archiver | k8s secret `minio-archive-config`, key `config.env` → `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`, ns `minio-archive` (or env `MINIO_ARCHIVE_ENDPOINT`/`_ACCESS_KEY`/`_SECRET_KEY`) | homelab cluster (`_minio.py`) |
 | LLM extraction (Stage 2) | `OPENROUTER_API_KEY` (env) | OpenRouter dashboard |
 
+### task-spec-drafter email — no local env file, and the DEFAULT send path needs NO credential
+
+`scripts/task-spec-drafter/email_send.py` sends the drafter digest. It has **two**
+send paths, chosen by `REPO_COS_SEND` (default **`relay`**), and only one of them
+uses a credential at all — so "the drafter's mail credential" is ambiguous until
+you say which path you mean:
+
+- **`relay` — the DEFAULT — has NO SMTP AUTH.** It reaches the postfix relay over a
+  `kubectl port-forward` to `service/postfix-relay` in ns `nebula` of the
+  production cluster, and that relay trusts `MYNETWORKS` (`127.0.0.0/8`). What this
+  path needs is a working `REPO_COS_PROD_KUBECONFIG` (see the Kubeconfigs table
+  below) — **not** a secret. 🔴 A rotation that "fixes the drafter's mail" by
+  touching the Gmail password changes nothing on this path.
+- **`gmail` — the FALLBACK** (`REPO_COS_SEND=gmail`) — uses a Gmail app password.
+  Kept so a relay or cluster hiccup still delivers.
+
+| what | key / secret (names only) | source of truth |
+|---|---|---|
+| Gmail SMTP user | SOPS `<homelab-talos>/clusters/homelab/apps/mailbox/secrets-imap.enc.yaml` → k8s Secret `mailbox-gmail-imap`, `stringData.IMAP_USER`. Env `REPO_COS_SMTP_USER` OVERRIDES it | the homelab repo; decrypt with `SOPS_AGE_KEY_FILE=~/workspace/homelab-talos/.secrets/age.key` |
+| Gmail SMTP app password | same file and Secret, `stringData.IMAP_APP_PASSWORD`. Env `REPO_COS_SMTP_PASSWORD` OVERRIDES it | Google account → Security → App passwords |
+
+🔴 **Rotation coupling — this app password is SHARED, and its OTHER consumer is not
+in this repo.** The same `mailbox-gmail-imap` / `IMAP_APP_PASSWORD` is read by the
+mailbox **sent-poller** (`<homelab-talos>/clusters/homelab/apps/mailbox/sent-poller.yaml`
+and `.../src/sent_poller.py`). Rotating it therefore breaks the sent-poller as well
+as the drafter's fallback, and `git grep` inside devrc will never show you that —
+measured 2026-09-20, `email_send.py` is the **only** file in this repo that names
+the key. Rotate by updating the SOPS file, then reconciling homelab.
+
+⚠ **`REPO_COS_SMTP_USER` / `REPO_COS_SMTP_PASSWORD` are an OVERRIDE, not the source
+of truth** (`email_send.py:129-132` — they win "so a caller can supply creds").
+Nothing on this host sets them, and there is no local env file for them: an
+operator who exports them is bypassing the SOPS lookup for that run only.
+
 ### analyze-service index backup — no new secret, REUSES the SOPS age key
 
 `scripts/analyze-service-index/backup.py` (systemd user timer
