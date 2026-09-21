@@ -117,24 +117,14 @@ notifications and repo browse are dropped.
   ceiling and the playbook says evict what has CLOSED before anything else — the
   surviving RESOLVED blocks carry both outcomes. History: `git log -p` this file.
 
-### 🔴 No write verb has ever executed against real GitHub
-- as-of: 2026-09-16
-- **Symptom + exact repro:** n/a — an untested path in shipped code, not a defect. The five
-  write verbs are exercised only against in-process fakes and `httptest`.
-- **Observed (with values):** the whole Go suite (231 tests) passes inside `nix build`'s
-  **network-less sandbox**, which is itself the proof no test reaches a real host. Four
-  additional locks: `App.runner` is `nil` in pure tests; the one end-to-end test asserts the
-  write ledger is *exactly* `[PostComment … body="ok"]`; `http.DefaultTransport` is replaced in
-  both network-reaching packages by a loopback-only transport; `cmd/*` is exempt with a stated
-  reason. **I verified the transport lock myself** — disarming it yields
-  `the guard let a request to api.github.com THROUGH`.
-- **Ruled out:** that the guard is vacuous — mutated it and watched the negative control fire.
-  ⚠ My FIRST mutant did not compile (orphaned `fmt`), which is not a result; a compiling
-  variant is what produced the kill. via: measurement
-- **Leading hypothesis:** none. `LiveRunner`'s three delegations and `ghapi`'s three endpoints
-  are plain code paths that have simply never run live.
-- **Next probe:** open a throwaway PR in a scratch repo and drive `c` (comment) then `m`
-  (merge) against it. **Operator-only** — an agent must not run a live write verb.
+### DEMOTED (still OPEN) — no write verb has ever executed against real GitHub
+- as-of: 2026-09-16 · **full block: `claudedocs/refs/mention-review-write-verbs-untested.md`**
+- 🔴 **NOT CLOSED — demoted, not evicted**, to leave this doc usable headroom. All five write
+  verbs (`c`/`a`/`R`/`v`/`m`) are exercised only against fakes; the Go suite runs in a
+  network-less sandbox, which is itself the proof nothing reaches a real host.
+- **Next probe: OPERATOR-ONLY.** Open a throwaway PR in a scratch repo and drive `c` then `m`.
+  🔴 An agent must not press a write key — they act on real GitHub as the operator. This is
+  why the item cannot close on its own.
 
 ### EVICTED — the 422 diagnosis block (2026-09-21, byte ceiling)
 - The 2026-09-18 block "The 422's actual cause was never determined". 🔴 Evicted by `/audit-pr`
@@ -148,52 +138,39 @@ notifications and repo browse are dropped.
   `errors[]`, so **the next occurrence names its own reason. If it recurs, capture the card
   verbatim before anything else** — that single string settles it.
 
-### 🔴 Why right-aligning the rank marker moves fzf's ranking — MECHANISM UNKNOWN
-- as-of: 2026-09-20
-- **Symptom + exact repro:** rendering the rank `f"{rank:>3}"` instead of `f"{rank:<3}"` changes
-  fzf's output order. 120-row synthetic corpus, 20 queries,
-  `fzf --filter <q> -i --tiebreak=end --nth=2..`, marker present in both arms.
-- **Observed (with values):** right-aligned — top-1 changed on **7 of 20**, tail on 13 of 20.
-  Left-aligned — top-1 on **0 of 20**, tail on 1 of 20. Match SET identical 20/20 both. fzf
-  0.74.4. via: measurement
-- **Ruled out:** that the marker becomes MATCHABLE under right alignment — this was the shipped
-  explanation and it is FALSE. A query matching only the marker digits returns **0 rows under
-  BOTH alignments**; positive control, 1 row with `--nth` dropped. via: measurement
-- **Ruled out:** that field-1 WIDTH explains it. Width genuinely does reach fzf's positional
-  tiebreak (identical field-2.. text at widths 3 vs 6 inverts; input order once equalised, and
-  under `--tiebreak=index`) — but `:<3` and `:>3` are the SAME width, so offsets are unchanged
-  between the two alignments. via: measurement
-- **Leading hypothesis:** none. Recorded as unknown deliberately — the first explanation read as
-  well as a true one and was wrong; a second invented under pressure would be a hypothesis
-  wearing a comment's clothes.
-- **Next probe:** `fzf --filter` both alignments over a corpus where every rank has the SAME
-  digit count (ranks 100–199). Difference vanishes ⇒ digit-count variation is the cause; persists
-  at constant digits AND width ⇒ it is in fzf's scorer, worth reporting upstream.
+### DEMOTED (still OPEN) — why right-aligning the rank marker moves fzf's ranking
+- as-of: 2026-09-20 · **full block: `claudedocs/refs/mention-picker-fzf-alignment.md`**
+- 🔴 **NOT CLOSED — demoted, not evicted** (playbook step 2), because both CLOSED blocks were
+  already evicted and a budget may not be paid with an open investigation.
+- `f"{rank:>3}"` vs `f"{rank:<3}"` changes fzf's order — right moved top-1 on **7 of 20**, left
+  on **0 of 20** (fzf 0.74.4, same width, identical match set); shipped code uses `:<` on that.
+  **Both plausible mechanisms are RULED OUT** and the leading hypothesis is deliberately none.
+- **Next probe:** re-run both alignments over ranks 100–199 (constant digit count).
 
 ## Next steps (ranked)
-1. **Decide whether `below`-dominance is the real defect.** The picked row's class is `below` 56 /
-   `plausible` 17, and the proposal flags that NOT DIAGNOSED and *"a bigger finding than symptom
-   1"*. Cheap mechanical test already exists: re-run the causal replay with the class term demoted
-   below distance/score and read top-1 against the 12.7% observed. Untested mechanism worth trying
-   first: many clicked `#N` are clawgate/ClickUp ids, not GitHub numbers, so no repo's range is
-   relevant. Repo: devrc.
-   ⚠ **This was rank 3 until symptom 1 closed; it is rank 1 because it is the only item carrying
-   an external forcing function, not because anything new happened to it.** Renumbered against a
-   MEASURED empty claim set — `claim-work --list` showed `mention-review-tui-1` released and no
-   other `mention-review-tui-*` claim live at that moment.
-   forcing: regression — the shipped sort key ranks by a term that disagrees with 77% of real
-   picks; #1813 makes that disagreement visible without fixing it.
-2. **Round 3 delta audit of `#1813`, scoped to round 2's fixes plus the two merge commits.**
-   Round 2 returned findings, so the ladder's rule says another round follows; a clean round
-   ends it. Range is now `2f9af4f8..8c5fda78` (was `..9c4bb252`) and **includes `b116179f` +
-   `8c5fda78`, which are merges** — a delta audit over a merge range reads differently, so state
-   the range you actually gave it. Post the `audit-claims` block BEFORE dispatching: a delta with
-   no parseable block is REFUSED, and a MISSING INTERMEDIATE one does NOT refuse — it silently
-   anchors older and widens the range. ⚠ **`#1813` IS MERGED** (`7f39fda7`), so this audits
-   shipped code — a finding here is a follow-up PR, not a change to a pending one. Repo: devrc.
-   forcing: none — advisory; nothing external waits on it. **Ranked BELOW an item with a real
-   forcing function deliberately**: a `forcing: none` item is not eligible to be worked, so
-   putting it first would have pointed the next session's `claim-work` at a non-workable rank.
+1. **Merge `#1829` (Tier A staleness margin) after an `/audit-pr` round 0.** It changes the
+   sort key on a path with three prior audit rounds, and its ceiling is ONE empirical constant.
+   Repo: devrc. IN FLIGHT: devrc#1829. Verified independently of the implementer: **0 of 6**
+   real wrong-repo picks leak to PLAUSIBLE at the ceiling margin; the motivating staleness case
+   flips to PLAUSIBLE; `IMPOSSIBLE` preserved at `max_ref==0`; regression matrix **red at
+   `3fa77f49` (40 of 51) → green at HEAD (51/51)**, with 8 assertion-shaped failures at base
+   distinct from the symbol-missing ones.
+   forcing: regression — the shipped sort key filed real references BELOW; reproduced live
+   (table entry 1809 vs a live head of 1828 off a 0.71-day table = 19 references misfiled).
+2. **Merge `#1828` (LICENSE).** Backs the derivation's MIT claim, scoped to
+   `nix/pkgs/tools/mention-review/src/` so the grant covers the Go module and NOT the personal
+   config (operator, 2026-09-21). `nix-instantiate --parse` OK; gotests `RESULT: PASS` 386,
+   `SCOPE: FULL`, with the file inside `cleanSource`. Repo: devrc. IN FLIGHT: devrc#1828.
+   forcing: security — a PUBLIC repo asserting a licence grant nobody had made.
+3. **Correct ONE SENTENCE in `proposal-mention-picker-visibility.md` once `#1829` lands** — the
+   `and **not** a stale-table artifact` clause in §(B), a wrong-clock error (refuted below).
+   🔴 **Nothing else there is wrong.** §(B) is the **`--no-sort`** option and the 54/17 table is
+   the evidence the operator REFUSED it on — NOT a diagnosis that the class term is bad;
+   demoting that term appears once, at `:272-278`, already **NOT DIAGNOSED**. Repo: devrc.
+   ⚠ **Renumbering note, carried:** ranks here have been renumbered twice, each time against a
+   MEASURED empty claim set (`claim-work --list` showing no live `mention-review-tui-*`). The
+   rank is half a claim's identity — never renumber without that check.
+   forcing: none — the code is fixed either way; this is the prose catching up.
 ## Defects (batched)
 - 🔴 **NO `LICENSE` FILE WHILE THE DERIVATION CLAIMS MIT** —
   `nix/pkgs/tools/mention-review/default.nix:146` declares `licenses.mit` with nothing backing
@@ -733,6 +710,42 @@ notifications and repo browse are dropped.
   `RULES.md` §Git Workflow and the cairn `devrc/scripts` entry. **They were written out HERE and
   cut by `/audit-pr` round 0** — 66% of that update's growth, into a doc whose own 🔴 rule 68
   lines above says methodology goes to cairn. Do not re-add them.
+
+- 🔴 **`below`-DOMINANCE WAS A STALE-TABLE ARTIFACT, NOT A BAD SORT KEY AND NOT ClickUp IDS —
+  and the proposal's rebuttal of staleness is a NON-SEQUITUR.** ⚠ **An earlier draft also
+  called the proposal's finding MISATTRIBUTED; that was MY error** (round 0 on `#1829` caught
+  it) — the proposal never diagnosed the class term as bad, and **exactly one sentence there
+  is wrong**: the staleness clause. I mischaracterised it while charging it with
+  mischaracterisation. The mechanism argument is logical: `CLASS_BELOW`
+  requires `max_ref < N`, so if a mention points at a **real, existing** item then the repo's
+  TRUE max at click time was necessarily ≥ N. Click-time BELOW can therefore ONLY come from
+  (a) a stale `known_ranges.json` or (b) a wrong repo. **Measured: of 100 distinct `(repo, n)`
+  picks, 94 exist and 6 do not** — so (b) is ~6% and the rest of the BELOW mass is (a).
+  - §(B) says *"not a stale-table artifact — refreshed by a daily timer, last run within 5h of
+    the measurement"*. The telemetry `klass` is recorded at **click** time; the table's
+    freshness at **measurement** time cannot speak to it. Right fact, wrong clock.
+  - 🔴 **The proposal states the SAME quantity twice with OPPOSITE answers and never
+    reconciles them:** §1.4 *"104 plausible, 5 below"* vs §(B) *"below 54, plausible 17"*. §1.4
+    RECOMPUTES with a current table (washing staleness out); §(B) reads click-time telemetry
+    (preserving it). An independent replay of 121 picks against today's table gives **115
+    plausible / 6 below**, corroborating §1.4 — so **the two differ by exactly the staleness**,
+    which is the whole finding sitting unnoticed inside one document.
+  - ⚠ **The stale side is an UPPER-BOUNDING ARGUMENT, not an observation.** `picks.jsonl`
+    stores `(t, repo, n)` with no `max_ref`, and no historical table snapshots exist, so the
+    click-time gap distribution is **unrecoverable**. Only the wrong-repo side is measured.
+- **The six wrong-repo gaps are a ONE-SIDED bound, which is what makes the ceiling safe.**
+  Today's gaps are `1810, 183, 171, 135, 79, 74`. `gap = n − max_ref` shrinks monotonically as
+  `max_ref` grows, so **today's 74 is a LOWER bound on the click-time gap** — at click time
+  `max_ref` was smaller and the gap larger. A ceiling of 60 < 74 therefore holds a fortiori,
+  and the implementer's stated worry that "the ceiling depends on 74 being right" is retired.
+- 🔴 **I BRIEFED A ONE-DAY GROWTH FIGURE AS IF IT WERE A RATE, AND IT WAS ~2.5× LOW.** I told
+  the implementer "~14/day" from a single day's observation of one repo. It measured 14 days
+  across the eight busiest repos (34.1 / 23.2 / 11.2 / 10.9 / 10.4 / 8.9 / 4.8 / 0.0 per day)
+  and re-measured the fastest over 31 days at 39.0/day, landing on `RANGE_GROWTH_PER_DAY =
+  40.0`. A margin built on my number would have under-covered by 2.5×. **"One measurement is
+  not a general claim" — committed by the briefer, caught by the implementer.**
+- ⚠ **Two `gh` instrument traps from this work are in cairn, not here** — `devrc/scripts`
+  2026-09-21, rev `610596953ba16646`.
 
 ## How to verify
 ```bash
