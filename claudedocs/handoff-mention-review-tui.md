@@ -22,42 +22,52 @@ notifications and repo browse are dropped.
 ## State now
 - 🔴 **THE ARC IS CLOSED** — the operator used `mention-review` for a real review **on a real
   screen** and reported **"done, working"** (2026-09-18); that is the `judgement` line this doc
-  froze at round 1. ⚠ **Stated at the scope of the evidence:** the condition also says *"beats
-  octo at reading a diff"*, and `"done, working"` carries no comparison. Pre-existing gap.
+  froze at round 1. ⚠ The condition also says *"beats octo at reading a diff"*, and
+  `"done, working"` carries no comparison. Pre-existing gap.
 - ✅ **CARRIED FORWARD — durable, would otherwise be dropped by the next replace:**
   `#1793` → `cee56910` (picker promotion, THREE gates narrower than authorised: promotes only
   when the ordering RAN, its top row is not already the pane guess, and that row is
   `CLASS_PLAUSIBLE` **and** uniquely separated) · `#1781` → `8d0984ba` · `#1772` → `2b131bf2` ·
-  `#1773` → `97c20d06` · `#1775` → `66e51d90`. 🔴 **`--version` CANNOT distinguish builds** —
-  verify by content with a positive control. **The picker is live with NO switch** — the
-  Alacritty wrapper execs `scripts/mention-open.py` from the WORKING TREE.
-- ✅ **SYMPTOM 1 — the arc's one unmet objective — IS DECIDED AND IMPLEMENTED.** Operator,
-  2026-09-20: **(D) then (A), (B) REFUSED**. Two STACKED PRs, both OPEN:
-  - **`#1812`** head **`b17cf93f`**, base `main`, `MERGEABLE`, **all four Tekton legs green**.
-    Payload is ONE executable line: `--bind="esc:print-query+abort"`, so an ESC records `queried`.
-  - **`#1813`** head **`9c4bb252`**, base is **`#1812`'s branch, not `main`**. **No CI posted on
-    that head — ABSENT, not green.** Every row carries its RANK (`1`,`2`,… / `-` unranked /
-    `?` unstamped-bug), `--nth=2..` keeping the marker out of fzf's haystack.
-  - 🔴 **DO NOT `gh pr merge --delete-branch` #1812 while #1813 is open** — GitHub auto-closes
-    a PR whose base branch is deleted and REFUSES to reopen it.
-- ⚠ **(A) SHIPPED NARROWER THAN OPTION (A) AS WRITTEN — rank only, no class column.** Option (A)
-  offered *"class **and/or** rank"*; shipping both was the implementer's reading, and `/audit-pr`
-  round 0 logged the class field as UNATTRIBUTED. Operator chose rank. Measured: the click-time
-  class of the picked row is `below` **56** vs `plausible` **17**, so a class column would read
-  "the ranker does not trust this" on the WANTED row ~3 times in 4.
-- ✅ **AUDIT LADDER RUN TO ROUND 2 ON BOTH PRs** (round 0 requirements/deletion, round 1 nine
-  axes blind, round 2 delta). Round-1 `audit-claims` blocks are POSTED on both (`payload=31` on
-  #1812, `payload=71` on #1813; classification decided once — payload is `scripts/mention-open.py`,
-  scaffolding is `scripts/tests/**` and `claudedocs/**`). **Both round 2s found things needing
-  fixing, so NEITHER ladder returned a clean round.** All findings fixed and pushed. Suites:
-  #1812 `650 passed / 2 skipped`, #1813 `657 / 2`, dev-host tier only — not a gate verdict.
-- **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5**. Its positive control
-  shows the board is reachable, but a wrong session id also answers 200 with an empty array, so
-  this is NOT a clean bill of health.
-- 🔴 **THIS SESSION'S METHODOLOGY LESSONS ARE IN THE CAIRN INDEX, NOT HERE** — `devrc/scripts`
-  and `devrc/tests`, both 2026-09-21, carrying the fzf contract (abort is FOUR keys; bind ACTION
+  `#1773` → `97c20d06` · `#1775` → `66e51d90` · **`#1812` → `6ee5ff68`**. 🔴 **`--version`
+  CANNOT distinguish builds** — verify by content with a positive control. **The picker is live
+  with NO switch** — the Alacritty wrapper execs `scripts/mention-open.py` from the WORKING TREE.
+- ✅ **SYMPTOM 1 — the arc's one unmet objective — IS DECIDED AND HALF-LANDED.** Operator,
+  2026-09-20: **(D) then (A), (B) REFUSED**.
+  - **`#1812` MERGED as squash `6ee5ff68` (2026-09-21)**, `--delete-branch` NOT passed. Payload
+    is ONE executable line: `--bind="esc:print-query+abort"`, so an ESC records `queried`.
+    🔴 **Verified by CONTENT, never ancestry** (a squash is never an ancestor of its branch):
+    `git diff 17b6ff96 origin/main -- scripts/mention-open.py scripts/tests/test_mention_open.py`
+    is EMPTY, positive control `git grep -c 'def ' origin/main -- scripts/mention-open.py` = 61.
+    Four Tekton legs green **on that exact head sha**, read per-context from
+    `/commits/<sha>/statuses` — never the roll-up, which maps `error` onto `failure`.
+  - **`#1813` PUSHED, awaiting CI — head now `8c5fda78`** (was `9c4bb252`), base auto-retargeted
+    to `main`. Every row carries its RANK (`1`,`2`,… / `-` unranked / `?` unstamped-bug), with
+    `--nth=2..` keeping the marker out of fzf's haystack. Net payload vs `main`: **3 files,
+    +554/−21**.
+- 🔴 **`#1813` WAS `CONFLICTING`/`DIRTY`, NOT MERELY "NO CI POSTED" — the previous update of this
+  doc had that wrong, and a kickoff line propagated it.** Its branch predated three of the
+  parent's newest commits (`b17cf93f`, `26228216`, `17b6ff96`), so it conflicted against its own
+  base before `main` ever entered it. Merged parent-tip-then-`main` in a throwaway worktree.
+- ✅ **Merged tree verified locally: `648 passed, 2 skipped in 99.51s`** across
+  `test_mention_open` + `test_mention_scan` + `test_mutation_battery_anchors`, at base
+  `6ee5ff68`. That is **8 ABOVE the 640/2 the pre-`#1813` tree gives** — a number that did not
+  move would mean the branch's own tests never ran. ⚠ **Dev-host tier ONLY**; the `nix build`
+  sandbox tier that Tekton runs was NOT run here, and the two are blind to different things.
+- ⚠ **(A) SHIPPED NARROWER THAN OPTION (A) AS WRITTEN — rank only, no class column**
+  (`a70839af`). Option (A) offered *"class **and/or** rank"*. Measured: the click-time class of
+  the picked row is `below` **56** vs `plausible` **17**, so a class column would read "the
+  ranker does not trust this" on the WANTED row ~3 times in 4.
+- ⚠ **`#1812` MERGED WITHOUT ITS ROUND-3 DELTA AUDIT, AND THE LADDER'S OWN RULE SAYS A CLEAN
+  ROUND ENDS IT — round 2 was NOT clean.** The merge followed this doc's rank 1 and the
+  operator's kickoff, and the round-3 item was `forcing: none`/advisory; recording it so the
+  gap is a decision on the record rather than an omission nobody noticed.
+- **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5** again. Its positive
+  control (2 links for a different session) shows the board is reachable, but a wrong session id
+  also answers 200 with an empty array, so this is NOT a clean bill of health.
+- 🔴 **METHODOLOGY LESSONS ARE IN THE CAIRN INDEX, NOT HERE** — `devrc/scripts` and
+  `devrc/tests`, both 2026-09-21, carrying the fzf contract (abort is FOUR keys; bind ACTION
   ORDER is load-bearing and a reorder is silent; `--nth` excludes a marker from MATCHING but not
-  RANKING) and the control-design lesson below. `cairn recall --repo ~/workspace/devrc`.
+  RANKING). `cairn recall --repo ~/workspace/devrc`.
 
 ## Open investigations — live diagnosis state
 
@@ -154,18 +164,23 @@ notifications and repo browse are dropped.
   at constant digits AND width ⇒ it is in fzf's scorer, worth reporting upstream.
 
 ## Next steps (ranked)
-1. **Merge `#1812`, then `#1813`.** `#1812` is green on all four legs and `MERGEABLE`; merge it
-   **without** `--delete-branch`, or retarget `#1813` first (`gh pr edit 1813 --base main`). Then
-   re-check `#1813` — `mergeable` reads `UNKNOWN` (a recompute, poll it) and **no CI has posted on
-   `9c4bb252`**. After both land: `scripts/ship.sh`, then verify by CONTENT — `bin/mention-review`
-   is a `makeWrapper` script, so grep the WRAPPED binary with a positive control first.
-   Repo: devrc. IN FLIGHT: devrc#1812, devrc#1813.
-   forcing: user — the operator chose (D) then (A) on 2026-09-20; these PRs are that decision.
-2. **Round 3 delta audits, scoped to round 2's fixes only.** Both round 2s returned findings, so
-   the ladder's rule says another round follows; a clean round ends it. Ranges
-   `bd437b53..b17cf93f` (#1812) and `2f9af4f8..9c4bb252` (#1813). Post each round's `audit-claims`
-   block BEFORE dispatching — a delta with no parseable block is REFUSED, and a MISSING
-   INTERMEDIATE one does NOT refuse, it silently anchors older and widens the range. Repo: devrc.
+1. **Merge `#1813` once its four Tekton legs report on head `8c5fda78`.** Last step of symptom 1
+   and of the arc. Then `scripts/ship.sh`, and verify by CONTENT — `bin/mention-review` is a
+   `makeWrapper` script, so grep the WRAPPED binary with a positive control first. Repo: devrc.
+   IN FLIGHT: devrc#1813. 🔴 **Read the legs on THAT sha** — this branch has never had CI on any
+   head, so there is no prior green to lean on, and the repo's measured red rate is ~42% noise:
+   read the failing test's NAME and ask whether a 3-file picker diff can reach it before
+   debugging. ⚠ The base branch was **auto-deleted by a repo setting** when `#1812` merged (not
+   by a `--delete-branch` flag) and `#1813` retargeted to `main` rather than closing — the
+   stacked-parent hazard did not fire, but do not read that as the rule having protected it.
+   forcing: user — the operator chose (D) then (A) on 2026-09-20; this PR is that decision.
+2. **Round 3 delta audit of `#1813`, scoped to round 2's fixes plus the two merge commits.**
+   Round 2 returned findings, so the ladder's rule says another round follows; a clean round
+   ends it. Range is now `2f9af4f8..8c5fda78` (was `..9c4bb252`) and **includes `b116179f` +
+   `8c5fda78`, which are merges** — a delta audit over a merge range reads differently, so state
+   the range you actually gave it. Post the `audit-claims` block BEFORE dispatching: a delta with
+   no parseable block is REFUSED, and a MISSING INTERMEDIATE one does NOT refuse — it silently
+   anchors older and widens the range. Repo: devrc.
    forcing: none — advisory; nothing external waits on it.
 3. **Decide whether `below`-dominance is the real defect.** The picked row's class is `below` 56 /
    `plausible` 17, and the proposal flags that NOT DIAGNOSED and *"a bigger finding than symptom
@@ -180,16 +195,24 @@ notifications and repo browse are dropped.
   `nix/pkgs/tools/mention-review/default.nix:146` declares `licenses.mit` with nothing backing
   it, and the repo is PUBLIC.
 - 🔴 **181+ agent worktrees registered in this clone**, oldest 2026-08-13; a stale worktree
-  holds its branch repo-globally. `scripts/worktree-prune` exists; not run.
+  holds its branch repo-globally. `scripts/worktree-prune` exists; not run. ⚠ This session added
+  **two more** (`/tmp/devrc-rank-T2Xs`, `/tmp/devrc-handoff-1kIX`) — remove them.
 - 🔴 **TEST-ISOLATION SEAM: every `ranges=` test in `test_mention_open.py` consumes
   `MO.PICKS_PATH`, which no autouse fixture redirects** — they read the operator's real
   `~/.config/mention-open/picks.jsonl`. Found by `/audit-pr` round 4, **pre-existing**, inert
   for those tests (Tier B sits below class and distance and cannot move a uniquely-PLAUSIBLE
   top row). Worth closing on its own.
+- ⚠ **A COMMENT ON `main` COUNTS THREE GUARDS AND THEN LISTS TWO.** `scripts/mention-open.py`
+  (search `THREE guards catch it`) reads *"THREE guards catch it … (the whole-string
+  `EXPECTED_PICKER_SH` pin, and `_ESC_PRINTS_QUERY` …), but **neither** was CHOSEN for that."*
+  The parenthetical enumerates two and the conclusion says "neither" — the correction to THREE
+  landed in the lead sentence and was never carried into the list. **Pre-existing on `main`,
+  byte-identical there — NOT a merge artifact** (checked, because it first surfaced inside a
+  conflict resolution and read like one). Name the third guard or revert the count.
 - ⚠ **`drift-check.sh` rc 17 on BOTH hosts, and the two have DIVERGED from each other** on
   `homelab-talos/containers/clawgate`. 🔴 **No ranked item, and NO COUNTS WRITTEN HERE** — the
   deadman reports it every 6 h with live numbers, and an earlier draft's counts were stale
-  within hours (round 0 re-derived one of the three as already wrong). Run the checker.
+  within hours. Run the checker.
 - Pre-existing and known: `ghapi_test.go`/`argv_test.go` not `gofmt`-clean (confirmed on `main`
   at `2b131bf2`); four scanner limits documented in `detailrouting_test.go`; two guards at
   `scripts/tests/test_mention_review.py:122` and `:361` claiming more than they check.
@@ -684,24 +707,70 @@ notifications and repo browse are dropped.
   has grown reads `plausible` retrospectively. **Mechanism likely, NOT proven:** no historical
   table snapshots exist.
 
+- 🔴 **A SQUASHED PARENT RE-PRESENTS THE *SAME* CONFLICTS TO THE CHILD, AND THAT IS NOT A FAILED
+  RESOLUTION.** Merging the parent TIP into `#1813` conflicted in ONE file; committing that and
+  then merging `origin/main` conflicted in the **same three regions again**, because the squash
+  commit is not an ancestor of the parent-branch commits the child had just merged, so the merge
+  base fell back to old `main` and every parent-side hunk was re-offered. The two-step is still
+  right — parent-tip-first cut the conflict surface from **four files to one** — but budget for
+  resolving twice, and expect the second pass to be mechanical (*take HEAD*) only because the
+  first pass already decided the content.
+- 🔴 **THE ONLY REAL CONFLICT WAS SEMANTIC, AND *BOTH* SIDES WERE FALSE ON THE MERGED TREE —
+  taking either would have shipped a wrong comment through a clean `git` resolution.** The pty
+  readiness comment in `_fzf_interactive_first_row`:
+  - the parent's text says *"On THIS tree … round 2 got ZERO failures over 80 prompt-only
+    observations — so the rate does NOT reproduce here"*. True of the PARENT tree, where
+    `_eponymous_corpus` is a hardcoded f-string (`f"github 1234 — …/{r}/pull/1234"`) carrying
+    **no marker**. On the merged tree that corpus derives its rows from `picker_rows()` and calls
+    `MO.stamp_picker_markers`, so it **is** the marker-carrying corpus where the race was
+    measured biting 11–12 of 20. Verbatim it tells a maintainer the race does not bite in the one
+    file where it was measured biting.
+  - HEAD's text says the race is *"pre-existing, not something the row marker opened"*. The
+    parent's marker-free **0-of-80** is evidence against that.
+  **Resolved by scoping each measurement to its own corpus and WITHDRAWING the causal claim
+  rather than substituting a second one:** the marker's WIDTH is demonstrably not the variable
+  (12 of 20 at the shipped 5-byte rank-only width vs 11–12 at the ~16-byte class+rank one), but
+  0-of-80 and 12-of-20 differ by the *whole* change of corpus and nothing isolates the marker
+  inside it. `claude/RULES.md`'s "a clean git merge is not a clean merge", with the luck of
+  surfacing as a real conflict instead of auto-merging silently.
+- **Verify a conflict resolution by re-reading BOTH sides of a two-way pin, not just the file you
+  edited.** `PICKER_SH` (module) and `EXPECTED_PICKER_SH` (test) are pinned against each other by
+  `test_the_picker_SHELL_SCRIPT_stays_the_shape_it_is_pinned_to`, and the squash offered the same
+  conflict in EACH — resolving one and not the other is a red that reads like a payload bug. Both
+  resolved to `--nth=2..`, then re-grepped side by side.
+- **`rerere` is enabled in this clone (`rerere.enabled=true`), and this doc already records it
+  replaying a resolution from a different merge.** Disable it **per command**
+  (`git -c rerere.enabled=false merge …`) — NEVER `git config --local`, because worktree config
+  writes the **common** git dir and would change the shared clone for every session.
+- **Check the docs in a stacked merge's conflict set explicitly.** Here both auto-merged to
+  byte-identical copies of `main`'s (`git diff origin/main -- <doc>` empty for each), which is the
+  good case — but this doc has an enforced byte ceiling, and one that merged to a UNION of two
+  versions would breach it without touching a line of code.
+- ⚠ **`gitenv(session)` printed `unattributed-observations=3` on a clean run** — `.git/config`
+  changed between tests with no test body running, and it could not attribute the write because
+  other sessions' processes sit in the repo. `attributed-violations=0`, mode `report(auto)`. A
+  REPORT, not a failure, and the expected shape on a shared box.
+
 ## How to verify
 ```bash
-# 🔴 `--version` CANNOT answer "is it deployed". Follow the WRAPPER; POSITIVE CONTROL FIRST.
-B=$(readlink -f "$(command -v mention-review)")
-R=$(grep -oE '/nix/store/[a-z0-9]+-mention-review[^/]*/bin/\.mention-review-wrapped' "$B"|tail -1)
-grep -ac 'usage: mention-review' "$R"                            # POSITIVE CONTROL — must be 1
-grep -c 'nth=2\.\.' $DEVRC/scripts/mention-open.py               # the marker gate — NON-ZERO
-grep -c 'esc:print-query+abort' $DEVRC/scripts/mention-open.py   # the ESC bind — NON-ZERO
+# 🔴 `#1812` landed — by CONTENT, never ancestry (a squash is never an ancestor).
+#   POSITIVE CONTROL FIRST or the emptiness below is a fact about the instrument.
+git -C $DEVRC grep -c 'def ' origin/main -- scripts/mention-open.py        # must be non-zero
+git -C $DEVRC diff 17b6ff96 origin/main -- \
+  scripts/mention-open.py scripts/tests/test_mention_open.py               # must be EMPTY
 
-# The suite, scope NAMED so the number reproduces (657 passed / 2 skipped on #1813):
+# `#1813`'s CI, per-context on its own head — NEVER `/commits/<sha>/status` (the roll-up maps
+#   `error` onto `failure`, so it reads RED for a merely superseded run).
+H=$(gh pr view 1813 --json headRefOid --jq .headRefOid); echo "${H}"   # expect 8c5fda78…
+gh api "/repos/innovation-upstream/devrc/commits/${H}/statuses" \
+  --jq '.[] | "\(.context)\t\(.state)\t\(.updated_at)"' | sort -u
+
+# The suite on the merged tree, scope NAMED so the number reproduces: 648 passed / 2 skipped at
+#   base 6ee5ff68 — ABOVE the 640/2 the pre-#1813 tree gives, which is the point.
 nix develop $DEVRC -c python3 -m pytest \
-  $DEVRC/scripts/tests/{test_mention_open,test_mention_scan,test_mutation_battery_anchors,test_handoff_doc_size}.py \
-  -q -p no:cacheprovider
+  $DEVRC/scripts/tests/{test_mention_open,test_mention_scan,test_mutation_battery_anchors}.py -q
 
-# 🔴 AFTER ANY EDIT NEAR `picked_ordered` OR `PICKER_SH` — anchor guard FIRST, then the rows it
-#   names. Gating `picked_ordered` took K88 to 0x, where a row scores SURVIVED testing nothing.
-nix develop $DEVRC -c python3 -m pytest $DEVRC/scripts/tests/test_mutation_battery_anchors.py -q
-PYTHONDONTWRITEBYTECODE=1 nix develop $DEVRC -c python3 \
-  $DEVRC/scripts/tests/mutation_battery_mentions.py --only K48,K49,K50,K54,K56,K88,K89
-git -C <worktree> status --porcelain -- scripts/mention-open.py   # MUST be empty afterwards
+# 🔴 The two pinned picker strings must stay IDENTICAL — one hit in EACH file.
+git -C $DEVRC grep -n 'bind="esc:print-query+abort" --nth=2\.\.' -- \
+  scripts/mention-open.py scripts/tests/test_mention_open.py
 ```
