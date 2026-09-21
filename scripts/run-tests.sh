@@ -2544,7 +2544,26 @@ TARGET_FLOORS=(
   # ZERO new skips, so EXPECTED_SKIPS is untouched. Read from the AUTHORITATIVE gate:
   #   PASS  scripts/claude-hooks/tests/test_clawgate_writeback_guard.py  (collected=296 passed=296 skipped=0 floor=266)
   #   _suggested_floor 296 = 296 - min(50, max(1, 296/20 = 14)) = 296 - 14 = 282.
-  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|282"
+  #
+  # 2026-09-21, the `muster` widening (Phase 0 step 1 of the clawgate->muster
+  # extraction): 296 -> 371 collected. The +75 exist because both arming patterns
+  # in this hook spelled `clawgatectl` literally, so the rename alone would have
+  # left `tracked_ids` empty and the Stop path reaching NO VERDICT — silent, which
+  # is also what a correctly-written-back session looks like. RED at 23b898d5: 20
+  # of the new cases, incl. the whole-path `test_THE_SILENT_NO_VERDICT_CASE_*`
+  # (measured `reader.calls == []` there — the live read was never attempted).
+  # The rest are the other direction: the bare-word over-match controls (13
+  # commands that must NOT arm a hook that can BLOCK), the compatibility cases for
+  # an env file that has never heard of muster, and the CLI-name SEAM ledger.
+  # ZERO new skips, so EXPECTED_SKIPS is untouched.
+  #   _suggested_floor 371 = 371 - min(50, max(1, 371/20 = 18)) = 371 - 18 = 353.
+  # ⚠ MEASURED BY `pytest <this file> --collect-only -q`, NOT by the nix gate, and
+  # the difference is stated rather than glossed: this is a per-FILE target with
+  # zero skips, so the gate runs exactly this file and its count cannot be moved by
+  # another branch's tests — which is the one case where the two measurements are
+  # the same number. If this line conflicts with a sibling branch, re-run the gate
+  # on the MERGED tree and copy what it prints; do NOT reconcile by hand.
+  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|353"
   # 2026-08-20, the clawgate task INTERVIEW gate arrives as a NEW target: 300
   # collected. Large because the non-matches are the load-bearing half of a hook
   # that DENIES — 30 commands that must not trigger, 5 producer launchers, 15
@@ -2559,7 +2578,22 @@ TARGET_FLOORS=(
   #   _suggested_floor 300 = 300 - min(50, max(1, 300/20 = 15)) = 300 - 15 = 285.
   # ZERO new skips, so EXPECTED_SKIPS is untouched. If this line conflicts with a
   # sibling branch, re-run the gate on the MERGED tree and copy what it prints.
-  "scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py|285"
+  #
+  # 2026-09-21, the same `muster` widening on this gate: 300 -> 361 collected. This
+  # hook breaks by NAME only — `PREFILTER`, `basename(argv[0])`, `CREATE_PATHS` —
+  # and the failure is a silent ALLOW of every criteria-less create. RED at
+  # 23b898d5: 41 of the new cases. The `clawgatectl` twin of every parametrized row
+  # is green on both sides and is the regression half; the 12 bare-word rows and the
+  # 5 versioned-path near-misses are the over-match half; and the PREFILTER seam
+  # guard takes its positive control from the CLASSIFIERS rather than from
+  # `evaluate`, which consults the same prefilter and would make it circular.
+  # 21-row mutation battery, PYTHONDONTWRITEBYTECODE=1, 21/21 as expected, incl.
+  # both positive controls and two comment-only SURVIVES controls:
+  # `scripts/tests/mutants-muster-hook-guards.sh`. ZERO new skips.
+  #   _suggested_floor 361 = 361 - min(50, max(1, 361/20 = 18)) = 361 - 18 = 343.
+  # ⚠ Same measurement caveat as the line above: `--collect-only` on this per-FILE
+  # target, not the nix gate. Re-run the gate on the MERGED tree if this conflicts.
+  "scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py|343"
   # 2026-08-25, the gh-issue closing-condition gate arrives as a NEW target: 251
   # collected, 0 skipped, measured on this branch. Gate's own rule applied to the
   # gate's own count:

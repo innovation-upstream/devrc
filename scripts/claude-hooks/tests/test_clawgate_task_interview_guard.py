@@ -788,7 +788,13 @@ def test_the_hooks_constants_are_pinned_to_their_literals():
     assert guard.OVERRIDE_ENV == OVERRIDE
     assert guard.OVERRIDE_VALUE == "1"
     assert guard.MAX_BODY_FILE_BYTES == BODY_FILE_CAP
-    assert guard.CREATE_PATH == "/api/tasks"
+    # 🔴 A LEDGER, ASSERTED IN BOTH DIRECTIONS. It fails when the set GROWS (a new
+    # spelling arrived and nothing reviewed what it now denies) and when it SHRINKS
+    # (a spelling was dropped and every create through it is silently allowed). The
+    # second direction is the one the muster rename would have tripped.
+    assert guard.CREATE_PATHS == ("/api/tasks", "/api/v1/tasks")
+    assert guard.TASK_CLI_NAMES == ("clawgatectl", "muster")
+    assert guard.TASK_CLI_VALUE_FLAGS == ("--api-url", "--token", "--env-file")
 
 
 def test_the_missing_criteria_message_explains_the_status_gate():
@@ -993,9 +999,34 @@ def test_the_hook_never_writes_bytecode_beside_itself():
     (["clawgatectl", "task create"], False),
     (["curl", "task", "create"], False),
     ([], False),
+    # 🔴 THE SECOND CLI SPELLING — `muster`, the extracted binary. Every row above,
+    # mirrored, because the predicate must be exactly as wide and exactly as narrow
+    # for both names. Red before the widening: `basename(argv[0]) != "clawgatectl"`
+    # returned False for all of them, so a criteria-less `muster task create` was
+    # ALLOWED with no diagnostic anywhere.
+    (["muster", "task", "create"], True),
+    (["muster", "task", "create", "--body", "x"], True),
+    (["muster", "--token", "t", "task", "create"], True),
+    (["/nix/store/x/bin/muster", "task", "create"], True),
+    (["muster", "--api-url", "http://board.invalid:9", "task", "create"], True),
+    (["muster", "task", "ls"], False),
+    (["muster", "task", "get", "5"], False),
+    (["muster", "task", "comment", "5", "--body", "x"], False),
+    (["muster", "task", "status", "5", "create"], False),
+    (["muster", "create", "task"], False),
+    (["muster", "roll"], False),
+    (["muster", "task"], False),
+    (["muster"], False),
+    (["muster", "task create"], False),
+    # 🔴 THE OVER-MATCH CONTROLS. `muster` is an ordinary English word, so the
+    # predicate must key on argv[0]'s BASENAME and never on the word appearing
+    # somewhere in the command. A binary merely NAMED like it is not it.
+    (["musterctl", "task", "create"], False),
+    (["git", "commit", "-m", "muster task create rename"], False),
+    (["echo", "muster", "task", "create"], False),
 ])
-def test_is_clawgatectl_task_create(argv, expected):
-    assert guard.is_clawgatectl_task_create(argv) is expected
+def test_is_task_cli_create(argv, expected):
+    assert guard.is_task_cli_create(argv) is expected
 
 
 @pytest.mark.parametrize("argv,expected", [
@@ -1305,3 +1336,176 @@ def test_help_exemption_unit_level():
 def test_help_is_not_a_blanket_allow_for_the_word_anywhere():
     """`help` as a NON-leading operand is a task title, not the subcommand."""
     assert denied_missing('clawgatectl task create --title help --body "%s"' % NO_AC)
+
+
+# =========================================================================== #
+# THE `muster` EXTRACTION — the widening that must land BEFORE the rename
+#
+# 🔴 WHAT BREAKS IS NAME MATCHING, AND IT BREAKS SILENTLY. This gate makes zero
+# network calls; its entire reach is `PREFILTER` plus `basename(argv[0])`. Rename the
+# CLI to `muster` and the prefilter returns before anything is parsed, so every
+# criteria-less create is ALLOWED with no output, no exit code and no diagnostic
+# anywhere — and the docstring records what that costs: "the string 'acceptance
+# criteria' appears in ZERO Go, TS or SQL files… What enforces it is exactly two
+# things: SKILL.md's pickup ritual, and THIS HOOK."
+#
+# Every `muster` case below was measured RED at devrc 23b898d5 (the commit before
+# this widening): `reason(...)` returned None, i.e. ALLOWED. The `clawgatectl` twins
+# were green there and are green now — they are the regression half.
+# =========================================================================== #
+MUSTER = "muster"
+CLI_SPELLINGS = ("clawgatectl", "muster")
+
+
+@pytest.mark.parametrize("cli", CLI_SPELLINGS)
+def test_a_criteria_less_create_is_DENIED_for_every_cli_spelling(cli):
+    """The whole point, through the REAL hook process. `clawgatectl` is the regression
+    control (green before, green now); `muster` is the widening (red before)."""
+    assert denied_missing('%s task create --title T --body "%s"' % (cli, NO_AC))
+
+
+@pytest.mark.parametrize("cli", CLI_SPELLINGS)
+def test_a_create_WITH_criteria_passes_silently_for_every_cli_spelling(cli):
+    """🔴 THE OTHER DIRECTION, OR THE DENIAL ABOVE PROVES ONLY THAT THE HOOK DENIES.
+    The one-liner escape hatch has to survive both spellings."""
+    assert allowed('%s task create --title T --body "%s"' % (cli, AC))
+
+
+@pytest.mark.parametrize("cli", CLI_SPELLINGS)
+def test_an_UNREADABLE_body_still_blocks_for_every_cli_spelling(cli):
+    """The third verdict family. A body this gate cannot evaluate is a BLOCK, never a
+    pass — a gate walkable by changing the SHAPE of the call is a spelled guard."""
+    assert denied_unseeable('%s task create --title T --body "$(gen-spec.sh)"' % cli)
+
+
+@pytest.mark.parametrize("cli", CLI_SPELLINGS)
+def test_a_heredoc_body_is_read_for_every_cli_spelling(cli):
+    """The dominant real shape, both spellings."""
+    cmd = ("%s task create --title T --body \"$(cat <<'EOF'\n%s\nEOF\n)\""
+           % (cli, NO_AC))
+    assert denied_missing(cmd)
+
+
+@pytest.mark.parametrize("cmd", [
+    # 🔴 THE OVER-MATCH CONTROLS. `muster` is an ordinary English word and this
+    # extraction makes it a frequent one in commit messages and greps. A PreToolUse
+    # DENY in front of one of these would be worse than the hole it closes.
+    "muster task ls --status open",
+    "muster task get 701",
+    "muster task comment 701 --body 'shipped'",
+    "muster task status 701 ready_for_review",
+    "muster roll",
+    "muster dispatch 701",
+    "git commit -m 'docs(plan): the muster extraction, phase 0'",
+    "grep -rn muster /home/zach/workspace/homelab-talos/claudedocs",
+    "echo 'we will muster the agents later'",
+    "musterctl task create --body 'whatever'",
+    # a task create on a DIFFERENT tool's API — clank-resolver has its own /api/tasks
+    # look-alike, and `wget` is not a client this gate claims to understand
+    "wget -X POST http://other.invalid/api/tasks --body-data '{}'",
+])
+def test_the_word_muster_alone_never_denies(cmd):
+    assert allowed(cmd), cmd
+
+
+def test_the_versioned_create_path_is_in_scope_for_curl(monkeypatch):
+    """`/api/v1/tasks` is insurance against muster mounting its API under a version.
+    A POST there with no criteria must deny exactly as `/api/tasks` does."""
+    assert denied_missing(
+        "curl -X POST http://muster.invalid:8/api/v1/tasks "
+        "-d '{\"body\":\"%s\"}'" % NO_AC)
+    assert allowed(
+        "curl -X POST http://muster.invalid:8/api/v1/tasks "
+        "-d '{\"body\":\"%s\"}'" % AC.replace("\n", "\\n"))
+
+
+@pytest.mark.parametrize("cmd", [
+    # …and the NEAR MISSES on that path, so widening it did not widen the scope.
+    "curl -X POST http://muster.invalid:8/api/v1/tasks/701/comments -d '{}'",
+    "curl -X POST http://muster.invalid:8/api/v1/tags -d '{}'",
+    "curl -X GET http://muster.invalid:8/api/v1/tasks -d '{}'",
+    "curl http://muster.invalid:8/api/v1/tasks",
+    "curl -X POST http://muster.invalid:8/api/v2tasks -d '{}'",
+])
+def test_the_versioned_path_near_misses_do_not_deny(cmd):
+    assert allowed(cmd), cmd
+
+
+def test_the_PREFILTER_admits_everything_the_CLASSIFIERS_recognise():
+    """🔴 A SEAM GUARD, AND IT MUST NOT ASK `evaluate`. `main()` returns on the
+    prefilter before `evaluate` is reached — but `evaluate` consults the SAME prefilter
+    as its first line, so using it as the positive control makes the test circular: a
+    narrowed prefilter would fail on the control rather than on the claim, and the claim
+    would never execute. The independent witness is the CLASSIFIER PAIR
+    (`is_task_cli_create` / `is_curl_task_create`), which never looks at the prefilter.
+
+    The relationship pinned: every argv the classifiers call a create must also survive
+    the prefilter. A prefilter narrower than the classifiers is a silent allow no test
+    of either half alone can see.
+    """
+    creatable = [
+        'clawgatectl task create --body "%s"' % NO_AC,
+        'muster task create --body "%s"' % NO_AC,
+        '/nix/store/x/bin/muster task create --body "%s"' % NO_AC,
+        'muster --api-url http://muster.invalid:8 task create --body "%s"' % NO_AC,
+        "curl -X POST http://h/api/tasks -d '{\"body\":\"x\"}'",
+        "curl -X POST http://h/api/v1/tasks -d '{\"body\":\"x\"}'",
+    ]
+    for cmd in creatable:
+        argvs = guard_core.commands(cmd)
+        # POSITIVE CONTROL, from the classifiers only — never from `evaluate`.
+        recognised = [a for a in argvs
+                      if guard.is_task_cli_create(a) or guard.is_curl_task_create(a)]
+        assert recognised, cmd
+        # THE CLAIM: the prefilter lets it reach them at all.
+        assert guard.PREFILTER.search(cmd) is not None, cmd
+
+
+def test_the_CRASH_classifier_recognises_both_spellings_and_both_paths():
+    """🔴 THE BACKSTOP MUST NOT BE NARROWER THAN THE GATE. `CRASH_LOOKS_LIKE_CREATE` is
+    what denies when `guard_core` fails to import — i.e. exactly when the gate is
+    already broken — so a spelling it does not recognise is an unchecked create at the
+    worst possible moment."""
+    for cmd in ('clawgatectl task create --body "x"',
+                'muster task create --body "x"',
+                "curl -X POST http://h/api/tasks -d '{}'",
+                "curl -X POST http://h/api/v1/tasks -d '{}'"):
+        assert guard.CRASH_LOOKS_LIKE_CREATE.search(cmd) is not None, cmd
+    # …and the reads it must still leave alone
+    for cmd in ("curl http://h/api/tasks/701",
+                "curl http://h/api/v1/tasks/701/comments",
+                "muster task ls"):
+        assert guard.CRASH_LOOKS_LIKE_CREATE.search(cmd) is None, cmd
+
+
+def test_the_help_exemption_covers_both_cobra_binaries():
+    """Both CLIs are cobra, so both print usage and exit without creating anything.
+    An exemption scoped to one name would put a deny in front of `muster task create
+    --help` — a false positive on a command that cannot reach the API."""
+    for cli in CLI_SPELLINGS:
+        assert guard.is_help_invocation([cli, "task", "create", "--help"]) is True
+        assert guard.is_help_invocation([cli, "task", "create", "-h"]) is True
+        assert guard.is_help_invocation([cli, "help", "task", "create"]) is True
+        assert guard.is_help_invocation([cli, "task", "create"]) is False
+        assert guard.is_help_invocation(
+            [cli, "--token", "--help", "task", "create"]) is False
+    # 🔴 …and still NOT for curl, which posts the request regardless.
+    assert denied_missing(
+        "curl -X POST http://muster.invalid:8/api/v1/tasks --help "
+        "-d '{\"body\":\"%s\"}'" % NO_AC)
+
+
+@pytest.mark.parametrize("cli", CLI_SPELLINGS)
+def test_the_override_works_for_every_cli_spelling(cli):
+    """The greppable escape hatch, unchanged in spelling, must reach both binaries."""
+    assert allowed('%s=1 %s task create --body "%s"'
+                   % (OVERRIDE, cli, NO_AC))
+    assert denied_missing('%s task create --body "%s"' % (cli, NO_AC))
+
+
+def test_a_line_that_creates_through_BOTH_clis_is_judged_as_a_whole():
+    """🔴 The verdict is "every create had criteria", never "some body somewhere did".
+    A mixed-spelling line is the shape most likely to slip past a per-binary check."""
+    cmd = ('clawgatectl task create --body "%s" && muster task create --body "%s"'
+           % (AC, NO_AC))
+    assert denied_missing(cmd)
