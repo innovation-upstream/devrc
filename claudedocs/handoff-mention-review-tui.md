@@ -61,6 +61,22 @@ notifications and repo browse are dropped.
 
 ## Open investigations — live diagnosis state
 
+### EVICTED — six CLOSED blocks (2026-09-21, byte ceiling)
+- Every block below had been RETRACTED AS LIVE by its own author and carried a
+  `Next probe: none — closed.`: the two `gotests` CI-leg blocks (located, then
+  resolved), `main` RED from a skill prune that cut text two-way ledgers pin
+  (`#1756` → `61faa675`), the eight re-anchored mutation rows KILLING, ranks 1
+  and 3, and `main` red on `test_opencode_engine` (`#1804` → `7ef01c05`, whose
+  lesson — a stale-looking pin where the PINNED version was the good one — is the
+  one worth remembering). 🔴 Evicted because this update put the doc **216 B over**
+  its 65,536 B ceiling and `test_no_handoff_doc_exceeds_its_budget` fails for
+  EVERYONE, not just this PR. The playbook's own order: evict what has CLOSED
+  first, and raising the number is LAST. History: `git log -p` this file.
+- ⚠ **Carried forward from the replaced status header, because it is a DECISION and
+  not a status:** §12.4 is ANSWERED — PR-level comments only, **no inline diff-line
+  positioning** (operator, 2026-09-15); and the 422 arc is CLOSED (`#1761` →
+  `1ff1bd6e`) — the renderer discarded `errors[]`.
+
 ### EVICTED — two superseded blocks (2026-09-20, byte ceiling)
 - The 2026-09-14 "Go tier has NO CI leg" block (superseded by the 09-15 block below,
   which is itself retired by the 09-16 RESOLVED one) and the 2026-09-18 "eight rows
@@ -68,37 +84,6 @@ notifications and repo browse are dropped.
   its apply-vs-kill correction). 🔴 Evicted because this doc was 229 B from its
   ceiling and the playbook says evict what has CLOSED before anything else — the
   surviving RESOLVED blocks carry both outcomes. History: `git log -p` this file.
-
-### The `gotests` CI leg — pipeline LOCATED, change not yet made (supersedes the 2026-09-14 block above)
-- as-of: 2026-09-15
-- **Supersedes** the earlier block of the same subject; its "Next probe" said *find the
-  pipeline*. It is found. Everything else in that block still holds.
-- **Symptom + exact repro:** `gh pr checks <any devrc PR>` lists `tekton/devrc-pytests`,
-  `tekton/devrc-nodetests`, `tekton/devrc-cairn-client-runs` and **no** `tekton/devrc-gotests`.
-- **Observed (with values):** the pipeline is `clusters/homelab/apps/tekton-pipelines/triggers/
-  devrc-ci-pipeline.yaml` in **homelab-talos**, alongside `devrc-ci-triggertemplate.yaml`.
-  Confirmed present. The deadman half is now CLOSED on main (`gotests` in the tier loop), so
-  `main` is covered every 4 hours; **PR-time coverage is still zero.** via: command
-- **Ruled out:** that the leg could be added from inside devrc — it cannot; the pipeline is a
-  different repo. via: command
-- 🔴 **Constraint that changes how this is done:** `homelab-talos` is GitOps-reconciled from
-  `trunk`, and its own `CLAUDE.md` declares that **committing to the main branch IS deploying**
-  — the one repo with that exception. A pipeline edit there is a live CI change, not a PR that
-  waits for review.
-- **Next probe:** add a `gotests` leg mirroring the `nodetests` one in
-  `devrc-ci-pipeline.yaml`. **Closes when `gh pr checks` on any devrc PR lists
-  `tekton/devrc-gotests`.**
-
-### RESOLVED — the `gotests` CI leg (retires the 2026-09-15 block above)
-- as-of: 2026-09-16
-- **Retracted as live.** The leg exists, posts, and passes. Closing condition met exactly as
-  written: `gh pr checks` lists `tekton/devrc-gotests`. Everything below is history.
-- **Observed (with values):** `tekton/devrc-gotests pass — TOTAL: pass=119 fail=0 ran=119
-  (global floor 111)` on the first devrc PR after the merge; `pass=231` on #1723.
-- **Ruled out:** that a fourth sequential leg would blow the gate's 60m budget on day one —
-  the four legs on #1723 all reported green. ⚠ NOT a general claim: measured over 21 retained
-  `devrc-ci-*-gate` TaskRuns, two runs were already at **55.9m and 58.1m** against the 60m cap,
-  with `pytests` alone at 49.1m and 46.0m. Watch this. via: measurement
 
 ### 🔴 No write verb has ever executed against real GitHub
 - as-of: 2026-09-16
@@ -118,32 +103,6 @@ notifications and repo browse are dropped.
   are plain code paths that have simply never run live.
 - **Next probe:** open a throwaway PR in a scratch repo and drive `c` (comment) then `m`
   (merge) against it. **Operator-only** — an agent must not run a live write verb.
-
-### RESOLVED — `main` was RED for hours; a skill PRUNE cut text that two-way ledgers pin
-- as-of: 2026-09-17
-- **Retracted as live.** Fixed by `#1756` → `61faa675`, shipped to both hosts. History below.
-- **Symptom + exact repro:** `nix build .#checks.x86_64-linux.pytests` → 17 failures; a dev-host
-  run of the three handoff suites → 13. Every PR's `pytests` leg red regardless of its diff.
-- **Observed (with values):** `d2844af6` (#1750) pruned `claude/skills/handoff/SKILL.md`
-  27,419 → 19,421 B and removed **all 8 refusal markers** across rules (j) and (k) —
-  `[no via: field]`, `[no forcing: field]`, `[unknown kind`, `[unparsed`, `[fenced]` — which
-  `scripts/lib/handoff_doc.py` still prints. 17 pinned sentences total. Assertion text:
-  *"the module prints '[no via: field]' for rule (k) and claude/skills/handoff/SKILL.md never
-  mentions it — an executor hits an undocumented marker at the moment it is about to push."*
-  via: measurement
-- **Ruled out:** that PR #1748 (the Files tree) caused it — the sandbox tier reproduced all 17
-  on a tree built BEFORE that merge, and the PR touches zero `.md` and nothing outside
-  `internal/ui`. via: measurement
-- **Ruled out:** that it was a TWO-TIER divergence — **this was MY first diagnosis and it was
-  WRONG.** I tracked the one test CI NAMED (`test_every_red_paragraph_is_a_ledger_rule…`),
-  which genuinely passes on the dev host; the other 16 fail in BOTH tiers. A CI summary names
-  ONE failure, never the failure set. via: measurement
-- **Ruled out:** that restoring the text would breach the byte ceiling and force an eviction —
-  I presented that as a fork needing an operator decision BEFORE measuring it. Budget is
-  `MAX_BYTES 21,200 − MIN_HEADROOM 900 = 20,300`; the file was at 19,421, so there were **879
-  bytes** free. There was no fork. via: measurement
-- **Next probe:** none — closed. ⚠ Residual: the fix lands at **20,088 B, 212 bytes of
-  headroom**. The squeeze that caused this is paid down, not resolved.
 
 ### 🔴 The 422's actual cause was never determined — the response body is unrecoverable
 - as-of: 2026-09-18
@@ -171,62 +130,6 @@ notifications and repo browse are dropped.
 - **Next probe:** none available retrospectively — the body is gone. The shipped renderer now
   surfaces `errors[]`, so **the next occurrence names its own reason**. If it recurs, capture the
   card verbatim before anything else; that single string settles this block.
-
-### RESOLVED — the eight re-anchored mutation rows KILL (retires the 2026-09-18 block of the same subject)
-- as-of: 2026-09-19
-- **Retracted as live.** The 2026-09-18 block "The eight re-anchored mutation rows APPLY but are
-  not known to KILL" is answered exactly as its closing condition was written: *"each row
-  reports KILLED with its own error."* Everything below is history.
-- **Symptom + exact repro:** n/a — a coverage gap in merged code, now measured shut.
-  `PYTHONDONTWRITEBYTECODE=1 nix develop $DEVRC -c python3 scripts/tests/mutation_battery_mentions.py --only K48,K49,K50,K54,K66,K67,K82,K92`
-- **Observed (with values):** `CONTROL (pristine): 733 passed, 0 failed, 0 errors`; observation
-  floor 366 tests must RUN. **`9/9 killed for the stated reason; problems: none`**, every row
-  `KILLED(attributed)`: K48 f=5 · K49 f=5 · K50 f=2 · K54 f=2 · K66 f=3 · K67 f=2 · K82 f=1 ·
-  K92 f=1, and `positive control P1: KILLED — the battery can observe`. `restore: OK —
-  default.nix=8fbc07fbcc71 session-tailer.py=49dea6798c1c mention_scan.py=fc2d0794f2ff
-  mention-open.py=3cb484e55584`. via: measurement
-- **Ruled out:** that the filter silently ran a full sweep — the banner printed
-  `🔴 FILTERED RUN — ['K48'…'K92'] plus the P1 control ONLY. This is evidence about those rows
-  and nothing else.` and the run scored exactly 9 rows. via: measurement
-- **Ruled out:** that a stale bytecode cache let a mutant score without executing — the run set
-  `PYTHONDONTWRITEBYTECODE=1`, and P1 (the known-fatal positive control) was KILLED in the same
-  batch. via: measurement
-- **Next probe:** none — closed.
-
-### RESOLVED — ranks 1 and 3 (retires the 2026-09-19 "eight re-anchored rows" block)
-- as-of: 2026-09-20
-- **Retracted as live.** Both closed exactly as their closing conditions were written: the ship
-  verified by content on both hosts, and `--only K48,K49,K50,K54,K66,K67,K82,K92` →
-  `9/9 killed for the stated reason; problems: none`, control 733 passed, P1 KILLED.
-  via: measurement
-- **Next probe:** none — closed.
-
-### RESOLVED — `main` was red on `test_opencode_engine`; the pin was RIGHT and the BINARY was wrong
-- as-of: 2026-09-20
-- **Retracted as live, and the retraction matters more than the diagnosis did.** Closed by
-  **`#1804` → `7ef01c05`** — merged **36 minutes after this doc's PR opened**, and caught by
-  `/audit-pr` round 0 before it could publish a harmful instruction.
-- **Observed (with values):** `main` is GREEN on all four `tekton/devrc-main-*` at
-  `7ef01c05`; the dev shell reports `1.18.29` and `PINNED_VERSION = "1.18.29"` — they agree.
-  via: measurement
-- 🔴 **MY NEXT PROBE WAS WRONG IN THE DIRECTION THAT MATTERS, AND IS RECORDED RATHER THAN
-  DELETED.** It said *"re-derive the header's measurements against the NEW binary, then update
-  pin and measurements together"* — i.e. re-key seven measurement claims to **1.18.30**. But
-  `#1804` pinned opencode **back to 1.18.29 via a third frozen nixpkgs input** precisely
-  because **1.18.30 cannot run a single prompt** (upstream `anomalyco/opencode#48645`). A
-  session following it would measure a binary that cannot complete a prompt and could re-break
-  `main`. It also named four files of which the real fix touched one, and omitted `flake.nix` /
-  `flake.lock`, where the fix actually lives. **I diagnosed the symptom correctly and inferred
-  the wrong remedy: "the pin is stale" and "the pinned version is the good one" look identical
-  from the failing assertion.**
-- 🔴 **THE SHAPE, AND IT IS THE SECOND TIME IN TWO UPDATES OF THIS DOC:** a handoff minting a
-  ranked item for a property a LIVE MECHANISM already owns. `#1781` round 0 killed the same
-  shape for `drift-check.sh` rc 17; this one was owned by `main-green-check` (4-hourly,
-  reproduces before alerting), `main-status-watch.py` (10-min poll) and the four
-  `tekton/devrc-main-*` checks — and it went stale in **36 minutes**. 🔴 **Do not mirror a
-  live deadman into this doc. Ask deletion test (c): does something else already check this
-  against reality?**
-- **Next probe:** none — closed.
 
 ### 🔴 Why right-aligning the rank marker moves fzf's ranking — MECHANISM UNKNOWN
 - as-of: 2026-09-20
