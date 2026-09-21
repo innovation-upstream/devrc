@@ -378,15 +378,37 @@ test("the MODEL keeps a record tone distinct from the per-window tones", () => {
 // account read as still-at-92%, forever.
 
 const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
 const iso = (ms) => new Date(ms).toISOString();
 
-/** A record whose session window resets at `resetsAt`, last measured `ageH`
- * hours ago at `pct`. Percentages are pairwise distinct and distinct from
- * WARN_PCT/CRIT_PCT so a mutant hardcoding a band cannot hide. */
-function acct(uuid, name, pct, resetsAt, ageH) {
+/**
+ * A record whose session window resets at `resetsAt`, last measured `ageH`
+ * hours ago at `pct` session / `wk` weekly. `over` gets the record for the
+ * fields a single test cares about.
+ *
+ * 🔴 THE WEEKLY PERCENTAGE IS A PARAMETER, AND IT HAD TO BECOME ONE. Every
+ * fixture in this section used to leave `weekly.utilization` at the constant
+ * 47 that `fullUsage()` supplies, on EVERY record -- so the suite was
+ * structurally blind to the weekly dimension for other-account rows, which is
+ * exactly the dimension `otherRow` was ignoring (it passed `percentTone(pct,
+ * null)`). A suite whose fixtures pin a dimension cannot see that dimension's
+ * bugs. Values are pairwise distinct within every fixture set, distinct from
+ * the session percentage beside them, and distinct from every constant the
+ * assertions name (WARN_PCT 80, CRIT_PCT 95, WEEKLY_EXHAUSTED_PCT 100, 0), so
+ * a mutant hardcoding a literal cannot survive by landing on a fixture value.
+ *
+ * `severity` is nulled so the PERCENT half of the tone rule is isolated --
+ * `fullUsage()` carries a "medium" severity row that would otherwise decide
+ * every tone below. A dedicated test covers severity reaching an other-row.
+ */
+function acct(uuid, name, pct, wk, resetsAt, ageH, over) {
   const r = rec(uuid, name, NOW - ageH * HOUR);
+  r.severity = null;
   r.session.utilization = pct;
   r.session.resetsAt = resetsAt;
+  r.weekly.utilization = wk;
+  r.weekly.resetsAt = iso(NOW + 4 * DAY);
+  if (over) over(r);
   return r;
 }
 
@@ -396,8 +418,8 @@ test("🔴 REGRESSION: a stored account whose reset has ELAPSED reads as AVAILAB
   // had no `others` at all, and the only surface that showed B said
   // "Session 91% · resets soon" -- the one state his workflow depends on,
   // inverted.
-  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
-  const freed = acct(ORG_B, NAME_B, 91, iso(NOW - 2 * HOUR), 6);
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+  const freed = acct(ORG_B, NAME_B, 91, 14, iso(NOW - 2 * HOUR), 6);
   const m = W.widgetModel(active, NOW, {
     accounts: { [ORG_A]: active, [ORG_B]: freed },
     lastActiveOrg: ORG_A,
@@ -417,13 +439,212 @@ test("🔴 REGRESSION: a stored account whose reset has ELAPSED reads as AVAILAB
   assert.ok(!/\b0%/.test(row.value + row.meta), "never a fabricated 0%");
 });
 
+// --- 🔴 F1: the row verdict is not a SESSION-window verdict ------------------ //
+//
+// 🔴 THE DEFECT. `otherRow` hardcoded `tone: "ok", stale: false` on the free
+// branch and called `percentTone(v.sessionPct, null)` -- weekly literally
+// null -- on the measured one, i.e. it ran a SECOND, narrower rule than the
+// card above it and the badge beside it, in the PR whose commit is titled
+// "one rule, one place". MEASURED at b97190c8: an account whose five-hour
+// window had reset three hours ago, with its SEVEN-DAY window at 100% and
+// `lockedReason: "Weekly limit reached."` resetting in four days, rendered
+//
+//     AVAILABLE — reset 3h ago (was 95%, measured 8h ago)     tone ok, sorted #1
+//
+// and logging into it is immediately weekly-blocked. Because the weekly
+// window is seven days against the session's five hours, that state persists
+// for DAYS. Adding `session.lockedReason` and a `staleSince` (a 403) produced
+// a BYTE-IDENTICAL row.
+
+/** The trap: session window long since reset, weekly window spent. */
+const weeklyBlocked = (uuid, name, pct, wkPct, lockedReason) =>
+  acct(uuid, name, pct, wkPct, iso(NOW - 3 * HOUR), 8, (r) => {
+    r.weekly.lockedReason = lockedReason === undefined ? "Weekly limit reached." : lockedReason;
+  });
+
+test("🔴 REGRESSION: a weekly-BLOCKED account does not read AVAILABLE on the card", () => {
+  // Watched RED at b97190c8: value "AVAILABLE", tone "ok", state "free".
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+  const trap = weeklyBlocked(ORG_B, NAME_B, 95, 100);
+  const m = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: trap }, lastActiveOrg: ORG_A,
+  });
+  const row = m.others[0];
+  assert.equal(row.state, "blocked", `the row is "${row.state}"`);
+  assert.notEqual(row.value, "AVAILABLE");
+  assert.equal(row.value, "BLOCKED");
+  assert.equal(row.tone, "crit", "an unusable account painted as a good switch target");
+
+  // 🔴 THE DECISION, WRITTEN DOWN AS A CONTRACT rather than left to prose:
+  // the row names the BINDING CONSTRAINT and says WHEN it frees up, because
+  // that is the question "should I switch here" actually turns on -- and it
+  // keeps the measured-value-visible, no-fabricated-0% rule the free branch
+  // established.
+  assert.match(row.meta, /Weekly limit reached\./,
+    `the lock the ACTIVE card renders is dropped on an other row: "${row.meta}"`);
+  assert.match(row.meta, /frees up in 4d0h/, `no wait time stated: "${row.meta}"`);
+  assert.match(row.meta, /session was 95%/, "the last MEASURED value must remain visible");
+  assert.match(row.meta, /measured 8h ago/, "...with its age");
+  assert.ok(!/\b0%/.test(row.value + row.meta), "never a fabricated 0%");
+  assert.ok(!/AVAILABLE|resets soon/.test(row.meta), `meta reads "${row.meta}"`);
+});
+
+test("🔴 REGRESSION: an EXHAUSTED weekly window with no lock string still blocks, and says why", () => {
+  // Watched RED at b97190c8. The API need not send a reason; 100% of the
+  // allowance is out on its own terms, and the row states the reading it
+  // blocked on rather than an invented sentence.
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+  const trap = weeklyBlocked(ORG_B, NAME_B, 62, 100, null);
+  const m = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: trap }, lastActiveOrg: ORG_A,
+  });
+  assert.equal(m.others[0].state, "blocked");
+  assert.match(m.others[0].meta, /weekly 100%/, `meta reads "${m.others[0].meta}"`);
+  assert.match(m.others[0].meta, /frees up in 4d0h/);
+});
+
+test("🔴 REGRESSION: a blocked row and a free row no longer render IDENTICALLY", () => {
+  // MEASURED at b97190c8: a weekly-locked account and a genuinely free one
+  // produced the same row modulo the name -- "AVAILABLE — reset 3h ago (was
+  // 95%, measured 8h ago)", tone ok -- two opposite stored states, one
+  // output, and the wrong one of the two was being recommended. Watched RED
+  // there on both assertions below.
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+  const lockedWeekly = weeklyBlocked(ORG_B, NAME_B, 95, 100);
+  const genuinelyFree = acct(ORG_D, NAME_D, 95, 33, iso(NOW - 3 * HOUR), 8);
+
+  const m = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: lockedWeekly, [ORG_D]: genuinelyFree },
+    lastActiveOrg: ORG_A,
+  });
+  const byName = Object.fromEntries(m.others.map((r) => [r.name, r]));
+  const shape = (r) => `${r.state}|${r.value}|${r.meta}|${r.tone}`;
+
+  assert.equal(byName[NAME_D].value, "AVAILABLE", "the genuinely free one is still free");
+  assert.equal(byName[NAME_B].value, "BLOCKED");
+  assert.notEqual(shape(byName[NAME_B]), shape(byName[NAME_D]),
+    "a weekly-blocked account and a free one still render identically");
+});
+
+test("a LIVE session lock is named ahead of a weekly one; a SPENT one is not named at all", () => {
+  // 🔴 A DELIBERATE COINCIDENCE, PINNED SO IT READS AS A DECISION. The round-1
+  // audit noted that adding `session.lockedReason: "account_suspended"` to a
+  // weekly-blocked record produced a byte-identical row, and it still does
+  // when that record's SESSION WINDOW HAS SINCE RESET -- because a session
+  // lock is evidence about the session window and is spent by that window's
+  // own reset, exactly as the percentage beside it is. Naming a spent lock
+  // would recreate this module's founding defect one field over: an account
+  // marked BLOCKED forever off a five-hour lock it can never be re-measured
+  // out of.
+  //
+  // ⚠ AND THERE IS A REAL RESIDUE, NAMED RATHER THAN PAPERED OVER: an
+  // ACCOUNT-level suspension that the API happens to surface through
+  // `five_hour.locked_reason` becomes invisible once the session window turns
+  // over. Distinguishing it from an ordinary "Session limit reached." would
+  // mean string-matching an uncontracted field, which is the prose-heuristic
+  // fix RULES.md says to offer rather than reach for. The state is still
+  // BLOCKED in the case that matters here (the weekly window), and a
+  // suspension with NO weekly block would read as free. Not closed.
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+
+  // Session window still OPEN -> the lock is live, and it is the one blocking
+  // you now, so it outranks the weekly reason.
+  const liveLock = acct(ORG_B, NAME_B, 95, 100, iso(NOW + 2 * HOUR), 8, (r) => {
+    r.session.lockedReason = "account_suspended";
+    r.weekly.lockedReason = "Weekly limit reached.";
+  });
+  const live = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: liveLock }, lastActiveOrg: ORG_A,
+  }).others[0];
+  assert.equal(live.state, "blocked");
+  assert.match(live.meta, /account_suspended/,
+    "the session lock is the one blocking you NOW and must be the one named");
+  assert.ok(!/Weekly limit reached/.test(live.meta),
+    `both reasons on one row reads as two problems: "${live.meta}"`);
+
+  // Session window RESET -> the lock is spent, and the weekly reason is the
+  // one that still binds. Identical to the same record without the session
+  // lock, and that is the contract.
+  const spent = weeklyBlocked(ORG_C, NAME_C, 95, 100);
+  spent.session.lockedReason = "account_suspended";
+  const plain = weeklyBlocked(ORG_D, NAME_D, 95, 100);
+  const m = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_C]: spent, [ORG_D]: plain }, lastActiveOrg: ORG_A,
+  });
+  const byName = Object.fromEntries(m.others.map((r) => [r.name, r]));
+  assert.ok(!/account_suspended/.test(byName[NAME_C].meta),
+    `a lock spent by its own window's reset was reported as live: "${byName[NAME_C].meta}"`);
+  assert.equal(byName[NAME_C].meta.replace(NAME_C, ""), byName[NAME_D].meta.replace(NAME_D, ""),
+    "a spent session lock must change nothing -- if it does, this decision has drifted");
+});
+
+test("🔴 REGRESSION: a weekly-blocked account is sorted BELOW a usable one", () => {
+  // Watched RED at b97190c8: the blocked account read "free" and took row 1,
+  // above an account at 12% that actually works.
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+  const trap = weeklyBlocked(ORG_B, NAME_B, 95, 100);
+  const usable = acct(ORG_C, NAME_C, 12, 19, iso(NOW + 2 * HOUR), 1);
+  const m = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: trap, [ORG_C]: usable }, lastActiveOrg: ORG_A,
+  });
+  assert.deepEqual(m.others.map((r) => r.name), [NAME_C, NAME_B],
+    "the account that rejects you at the login screen is being recommended first");
+});
+
+test("🔴 the next-free footer counts a blocked account -- four days is still an answer", () => {
+  // Watched RED at b97190c8: with every other account weekly-blocked the
+  // footer was null, so the card said nothing at all about the wait.
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 30 * 60 * 1000), 0);
+  const trap = weeklyBlocked(ORG_B, NAME_B, 95, 100);
+  const m = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: trap }, lastActiveOrg: ORG_A,
+  });
+  assert.equal(m.nextFree, `next free: ${NAME_B} in 4d0h`);
+});
+
+test("🔴 a fresh measured row is coloured by BOTH windows, not the session alone", () => {
+  // Watched RED at b97190c8: `percentTone(v.sessionPct, null)` could not see
+  // the weekly window, so a 23% session row beside a 97% weekly window
+  // painted green -- "showing 'ok' while the weekly window sits at 97% would
+  // be a lie by omission", which is severity.js's own sentence.
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+  const calmSession = acct(ORG_B, NAME_B, 23, 97, iso(NOW + HOUR), 1);
+  const alsoCalm = acct(ORG_C, NAME_C, 23, 84, iso(NOW + HOUR), 1);
+  const m = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: calmSession, [ORG_C]: alsoCalm },
+    lastActiveOrg: ORG_A,
+  });
+  const byName = Object.fromEntries(m.others.map((r) => [r.name, r]));
+  assert.equal(byName[NAME_B].tone, "crit", "a 97% weekly window did not reach the row");
+  assert.equal(byName[NAME_C].tone, "warn", "...and neither did an 84% one");
+  assert.equal(byName[NAME_B].value, "23%", "the session reading is still what is SHOWN");
+});
+
+test("🔴 the API severity reaches an other-account row, as it does the card", () => {
+  // The other half of the consolidated rule. A severity the percentages do
+  // not justify must not be silently dropped on the way to a row -- that is
+  // the badge-vs-page disagreement lib/severity.js exists to eliminate.
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+  const loud = acct(ORG_B, NAME_B, 23, 14, iso(NOW + HOUR), 1,
+    (r) => { r.severity = "critical"; });
+  const m = W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: loud }, lastActiveOrg: ORG_A,
+  });
+  assert.equal(m.others[0].tone, "crit");
+  // ...and it does not INVENT alarm: the same row with no severity is calm.
+  const quiet = acct(ORG_B, NAME_B, 23, 14, iso(NOW + HOUR), 1);
+  assert.equal(W.widgetModel(active, NOW, {
+    accounts: { [ORG_A]: active, [ORG_B]: quiet }, lastActiveOrg: ORG_A,
+  }).others[0].tone, "ok");
+});
+
 test("🔴 staleness does NOT grey a presumed-free row (it greys the others)", () => {
   // The 6h staleness rule washes out precisely the most actionable row, and
   // does so BY CONSTRUCTION: an account you are not logged into cannot be
   // re-measured, so every good switch target is stale.
-  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
-  const freed = acct(ORG_B, NAME_B, 91, iso(NOW - 2 * HOUR), 9);     // 9h old
-  const waiting = acct(ORG_C, NAME_C, 62, iso(NOW + 4 * HOUR), 9);   // also 9h old
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+  const freed = acct(ORG_B, NAME_B, 91, 14, iso(NOW - 2 * HOUR), 9);     // 9h old
+  const waiting = acct(ORG_C, NAME_C, 62, 19, iso(NOW + 4 * HOUR), 9);   // also 9h old
   const m = W.widgetModel(active, NOW, {
     accounts: { [ORG_A]: active, [ORG_B]: freed, [ORG_C]: waiting },
     lastActiveOrg: ORG_A,
@@ -439,10 +660,19 @@ test("🔴 staleness does NOT grey a presumed-free row (it greys the others)", (
   assert.equal(byName[NAME_C].tone, "stale");
 });
 
-test("a fresh measured row keeps its own percent band", () => {
-  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
-  const hot = acct(ORG_B, NAME_B, 97, iso(NOW + HOUR), 1);
-  const calm = acct(ORG_C, NAME_C, 23, iso(NOW + HOUR), 1);
+test("a fresh measured row shows its band when the SESSION window is the worst constraint", () => {
+  // 🔴 REWRITTEN FROM AN IMPLEMENTATION ASSERTION INTO A CONTRACT. This
+  // used to expect "ok" for a 23% row whose fixture also carried a 47%
+  // weekly window and a "medium" API severity -- an expectation that was
+  // only correct because `otherRow` consulted neither. It therefore
+  // asserted the one-window rule the implementation happened to use, and
+  // would have stayed green through the whole of F1. The contract is
+  // "the worst binding constraint decides"; this pins the case where the
+  // session window IS that constraint, with the other two explicitly
+  // held below it, and the test above pins the cases where they are not.
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+  const hot = acct(ORG_B, NAME_B, 97, 14, iso(NOW + HOUR), 1);
+  const calm = acct(ORG_C, NAME_C, 23, 19, iso(NOW + HOUR), 1);
   const m = W.widgetModel(active, NOW, {
     accounts: { [ORG_A]: active, [ORG_B]: hot, [ORG_C]: calm },
     lastActiveOrg: ORG_A,
@@ -455,8 +685,8 @@ test("a fresh measured row keeps its own percent band", () => {
 });
 
 test("an other-account row with no reset time says so, and shows no countdown", () => {
-  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
-  const murky = acct(ORG_B, NAME_B, 62, null, 1);
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+  const murky = acct(ORG_B, NAME_B, 62, 14, null, 1);
   const m = W.widgetModel(active, NOW, {
     accounts: { [ORG_A]: active, [ORG_B]: murky }, lastActiveOrg: ORG_A,
   });
@@ -468,18 +698,21 @@ test("an other-account row with no reset time says so, and shows no countdown", 
 });
 
 test("every other-row carries the full field set the painter reads", () => {
-  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
   const accounts = {
     [ORG_A]: active,
-    [ORG_B]: acct(ORG_B, NAME_B, 91, iso(NOW - 2 * HOUR), 6),
-    [ORG_C]: acct(ORG_C, NAME_C, 62, iso(NOW + HOUR), 1),
-    [ORG_D]: acct(ORG_D, NAME_D, 23, null, 1),
+    [ORG_B]: acct(ORG_B, NAME_B, 91, 14, iso(NOW - 2 * HOUR), 6),
+    [ORG_C]: acct(ORG_C, NAME_C, 62, 19, iso(NOW + HOUR), 1),
+    [ORG_D]: acct(ORG_D, NAME_D, 23, 26, null, 1),
+    blocked_key: weeklyBlocked("55555555-5555-4555-8555-555555555555", "fifth", 44, 100),
   };
   const m = W.widgetModel(active, NOW, { accounts, lastActiveOrg: ORG_A });
-  assert.equal(m.others.length, 3);
+  assert.equal(m.others.length, 4);
+  assert.deepEqual([...new Set(m.others.map((r) => r.state))].sort(),
+    ["blocked", "free", "measured", "unknown"],
+    "precondition: all four branches are exercised");
   for (const row of m.others) {
     assert.equal(typeof row.name, "string");
-    assert.ok(["free", "measured", "unknown"].includes(row.state), row.state);
     assert.equal(typeof row.value, "string");
     assert.equal(typeof row.meta, "string");
     assert.equal(typeof row.stale, "boolean");
@@ -494,15 +727,16 @@ test("an other-row carries NOTHING the painter does not read", () => {
   // (only the main card's rows are barred) and never reads a `key` (it
   // rebuilds the whole section each render, so there is no list to diff).
   // Both were computed on all three branches for a round with no reader.
-  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
   const accounts = {
     [ORG_A]: active,
-    [ORG_B]: acct(ORG_B, NAME_B, 91, iso(NOW - 2 * HOUR), 6),    // free
-    [ORG_C]: acct(ORG_C, NAME_C, 62, iso(NOW + HOUR), 1),        // measured
-    [ORG_D]: acct(ORG_D, NAME_D, 23, null, 1),                   // unknown
+    [ORG_B]: acct(ORG_B, NAME_B, 91, 14, iso(NOW - 2 * HOUR), 6),    // free
+    [ORG_C]: acct(ORG_C, NAME_C, 62, 19, iso(NOW + HOUR), 1),        // measured
+    [ORG_D]: acct(ORG_D, NAME_D, 23, 26, null, 1),                   // unknown
+    blocked_key: weeklyBlocked("55555555-5555-4555-8555-555555555555", "fifth", 44, 100),
   };
   const m = W.widgetModel(active, NOW, { accounts, lastActiveOrg: ORG_A });
-  assert.equal(m.others.length, 3, "precondition: all three branches are exercised");
+  assert.equal(m.others.length, 4, "precondition: all four branches are exercised");
   const EXPECTED = ["name", "state", "value", "meta", "tone", "stale"];
   for (const row of m.others) {
     assert.deepEqual(Object.keys(row).sort(), [...EXPECTED].sort(),
@@ -520,14 +754,15 @@ test("🔴 EVERY other account reaches the card -- no row is counted-but-unreach
   // The height bound moved into CSS (`.otherlist` scrolls), which keeps the
   // "card over his chat" constraint without hiding anything; the painter's
   // half is pinned in content_widget.test.mjs.
-  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
   const accounts = { [ORG_A]: active };
-  // Six others, all measured, with distinct percentages so the order is the
-  // rule's and not the map's.
+  // Six others, all measured, with distinct session AND weekly percentages
+  // so the order is the rule's and not the map's.
   const pcts = [23, 31, 42, 53, 62, 71];
+  const wks = [14, 19, 26, 33, 44, 51];
   pcts.forEach((p, i) => {
     const id = `9${i}999999-9999-4999-8999-999999999999`;
-    accounts[id] = acct(id, `acct ${i}`, p, iso(NOW + (i + 1) * HOUR), 1);
+    accounts[id] = acct(id, `acct ${i}`, p, wks[i], iso(NOW + (i + 1) * HOUR), 1);
   });
   const m = W.widgetModel(active, NOW, { accounts, lastActiveOrg: ORG_A });
 
@@ -548,9 +783,9 @@ test("the next-free footer names the soonest account -- which is NOT the first r
   // questions with two different answers, on one card. Round 0 measured the
   // footer null on a two-account fixture and read that as redundancy; it is
   // null only when there is genuinely nothing to wait for.
-  const active = acct(ORG_A, NAME_A, 37, iso(NOW + 30 * 60 * 1000), 0);
-  const soon = acct(ORG_B, NAME_B, 62, iso(NOW + HOUR + 12 * 60 * 1000), 1);
-  const later = acct(ORG_C, NAME_C, 23, iso(NOW + 5 * HOUR), 1);
+  const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 30 * 60 * 1000), 0);
+  const soon = acct(ORG_B, NAME_B, 62, 14, iso(NOW + HOUR + 12 * 60 * 1000), 1);
+  const later = acct(ORG_C, NAME_C, 23, 19, iso(NOW + 5 * HOUR), 1);
   const m = W.widgetModel(active, NOW, {
     accounts: { [ORG_A]: active, [ORG_B]: soon, [ORG_C]: later }, lastActiveOrg: ORG_A,
   });
@@ -561,14 +796,14 @@ test("the next-free footer names the soonest account -- which is NOT the first r
 
   // Nothing pending -> no line at all, rather than an empty one.
   const allFree = {
-    [ORG_A]: active, [ORG_B]: acct(ORG_B, NAME_B, 91, iso(NOW - HOUR), 6),
+    [ORG_A]: active, [ORG_B]: acct(ORG_B, NAME_B, 91, 14, iso(NOW - HOUR), 6),
   };
   assert.equal(W.widgetModel(active, NOW, { accounts: allFree, lastActiveOrg: ORG_A }).nextFree, null);
 });
 
 test("the account already ON the card never appears again under 'other accounts'", () => {
-  const a = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
-  const b = acct(ORG_B, NAME_B, 62, iso(NOW + HOUR), 1);
+  const a = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+  const b = acct(ORG_B, NAME_B, 62, 14, iso(NOW + HOUR), 1);
   const accounts = { [ORG_A]: a, [ORG_B]: b };
 
   assert.deepEqual(
@@ -580,9 +815,82 @@ test("the account already ON the card never appears again under 'other accounts'
     W.widgetModel(a, NOW, { accounts, lastActiveOrg: null }).others.map((r) => r.name), [NAME_B]);
 });
 
+// --- 🔴 F2: ONE answer for "which record is active" -------------------------- //
+//
+// 🔴 THE SEAM. service_worker.js writes `lastActiveOrg = activeUuid`
+// unconditionally, while a non-401/403 failure on a first-seen org (network,
+// 5xx, a non-JSON 200) leaves `accounts[activeUuid]` absent. The widget then
+// identified "active" by MAP KEY and the popup by the record's own `orgUuid`
+// FIELD, and pickRecord() promoted the freshest record onto the card and
+// handed it the ACTIVE-ACCOUNT EXEMPTION it is not entitled to. MEASURED at
+// b97190c8 with `{B: 92%, reset elapsed 2h, freshest; C: 40% pending}` and
+// `lastActiveOrg` naming a ghost org:
+//
+//     WIDGET card   : B | Session 92% · resets soon     <- the pre-PR string
+//     WIDGET others : C = 40%                            <- no AVAILABLE row
+//     POPUP         : B: AVAILABLE · reset 2h ago (was 92%)
+//
+// The popup half is pinned in popup.test.mjs's cross-surface guard.
+
+const GHOST = "99999999-9999-4999-8999-999999999999";
+
+test("🔴 REGRESSION: the card does not hand the active-account exemption to a FALLBACK record", () => {
+  // Watched RED at b97190c8: the session row's meta was "resets soon".
+  const b = acct(ORG_B, NAME_B, 92, 14, iso(NOW - 2 * HOUR), 0);
+  const c = acct(ORG_C, NAME_C, 40, 19, iso(NOW + 2 * HOUR), 1);
+  const accounts = { [ORG_B]: b, [ORG_C]: c };
+  assert.equal(W.pickRecord(accounts, GHOST), b, "precondition: the card falls back to B");
+
+  const m = W.widgetModel(b, NOW, { accounts, lastActiveOrg: GHOST });
+  const sess = m.rows.find((x) => x.key === "session");
+  assert.ok(!/resets soon/.test(sess.meta),
+    `the card still reads "${sess.value} · ${sess.meta}" for a record that will NEVER be re-measured`);
+  assert.equal(sess.value, "AVAILABLE");
+  assert.equal(sess.bar, null, "an empty track: the stored % describes a window that is gone");
+  assert.match(sess.meta, /reset 2h ago/, sess.meta);
+  assert.match(sess.meta, /was 92%/, "the last MEASURED value must remain visible");
+  assert.ok(!/\b0%/.test(sess.value + sess.meta), "never a fabricated 0%");
+});
+
+test("🔴 the ACTIVE account keeps its countdown -- the exemption still applies where it is earned", () => {
+  // The other direction, and the reason the exemption exists at all:
+  // content_probe.js fetches with the CURRENT session cookie, so this is the
+  // one account "the next snapshot will correct it" is true of.
+  const a = acct(ORG_A, NAME_A, 92, 8, iso(NOW - 2 * HOUR), 0);
+  const accounts = { [ORG_A]: a };
+  const m = W.widgetModel(a, NOW, { accounts, lastActiveOrg: ORG_A });
+  const sess = m.rows.find((x) => x.key === "session");
+  assert.equal(sess.meta, "resets soon");
+  assert.equal(sess.value, "92%");
+
+  // ...and with NO account map the caller has one record and it is by
+  // construction the one in front of you, so it keeps the exemption too.
+  assert.equal(W.widgetModel(a, NOW).rows.find((x) => x.key === "session").meta, "resets soon");
+  assert.equal(W.widgetModel(a, NOW, { labels: {} }).rows
+    .find((x) => x.key === "session").meta, "resets soon");
+});
+
+test("🔴 REGRESSION: a JUNK value under the active key does not blank the whole widget", () => {
+  // Watched RED at b97190c8: `accounts[lastActiveOrg]` returned the string
+  // "junk", pickRecord handed it back as the record, and widgetModel rendered
+  // `empty: true` with `others: []` -- the entire widget gone, with real data
+  // stored. widget.js's comment asserted this could only happen on an EMPTY
+  // map, which is the claim that stopped anyone looking.
+  const b = acct(ORG_B, NAME_B, 62, 14, iso(NOW + HOUR), 1);
+  const accounts = { [ORG_A]: "junk", [ORG_B]: b };
+  assert.equal(W.pickRecord(accounts, ORG_A), b, "a string is not a record");
+
+  const m = W.widgetModel(W.pickRecord(accounts, ORG_A), NOW,
+    { accounts, lastActiveOrg: ORG_A });
+  assert.equal(m.empty, false, "the widget rendered its waiting state over real data");
+  assert.equal(m.name, NAME_B);
+  assert.deepEqual(m.others.map((r) => r.name), [],
+    "the junk entry must not be painted as an account either");
+});
+
 test("labels rename both the card's own header and the other rows", () => {
-  const a = acct(ORG_A, NAME_A, 37, iso(NOW + 3 * HOUR), 0);
-  const b = acct(ORG_B, NAME_B, 62, iso(NOW + HOUR), 1);
+  const a = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+  const b = acct(ORG_B, NAME_B, 62, 14, iso(NOW + HOUR), 1);
   const m = W.widgetModel(a, NOW, {
     accounts: { [ORG_A]: a, [ORG_B]: b },
     lastActiveOrg: ORG_A,
@@ -620,11 +928,16 @@ test("the others section is TOTAL over garbage ctx -- it runs in his real tab", 
     { accounts: { [ORG_B]: null }, lastActiveOrg: 5 },
     { accounts: { [ORG_B]: "nope" }, lastActiveOrg: ORG_A, labels: "nope" },
     { accounts: { [ORG_B]: rec(ORG_B, NAME_B) }, labels: 7 },
+    { accounts: { [ORG_A]: r }, lastActiveOrg: "constructor" },
   ];
   for (const ctx of ctxs) {
     const m = W.widgetModel(r, NOW, ctx);
     assert.ok(Array.isArray(m.others), `ctx=${JSON.stringify(ctx)}`);
     assert.ok(m.nextFree === null || typeof m.nextFree === "string");
+    for (const row of m.rows) {
+      assert.equal(typeof row.value, "string", `ctx=${JSON.stringify(ctx)}`);
+      assert.equal(typeof row.meta, "string");
+    }
   }
 });
 

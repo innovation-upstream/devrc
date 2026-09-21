@@ -56,6 +56,18 @@
 //     with an unknown end still blocks. The inference is safe in one
 //     direction only.
 //
+// ⚠ ONE RESIDUE, NAMED RATHER THAN PAPERED OVER. The session rule is right
+// for `five_hour.locked_reason` values that ARE the five-hour cap ("Session
+// limit reached."), and wrong for an ACCOUNT-level state the API happens to
+// surface through the same field -- a suspension does not clear at the next
+// five-hour boundary, but this treats it as spent once the window turns over.
+// Telling the two apart means string-matching an uncontracted field, which is
+// the prose-heuristic fix RULES.md says to OFFER rather than reach for, so it
+// is not done here. In practice a suspended account is almost always weekly-
+// blocked too and still reads BLOCKED for that reason; a suspension with a
+// healthy weekly window reads free. Pinned as a decision in widget.test.mjs's
+// "a LIVE session lock is named ahead of a weekly one". Not closed.
+//
 // The ACTIVE account is the one documented exemption, and it is a fact about
 // MEASUREMENT rather than a styling choice: it is the one account the probe
 // WILL re-measure within seconds, so for it "the next snapshot will correct

@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 
 const P = await import("../extension/popup.js");
 const { accountLabel } = await import("../extension/lib/format.js");
+const { isActiveRecord } = await import("../extension/lib/availability.js");
 const W = await import("../extension/lib/widget.js");
 const { NAME_A, NAME_B, NOW, ORG_A, ORG_B, ORG_C, fullUsage } =
   await import("./fixtures.mjs");
@@ -122,6 +123,144 @@ test("🔴 the popup and the widget give ONE answer for one stored record", () =
       `popup "${P.sessionLine(other, NOW, false)}" vs widget "`
       + `${model.others[0].value} ${model.others[0].meta}"`);
   }
+});
+
+test("🔴 REGRESSION: the two surfaces agree when lastActiveOrg names an org with NO record", () => {
+  // 🔴 THE SEAM THE GUARD ABOVE WAS TOO NARROW TO SEE. It only ever built
+  // states where `lastActiveOrg` named a STORED record, so it could not
+  // observe the one the two surfaces spelled differently -- widget by MAP
+  // KEY, popup by the record's own `orgUuid` FIELD. service_worker.js writes
+  // `lastActiveOrg = activeUuid` unconditionally while a non-401/403 failure
+  // on a first-seen org leaves `accounts[activeUuid]` absent, so this is a
+  // real stored state.
+  //
+  // MEASURED at b97190c8 with {B: 92%, reset elapsed 2h, freshest; C: 40%
+  // pending} and a ghost active org -- watched RED here:
+  //
+  //   WIDGET card   : B | Session 92% · resets soon   <- the pre-PR string
+  //   WIDGET others : C = 40%                          <- no AVAILABLE row
+  //   POPUP         : B: AVAILABLE · reset 2h ago (was 92%)
+  //
+  // pickRecord() promoted B onto the card and handed it the ACTIVE-ACCOUNT
+  // EXEMPTION, which is earned only by the account content_probe.js will
+  // re-measure with the current session cookie -- and B is not it.
+  const GHOST = "99999999-9999-4999-8999-999999999999";
+  const b = rec(ORG_B, NAME_B, 92, NOW);
+  b.session.resetsAt = new Date(NOW - 2 * HOUR).toISOString();
+  const c = rec(ORG_C, "third", 40, NOW - HOUR);
+  c.session.resetsAt = new Date(NOW + 2 * HOUR).toISOString();
+  const accounts = { [ORG_B]: b, [ORG_C]: c };
+
+  // The popup's own answer, through the predicate paint() now uses.
+  const popupLine = P.sessionLine(b, NOW, isActiveRecord(b, accounts, GHOST));
+  assert.match(popupLine, /AVAILABLE/, popupLine);
+
+  // The widget's card, on the same storage and the same `now`.
+  assert.equal(W.pickRecord(accounts, GHOST), b, "precondition: the card falls back to B");
+  const card = W.widgetModel(b, NOW, { accounts, lastActiveOrg: GHOST });
+  const sess = card.rows.find((x) => x.key === "session");
+  assert.ok(!/resets soon/.test(sess.meta),
+    `the card reads "${sess.value} · ${sess.meta}" while the popup reads "${popupLine}"`);
+
+  // THE RELATIONSHIP, not the two components: both surfaces must reach the
+  // same verdict for B, and B must not vanish from the widget entirely.
+  assert.equal(sess.value === "AVAILABLE", /AVAILABLE/.test(popupLine),
+    "one storage read, two answers");
+  assert.equal(card.others.length, 1, "C is still listed");
+  assert.ok(!card.others.some((r) => r.name === NAME_B),
+    "B is on the card, so it must not also be listed underneath");
+});
+
+test("🔴 the seam holds across EVERY availability state, active and ghost alike", () => {
+  // The relationship guard, widened. For each state, and for both an active
+  // key that names a record and one that names nothing, the popup's line and
+  // the widget's row must agree about the verdict.
+  const GHOST = "99999999-9999-4999-8999-999999999999";
+  const mk = (uuid, name, pct, resetsAtMs, over) => {
+    const r = rec(uuid, name, pct, NOW - HOUR);
+    r.severity = null;
+    r.session.resetsAt = resetsAtMs === null ? null : new Date(resetsAtMs).toISOString();
+    r.weekly.utilization = 33;
+    r.weekly.resetsAt = new Date(NOW + 4 * 24 * HOUR).toISOString();
+    if (over) over(r);
+    return r;
+  };
+  const active = mk(ORG_A, NAME_A, 37, NOW + 3 * HOUR);
+  const cases = {
+    free: mk(ORG_B, NAME_B, 92, NOW - 2 * HOUR),
+    measured: mk(ORG_B, NAME_B, 62, NOW + HOUR),
+    unknown: mk(ORG_B, NAME_B, 23, null),
+    blocked: mk(ORG_B, NAME_B, 95, NOW - 2 * HOUR, (r) => {
+      r.weekly.utilization = 100;
+      r.weekly.lockedReason = "Weekly limit reached.";
+    }),
+  };
+
+  for (const [expected, other] of Object.entries(cases)) {
+    for (const activeKey of [ORG_A, GHOST]) {
+      const accounts = { [ORG_A]: active, other_key: other };
+      const model = W.widgetModel(active, NOW, { accounts, lastActiveOrg: activeKey });
+      assert.equal(model.others.length, 1, "precondition: the widget lists the other account");
+      const row = model.others[0];
+      assert.equal(row.state, expected, `widget called it ${row.state}`);
+
+      const line = P.sessionLine(other, NOW, isActiveRecord(other, accounts, activeKey));
+      const popupVerdict = /^BLOCKED/.test(line) ? "blocked"
+        : (/AVAILABLE/.test(line) ? "free" : "not-free");
+      const widgetVerdict = row.state === "blocked" ? "blocked"
+        : (row.state === "free" ? "free" : "not-free");
+      assert.equal(popupVerdict, widgetVerdict,
+        `${expected}/${activeKey === GHOST ? "ghost" : "active"}: `
+        + `popup "${line}" vs widget "${row.value} ${row.meta}"`);
+    }
+  }
+});
+
+test("🔴 REGRESSION: a BLOCKED account says so in the popup, with the reason and the wait", () => {
+  // Watched RED at b97190c8: "Session AVAILABLE · reset 2h ago (was 95%)".
+  const r = rec(ORG_B, NAME_B, 95, NOW - 8 * HOUR);
+  r.session.resetsAt = new Date(NOW - 2 * HOUR).toISOString();
+  r.weekly.utilization = 100;
+  r.weekly.resetsAt = new Date(NOW + 4 * 24 * HOUR).toISOString();
+  r.weekly.lockedReason = "Weekly limit reached.";
+
+  const line = P.sessionLine(r, NOW, false);
+  assert.ok(!/AVAILABLE/.test(line), `the popup still reads "${line}"`);
+  assert.match(line, /^BLOCKED/, line);
+  assert.match(line, /Weekly limit reached\./, line);
+  assert.match(line, /frees up in 4d0h/, line);
+  assert.match(line, /session was 95%/, "the last MEASURED value must remain visible");
+  assert.ok(!/\b0%/.test(line), "never a fabricated 0%");
+  // ...and it reaches the row model the painter reads, not just the helper.
+  assert.equal(P.renderRow(r, NOW, false).session, line);
+
+  // 🔴 THE EXEMPTION DOES NOT REACH A BLOCK. It exists because an elapsed
+  // reset on the ACTIVE account is a pending correction the next probe will
+  // make; a lock is a stored fact the next probe will CONFIRM. The widget's
+  // card renders the same lock in its `locked` banner, so both surfaces
+  // report it for the active account too.
+  assert.equal(P.sessionLine(r, NOW, true), line,
+    "the active account was told it is fine while its weekly window is shut");
+  assert.equal(W.widgetModel(r, NOW).locked, "Weekly limit reached.",
+    "the widget's card surfaces the same lock for the same record");
+});
+
+test("ordering: a JUNK value under the active key is not pinned to the top as 'active'", () => {
+  // `orderAccounts` read `map[lastActiveOrg]` bare, so anything truthy under
+  // that key was promoted to the head of the dashboard as the active account.
+  const b = rec(ORG_B, NAME_B, 20, NOW);
+  const ordered = P.orderAccounts({ [ORG_A]: "junk", [ORG_B]: b }, ORG_A);
+  assert.equal(ordered[0], b,
+    "a string was pinned to the head of the dashboard as the active account");
+  // The junk entry is still in the list -- Object.values() carries it, which
+  // is pre-existing and out of this change's scope -- but it is ordered on
+  // its (absent) freshness like anything else, not promoted by identity.
+  assert.equal(ordered.length, 2);
+
+  // `map["constructor"]` answers a truthy FUNCTION off Object.prototype, so a
+  // bare read would pin Object's constructor as the active account.
+  const only = P.orderAccounts({ [ORG_B]: b }, "constructor");
+  assert.deepEqual(only.map((r) => r.orgUuid), [ORG_B]);
 });
 
 test("INVARIANT GUARD: the ACTIVE account keeps its countdown -- it is re-measured", () => {

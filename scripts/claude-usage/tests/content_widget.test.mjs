@@ -276,14 +276,27 @@ test("with no stored account the card is an instruction, not zeroes", async () =
 // on the model. The defect lives in the DOM, so the guard lives in the DOM.
 
 const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
 
 /** A stored-shaped record for a NON-active account, built through the real
  * normalizer. `resetsAtMs`/`ageH` are relative to Date.now(), which is what
- * render() reads. */
-function acct(uuid, name, pct, resetsAtMs, ageH) {
+ * render() reads.
+ *
+ * 🔴 `wk` IS A PARAMETER FOR THE REASON widget.test.mjs's twin RECORDS: every
+ * fixture here used to leave `weekly.utilization` at the constant 47 that
+ * `fullUsage()` supplies, on EVERY record, so this suite was structurally
+ * blind to the weekly dimension -- the dimension the row rule was ignoring.
+ * Values are pairwise distinct, distinct from the session percentage beside
+ * them, and distinct from every constant the assertions name (80, 95, 100, 0).
+ * `severity` is nulled so the percent half of the tone rule is isolated. */
+function acct(uuid, name, pct, wk, resetsAtMs, ageH, over) {
   const r = normalizeUsage(fullUsage(), uuid, name, Date.now() - ageH * HOUR);
+  r.severity = null;
   r.session.utilization = pct;
   r.session.resetsAt = resetsAtMs === null ? null : new Date(resetsAtMs).toISOString();
+  r.weekly.utilization = wk;
+  r.weekly.resetsAt = new Date(Date.now() + 4 * 24 * HOUR).toISOString();
+  if (over) over(r);
   return r;
 }
 
@@ -299,8 +312,8 @@ test("🔴 REGRESSION: the widget SHOWS a freed-up account, as available and not
   const m = await mount({
     storage: {
       accounts: {
-        [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0),
-        [ORG_B]: acct(ORG_B, NAME_B, 91, now - 2 * HOUR, 6),
+        [ORG_A]: acct(ORG_A, NAME_A, 37, 8, now + 3 * HOUR, 0),
+        [ORG_B]: acct(ORG_B, NAME_B, 91, 14, now - 2 * HOUR, 6),
       },
       lastActiveOrg: ORG_A,
     },
@@ -320,6 +333,55 @@ test("🔴 REGRESSION: the widget SHOWS a freed-up account, as available and not
   assert.match(text, /measured 6h ago/, "...with its age");
 });
 
+test("🔴 REGRESSION: a weekly-BLOCKED account is not painted as the best switch target", async () => {
+  // THE F1 defect, in the DOM where the operator meets it. B's five-hour
+  // window reset three hours ago and its SEVEN-DAY window is at 100% and
+  // locked for another four days. Watched RED at b97190c8: the row read
+  // "AVAILABLE — reset 3h ago (was 95%, measured 8h ago)" with a green dot,
+  // above a usable account.
+  const now = Date.now();
+  const m = await mount({
+    storage: {
+      accounts: {
+        [ORG_A]: acct(ORG_A, NAME_A, 37, 8, now + 3 * HOUR, 0),
+        [ORG_B]: acct(ORG_B, NAME_B, 95, 100, now - 3 * HOUR, 8, (r) => {
+          r.weekly.lockedReason = "Weekly limit reached.";
+        }),
+        [ORG_C]: acct(ORG_C, NAME_C, 12, 19, now + 2 * HOUR, 1),
+      },
+      lastActiveOrg: ORG_A,
+    },
+  });
+
+  const rows = m.shadow.querySelectorAll(".other");
+  assert.equal(rows.length, 2);
+  const blockedRow = find(m.shadow, ".other.blocked");
+  assert.ok(blockedRow, "no blocked row was painted — the state never reaches the DOM");
+  const text = textOf(blockedRow);
+  assert.ok(!/AVAILABLE/.test(text), `the blocked row still reads "${text}"`);
+  assert.match(text, /BLOCKED/, text);
+  // 🔴 The LOCK the active card has always rendered must reach an other row.
+  assert.match(text, /Weekly limit reached\./,
+    `the lock is dropped on the way to an other-account row: "${text}"`);
+  // The SHAPE, not the exact string: this harness runs on the real clock, so
+  // the fixture's `now + 4d` has already drifted to 3d23h by the time
+  // render() reads Date.now(). The exact text is pinned in widget.test.mjs,
+  // which uses a frozen NOW. What matters here is that a MULTI-DAY wait
+  // reaches the DOM at all.
+  assert.match(text, /frees up in \d+d\d+h/, `no wait time on screen: "${text}"`);
+  assert.match(text, /session was 95%/, "the last MEASURED value must remain on screen");
+
+  // Coloured as unusable, and NOT greyed — the verdict is a live inference.
+  assert.match(cls(find(m.shadow, ".other.blocked .dot")), /\bt-crit\b/,
+    "an unusable account is painted calm");
+  assert.ok(!/\bstale\b/.test(cls(blockedRow)),
+    `the blocked row is class "${cls(blockedRow)}" — greyed out`);
+
+  // ...and it is painted BELOW the account that actually works.
+  assert.match(textOf(rows[0]), new RegExp(NAME_C.replace(/[.*+?^${}()|[\]\\<>]/g, "\\$&")),
+    "the account that rejects you at the login screen is the first row");
+});
+
 test("🔴 the presumed-free row is NOT painted as stale", async () => {
   // A 9h-old snapshot is stale by the 6h rule, and the free row is stale BY
   // CONSTRUCTION. Greying it washes out the most actionable thing on the card.
@@ -327,9 +389,9 @@ test("🔴 the presumed-free row is NOT painted as stale", async () => {
   const m = await mount({
     storage: {
       accounts: {
-        [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0),
-        [ORG_B]: acct(ORG_B, NAME_B, 91, now - 2 * HOUR, 9),
-        [ORG_C]: acct(ORG_C, NAME_C, 62, now + 4 * HOUR, 9),
+        [ORG_A]: acct(ORG_A, NAME_A, 37, 8, now + 3 * HOUR, 0),
+        [ORG_B]: acct(ORG_B, NAME_B, 91, 14, now - 2 * HOUR, 9),
+        [ORG_C]: acct(ORG_C, NAME_C, 62, 19, now + 4 * HOUR, 9),
       },
       lastActiveOrg: ORG_A,
     },
@@ -347,6 +409,38 @@ test("🔴 the presumed-free row is NOT painted as stale", async () => {
     "a stale MEASURED row must still grey — there the percentage IS the claim");
 });
 
+/**
+ * Every CSS rule in a `var X = [ "...", "..." ].join("")` block, as
+ * `{selectors: [...], body}`. Parses the STRUCTURE rather than matching a
+ * spelling, because a selector list is what the old guard could not see.
+ *
+ * `@media` preludes are stripped first so the rules nested inside them are
+ * tokenized like any others -- a hazard re-introduced inside the dark-mode
+ * block would otherwise be invisible.
+ */
+function cssRules(src) {
+  const fragments = [...src.matchAll(/"((?:[^"\\]|\\.)*)"/g)]
+    .map((m) => m[1].replace(/\\(.)/g, "$1"));
+  const css = fragments.join("").replace(/@media[^{]*\{/g, "");
+  const out = [];
+  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    out.push({
+      selectors: m[1].split(",").map((s) => s.trim()).filter(Boolean),
+      body: m[2],
+    });
+  }
+  return out;
+}
+
+/** Does any rule set `opacity` on `.card.stale` ITSELF (rather than on a
+ * descendant of it)? A selector that continues past `.card.stale` with a
+ * combinator or a space is targeting a child and is the SCOPED form. */
+function dimsTheWholeCard(src) {
+  return cssRules(src).filter((r) => /(^|[^-\w])opacity\s*:/.test(r.body))
+    .flatMap((r) => r.selectors)
+    .filter((sel) => /^(\.card\.stale|\.stale\.card)$/.test(sel));
+}
+
 test("🔴 the stale dim is scoped to the active account, never to the whole card", async () => {
   // A SOURCE-LEVEL MECHANISM PIN, not a behavioural assertion, and labelled as
   // one: `opacity` on an ancestor cannot be undone by a descendant, so a bare
@@ -354,14 +448,50 @@ test("🔴 the stale dim is scoped to the active account, never to the whole car
   // what class the painter gives it — and the shadow-DOM harness has no
   // cascade, so no DOM assertion above can see that. The test directly above
   // would stay green while the operator's card was uniformly washed out.
+  //
+  // 🔴 IT WAS A SPELLED GUARD AND IT IS NOW A STRUCTURAL ONE. The check was
+  // `/"\.card\.stale\{[^"]*opacity/`, which only matches a fragment that
+  // BEGINS with `.card.stale{` — so the hazard written as a selector LIST,
+  // `".card.dead,.card.stale{opacity:.6}"`, walked straight past it. That is
+  // not a hypothetical shape: the line directly above the scoped rule in
+  // content_widget.js is `".card.dead,.pill.dead{opacity:.6}"`, so grouping
+  // the two is the most natural edit anyone would make. The guard now parses
+  // the rules and asks whether `.card.stale` is a selector of any rule that
+  // sets opacity, which no rewording can dodge.
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../extension/content_widget.js", import.meta.url), "utf8");
-  const bare = src.match(/"\.card\.stale\{[^"]*opacity/);
-  assert.equal(bare, null,
-    `content_widget.js dims the whole card (${bare && bare[0]}), which greys the `
-    + "other-account rows including the presumed-free one");
-  assert.match(src, /\.card\.stale>\.row/,
-    "the scoped dim rule is gone — the active account no longer greys at all");
+
+  // 🔴 POSITIVE CONTROL FIRST. A detector that has never been shown to fire
+  // reports a clean zero whether the hazard is absent or it is wired to
+  // nothing — and this detector's predecessor WAS wired to nothing for the
+  // grouped shape. Both variants must be caught, and the old regex catches
+  // neither of the first two.
+  const hazards = [
+    '".card.dead,.card.stale{opacity:.6}"',
+    '".card.stale , .other{opacity:.72}"',
+    '".card.stale{opacity:.72}"',
+  ];
+  for (const h of hazards) {
+    assert.ok(dimsTheWholeCard(`var CSS = [${h}].join("");`).length > 0,
+      `the detector cannot see the hazard written as ${h}`);
+  }
+  // ...and a NEGATIVE control: the scoped form must NOT trip it, or the guard
+  // is merely permanently red and says nothing.
+  assert.deepEqual(
+    dimsTheWholeCard('var CSS = [".card.stale>.head,.card.stale>.row{opacity:.72}"].join("");'),
+    [], "the detector flags the SCOPED rule, so it cannot distinguish the two");
+
+  // Only now is the real reading worth anything.
+  assert.deepEqual(dimsTheWholeCard(src), [],
+    "content_widget.js dims the whole card, which greys the other-account rows "
+    + "including the presumed-free one");
+
+  // And the scoped rule still has to EXIST, or the active account never greys.
+  const scoped = cssRules(src).flatMap((r) => r.selectors)
+    .filter((sel) => sel.startsWith(".card.stale>"));
+  assert.ok(scoped.length >= 4,
+    `only ${scoped.length} scoped dim selector(s) (${scoped}) — the active `
+    + "account's own elements no longer grey when its snapshot is old");
 });
 
 test("🔴 the card PAINTS every account -- the '+N more' dead end is gone", async () => {
@@ -372,10 +502,11 @@ test("🔴 the card PAINTS every account -- the '+N more' dead end is gone", asy
   // pointer-events test below forbids. So every row is painted and the
   // height is bounded by CSS instead.
   const now = Date.now();
-  const accounts = { [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0) };
+  const accounts = { [ORG_A]: acct(ORG_A, NAME_A, 37, 8, now + 3 * HOUR, 0) };
+  const wks = [14, 19, 26, 33, 44, 51];
   [23, 31, 42, 53, 62, 71].forEach((p, i) => {
     const id = `9${i}999999-9999-4999-8999-999999999999`;
-    accounts[id] = acct(id, `acct ${i}`, p, now + (i + 1) * HOUR, 1);
+    accounts[id] = acct(id, `acct ${i}`, p, wks[i], now + (i + 1) * HOUR, 1);
   });
   const m = await mount({ storage: { accounts, lastActiveOrg: ORG_A } });
   assert.equal(m.shadow.querySelectorAll(".other").length, 6,
@@ -413,8 +544,8 @@ test("the next-free footer is painted when something is pending", async () => {
   const m = await mount({
     storage: {
       accounts: {
-        [ORG_A]: acct(ORG_A, NAME_A, 37, now + 30 * 60 * 1000, 0),
-        [ORG_B]: acct(ORG_B, NAME_B, 62, now + HOUR + 12 * 60 * 1000, 1),
+        [ORG_A]: acct(ORG_A, NAME_A, 37, 8, now + 30 * 60 * 1000, 0),
+        [ORG_B]: acct(ORG_B, NAME_B, 62, 14, now + HOUR + 12 * 60 * 1000, 1),
       },
       lastActiveOrg: ORG_A,
     },
@@ -434,8 +565,8 @@ test("a per-account LABEL renames the row the widget paints", async () => {
   const m = await mount({
     storage: {
       accounts: {
-        [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0),
-        [ORG_B]: acct(ORG_B, NAME_B, 62, now + HOUR, 1),
+        [ORG_A]: acct(ORG_A, NAME_A, 37, 8, now + 3 * HOUR, 0),
+        [ORG_B]: acct(ORG_B, NAME_B, 62, 14, now + HOUR, 1),
       },
       lastActiveOrg: ORG_A,
       accountLabels: { [ORG_A]: "personal", [ORG_B]: "work" },
@@ -454,9 +585,9 @@ test("🔴 the other-accounts section adds NO interactive target over the page",
   const m = await mount({
     storage: {
       accounts: {
-        [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0),
-        [ORG_B]: acct(ORG_B, NAME_B, 91, now - 2 * HOUR, 6),
-        [ORG_C]: acct(ORG_C, NAME_C, 62, now + HOUR, 1),
+        [ORG_A]: acct(ORG_A, NAME_A, 37, 8, now + 3 * HOUR, 0),
+        [ORG_B]: acct(ORG_B, NAME_B, 91, 14, now - 2 * HOUR, 6),
+        [ORG_C]: acct(ORG_C, NAME_C, 62, 19, now + HOUR, 1),
       },
       lastActiveOrg: ORG_A,
     },
@@ -477,8 +608,8 @@ test("collapsing still works, and the collapsed pill hides the other rows", asyn
   const now = Date.now();
   const store = {
     accounts: {
-      [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0),
-      [ORG_B]: acct(ORG_B, NAME_B, 91, now - 2 * HOUR, 6),
+      [ORG_A]: acct(ORG_A, NAME_A, 37, 8, now + 3 * HOUR, 0),
+      [ORG_B]: acct(ORG_B, NAME_B, 91, 14, now - 2 * HOUR, 6),
     },
     lastActiveOrg: ORG_A,
   };
@@ -501,9 +632,9 @@ test("a widget booted COLLAPSED stays collapsed even with other accounts to show
   const m = await mount({
     storage: {
       accounts: {
-        [ORG_A]: acct(ORG_A, NAME_A, 37, now + 3 * HOUR, 0),
-        [ORG_B]: acct(ORG_B, NAME_B, 91, now - 2 * HOUR, 6),
-        [ORG_D]: acct(ORG_D, NAME_D, 62, now + HOUR, 1),
+        [ORG_A]: acct(ORG_A, NAME_A, 37, 8, now + 3 * HOUR, 0),
+        [ORG_B]: acct(ORG_B, NAME_B, 91, 14, now - 2 * HOUR, 6),
+        [ORG_D]: acct(ORG_D, NAME_D, 62, 26, now + HOUR, 1),
       },
       lastActiveOrg: ORG_A,
       widgetCollapsed: true,
