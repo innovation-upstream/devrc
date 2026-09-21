@@ -371,8 +371,8 @@ makes P1 auditable rather than felt.
 | P3 | paste-ready DoD offer | — | — | 🔴 **DELETED** — remedy already printed |
 | P1′ | per-doc evictable backlog in `budget_warning()` | `handoff_doc.py`, `handoff-audit.py` | none (prints only) | **on this branch, `97fee3d0` — NOT merged**; verified live |
 
-**Nothing remains to build.** One landed as specified (P4), one landed corrected (P1′) — on the branch; nothing is on `main` until #1815 merges, two
-deleted by measurement (P2, P3).
+**Nothing remains to build.** One landed as specified (P4), one landed corrected (P1′), two deleted by
+measurement (P2, P3) — all on the branch; nothing is on `main` until #1815 merges.
 
 🔴 **This arc's closing condition cannot be met as written and should not be re-aimed.** It
 was frozen at round 1 as "P1 merged AND the APPEND share below 70%" — but the demotion is

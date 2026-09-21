@@ -2941,22 +2941,39 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         # than failing loudly. Caught by a control that re-derived each bucket's
         # byte count from its own range. Indices are explicit and pinned by
         # `test_the_union_indices_match_each_buckets_tuple_shape`.
-        # 🔴 THE UNION IS DELETED, AND ITS REASON IS GONE RATHER THAN REPLACED.
-        # It was added (round 1, F5) because `resolved` and `dated` can hold the
-        # SAME block, so summing them double-counted. Round 2 then narrowed the
-        # counted set to step 1 = {resolved, done} — and those two are
-        # STRUCTURALLY DISJOINT: `resolved` is `### ` blocks under
-        # `## Open investigations`, `done` is items under `## Next steps`, so no
-        # block can be both. MEASURED at round 3 over this repo's 99 handoff docs:
-        # 2 docs overlap across all four buckets, **0** across the step-1 pair;
-        # and two mutants that restored the double-count verbatim SURVIVED the
-        # whole 502-test suite. A guard that cannot be exercised, cannot be
-        # killed, and whose cited measurement describes a pair it no longer
-        # covers is worse than none — so it is removed rather than kept
-        # "defensively" with a fresh justification invented for it.
-        # Re-derive before re-adding: if a future bucket joins step 1, check
-        # whether it can share lines with an existing one.
-        step1_b = sum(r[1] for r in step1)
+        # 🔴 A TRUE INTERVAL UNION, AND THE THIRD ATTEMPT AT THIS NUMBER. The
+        # history is kept because each wrong version looked right:
+        #   round 1 (F5) added a union over all four buckets — correct, because
+        #     `resolved` and `dated` can hold the SAME block.
+        #   round 2 narrowed the COUNTED set to step 1 = {resolved, done}, which
+        #     left the union guarding a pair that (then) never overlapped.
+        #   round 3 DELETED the union on the claim that those two are
+        #     "structurally disjoint — `resolved` is blocks under
+        #     `## Open investigations`, `done` is items under `## Next steps`".
+        # 🔴 THAT CLAIM IS FALSE, and round 4 produced the counterexample.
+        # `NEXT_STEPS` and `INVESTIGATIONS` are two REGEXES tested with `if` /
+        # `if` over the SAME heading list (`handoff-audit.py`), not two headings —
+        # so ONE H2 can match both. `## Open investigations / next steps` does
+        # exactly that and exists in this corpus
+        # (`claudedocs/archive/handoff-browser-bridge-gates-and-deploys-2026-08-02.md`).
+        # A resolved `### ` block holding a done ranked item is then booked in
+        # BOTH step-1 buckets, and summing them promised 1,746 B out of a 1,048 B
+        # document — round 1's F5 outcome verbatim: evict everything named and
+        # still be red. Reproduced, and pinned by
+        # `test_a_heading_matching_BOTH_step1_detectors_is_not_double_counted`.
+        # ⚠ The re-add trigger is NOT "a new bucket joins step 1" (round 3's
+        # wording); it is a DOCUMENT putting investigations and ranked items under
+        # one heading, which needs no code change at all.
+        lines = merged_text.splitlines(keepends=True)
+        spans = sorted((x[AUDIT_SPAN_INDEX[k][0]], x[AUDIT_SPAN_INDEX[k][1]])
+                       for k in ("resolved", "done") for x in a[k])
+        merged_spans: list[list[int]] = []
+        for s_, e_ in spans:
+            if merged_spans and s_ <= merged_spans[-1][1]:
+                merged_spans[-1][1] = max(merged_spans[-1][1], e_)
+            else:
+                merged_spans.append([s_, e_])
+        step1_b = sum(len("".join(lines[s_:e_]).encode()) for s_, e_ in merged_spans)
         net = max(0, step1_b - mod.RESUME_COST * len(a["done"]))
         # 🔴 NET, and the shortfall is stated rather than implied. Quoting a gross
         # number that does not actually clear the overage sends an author cutting
@@ -3005,14 +3022,6 @@ def evictable_note(merged_text: str, over_by: int) -> str:
                        f"  — step 2, NOT counted above")
             out.append(f"         {advice}"
                        + ("  ⚠ the SAME block already counted above" if dup else ""))
-        if step2:
-            # 🔴 Carried INSIDE the note so it reaches BOTH arms. The over-budget
-            # arm states this prohibition separately; the near-headroom arm —
-            # which is the one that prints at over_by == 0, i.e. most of the time
-            # this note appears — carried no counterweight at all after round 2
-            # moved it. Round 3, F1.
-            out.append("    🔴 Do NOT satisfy a budget by deleting an open investigation, a "
-                       "gotcha or a ruled-out theory.")
         return "\n".join(out)
     except (Exception, SystemExit):
         # 🔴 `SystemExit` IS NOT AN `Exception` — it derives from BaseException,
@@ -3116,6 +3125,15 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
         # prescribing where that arm deliberately only reports. Here it is the
         # CHEAPEST moment to act — the tail above says so — so the number belongs.
         note = evictable_note(merged_text, 0) if gated else ""
+        if note:
+            # 🔴 ONE COPY PER ARM. The over-budget arm states this prohibition in
+            # its own block; round 3 put a second copy inside the note, which
+            # made that arm print two near-identical 🔴 lines two lines apart —
+            # the "a line that prints every time is a line nobody reads" failure
+            # this module argues against (round 4, 🟢-3). The near arm carried
+            # NONE after round 2 moved it, so it gets its own here.
+            note += ("\n    🔴 Do NOT satisfy a budget by deleting an open investigation, "
+                     "a gotcha or a ruled-out theory.")
         return f"{head}\n{note}" if note else head
     return ""
 

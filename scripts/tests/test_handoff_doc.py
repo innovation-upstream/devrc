@@ -7700,7 +7700,7 @@ def test_evictable_note_pins_the_NET_NUMBER_not_only_the_verdict_word():
     )
 
 
-def test_the_union_indices_match_each_buckets_tuple_shape():
+def test_the_span_indices_match_each_buckets_tuple_shape():
     """🔴 THE CONTROL THAT CAUGHT A DEFECT IN THIS FEATURE'S OWN FIX, made
     permanent. The four buckets have THREE different tuple shapes and no
     positional rule covers all of them, so the first draft of the union read
@@ -7826,7 +7826,64 @@ def test_each_bucket_carries_the_PLAYBOOK_STEP_that_actually_applies():
     assert "JUDGEMENT: the playbook calls retracted reasoning demotable" in note, (
         "the retracted row must state the tension, not prescribe a move:\n" + note
     )
-    assert "Do NOT satisfy a budget by deleting an open investigation, a gotcha" in note, (
-        "the prohibition must ride INSIDE the note so it reaches the near-headroom "
-        f"arm too, which is where this prints most often:\n{note}"
+    # The prohibition lives on the WARNING, one copy per arm — asserted in
+    # test_each_arm_carries_exactly_one_prohibition rather than here, because
+    # carrying it inside the note made the over-budget arm print it twice
+    # (round 4, 🟢-3).
+
+
+def test_a_heading_matching_BOTH_step1_detectors_is_not_double_counted():
+    """🔴 REGRESSION TEST for the defect round 3's own fix re-opened, and the one
+    its sibling above structurally CANNOT see.
+
+    `test_evictable_note_does_not_DOUBLE_COUNT…` builds a `resolved` × `dated`
+    overlap — but `dated` is step 2 and no longer reaches `net`, so that fixture
+    cannot move the number it asserts on. The pair that IS summed is
+    {resolved, done}, and round 3 deleted the union claiming those two are
+    "structurally disjoint". They are not: `NEXT_STEPS` and `INVESTIGATIONS` are
+    two regexes tested with `if`/`if` over the SAME heading list, so one H2
+    matches both — `## Open investigations / next steps`, which exists in this
+    corpus at claudedocs/archive/handoff-browser-bridge-gates-and-deploys-2026-08-02.md.
+
+    Without the union this document promises 1,746 B out of 1,048 B and says it
+    CLEARS 1,500 — round 1's F5 outcome verbatim: the author evicts everything
+    named and is still red. The assertion is the physical bound (net cannot
+    exceed the whole document), so it fails for ANY double count rather than for
+    one arrangement of it.
+
+    RED with the union removed, GREEN with it."""
+    doc = (
+        "# H\n\n## Goal\ng\n\n"
+        "## Open investigations / next steps\n"
+        "### ✅ RESOLVED — the thing that was wrong\n"
+        "1. DONE — shipped as abc1234. " + "D" * 900 + "\n   forcing: none\n"
     )
+    note = hd.evictable_note(doc, 1500)
+    arrow = re.search(r"→ ([\d,]+) B", note)
+    assert arrow, note
+    net = int(arrow.group(1).replace(",", ""))
+    assert net <= len(doc.encode()), (
+        f"net {net:,} B exceeds the ENTIRE {len(doc.encode()):,} B document — the same "
+        f"block is booked in both step-1 buckets:\n{note}"
+    )
+    assert "does NOT clear" in note, (
+        "a document smaller than the overage was reported as clearing it:\n" + note
+    )
+
+
+def test_each_arm_carries_exactly_one_prohibition():
+    """🔴 ONE COPY PER ARM (round 4, 🟢-3). The over-budget arm states the
+    prohibition in its own block; round 3 added a second copy inside the note, so
+    that arm printed two near-identical 🔴 lines two lines apart. The near arm had
+    none at all after round 2 moved it. Both directions are asserted: exactly one,
+    never zero, never two."""
+    doc = (REPO_ROOT / "claudedocs" / "handoff-audit-pr-ladder.md").read_text(
+        encoding="utf-8", errors="replace")
+    near = hd.budget_warning("claudedocs/handoff-audit-pr-ladder.md", doc, doc[:100],
+                             gated=True)
+    over = hd.budget_warning("claudedocs/handoff-not-grandfathered.md", doc, doc[:100],
+                             gated=True)
+    assert near.startswith("⚠ Size:") and over.startswith("🔴 THIS UPDATE"), (near[:60], over[:60])
+    for name, text in (("near-headroom", near), ("over-budget", over)):
+        n = text.count("Do NOT satisfy")
+        assert n == 1, f"the {name} arm carries {n} copies of the prohibition, not 1:\n{text}"
