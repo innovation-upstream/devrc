@@ -710,9 +710,29 @@ let
     ];
   };
 
+  # remote-airvpn: the workbench's HOST AirVPN pill, MIRRORED as its own
+  # laptop item from the same snapshot the `wb` pill reads. The rollup shows a
+  # block only while it is ALARMING — and `i3status-airvpn`'s steady states are
+  # icon-only — so a down tunnel was invisible there and the laptop had no
+  # airvpn item at all. The mirror renders the remote verdict verbatim
+  # (text, state and icon; the gather carries the glyph through). No thresholds
+  # here, for the same reason remoteHostBlock states above: the verdict comes
+  # from the remote bar's own command. Click → remote-host-detail, which is
+  # laptop-safe (no LAN target).
+  remoteAirvpnBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-remote-host --host workbench --block i3status-airvpn";
+    json = true;
+    interval = 30;
+    click = [
+      { button = "left"; cmd = remoteHostDetailCmd; }
+      { button = "right"; cmd = remoteHostDetailCmd; }
+    ];
+  };
+
   blocks =
     [ memoryBlock diskBlock scratchpadsBlock netBlock cpuBlock loadBlock temperatureBlock ]
-    ++ lib.optional isLaptop remoteHostBlock
+    ++ lib.optionals isLaptop [ remoteHostBlock remoteAirvpnBlock ]
     ++ lib.optional (!isLaptop) fansBlock
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
@@ -731,8 +751,10 @@ let
     # client prod, and `bar_freshness` ages the synced payload exactly as it
     # would a local poll.
     ++ [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock ]
-    # airvpn + runaways stay workbench-only: those ARE host-local facts, and the
-    # laptop sees them through the relayed `wb` pill instead.
+    # airvpn + runaways stay workbench-only: those ARE host-local facts. The
+    # laptop sees airvpn through BOTH the relayed `wb` rollup (alarms only)
+    # and the dedicated `remoteAirvpnBlock` mirror above (every steady state,
+    # icon included); runaways stays folded into the `wb` pill.
     ++ lib.optionals (!isLaptop) [ airvpnBlock runawaysBlock ]
     ++ [ timeBlock ]
     ++ lib.optionals (!isLaptop) [ claudeRunsBlock rigcontrolBlock ]

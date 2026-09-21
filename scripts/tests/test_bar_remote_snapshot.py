@@ -532,6 +532,147 @@ def test_an_errored_remote_block_is_surfaced_not_smoothed_away(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# the mirror: one relayed block given its own pill (`--block NAME`)
+# ---------------------------------------------------------------------------
+#
+# The `wb` rollup only shows a block when it is ALARMING, and an icon-only
+# block (`i3status-airvpn` down/stale is literally text="") contributes
+# nothing visible at all — so the workbench's tunnel state was invisible on
+# the laptop in every steady state. The mirror gives one classified block a
+# dedicated pill that renders the remote verdict VERBATIM, icon included.
+
+MIRROR_ARGS = ("--host", "workbench", "--block", "i3status-airvpn")
+
+
+def test_the_mirror_relays_the_remote_blocks_OWN_state_verbatim(tmp_path):
+    """The verdict travels; the predicate does not — same contract as the rollup."""
+    out = _run_pill(tmp_path, _live([
+        {"name": "i3status-airvpn", "icon": "net_vpn", "text": "CA", "state": "Idle"}]),
+        *MIRROR_ARGS)
+    assert out["text"] == "CA"
+    assert out["icon"] == "net_vpn", "the glyph is the mirror's whole identity"
+    assert out["state"] == "Idle"
+
+
+def test_the_mirror_is_NEVER_EMPTY_even_when_the_remote_pill_is_icon_only(tmp_path):
+    """🔴 A DOWN tunnel renders `{"icon": "net_vpn", "text": ""}` — mirroring
+    that with an empty pill would make the mirror invisible in exactly the
+    steady state it exists to show. The glyph travels with the text."""
+    out = _run_pill(tmp_path, _live([
+        {"name": "i3status-airvpn", "icon": "net_vpn", "text": "", "state": "Idle"}]),
+        *MIRROR_ARGS)
+    assert out["icon"] == "net_vpn", "an icon-only reading must not collapse to empty"
+    assert out["state"] == "Idle"
+
+
+def test_a_STALE_mirror_gets_the_trailing_question_mark(tmp_path):
+    """The bar-wide grammar composes with the mirror: a stale snapshot over a
+    quiet reading renders the glyph + `?`, at least Warning."""
+    old = int(time.time()) - 4000
+    out = _run_pill(tmp_path, _live([
+        {"name": "i3status-airvpn", "icon": "net_vpn", "text": "", "state": "Idle"}],
+        ts=old), *MIRROR_ARGS)
+    assert out["text"].endswith("?")
+    assert out["state"] == "Warning", \
+        "a reading we cannot refresh is never better news than a quiet one we can"
+    assert out["icon"] == "net_vpn"
+
+
+def test_the_mirror_CARRIES_a_frozen_alarm_behind_the_question_mark(tmp_path):
+    """🔴 An outage may make a reading less trusted; it may never make a
+    recorded alarm quieter. A frozen LEAK stays Critical behind the `?`."""
+    old = int(time.time()) - 4000
+    out = _run_pill(tmp_path, _live([
+        {"name": "i3status-airvpn", "icon": "net_vpn", "text": "LEAK",
+         "state": "Critical"}], ts=old), *MIRROR_ARGS)
+    assert "LEAK" in out["text"] and out["text"].endswith("?")
+    assert out["state"] == "Critical"
+
+
+def test_an_UNREACHABLE_peer_still_shows_the_mirror_its_last_reading(tmp_path):
+    good = _live([{"name": "i3status-airvpn", "icon": "net_vpn",
+                   "text": "CA", "state": "Idle"}])
+    out = _run_pill(tmp_path, {"schema": 1, "host": "workbench",
+                               "ts": int(time.time()), "state": "unreachable",
+                               "detail": "ssh timeout", "last_good": good},
+                    *MIRROR_ARGS)
+    assert "CA" in out["text"], "the last reading went silent during an outage"
+    assert out["text"].endswith("?")
+    assert out["state"] == "Warning", \
+        "a carried neutral reading is not an alarm, but the outage is at least a Warning"
+
+
+def test_a_readable_snapshot_WITHOUT_the_block_is_a_NAMED_question_mark(tmp_path):
+    """🔴 THE SILENT ZERO, mirror-shaped: a current gather that did not carry
+    this block must not render as a quiet tunnel."""
+    out = _run_pill(tmp_path, _live([{"name": "i3status-load", "text": "", "state": "Idle"}]),
+                    *MIRROR_ARGS)
+    assert "airvpn" in out["text"] and "?" in out["text"]
+    assert out["state"] == "Warning"
+
+
+def test_a_MISSING_snapshot_renders_a_visible_question_mark_in_mirror_mode(tmp_path):
+    out = _run_pill(tmp_path, None, *MIRROR_ARGS)
+    assert "airvpn" in out["text"] and "?" in out["text"]
+    assert out["state"] == "Warning"
+
+
+def test_an_ERRORED_remote_block_is_surfaced_in_the_mirror(tmp_path):
+    out = _run_pill(tmp_path, _live([
+        {"name": "i3status-airvpn", "icon": "net_vpn", "text": "",
+         "state": "Idle", "error": "timeout"}]), *MIRROR_ARGS)
+    assert out["state"] in ("Warning", "Critical")
+    assert "timeout" in out["text"], out["text"]
+
+
+def test_remote_PANGO_markup_cannot_leak_into_the_mirror(tmp_path):
+    out = _run_pill(tmp_path, _live([
+        {"name": "i3status-airvpn",
+         "text": '<span foreground="#cc241d">LEAK</span>', "state": "Critical"}]),
+        *MIRROR_ARGS)
+    assert "<span" not in out["text"] and "LEAK" in out["text"]
+
+
+def test_run_block_carries_the_ICON_for_a_json_block(tmp_path):
+    """The mirror needs the glyph to travel; `short_text` stays dropped."""
+    cmd = _script(tmp_path,
+                  'echo \'{"icon":"net_vpn","text":"CA","state":"Idle"}\'\n')
+    out = snap.run_block(cmd, dict(os.environ), is_json=True)
+    assert out["icon"] == "net_vpn"
+    plain = _script(tmp_path, "echo '☀'\n", name="blk2")
+    out = snap.run_block(plain, dict(os.environ), is_json=False)
+    assert "icon" not in out
+
+
+def test_a_mirror_entry_WITHOUT_glyph_or_text_names_the_block(tmp_path):
+    """🔴 MEASURED LIVE, 2026-09-21: a workbench one generation behind carries
+    the airvpn entry with `text: ""` and NO icon (the old gather drops it), and
+    the mirror must name the block rather than render an empty pill. This is
+    the version-skew shape, not a hypothetical."""
+    out = _run_pill(tmp_path, _live([
+        {"name": "i3status-airvpn", "text": "", "state": "Idle"}]), *MIRROR_ARGS)
+    assert "airvpn" in out["text"] and "?" in out["text"]
+    assert out["state"] == "Warning"
+    assert out["text"].strip(), "an empty mirror pill in the version-skew case"
+
+
+def test_the_laptop_gets_a_DEDICATED_airvpn_mirror_BY_NIX():
+    """The dedicated pill is a deployment fact, mirroring one relayed block."""
+    nix = (SCRIPTS.parent / "nix" / "graphical.nix").read_text()
+    m = re.search(r"^  (\w+) = \{\n    block = \"custom\";\n    command = "
+                  r"\"\$\{scriptsDir\}/i3status-remote-host --host workbench "
+                  r"--block i3status-airvpn\";", nix, re.M)
+    assert m, "no dedicated airvpn mirror instance in graphical.nix"
+    blk = m.group(1)
+    # the mirror rides the SAME isLaptop gate as the wb pill: one line, one gate
+    gate = [ln for ln in nix.splitlines() if blk in ln
+            and "lib.optionals" in ln]
+    assert gate, "mirror block %s is not in the blocks list" % blk
+    assert all("isLaptop" in ln for ln in gate), \
+        "the mirror must be laptop-gated like the wb pill"
+
+
+# ---------------------------------------------------------------------------
 # the detail view: scripts/remote-host-detail
 # ---------------------------------------------------------------------------
 
