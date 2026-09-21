@@ -1494,9 +1494,9 @@ test("AGENT SURFACE PARTITION: every wire op is REACHABLE or a DECLARED exclusio
 });
 
 // --------------------------------------------------------------------------- //
-// `site_notes` — the agent's ONE structural blind spot, pinned in both halves.
+// `site_flows` — the agent's ONE structural blind spot, pinned in both halves.
 //
-// server.py's _annotate_site_notes sets `site_notes` on the ENVELOPE ROOT, while
+// server.py's _annotate_site_flows sets `site_flows` on the ENVELOPE ROOT, while
 // summarizeResult reads `envelope.data`. So a registered host's flow notes never
 // reach the model. That is deliberate (the agent has no `read` tool, so a path is
 // an instruction it cannot follow) but it is a CAPABILITY GAP the caller has to
@@ -1509,7 +1509,7 @@ test("AGENT SURFACE PARTITION: every wire op is REACHABLE or a DECLARED exclusio
 // `OP_TO_SERVER` (14) is what it can be GIVEN: browser_tool_impl.mjs:159 keeps
 // `upload` in that map precisely so it "remains REACHABLE, but only via an explicit
 // BROWSER_AGENT_ALLOWED_OPS opt-in". Keyed on the default set, this guard did not
-// cover `upload` at all — a `site_notes` forward added to that branch passed the
+// cover `upload` at all — a `site_flows` forward added to that branch passed the
 // FULL suite. This file already uses OP_TO_SERVER as its definition of reachable
 // (see the AGENT SURFACE PARTITION test), so use the same vocabulary here.
 //
@@ -1521,10 +1521,10 @@ test("AGENT SURFACE PARTITION: every wire op is REACHABLE or a DECLARED exclusio
 // the `html` branch entirely. The spot-pin below caught exactly that.
 const AGENT_REACHABLE_OPS = [...Object.keys(OP_TO_SERVER)].sort();
 
-const SITE_NOTES_PATH = "reference/sites/example.test.md";
+const SITE_FLOWS_PATH = "flows/example.test.md";
 const siteNotesEnvelope = () => ({
   id: "cid", ok: true,
-  site_notes: SITE_NOTES_PATH,
+  site_flows: SITE_FLOWS_PATH,
   data: {
     url: "https://example.test/page", title: "T", domain: "example.test",
     path: "/page", searchParams: {}, tabId: 4242,
@@ -1535,7 +1535,7 @@ const siteNotesEnvelope = () => ({
   },
 });
 
-test("SITE NOTES: no agent-reachable op forwards `site_notes` to the model", () => {
+test("SITE FLOWS: no agent-reachable op forwards `site_flows` to the model", () => {
   // Spot-pin, not just a count: a length floor alone cannot see an inventory that
   // silently SHRANK past ops this guard is specifically about. `upload` is the
   // opt-in one the previous revision of this test missed entirely.
@@ -1552,13 +1552,13 @@ test("SITE NOTES: no agent-reachable op forwards `site_notes` to the model", () 
     // vacuous while all three of these tests stay green — measured, round 1 audit.
     // A control at the END of the list cannot cover the items before it; this can.
     assert.ok(out.length > 0,
-      `summarizeResult("${op}") returned EMPTY — its \`site_notes\` check below is ` +
+      `summarizeResult("${op}") returned EMPTY — its \`site_flows\` check below is ` +
       `vacuous, so a leak on this op would go unseen. Fix the summarizer, not this ` +
       `assertion.`);
-    if (out.includes("site_notes") || out.includes(SITE_NOTES_PATH)) leaked.push(op);
+    if (out.includes("site_flows") || out.includes(SITE_FLOWS_PATH)) leaked.push(op);
   }
   assert.deepEqual(leaked, [],
-    `op(s) now forward \`site_notes\`: ${leaked.join(", ")}. If that is INTENDED ` +
+    `op(s) now forward \`site_flows\`: ${leaked.join(", ")}. If that is INTENDED ` +
     `(the agent gained a way to read the file), delete this test AND the ` +
     `\`· **site-noted**\` clause in SKILL.md's FIRST DECISION — leaving the clause ` +
     `standing would tell every caller to route around a gap that no longer exists.`);
@@ -1570,13 +1570,13 @@ test("SITE NOTES: no agent-reachable op forwards `site_notes` to the model", () 
 // others, which is why per-op liveness is asserted inside the loop above rather
 // than inferred from here (a `summarizeResult` empty for every op but `context`
 // passes this control while leaving the rest of the sweep vacuous — measured).
-test("SITE NOTES positive control: the same harness DOES observe a forwarded field", () => {
+test("SITE FLOWS positive control: the same harness DOES observe a forwarded field", () => {
   const out = String(summarizeResult("context", siteNotesEnvelope(), {}, null));
   assert.ok(out.includes("example.test"),
     `the harness cannot see a field summarizeResult really does forward ` +
-    `(context.domain), so its \`site_notes\` zero is meaningless: ${out}`);
-  assert.ok(!out.includes(SITE_NOTES_PATH),
-    "and it still must not carry the site_notes PATH");
+    `(context.domain), so its \`site_flows\` zero is meaningless: ${out}`);
+  assert.ok(!out.includes(SITE_FLOWS_PATH),
+    "and it still must not carry the site_flows PATH");
 });
 
 // 🔴 A guard on WORDS is walkable by REWORDING, so this pins the WHOLE normalised
@@ -1585,7 +1585,7 @@ test("SITE NOTES positive control: the same harness DOES observe a forwarded fie
 // No trailing list separator: pinning one would pin the sentence's POSITION too,
 // so an innocuous reordering elsewhere in the paragraph would read as a removal.
 const SKILL_SITE_NOTED_CLAUSE =
-  "It also never sees `site_notes` — brief those flows in yourself.";
+  "It also never sees `site_flows` — brief those flows in yourself.";
 
 // 🔴 SCOPED TO THE SECTION THE TEST NAMES, not the whole file. A whole-file
 // substring stays green when the sentence is MOVED — right words, wrong place,
@@ -1601,11 +1601,11 @@ function skillFirstDecisionSection() {
   return skill.slice(start, after === -1 ? undefined : after);
 }
 
-test("SITE NOTES: SKILL.md's FIRST DECISION still warns the caller", () => {
+test("SITE FLOWS: SKILL.md's FIRST DECISION still warns the caller", () => {
   const normalised = skillFirstDecisionSection().replace(/\s+/g, " ");
   assert.ok(normalised.includes(SKILL_SITE_NOTED_CLAUSE),
     `SKILL.md no longer carries the site-noted clause verbatim. The agent is ` +
-    `STILL blind to \`site_notes\` (the test above proves it), so a caller reading ` +
+    `STILL blind to \`site_flows\` (the test above proves it), so a caller reading ` +
     `only SKILL.md would now dispatch the agent at a registered host and lose that ` +
     `site's flows. NOTE this is scoped to the \`## FIRST DECISION\` section — if the ` +
     `sentence still exists but MOVED, that is this failure, and moving it back is ` +

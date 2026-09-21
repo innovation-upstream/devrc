@@ -898,10 +898,10 @@ function _withHiddenNotice(data, body, autoWake) {
 // tab — see hiddenNotice. It only affects text/html/eval; every other op and every
 // existing caller/test is unaffected.
 //
-// 🔴 `site_notes` IS NOT FORWARDED, AND THAT IS DELIBERATE — but it is a REAL
+// 🔴 `site_flows` IS NOT FORWARDED, AND THAT IS DELIBERATE — but it is a REAL
 // capability gap, not a nil-cost omission, so it is written down rather than left
-// to be rediscovered. server.py sets `site_notes` on the ENVELOPE ROOT
-// (_annotate_site_notes: `result["site_notes"] = path`), while every branch below
+// to be rediscovered. server.py sets `site_flows` on the ENVELOPE ROOT
+// (_annotate_site_flows: `result["site_flows"] = path`), while every branch below
 // reads `envelope.data` — so the field is structurally invisible to the model on
 // every op it can reach.
 //
@@ -912,7 +912,7 @@ function _withHiddenNotice(data, body, autoWake) {
 //    BROWSER_AGENT_ALLOWED_OPS (see line ~159), so it is reachable and is covered.
 //  * "every branch reads envelope.data" is the mechanism for all of them EXCEPT
 //    `whoami`, which reads the ROOT (`const w = envelope || {}`). It is safe for a
-//    DIFFERENT reason — it answers GET /whoami, which _annotate_site_notes never
+//    DIFFERENT reason — it answers GET /whoami, which _annotate_site_flows never
 //    touches, and its output is field-pinned regardless. Do not generalise the
 //    `.data` mechanism to it; the guard in tests/browser_tool.test.mjs covers both
 //    by asserting the OUTPUT, which is why it does not care which is which.
@@ -929,7 +929,7 @@ function _withHiddenNotice(data, body, autoWake) {
 // "agent-first when ambiguous" is wrong for exactly those hosts. SKILL.md says so
 // in one sentence (it has a hard byte ceiling); the ACTIONABLE half — how to tell
 // a site-noted host, and how to brief its flows into a goal — is
-// reference/agent.md § "The agent never sees `site_notes`", which has no ceiling.
+// reference/agent.md § "The agent never sees `site_flows`", which has no ceiling.
 // tests/browser_tool.test.mjs pins both halves: that no reachable op forwards the
 // field, and that SKILL.md still warns about it.
 export function summarizeResult(op, envelope, env = {}, autoWake = null) {

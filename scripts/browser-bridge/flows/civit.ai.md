@@ -1,16 +1,18 @@
 # civit.ai — Civitai App Blocks: the iframe, the boot, and the 404 that looks like an app
 
-**Load this when:** a result envelope named this file in `site_notes` · you are
+**Load this when:** a result envelope named this file in `site_flows` · you are
 driving anything at `<slug>.civit.ai` · a selector or injected JS on an App Block
 returned `null` and you are about to call the bridge broken · you are about to
 report an App Block control as missing or a component as defective.
 
-Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md`.
+Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md` (`reference/…` paths
+below resolve from that bridge dir).
 Mechanism files stay authoritative for mechanism: frames and OOPIFs →
 `reference/frames-cdp.md`; throttling and `wake` → `reference/spa-wake.md`;
 stripped `data-testid` and hit-testing → `reference/css-hit-test.md`; proving a
 read is the live authenticated session → `reference/auth-pages.md`. The parent
-site's identity and `/apps` reads → `reference/sites/civitai.com.md`.
+site's identity and `/apps` reads →
+`~/workspace/devrc/scripts/browser-bridge/flows/civitai.com.md`.
 This file is only what is true of **an App Block**.
 
 🔴 **Before driving a block by hand, check whether a recipe already exists.** The
