@@ -4866,16 +4866,32 @@ in
     };
   };
 
-  # Daily. RandomizedDelaySec keeps it off the 04:00/05:00 cluster the other
-  # units sit on; Persistent catches up a single missed run after a reboot,
-  # which matters on the laptop — a host that is closed at the boundary would
-  # otherwise skip a day silently, and the only symptom is an age.
+  # 🔴 EVERY 4 HOURS, AND THE PERIOD IS A CORRECTNESS PARAMETER — NOT A COST ONE.
+  # This was `*-*-* 07:00:00` (daily) with no argument for daily over anything
+  # else, and `/audit-pr` round 0 on #1829 measured what that costs: the picker
+  # classes a repo's row `BELOW` when the clicked number exceeds the table's
+  # recorded max, so the table's AGE is the ranking's error term. Measured on a
+  # live 395-row table, the fastest repo gains ~34 references/day, so a daily
+  # table misfiles roughly a day's worth of fresh PRs; at 4-hourly the worst
+  # drift is ~5.7, which is ~13x under the smallest MEASURED wrong-repo gap (74)
+  # — i.e. the margin between "stale" and "genuinely the wrong repo" stops being
+  # a judgement call. Caught in the act: a 0.75-day-old table recorded devrc at
+  # 1809 while PR #1829 was open against it.
+  #
+  # Cost is not the constraint: ~400 repos is ~8 batched GraphQL requests at
+  # ~2.2s (measured in `regen-known-repos.py`), so a run is ~20s and six runs a
+  # day is a rounding error against the API budget.
+  #
+  # RandomizedDelaySec still keeps it off the 04:00/05:00 cluster the other
+  # units sit on. Persistent catches up a single missed run after a reboot,
+  # which matters on the laptop — a host closed across a boundary would
+  # otherwise skip silently, and the only symptom is an age.
   systemd.user.timers.mention-known-repos-refresh = {
     Unit = {
-      Description = "Daily timer for the mention-open repo mapping refresh";
+      Description = "4-hourly timer for the mention-open repo mapping refresh";
     };
     Timer = {
-      OnCalendar = "*-*-* 07:00:00";
+      OnCalendar = "*-*-* 00/4:00:00";
       Persistent = true;
       RandomizedDelaySec = 900;
     };
