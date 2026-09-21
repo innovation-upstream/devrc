@@ -1982,6 +1982,19 @@ PINNED_PATH_CLOBBERS = {
         "single needle covers every site rather than pinning whichever the "
         "scan reaches first. `sys.executable` is absolute, so the interpreter "
         "still resolves with PATH gone"),
+    "test_i3status_stt.py": (
+        'env["PATH"]' + ' = str(tmp_path / "does-not-exist")',
+        "the same NON-EXISTENCE justification as test_i3_game_mode.py above: "
+        "the replacement directory is never created, so nothing — least of all "
+        "`stt-voice` — is reachable through it, and REPLACING is required to "
+        "reach the case at all. The test is the stt pill's documented "
+        "fail-safe: a click on `stt-voice --toggle` with the tool unresolvable "
+        "must be swallowed (exit 0, NO stdout — a click handler has nowhere to "
+        "show an error), and stt-voice IS installed on the dev host "
+        "(it is in home.packages), so no amount of PREPENDING can make it "
+        "unfindable; a prepending version would invoke the LIVE tool and "
+        "start a real recording on the operator's box. `sys.executable` is "
+        "absolute, so the interpreter still resolves with PATH gone"),
     "test_resume_state_clawgate.py": (
         'env["PATH"]' + ' = f"{nocg}',
         "justified by ENUMERATION rather than by emptiness. The "

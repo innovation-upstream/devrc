@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""i3status-rust custom block: the STT VOICE pill (render only; stt-voice owns state).
+
+Hold-to-talk voice input lives in the Go tool `stt-voice`
+(nix/pkgs/tools/stt-voice): `$mod+m` PRESS starts recording, RELEASE stops +
+transcribes + opens the transcript TUI. The Go tool writes
+`~/.cache/stt-voice/state.json` atomically and `pkill -RTMIN+20 i3status-rs`
+after every write. This block is the READ half: one local file read, no
+poller process, no network — and its left-click re-invokes the tool's own
+toggle (two trigger sources, one state machine).
+
+  idle / unreadable   ->  empty block, exit 0          (hidden — CALM-bar rule)
+  recording           ->  ` 󰍬 REC 42s `  Critical (red)
+  transcribing        ->  ` 󰍬 stt … `    Warning  (yellow)
+  error               ->  ` 󰍬 stt! `     Critical (red)
+
+🔴 A DEAD PID IS IDLE, NOT A STATE. Every non-error state carries the `pid` of
+the process that should still be alive (the recording supervisor, or the stop
+process mid-POST). `kill -0` failing maps it to idle: a crashed recorder must
+NEVER leave a stale red REC pill. The `error` row is deliberately exempt — its
+pid is the process that FAILED, which is always dead by the time anyone
+re-reads the file, and the error is information that survives until the next
+start clears it.
+
+🔴 NO ICON KEY, GLYPH IN TEXT — the gamemode/notifs precedent. material-nf's
+`microphone` key is an ARRAY (the native sound block indexes it by capture
+level) and an array icon on a value-less custom block is unproven rendering;
+the glyph U+F036C (nf-md-microphone, the code point the `microphone` entry
+itself uses, in the bar's own JetBrainsMono Nerd Font) rides in the text,
+exactly like the 󰊗 gamepad glyph. `test_bar_status.py`'s icon allowlist is
+unaffected because no `"icon"` key is ever emitted.
+
+🔴 THE SIGNAL IS STT-VOICE'S JOB, NOT A POLLER'S. Transitions are instant
+because the Go tool signals after every state write (`pkillSignal` in
+cmd/stt-voice/main.go == `signal` in sttBlock in nix/graphical.nix; the pair
+is pinned by test_i3_stt_voice.py, which also pins uniqueness against every
+other block and the poller). While recording, the tool's supervisor signals
+once per second so the elapsed count ticks; `interval` below is only a
+backstop for a crash repair and for transitions made before the tool
+existed... it reads a tiny local file, so 30s costs nothing.
+
+Fail-safe (same contract as `i3status-gamemode`): any read/parse error ->
+empty JSON, exit 0. A broken state file must NEVER crash or wedge the bar.
+
+Unit-tested (pure halves + `--state`/`--toggle` e2e, hermetic) in
+scripts/tests/test_i3status_stt.py.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+#: Real-time signal that repaints this block: `pkill -RTMIN+20 i3status-rs`,
+#: fired by the GO TOOL after every state write — NOT by this script. MUST
+#: equal `signal` in sttBlock (nix/graphical.nix) and `pkillSignal` in
+#: cmd/stt-voice/main.go; all pinned together by test_i3_stt_voice.py. Spelled
+#: here so the number's owner is greppable from the bar side too.
+SIGNAL = 20
+
+# nf-md-microphone (U+F036C) — verified as the code point behind the real
+# material-nf `microphone` key (see the material-nf.toml in the i3status-rust
+# store path), i.e. a REAL i3status-rust icon set glyph, in JetBrainsMono
+# Nerd Font, the bar's font.
+GLYPH = "\U000f036c"  # 󰍬
+
+#: A dead-pid read and an unreadable file are both "not measured"; the honest
+#: rendering of both is the hidden block.
+EMPTY = {"text": "", "state": "Idle"}
+
+
+def state_path() -> str:
+    """Where the Go tool writes state — XDG_CACHE_HOME/stt-voice/state.json,
+    falling back to ~/.cache, exactly like os.UserCacheDir on the Go side.
+    (Pinned against the Go tool's own spelling by test_i3_stt_voice.py.)"""
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "stt-voice", "state.json")
+
+
+# --------------------------------------------------------------------------- #
+# Pure / mockable logic (unit-tested against fixtures — NO filesystem, NO X11)
+# --------------------------------------------------------------------------- #
+def parse_state(raw):
+    """state.json bytes -> dict, or None when UNMEASURED.
+
+    `state` must be a non-empty string. `pid` (int) and `started_at` (number)
+    are validated when present so a half-written or corrupted file is never
+    coerced into a pill — every malformed shape is None, and render(None) is
+    the hidden block. Never raises.
+    """
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    state = obj.get("state")
+    if not isinstance(state, str) or not state.strip():
+        return None
+    pid = obj.get("pid")
+    if "pid" in obj and (not isinstance(pid, int) or isinstance(pid, bool)):
+        # null pid present in the file is corruption, not absence: the writer
+        # omits the key or writes a real int, never null.
+        return None
+    started = obj.get("started_at")
+    if "started_at" in obj and (
+            isinstance(started, bool) or not isinstance(started, (int, float))):
+        return None
+    return obj
+
+
+def pid_alive(pid) -> bool:
+    """`kill -0`. A ProcessLookupError is DEAD; a PermissionError means the
+    process EXISTS but belongs to someone else — alive. Anything else (a pid
+    too large for the kernel, a non-int) is treated as dead: the honest
+    reading of "cannot measure" for a liveness check is "not alive", because
+    the pill that must never lie is the red REC one."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def render(st, now, alive) -> dict:
+    """Pure: (state dict | None, now, pid-alive | None) -> i3status-rust block.
+
+    `alive` is computed by the caller (a filesystem-free read lets the tests
+    inject it); it is consulted only for the states whose pill claims a live
+    process. `error` renders regardless of pid — see the header.
+    """
+    if not isinstance(st, dict):
+        return dict(EMPTY)
+    state = st.get("state")
+    if state == "error":
+        return {"text": " %s stt! " % GLYPH, "short_text": " %s stt! " % GLYPH,
+                "state": "Critical"}
+    if state == "recording":
+        if alive is not True:
+            return dict(EMPTY)
+        secs = _elapsed(st.get("started_at"), now)
+        if secs is None:
+            return {"text": " %s REC " % GLYPH,
+                    "short_text": " %s REC " % GLYPH, "state": "Critical"}
+        return {"text": " %s REC %ds " % (GLYPH, secs),
+                "short_text": " %s %ds " % (GLYPH, secs),
+                "state": "Critical"}
+    if state == "transcribing":
+        if alive is not True:
+            return dict(EMPTY)
+        return {"text": " %s stt … " % GLYPH,
+                "short_text": " %s stt … " % GLYPH, "state": "Warning"}
+    # idle, unknown future states, everything else: hidden
+    return dict(EMPTY)
+
+
+def _elapsed(started_at, now):
+    """Epoch seconds -> whole elapsed seconds, or None when unmeasurable.
+    A future timestamp (clock stepped under us) clamps at 0, never negative."""
+    if not isinstance(started_at, (int, float)) or isinstance(started_at, bool):
+        return None
+    return max(0, int(now - started_at))
+
+
+# --------------------------------------------------------------------------- #
+# Side-effecting (filesystem / subprocess — covered end-to-end via fixtures)
+# --------------------------------------------------------------------------- #
+def current_state(path=None):
+    """Read + parse the state file, and (for the live-process states) check
+    the pid. Returns (state_dict_or_None, alive_or_None)."""
+    p = path or state_path()
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as fh:
+            st = parse_state(fh.read())
+    except OSError:
+        return None, None
+    if st is None:
+        return None, None
+    state = st.get("state")
+    alive = None
+    if state in ("recording", "transcribing"):
+        pid = st.get("pid")
+        # pid 0 (or any non-positive) is never a live recorder: os.kill(0, 0)
+        # probes the whole process GROUP, which would read as "alive" and
+        # resurrect a phantom REC. The Go tool never writes one for these
+        # states; this is the read-side guard for a file that does.
+        alive = pid_alive(pid) if isinstance(pid, int) and pid > 0 else False
+    return st, alive
+
+
+def toggle() -> int:
+    """The bar pill's left-click: hand the decision to the tool's own toggle
+    (start when idle, stop when recording). Returns 0 always — a click handler
+    that errors gives the operator nothing useful and i3status-rust has
+    nowhere to show it; the tool itself toasts when it needs to. The tool
+    signals the bar on every state write, so no repaint is needed here."""
+    try:
+        subprocess.run(["stt-voice", "toggle"], capture_output=True, timeout=10)
+    except Exception:
+        pass
+    return 0
+
+
+def main(argv) -> int:
+    path = None
+    if "--toggle" in argv:
+        return toggle()
+    if "--state" in argv:
+        i = argv.index("--state")
+        if i + 1 < len(argv):
+            path = argv[i + 1]
+    st, alive = current_state(path)
+    sys.stdout.write(json.dumps(render(st, time.time(), alive)) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Exception:   # a bar block must never crash loudly
+        sys.stdout.write(json.dumps(EMPTY) + "\n")
+        sys.exit(0)
