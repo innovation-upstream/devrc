@@ -375,7 +375,33 @@ SUITES=(
   #           = 14 - min(50, 1) = 14 - 1 = 13 (unchanged);
   # tests: 256 - min(50, max(1, 256/20)) = 256 - min(50, max(1, 12.8))
   #           = 256 - min(50, 12.8) = 256 - 12.8 = 243.2 -> 244.
-  "scripts/claude-usage/tests|13|244"
+  #
+  # Re-measured 2026-09-20 on the same branch after the round-3 delta audit.
+  # The file COUNT did not move; 256 -> 257, +1:
+  #   +1  R3-F1 -- the CARD's headline tone (`widgetModel`'s `tone`, which
+  #       paints the collapsed pill AND the card's header dot) and its weekly
+  #       row's tone both read the record RAW through severity.js's
+  #       `toneForRecord`, with no spent-evidence rule. On a non-exempt
+  #       record that made the card `crit` while the SAME record's
+  #       other-account row, same storage and same `now`, was `ok` -- the
+  #       R2-1 shape one surface over. One test, carrying four regression
+  #       assertions (the card tone, the card-vs-row relationship, the weekly
+  #       row tone, and the spent-SESSION half on its own) plus four
+  #       assertions labelled INVARIANT GUARD in place: a weekly window that
+  #       has NOT reset still reddens the card, the ACTIVE card keeps the raw
+  #       read, the row's VALUE is unchanged, and the row's meta is still the
+  #       literal "resets soon" (the separately-named string residue).
+  # R3-F2 (the stale-dim CSS guard now catching the bare `.stale{...}` shape)
+  # and R3-F3 (`nextFreeAt`'s own null enumeration) added assertions and
+  # prose to existing tests, so they move no count.
+  # MEASURED by this runner: 14 files / 257 tests. Floors, by the formula at
+  # the top of this block (this runner prints no replacement of its own --
+  # only the pytest one does):
+  # files: 14 - min(50, max(1, 14/20)) = 14 - min(50, max(1, 0.7))
+  #           = 14 - min(50, 1) = 14 - 1 = 13 (unchanged);
+  # tests: 257 - min(50, max(1, 257/20)) = 257 - min(50, max(1, 12.85))
+  #           = 257 - min(50, 12.85) = 257 - 12.85 = 244.15 -> 245.
+  "scripts/claude-usage/tests|13|245"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree; js-source:
