@@ -173,7 +173,9 @@ def test_picker_rows_show_the_platform_and_the_url():
     _span, cands = MO.resolve("#370", default_repo="civitai/talos-infra")
     rows = MO.picker_rows(cands)
     assert len(rows) == 2
-    assert rows[0].startswith("clawgate task 370 ")
+    # The marker is a PREFIX, so the platform/id/url text is what follows it —
+    # asserted from field 2 on, which is exactly the slice `--nth=2..` matches.
+    assert rows[0].split(None, 1)[1].startswith("clawgate task 370 ")
     assert rows[0].endswith("https://clawgate.zacx.dev/tasks/370")
     assert rows[1].endswith("https://github.com/civitai/talos-infra/pull/370")
 
@@ -2449,8 +2451,23 @@ def _eponymous_corpus() -> tuple[list[str], str]:
              "mortar", "nectar", "oxbow")
     repos += [f"{o}/{n}" for o in others for n in names]
     repos = sorted(set(repos), key=str.lower)
-    return ([f"github 1234 — https://github.com/{r}/pull/1234" for r in repos],
-            f"{owner}/{owner}")
+    # 🔴 BUILT BY `picker_rows` ITSELF, NOT SPELLED HERE. This docstring has
+    # always claimed "the exact shape `picker_rows()` builds", and a hardcoded
+    # f-string made that a claim rather than a fact: when the row format grew a
+    # marker, this corpus silently became the OLD shape and the real-fzf tests
+    # below started measuring a row production no longer emits — with `--nth`
+    # indexing fields, that is not a cosmetic difference, it is fzf matching a
+    # different substring. Deriving the rows is what makes the docstring true.
+    cands = [{"platform": MO.PLATFORM_GITHUB, "id": "1234",
+              "url": f"https://github.com/{r}/pull/1234"} for r in repos]
+    # 🔴 STAMPED, OR EVERY ROW BEGINS WITH THE *BUG* TOKEN. Unstamped
+    # candidates render `?` — the marker the module defines as "a row nobody
+    # stamped", which production never emits. The rows below feed the real-fzf
+    # and pty tests, so leaving them unstamped would measure fzf against a
+    # shape the picker cannot produce, while this docstring claimed "the exact
+    # shape `picker_rows()` builds". Found by `/audit-pr` round 1.
+    MO.stamp_picker_markers(cands, {c["url"] for c in cands})
+    return MO.picker_rows(cands), f"{owner}/{owner}"
 
 
 def _fzf_rank(rows: list[str], query: str, target: str, *flags) -> int:
@@ -2588,15 +2605,25 @@ def _fzf_interactive_first_row(rows: list[str], query: str) -> str:
         # and a NON-ZERO numerator means the query has actually been applied.
         # BOTH halves are load-bearing: fzf reads and filters concurrently, so
         # the denominator can be complete while the numerator is still 0.
-        # 🔴 MEASURED ON #1813's TREE, NOT THIS ONE, AND THE SCOPE IS THE
-        # POINT. Prompt-only readiness failed 11-12 of 20 runs there, where
-        # the corpus rows carry a marker; gating on the settled counter, 0
-        # of 25. On THIS tree `/audit-pr` round 2 re-derived it over 80
-        # prompt-only observations and got ZERO failures — so the rate does
-        # NOT reproduce here and an earlier version of this comment stated
-        # it unscoped, beside this corpus, as though it did. The race is a
-        # property of how long the rows take to load; the gate is cheap and
-        # correct either way, but do not read the number as this file's.
+        # 🔴 THE RATE IS A PROPERTY OF THE CORPUS, AND THIS TREE IS THE SLOW
+        # ONE. `_eponymous_corpus` derives its rows from `picker_rows()` and
+        # stamps them, so they carry the rank marker this branch adds; on that
+        # corpus prompt-only readiness failed 11-12 of 20 runs, and gating on
+        # the settled counter, 0 of 25. On the parent branch, where the corpus
+        # was a hardcoded f-string with no marker, `/audit-pr` round 2 got ZERO
+        # failures over 80 prompt-only observations. Neither number is this
+        # file's unscoped — read each against the corpus it was taken on.
+        #
+        # ⚠ THE MARKER'S WIDTH IS NOT THE VARIABLE; ITS PRESENCE MAY BE, AND
+        # NOTHING HERE ISOLATES IT. Round 1 measured the race just as wide open
+        # at the shipped 5-byte rank-only width (12 of 20) as at the ~16-byte
+        # class+rank one, so narrowing the marker did not close it. But 0-of-80
+        # on the marker-free corpus and 12-of-20 here differ by the WHOLE change
+        # of corpus — derived-and-stamped rows, not those 5 bytes alone. An
+        # earlier wording on this branch called the race "pre-existing, not
+        # something the row marker opened"; that is stronger than the
+        # measurements support, so it is withdrawn rather than restated. The
+        # gate below is cheap and correct either way.
         total = len(rows)
         drawn = _drain(master,
                        lambda b: (_PTY_PROMPT.encode() in b
@@ -2916,7 +2943,7 @@ def test_REAL_fzf_is_CASE_INSENSITIVE_only_with_the_flag():
 # --------------------------------------------------------------------------- #
 EXPECTED_PICKER_SH = (
     'fzf -i --tiebreak=end --layout=reverse --info=inline --print-query '
-    '--bind="esc:print-query+abort" '
+    '--bind="esc:print-query+abort" --nth=2.. '
     '--prompt="mention > " --pointer=">" --color=16 '
     '--header-lines="$3" <"$1" >"$2"'
 )
@@ -2949,6 +2976,210 @@ def test_the_picker_shell_script_carries_no(metachar, what):
     substring check. Two guards on one property, on purpose: the hazard here is
     disclosure, and the exact-string pin is the kind a future edit "fixes"."""
     assert metachar not in MO.PICKER_SH, f"PICKER_SH gained {metachar!r}: {what}"
+
+
+def _marked(repos: list[str], num: str = "1804") -> list[dict]:
+    """Candidate dicts for `repos`, in the shape the universe arm builds."""
+    return [{"platform": MO.PLATFORM_GITHUB, "id": num,
+             "url": f"https://github.com/{r}/issues/{num}"} for r in repos]
+
+
+def test_the_row_MARKER_names_the_RANK_and_unplaced_rows_have_NONE():
+    """🔴 SYMPTOM 1: the pre-computed order reaches fzf as INPUT ORDER, so the
+    first keystroke hands ordering to fzf's own score and our rank becomes
+    invisible to anyone who types. The marker puts it in the row TEXT, which a
+    narrowed list still shows.
+
+    A row the ordering did not place must carry NO number. Printing one would
+    invent a rank for a row that was never ranked — the clawgate row and the
+    pane guess are pinned, not ranked, and the telemetry already keeps that
+    distinction (`ordered`)."""
+    cands = _marked(["acme/widget", "acme/api"])
+    pinned = [{"platform": "clawgate", "id": "1804",
+               "url": "https://clawgate.zacx.dev/tasks/1804"}]
+    allc = pinned + cands
+    ordered = {c["url"] for c in cands}
+    MO.stamp_picker_markers(allc, ordered)
+    # The pinned clawgate row was never ranked, so it carries no number…
+    assert allc[0]["marker"].split() == ["-"], allc[0]["marker"]
+    # …and the two ordered rows are numbered by their POSITION in the ordering,
+    # 1-based, counted only over the rows the ordering actually placed.
+    assert allc[1]["marker"].split() == ["1"], allc[1]["marker"]
+    assert allc[2]["marker"].split() == ["2"], allc[2]["marker"]
+
+
+def test_the_rank_marker_WIDTH_is_uniform_past_the_universe_size():
+    """🔴 A RANK THAT OVERFLOWS `PICKER_MARKER_RANK_W` CHANGES fzf's RANKING.
+
+    fzf scores positional tiebreaks against offsets in the ORIGINAL line, so
+    field 1's WIDTH reaches the ranking even though `--nth=2..` keeps its text
+    out of the haystack — measured at 0.74.4, two rows with byte-identical
+    field-2.. text and differing field-1 widths come back in opposite order.
+    A width that some ranks overflow therefore splits the corpus into two
+    scoring regimes at an arbitrary boundary.
+
+    🔴 THIS EXISTS BECAUSE THE CONSTANT HAD NO GUARD PAST RANK 24, AND A WRONG
+    VALUE SURVIVED THE WHOLE SUITE. `/audit-pr` round 1 mutated
+    `PICKER_MARKER_RANK_W` to **2** — uniform to rank 99, overflowing from 100
+    — and 490 tests passed. The only test that could have seen it renders 24
+    rows, so its ranks never reach three digits: a fixture whose values can
+    only ever produce the constant's own behaviour. On the operator's real
+    universe (~395 rows) `W = 2` would put nearly 300 rows at a different
+    field-1 width from the rest.
+
+    🔴 THE UNIVERSE SIZE BELOW IS A LITERAL AND THIS GUARD DOES **NOT** TIGHTEN
+    ON ITS OWN — an earlier version of this docstring said it was "asserted
+    against the LIVE universe size … so the guard tightens on its own as the
+    universe grows", with a hardcoded number on the very next line. Nothing here
+    reads `load_known_universe()`, and deliberately so: a test keyed to what is
+    installed on one host is environment-coupled without saying so. But the
+    claim mattered, because it told a maintainer this constant would never need
+    revisiting. It will: when the universe passes `10 ** PICKER_MARKER_RANK_W`,
+    rank 1000 renders 4 columns against rank 1's 3 and the split above is back —
+    and an assertion that only ever asks about rank 395 cannot see it.
+
+    The second assertion is what keeps the pair honest: it fails if the pinned
+    size ever grows past what the width can represent, so raising one without
+    the other is a red test rather than a silent regression."""
+    universe = 395          # measured on the operator's host, 2026-09-20
+    assert 10 ** MO.PICKER_MARKER_RANK_W > universe, (
+        f"PICKER_MARKER_RANK_W={MO.PICKER_MARKER_RANK_W} cannot represent every "
+        f"rank in a {universe}-row universe, so rows past 10**W render wider "
+        f"than the rest and score differently in fzf. Raise the constant when "
+        f"you raise this literal — and re-read this test's docstring, because "
+        f"the literal does not update itself")
+    widest = MO.picker_marker(str(universe))
+    narrowest = MO.picker_marker("1")
+    assert len(widest) == len(narrowest), (
+        f"rank {universe} renders {widest!r} ({len(widest)} cols) while rank 1 "
+        f"renders {narrowest!r} ({len(narrowest)}) — PICKER_MARKER_RANK_W="
+        f"{MO.PICKER_MARKER_RANK_W} is too narrow for the universe, so rows "
+        f"past the overflow point score differently in fzf")
+    # The unranked and unstamped tokens share the column, so they must match it
+    # too — a ragged column is the same defect by another route.
+    for token in (MO.PICKER_MARKER_UNRANKED, MO.PICKER_MARKER_UNSTAMPED):
+        assert len(MO.picker_marker(token)) == len(narrowest), (
+            f"marker token {token!r} renders "
+            f"{MO.picker_marker(token)!r}, a different width from a rank")
+
+
+def test_the_PROMOTED_row_is_marked_rank_1_not_a_NEGATIVE_offset():
+    """🔴 THE TRAP THIS MODULE ALREADY DOCUMENTS, ONE FIELD ALONG. A promoted
+    row sits at position 0 with `rank < pinned_above`, so `rank - pinned_above`
+    goes NEGATIVE and the arithmetic reports the genuinely-ordered row as
+    pinned and the demoted guess as ordered — both inverted. `picker_markers`
+    counts off `ordered_urls` instead, so the promoted row reads `1`: it IS the
+    ordering's top row, which is why it was promoted.
+
+    Built as the promotion arm builds it: the ordered row FIRST, the pinned
+    guess BELOW it, and THEN the rest of the ordered block.
+
+    🔴 THAT THIRD ROW IS THE WHOLE TEST, AND WITHOUT IT THIS WAS VACUOUS —
+    measured, not supposed. With only [promoted, guess], the promoted row is at
+    index 0, so counting off `ordered_urls` and counting off the INDEX both say
+    `1`: the mutant that swaps one for the other SURVIVED a green assertion.
+    A pinned row sitting ABOVE a later ordered row is what makes the two
+    disagree — ordered-count says `2`, the index says `3`."""
+    promoted = _marked(["acme/widget"])
+    guess = [{"platform": MO.PLATFORM_GITHUB, "id": "1804",
+              "url": "https://github.com/acme/guess/issues/1804"}]
+    rest = _marked(["acme/api"])
+    allc = promoted + guess + rest   # promoted, then the pinned guess, then more
+    MO.stamp_picker_markers(allc, {promoted[0]["url"], rest[0]["url"]})
+    assert allc[0]["marker"].split() == ["1"], (
+        f"the promoted row is marked {allc[0]['marker']!r} — it is the "
+        f"ordering's own top row and must read rank 1, never a negative or "
+        f"pinned marker")
+    assert allc[1]["marker"].split() == ["-"], allc[1]["marker"]
+    assert allc[2]["marker"].split() == ["2"], (
+        f"the row below the pinned guess is marked {allc[2]['marker']!r} — it "
+        f"is the SECOND row the ordering placed, and a rank counted off the "
+        f"list INDEX would call it 3, skipping a number for a row that was "
+        f"never ranked")
+
+
+def test_every_picker_row_carries_the_marker_FIELD_that_nth_indexes():
+    """🔴 `--nth=2..` INDEXES FIELDS, SO A ROW WITHOUT A MARKER MATCHES THE
+    WRONG SUBSTRING — its `<platform> <id>` is eaten by the offset and only the
+    URL stays in the haystack. This pins the contract both halves rest on: at
+    least two fields on EVERY row, and field 2 onward byte-identical to the
+    text the picker showed before markers existed.
+
+    Driven for a STAMPED list and an UNSTAMPED one, because the fallback in
+    `picker_rows` is what protects a future assembly arm that forgets."""
+    cands = _marked(["acme/widget", "acme/api"])
+    unstamped = MO.picker_rows(cands)
+    # 🔴 AN UNSTAMPED ROW IS A BUG, AND IT MUST NOT SPELL ITSELF `pinned`.
+    # Nothing reaches `picker_rows` unstamped through `stamp_picker_markers`;
+    # if one does, an assembly arm contributed a row after the stamp. Rendering
+    # that with the same word a legitimately unranked row uses would make the
+    # one state nobody can see look exactly like the ordinary one.
+    assert [r.split()[0] for r in unstamped] == ["?", "?"], unstamped
+    MO.stamp_picker_markers(cands, {cands[0]["url"]})
+    for rows, what in ((unstamped, "unstamped"), (MO.picker_rows(cands),
+                                                  "stamped")):
+        for row, c in zip(rows, cands):
+            fields = row.split()
+            assert len(fields) >= 2, f"{what}: {row!r} has {len(fields)} fields"
+            assert row.split(None, 1)[1] == (
+                f"github {c['id']} — {c['url']}"), (
+                f"{what}: field 2.. is {row.split(None, 1)[1]!r}, which is what "
+                f"`--nth=2..` hands fzf as the haystack")
+
+
+def test_REAL_fzf_does_NOT_match_the_row_MARKER():
+    """🔴 THE COST THE PROPOSAL NAMES, MEASURED SHUT. A leading token is
+    fuzzy-matchable, so without `--nth` the rank DIGITS join the haystack — and
+    this picker's subjects are NUMBERS (`#1804`), so digit queries are ordinary.
+    Under the picker's real flags the marker must change nothing about which
+    rows match, or in what order.
+
+    🔴 THE QUERY LIST IS THE INSTRUMENT, AND A WORD-ONLY ONE IS BLIND HERE.
+    When the marker was `<class> <rank>` its words (`below`, `impossible`) were
+    matched by ordinary word queries, so the control fired easily. A rank-only
+    marker is DIGITS, and against word queries it changes nothing even with
+    `--nth` removed — MEASURED, 0 of 20 — so the first version of this test
+    asserted equality while its own control could not fire, and said so by
+    failing. The digit queries below are what make the flag observable. A sweep
+    is only a claim about the dimension its fixtures can vary.
+
+    Compared as an ORDERED list, not a set: a digit marker is more likely to
+    reorder the tail than to admit a new row, and the set comparison is the
+    weaker of the two."""
+    _require_fzf()
+    repos = [f"{o}/{n}"
+             for o in ("nimbusworks", "harborlight", "quillstone", "acme")
+             for n in ("widget", "api", "cli", "ledger", "ember", "gateway")]
+    bare = MO.picker_rows(_marked(repos))          # every row `-`
+    cands = _marked(repos)
+    MO.stamp_picker_markers(cands, {c["url"] for c in cands})
+    marked = MO.picker_rows(cands)
+    flags = _picker_flags()
+    assert any(f.startswith("--nth") for f in flags), (
+        "the picker lost --nth, so the marker is in the haystack: this test's "
+        "premise is gone, not merely its assertion")
+    no_nth = [f for f in flags if not f.startswith("--nth")]
+
+    def ranked(rows, fl, query):
+        out = subprocess.run(["fzf", "--filter", query, *fl],
+                             input="\n".join(rows) + "\n",
+                             capture_output=True, text=True)
+        # Compare on the URL, the one part the marker cannot alter, IN ORDER.
+        return [ln.rsplit(" ", 1)[-1] for ln in out.stdout.split("\n") if ln]
+
+    control_differs = 0
+    # Word queries AND digit queries — the digits are the discriminating half.
+    for query in ("widget", "led", "ember", "api", "1", "12", "7", "2"):
+        base = ranked(bare, flags, query)
+        assert base, f"positive control: fzf matched nothing for {query!r}"
+        assert ranked(marked, flags, query) == base, (
+            f"query {query!r} ranked rows differently once the marker was on "
+            f"them — `--nth` is supposed to keep it out of the haystack")
+        if ranked(marked, no_nth, query) != base:
+            control_differs += 1
+    assert control_differs, (
+        "POSITIVE CONTROL FAILED: removing --nth changed nothing either, so "
+        "the equality asserted above is not evidence that --nth does anything")
 
 
 def test_the_picker_shell_script_has_EXACTLY_the_two_redirections():
@@ -6623,6 +6854,112 @@ def test_main_says_the_rows_are_UNORDERED_when_the_table_is_STALE(monkeypatch,
         f"({ordered}) — this test cannot see a stale table being ordered")
 
 
+def test_a_DEGRADED_ordering_marks_every_row_UNRANKED_not_1_to_N(monkeypatch,
+                                                                 tmp_path):
+    """🔴 THE HEADER AND THE ROWS MUST NOT CONTRADICT EACH OTHER ON SCREEN.
+
+    `_ordered_universe` returns the universe UNTOUCHED when the table is stale
+    or absent, but every arm still fills `ordered_urls` with the whole appended
+    block. An ungated stamp therefore numbers rows `1..N` that the ordering
+    never placed — one line under a header that says "rows unordered".
+
+    MEASURED on the pre-fix code: with a stale table the repository with ZERO
+    references, which cannot contain `#1291`, was marked **rank 1**, and the
+    whole marker column rendered IDENTICALLY to a run where the ordering had
+    actually worked. The two states were indistinguishable to the operator.
+
+    🔴 THE FIXTURE IS THE ONE FROM THE STALE-HEADER TEST ABOVE, AND ITS NAME
+    CHOICE IS LOAD-BEARING HERE TOO: `alpha/zeroref` sorts FIRST
+    alphabetically and ranks LAST by plausibility, so "the ordering ran
+    anyway" and "the ordering was skipped" produce different rows. Without
+    that, a marker asserting `-` could be satisfied by coincidence.
+
+    ⚠ `no-table` is not an exotic state: it fires on every picker until the
+    generator has run once, and FOREVER on a host where `gh` is absent or
+    logged out."""
+    universe = ["alpha/zeroref", "mike/highhead", "zulu/unmeasured"]
+    _ranges_on_disk(monkeypatch, tmp_path,
+                    {"alpha/zeroref": 0, "mike/highhead": 9000},
+                    age_days=MO.STALE_MAPPING_DAYS + 3)
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: universe)
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(cands=c, mesg=mesg) or "")
+    assert MO.main(["#1291"]) == 0
+    # POSITIVE CONTROL: this really is the degraded path, or the markers below
+    # would be `-` for some other reason entirely.
+    assert "rows unordered" in seen["mesg"], seen["mesg"]
+
+    markers = [c.get("marker", "").strip() for c in seen["cands"]]
+    assert markers and all(m == MO.PICKER_MARKER_UNRANKED for m in markers), (
+        f"a DEGRADED ordering stamped {markers!r} — every row must read "
+        f"{MO.PICKER_MARKER_UNRANKED!r}, because the ordering placed NONE of "
+        f"them. A number here tells the operator a row was ranked while the "
+        f"header one line above tells them nothing was")
+
+
+def test_a_DEGRADED_ordering_emits_ordered_FALSE_not_TRUE(monkeypatch,
+                                                          tmp_path, spool):
+    """🔴 THE THIRD SURFACE OF THE SAME FACT, AND IT WAS LEFT BEHIND.
+
+    A degraded ordering (stale or absent range table) places NO row. The header
+    says "rows unordered" and the row marker says `-` — but `ordered` was
+    emitted ungated, so the telemetry said `True` for the same click. Three
+    surfaces, one fact, and the one an analyst queries was the one still
+    asserting the retracted reading.
+
+    🔴 IT IS THE HEADLINE FILTER, WHICH IS WHY THIS IS NOT COSMETIC.
+    `click_dims` instructs: *"A consumer measuring the ordering must filter
+    `ordered = true`."* Ungated, that filter ADMITS clicks where no ordering
+    ran — biasing "did the ordering work" toward "no" using rows it never
+    touched. The gate keeps that instruction true as written.
+
+    The fixture is the stale-table one: `alpha/zeroref` has ZERO references and
+    cannot hold `#1291`, so a click on it under a stale table is exactly the
+    case that must not be filed as ordered."""
+    universe = ["alpha/zeroref", "mike/highhead", "zulu/unmeasured"]
+    _ranges_on_disk(monkeypatch, tmp_path,
+                    {"alpha/zeroref": 0, "mike/highhead": 9000},
+                    age_days=MO.STALE_MAPPING_DAYS + 3)
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: universe)
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "open_reference", lambda u: (0, "browser"))
+
+    # 🔴 PICK A URL OUT OF THE LIST THE PICKER WAS ACTUALLY GIVEN, never a
+    # hardcoded one. A guessed URL (`/issues/` vs `/pull/`) matches no
+    # candidate, and the click then emits `platform=''` with `rank` ABSENT —
+    # which makes `ordered` NOT MEASURED and the assertion below pass or fail
+    # for a reason that has nothing to do with the gate under test.
+    chosen = {}
+
+    def _pick_the_zero_ref_row(c, mesg=""):
+        for cand in c:
+            if MO.repo_of_github_url(cand["url"]) == "alpha/zeroref":
+                chosen.update(cand)
+                return cand["url"]
+        return ""                      # pragma: no cover — fixture broke
+
+    monkeypatch.setattr(MO, "pick", _pick_the_zero_ref_row)
+    assert MO.main(["#1291"]) == 0
+    assert chosen, "the zero-reference row was never offered to the picker"
+
+    events = _click_events(spool)
+    assert events, "no click row was emitted at all"
+    dims = events[-1]["payload"]
+    assert dims["outcome"] == MO.CLICK_PICKED, dims
+    # POSITIVE CONTROL: this really is the degraded path, or `ordered` being
+    # False below would be about something else entirely.
+    assert dims.get("ordering") == MO.ORDER_STALE, dims
+    assert dims.get("ordered") is False, (
+        f"a DEGRADED ordering emitted ordered={dims.get('ordered')!r} — no row "
+        f"was placed, so a consumer following `click_dims`' own instruction to "
+        f"filter `ordered = true` would count this click as evidence about an "
+        f"ordering that never ran. Full dims: {dims!r}")
+
+
 def test_main_RECORDS_the_repository_the_operator_PICKED(monkeypatch):
     """Tier B's write side, end to end: the row the operator selected becomes a
     line in the log, and the log is the one the autouse redirect points at."""
@@ -9315,11 +9652,19 @@ def test_a_DISMISSED_picker_carries_the_ORDERING_dims_and_whether_a_QUERY_was_ty
     🔴 WHAT THIS TEST DOES *NOT* PROVE, SAID HERE BECAUSE ITS FIRST DRAFT
     CLAIMED IT. `pick` is STUBBED, so this asserts the PLUMBING — that whatever
     `pick` recorded reaches the row. It is NOT evidence that a real Esc
-    dismissal records anything, and MEASURED against fzf 0.74.3 it does not:
-    an abort writes ZERO BYTES, so `queried` is NOT MEASURED there. The ending
-    the flag really covers on this arm is ENTER-WITH-NO-MATCH, which writes the
-    query line alone. `test_a_real_ABORT_records_NO_query_verdict_at_all` pins
-    the limit so nobody reads this test as the wider claim."""
+    dismissal records anything.
+
+    ⚠ AND THE REST OF THIS PARAGRAPH USED TO SAY AN ESC RECORDS NOTHING, WHICH
+    IS NO LONGER TRUE. It read: *"MEASURED against fzf 0.74.3 it does not: an
+    abort writes ZERO BYTES … the ending the flag really covers on this arm is
+    ENTER-WITH-NO-MATCH"*, and pointed at
+    `test_a_real_ABORT_records_NO_query_verdict_at_all`. Since
+    `--bind="esc:print-query+abort"` an ESC writes `<query>\\n` and IS measured;
+    the endings still writing zero bytes are `ctrl-c`/`ctrl-g`/`ctrl-q` and
+    empty-query `ctrl-d`. That test was renamed to
+    `test_an_ESC_abort_RECORDS_a_verdict_and_the_OTHER_aborts_do_not`, which is
+    where the limit is pinned. Missed by two audit rounds because it sits in a
+    file neither the bind nor the marker diff touched."""
     _ordering_fixture(monkeypatch, tmp_path)
 
     def _dismiss_after_typing(c, mesg=""):

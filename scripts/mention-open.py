@@ -456,17 +456,139 @@ def openable(span: dict) -> list[dict]:
     return [c for c in span.get("candidates", []) if c.get("url")]
 
 
+# The marker every picker row carries: ONE whitespace-free field, the row's
+# rank in the ordering. Padding never changes the field COUNT, which is what
+# `--nth` indexes. Three digits covers a 394-row universe with room to grow.
+#
+# 🔴 THE WIDTH IS NOT COSMETIC. fzf's positional tiebreaks score against
+# offsets in the ORIGINAL line, so field 1's WIDTH reaches the ranking even
+# though `--nth=2..` keeps its TEXT out of the haystack. MEASURED at 0.74.4:
+# two rows whose field-2.. text is BYTE-IDENTICAL and whose field-1 widths
+# differ (`1` padded to 3 vs `1000` padded to 6) come back in the OPPOSITE
+# order under `--tiebreak=end --nth=2..`, and in input order once the widths
+# are equalised. So a uniform width is load-bearing, and this constant going
+# too small — letting some ranks overflow it — is a correctness bug, not a
+# cosmetic one. `test_the_rank_marker_WIDTH_is_uniform_past_the_universe_size`
+# is the guard.
+PICKER_MARKER_RANK_W = 3
+# 🔴 LEFT-ALIGNED, AND MEASURED BETTER — BUT THE MECHANISM IS NOT ESTABLISHED,
+# AND SAYING SO IS DELIBERATE. MEASURED at fzf 0.74.4 over a 120-row synthetic
+# corpus, 20 queries: right-aligned, top-1 changed on 7; left-aligned, on 0
+# (tail order 13 vs 1). Keep `:<`.
+#
+# ⚠ AN EARLIER VERSION OF THIS COMMENT EXPLAINED IT AND THE EXPLANATION WAS
+# FALSE. It said right-alignment's leading blanks shift what `--nth=2..`
+# selects, so "the rank lands back INSIDE the haystack for narrow ranks".
+# MEASURED against that claim directly: a query matching ONLY the marker digits
+# returns ZERO rows under BOTH alignments with `--nth=2..` (positive control:
+# 1 row with the flag dropped). The marker is never matchable either way.
+#
+# 🔴 AND THE WIDTH EFFECT ABOVE DOES NOT EXPLAIN IT EITHER: `:<3` and `:>3`
+# produce the SAME width, so the offsets are unchanged between the two
+# alignments. The direction is reproducible and the choice rests on it; WHY
+# right-alignment moves the ranking at constant width is UNKNOWN. Recorded as
+# unknown rather than given a second plausible mechanism — the first one read
+# just as well and was wrong, and a reason invented under pressure to supply
+# one is a hypothesis wearing a comment's clothes.
+PICKER_MARKER_UNRANKED = "-"
+# 🔴 A DIFFERENT TOKEN FOR "NOBODY STAMPED THIS ROW", AND THE DIFFERENCE IS THE
+# POINT. `picker_rows` falls back when a candidate carries no `marker` at all,
+# which cannot happen through `stamp_picker_markers` — it means an assembly arm
+# contributed a row after the stamp, i.e. a BUG. Rendering that as `-` would
+# spell a defect the same way as a legitimately unranked row, so the one state
+# nobody can see is the one that looks normal. This keeps the click working
+# (never raise on the click path) and makes the failure legible.
+PICKER_MARKER_UNSTAMPED = "?"
+
+
+def picker_marker(rank: str) -> str:
+    """The marker field, padded for alignment. One writer, so the width used to
+    BUILD a row and the width the guards assert on cannot drift apart.
+
+    ⚠ NOTHING STRIPS BY WIDTH, and an earlier version of this line said
+    something did: `row_to_url` matches the URL SUFFIX and the tests split
+    on whitespace, so no consumer depends on this width to find the row.
+    What it IS load-bearing for is fzf's positional scoring — see
+    `PICKER_MARKER_RANK_W`."""
+    return f"{rank:<{PICKER_MARKER_RANK_W}}"
+
+
+def picker_markers(candidates: list[dict],
+                   ordered_urls: set[str] | None) -> list[str]:
+    """One marker per candidate — where the ordering put that row.
+
+    🔴 THE RANK IS COUNTED OFF `ordered_urls`, NOT `rank - pinned_above`, AND
+    THAT IS NOT A STYLE CHOICE. This module already records that the
+    subtraction INVERTS for the promoted row: a promoted row sits at position 0
+    with `rank < pinned_above`, so the arithmetic makes the genuinely-ordered
+    row look pinned and the demoted guess look ordered. Counting ordered rows in
+    display order gives the promoted row rank 1 — which is what it is, since it
+    is the ordering's own top row — and cannot go negative.
+
+    A row the ordering did not place gets `-`: no number, because it has no
+    rank. Inventing one is the failure `ordered_urls` exists to prevent.
+
+    🔴 RANK ONLY — THE CLASS WAS DROPPED, AND BY THE OPERATOR RATHER THAN FOR
+    TIDINESS. Option (A) offered *"its Tier A class **and/or** its rank"*;
+    shipping both was the implementer's reading, and `/audit-pr` round 0 on
+    #1813 logged the class field as an UNATTRIBUTED requirement. The measurement
+    that decided it: over every recorded pick, the class of the row the operator
+    actually chose is `below` **56** times against `plausible` **17** — so a
+    class column would read "the ranker does not trust this row" on the WANTED
+    row roughly three times in four, while the picker header already says the
+    same thing and already survives a typed query. The class term is itself the
+    thing the proposal flags as undiagnosed, so putting it permanently on screen
+    would teach a vocabulary that may be about to change. Rank is the half
+    symptom 1 actually names: it is what fzf's own score overwrites the moment
+    the operator types.
+    """
+    markers = []
+    rank = 0
+    for c in candidates:
+        if not ordered_urls or c["url"] not in ordered_urls:
+            markers.append(picker_marker(PICKER_MARKER_UNRANKED))
+            continue
+        rank += 1
+        markers.append(picker_marker(str(rank)))
+    return markers
+
+
+def stamp_picker_markers(candidates: list[dict],
+                         ordered_urls: set[str] | None) -> None:
+    """Write `c["marker"]` on every candidate, in place. ONE writer.
+
+    The single choke point between assembling the rows and showing them, so no
+    arm of the assembly can contribute rows that carry no marker.
+    """
+    for c, marker in zip(candidates,
+                         picker_markers(candidates, ordered_urls)):
+        c["marker"] = marker
+
+
 def picker_rows(candidates: list[dict]) -> list[str]:
-    """One `TAB`-free display row per candidate: `<platform> <id> — <url>`.
+    """One `TAB`-free display row per candidate:
+    `<rank>  <platform> <id> — <url>`.
 
     The URL is IN the row on purpose: the whole point of the picker is that the
     operator can see which of two plausible references they are about to open,
     and the platform name alone does not tell them that.
+
+    🔴 EVERY ROW CARRIES A MARKER, AND A MISSING `c["marker"]` IS NOT "NO
+    MARKER" — it falls back to the unranked one. `PICKER_SH` passes `--nth=2..`
+    so the marker is EXCLUDED FROM MATCHING, and that flag indexes FIELDS: a row
+    with no marker would have its `<platform> <id>` eaten by the offset and
+    match on the URL alone. The fallback is what stops a future arm of the
+    assembly reintroducing that by contributing an unstamped candidate.
+
+    ⚠ The marker is a PREFIX because `row_to_url` matches on the URL SUFFIX and
+    says so — decoration on the left cannot open the wrong row.
     """
+    unstamped = picker_marker(PICKER_MARKER_UNSTAMPED)
     rows = []
     for c in candidates:
         label = PLATFORM_LABEL.get(c["platform"], c["platform"])
-        rows.append(f"{label} {c['id']} — {c['url']}")
+        rows.append(f"{c.get('marker') or unstamped}  "
+                    f"{label} {c['id']} — {c['url']}")
     return rows
 
 
@@ -2502,9 +2624,27 @@ PICKER_LINES = 22
 # header and the match ORDER are untouched. The picker UX decision the operator
 # still owns is a separate question — see
 # `claudedocs/proposal-mention-picker-visibility.md`.
+# 🔴 `--nth=2..` IS WHAT MAKES THE ROW MARKER FREE. Every row is
+# `<rank>  <platform> <id> — <url>` (see `picker_rows`), and a leading token is
+# FUZZY-MATCHABLE: without this flag the rank DIGITS are part of the haystack,
+# and a picker whose subjects are numbered (`#1804`) gets digit queries often.
+# MEASURED at 0.74.4 over a synthetic 120-row corpus and 25 queries, marker
+# present in both arms, the only difference being this flag:
+#   * WITHOUT `--nth`: match set differs on 3 of 25, top-1 moves on 4 of 25.
+#   * WITH `--nth=2..`: match set IDENTICAL 25/25, top-1 and top-3 unchanged
+#     25/25, and the whole ranking byte-identical on 24 of 25.
+# 🔴 THE CONTROL HAD TO BE REBUILT TO SEE THAT, AND THE FIRST ONE WAS INERT.
+# With word-only queries the digit marker changes NOTHING even without `--nth`
+# (0 of 20), so the first sweep's "identical" arm was agreeing with a control
+# that could not fire. Adding digit queries (`1`, `12`, `7`, `100`, `42`) is
+# what made the flag's benefit observable. A sweep is only a claim about the
+# dimension its fixtures can vary.
+# ⚠ NOT byte-identical in every case: the TAIL order moves on 1 of 25. The
+# claim is "the rows that match, and the head of the order, are untouched" —
+# NOT "fzf behaves exactly as before".
 PICKER_SH = (
     'fzf -i --tiebreak=end --layout=reverse --info=inline --print-query '
-    '--bind="esc:print-query+abort" '
+    '--bind="esc:print-query+abort" --nth=2.. '
     '--prompt="mention > " --pointer=">" --color=16 '
     '--header-lines="$3" <"$1" >"$2"'
 )
@@ -2900,6 +3040,14 @@ def run_picker(payload: str, header_lines: int) -> tuple[str, str]:
 def pick(candidates: list[dict], mesg: str = "") -> str:
     """Ask fzf which candidate to open. Returns the chosen URL, or "" if the
     operator dismissed the picker (which must open NOTHING).
+
+    ⚠ THE ROW MARKER RIDES ON THE CANDIDATE, NOT ON A PARAMETER HERE, AND THAT
+    IS DELIBERATE. `stamp_picker_markers` writes `c["marker"]` at the single
+    choke point above this call. Threading it as an argument instead would put
+    it in a signature that a dozen tests stub with their own lambdas — the
+    marker would then be a thing every caller and every stub has to know about,
+    and the one that forgets gets rows whose fields are off by two while
+    `--nth=2..` silently matches the wrong ones.
 
     🔴 `mesg` IS WHERE THE DIAGNOSIS GOES, AND IT STAYS THERE. "I typed
     `kubectl-neat` and the list went empty" and "I changed my mind" both arrive
@@ -4225,6 +4373,30 @@ def main(argv: list[str] | None = None) -> int:
     # scrolled.
     set_pick_reason(PICK_REASON_UNATTRIBUTED)
     set_pick_queried(None)
+    # 🔴 THE RANKER'S OPINION, ON THE ROW, WHERE A TYPED QUERY CANNOT HIDE IT.
+    # The pre-computed order reaches fzf as INPUT ORDER only, so the first
+    # keystroke hands ordering to fzf's own score and the ranking becomes
+    # invisible to anyone who types rather than scrolls — symptom 1. The marker
+    # is in the row text, so it survives narrowing; `--nth=2..` keeps it out of
+    # the haystack (see `PICKER_SH`).
+    # 🔴 GATED ON `ORDER_APPLIED`, AND WITHOUT THIS THE MARKER LIES ON EVERY
+    # DEGRADED CLICK. `_ordered_universe` returns the universe UNTOUCHED when
+    # the table is stale or absent, but every arm still fills `ordered_urls`
+    # with the whole appended block — so an ungated stamp numbers rows 1..N
+    # that the ordering never placed, one line under a header that says
+    # "rows unordered". MEASURED on the shipped code: with a stale table, the
+    # repository with ZERO references — which cannot contain the clicked
+    # number — was marked rank 1, rendering identically to a run where the
+    # ordering had actually worked.
+    #
+    # ⚠ `no-table` is not exotic: it fires on every picker until the generator
+    # has run once, and FOREVER on a host where `gh` is absent or logged out.
+    # The promotion is already gated on this same state; the marker inherited
+    # neither that gate nor the note's wording. Passing `None` makes every row
+    # read `-`, which is what `picker_markers`' own docstring promises for a
+    # row the ordering did not place.
+    stamp_picker_markers(
+        candidates, ordered_urls if order_state == ORDER_APPLIED else None)
     url = pick(candidates, mesg=mesg)
     reason = last_pick_reason()
     queried = last_pick_queried()
@@ -4311,7 +4483,22 @@ def main(argv: list[str] | None = None) -> int:
     # `ordered=True` — both INVERTED, in the one dim that says whether the
     # ordering placed the row. `ordered_urls` is what the ordering actually
     # returned, so it answers without reading a position at all.
+    # 🔴 GATED ON `ORDER_APPLIED` FOR THE SAME REASON THE ROW MARKER IS, AND
+    # THIS SURFACE WAS LEFT BEHIND WHEN THAT ONE WAS FIXED. `ordered_urls` is
+    # filled unconditionally by every arm, but `_ordered_universe` returns the
+    # universe UNTOUCHED on a stale or absent table — so without this gate a
+    # degraded click emitted `ordered=True` while the header said "rows
+    # unordered" and the row marker said `-`. Three surfaces, one fact, and the
+    # telemetry was the one still asserting the retracted reading.
+    #
+    # ⚠ THAT IS NOT COSMETIC, BECAUSE THIS DIM IS THE HEADLINE FILTER. The
+    # paragraph in `click_dims` tells a consumer measuring the ordering to
+    # filter `ordered = true`; ungated, that filter ADMITS clicks where no
+    # ordering ran, biasing "did the ordering work" toward "no" with rows it
+    # never touched. Gating here keeps that instruction true as written rather
+    # than making every consumer remember a second condition.
     picked_ordered = (pinned_above is not None and picked_rank is not None
+                      and order_state == ORDER_APPLIED
                       and url in ordered_urls)
     # ...and the class is reported only for a row the ordering actually placed.
     # It used to be emitted whenever the ordering RAN, which made a pinned pane
