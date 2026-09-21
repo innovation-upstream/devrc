@@ -1847,6 +1847,17 @@ def test_eight_repos_still_offer_the_picker(spy, monkeypatch):
 ONE_CANDIDATE = [{"platform": "github", "id": "7",
                   "url": "https://github.com/gardenersguild/trowelcast/pull/7"}]
 
+# 🔴 DERIVED FROM THE REAL `PICKER_SH`, NEVER A LITERAL `True`. Whether an ESC
+# abort writes the query line is a property of a FLAG, so the fake below reads
+# the flag: drop `esc:print-query` from `PICKER_SH` and every ESC fixture goes
+# back to writing zero bytes, which is what makes
+# `test_an_ESC_abort_RECORDS_a_verdict_and_the_OTHER_aborts_do_not` a regression
+# test rather than a restatement of the fake. Keyed on the ACTION, not the whole
+# flag string, so reordering `abort`/`print-query` inside the bind does not
+# silently flip the fixture — the whole-string pin on `PICKER_SH` is what
+# reviews the bind's exact shape.
+_ESC_PRINTS_QUERY = "esc:print-query" in MO.PICKER_SH
+
 
 class _FakeTerminal:
     """Stands in for the terminal `pick()` spawns, doing what it really does.
@@ -1873,26 +1884,54 @@ class _FakeTerminal:
     means dropping `--print-query` from `PICKER_SH` moves this fake with it,
     instead of leaving a fixture asserting a contract nobody has.
 
-    🔴 THE THREE ENDINGS ARE MEASURED AGAINST fzf 0.74.3, NOT ASSUMED — AND THE
+    🔴 THE FOUR ENDINGS ARE MEASURED AGAINST fzf 0.74.4, NOT ASSUMED — AND THE
     FIRST VERSION OF THIS FAKE GOT THE ABORT WRONG, which made it friendlier
     than the real thing in the very way the paragraph above warns about. Driven
-    through a pty, three samples per ending:
+    through a pty, both flag states side by side:
 
-        selection          ->  `<query>\\n<row>\\n`   (2 lines; query may be "")
+        selection          ->  `<query>\\n<row>\\n`   (2 lines, exit 0)
         ENTER, no match    ->  `<query>\\n`           (1 line, exit 1)
-        ESC / Ctrl-C abort ->  NOTHING AT ALL         (0 bytes, exit 130)
+        ESC abort          ->  `<query>\\n`           (1 line, exit 0)
+        ANY OTHER ABORT    ->  NOTHING AT ALL         (0 bytes, exit 130)
 
-    So `choose=None` with an EMPTY query models an ABORT and writes nothing —
-    which is byte-for-byte what this fake did before `--print-query` existed —
-    while `choose=None` with a query models ENTER-WITH-NO-MATCH and writes the
-    query line alone. Collapsing those two would let a test claim the abort path
-    records a query verdict, which it does not.
+    🔴 "ANY OTHER ABORT" IS FOUR KEYS, NOT Ctrl-C. fzf's keymap reads
+    `abort  ctrl-c  ctrl-g  ctrl-q  esc`, and `ctrl-d` aborts as well on an
+    empty query; all of them write zero bytes, measured at 0.74.4. This
+    docstring said "Ctrl-C alone" in THREE places and was missed by the very
+    commit that corrected the same claim in the module, the proposal and the
+    test below it — a fourth site for a claim already retracted twice. Found by
+    `/audit-pr` round 1. **The natural place a maintainer looks is this fake**,
+    which is what made the omission expensive rather than cosmetic.
+
+    🔴 THERE WERE THREE ENDINGS UNTIL `--bind="esc:print-query+abort"` LANDED,
+    AND THE ONE THAT MOVED IS THE ONE THIS FAKE USED TO MODEL BY DEFAULT. ESC
+    wrote nothing; it now writes the query line, so `choose=None` models ESC (or
+    ENTER-with-no-match — on stdout they are BYTE-IDENTICAL, and nothing in
+    production tells them apart) and **`hard_abort=True` is the only way to get
+    the zero-byte ending**, which is every abort key EXCEPT `esc`.
+
+    ⚠ SO A TEST THAT WANTS "fzf WROTE NOTHING" MUST SAY `hard_abort=True`. The
+    default changed meaning deliberately rather than keeping a name that would
+    quietly model the rarer ending: ESC is the common abort, and a fake whose
+    default models the rare one is the friendlier-peer hazard again.
     """
 
     def __init__(self, choose: str | None = None, *, answer_early: bool = False,
-                 query: str = ""):
+                 query: str = "", hard_abort: bool = False, esc: bool = False):
         self.choose = choose
         self.query = query
+        # Every abort key EXCEPT `esc` (ctrl-c / ctrl-g / ctrl-q, and ctrl-d on
+        # an empty query): the endings that still write zero bytes. Not
+        # derivable from `choose`/`query` any more — ESC with an empty query
+        # writes a bare newline, a DIFFERENT ending from writing nothing.
+        self.hard_abort = hard_abort
+        # 🔴 AN ESC ABORT, WHOSE BYTES DEPEND ON A FLAG — SO IT IS READ OUT OF
+        # THE REAL `PICKER_SH` (see `_ESC_PRINTS_QUERY`) RATHER THAN HARDCODED.
+        # Spelling "ESC writes the query" here would leave this fake asserting a
+        # contract production could lose in one edit: drop the bind and the fake
+        # would keep writing the line, so the tests resting on it would stay
+        # green while the real picker went back to writing nothing.
+        self.esc = esc
         # 🔴 `answer_early` MODELS WHAT fzf ACTUALLY DOES, and without it this
         # fake is a FRIENDLIER PEER THAN THE REAL ONE. fzf answers the moment the
         # operator presses a key — it does NOT wait to drain the list — and then
@@ -1915,10 +1954,17 @@ class _FakeTerminal:
             wfh = open(choice_fifo, "w", encoding="utf-8")
 
             def answer():
-                # The three MEASURED endings — see the class docstring.
-                if self.choose is None and not self.query:
-                    return                      # ABORT: fzf writes NOTHING
+                # The four MEASURED endings — see the class docstring.
+                if self.hard_abort:
+                    return    # ctrl-c / ctrl-g / ctrl-q / empty ctrl-d:
+                              # fzf writes NOTHING for any of them
+                if self.esc and not _ESC_PRINTS_QUERY:
+                    return                  # ESC before the bind: also NOTHING
                 if MO.PICKER_QUERY_LINE is not None:
+                    # Every other ending writes the query line, even when the
+                    # query is empty — an ESC on an untouched picker writes a
+                    # bare "\n", which is what makes `False` reachable on the
+                    # dismissal arm.
                     wfh.write(self.query + "\n")
                 if self.choose is not None:
                     wfh.write(self.choose + "\n")
@@ -1956,8 +2002,9 @@ class _FakeTerminal:
 
 
 def _drive_picker(monkeypatch, candidates=None, mesg="", choose=None,
-                  answer_early=False, query=""):
-    term = _FakeTerminal(choose, answer_early=answer_early, query=query)
+                  answer_early=False, query="", hard_abort=False, esc=False):
+    term = _FakeTerminal(choose, answer_early=answer_early, query=query,
+                         hard_abort=hard_abort, esc=esc)
     monkeypatch.setattr(MO.subprocess, "Popen", term.popen)
     url = MO.pick(candidates if candidates is not None else ONE_CANDIDATE,
                   mesg=mesg)
@@ -2158,8 +2205,15 @@ def test_a_selection_comes_back_as_its_URL(monkeypatch):
 
 
 def test_a_DISMISSAL_opens_nothing(monkeypatch):
-    """fzf exits without writing when the operator presses Esc. That must be ""
-    — never a guess at row 1."""
+    """A dismissal must open NOTHING — never a guess at row 1.
+
+    ⚠ ITS OLD DOCSTRING SAID "fzf exits WITHOUT WRITING when the operator
+    presses Esc", AND THAT IS NO LONGER TRUE. With
+    `--bind="esc:print-query+abort"` an ESC writes `<query>\\n`, and this test's
+    fixture (`choose=None`, default `query=""`) models exactly that — a bare
+    newline, not zero bytes. The assertion was right either way, which is
+    precisely why the sentence could go stale unnoticed: nothing here reads it.
+    The zero-byte endings now need `hard_abort=True`; see `_FakeTerminal`."""
     _term, url = _drive_picker(monkeypatch, choose=None)
     assert url == ""
 
@@ -2525,10 +2579,39 @@ def _fzf_interactive_first_row(rows: list[str], query: str) -> str:
         return seen
 
     try:
-        drawn = _drain(master, lambda b: _PTY_PROMPT.encode() in b,
+        # 🔴 THE PROMPT IS NOT READINESS. fzf draws its prompt BEFORE it has
+        # finished reading stdin, so a key sent on the prompt alone can land
+        # while the list is still loading: fzf then has nothing to match, exits
+        # with the query line alone, and the failure reads as a ranking bug.
+        # The real signal is fzf's own `<matched>/<total>` counter — the
+        # denominator reaching the row count means the list finished loading,
+        # and a NON-ZERO numerator means the query has actually been applied.
+        # BOTH halves are load-bearing: fzf reads and filters concurrently, so
+        # the denominator can be complete while the numerator is still 0.
+        # 🔴 MEASURED ON #1813's TREE, NOT THIS ONE, AND THE SCOPE IS THE
+        # POINT. Prompt-only readiness failed 11-12 of 20 runs there, where
+        # the corpus rows carry a marker; gating on the settled counter, 0
+        # of 25. On THIS tree `/audit-pr` round 2 re-derived it over 80
+        # prompt-only observations and got ZERO failures — so the rate does
+        # NOT reproduce here and an earlier version of this comment stated
+        # it unscoped, beside this corpus, as though it did. The race is a
+        # property of how long the rows take to load; the gate is cheap and
+        # correct either way, but do not read the number as this file's.
+        total = len(rows)
+        drawn = _drain(master,
+                       lambda b: (_PTY_PROMPT.encode() in b
+                                  and _counter(b)[1] == total
+                                  and _counter(b)[0] >= 1),
                        time.monotonic() + 20)
         assert _PTY_PROMPT.encode() in drawn, (
             "fzf never drew its prompt in 20s — this test measured nothing. "
+            f"terminal saw: {drawn[-400:]!r}")
+        matched, seen = _counter(drawn)
+        assert seen == total and matched >= 1, (
+            f"fzf's counter never settled at `>=1/{total}` in 20s — last seen "
+            f"{matched}/{seen}. Enter would be pressed against a list that is "
+            f"still loading ({seen} != {total}) or not yet filtered "
+            f"({matched} == 0), and neither measures the ranking. "
             f"terminal saw: {drawn[-400:]!r}")
         os.write(master, b"\r")
         # `--print-query` writes the query first, so the SELECTION is the last
@@ -2549,6 +2632,207 @@ def _fzf_interactive_first_row(rows: list[str], query: str) -> str:
         f"measurement did not happen, so neither did the assertion")
     lines = got.decode("utf-8", "replace").split("\n")
     return _drop_query_line(lines)[0]
+
+
+def _counter(drawn: bytes) -> tuple[int, int]:
+    """fzf's MOST RECENT `<matched>/<total>` counter, as `(matched, total)`.
+
+    `--info=inline` draws it beside the prompt. `total` is how many rows fzf
+    has READ, so it reaching the row count means the list finished loading;
+    `matched` is how many survive the current query, so non-zero means the
+    query has actually been APPLIED. Both halves are load-bearing — fzf reads
+    and filters concurrently, so the denominator can be complete while the
+    numerator is still 0, and a key sent there measures nothing.
+
+    ⚠ LAST, NOT LARGEST. The counter is re-rendered as it climbs and every
+    intermediate value is still in the byte stream, so the largest numerator is
+    a value from the PAST. Only the most recent pair describes the screen the
+    key is about to be sent to.
+
+    ⚠ Returns `(0, 0)` when nothing has been drawn, so a caller comparing
+    against a real row count cannot read "no counter" as "counter matched".
+
+    ⚠ It reads the last `\\d+/\\d+` ANYWHERE in the drained bytes, not
+    specifically fzf's info line. No row in this file's corpora contains
+    `digits/digits`, so it cannot misfire today — but a corpus that did would
+    silently hand the readiness gate a row fragment.
+    """
+    import re  # noqa: PLC0415 — only this helper needs it
+    text = drawn.decode("utf-8", "replace")
+    found = re.findall(r"(\d+)/(\d+)", text)
+    return (int(found[-1][0]), int(found[-1][1])) if found else (0, 0)
+
+
+def _fzf_interactive_abort(rows: list[str], query: str,
+                           key: bytes) -> tuple[bytes, int, bool]:
+    """Drive a REAL interactive fzf to an ABORT and return `(stdout, status)`.
+
+    🔴 THE ONE THING THE FAKE CANNOT DO. Every other guard on the ESC contract
+    asserts against `_FakeTerminal`, whose abort branch was written in the same
+    commit as the tests that read it — the friendlier-peer hazard this file
+    names repeatedly. `_ESC_PRINTS_QUERY` and the `PICKER_SH` whole-string pin
+    both guard the FLAG STRING; neither can see fzf changing what the flag
+    DOES. `print-query` is not in fzf 0.74.4's documented action list, so it
+    carries no compatibility promise, and the failure would be silent: a second
+    printed line makes `row = lines[1]` the operator's typed text, so every ESC
+    is filed as a selection and then as `unmapped-row`.
+
+    Same pty machinery and the same `_picker_flags()` as
+    `_fzf_interactive_first_row`, and it reuses that helper's
+    `<matched>/<total>` readiness gate.
+
+    ⚠ THE GATE IS INHERITED, NOT LOAD-BEARING HERE, and this docstring claimed
+    otherwise. It said "a key sent before the list has loaded measures nothing"
+    — true of `_fzf_interactive_first_row`, whose key SELECTS A ROW and so
+    depends on the match set. An abort's bytes do not: `/audit-pr` round 2
+    measured 15 ESC and 15 Ctrl-C runs with NO readiness wait at all and got 0
+    deviations. The gate is kept for symmetry and because it makes a genuinely
+    broken spawn fail fast, but it is not what makes this measurement valid —
+    the `ended` flag is. Copied prose inherits the ORIGINAL's justification,
+    which is how a sentence ends up true of the function it came from and false
+    of the one it now sits in.
+    """
+    import fcntl     # noqa: PLC0415
+    import pty       # noqa: PLC0415
+    import struct    # noqa: PLC0415
+    import termios   # noqa: PLC0415
+
+    flags = [*_picker_flags(), f"--prompt={_PTY_PROMPT} ", f"--query={query}"]
+    r_in, w_in = os.pipe()
+    r_out, w_out = os.pipe()
+    pid, master = pty.fork()
+    if pid == 0:                 # pragma: no cover — the child never returns
+        os.dup2(r_in, 0)
+        os.dup2(w_out, 1)
+        os.environ["TERM"] = "xterm-256color"
+        os.execvp("fzf", ["fzf", *flags])
+    os.close(r_in)
+    os.close(w_out)
+    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+    with os.fdopen(w_in, "wb") as fh:
+        fh.write(("\n".join(rows) + "\n").encode())
+
+    def _drain(fd, until, deadline):
+        seen = b""
+        while time.monotonic() < deadline:
+            r, _w, _x = select.select([fd], [], [], 0.2)
+            if not r:
+                continue
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:       # pragma: no cover — pty hangup
+                break
+            if not chunk:
+                break
+            seen += chunk
+            if until(seen):
+                break
+        return seen
+
+    status = -1
+    out = b""
+    ended = False      # did the CHILD end, or did we give up?
+    try:
+        total = len(rows)
+        drawn = _drain(master,
+                       lambda b: (_PTY_PROMPT.encode() in b
+                                  and _counter(b)[1] == total
+                                  and _counter(b)[0] >= 1),
+                       time.monotonic() + 20)
+        matched, seen = _counter(drawn)
+        assert seen == total and matched >= 1, (
+            f"fzf's counter never settled at `>=1/{total}` — last {matched}/"
+            f"{seen}; the key below would hit a list that is still loading")
+        os.write(master, key)
+        # 🔴 DRAIN THE PTY AS WELL AS THE PIPE, AND CLOSE BEFORE `waitpid`.
+        # An abort writes ONE line or NONE, so there is no line count to wait
+        # for — but fzf keeps REDRAWING to the pty on its way out, and a pty
+        # buffer nobody reads fills and BLOCKS the child. The first version of
+        # this helper drained only `r_out` and called `waitpid` first: fzf
+        # never exited, `waitpid` never returned, and the test hung until the
+        # runner's timeout (measured: pytest killed at 540s, rc 124, ZERO
+        # output — which through a pipe reads as a silent pass).
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            r, _w, _x = select.select([r_out, master], [], [], 0.2)
+            if not r:
+                continue
+            for fd in r:
+                try:
+                    chunk = os.read(fd, 65536)
+                except OSError:            # pty hangup — the child is gone
+                    ended = True
+                    continue
+                if not chunk:
+                    ended = True
+                elif fd == r_out:
+                    out += chunk
+            if ended:
+                break
+    finally:
+        os.close(r_out)
+        os.close(master)
+        try:
+            _pid, status = os.waitpid(pid, 0)
+        except (ChildProcessError, OSError):  # pragma: no cover
+            status = -1
+    return out, (os.WEXITSTATUS(status) if status >= 0 else -1), ended
+
+
+def test_REAL_INTERACTIVE_fzf_writes_the_QUERY_on_an_ESC_abort():
+    """🔴 THE SHIPPED CONTRACT, AGAINST REAL fzf RATHER THAN THE FAKE.
+
+    Everything else asserting this drives `_FakeTerminal`, so the whole ESC
+    feature rested on one out-of-band pty measurement that no test re-ran — a
+    claim, not evidence, by this file's own standard. This drives the real
+    binary with the real `PICKER_SH` flags.
+
+    The Ctrl-C arm is the control: it proves the harness can observe a
+    zero-byte ending, so the `b"nimbus\\n"` above is a fact about ESC and not
+    about a reader that returns whatever it likes.
+
+    🔴 AND THAT CONTROL HAS TO ASSERT THE CHILD ENDED, OR IT PASSES ON A
+    TIMEOUT. MEASURED by `/audit-pr` round 2: sending a key that does not abort
+    at all (`b"z"`) yields the IDENTICAL `(b"", 130)` tuple — 130 because the
+    harness closing the pty is itself what kills fzf — and the only difference
+    is wall time, 8.6s against 0.5s, which nothing checked. So a Ctrl-C arm
+    asserting bytes alone would still pass if fzf stopped treating Ctrl-C as
+    `abort`, and the docstring's "it proves the harness can observe a zero-byte
+    ending" would be satisfied by a harness that observed no ending. The helper
+    now reports whether the drain ended on EOF, and both arms assert it."""
+    _require_fzf()
+    rows, _target = _eponymous_corpus()
+
+    out, rc, ended = _fzf_interactive_abort(rows, "nimbus", b"\x1b")
+    assert ended, (
+        f"the ESC arm hit the drain deadline instead of the child exiting "
+        f"(bytes={out!r}, rc={rc}) — fzf did not abort, so this measured a "
+        f"timeout rather than the ESC contract")
+    assert out == b"nimbus\n", (
+        f"a real ESC abort wrote {out!r} at rc={rc}. The shipped bind is "
+        f"`esc:print-query+abort`, so it must write the query line and nothing "
+        f"else — a SECOND line would make `row` the operator's typed text and "
+        f"file every ESC as a selection")
+
+    ctrl_c, rc_c, ended_c = _fzf_interactive_abort(rows, "nimbus", b"\x03")
+    assert ended_c, (
+        f"CONTROL FAILED: Ctrl-C hit the drain deadline (bytes={ctrl_c!r}, "
+        f"rc={rc_c}) — a key that does NOT abort produces the same empty bytes "
+        f"and the same rc 130, so without this the arm would pass while "
+        f"proving only that fzf ignored the key")
+    assert ctrl_c == b"", (
+        f"CONTROL FAILED: Ctrl-C wrote {ctrl_c!r} at rc={rc_c}, so this "
+        f"harness cannot distinguish a writing ending from a silent one and "
+        f"the ESC assertion above is not evidence")
+
+    # 🔴 THE CONTROL'S OWN CONTROL: a key that aborts nothing must be caught by
+    # the `ended` assertion, or the two arms above are agreeing about a flag
+    # that is always True.
+    noop, _rc_n, ended_n = _fzf_interactive_abort(rows, "nimbus", b"z")
+    assert not ended_n, (
+        f"a non-aborting key ended the child (bytes={noop!r}) — then `ended` "
+        f"cannot separate 'fzf aborted silently' from 'fzf ignored the key', "
+        f"and both assertions above rest on a flag that is always True")
 
 
 def test_REAL_INTERACTIVE_fzf_opens_on_the_FIRST_INPUT_ROW_with_no_query():
@@ -2632,6 +2916,7 @@ def test_REAL_fzf_is_CASE_INSENSITIVE_only_with_the_flag():
 # --------------------------------------------------------------------------- #
 EXPECTED_PICKER_SH = (
     'fzf -i --tiebreak=end --layout=reverse --info=inline --print-query '
+    '--bind="esc:print-query+abort" '
     '--prompt="mention > " --pointer=">" --color=16 '
     '--header-lines="$3" <"$1" >"$2"'
 )
@@ -9361,55 +9646,90 @@ def test_the_picker_OUTPUT_LINE_count_is_DERIVED_from_the_flag_not_spelled():
     assert MO.PICKER_QUERY_LINE != MO.PICKER_ROW_LINE
 
 
-def test_a_real_ABORT_records_NO_query_verdict_at_all(monkeypatch):
-    """🔴 THE LIMIT OF `--print-query`, PINNED BECAUSE THE FIRST DRAFT OF THIS
-    FEATURE CLAIMED THE OPPOSITE IN THREE COMMENTS AND THE PR BODY.
+def test_an_ESC_abort_RECORDS_a_verdict_and_the_OTHER_aborts_do_not(monkeypatch):
+    """🔴 WHAT `--bind="esc:print-query+abort"` BOUGHT, AND WHAT IT DID NOT.
+    This test REPLACES `test_a_real_ABORT_records_NO_query_verdict_at_all`,
+    which pinned the pre-bind contract where EVERY abort wrote zero bytes. That
+    test was correct when written and is now false for ESC; the half that
+    survives is Ctrl-C, asserted below.
 
-    🔴 WHAT THIS PINS, AND WHERE THE MEASUREMENT ACTUALLY LIVES — SAID PLAINLY
-    BECAUSE THE TEST'S NAME SAYS "REAL". It drives `_FakeTerminal`, NOT fzf. The
-    fzf behaviour it encodes — an ESC/Ctrl-C abort writes **zero bytes** and
-    exits 130 — was measured OUT OF BAND (pty, fzf 0.74.3, three samples plus a
-    Ctrl-C and a positive control) and is recorded in `PICKER_SH`'s comment; the
-    fake's abort branch was written in the SAME commit as this test, so if that
-    belief were wrong this test could not notice. That is the friendlier-peer
-    hazard the fake's own docstring names, and it is not closable here: fzf's
-    `--filter` mode cannot express an abort, and this file's real-fzf family is
-    deliberately non-interactive.
+    🔴 WHAT THIS PINS, AND WHERE THE MEASUREMENT ACTUALLY LIVES. It drives
+    `_FakeTerminal`, NOT fzf. The fzf behaviour it encodes was measured OUT OF
+    BAND (pty, fzf **0.74.4**, both flag states side by side):
 
-    So read it as: **given the measured contract, the HANDLER does the right
-    thing.** It has real teeth on production code — mutating the terminator
-    check kills it with its own message (mutant M11) — and the contract it rests
-    on is re-measured whenever `PICKER_SH` changes, which is what the
-    whole-string pin on that constant is for.
+        without the bind:  ESC -> 0 bytes, exit 130
+        with the bind:     ESC -> `<query>\\n`, exit 0   (empty query -> `\\n`)
+        either way, EVERY OTHER ABORT -> 0 bytes, exit 130
 
-    Why it is worth a test rather than a comment: `False` would mean "the
-    operator scrolled to their row", which is the population "is the
-    pre-computed order being consulted?" is measured FROM. Filing every abort
-    there would answer symptom 1 with the wrong number, in the reassuring
-    direction.
+    🔴 "EVERY OTHER ABORT" IS FOUR KEYS, NOT ONE, AND THIS TEST WAS NAMED
+    `..._and_only_Ctrl_C_does_not` UNTIL /audit-pr ROUND 0. fzf's keymap reads
+    `abort  ctrl-c  ctrl-g  ctrl-q  esc`, and `ctrl-d` aborts too on an empty
+    query; all four write zero bytes, measured at 0.74.4 with the ESC rows as
+    the positive control. The old name asserted EXCLUSIVITY nobody had measured.
 
-    The two endings are driven side by side so the assertion cannot be satisfied
+    ⚠ WHAT THIS TEST CAN AND CANNOT SEE, because the rename might suggest
+    otherwise: it drives `_FakeTerminal`, which models ENDINGS and not KEYS, so
+    `hard_abort=True` stands for "the ending that writes zero bytes" — it cannot
+    tell ctrl-c from ctrl-g, and nothing downstream of `run_picker` can either,
+    which is exactly why they share one arm. The key-level fact lives in
+    `PICKER_SH`'s comment, measured out of band.
+
+    and is recorded in `PICKER_SH`'s comment. The probe carried its own positive
+    control: the four endings the bind does NOT touch reproduced byte-for-byte,
+    including `ENTER, no match -> <query>\\n, exit 1`, which is the row an
+    earlier draft of that comment got wrong twice.
+
+    🔴 THE FRIENDLIER-PEER HAZARD IS CLOSED BY DERIVATION, NOT BY CARE. The
+    fake's ESC branch reads `_ESC_PRINTS_QUERY` out of the real `PICKER_SH`, so
+    dropping the bind from production flips the fixture and turns the first
+    assertion RED. Without that, the fake and this test would agree with each
+    other about a contract production had lost — which is exactly how the
+    original version of this fake got the abort wrong in the first place.
+
+    Why it is worth a test rather than a comment: the three-valued dim is what
+    keeps `False` ("the operator scrolled to their row") apart from NOT MEASURED
+    ("we could not see"), and `False` is the population symptom 1's rate is
+    computed FROM. Filing a Ctrl-C there would answer symptom 1 with the wrong
+    number, in the reassuring direction.
+
+    All three endings are driven side by side so no assertion can be satisfied
     by a reader that never records anything."""
     if MO.PICKER_QUERY_LINE is None:      # pragma: no cover — flag dropped
         pytest.skip("--print-query is not set, so there is no query line")
 
-    # ENTER WITH NO MATCH — fzf writes the query line ALONE. This is the
-    # POSITIVE CONTROL: the dismissal arm CAN record a verdict.
+    # ESC WITH A TYPED QUERY — the ending the bind exists for. Before it, this
+    # recorded NOTHING; the whole point is that it now records `True`.
     MO.set_pick_queried(None)
-    _term, url = _drive_picker(monkeypatch, choose=None, query="zqx-no-match")
-    assert url == "", url
+    _term, url = _drive_picker(monkeypatch, choose=None, query="zqx-typed",
+                               esc=True)
+    assert url == "", f"an ESC abort opened something: {url!r}"
     assert MO.last_pick_queried() is True, (
-        "POSITIVE CONTROL FAILED: an Enter-with-no-match wrote a query line and "
-        "nothing recorded it, so the None below says nothing about the abort")
+        f"an ESC abort after typing recorded {MO.last_pick_queried()!r} — with "
+        f"`esc:print-query+abort` fzf writes the query line, so this is the "
+        f"ending the bind was added to capture")
 
-    # ABORT — fzf writes NOTHING, so there is no verdict to record.
+    # ESC ON AN UNTOUCHED PICKER — a bare "\n". This is what makes `False`
+    # REACHABLE on the dismissal arm, which the pre-bind contract could not do
+    # and which is why that arm's old "True by construction" note is retired.
     MO.set_pick_queried(None)
-    _term2, url2 = _drive_picker(monkeypatch, choose=None, query="")
-    assert url2 == "", url2
+    _term2, url2 = _drive_picker(monkeypatch, choose=None, query="", esc=True)
+    assert url2 == "", f"an ESC abort opened something: {url2!r}"
+    assert MO.last_pick_queried() is False, (
+        f"an ESC abort with an EMPTY query recorded "
+        f"{MO.last_pick_queried()!r} — a bare newline is a MEASUREMENT that the "
+        f"operator scrolled, not an absence of one")
+
+    # Any OTHER abort (ctrl-c / ctrl-g / ctrl-q / empty-query ctrl-d) — still
+    # zero bytes, so still NOT MEASURED. The surviving half of the test this
+    # replaces, and the residual gap named in `click_dims`.
+    MO.set_pick_queried(None)
+    _term3, url3 = _drive_picker(monkeypatch, choose=None, hard_abort=True)
+    assert url3 == "", f"a zero-byte abort opened something: {url3!r}"
     assert MO.last_pick_queried() is None, (
-        f"an aborted picker recorded {MO.last_pick_queried()!r} — fzf writes "
-        f"ZERO BYTES on an abort, so any verdict here is invented, and `False` "
-        f"would file the click under 'the operator scrolled'")
+        f"a zero-byte abort recorded {MO.last_pick_queried()!r} — ctrl-c, "
+        f"ctrl-g, ctrl-q and empty-query ctrl-d write NOTHING whatever the "
+        f"bind says, so any verdict is invented, and `False` would file the "
+        f"click under 'the operator scrolled'")
 
 
 def test_a_TORN_query_line_is_NOT_MEASURED_rather_than_read_half_written(
