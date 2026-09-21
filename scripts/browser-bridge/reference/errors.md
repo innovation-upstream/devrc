@@ -96,6 +96,33 @@ inline in SKILL.md — it is a correctness rail, not a debugging step.)
 - `Cannot access a chrome:// URL` (with a `null` result) → `eval`/`js` can't run on
   `chrome://` / `brave://` pages. Not a bridge fault.
 
+## 🔴 Injections refused on EVERY host — Brave's per-extension Site access
+
+Every injection op (`text`/`js`/`eval`, anything needing content-script
+access) on ANY tab answers `Cannot access contents of the page. Extension
+manifest must request permission to access the respective host.` — while the
+messaging ops (`health`/`tabs`/`context`/`ping`/`whoami`) all answer, and
+`health` shows `extension_connected:true` + `extension_stale:false` with a
+current build. It reads exactly like a broken bridge or a broken site; it is
+neither.
+
+- **Discriminator:** messaging ops fine + injections refused on EVERY host =
+  this. (Stale build → `unknown_op`; dropped extension →
+  `extension_connected:false`; page CSP → only `js` returns `null`, and only
+  on that one site.)
+- **Cause (confirmed 2026-09-20, measured on both hosts):** the manifest
+  carries `<all_urls>`, so the block is not the manifest — it is Brave's
+  per-extension **Site access** setting (`Details` → `Site access`), which
+  the browser holds per profile and which can differ between machines
+  running the identical build. The laptop's fix cleared injections there
+  the same day; the workbench stayed blind until its own fix.
+- **Recovery (operator, ~30 s, on the host you are driving):**
+  `brave://extensions` → Browser Bridge (command channel) → `Details` →
+  **Site access** → **On all sites**. If still refused: reload ↻ the
+  extension (it may re-prompt the `debugger` permission), then `$BB health`
+  → `extension_connected:true`, then probe `text` on a real tab. A fix on
+  one host does NOT carry to the other.
+
 ## CLI exit codes — and the one that is NOT a failure to debug
 
 The CLI's own codes, distinct from the wire errors above. Only three are ever

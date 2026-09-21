@@ -70,10 +70,19 @@ read above, one layer deeper.
 - `eval`/`js` runs in the page's MAIN world and WORKS on discord.com (no CSP
   eval block — measured `js "1+1"` → `2` on a hidden tab). Prefer `js` for
   extraction here.
-- ⚠ UNMEASURED: the trusted-click → type → `key Enter` send sequence, and menu
-  toggles (threads, emoji picker, context menus). Drive these in a tab this
-  session owns (`open` + `nav`), never on the operator's live tab, and NEVER
-  send without the operator asking — `Enter` in the composer sends.
+- Measured 2026-09-21 in an owned tab on a channel of this shape: trusted
+  `click [role=textbox]` focuses the composer; `type` lands verbatim
+  (readback via `js` `textContent`); clearing is bounded `key Backspace`
+  presses — a cleared Slate editor reads back as ONLY the U+FEFF zero-width
+  marker. Composer-area buttons carry `aria-label`s (`Add Emoji`,
+  `Open GIF picker`, `Open sticker picker`, `More message options`, `Apps` —
+  all with `aria-expanded` except `Send a gift`); a trusted click toggles
+  `aria-expanded` true↔false and a second click closes what the first
+  opened (measured on two). There is no right-click op, so per-message
+  context menus stay out of reach.
+- ⚠ UNMEASURED: the `key Enter` send sequence — never without the operator
+  asking; `Enter` in the composer sends. Drive these in a tab this session
+  owns (`open` + `nav`), never on the operator's live tab.
 
 ## 🔴 Secrets
 
