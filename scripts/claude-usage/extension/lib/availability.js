@@ -53,8 +53,20 @@
 //     spent by `weekly.resetsAt`, up to seven days later. A session reset
 //     cannot clear it, so it outranks the session verdict.
 //   * a reset we cannot parse has NOT been shown to have happened, so a lock
-//     with an unknown end still blocks. The inference is safe in one
-//     direction only.
+//     -- or a spent weekly percentage -- with an unknown end still blocks.
+//     The inference is safe in one direction only.
+//
+// ⚠ AND THAT LAST ONE IS PERMANENT, WHICH IS WORTH SAYING OUT LOUD RATHER
+// THAN LEAVING TO BE REDISCOVERED. `weeklyOpen` is true when `weekly.at` is
+// null, so a record carrying `weekly.utilization >= WEEKLY_EXHAUSTED_PCT` and
+// an unparseable `weekly.resetsAt` reads BLOCKED for as long as it is stored:
+// a non-active account cannot be re-measured, so nothing will ever overwrite
+// the shape. `{seven_day: {utilization: null, resets_at: null}}` is a shape
+// the recon fixtures already carry, so a null `resets_at` is observed; whether
+// the API can emit one BESIDE a 100% utilization is not knowable from this
+// repo. It is the conservative direction -- a permanent "cannot switch here"
+// costs an account off the list, where the optimistic reading costs a switch
+// into a wall -- and it is a choice, not a derivation.
 //
 // ⚠ ONE RESIDUE, NAMED RATHER THAN PAPERED OVER. The session rule is right
 // for `five_hour.locked_reason` values that ARE the five-hour cap ("Session
@@ -186,24 +198,50 @@ function windowOf(record, key) {
  * shown beside the verdict either way).
  *
  * Always returns the full field set, so a caller never has to guard:
- *   state, resetsAt, resetElapsedMs, sessionPct, weeklyPct, asOf,
- *   lockedReason, freesAt
+ *   state, resetsAt, resetElapsedMs, sessionPct, weeklyPct, weeklyBindingPct,
+ *   asOf, lockedReason, freesAt
  * Fields that do not apply to the state are null.
  *
  * ⚠ EVERY FIELD HERE HAS A CONSUMER, and that is the rule for adding one.
  * `msUntilReset` and `ageMs` were returned for a round with zero references
  * outside this file -- the caller recomputed both from the raw record through
  * `formatCountdown()` and `stalenessLabel()` -- so they were deleted rather
- * than wired up. Today: `state` (widget.js's `otherRow` + card, `toneForRow`,
- * `orderForSwitch`, `nextFreeAt`, popup.js's `sessionLine`), `resetsAt`
- * (`otherRow`'s "reset 2h ago", the measured tiebreak), `resetElapsedMs` (the
- * longest-free-first sort), `sessionPct` (`otherRow`, `sessionLine`,
- * `toneForRow`, the measured sort), `weeklyPct` (`toneForRow`, and
- * `otherRow`'s "weekly 100%" when nothing was locked but the window is spent),
- * `asOf` (`otherRow`'s "measured 6h ago"), `lockedReason` (the blocked row's
- * and the blocked popup line's text -- the ACTIVE card already rendered a lock
- * and every other row dropped it), `freesAt` (`nextFreeAt`, the blocked
- * ordering, and the blocked row's "frees up in 4d0h").
+ * than wired up. Consumers are named by FUNCTION and not by line number, so
+ * the ledger cannot rot the moment either file is edited:
+ *
+ *   state             widget.js `otherRow`, `widgetModel`'s `shownState`,
+ *                     `toneForRow`, `orderForSwitch`; popup.js `sessionLine`.
+ *   resetsAt          `otherRow`'s and the card's "reset 2h ago"; the
+ *                     measured tiebreak in `orderForSwitch`; `sessionLine`.
+ *   resetElapsedMs    the longest-free-first sort in `orderForSwitch`.
+ *   sessionPct        `otherRow`, the card's session row, the measured sort;
+ *                     `sessionLine`.
+ *   weeklyPct         the "weekly 100%" a BLOCKED row states when nothing was
+ *                     locked but the window is spent -- widget.js's
+ *                     `blockedBecause` and `sessionLine`'s own copy of it.
+ *                     It is the RAW last reading and may be spent evidence;
+ *                     nothing colours anything with it.
+ *   weeklyBindingPct  `toneForRow`, and nothing else. See below.
+ *   asOf              `otherRow`'s and the card's "measured 6h ago".
+ *   lockedReason      the blocked row's, the blocked card row's and the
+ *                     blocked popup line's text; `widgetModel`'s lock banner
+ *                     for a non-exempt record.
+ *   freesAt           `nextFreeAt`, the blocked ordering, and the "frees up
+ *                     in 4d0h" on the blocked row, the blocked card row and
+ *                     `sessionLine`.
+ *
+ * ⚠ `nextFreeAt` READS `freesAt` AND NOTHING ELSE. This ledger listed it as a
+ * consumer of `state` for a round; grep the body -- there is no `v.state` in
+ * it. The entry was written from what the function is for rather than from
+ * what it reads.
+ *
+ * 🔴 `weeklyBindingPct` IS `weeklyPct` WITH THIS FILE'S OWN SPENT-EVIDENCE
+ * RULE ALREADY APPLIED: the weekly reading, or null once `weekly.resetsAt`
+ * has been shown to have passed. It exists so `toneForRow` does not have to
+ * spell that rule a second time -- which is exactly how it came to paint an
+ * AVAILABLE row red off a 100% that had already reset. With no usable clock
+ * it stays equal to `weeklyPct`, because a reset we cannot time has not been
+ * shown to have happened.
  */
 export function availability(record, now) {
   const out = {
@@ -212,6 +250,7 @@ export function availability(record, now) {
     resetElapsedMs: null,
     sessionPct: null,
     weeklyPct: null,
+    weeklyBindingPct: null,
     asOf: null,
     lockedReason: null,
     freesAt: null,
@@ -222,6 +261,10 @@ export function availability(record, now) {
   const weekly = windowOf(record, "weekly");
   out.sessionPct = session.pct;
   out.weeklyPct = weekly.pct;
+  // Binds until the weekly window has been SHOWN to have reset. The `t === null`
+  // return below keeps that conservative default: with no usable clock nothing
+  // has been shown to have passed.
+  out.weeklyBindingPct = weekly.pct;
   out.asOf = finite(record.asOf);
 
   const t = finite(now);
@@ -236,6 +279,10 @@ export function availability(record, now) {
   // expired must not be dismissed.
   const sessionOpen = session.at === null || session.at > t;
   const weeklyOpen = weekly.at === null || weekly.at > t;
+  // The same rule, applied to the weekly PERCENTAGE rather than to a lock: a
+  // reading from a window that has since turned over is spent evidence and
+  // may not colour a row. One place, so no consumer re-derives it.
+  if (!weeklyOpen) out.weeklyBindingPct = null;
   const sessionLock = sessionOpen ? session.locked : null;
   const weeklyLock = weeklyOpen ? weekly.locked : null;
   const weeklyExhausted = weeklyOpen
@@ -292,9 +339,19 @@ export function availability(record, now) {
  * service_worker.js sets `lastActiveOrg` whether or not the /usage fetch
  * produced a record (a network error, a 5xx, or a non-JSON 200 on a
  * first-seen org leaves it absent), so this is a real stored state and not a
- * defensive flourish. `hasOwnProperty`, for the reason severity.js's
- * SEVERITY_TONES lookup documents: `accounts["constructor"]` answers something
- * truthy off Object.prototype.
+ * defensive flourish.
+ *
+ * ⚠ THE `hasOwnProperty` GUARD DECIDES EXACTLY ONE KEY, AND THIS COMMENT USED
+ * TO NAME THE WRONG ONES. It cited `accounts["constructor"]` "answering
+ * something truthy off Object.prototype" -- true, and irrelevant: a truthy
+ * FUNCTION is rejected by `isRecord` two lines down, so deleting the guard
+ * changes nothing for `constructor` or `toString` (MEASURED: the deletion
+ * SURVIVED all 251 tests at 38bbc1f1). The one key it actually decides is
+ * `__proto__`, where the bare read answers `Object.prototype` -- an ordinary
+ * object that `isRecord` accepts, so without the guard Object.prototype is
+ * returned AS the active record. That case is NOT reachable in production:
+ * `lastActiveOrg` is an API UUID. It is pinned anyway, because a guard whose
+ * only reachable case is untested reads as coverage while providing none.
  */
 export function activeRecord(accounts, lastActiveOrg) {
   const map = isRecord(accounts) ? accounts : {};
@@ -323,16 +380,31 @@ export function isActiveRecord(record, accounts, lastActiveOrg) {
  *             degree of "high usage"; the account cannot be used at all.
  *   free      the session window RESET, so its percentage is SPENT evidence
  *             and must not colour anything -- a 91%-then-reset account is not
- *             red. The weekly window is the one constraint provably unspent by
- *             a session reset, so it alone decides. The API's `severity`
+ *             red. The weekly reading decides instead, and it decides ONLY
+ *             while the weekly window is itself still open. 🔴 THAT SECOND
+ *             HALF WAS MISSING FOR A ROUND and this comment did not say so:
+ *             it read "the one constraint provably unspent by a session
+ *             reset", which is true and is not the whole rule -- a weekly
+ *             reading is spent by the WEEKLY reset. MEASURED at 38bbc1f1 on
+ *             `{session 50%, reset 3h ago; weekly 100%, reset 1h ago}`: the
+ *             row rendered `AVAILABLE`, meta `reset 3h ago (was 50%, measured
+ *             8d ago)`, tone `crit` -- painted red with nothing on the row
+ *             explaining the colour. Reachable on any account not logged into
+ *             for over a week, which is the population this widget exists
+ *             for. `weeklyBindingPct` carries the rule so this function
+ *             spells it nowhere. The API's `severity`
  *             string is deliberately NOT consulted here: normalize.js collapses
  *             it to one value across windows, so it cannot be shown to have
  *             survived the session reset, and letting it in would re-redden the
  *             row on the same spent evidence. Staleness does not grey a free
  *             row (widget.js records why: the best switch target is stale BY
  *             CONSTRUCTION).
- *   measured  every constraint binds, staleness included -- here the stored
- *             session percentage IS the claim being made.
+ *   measured  every UNSPENT constraint binds, staleness included -- here the
+ *             stored session percentage IS the claim being made, and the
+ *             session window is open by definition of the state. The weekly
+ *             reading is spent by its own reset here exactly as it is on a
+ *             free row; that is the same `weeklyBindingPct`, not a second
+ *             rule.
  *   unknown   as measured.
  *
  * ⚠ A free row with no usable weekly reading is "ok", not "unknown". The
@@ -342,13 +414,17 @@ export function isActiveRecord(record, accounts, lastActiveOrg) {
 export function toneForRow(record, verdict, isStaleFn, now) {
   const state = verdict && verdict.state;
   if (state === BLOCKED) return "crit";
-  if (state === FREE) return percentTone(null, verdict.weeklyPct) || "ok";
+  // The weekly reading with the spent-evidence rule already applied by
+  // `availability()`. Read in BOTH branches below, because a weekly window
+  // that has turned over is spent for a measured row as much as for a free one.
+  const weeklyBinding = verdict && verdict.weeklyBindingPct;
+  if (state === FREE) return percentTone(null, weeklyBinding) || "ok";
   const rec = isRecord(record) ? record : null;
   const stale = isStaleFn(rec && rec.asOf, now) || !(rec && rec.staleSince === null);
   if (stale) return "stale";
   const votes = [
     severityTone(rec && rec.severity),
-    percentTone(verdict && verdict.sessionPct, verdict && verdict.weeklyPct),
+    percentTone(verdict && verdict.sessionPct, weeklyBinding),
   ].filter((tone) => tone !== null);
   if (!votes.length) return "unknown";
   return votes.reduce(worstTone);

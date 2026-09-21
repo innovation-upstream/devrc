@@ -477,8 +477,21 @@
     //            card on screen (nothing has been cleared yet) and log once.
     //   paint    the painter broke. The root IS cleared by then, so the card
     //            goes blank -- but the log says which stage did it.
-    //   storage  the trailing catch, and now ONLY that: a rejected
-    //            storage.local.get, which is an ordinary page-teardown race.
+    //   storage  the trailing catch: a rejected storage.local.get, which is
+    //            an ordinary page-teardown race.
+    //
+    // ⚠ THE TRAILING CATCH IS NOT "ONLY THAT", and saying it was is what this
+    // note replaces. Three statements sit between the two inner try blocks --
+    // `ensureShadow(...)`, `sh.querySelector(".root")` and
+    // `root.textContent = ""` -- and a throw in any of them still lands in a
+    // catch labelled "storage unreadable". They are DOM calls against a node
+    // this file created, in a shadow root it owns, so a throw there means the
+    // page tore the host out from under us mid-render, which is the same
+    // teardown race the label describes; the label is wrong about the
+    // mechanism and right about the cause. Not wrapped in a fourth stage,
+    // because a third `console.warn` for a case that produces no user-visible
+    // difference buys nothing. The three stages above are the ones that name
+    // DIFFERENT bugs.
     getting.then(function (got) {
       var model, collapsed;
       try {

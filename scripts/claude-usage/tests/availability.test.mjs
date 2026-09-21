@@ -180,7 +180,7 @@ test("every verdict carries the full field set, whatever the state", () => {
   // formatCountdown()/stalenessLabel() -- and were deleted rather than wired
   // up. Every name below has a named consumer in availability.js's header.
   const keys = ["state", "resetsAt", "resetElapsedMs", "sessionPct", "weeklyPct",
-    "asOf", "lockedReason", "freesAt"];
+    "weeklyBindingPct", "asOf", "lockedReason", "freesAt"];
   const cases = [
     A.availability(rec(), NOW),
     A.availability(rec({ session: { utilization: 91, resetsAt: at(NOW - H) } }), NOW),

@@ -417,6 +417,12 @@ test("🔴 the presumed-free row is NOT painted as stale", async () => {
  * `@media` preludes are stripped first so the rules nested inside them are
  * tokenized like any others -- a hazard re-introduced inside the dark-mode
  * block would otherwise be invisible.
+ *
+ * ⚠ IT ONLY SEES DOUBLE-QUOTED FRAGMENTS. Single quotes and template literals
+ * are not matched, so CSS written either way is invisible to this parser.
+ * That is adequate rather than complete: every fragment in content_widget.js
+ * is a double-quoted string, and there is no build step that could rewrite
+ * them. Check this function before trusting the guard below if that changes.
  */
 function cssRules(src) {
   const fragments = [...src.matchAll(/"((?:[^"\\]|\\.)*)"/g)]
@@ -464,7 +470,20 @@ test("INVARIANT GUARD: the stale dim is scoped to the active account, never to t
   // content_widget.js is `".card.dead,.pill.dead{opacity:.6}"`, so grouping
   // the two is the most natural edit anyone would make. The guard now parses
   // the rules and asks whether `.card.stale` is a selector of any rule that
-  // sets opacity, which no rewording can dodge.
+  // sets opacity.
+  //
+  // ⚠ IT IS NOT UNDODGEABLE, AND THIS COMMENT SAID IT WAS ("which no
+  // rewording can dodge"). `dimsTheWholeCard` matches the selector against
+  // `/^(\.card\.stale|\.stale\.card)$/`, so it CATCHES `.card.stale{…}` and
+  // any selector LIST containing it, and MISSES every equivalent written
+  // differently: `.root .card.stale`, `.root>.card.stale`, `div.card.stale`,
+  // `.card.stale:not(.x)` -- plus anything single-quoted or in a template
+  // literal, which `cssRules` cannot see at all. Each of those greys the
+  // whole card exactly as the caught form does. Practical coverage is
+  // adequate because this file's CSS is entirely unprefixed, double-quoted
+  // fragments with no descendant-scoped card rules; the absolute was the
+  // defect, not the guard. Widening it means matching any selector whose
+  // LAST compound contains both classes, which nobody has needed yet.
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../extension/content_widget.js", import.meta.url), "utf8");
 

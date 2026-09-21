@@ -194,16 +194,38 @@ export function widgetModel(record, now, ctx) {
   // and it is by construction the one in front of you, so it keeps it; a
   // garbage ctx degrades to that same single-record reading rather than
   // silently losing the exemption.
+  //
+  // 🔴 AND IT IS WITHDRAWN FOR EVERY STATE, NOT JUST `free`. For a round this
+  // was `!exempt && verdict.state === FREE`, so the sentence above was false
+  // as implemented and the state it most needed to cover was the one it
+  // missed. MEASURED at 38bbc1f1, `lastActiveOrg` naming a ghost org and
+  // `pickRecord` falling back to a weekly-blocked record: the card's session
+  // row read `95% · resets soon` -- again the literal defect string -- while
+  // the POPUP, same record, same `now`, read `BLOCKED · Weekly limit
+  // reached. · frees up in 4d0h`. With no lock STRING on the record the card
+  // said nothing about being blocked at all: `resets soon`, and an absent
+  // lock banner. The same measurement found the mirror case: a session lock
+  // SPENT by its own reset left the card reading `AVAILABLE` in green with
+  // the red `Session limit reached.` banner still under it, because the
+  // banner read the raw record rather than the verdict.
   const cx = ctx && typeof ctx === "object" ? ctx : null;
   const cxAccounts = cx && cx.accounts && typeof cx.accounts === "object" ? cx.accounts : null;
   const exempt = cxAccounts === null
     || isActiveRecord(record, cxAccounts, cx.lastActiveOrg);
   const verdict = availability(record, now);
+  // The state the CARD is allowed to act on: the verdict for a record that
+  // has not earned the exemption, and null for one that has (the exempt card
+  // keeps its live countdown, which is the whole point of the exemption).
+  const shownState = exempt ? null : verdict.state;
   // A non-exempt record whose session window has closed states the verdict,
   // exactly as an other-account row does -- and shows an EMPTY track, because
   // the stored percentage describes a window that no longer exists and a bar
   // is a claim about a current one.
-  const shownFree = !exempt && verdict.state === FREE;
+  const shownFree = shownState === FREE;
+  // Likewise a blocked one: the row reports a STATE, not a percentage, so
+  // there is no track under it either. The last measured number stays in the
+  // meta, so nothing is hidden -- it is just no longer drawn as a live bar.
+  const shownBlocked = shownState === BLOCKED;
 
   // 🔴 EACH BAR IS COLOURED BY ITS OWN WINDOW, not by the record's tone. The
   // record tone is the WORSE of session and weekly, which is right for the
@@ -214,18 +236,31 @@ export function widgetModel(record, now, ctx) {
   // trustworthy once the snapshot is old.
   const rowTone = (v) => (stale ? "stale" : (percentTone(v, null) || "unknown"));
 
+  // The session row's three readings, spelled once each. `blockedBecause` and
+  // `blockedUntil` are the SAME helpers the other-account rows use, so the
+  // card and the list cannot word a block two ways.
+  let sessionValue = formatPct(sessPct);
+  // "resets soon" already carries its verb; a bare countdown gets one.
+  let sessionMeta = cd === "resets soon" ? cd : `resets ${cd}`;
+  if (shownFree) {
+    sessionValue = "AVAILABLE";
+    sessionMeta = `reset ${stalenessLabel(verdict.resetsAt, now)}`
+      + ` (was ${formatPct(verdict.sessionPct)}, ${measuredPart(verdict.asOf, now)})`;
+  } else if (shownBlocked) {
+    sessionValue = "BLOCKED";
+    sessionMeta = `${blockedBecause(verdict)} · ${blockedUntil(verdict, now)}`
+      + ` (session was ${formatPct(verdict.sessionPct)}, ${measuredPart(verdict.asOf, now)})`;
+  }
+
   const rows = [
     {
       key: "session",
       label: "Session",
-      value: shownFree ? "AVAILABLE" : formatPct(sessPct),
-      bar: shownFree ? null : clampPct(sessPct),
-      tone: shownFree ? toneForRow(record, verdict, isStale, now) : rowTone(sessPct),
-      // "resets soon" already carries its verb; a bare countdown gets one.
-      meta: shownFree
-        ? `reset ${stalenessLabel(verdict.resetsAt, now)}`
-          + ` (was ${formatPct(verdict.sessionPct)}, ${measuredPart(verdict.asOf, now)})`
-        : (cd === "resets soon" ? cd : `resets ${cd}`),
+      value: sessionValue,
+      bar: (shownFree || shownBlocked) ? null : clampPct(sessPct),
+      tone: (shownFree || shownBlocked)
+        ? toneForRow(record, verdict, isStale, now) : rowTone(sessPct),
+      meta: sessionMeta,
     },
     {
       key: "weekly",
@@ -253,9 +288,23 @@ export function widgetModel(record, now, ctx) {
 
   // A locked window is the one state where a percentage is not the story.
   // Session lock is reported ahead of weekly: it is the one blocking you now.
-  const locked = (record.session && record.session.lockedReason)
-    || (record.weekly && record.weekly.lockedReason)
-    || null;
+  //
+  // 🔴 THE BANNER IS PART OF THE EXEMPTION TOO. For an exempt (active) record
+  // it reads the record raw, which is the earned exemption: the next probe is
+  // seconds away and will confirm or clear it. For a NON-exempt record it
+  // reads the verdict, which applies availability.js's spent-evidence rule --
+  // a session lock whose own five-hour window has since reset is not a live
+  // lock. The raw read on a non-exempt record put `AVAILABLE` in green and
+  // `Session limit reached.` in red on the same card (MEASURED at 38bbc1f1),
+  // which is this module's founding defect in the one field the session row's
+  // fix did not cover. `verdict.lockedReason` is null unless the verdict is
+  // BLOCKED, and it already orders session ahead of weekly for the same
+  // reason this line does.
+  const locked = exempt
+    ? ((record.session && record.session.lockedReason)
+      || (record.weekly && record.weekly.lockedReason)
+      || null)
+    : verdict.lockedReason;
 
   const others = buildOthers(record, now, ctx);
 
@@ -284,10 +333,18 @@ export function widgetModel(record, now, ctx) {
  * answers a different question, "how long until ANY of them frees up", which
  * is ordered by TIME. An account at 23% resetting in 5h sorts above one at
  * 62% resetting in 1h12m, so the first measured row is routinely not the next
- * one to free up. It is also null exactly when there is nothing to wait for
- * (everything else is already free, or unknown), which is information rather
- * than an empty line. `the next-free line names the soonest account` pins
- * both halves.
+ * one to free up.
+ *
+ * ⚠ WHEN IT IS NULL, STATED FROM THE CODE RATHER THAN FROM THE INTENT. This
+ * said "null exactly when there is nothing to wait for (everything else is
+ * already free, or unknown)", and that was incomplete in BOTH directions once
+ * `nextFreeAt` started reading `freesAt` instead of `resetsAt`. It is null
+ * when every other account's `freesAt` is null -- free, unknown, or BLOCKED
+ * WITH NO KNOWABLE END -- or when there are no other accounts. And it is
+ * non-null for a blocked account with a knowable end, which is emphatically
+ * something to wait for: `next free: <label> in 4d0h` is pinned for exactly
+ * that record. `the next-free line names the soonest account` pins the
+ * ordering half.
  *
  * Returns `{ others, nextFree }` and never throws over garbage.
  */
@@ -313,10 +370,19 @@ function buildOthers(record, now, ctx) {
   // countdown (formatCountdown, above), because that is the one account the
   // probe will re-measure in seconds. popup.js applies the same exemption
   // through `sessionLine`'s `isActive`.
-  // `activeRecord()`, never a bare `accounts[activeOrg]`: the bare read hands
-  // back a junk value under the active key as though it were a record, and it
-  // is the second of the two spellings that made this surface and the popup
-  // name different active accounts.
+  // ⚠ `activeRecord()` HERE IS CONSISTENCY, NOT A FIX, AND THIS COMMENT USED
+  // TO CLAIM OTHERWISE. It said the bare `accounts[activeOrg]` "is the second
+  // of the two spellings that made this surface and the popup name different
+  // active accounts" -- but reverting THIS call site to the bare read was
+  // MEASURED to SURVIVE all 251 tests, and it is observationally identical
+  // here: `activeRec` is only ever used as a `!==` filter against a list
+  // `orderForSwitch` has already stripped of everything `isRecord` rejects,
+  // so a junk value under the active key can match nothing either way. The
+  // seam that really did split the two surfaces was `pickRecord` (widget) vs
+  // the popup's `orgUuid` FIELD spelling, and both of those are mutant-killed
+  // by their own tests. The call stays because one predicate for "which
+  // record is active" is worth having whether or not each site can observe
+  // the difference; what it does NOT do is close a gap.
   const activeRec = activeRecord(accounts, activeOrg);
   const rest = orderForSwitch(accounts, now)
     .filter((r) => r !== record && r !== activeRec);
@@ -453,14 +519,16 @@ function blockedUntil(v, now) {
  * otherwise nothing (the session row already shows a countdown, and repeating
  * "unknown" twice reads as a bug).
  *
- * ⚠ THIS STILL SAYS "resets soon" FOR AN ELAPSED WEEKLY RESET, and that is
- * the one place the string this whole change exists to remove survives.
- * MEASURED 2026-09-20 on a record whose weekly reset passed 30 minutes ago:
- * the SESSION row of a non-exempt card correctly reads "resets 2h0m" while
- * this row reads "resets soon". For the ACTIVE account that is the earned
- * exemption and it is fine; for the FALLBACK record the card shows when
- * `lastActiveOrg` names no stored record it is not earned, exactly as it was
- * not for the session row.
+ * ⚠ THIS STILL SAYS "resets soon" FOR AN ELAPSED WEEKLY RESET, and it is now
+ * the ONLY place the string this whole change exists to remove survives on a
+ * non-exempt surface -- the session row above cannot produce it in any state
+ * once the exemption is withdrawn (free and blocked state the verdict; a
+ * measured window has a future reset by definition; an unknown one renders
+ * "unknown"). MEASURED 2026-09-20 on a record whose weekly reset passed 30
+ * minutes ago: the SESSION row of a non-exempt card correctly reads "resets
+ * 2h0m" while this row reads "resets soon". For the ACTIVE account that is
+ * the earned exemption and it is fine; for the FALLBACK record the card shows
+ * when `lastActiveOrg` names no stored record it is not earned.
  *
  * NOT FIXED HERE, deliberately. A previous round left the weekly window's
  * elapsed-reset shape alone reasoning that "a weekly countdown renders only
