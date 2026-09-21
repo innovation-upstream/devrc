@@ -456,10 +456,11 @@ const CARD_CLASSES = ["card", "stale"];
  * bare form is the likeliest edit of the three, since "dim anything stale" is
  * the obvious way to write the intent.
  *
- * It must NOT match `.other.stale`, the real rule two lines down in
- * content_widget.js that greys a stale other-account ROW: `other` is not a
- * class on the card, so the subset test rejects it. That rule is the reason
- * this cannot simply be "any selector mentioning .stale". */
+ * It must NOT match `.other.stale{opacity:.72}`, a REAL rule further down
+ * content_widget.js's CSS that greys a stale other-account ROW: `other` is
+ * not a class on the card, so the subset test rejects it. That rule is the
+ * reason this cannot simply be "any selector mentioning .stale", and it is a
+ * negative control in the test below. */
 function matchesTheStaleCardItself(sel) {
   const s = sel.trim();
   if (!/^(?:\.[-\w]+)+$/.test(s)) return false;
@@ -535,9 +536,11 @@ test("INVARIANT GUARD: the stale dim is scoped to the active account, never to t
     '".card.dead,.card.stale{opacity:.6}"',
     '".card.stale , .other{opacity:.72}"',
     '".card.stale{opacity:.72}"',
-    // The bare form, which the enumerated predicate missed while its own
-    // comment listed four misses that did not include it.
+    // The bare form. THIS is the one the enumerated predicate missed while
+    // its own comment listed four misses that did not include it.
     '".stale{opacity:.6}"',
+    // Reordered compound. Already caught by the old predicate's second
+    // alternative -- here as breadth, not as a new case.
     '".stale.card{opacity:.6}"',
   ];
   for (const h of hazards) {
