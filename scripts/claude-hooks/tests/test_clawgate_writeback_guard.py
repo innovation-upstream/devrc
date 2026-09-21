@@ -49,6 +49,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -3961,6 +3962,14 @@ def test_an_unreachable_board_is_a_systemMessage_that_NAMES_the_endpoint(home,
                         now=WORK_EPOCH)
     verdict = guard.stop_decision(payload("Stop"), reader=r)
     out = emitted(capsys, verdict)
+    # 🔴 SOMETHING WAS EMITTED, ASSERTED FIRST — and that ordering is a fix, not a
+    # formality. `forces_a_continuation(None)` is False, so a regression to SILENCE
+    # satisfies the "does not block" claim below vacuously; only the next line would
+    # have caught it, and it would have reported `TypeError: 'NoneType' is not
+    # iterable` rather than "expected a notice, got silence". Found by a Pyright row
+    # (`sorted` over `Any | None`) during review, not by a failing test.
+    assert out is not None, "the unreachable board emitted NOTHING — silence is the " \
+                            "one verdict this rung may never produce"
     # 🔴 NOT a block: run through the REAL writer and the REAL continuation rule.
     assert not forces_a_continuation(out), out
     assert sorted(out) == ["systemMessage"], out
@@ -3982,3 +3991,100 @@ def test_a_MEASURED_missing_writeback_still_blocks_so_the_notice_is_not_the_only
                         now=WORK_EPOCH)
     out = emitted(capsys, guard.stop_decision(payload("Stop"), reader=r))
     assert forces_a_continuation(out), out
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE TWO TIMEOUT HANDLERS, DRIVEN BY A REAL `subprocess.TimeoutExpired`
+#
+# Raised by a Pyright review of the widening: `subprocess` is a module-level
+# `None` bound lazily by `_sp()`, so `except subprocess.TimeoutExpired` reads as
+# `reportOptionalMemberAccess`. If `subprocess` COULD still be None there, the
+# except clause itself raises `AttributeError` — i.e. the timeout path CRASHES
+# instead of degrading to the notice it was designed to produce, in a guard whose
+# whole contract is fail-open.
+#
+# 🔴 THE FINDING IS A FALSE POSITIVE, BUT THE HANDLERS WERE GENUINELY UNTESTED,
+# AND THOSE ARE DIFFERENT FACTS. `_read_task` calls `_sp()` unconditionally before
+# either `try`, so the global is bound; Pyright cannot see a global rebound inside
+# a helper. But the only timeout tests in this file
+# (`test_the_curl_wait_OUTLIVES_curls_own_max_time` and its positive control)
+# assert the NUMBERS handed to `run` and never raise the exception, so nothing had
+# ever executed lines 1435/1448. A green suite of 371 tests was evidence about the
+# happy path.
+#
+# So these two drive a REAL hang through a REAL `subprocess.run(timeout=…)` and
+# assert the exception TYPE: `LiveReadError`, never `AttributeError`. That makes
+# the test the reachability proof for the Pyright row as well as the coverage for
+# the handler — if the global were unbound, the assertion fails with the very
+# error the review predicted.
+#
+# 🔴 THE STUB HANGS ON A FIFO, USING ONLY POSIX BUILTINS. `_isolated_path` strips
+# PATH to the stub dir, so `sleep` is NOT FOUND and a stub that calls it exits
+# instantly — which would make these tests pass for the wrong reason (a fast
+# non-zero exit is the `rc=` path, not the timeout path). `read` is a builtin and
+# a read from a writer-less FIFO blocks forever at zero CPU, in both tiers.
+# --------------------------------------------------------------------------- #
+HANG_TIMEOUT = 0.05          # distinct from PER_TASK_TIMEOUT_SECS (5.0) and from 1
+
+
+def _hang_stub(tmp_path, name, bindir):
+    """An executable at `bindir/name` that blocks until it is killed."""
+    fifo = tmp_path / ("hang-fifo-" + name)
+    os.mkfifo(str(fifo))
+    # POSIX `read` builtin on a FIFO nobody writes to: blocks, spawns nothing,
+    # burns no CPU, and needs no binary on the stripped PATH.
+    return mockbin.write_exec(bindir / name, "read __x < %s\n" % fifo)
+
+
+def test_a_hanging_task_CLI_becomes_a_timeout_LiveReadError_not_an_AttributeError(
+        tmp_path, monkeypatch):
+    b = _bin(tmp_path)
+    _hang_stub(tmp_path, "clawgatectl", b)
+    _isolated_path(monkeypatch, b)
+    envf = _envfile(tmp_path, "hang-cli.env", CLAWGATE_TASKS_API_URL=MUSTER_URL,
+                   CLAWGATE_TASKS_HOOK_TOKEN=MUSTER_TOKEN)
+    with pytest.raises(guard.LiveReadError) as e:
+        guard.live_task(712, timeout=HANG_TIMEOUT, env_path=str(envf))
+    # 🔴 The TYPE is the claim. An unbound `subprocess` global would surface as
+    # AttributeError out of the handler, and `pytest.raises(LiveReadError)` would
+    # report it — which is exactly the failure the Pyright row describes.
+    assert "clawgatectl timed out after %ss" % HANG_TIMEOUT in str(e.value), str(e.value)
+    # ...and the degraded notice is still diagnosable: the endpoint survives the
+    # timeout path, not only the rc!=0 path.
+    assert "%s/api/tasks/712" % MUSTER_URL in e.value.endpoint, e.value.endpoint
+
+
+def test_a_hanging_CURL_becomes_a_timeout_LiveReadError_not_an_AttributeError(
+        tmp_path, monkeypatch):
+    """The second handler, on the fallback leg. No task CLI exists, so the chain
+    reaches curl; curl hangs and `subprocess.run` kills it at
+    `timeout + CURL_KILL_MARGIN_SECS`."""
+    b = _bin(tmp_path)
+    _hang_stub(tmp_path, "curl", b)
+    _isolated_path(monkeypatch, b)
+    envf = _envfile(tmp_path, "hang-curl.env", CLAWGATE_TASKS_API_URL=MUSTER_URL,
+                   CLAWGATE_TASKS_HOOK_TOKEN=MUSTER_TOKEN)
+    with pytest.raises(guard.LiveReadError) as e:
+        guard.live_task(713, timeout=HANG_TIMEOUT, env_path=str(envf))
+    assert "curl timed out after %ss" % HANG_TIMEOUT in str(e.value), str(e.value)
+    assert "%s/api/tasks/713" % MUSTER_URL in e.value.endpoint, e.value.endpoint
+
+
+def test_the_NEGATIVE_CONTROL_the_hang_stub_really_hangs(tmp_path, monkeypatch):
+    """🔴 WITHOUT THIS THE TWO ABOVE COULD PASS FOR THE WRONG REASON. A stub that
+    exits instantly (the shape `sleep 5` takes on a stripped PATH — command not
+    found, rc 127) lands on the `rc=` branch, and a test that only checked for a
+    LiveReadError would be green having never touched the timeout handler. So:
+    the same stub, given a generous timeout, must NOT raise at all within it —
+    it must be the WAIT that ends the process, not the process."""
+    b = _bin(tmp_path)
+    _hang_stub(tmp_path, "clawgatectl", b)
+    _isolated_path(monkeypatch, b)
+    start = time.monotonic()
+    with pytest.raises(guard.LiveReadError) as e:
+        guard.live_task(714, timeout=0.4, env_path=str(tmp_path / "absent.env"))
+    elapsed = time.monotonic() - start
+    # It timed out (not `rc=127`), and it took AT LEAST the timeout to do so.
+    assert "timed out after 0.4s" in str(e.value), str(e.value)
+    assert "rc=" not in str(e.value), str(e.value)
+    assert elapsed >= 0.4, elapsed

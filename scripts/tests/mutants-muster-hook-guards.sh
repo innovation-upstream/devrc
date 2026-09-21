@@ -38,8 +38,14 @@
 #   * the unmutated BASELINE must be green (else every row is meaningless);
 #   * W0/I0 are POSITIVE CONTROLS — mutants that MUST be caught, so a harness
 #     wired to nothing cannot report a clean sweep;
-#   * the SURVIVES rows edit comments only and must kill NOTHING, so a harness
-#     that is red for everything cannot report a clean sweep either.
+#   * W16/I7 are comment-only edits and must kill NOTHING, so a harness that is
+#     red for everything cannot report a clean sweep either.
+#
+# 🔴 ONE SURVIVES ROW IS NOT A CONTROL — W14 removes real CODE and survives on
+# purpose, because the thing it removes is an INVARIANT GUARD against a hazard no
+# input can produce (a failing stdlib import). It is here so nobody claims
+# coverage for that line, and so the next author does not "fix" a gap that is a
+# deliberate two-line insurance policy. Read its comment before touching it.
 #
 # 🔴 PYTHONDONTWRITEBYTECODE=1 AND `__pycache__` DELETED PER ROW: CPython
 # validates cached bytecode on source mtime-in-whole-SECONDS plus size, so a
@@ -99,8 +105,8 @@ ROWS=0
 # ran yields zero FAILED lines — i.e. "clean" — so a harness wired to nothing
 # would score every mutant SURVIVED. `run-tests.sh`'s own formula is
 # `m - min(50, max(1, m/20))`; re-derive with `--collect-only`, never by memory.
-# Measured 2026-09-21: writeback 371, interview 361.
-WB_FLOOR=352
+# Measured 2026-09-21: writeback 374, interview 361.
+WB_FLOOR=355
 IV_FLOOR=343
 
 failing() { # failing <suite> <floor>
@@ -259,9 +265,63 @@ run "W11 the cannot-measure rung becomes a BLOCK" \
     "$WB" "$WB_SUITE" "$WB_FLOOR" \
     '                notices.append(unknown_text(tid, first_read_ts, err, session_id,' \
     '                blocks.append(unknown_text(tid, first_read_ts, err, session_id,'
-# W12 SURVIVES: a comment-only edit must kill nothing, or every row above is a
+# W12/W13 🔴 THE TWO TIMEOUT HANDLERS, added after a Pyright review pointed at
+# `except subprocess.TimeoutExpired` on a lazily-bound global. The finding was a
+# false positive (`_read_task` calls `_sp()` before either `try`), but the
+# handlers were genuinely UNEXECUTED by any test — the only timeout tests in the
+# suite assert the NUMBERS handed to `run`. These rows are what prove the new
+# real-hang tests reach the handler rather than the `rc=` branch beside it:
+# deleting the clause hands the exception to the generic `except Exception`, whose
+# message is `TimeoutExpired: …` and not `<binary> timed out after …`.
+run "W12 the CLI leg loses its TimeoutExpired handler" \
+    test_a_hanging_task_CLI_becomes_a_timeout_LiveReadError_not_an_AttributeError \
+    "$WB" "$WB_SUITE" "$WB_FLOOR" \
+    '        except subprocess.TimeoutExpired:
+            raise LiveReadError("%s timed out after %ss" % (binary, timeout))' \
+    '        except NotImplementedError:
+            raise LiveReadError("%s timed out after %ss" % (binary, timeout))'
+run "W13 the curl leg loses its TimeoutExpired handler" \
+    test_a_hanging_CURL_becomes_a_timeout_LiveReadError_not_an_AttributeError \
+    "$WB" "$WB_SUITE" "$WB_FLOOR" \
+    '    except subprocess.TimeoutExpired:
+        raise LiveReadError("curl timed out after %ss" % timeout)' \
+    '    except NotImplementedError:
+        raise LiveReadError("curl timed out after %ss" % timeout)'
+# W14 🔴 A DELIBERATE, DOCUMENTED SURVIVOR — and it is here to stop anyone
+# claiming coverage it does not have. `_read_task`'s explicit `_sp()` is the guard
+# the Pyright row is really about: it exists so that an `import subprocess` that
+# FAILS raises before the `try`, instead of leaving the global None while
+# `except subprocess.TimeoutExpired` is evaluated (AttributeError out of the
+# handler, fail-open contract defeated). MEASURED: removing it kills NOTHING,
+# because `_via_cli` calls `_sp()` itself, so by the time `run` raises the global
+# is bound anyway. The only input that could kill it is a failing stdlib import,
+# which cannot be produced. So it is an INVARIANT GUARD against an unreachable
+# hazard — two free lines — NOT regression coverage, and this row is the record
+# of that rather than a gap someone should try to close.
+run "W14 _read_task's defensive _sp() removed (documented survivor)" SURVIVES \
+    "$WB" "$WB_SUITE" "$WB_FLOOR" \
+    '    _sp()
+    # Only the TASKS-specific override is handed to the CLI; see `_via_cli`.' \
+    '    # Only the TASKS-specific override is handed to the CLI; see `_via_cli`.'
+# W15 THE SILENCE ROW. It proves the test can SEE a notice rung that emits
+# nothing — the one verdict that rung may never produce.
+# 🔴 AND IT DOES *NOT* VINDICATE THE `out is not None` ASSERTION ADDED DURING THE
+# PYRIGHT REVIEW: measured, this mutant dies with or without that line, because
+# `sorted(None)` raises TypeError one line later. What the assertion buys is the
+# DIAGNOSIS — a named "emitted NOTHING" failure instead of `TypeError: 'NoneType'
+# is not iterable` — not the kill. Stated rather than claimed: the vacuous half is
+# real (`forces_a_continuation(None)` is False, so the "does not block" claim
+# above it passes for silence), but it was never the LAST line standing.
+run "W15 emit() goes SILENT on the notice rung" \
+    test_an_unreachable_board_is_a_systemMessage_that_NAMES_the_endpoint \
+    "$WB" "$WB_SUITE" "$WB_FLOOR" \
+    '    elif kind == "notice":
+        json.dump({"systemMessage": text}, sys.stdout)' \
+    '    elif kind == "__never__":
+        json.dump({"systemMessage": text}, sys.stdout)'
+# W16 SURVIVES: a comment-only edit must kill nothing, or every row above is a
 # harness that is simply red for any change.
-run "W12 comment-only edit (control)" SURVIVES "$WB" "$WB_SUITE" "$WB_FLOOR" \
+run "W16 comment-only edit (control)" SURVIVES "$WB" "$WB_SUITE" "$WB_FLOOR" \
     '# The task API path, as a PATTERN.' \
     '# The task API path, as a PATTERN (see the extraction plan).'
 

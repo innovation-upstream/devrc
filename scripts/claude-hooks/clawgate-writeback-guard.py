@@ -1417,6 +1417,30 @@ def _read_task(task_id, timeout, env_path):
     # the module attribute, and an except clause is evaluated even when the exception
     # came from the import itself — at which point a still-None `subprocess` would
     # raise AttributeError out of the handler and defeat the fail-open contract.
+    #
+    # 🔴 PYRIGHT FLAGS BOTH OF THOSE CLAUSES (`reportOptionalMemberAccess`,
+    # "TimeoutExpired is not a known attribute of None") AND IT IS A FALSE POSITIVE —
+    # triaged, not waved off, and recorded here so the next reviewer does not re-derive
+    # it. `subprocess` is a module-level `None` that `_sp()` rebinds via `global`;
+    # Pyright cannot narrow a global reassigned inside a helper. The rows pre-date this
+    # file's muster widening (measured: same rule, same two clauses, at 1274/1284 of
+    # 23b898d5 — the widening moved them, it did not introduce them).
+    #
+    # 🔴 THE HANDLERS THEMSELVES WERE GENUINELY UNTESTED UNTIL THAT REVIEW, WHICH IS A
+    # DIFFERENT FACT FROM THE FINDING BEING WRONG. The suite's only timeout tests
+    # assert the NUMBERS handed to `run`. Three cases now drive a REAL hang through a
+    # REAL `subprocess.run(timeout=…)` and assert the exception TYPE, so an unbound
+    # global would surface as exactly the AttributeError Pyright predicts:
+    # `test_a_hanging_task_CLI_becomes_a_timeout_LiveReadError_not_an_AttributeError`,
+    # its `_CURL_` twin, and `test_the_NEGATIVE_CONTROL_the_hang_stub_really_hangs`
+    # (without which a stub that exits instantly would pass them on the `rc=` branch).
+    #
+    # 🔴 THIS CALL IS AN INVARIANT GUARD, NOT COVERED CODE, AND THE BATTERY SAYS SO.
+    # Removing it kills NOTHING (`mutants-muster-hook-guards.sh` row W14, a deliberate
+    # documented survivor): `_via_cli` calls `_sp()` itself, so by the time `run` raises
+    # the global is bound anyway. The only input that could kill it is a failing stdlib
+    # import, which cannot be produced. Two free lines against an unreachable hazard —
+    # do not "close the gap", and do not count it as coverage.
     _sp()
     # Only the TASKS-specific override is handed to the CLI; see `_via_cli`.
     api_url = _env_file(env_path).get(TASK_API_URL_VARS[0])

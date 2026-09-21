@@ -2546,7 +2546,7 @@ TARGET_FLOORS=(
   #   _suggested_floor 296 = 296 - min(50, max(1, 296/20 = 14)) = 296 - 14 = 282.
   #
   # 2026-09-21, the `muster` widening (Phase 0 step 1 of the clawgate->muster
-  # extraction): 296 -> 371 collected. The +75 exist because both arming patterns
+  # extraction): 296 -> 374 collected. The +75 exist because both arming patterns
   # in this hook spelled `clawgatectl` literally, so the rename alone would have
   # left `tracked_ids` empty and the Stop path reaching NO VERDICT — silent, which
   # is also what a correctly-written-back session looks like. RED at 23b898d5: 20
@@ -2556,14 +2556,23 @@ TARGET_FLOORS=(
   # commands that must NOT arm a hook that can BLOCK), the compatibility cases for
   # an env file that has never heard of muster, and the CLI-name SEAM ledger.
   # ZERO new skips, so EXPECTED_SKIPS is untouched.
-  #   _suggested_floor 371 = 371 - min(50, max(1, 371/20 = 18)) = 371 - 18 = 353.
+  # +3 of those arrived in review: a Pyright row on `except subprocess.TimeoutExpired`
+  # (a lazily-bound module global) was a FALSE POSITIVE — `_read_task` calls `_sp()`
+  # before either `try` — but it exposed that NEITHER timeout handler had ever been
+  # executed by any test: the only timeout tests assert the NUMBERS handed to `run`.
+  # Three cases now drive a REAL hang through a REAL `subprocess.run(timeout=...)`
+  # and assert the exception TYPE, so an unbound global would surface as the
+  # AttributeError the review predicted rather than as a notice. RED at 23b898d5 in
+  # the trivial sense (the functions did not exist); the claim they pin is new, not
+  # a rename.
+  #   _suggested_floor 374 = 374 - min(50, max(1, 374/20 = 18)) = 374 - 18 = 356.
   # ⚠ MEASURED BY `pytest <this file> --collect-only -q`, NOT by the nix gate, and
   # the difference is stated rather than glossed: this is a per-FILE target with
   # zero skips, so the gate runs exactly this file and its count cannot be moved by
   # another branch's tests — which is the one case where the two measurements are
   # the same number. If this line conflicts with a sibling branch, re-run the gate
   # on the MERGED tree and copy what it prints; do NOT reconcile by hand.
-  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|353"
+  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|356"
   # 2026-08-20, the clawgate task INTERVIEW gate arrives as a NEW target: 300
   # collected. Large because the non-matches are the load-bearing half of a hook
   # that DENIES — 30 commands that must not trigger, 5 producer launchers, 15
