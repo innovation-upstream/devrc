@@ -311,7 +311,7 @@ def _is_pathish(token: str) -> bool:
       * a single-segment absolute (`/dp-build-deploy`) is a route, a pipeline
         name or an HTTP path far more often than a file — it carries no
         extension and no directory shape, so there is nothing to check;
-      * a PLACEHOLDER segment (`reference/sites/<host>.md`) names a whole
+      * a PLACEHOLDER segment (`flows/<host>.md`) names a whole
         directory through a variable the reader resolves at run time — the same
         convention `skill-audit.py`'s `REF_PATH` deliberately excludes. Statting
         the literal string always fails, so counting it invents a broken pointer

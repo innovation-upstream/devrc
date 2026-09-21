@@ -567,7 +567,7 @@ def test_wait_events_returns_as_soon_as_the_condition_holds(tmp_path):
 # ACTIVITY_SPOOL_DIR at a per-test tmp dir — now lives in `conftest.py`, one
 # directory-wide definition instead of this module-scoped copy. It was scoped to
 # this file only while its docstring claimed it covered EVERY test, so the other
-# eight modules in this directory ran unisolated (one of them, test_site_notes,
+# eight modules in this directory ran unisolated (one of them, test_site_flows,
 # genuinely writing rows into the production activity pipeline).
 # `telemetry` below depends on it having run — it returns the very path that
 # fixture pointed ACTIVITY_SPOOL_DIR at. `_disable_i3` does not; it is unrelated.

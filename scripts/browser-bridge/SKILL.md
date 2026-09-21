@@ -12,13 +12,13 @@ $BB --instance <key> open <url>     # open a NEW tab THIS session owns → retur
 ```
 
 🔴 **Run `whoami` first on every fresh browser task.** Both hosts are hostname
-`nixos` and this bridge could be either, with several Brave profiles — confirm the
-host and pick the right `--instance` first. Architecture / security model:
+`nixos`, several Brave profiles each — confirm the host, pick the right
+`--instance`. Architecture / security model:
 `~/workspace/devrc/scripts/browser-bridge/README.md`.
 
 🔴 **Every `reference/<file>.md` named below lives at
-`~/workspace/devrc/scripts/browser-bridge/reference/`** — that exact path; only
-`SKILL.md` + the CLI are symlinked into `~/.claude/skills/browser/`.
+`~/workspace/devrc/scripts/browser-bridge/reference/`** (only `SKILL.md` + the
+CLI are symlinked into `~/.claude/skills/browser/`).
 
 ## FIRST DECISION: agent or direct?
 
@@ -35,9 +35,21 @@ BLIND — no pixels; you must SEE a screenshot, or hit-test paint order) ·
 
 🔴 The AGENT's auto-`wake` covers a hidden `text`/`html` read but **never `eval`/`js`** — so
 ASSERT a non-zero content count in any `js` measurement. It also never sees
-`site_notes` — brief those flows in yourself. Result handling
+`site_flows` — brief those flows in yourself. Result handling
 (`blocked`/`partial`), why thin `evidence` is NOT protection, and the
 `--allow-domains` guardrail → `reference/agent.md`.
+
+## 🔴 FLOWS: read the site's BEFORE acting on it
+
+Before the first click/type/js/upload/agent on any host, read
+`flows/<host>.md`, under `~/workspace/devrc/scripts/browser-bridge/`. Resolve
+it: a tab op's envelope carries `site_flows` naming the exact file (off a
+fresh `nav`, not a later `context` — committed urls lag), or pre-op
+look the host up in `flows/_index.json` (host-suffix keys, longest wins).
+Neither = none; absence means nothing. It holds that site's multi-step flows
+(sign-in, account switch, pickers, wizards) and the reads that lie there —
+skipping it is how a one-click flow gets reported to the operator as a
+blocker.
 
 ## Ops
 
@@ -131,4 +143,3 @@ record/restore commands → `reference/spa-wake.md`.
 | `reference/auth-pages.md` | an authenticated request; you were about to read a cookie; a read looks logged-OUT; `extension_connected:false` |
 | `reference/security-ops.md` | 🔴 **you are MODIFYING browser-bridge** (the live-verify-on-real-Brave gate is mandatory); the user asks whether/what it records; first-time setup or a second profile |
 | `reference/x-fallback.md` | CDP `screenshot` is unsatisfactory and you must capture the raw X window (`DISPLAY`/`XAUTHORITY`, xdotool/maim) |
-| `reference/sites/<host>.md` | 🔴 **READ IT BEFORE the first action on that host, not after something fails** — a tab op names it (`site_notes`) for a REGISTERED host only; identity reads (`whoami`/`health`/`ping`) and unknown hosts carry no field, so ABSENCE means nothing. It carries that site's **multi-step FLOWS** (sign-in, account switching, pickers, wizards) plus the reads that lie there. Skipping it is how a one-click flow gets reported to the operator as a blocker |

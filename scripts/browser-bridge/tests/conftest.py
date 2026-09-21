@@ -16,7 +16,7 @@ the scary one, and the difference is the whole lesson. Running every module
 alone at `origin/main` with a fresh spool and counting `source=browser-bridge`
 rows:
 
-    test_site_notes.py            17     <- the only sibling that ever emitted
+    test_site_flows.py            17     <- the only sibling that ever emitted
     test_server.py                 0-1   <- the file that HAD the fixture
     the other seven                 0
 
@@ -81,7 +81,7 @@ def _session_spool_backstop(tmp_path_factory):
 
     MEASURED, not theoretical — but NOT at the rate first supposed, and the
     difference decides the fix. Repeating the suspect shape is a poor detector:
-    `test_spool_isolation.py test_site_notes.py` leaked once in 15 runs for one
+    `test_spool_isolation.py test_site_flows.py` leaked once in 15 runs for one
     observer and 0 times in 20 for another. A DETERMINISTIC probe (a non-daemon
     thread that emits after a set delay, so the interpreter joins it at exit)
     separates two windows that look identical in a leak count:

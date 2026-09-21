@@ -1,6 +1,6 @@
 # localhost — the operator's LOCAL DEV SERVERS, and why a 404 here usually is not a bug
 
-**Load this when:** a result envelope named this file in `site_notes` · you are about
+**Load this when:** a result envelope named this file in `site_flows` · you are about
 to drive `http://localhost:<port>` · a local page 404s, renders an onboarding wizard,
 or looks logged-out and you are about to call the app broken.
 

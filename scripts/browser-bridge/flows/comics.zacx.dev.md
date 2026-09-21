@@ -1,12 +1,13 @@
 # comics.zacx.dev — comic-flex: two lanes, a CSP that fakes a broken bridge, and a passkey nobody can automate
 
-**Load this when:** a result envelope named this file in `site_notes` · you are
+**Load this when:** a result envelope named this file in `site_flows` · you are
 about to drive or read `comics.zacx.dev` or `comic-flex.homelab.lan` · a `js`/`eval`
 came back `null` here · you are about to report that the bridge or the profile is
 broken · you need the pause/next/busy-card flows · you are about to log in or out
 of Authelia on the operator's live profile.
 
-Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md`.
+Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md` (`reference/…` paths
+below resolve from that bridge dir).
 Mechanism stays in the mechanism files: throttling and `wake` →
 `reference/spa-wake.md`; hit-testing → `reference/css-hit-test.md`; proving a read
 is the live authenticated session → `reference/auth-pages.md`. This file is only
