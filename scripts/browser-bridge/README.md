@@ -1043,7 +1043,9 @@ consent gate:
   above — and on the suite, not on a live run.
 
 So: the path this change **closes** is well evidenced; the path it **leaves open for
-a human who types `--focus`** is the one nobody has watched work end to end.
+a human who types `--focus`** has been watched against a real i3 exactly ONCE
+(2026-09-21 — raise, recorded restore, hydration; see the bullet above), which is
+evidence the raise path works, NOT a verification of the gate's full contract.
 
 ### Real false-outage report — a hidden tab that looked like a production outage
 
