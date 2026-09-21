@@ -176,6 +176,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -665,6 +666,76 @@ CLASS_IMPOSSIBLE = 3    # max_ref == 0 — no issues and no pull requests at all
 PLAUSIBILITY_CLASSES = (CLASS_PLAUSIBLE, CLASS_BELOW, CLASS_UNKNOWN,
                         CLASS_IMPOSSIBLE)
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE STALENESS TOLERANCE — WHY `BELOW` WAS WHERE THE OPERATOR'S ROW KEPT
+# LANDING, AND WHY THE FIX IS A MARGIN RATHER THAN A DEMOTION.
+#
+# `CLASS_BELOW` means `max_ref < N`. A reference that REALLY EXISTS cannot be
+# below its own repository's head, so at CLICK TIME a genuinely-existing `#N`
+# can only be filed BELOW two ways: the table was STALE, or the operator clicked
+# a number belonging to a DIFFERENT repository.
+#
+# MEASURED, click-time telemetry, n=71: the class of the row the operator
+# actually PICKED was `below` 54 times against `plausible` 17 — roughly three
+# clicks in four wanted a row the sort had put behind EVERY plausible row.
+# Replaying the same picks against a CURRENT table gives 115 plausible / 6
+# below, and of 100 distinct `(repo, n)` picks checked against the GitHub API
+# **94 exist and 6 do not**. Wrong-repo is therefore ~6% of it; the whole
+# remaining difference between those two numbers IS the staleness.
+#
+# 🔴 A RETRACTED READING, KEPT SO NOBODY RE-DERIVES IT.
+# `claudedocs/proposal-mention-picker-visibility.md` §(B) attributes the same 54
+# vs 17 to the CLASS TERM BEING WRONG and proposes demoting it. That is
+# refuted by its own §1.4, which measures the class term as the sharpest thing
+# in the sort (a 394-row universe narrowed to a median of ~2 candidate rows).
+# Its rebuttal of staleness — "the table is refreshed by a daily timer, last run
+# within 5h of the measurement" — is a NON-SEQUITUR: the recorded class is a
+# fact about the table at CLICK time, not at measurement time. The proposal also
+# reports the same quantity twice with opposite answers (§1.4's 104/5 against
+# §(B)'s 17/54) and never reconciles them; the reconciliation is this paragraph.
+#
+# LIVE REPRODUCTION at the time of writing: the table's entry for the busiest
+# repository read 1809 while its live head was 1828, off a table 0.71 days old.
+# Every click on one of those nineteen references was classed BELOW.
+#
+# 🔴 THE VELOCITY HALF IS MEASURED; THE CEILING IS NOT. Which is which matters
+# more than either number, so it is said here rather than left to be inferred.
+#
+# `RANGE_GROWTH_PER_DAY` is an UPPER BOUND on how fast any repository in this
+# operator's universe allocates reference numbers, so `age x rate` is the growth
+# that COULD have happened since the table was written — a quantity, not a knob.
+# MEASURED over the eight highest-numbered repositories in the live table
+# (issues+PRs created in the preceding 14 days): 34.1, 23.2, 11.2, 10.9, 10.4,
+# 8.9, 4.8 and 0.0 per day. The fastest of them re-measured over 31 days gives
+# 39.0/day. 40 sits above both; raising it past the real maximum buys nothing
+# and only blurs the class.
+#
+# ⚠ IT IS ONE GLOBAL RATE, NOT A PER-REPO VELOCITY. Nothing records a previous
+# snapshot of the table, so a per-repo rate is not derivable from host state at
+# click time; the global bound over-serves the slow repositories by exactly the
+# amount the ceiling below allows. That cost is measured, under the ceiling.
+RANGE_GROWTH_PER_DAY = 40.0
+
+# `PLAUSIBLE_MARGIN_MAX` is a HARD CEILING, and it is EMPIRICAL RATHER THAN
+# PRINCIPLED — stated plainly, because a reason found for it later would be a
+# hypothesis wearing a comment's clothes. Its one job is to stay under the
+# smallest gap a genuinely WRONG-REPO click produces: of the 6 picks naming a
+# number no such repository has, the gaps (`n - max_ref`) are 74, 79, 135, 171,
+# 183 and 1810. 60 leaves 14 of headroom under the smallest — and the gap is
+# MONOTONE in table age (an older table can only make `max_ref` smaller, so the
+# gap larger), which is what makes one ceiling hold at EVERY age rather than
+# only at the age it was measured.
+#
+# ⚠ THE COST, NAMED RATHER THAN DISCOVERED: past ~1.5 days of table age the
+# ceiling stops covering the fastest repository's real growth, and a click there
+# falls back to BELOW exactly as before. That is a limit the separation imposes,
+# not an oversight — `STALE_MAPPING_DAYS` (7) x 40/day is 280, nearly four times
+# the smallest wrong-repo gap, so NO ceiling can serve both ends. The daily
+# refresh timer is what keeps the gap from mattering, and `ordering_state`
+# already throws the table away entirely past 7 days.
+PLAUSIBLE_MARGIN_MAX = 60
+# --------------------------------------------------------------------------- #
+
 # What `ordering_state` reports, and what the picker header says. A THREE-WAY
 # split rather than a boolean, because "there is no table yet" and "the table
 # stopped being refreshed" need different next moves from the operator: the
@@ -781,7 +852,49 @@ def universe_candidates(num: str, universe: list[str]) -> list[dict]:
             for full in universe]
 
 
-def plausibility_class(num: str, max_ref: int | None) -> int:
+def plausible_margin(age_days: float | None) -> int:
+    """How far BELOW `N` a recorded head may sit and still be PLAUSIBLE, given
+    how old the range table is. Pure, total, never raises.
+
+    `age x RANGE_GROWTH_PER_DAY`, capped at `PLAUSIBLE_MARGIN_MAX` — see the
+    block above those two constants for the measurement and for which of them
+    is measured and which is empirical.
+
+    🔴 THE AGE IS OBSERVABLE STATE, NOT A SECOND CONSTANT. It is the table's own
+    mtime, already measured once per click by `ranges_age_days` and already
+    carried to every consumer — so a FRESH table keeps the sharp, pre-margin
+    class and only a table that has had time to fall behind buys any tolerance.
+    That is what stops the margin from being a flat widening of Tier A.
+
+    🔴 EVERY UNUSABLE AGE IS 0, AND 0 IS EXACTLY PRE-MARGIN BEHAVIOUR. `None`
+    (`ranges_age_days` could not `stat` the file), a non-number, a NaN, an
+    infinity, a negative age: all degrade to the old class rather than raising.
+    This runs on a detached click handler with nowhere to print a traceback, so
+    a broken clock or a missing file must cost the operator a worse ORDER and
+    never a dead click — the same posture `load_known_ranges` takes, and the
+    reason the margin is a DEFAULTED parameter everywhere it travels.
+
+    ⚠ A STRING THAT PARSES IS STILL REJECTED, and the type check is what does
+    it rather than a `float()` in a `try`. `ranges_age_days` returns `float |
+    None`, so a `"1.0"` arriving here means a CALLER passed the wrong thing —
+    coercing it would grant a full day of tolerance off a type error and leave
+    nothing to find. `bool` is excluded explicitly for the reason
+    `load_known_ranges` excludes it: it is an `int` subclass, so `True` would
+    otherwise sail in as one day.
+
+    ⚠ NEVER NEGATIVE. A negative margin would move rows the other way — it would
+    file a repository whose head is PAST `N` as BELOW — which is a different
+    defect from the one this exists to fix, and a silent one.
+    """
+    if isinstance(age_days, bool) or not isinstance(age_days, (int, float)):
+        return 0
+    age = float(age_days)
+    if not math.isfinite(age) or age <= 0.0:
+        return 0
+    return min(PLAUSIBLE_MARGIN_MAX, math.ceil(age * RANGE_GROWTH_PER_DAY))
+
+
+def plausibility_class(num: str, max_ref: int | None, margin: int = 0) -> int:
     """Which of the four classes a repository falls in for a clicked `#num`.
 
     `max_ref is None` is UNKNOWN — the table has no entry, because the repo was
@@ -795,6 +908,19 @@ def plausibility_class(num: str, max_ref: int | None) -> int:
     evidence at all. `regen-known-repos.py` keeps them apart on the write side
     by OMITTING an unanswered repo rather than writing a 0; this keeps them
     apart on the read side.
+
+    🔴 `margin` IS THE STALENESS TOLERANCE, AND IT DEFAULTS TO 0 SO THAT EVERY
+    CALLER THAT CANNOT MEASURE ONE GETS THE OLD BEHAVIOUR. `plausible_margin`
+    computes it from the table's age; see the block above `RANGE_GROWTH_PER_DAY`
+    for why a stale table is where three clicks in four were being mis-filed.
+
+    🔴 `max_ref == 0` STAYS IMPOSSIBLE AT EVERY MARGIN, AND THE ORDER OF THESE
+    TWO BRANCHES IS WHAT ENFORCES IT. A repository with no issues and no pull
+    requests AT ALL cannot contain `#N` however stale the snapshot is — 0 is the
+    one value the table reports that no amount of growth can be hiding, because
+    growth is what would have moved it off 0 in the first place. Widening
+    IMPOSSIBLE by the margin would promote the 45% of this universe that has
+    never had a reference, which is the largest and cheapest half of the win.
     """
     if max_ref is None:
         return CLASS_UNKNOWN
@@ -807,7 +933,11 @@ def plausibility_class(num: str, max_ref: int | None) -> int:
         return CLASS_UNKNOWN
     if max_ref <= 0:
         return CLASS_IMPOSSIBLE
-    return CLASS_PLAUSIBLE if max_ref >= n else CLASS_BELOW
+    # 🔴 CLAMPED AT 0 HERE TOO, NOT ONLY IN `plausible_margin`. This is a public
+    # parameter with a default, so a caller can hand it anything; a negative
+    # margin must never be able to NARROW the class.
+    return (CLASS_PLAUSIBLE if max_ref + max(0, margin) >= n
+            else CLASS_BELOW)
 
 
 def load_known_ranges(path: Path | None = None) -> dict[str, int]:
@@ -1002,8 +1132,8 @@ def pick_scores(picks: list[dict], num: str,
     return scores
 
 
-def measured_rank_key(full: str, num: str,
-                      ranges: dict[str, int]) -> tuple[int, int]:
+def measured_rank_key(full: str, num: str, ranges: dict[str, int],
+                      margin: int = 0) -> tuple[int, int]:
     """`(class, distance)` — the MEASURED half of `order_universe`'s sort key.
 
     🔴 EXTRACTED SO THE SORT AND THE PROMOTION GATE CANNOT DISAGREE. The
@@ -1024,15 +1154,27 @@ def measured_rank_key(full: str, num: str,
     `distance` is 0 for every row outside `PLAUSIBLE`, exactly as in
     `order_universe`, so it can never reorder a class whose members were never
     compared on it.
+
+    🔴 THE DISTANCE IS AN ABSOLUTE VALUE, AND IT HAD TO BECOME ONE THE MOMENT
+    THE MARGIN EXISTED. Before the margin, `PLAUSIBLE` implied `max_ref >= N`,
+    so `max_ref - N` was never negative and `abs()` is a no-op on every case
+    that could previously arise — which is why no existing test can see this
+    change. A margin admits rows with `max_ref < N`, and on those the raw
+    subtraction is NEGATIVE: it would sort a repository whose stale head is 19
+    short of `N` AHEAD of one whose head is exactly `N`, i.e. ahead of an exact
+    fit, purely because the table had not caught up with it. `abs` reads the
+    term as it is documented — how far this repository's head is from the
+    clicked number, in either direction — so the nearest head wins and the
+    tolerance never outranks a measurement.
     """
     low = full.lower()
     max_ref = ranges.get(low)
-    klass = plausibility_class(num, max_ref)
+    klass = plausibility_class(num, max_ref, margin)
     try:
         target = int(num)
     except (TypeError, ValueError):
         target = None
-    distance = (max_ref - target
+    distance = (abs(max_ref - target)
                 if klass == CLASS_PLAUSIBLE and target is not None
                    and max_ref is not None
                 else 0)
@@ -1040,7 +1182,8 @@ def measured_rank_key(full: str, num: str,
 
 
 def order_universe(universe: list[str], num: str, ranges: dict[str, int],
-                   scores: dict[str, float] | None = None) -> list[str]:
+                   scores: dict[str, float] | None = None,
+                   margin: int = 0) -> list[str]:
     """The picker's universe rows, ordered by whether each repo could plausibly
     have `#num`. Pure — no I/O, no clock.
 
@@ -1052,6 +1195,11 @@ def order_universe(universe: list[str], num: str, ranges: dict[str, int],
          rows it says nothing about;
       3. the Tier B SCORE, descending — the operator's own picks, breaking ties
          the two above leave.
+
+    `margin` is the staleness tolerance the class is computed with — 0, the
+    default, is the pre-margin class. See `plausible_margin` and the block above
+    `RANGE_GROWTH_PER_DAY`: with a day-old table, three picks in four were
+    landing in `BELOW`, which this key ranks behind EVERY plausible row.
 
     🔴 AND THAT IS THE WHOLE KEY — THERE IS DELIBERATELY NO NAME IN IT. A
     trailing `name.lower()` was tried and REMOVED: it makes the function
@@ -1118,7 +1266,7 @@ def order_universe(universe: list[str], num: str, ranges: dict[str, int],
         # 🔴 THE MEASURED HALF COMES FROM `measured_rank_key`, NOT A SECOND
         # COPY. The promotion gate reads the same function, so the sort and the
         # gate cannot drift apart.
-        klass, distance = measured_rank_key(full, num, ranges)
+        klass, distance = measured_rank_key(full, num, ranges, margin)
         # 🔴 DISTANCE BEFORE SCORE — see the docstring. Tier B breaks ties Tier A
         # leaves; it does not overrule Tier A's first choice.
         return (klass, distance, -scores.get(full.lower(), 0.0))
@@ -3743,10 +3891,20 @@ def _ordered_universe(
     # than argued about.
     now = time.time()
     scores = pick_scores(load_picks(now=now), num, now=now)
-    rows = order_universe(universe, num, ranges, scores)
-    # Counted from the SAME `ranges` dict the sort used, not re-read: a header
-    # that disagreed with the order beside it would read as a bug in the note.
-    classes = [plausibility_class(num, ranges.get(r.lower())) for r in rows]
+    # 🔴 ONE MTIME READING, ONE MARGIN — the same "one measurement, two readers"
+    # discipline this docstring states for the age and the table. `age` here is
+    # the value the STATE was decided from and the value that travels back to
+    # the caller, so the caller's `plausible_margin(order_age)` is arithmetic on
+    # the identical float rather than a second `stat`. Deterministic and pure,
+    # so the two sites cannot disagree — which is why this is not smuggled into
+    # the return tuple.
+    margin = plausible_margin(age)
+    rows = order_universe(universe, num, ranges, scores, margin)
+    # Counted from the SAME `ranges` dict AND the SAME margin the sort used, not
+    # re-read: a header that disagreed with the order beside it would read as a
+    # bug in the note.
+    classes = [plausibility_class(num, ranges.get(r.lower()), margin)
+               for r in rows]
     # Counted from the SAME `ranges` and `scores` the sort used — a second read
     # could disagree with the order the operator is looking at, which is the
     # rule `_ordered_universe`'s docstring states for the age and the table.
@@ -3919,6 +4077,15 @@ def main(argv: list[str] | None = None) -> int:
     # `_ordered_universe`. `(0, 0)` while no ordering has run, which is what the
     # telemetry reads to OMIT both dims rather than ship a misleading zero.
     order_contrib = (0, 0)
+    # 🔴 THE STALENESS TOLERANCE THE SORT USED, DERIVED ONCE FROM `order_age`
+    # RATHER THAN RE-DERIVED AT EACH READER. Three sites below need the class as
+    # the operator SAW it — the promotion gate's two `measured_rank_key` calls
+    # and the click telemetry's `picked_class` — and a margin computed from a
+    # second mtime read could describe a different ordering from the one on
+    # screen. `plausible_margin` is pure, so this is arithmetic on the float
+    # `_ordered_universe` already measured, not a second `stat`. 0 until an
+    # ordering runs, which is exactly the pre-margin class.
+    order_margin = 0
     _universe_rows: list[list[dict]] = []
 
     def universe_rows() -> list[dict]:
@@ -3939,11 +4106,12 @@ def main(argv: list[str] | None = None) -> int:
         the alternative is a reader re-deriving that three-way exclusivity from
         scratch. What it must NOT do is read as a live optimisation."""
         nonlocal order_state, order_counts, order_age, order_ranges
-        nonlocal order_contrib
+        nonlocal order_contrib, order_margin
         if not _universe_rows:
             (rows, order_state, order_counts, order_age,
              order_ranges, order_contrib) = _ordered_universe(universe_repos,
                                                              num)
+            order_margin = plausible_margin(order_age)
             _universe_rows.append(universe_candidates(num, rows))
         return _universe_rows[0]
 
@@ -4131,15 +4299,20 @@ def main(argv: list[str] | None = None) -> int:
         # score is not available here, so a tie Tier B would have broken reads
         # as "not separated" and the promotion is skipped. It under-promotes
         # rather than over-claims; that asymmetry is deliberate.
+        #
+        # 🔴 THE SAME `order_margin` THE SORT USED. Omitting it here would
+        # reproduce, in the gate, exactly the drift the extraction of
+        # `measured_rank_key` exists to prevent: the gate would compute a
+        # pre-margin class while the rows on screen were ranked with one.
         top_key = (measured_rank_key(repo_of_github_url(ordered_rows[0]["url"]),
-                                     num, order_ranges)
+                                     num, order_ranges, order_margin)
                    if ordered_rows else None)
         top_is_separated = bool(
             top_key is not None
             and top_key[0] == CLASS_PLAUSIBLE
             and not any(
                 measured_rank_key(repo_of_github_url(c["url"]), num,
-                                  order_ranges) == top_key
+                                  order_ranges, order_margin) == top_key
                 for c in ordered_rows[1:]))
         # 🔴 GUARDED ON `extra`, NOT ON `universe`. A host whose whole universe
         # is the pane's own repo dedupes to nothing, and setting
@@ -4503,7 +4676,13 @@ def main(argv: list[str] | None = None) -> int:
     # ...and the class is reported only for a row the ordering actually placed.
     # It used to be emitted whenever the ordering RAN, which made a pinned pane
     # repo indistinguishable from a universe row ranked at the same position.
-    picked_class = (plausibility_class(num, order_ranges.get(picked_repo.lower()))
+    # 🔴 WITH `order_margin`, BECAUSE THIS DIM IS THE INSTRUMENT THAT MEASURED
+    # THE DEFECT. It must report the class the operator was LOOKING AT; a
+    # pre-margin class emitted beside a margin-ranked list would keep reporting
+    # `below` for rows the picker had already promoted, and the next reader
+    # would re-derive the retracted diagnosis from it.
+    picked_class = (plausibility_class(num, order_ranges.get(picked_repo.lower()),
+                                       order_margin)
                     if picked_repo and order_ranges and picked_ordered else None)
     picked_platform = next((c["platform"] for c in candidates
                             if c["url"] == url), "")

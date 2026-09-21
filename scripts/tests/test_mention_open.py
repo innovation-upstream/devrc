@@ -5981,6 +5981,480 @@ def test_a_NON_NUMERIC_subject_is_UNKNOWN_rather_than_guessed():
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 THE STALENESS MARGIN. See the block above `RANGE_GROWTH_PER_DAY` in the
+# handler for the diagnosis; what these pin is the SEPARATION it rests on.
+#
+# A reference that really exists cannot be below its own repository's head, so
+# a click-time `BELOW` is either a STALE table or a WRONG REPO. The margin has
+# to admit the first without admitting the second, and the two are separated
+# only EMPIRICALLY:
+#
+#   * the wrong-repo side is MEASURED — of 100 distinct `(repo, n)` picks
+#     checked against the GitHub API, 6 name a number no such repository has,
+#     and their gaps (`n - max_ref`) are the ledger below. The smallest is 74.
+#   * the stale side needs to cover roughly one refresh interval of the fastest
+#     repository's growth. That was measured at 34.1/day over 14 days and
+#     39.0/day over 31; the timer is daily.
+#
+# These numbers are from a real click log on a private host. The NUMBERS travel
+# (they are the whole argument); the repository names do NOT, and every fixture
+# below is synthetic — this repo is PUBLIC.
+# --------------------------------------------------------------------------- #
+
+# The six wrong-repo gaps, smallest first. A LEDGER, not a sample: the margin's
+# ceiling is chosen to sit under `min(...)` of it, so an entry added here must
+# be re-checked against `PLAUSIBLE_MARGIN_MAX`.
+_WRONG_REPO_GAPS = (74, 79, 135, 171, 183, 1810)
+
+# The largest stale-side gap the margin must still ADMIT. Derived, not measured:
+# one refresh interval (1 day) of the fastest measured growth (39.0/day), taken
+# up to the round 30 the separation argument uses. The click-time gap
+# distribution is NOT recoverable — `picks.jsonl` records `(t, repo, n)` and no
+# `max_ref` — so this end of the separation is an upper-bounding argument rather
+# than an observation, and it is labelled as one.
+_STALE_GAP_TO_ADMIT = 30
+
+
+def test_the_margin_CEILING_sits_inside_the_measured_SEPARATION():
+    """🔴 THE ONE STRUCTURAL FACT THE WHOLE DESIGN RESTS ON, PINNED TWO-WAY.
+
+    The ceiling has to be BELOW the smallest wrong-repo gap (or a wrong-repo
+    click gets promoted into `PLAUSIBLE`, which is the failure mode the ceiling
+    exists to prevent) and AT OR ABOVE the stale-side gap it must admit (or the
+    margin does not fix the defect it was built for). There is room for both
+    only because the two sides are 44 apart; if a future measurement closes that
+    gap, this test is what says so rather than the picker quietly getting worse.
+
+    ⚠ IT PINS A RELATIONSHIP, NOT A CONSTANT. Asserting `PLAUSIBLE_MARGIN_MAX
+    == 60` would pass while the ledger it is supposed to clear moved underneath
+    it."""
+    assert MO.PLAUSIBLE_MARGIN_MAX < min(_WRONG_REPO_GAPS), (
+        f"the ceiling {MO.PLAUSIBLE_MARGIN_MAX} reaches the smallest measured "
+        f"wrong-repo gap {min(_WRONG_REPO_GAPS)} — a click naming a number that "
+        f"repository has never had would be ranked PLAUSIBLE")
+    assert MO.PLAUSIBLE_MARGIN_MAX >= _STALE_GAP_TO_ADMIT, (
+        f"the ceiling {MO.PLAUSIBLE_MARGIN_MAX} is under the stale-side gap "
+        f"{_STALE_GAP_TO_ADMIT} it exists to admit — the margin cannot fix the "
+        f"defect it was built for")
+    # The growth rate must cover the fastest repository measured, or `age x rate`
+    # stops being an upper bound on what could have happened and becomes a knob.
+    assert MO.RANGE_GROWTH_PER_DAY >= 39.0, MO.RANGE_GROWTH_PER_DAY
+
+
+@pytest.mark.parametrize("age_days,expected", [
+    (None, 0),                 # `ranges_age_days` could not stat the file
+    (0.0, 0),                  # written this instant — no tolerance earned
+    (-3.0, 0),                 # a clock that went backwards
+    (0.25, 10),                # ceil(10.0)
+    (0.7, 28),                 # ceil(28.0) — the live reproduction's age
+    (0.9, 36),                 # ceil(36.0)
+    (0.90001, 37),             # ceil rounds UP: a hair more age buys a whole ref
+    (1.0, 40),                 # one refresh interval of the fastest repo
+    (1.49, 60),                # ceil(59.6) -> 60, the ceiling reached from below
+    (1.5, 60),                 # exactly at the ceiling
+    (3.3, 60),                 # past it
+    (6.9, 60),                 # the oldest age `ordering_state` still accepts
+    (900.0, 60),               # absurd, still bounded
+])
+def test_the_margin_GROWS_with_table_age_and_STOPS_at_the_ceiling(age_days,
+                                                                  expected):
+    """Pinned at both ends and in the middle, because this is a two-part
+    function and a single point cannot see either part.
+
+    ⚠ THE `ceil` IS DELIBERATE AND IS PINNED BY THE 0.90001 ROW. A reference
+    number is an integer, so half a reference of growth is a whole reference the
+    table has not seen; truncating would leave the margin one short at exactly
+    the moment it matters."""
+    assert MO.plausible_margin(age_days) == expected
+
+
+@pytest.mark.parametrize("junk", ["", "1.0", "nan", None, object(), True,
+                                  float("nan"), float("inf"),
+                                  float("-inf"), [], {}])
+def test_an_UNUSABLE_age_DEGRADES_to_the_old_class_and_NEVER_RAISES(junk):
+    """🔴 THE NON-FATAL CONTRACT, WHICH IS WHY 0 IS THE DEFAULT EVERYWHERE.
+    This runs on a DETACHED click handler with nowhere to print a traceback, so
+    a missing file, a broken clock or a NaN must cost the operator a worse ORDER
+    and never a dead click — the identical posture `load_known_ranges` takes.
+
+    0 is not an arbitrary fallback: it is EXACTLY the pre-margin class, so the
+    degraded path is the behaviour that shipped before this existed.
+
+    ⚠ `"1.0"` AND `True` ARE IN THIS LEDGER ON PURPOSE, and they are the two
+    rows that separate "never raises" from "coerces whatever it is handed". A
+    string that happens to parse is still not a measured age — it means some
+    caller passed the wrong thing, and admitting it would grant a full day of
+    tolerance off a type error. `True` is the same trap through Python's `bool`
+    being an `int` subclass, which is exactly why `load_known_ranges` rejects it
+    on the value side."""
+    assert MO.plausible_margin(junk) == 0
+
+
+@pytest.mark.parametrize("max_ref,margin,expected", [
+    # The regression, at the unit: a head 19 short of the clicked number, with
+    # the tolerance a 0.7-day-old table earns.
+    (1809, 28, MO.CLASS_PLAUSIBLE),
+    # The boundary, from both sides and ON it. 36 is the margin at age 0.9.
+    (1291 - 35, 36, MO.CLASS_PLAUSIBLE),   # just inside
+    (1291 - 36, 36, MO.CLASS_PLAUSIBLE),   # exactly on — INCLUDED
+    (1291 - 37, 36, MO.CLASS_BELOW),       # just outside
+    # A head PAST the number is plausible at every margin, unchanged.
+    (1300, 0, MO.CLASS_PLAUSIBLE),
+    (1300, 60, MO.CLASS_PLAUSIBLE),
+    # A margin may never NARROW: a negative one is clamped, not applied.
+    (1300, -50, MO.CLASS_PLAUSIBLE),
+    (1290, -50, MO.CLASS_BELOW),
+])
+def test_the_margin_MOVES_the_BELOW_boundary_and_only_that_boundary(
+        max_ref, margin, expected):
+    """The clicked number is 1828 for the first row and 1291 for the rest.
+
+    ⚠ THE FIXTURE VALUES OVERSHOOT THE BOUNDARY RATHER THAN LANDING ON A
+    MULTIPLE OF THE STEP. 36 is not a round multiple of anything in the
+    implementation, and 19 sits well inside 28 — so a mutant that scaled the
+    margin, or that swapped `>=` for `>`, is caught by the ON-the-boundary row
+    rather than surviving on an accident of the numbers."""
+    num = "1828" if max_ref == 1809 else "1291"
+    assert MO.plausibility_class(num, max_ref, margin) == expected
+
+
+@pytest.mark.parametrize("gap", _WRONG_REPO_GAPS)
+def test_a_WRONG_REPO_gap_stays_BELOW_at_EVERY_reachable_margin(gap):
+    """🔴 THE CONSTRAINT THAT SIZED THE CEILING. These six gaps are clicks where
+    the operator was in one repository's context and typed a number belonging to
+    a DIFFERENT, busier one. Promoting them would trade the staleness defect for
+    a confidently-wrong first row, which is strictly worse — the operator can
+    scroll past a demoted row, but a wrong row at the top is one Enter away.
+
+    Swept over EVERY age the ordering can reach rather than at one point,
+    because the margin is a function of age: `ordering_state` throws the table
+    away at `STALE_MAPPING_DAYS`, so `[0, 7)` is the whole reachable domain, and
+    the bound has to hold across all of it. The gap is MONOTONE in age — an
+    older table can only make `max_ref` smaller — so a ceiling that clears the
+    gap at the oldest reachable age clears it everywhere."""
+    num = 5000
+    max_ref = num - gap
+    for age in (0.0, 0.1, 0.5, 0.99, 1.0, 1.5, 2.0, 3.7, 6.999):
+        margin = MO.plausible_margin(age)
+        assert MO.plausibility_class(str(num), max_ref, margin) == MO.CLASS_BELOW, (
+            f"a wrong-repo click with gap {gap} was promoted to PLAUSIBLE at "
+            f"table age {age}d (margin {margin}) — the ceiling "
+            f"{MO.PLAUSIBLE_MARGIN_MAX} no longer clears the ledger")
+    # POSITIVE CONTROL, in the same run: the sweep above is only evidence if the
+    # same machinery CAN say PLAUSIBLE. A gap the margin is built to admit must
+    # move, or every assertion above is a fact about a function wired to nothing.
+    admitted = MO.plausibility_class(str(num), num - _STALE_GAP_TO_ADMIT,
+                                     MO.plausible_margin(1.0))
+    assert admitted == MO.CLASS_PLAUSIBLE, (
+        f"POSITIVE CONTROL FAILED — a {_STALE_GAP_TO_ADMIT}-gap at a one-day-old "
+        f"table is still {admitted}, so the BELOW assertions above prove nothing")
+
+
+@pytest.mark.parametrize("margin", [0, 1, 60, 1000, 10 ** 9])
+def test_a_repo_with_NO_references_stays_IMPOSSIBLE_at_EVERY_margin(margin):
+    """🔴 45% OF THE REAL UNIVERSE, AND THE MARGIN MUST NOT REACH IT. `0` is the
+    one value in the table no amount of growth can be hiding, because growth is
+    precisely what would have moved it off 0 — so a repository with no issues
+    and no pull requests AT ALL cannot contain `#N` however stale the snapshot
+    is. Widening IMPOSSIBLE by the margin would promote the largest and cheapest
+    half of the win straight back into the list.
+
+    The branch ORDER in `plausibility_class` is what enforces this, which is why
+    the sweep runs to 10^9: a mutant that moved the margin above the `max_ref
+    <= 0` test would survive any small value."""
+    assert MO.plausibility_class("1291", 0, margin) == MO.CLASS_IMPOSSIBLE
+    # UNKNOWN is untouched too — the margin compares against a NUMBER, and there
+    # is no number here to widen.
+    assert MO.plausibility_class("1291", None, margin) == MO.CLASS_UNKNOWN
+
+
+def test_a_margin_promoted_row_NEVER_OUTRANKS_an_EXACT_fit():
+    """🔴 THE SECOND-ORDER DEFECT THE MARGIN CREATES, CLOSED IN THE SAME CHANGE.
+
+    `measured_rank_key`'s distance was `max_ref - N`, and before the margin that
+    could not be negative — `PLAUSIBLE` implied `max_ref >= N`. A margin admits
+    rows with `max_ref < N`, and on those the raw subtraction goes NEGATIVE,
+    which sorts ASCENDING to the FRONT: a repository whose stale head is 19
+    short of the clicked number would outrank one whose head is exactly it.
+    That is a tolerance outranking a measurement.
+
+    `abs()` is the fix, and it is a no-op on every case that could arise before
+    the margin — which is why no pre-existing test can see it and this one
+    exists."""
+    universe = ["acme/stale", "acme/exact", "acme/past"]
+    ranges = {"acme/stale": 1809, "acme/exact": 1828, "acme/past": 1840}
+    got = MO.order_universe(universe, "1828", ranges, None,
+                            MO.plausible_margin(0.7))
+    assert got == ["acme/exact", "acme/past", "acme/stale"], got
+    # All three really are in one class, or this is measuring the class term
+    # rather than the distance term.
+    assert {MO.plausibility_class("1828", v, MO.plausible_margin(0.7))
+            for v in ranges.values()} == {MO.CLASS_PLAUSIBLE}
+
+
+def test_a_STALE_table_no_longer_ranks_a_REAL_reference_behind_EVERYTHING(
+        monkeypatch, tmp_path):
+    """🔴 THE REGRESSION. Driven through `main()` with a REAL mtime on a REAL
+    file, because the age is read from `st_mtime` and a stubbed loader cannot
+    reach the arm under test.
+
+    THE LIVE SHAPE IT REPRODUCES, measured on the operator's host: the range
+    table's entry for the busiest repository read 1809 while its live head was
+    1828, off a table 0.71 days old. Every click on one of those nineteen
+    references was filed `BELOW` — behind EVERY plausible row, including
+    repositories that had passed 1828 thousands of references ago.
+
+    RED at base / GREEN at HEAD. Before the margin this ordering is
+    `[acme/other, acme/stale]`: `acme/stale` is `BELOW` and the sort's first
+    term ranks it behind `acme/other`, whose head is 3172 past the number and
+    which is not what the operator wanted at all."""
+    universe = ["acme/stale", "acme/other"]
+    _ranges_on_disk(monkeypatch, tmp_path,
+                    {"acme/stale": 1809, "acme/other": 5000}, age_days=0.7)
+    # HERMETIC: Tier B must not be able to reorder these two rows, and the
+    # operator's real log must not be read by a test at all.
+    monkeypatch.setattr(MO, "PICKS_PATH", tmp_path / "no-picks-here.jsonl")
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: universe)
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(cands=c) or "")
+    assert MO.main(["#1828"]) == 0
+    repos = [MO.repo_of_github_url(c["url"]) for c in seen["cands"][1:]]
+    assert repos == ["acme/stale", "acme/other"], (
+        f"the stale-but-real row is still ranked behind a repository that "
+        f"passed #1828 thousands of references ago: {repos}")
+    # 🔴 THE ARM WAS REALLY ENTERED. An absent or stale table short-circuits
+    # `_ordered_universe` before anything is sorted, and this test would then be
+    # asserting on the INPUT order — which for this two-row universe is the same
+    # list. Without this the whole test is vacuous.
+    _rows, state, _counts, _age, _ranges, _contrib = MO._ordered_universe(
+        universe, "1828")
+    assert state == MO.ORDER_APPLIED, (
+        f"the ordering DEGRADED to {state!r} — the assertion above is about an "
+        f"unordered list, not about the margin")
+
+
+def test_the_CLICK_TELEMETRY_reports_the_class_the_operator_was_LOOKING_AT(
+        monkeypatch, tmp_path, spool):
+    """🔴 THE INSTRUMENT THAT MEASURED THE DEFECT MUST MOVE WITH THE FIX. The
+    `plausibility` dim is the whole evidence base for the "below 54 vs
+    plausible 17" finding, and it is emitted from a SECOND `plausibility_class`
+    call in `main()` — not from the sort. Left on the pre-margin margin it would
+    keep reporting `below` for rows the picker had already promoted, and the
+    next reader would re-derive the retracted diagnosis straight out of it.
+
+    RED at base / GREEN at HEAD: before the margin this row reads
+    `plausibility=below`. Behavioural — it drives `main()` and reads the spool,
+    naming no symbol this change introduced."""
+    universe = ["acme/stale", "acme/other"]
+    _ranges_on_disk(monkeypatch, tmp_path,
+                    {"acme/stale": 1809, "acme/other": 5000}, age_days=0.7)
+    monkeypatch.setattr(MO, "PICKS_PATH", tmp_path / "no-picks-here.jsonl")
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: universe)
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "open_url", lambda url: 0)
+    monkeypatch.setattr(
+        MO, "pick",
+        lambda c, mesg="": next(r["url"] for r in c
+                                if MO.repo_of_github_url(r["url"])
+                                == "acme/stale"))
+    assert MO.main(["#1828"]) == 0
+    events = _click_events(spool)
+    assert len(events) == 1, events
+    payload = events[0]["payload"]
+    assert payload.get("plausibility") == "plausible", (
+        f"the click row still reports the PRE-MARGIN class for a row the "
+        f"picker promoted: {payload}")
+    # The row really was one the ordering placed, or the dim would be absent
+    # for a reason that has nothing to do with the margin.
+    assert payload.get("ordered") is True, payload
+
+
+def test_the_PROMOTION_GATE_reads_the_SAME_margin_the_SORT_used(monkeypatch,
+                                                                tmp_path):
+    """🔴 FOUND BY THE MUTATION SWEEP, NOT BY REVIEW. Dropping `order_margin`
+    from the promotion gate's two `measured_rank_key` calls left the whole
+    suite green — the one mutant of thirteen that SURVIVED — so this test is
+    the reason it no longer does.
+
+    It is exactly the drift `measured_rank_key` was extracted to prevent, one
+    argument along: the SORT would rank a margin-promoted row first while the
+    GATE recomputed a pre-margin class for it, found `BELOW`, and refused to
+    promote. The operator would see the ordering's own first pick sitting under
+    a pane guess the module already refuses to auto-open.
+
+    The fixture makes the top row PLAUSIBLE ONLY BECAUSE OF THE MARGIN — head
+    1260 against `#1291` is a gap of 31, inside the 40 a one-day-old table
+    earns and outside a margin of 0 — while every other row is far enough below
+    to be `BELOW` at any margin. So the promotion fires only if BOTH halves
+    agree."""
+    table = {ALPHA_FIRST: 5, "gardenersguild/trowelcast": 5,
+             "hobbyist/plotwidget": 5, "wrongorg/wrongrepo": 5,
+             RANKED_FIRST: 1260}
+    seen = _guessed_picker(monkeypatch, text="#1291",
+                           universe=[UNIVERSE_ONLY, ALPHA_FIRST],
+                           ranges=table, tmp_path=tmp_path)
+    urls = [c["url"] for c in seen["rows"]]
+    assert RANKED_FIRST + "/pull/1291" in urls[1], (
+        f"the margin-promoted row was ranked first by the SORT but the GATE "
+        f"did not promote it — sort and gate are reading different margins: "
+        f"{urls}")
+    assert "best-ranked repository" in seen["mesg"], seen["mesg"]
+    # The row really is margin-dependent, or this test would fire with the
+    # margin deleted entirely and prove nothing about the gate.
+    assert MO.plausibility_class("1291", 1260) == MO.CLASS_BELOW
+    assert (MO.plausibility_class("1291", 1260, MO.plausible_margin(1.0))
+            == MO.CLASS_PLAUSIBLE)
+
+
+def test_the_gates_TIE_CHECK_reads_the_margin_too_not_only_its_TOP_ROW(
+        monkeypatch, tmp_path):
+    """🔴 THE SECOND HALF OF THE GATE, AND THE SWEEP FOUND IT SEPARATELY. The
+    gate is two `measured_rank_key` calls — one for the top row, one inside the
+    `any(...)` that asks whether anything TIES with it — and giving the margin
+    to only the first leaves a mutant alive that PROMOTES on a tie.
+
+    The shape: two repositories whose stale heads are IDENTICAL and both inside
+    the margin. Correctly, both score `(PLAUSIBLE, 31)`, they tie, and the
+    promotion must refuse — the ordering separated nothing, so calling either
+    "this host's best-ranked repository" would credit an alphabetical accident,
+    which is exactly what `test_NO_promotion_when_the_ordering_SEPARATED_NOTHING`
+    pins for the pre-margin case. With the margin missing from the tie check the
+    runner-up scores `(BELOW, 0)`, the tie disappears, and the promotion fires.
+    """
+    tied = {v: 5 for v in FAKE_UNIVERSE.values()}
+    tied[ALPHA_FIRST] = 1260          # margin-plausible for #1291
+    tied[RANKED_FIRST] = 1260         # ...and so is this one, IDENTICALLY
+    tied["wrongorg/wrongrepo"] = 5    # the pane guess
+    seen = _guessed_picker(monkeypatch, text="#1291",
+                           universe=[UNIVERSE_ONLY, ALPHA_FIRST],
+                           ranges=tied, tmp_path=tmp_path)
+    urls = [c["url"] for c in seen["rows"]]
+    assert "wrongorg/wrongrepo" in urls[1], (
+        f"two margin-promoted rows TIE, so the ordering separated nothing and "
+        f"the pane guess must keep its row: {urls}")
+    assert "best-ranked repository" not in seen["mesg"], (
+        f"the note credits a best-ranked row while two rows tie for it: "
+        f"{seen['mesg']}")
+    # POSITIVE CONTROL: the two really are tied AND really are margin-promoted,
+    # or this is the pre-margin no-promotion case wearing a new name.
+    m = MO.plausible_margin(1.0)
+    assert (MO.measured_rank_key(ALPHA_FIRST, "1291", tied, m)
+            == MO.measured_rank_key(RANKED_FIRST, "1291", tied, m)
+            == (MO.CLASS_PLAUSIBLE, 31))
+    assert (MO.measured_rank_key(ALPHA_FIRST, "1291", tied)
+            == (MO.CLASS_BELOW, 0)), "the rows are plausible without the margin"
+
+
+def test_the_PICKER_HEADER_counts_the_SAME_classes_the_rows_were_ranked_by(
+        monkeypatch, tmp_path):
+    """🔴 THE HEADER IS A CLAIM ABOUT THE LIST UNDERNEATH IT. `ordering_note`
+    says "N could have it", and N comes from a SECOND `plausibility_class` pass
+    in `_ordered_universe` — so a margin given to the sort and withheld from
+    that pass produces a header that contradicts the rows beside it, reading as
+    a bug in the note rather than in the count.
+
+    Found by the mutation sweep: withholding it there left the suite green.
+
+    One row is plausible ONLY because of the margin (head 1260 against `#1291`),
+    one is `BELOW` at any margin, one has no references at all — so all three
+    numbers in the header are distinct and none can be satisfied by another's
+    value."""
+    universe = ["acme/near", "acme/far", "acme/zero"]
+    _ranges_on_disk(monkeypatch, tmp_path,
+                    {"acme/near": 1260, "acme/far": 5, "acme/zero": 0},
+                    age_days=1.0)
+    monkeypatch.setattr(MO, "PICKS_PATH", tmp_path / "no-picks-here.jsonl")
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: universe)
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(mesg=mesg) or "")
+    assert MO.main(["#1291"]) == 0
+    assert "1 could have it" in seen["mesg"], (
+        f"the header counted the PRE-MARGIN classes while the rows were ranked "
+        f"with the margin: {seen['mesg']}")
+    assert "1 have no references at all" in seen["mesg"], seen["mesg"]
+
+
+def test_the_margin_does_NOT_COLLAPSE_Tier_A_at_the_REAL_universe_SIZE():
+    """🔴 CONSTRAINT: DO NOT WEAKEN TIER A. The class term is the sharpest thing
+    in the sort — §1.4 of the proposal measures it narrowing a 394-row universe
+    to a median of ~2 candidate rows — so a margin wide enough to blur that
+    would be a regression even with the suite green.
+
+    MEASURED against the operator's live 395-row table and a uniform sweep of
+    clicked numbers over 86..4895 (the range the proposal reports for the real
+    clicks): median plausible-class size 1 -> 1, mean 3.52 -> 3.99, max 29 -> 48
+    going from margin 0 to the ceiling. The reproduction here is on the
+    SYNTHETIC corpus, which is what a public repo can carry.
+
+    ⚠ THIS IS A RATIO GUARD, NOT A CONSTANT. The corpus is random-seeded and its
+    absolute counts are not the point; what must hold is that the ceiling does
+    not multiply the plausible class."""
+    repos, table = _measured_shape_corpus()
+    nums = [str(n) for n in range(120, 3000, 37)]
+
+    def sizes(margin):
+        return [sum(1 for r in repos
+                    if MO.plausibility_class(n, table[r.lower()], margin)
+                    == MO.CLASS_PLAUSIBLE)
+                for n in nums]
+
+    before, after = sizes(0), sizes(MO.PLAUSIBLE_MARGIN_MAX)
+    b_mean = sum(before) / len(before)
+    a_mean = sum(after) / len(after)
+    # POSITIVE CONTROL: the sweep really discriminates, or "it did not collapse"
+    # is a statement about a measurement that was never taken.
+    assert b_mean < len(repos) / 4, (
+        f"POSITIVE CONTROL FAILED — the pre-margin class already admits "
+        f"{b_mean:.1f} of {len(repos)} rows, so this corpus cannot show a "
+        f"collapse either way")
+    assert a_mean >= b_mean, "the margin made the class SMALLER — impossible"
+    assert a_mean <= b_mean * 2.0, (
+        f"the ceiling more than DOUBLED the plausible class "
+        f"({b_mean:.2f} -> {a_mean:.2f} rows of {len(repos)}) — Tier A's "
+        f"sharpness is the thing this margin must not spend")
+    assert max(after) < len(repos) // 2, (
+        f"at its worst the margin admits {max(after)} of {len(repos)} rows")
+
+
+def test_an_UNREADABLE_table_MTIME_degrades_the_click_rather_than_killing_it(
+        monkeypatch, tmp_path):
+    """🔴 THE DEGRADATION PATH, END TO END. `ranges_age_days` answers `None` on
+    any `OSError`, and every consumer must treat `None` as UNKNOWN rather than
+    as fresh. With no age there is no margin, and `ordering_state` already
+    declines to order on an unmeasurable age — so the click must still OPEN,
+    with the pre-margin behaviour and no traceback.
+
+    A detached click handler has nowhere to print, so an exception here is not a
+    loud failure — it is a DEAD CLICK, which is the one outcome this whole
+    handler exists to remove."""
+    _ranges_on_disk(monkeypatch, tmp_path, {"acme/stale": 1809})
+    monkeypatch.setattr(MO, "PICKS_PATH", tmp_path / "no-picks-here.jsonl")
+    monkeypatch.setattr(MO, "ranges_age_days", lambda *a, **k: None)
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe",
+                        lambda *a, **k: ["acme/stale", "acme/other"])
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    seen = {}
+    monkeypatch.setattr(MO, "pick",
+                        lambda c, mesg="": seen.update(cands=c) or "")
+    assert MO.main(["#1828"]) == 0
+    assert seen["cands"], "the click produced no picker at all"
+    assert MO.plausible_margin(None) == 0
+    _rows, state, _counts, age, ranges, _contrib = MO._ordered_universe(
+        ["acme/stale"], "1828")
+    assert age is None and state == MO.ORDER_STALE and ranges == {}, (
+        f"an unmeasurable age was not treated as UNKNOWN: "
+        f"age={age!r} state={state!r}")
+
+
+# --------------------------------------------------------------------------- #
 # order_universe — the sort
 # --------------------------------------------------------------------------- #
 _ORDER_UNIVERSE = ["acme/alpha", "acme/beta", "bravo/gamma", "delta/epsilon",
