@@ -7602,14 +7602,64 @@ def test_the_over_budget_warning_CARRIES_the_note_and_still_refuses_nothing():
     assert "Evictable in THIS doc" in w, w
 
 
-def test_the_note_is_withheld_from_the_UNGATED_arm():
-    """🔴 The ungated arm REPORTS THE NUMBER AND PRESCRIBES NOTHING, deliberately:
-    outside devrc the ladder cites a playbook the repo does not ship, so a
-    breakdown keyed to its step 1 would be prescribing where that arm must not."""
+def test_the_UNGATED_over_budget_arm_CARRIES_the_note_and_still_prescribes_nothing():
+    """🔴 THE ARM STILL PRESCRIBES NOTHING — that property is what this test pins,
+    and it is NOT the same claim as "the note is absent". This test replaces
+    `test_the_note_is_withheld_from_the_UNGATED_arm`, whose withholding was
+    specified when `evictable_note` also carried the eviction ladder; #1821
+    deleted that surface, so the note is now a measurement of `merged_text` and
+    names no remedy. Asserting the ABSENCE of the note was therefore asserting a
+    proxy for "no prescription" that stopped tracking it.
+
+    So both halves are checked explicitly: the numbers are present, and the
+    ladder's own words are not. The negative list is the ladder's distinctive
+    vocabulary from the GATED arm above — if a future edit reintroduces
+    prescription here, one of these fires."""
     w = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
                           _EVICTABLE_DOC + "z" * 70_000, "z" * 100, gated=False)
-    assert "SIZE ONLY, NO GATE" in w
-    assert "Evictable in THIS doc" not in w, w
+    assert "SIZE ONLY, NO GATE" in w, w
+    assert "Evictable in THIS doc" in w, w
+    # 🔴 THE BARE WORDS, NOT A PHRASE. An earlier draft of this list named four
+    # PHRASES and passed while the note still ended "steps 2-4 of the playbook
+    # cover the rest" — a pointer to a test only devrc ships, leaking into the
+    # one arm that may not prescribe, through a negative assertion written
+    # specifically to catch that. A phrase-list only ever catches the wordings
+    # you thought of; `playbook` and `ladder` cannot be said at all here.
+    for prescription in ("will go RED on `main`", "demote dated evidence",
+                         "Do NOT satisfy it by deleting", "claudedocs/refs/",
+                         "playbook", "ladder"):
+        assert prescription not in w, (prescription, w)
+
+
+def test_the_UNGATED_over_budget_note_is_the_SAME_TEXT_the_gated_arm_prints():
+    """🔴 ONE MEASUREMENT, NOT TWO. The point of dropping the guard is that both
+    arms report the same fact about the same document; a second code path that
+    computed it differently would be the "one rule, one place" defect the note's
+    own header argues against. Compared as text, so a divergence in the numbers,
+    the rows or the net line fails here rather than being discovered by a reader.
+
+    ⚠ The two warnings as a WHOLE still differ, and must — the gated arm names a
+    red `main` and the ungated one says nothing will go red. Only the note is
+    compared."""
+    doc, base = _EVICTABLE_DOC + "z" * 70_000, "z" * 100
+    gated = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
+                              doc, base, gated=True)
+    ungated = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
+                                doc, base, gated=False)
+    marker = "  Evictable in THIS doc"
+    assert marker in gated and marker in ungated, (gated, ungated)
+    # The note runs to the end of each warning in the gated arm's case only, so
+    # slice from the marker and compare the shared prefix of full lines.
+    note_g = [ln for ln in gated[gated.index(marker):].splitlines()
+              if ln.startswith("  ")]
+    note_u = [ln for ln in ungated[ungated.index(marker):].splitlines()
+              if ln.startswith("    ") or ln == marker]
+    assert note_u == [ln for ln in note_g if ln.startswith("    ") or ln == marker], (
+        "the ungated arm printed a DIFFERENT eviction measurement than the gated "
+        "arm for the same document:\n gated=%r\n ungated=%r" % (note_g, note_u))
+    assert gated != ungated, (
+        "the two arms became identical — the gate-specific sentences (red `main` "
+        "vs nothing will go red) are load-bearing and must still differ")
 
 
 def _near_text():
@@ -7632,12 +7682,44 @@ def test_the_NEAR_budget_arm_carries_the_note_when_gated():
     assert "Evictable in THIS doc" in w, w
 
 
-def test_the_NEAR_budget_arm_withholds_the_note_when_UNGATED():
-    """The other direction of the guard the mutant walked through."""
+def test_the_NEAR_budget_arm_carries_the_note_when_UNGATED_TOO():
+    """🔴 REACHABILITY IS STILL THE POINT, and it is why this test survives the
+    guard it was written to check. Its sibling above drives the near arm gated;
+    this one drives the SAME arm ungated, with `_near_text()` sized under the
+    ceiling on purpose — `test_the_UNGATED_over_budget_arm_…` returns from the
+    OVER arm and can never execute this line. That asymmetry is exactly how a
+    mutant deleting the old `if gated` survived a green suite (round 4 of
+    #1815), so the near arm keeps a test in every state it can be in.
+
+    What changed is the expectation, not the coverage: the guard is gone by the
+    operator's decision, so the note now prints here as well. The gate-specific
+    half of this arm is the `tail` sentence, pinned separately below."""
     w = hd.budget_warning("claudedocs/handoff-not-grandfathered.md",
                           _near_text(), "z" * 100, gated=False)
     assert w.startswith("⚠ Size:"), w
-    assert "Evictable in THIS doc" not in w, w
+    assert "Evictable in THIS doc" in w, w
+
+
+def test_the_NEAR_arms_gate_specific_TAIL_still_differs_by_gatedness():
+    """🔴 THE GUARD WAS DROPPED FROM THE NOTE, NOT FROM THE ARM. Without this,
+    deleting the remaining `if gated` — the one choosing the tail sentence —
+    would be invisible: every other near-arm assertion now holds in both
+    directions. Pins the two tails against each other rather than against a
+    spelling, so a reword of either fails loudly instead of silently passing.
+
+    ⚠ AN INVARIANT GUARD, NOT REGRESSION COVERAGE — say so rather than counting
+    it. It is GREEN on pre-change code, because the behaviour it pins is the
+    half of this arm that did NOT change; the three tests around it are the
+    regression ones (red at `origin/main` 3fa77f49, green at HEAD). Its value is
+    forward-looking: MUTATION-TESTED by collapsing `tail` to the gated wording,
+    which it killed on its own `no gate enforces it here` assertion."""
+    doc, base = _near_text(), "z" * 100
+    g = hd.budget_warning("claudedocs/handoff-not-grandfathered.md", doc, base,
+                          gated=True)
+    u = hd.budget_warning("claudedocs/handoff-not-grandfathered.md", doc, base,
+                          gated=False)
+    assert "red `main`" in g and "red `main`" not in u, (g, u)
+    assert "no gate enforces it here" in u and "no gate enforces it here" not in g, (g, u)
 
 
 def test_the_rank_charge_explainer_is_WITHHELD_when_no_rank_is_offered():

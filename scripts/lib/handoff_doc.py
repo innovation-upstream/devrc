@@ -2966,13 +2966,23 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         # 🔴 NET, and the shortfall is stated rather than implied. Quoting a gross
         # number that does not actually clear the overage sends an author cutting
         # and leaves them still red — the one outcome worse than saying nothing.
+        # 🔴 NO POINTER TO THE PLAYBOOK OR THE LADDER ON THESE LINES, and their
+        # removal is what let this note reach the UNGATED arms at all. Both were
+        # decoration on a number — "steps 2-4 of the playbook cover the rest" on
+        # the shortfall case, "before you need the ladder at all" on the zero
+        # case — and both named a remediation ladder that lives in a test only
+        # devrc ships. In a repo without it they are the civitai/cli#618 failure
+        # in miniature: an authoritative-sounding step nobody's gate requires.
+        # In a repo WITH it they were a second copy of what the over-budget arm
+        # already prints in full, three lines above. One rule, one place: the
+        # ladder belongs to `test_handoff_doc_size.py`, this note to the numbers.
         if net >= over_by > 0:
             out.append(f"    → {net:,} B net, which CLEARS the {over_by:,} B you are over by.")
         elif over_by > 0:
-            out.append(f"    → {net:,} B net, which does NOT clear the {over_by:,} B you are "
-                       f"over by; steps 2-4 of the playbook cover the rest.")
+            out.append(f"    → {net:,} B net, which does NOT clear the {over_by:,} B "
+                       f"you are over by.")
         else:
-            out.append(f"    → {net:,} B net available before you need the ladder at all.")
+            out.append(f"    → {net:,} B net already closed in this document.")
         # 🔴 CONDITIONAL, and the unconditional version was a real defect (round 0,
         # F4): it explained a charge that had not been applied, on a note whose
         # whole argument is that a line printing every time is a line nobody
@@ -3025,8 +3035,31 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
         # word "RED". Outside devrc that ladder has no authority: it cites a
         # playbook in a test the repo does not ship. The SIZE still transfers
         # (measured across the other repos' corpora), so the number stays.
+        #
+        # 🔴 THE NOTE IS NO LONGER WITHHELD HERE, AND THAT IS A REVERSAL THE
+        # OPERATOR MADE, NOT A DRIFT. The withholding was specified when this
+        # function ALSO carried the ladder — prescription and numbers travelled
+        # together, so suppressing one suppressed both. #1821 deleted the
+        # prescription surface from `evictable_note` outright (7 of 10 audit
+        # findings in that arc were caused by it), leaving a measurement of THIS
+        # document and nothing else: how many bytes of it have already closed.
+        # That number is a fact about the text, not a claim about any repo's
+        # gates — `evictable_note` reads `merged_text` and never touches a
+        # checkout — so the civitai/cli#618 argument, which is entirely about
+        # being TOLD to move bytes into `refs/`, no longer reaches it.
+        # MEASURED HERE, through this very function, against homelab-talos's 70
+        # live handoff docs: 31 of them now print a note, surfacing 289,805 B of
+        # already-closed content that this branch was hiding from their authors.
+        # ⚠ NOT the 370,563 B the deciding handoff quoted — that figure is the
+        # auditor's gross over ALL FOUR buckets, and this note deliberately
+        # reports only step 1 (`resolved` + `done`). Both are right about
+        # different things; this is the one this code can actually print, so it
+        # is the one recorded here. Re-derive rather than copy either forward.
+        # The sentence below still says nothing will go red; that is what keeps
+        # this a report.
         which = ("its grandfathered allowance" if grandfathered
                  else "the handoff-document ceiling")
+        note = evictable_note(merged_text, after - allowance)
         return "\n".join([
             f"⚠ SIZE ONLY, NO GATE: {after:,} B against {which} of "
             f"{allowance:,} B, over by {after - allowance:,} B "
@@ -3035,6 +3068,7 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
             "only the tree it lives in — nothing will go red and nothing is "
             "inherited by anyone. Treat it as JUDGEMENT about what the next "
             "session has to read, not as a build to fix.",
+            *([note] if note else []),
         ])
 
     if after > allowance:
@@ -3083,17 +3117,23 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
         head = (f"⚠ Size: {after:,} B of {allowance:,} B "
                 f"({sign}{delta:,} B this update) — {headroom:,} B left. The next "
                 f"update or two will go over; {tail}")
-        # 🔴 GATED ONLY, for the ungated arm's stated reason: outside devrc the
-        # ladder has no authority, and a breakdown keyed to its step 1 would be
-        # prescribing where that arm deliberately only reports. Here it is the
-        # CHEAPEST moment to act — the tail above says so — so the number belongs.
+        # 🔴 UNCONDITIONAL, and the `if gated` it replaces was removed by the
+        # operator, not by an agent's reading. The guard's stated reason was that
+        # a breakdown keyed to the ladder's step 1 would be PRESCRIBING where
+        # this arm may only report — true while `evictable_note` carried the
+        # ladder, and false since #1821 deleted that surface. What is left counts
+        # closed bytes in `merged_text`; it names no remedy and consults no
+        # checkout, so it is the same KIND of fact as the size already printed
+        # two lines above. The gated/ungated split survives where it is still
+        # about a gate: `tail` above, and the GRANDFATHERED arm below, which
+        # tells you to edit a ledger that really does live only in devrc.
         # ⚠ NO PROHIBITION HERE. One was added in round 4 and is removed by the
         # /the-algorithm pass: the eviction ladder — including "do NOT satisfy
         # this by deleting an open investigation, a gotcha or a ruled-out
         # theory" — belongs to `test_handoff_doc_size.py`, which the over-budget
         # arm already cites. Restating it here is the second copy that made this
         # advice wrong four times; this arm carried none before the note existed.
-        note = evictable_note(merged_text, 0) if gated else ""
+        note = evictable_note(merged_text, 0)
         return f"{head}\n{note}" if note else head
     return ""
 
