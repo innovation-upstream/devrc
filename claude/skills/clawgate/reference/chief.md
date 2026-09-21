@@ -66,20 +66,23 @@ match, and the two directions use disjoint credentials by design.
 
 | verb | route | credential | who runs it |
 |---|---|---|---|
-| `chief ask --text …` | `POST /operator/agents/{id}/message` | **`CLAWGATE_OPERATOR_TOKEN`** — the reserved *operator* agent's own hooks token — **plus** `CLAWGATE_HOOK_TOKEN` for the `GET /api/agents` name→id resolve it does first | the OPERATOR (you), talking TO chief |
+| `chief ask --text …` | `POST /api/agents/{name}/messages` | **`CLAWGATE_HOOK_TOKEN`** only — ONE credential since task #633 (clawgate 0.8.53) | the OPERATOR (you), talking TO chief |
 | `chief write --host --pane --text` | `POST /api/term/chief/send-keys` | **`CLAWGATE_CHIEF_TOKEN`** | CHIEF, inside its own pod |
 | `chief launch --host --cwd [--text]` | `POST /api/term/chief/new-session` | **`CLAWGATE_CHIEF_TOKEN`** | CHIEF, inside its own pod |
 
-🔴 **`chief ask` needs TWO credentials and it is not a bug.** `GET /api/agents` is
-behind `requireHookToken` (compares against the server's shared secret);
-`POST /operator/agents/{id}/message` is behind `requireOperatorToken` (resolves the
-bearer to the *operator* agent ROW). One value cannot satisfy both. Read the operator
-token out of its Secret:
-
-```bash
-kubectl --kubeconfig $KC -n devpod-operator get secret devpod-secrets \
-  -o jsonpath='{.data.HOOKS_TOKEN}' | base64 -d
-```
+🔴 **RETRACTED 2026-09-21 — `chief ask` needs ONE credential now, and the operator
+token it used to need NO LONGER EXISTS.** This block used to read *"`chief ask` needs TWO
+credentials and it is not a bug"*, and told you to read `CLAWGATE_OPERATOR_TOKEN` out of
+`devpod-operator`'s Secret. Task #633 phase 1 (clawgate **0.8.53**, homelab-infra #862)
+re-homed the write onto `POST /api/agents/{name}/messages` behind `requireArmedHookToken`,
+**deleted** `credOperator` / `--operator-token` / `CLAWGATE_OPERATOR_TOKEN` from the CLI, and
+deleted the reserved `operator` agent — so the namespace that snippet read from is `NotFound`.
+Keying by `{name}` also removes the `GET /api/agents` name→id resolve that made it two-tier.
+⚠ The route is now **fail-CLOSED**: with no `CLAWGATE_HOOK_TOKEN` configured **server-side** it
+answers **503** and the client maps that to exit **9** ("arm the server"), not exit 1.
+Measured live 2026-09-21 with the operator deleted: reply returned, path
+`POST /api/agents/chief/messages`, and `grep -c '/operator/agents'` over the pod's whole
+lifetime = **0**.
 
 🔴 **`CLAWGATE_CHIEF_TOKEN` is not a free-form secret you can invent.**
 `requireChiefToken` resolves it through `Agents.GetByHooksToken`, so it MUST BE some
@@ -130,7 +133,7 @@ A 401 on the GET says NOTHING about the POSTs, and a table keyed on
 | raise an attention entry | `POST /api/attention` | `requireHookOrAgentToken` | ✅ — was ❌ 401 here |
 | resolve an attention entry | `POST /api/attention/{id}/resolve` | `requireHookOrAgentToken` | ✅ — was ❌ 401 here |
 | **read** the attention queue | `GET /api/attention` | `requireHookToken` | ❌ **401** — not moved, on purpose |
-| the task board | `GET /api/tasks` | `requireHookToken` | ❌ 401 |
+| the task board | `GET /api/tasks` | `requireHookOrAgentToken` | ✅ **200** — re-tiered by task #633 (0.8.53); was ❌ 401 |
 | manage a layout | `POST /api/layout/views` | `requireHookToken` | ❌ 401 |
 
 🔴 **"CHIEF CANNOT ENUMERATE A PANE" WAS FALSE — MEASURED 2026-09-20.** Probed with
