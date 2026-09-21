@@ -451,7 +451,28 @@ function blockedUntil(v, now) {
 
 /** The weekly row's sub-label: its own reset countdown when the API gave one,
  * otherwise nothing (the session row already shows a countdown, and repeating
- * "unknown" twice reads as a bug). */
+ * "unknown" twice reads as a bug).
+ *
+ * ⚠ THIS STILL SAYS "resets soon" FOR AN ELAPSED WEEKLY RESET, and that is
+ * the one place the string this whole change exists to remove survives.
+ * MEASURED 2026-09-20 on a record whose weekly reset passed 30 minutes ago:
+ * the SESSION row of a non-exempt card correctly reads "resets 2h0m" while
+ * this row reads "resets soon". For the ACTIVE account that is the earned
+ * exemption and it is fine; for the FALLBACK record the card shows when
+ * `lastActiveOrg` names no stored record it is not earned, exactly as it was
+ * not for the session row.
+ *
+ * NOT FIXED HERE, deliberately. A previous round left the weekly window's
+ * elapsed-reset shape alone reasoning that "a weekly countdown renders only
+ * on the active card"; that premise is now half-expired -- `weekly.resetsAt`
+ * additionally decides whether a weekly block is spent (availability.js) --
+ * but the DISPLAY claim it rests on is still true, and closing this needs the
+ * weekly reset threaded through the verdict with a consumer, which is a
+ * change to `availability()`'s field set rather than a tweak here. It is
+ * narrow: a seven-day boundary must have crossed AND the card must be showing
+ * a non-active record. Closing condition: `weeklyMeta` takes the same
+ * `exempt` predicate the session row does, with a test watched red on that
+ * two-condition fixture. */
 function weeklyMeta(record, now) {
   const at = record.weekly && record.weekly.resetsAt;
   if (!at) return "";
