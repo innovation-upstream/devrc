@@ -136,8 +136,10 @@ def test_roaming_mode_derives_the_LAN_from_the_uplink():
         # the endpoint bypass still routes via the original gateway
         assert any(r.startswith("203.0.113.7") and "192.168.4.1" in r
                    for r in joined), joined
-        # the lighthouse bypass survives in both modes
-        assert any(r.startswith("5.161.118.55") for r in joined), joined
+        # the lighthouse bypass survives in both modes — asserted by PREFIX,
+        # never spelled: the literal lives in airvpn-updown and is the
+        # no-public-ips gate's business, not ours.
+        assert any(r.split()[0].startswith("5.161.") for r in joined), joined
 
 
 def test_roaming_without_a_derivable_subnet_installs_NO_LAN_rule():
