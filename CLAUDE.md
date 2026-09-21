@@ -20,6 +20,55 @@ Portable rules (`git add -A`, `reset --hard`, `stash`, worktree isolation, featu
 base-clone re-sync, stranded docs) are in **`claude/RULES.md` → "Git Workflow"** — read them
 there. Only what's specific to this repo, where a working tree is also a **deploy target**:
 
+- 🔴 **NEVER `commit` / `add` / `checkout` / `switch` / `stash` IN THE PRIMARY CLONE
+  `~/workspace/devrc`. Do every change through a throwaway worktree off `origin/main`.**
+  This clone is shared by concurrent sessions, and its checked-out branch is **not yours** —
+  modelled on `datapacket-talos` CLAUDE.md rule #10, which exists for the same reason.
+  **MEASURED HERE 2026-09-20:** while one session held a feature branch checked out, another
+  session committed its own unrelated work onto **that branch** (`e1ed617d`), dragging
+  `SECRETS.md`, `nix/home.nix`, `scripts/stt` and seven `browser-bridge` renames into a PR
+  about the handoff skill. Nothing errored; `git log` afterwards read exactly as expected,
+  because you are reading the branch you landed on. Found only after the push, and rescued as
+  `origin/rescued-stt-and-browser-flows`.
+  ```bash
+  WT=$(mktemp -d -u /tmp/devrc-XXXX)
+  git -C $DEVRC fetch -q origin main
+  git -C $DEVRC worktree add --detach "$WT" origin/main   # the REMOTE tip, never a local ref
+  cp $DEVRC/.envrc "$WT"/ && direnv allow "$WT"           # NOT tracked here — verified; unlike
+                                                          # datapacket-talos, where copying it
+                                                          # stages a tracked-file DELETION
+                                                          # ⚠ it is `use opencode`, which has NO
+                                                          # pytest — run tests with
+                                                          # `nix develop $DEVRC -c python3 -m pytest`
+  git -C "$WT" switch -c <branch>   # edit · commit · push FROM THE WORKTREE
+  git -C $DEVRC worktree remove --force "$WT"             # ONLY after the push SUCCEEDED
+  ```
+  🔴 **`worktree remove --force` DISCARDS UNCOMMITTED WORK in that tree** — that is the real
+  cost of removing early, so commit or copy aside first. ⚠ **It does NOT orphan a COMMITTED
+  one, and an earlier wording of this rule said it did.** That text was ported from
+  `datapacket-talos`, whose recipe stays on a DETACHED HEAD; the recipe above adds
+  `switch -c`, which writes a real ref in the common git dir. MEASURED 2026-09-20 on git
+  2.55.0, both shapes: with `switch -c` the branch **survives** removal and
+  `git fsck --dangling` prints **nothing** — so an agent recovering a failed push would run
+  the prescribed fsck, see an empty result, and conclude the work was gone while
+  `git branch --list <branch>` still held it. Detached-only is the shape that dangles.
+  🔴 **AND THIS REPO ESCALATES THE HAZARD BEYOND A WRONG-BRANCH COMMIT: a checkout here
+  changes LIVE BEHAVIOUR ON THIS HOST IMMEDIATELY, with no `switch`.** **Every** one of
+  `nix/home.nix`'s `mkOutOfStoreSymlink` targets resolves INTO this working tree — verified
+  2026-09-20, e.g. `readlink -f ~/.claude/skills/browser/SKILL.md` →
+  `scripts/browser-bridge/SKILL.md`. 🔴 **It is NOT just the `browser`/`dl-router` skills:
+  `~/.local/bin/claim-work` → `scripts/claim-work.sh`, i.e. the shared-queue LOCK itself,
+  which FAILS OPEN — so a checkout that moves it makes every concurrent session read "no
+  claim exists".** Also `opencode-dispatch`, `dl-route`, `peer-host`, `cairn-who`,
+  `cairn-validate`, `stt` and the `opencode` skill body. `home-manager switch --flake
+  ~/workspace/devrc` likewise builds **whatever is checked out**.
+  Keep this clone on `main`; that is what makes it a safe deploy target.
+  🔴 **`git stash` is banned here for a DIFFERENT reason, and the worktree does NOT fix it:**
+  `refs/stash` lives in the **common** git dir, so every worktree of this clone shares one
+  stack (`claude/RULES.md` → "git stash is repo-GLOBAL"). Copy files aside instead.
+  ⚠ Read-only agents need no worktree; **any file-modifying agent does** (`claude/RULES.md` →
+  "Git Workflow"), and that rule's surfaces — env, submodules, `cp -a`, repo-global config —
+  apply unchanged.
 - 🔴 **Never commit to `main` in EITHER host checkout** (`~/workspace/devrc`, workbench *or*
   laptop). `ship.sh` converges with `merge --ff-only`, so a diverged host is **skipped and
   left as found** — it then silently stops receiving every future change while still looking

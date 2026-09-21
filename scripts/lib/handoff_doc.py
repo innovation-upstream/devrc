@@ -2796,7 +2796,11 @@ BUDGET_NEAR_BYTES = 4_096
 # whatever checkout it ships in — the base clone, a worktree, any future clone.
 # Hence the predicate below is DERIVED from that fact rather than hardcoding a
 # path: a repo is gated iff it ships the gate.
-BUDGET_GATE_RELPATH = "scripts/tests/test_handoff_doc_size.py"
+#: Re-exported, NOT re-declared: `handoff_budget` owns it beside the ceiling it
+#: gates, because `handoff-audit.py` must ask the same question of a DIFFERENT
+#: root and two copies are how the two tools come to disagree. Name kept so every
+#: existing reference (and its tests) keeps working.
+BUDGET_GATE_RELPATH = handoff_budget.GATE_RELPATH
 
 
 def gate_enforces_budget(repo: Path) -> bool:
@@ -2820,6 +2824,215 @@ def gate_enforces_budget(repo: Path) -> bool:
         # An unreadable repo path is not evidence of a gate. Fail toward the
         # weaker claim: we never invent a gate we could not see.
         return False
+
+
+#: Where each `audit_text` bucket keeps its (start, end) LINE RANGE. The four
+#: buckets have three different tuple shapes and there is no positional rule that
+#: covers all of them — `retracted` is `(s, e, b)`, `resolved`/`dated` are
+#: `(title, s, e, b)`, `done` is `(rank, s, e, b, is_done)`, so "the last three"
+#: works for every bucket except `done`, whose last element is a bool. Enumerated
+#: rather than derived, and pinned two-way by a test that re-derives each bucket's
+#: own byte count from the range these indices select.
+AUDIT_SPAN_INDEX = {
+    "resolved": (1, 2),
+    "dated": (1, 2),
+    "done": (1, 2),
+    "retracted": (0, 1),
+}
+
+#: Sibling auditor. Loaded LAZILY and DEFENSIVELY — see `evictable_note`.
+_AUDITOR = Path(__file__).resolve().parent.parent / "handoff-audit.py"
+
+
+def evictable_note(merged_text: str, over_by: int) -> str:
+    """What the eviction playbook would recover from THIS doc, in bytes, or "".
+
+    Step 1 (evict what has CLOSED) is COUNTED; step 2 (demote dated evidence) is
+    reported beside it and deliberately not counted — see the split below.
+
+    🔴 WHY THIS EXISTS. The ladder in `test_handoff_doc_size.py` ranks EVICT WHAT
+    HAS CLOSED first and calls it "usually the whole answer" — but it says that
+    to every author about every document, and nothing told them how much "here"
+    holds for the doc in front of them. MEASURED 2026-09-20 corpus-wide: 468,110 B
+    (14.1%) is already evictable — 284,262 B of resolved investigations alone —
+    while 28 docs sit over the hard cap. The detection was never the gap.
+
+    🔴 IT REUSES `handoff-audit.py`'S DETECTORS AND KEEPS NO COPY. A second
+    implementation of "is this investigation resolved" is how the two answers
+    drift, and that auditor's own comments record the corrections its matchers
+    have already absorbed (a `retracted` bucket over-counted by 30% until bullets
+    crossing a heading were clipped). One rule, one place.
+
+    🔴 NEVER RAISES — this runs inside the WRITE PATH. An exception here would take
+    down `/handoff`'s only landing step and cost a session its record, to decorate
+    a warning. That reason alone carries the guard. Any failure ⇒ "" and the
+    warning prints exactly as it did before.
+
+    ⚠ An earlier draft added "another repo using this module has no such file,
+    which is the ordinary case". Round 0 of #1815 checked and found neither
+    `handoff_doc.py` nor `handoff-audit.py` vendored anywhere outside devrc
+    clones, so that clause named a configuration nobody has. Removed rather than
+    replaced with a better-sounding one: the write-path argument is sufficient,
+    and reaching for a second justification is how a wrong one gets written.
+    """
+    if not _AUDITOR.is_file():
+        return ""
+    try:
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("_handoff_audit",
+                                                      str(_AUDITOR))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        a = mod.audit_text(merged_text)
+        # 🔴 THE STEP IS PART OF THE ROW, and getting it wrong told authors to do
+        # the thing the playbook forbids. `test_handoff_doc_size.py`'s ladder is:
+        # step 1 EVICT WHAT HAS CLOSED; step 2 DEMOTE DATED EVIDENCE to `refs/`
+        # LEAVING A POINTER — and then, in terms, "DO NOT satisfy this by deleting
+        # an open investigation, a gotcha or a ruled-out theory". `retracted` is
+        # BY CONSTRUCTION bullets inside a Gotchas section, i.e. simultaneously a
+        # gotcha and a ruled-out theory. Labelling all four "step 1 — do this
+        # first" prescribed deleting exactly those. Round 1 of #1815, F4.
+        rows = [
+            ("resolved investigations", a["resolved_b"], len(a["resolved"]), "block", 1),
+            ("completed ranked items", a["done_b"], len(a["done"]), "item", 1),
+            ("retracted / dead-ends", a["retracted_b"], len(a["retracted"]), "bullet", 2),
+            ("work-status headings", a["dated_b"], len(a["dated"]), "block", 2),
+        ]
+        rows = [r for r in rows if r[1] > 0]
+        if not rows:
+            return ""
+        # 🔴 ONLY STEP 1 IS COUNTED, and that is the fix for two findings at once
+        # (round 2 of #1815, 🟡-4 and 🟡-5). Counting step-2 bytes toward a line
+        # that promises "CLEARS the N B you are over by" was wrong twice over: the
+        # playbook's step 2 is a MOVE that must leave a POINTER behind, so the
+        # bytes are not recovered at face value; and `retracted` is by
+        # construction bullets in a Gotchas section, which that same playbook says
+        # stay. The note now promises only what step 1 recovers and reports step 2
+        # beside it, uncounted — so no row is both promised and prohibited, and
+        # the itemisation reconciles with the total instead of exceeding it.
+        step1 = [r for r in rows if r[4] == 1]
+        step2 = [r for r in rows if r[4] == 2]
+        out = ["  Evictable in THIS doc, measured:"]
+        for label, b, n, unit, _s in step1:
+            out.append(f"    {label:<24}{b:>9,} B  ({n} {unit}{'' if n == 1 else 's'})"
+                       f"  — step 1, evict")
+        if not step1:
+            out.append("    (nothing has CLOSED — step 1 recovers nothing here)")
+
+        # 🔴 UNION, NOT SUM — `audit_text`'s `gross` adds the four buckets without
+        # unioning their line ranges, and one block can land in two of them (an
+        # H3 matching both RESOLVED_HEAD and WORK_STATUS). Measured: 7 of 851
+        # handoff docs under ~/workspace overlap, worst overstatement 42.6%. That
+        # is tolerable in a REPORT and not here, because this line promises
+        # "CLEARS the N B you are over by" — an author who evicts everything named
+        # and is still red got the one outcome worse than saying nothing.
+        # Round 1 of #1815, F5. `audit_text`'s own `gross` is left alone: it is a
+        # report number with its own tests, and this is the consumer that makes a
+        # promise out of it.
+        # 🔴 THE BUCKETS DO NOT SHARE A TUPLE SHAPE, and assuming they did was a
+        # defect in the FIRST draft of this union: `retracted` is a 3-tuple
+        # `(start, end, bytes)` while `resolved`/`dated` are `(title, start, end,
+        # bytes)` and `done` is `(rank, start, end, bytes, is_done)`. Blindly
+        # indexing [1],[2] read `retracted`'s END and BYTES as a line range, and
+        # because this whole body is wrapped in a `except (Exception, SystemExit)`
+        # the resulting IndexError would have DELETED THE NOTE SILENTLY rather
+        # than failing loudly. Caught by a control that re-derived each bucket's
+        # byte count from its own range. Indices are explicit and pinned by
+        # `test_the_union_indices_match_each_buckets_tuple_shape`.
+        # 🔴 A TRUE INTERVAL UNION, AND THE THIRD ATTEMPT AT THIS NUMBER. The
+        # history is kept because each wrong version looked right:
+        #   round 1 (F5) added a union over all four buckets — correct, because
+        #     `resolved` and `dated` can hold the SAME block.
+        #   round 2 narrowed the COUNTED set to step 1 = {resolved, done}, which
+        #     left the union guarding a pair that (then) never overlapped.
+        #   round 3 DELETED the union on the claim that those two are
+        #     "structurally disjoint — `resolved` is blocks under
+        #     `## Open investigations`, `done` is items under `## Next steps`".
+        # 🔴 THAT CLAIM IS FALSE, and round 4 produced the counterexample.
+        # `NEXT_STEPS` and `INVESTIGATIONS` are two REGEXES tested with `if` /
+        # `if` over the SAME heading list (`handoff-audit.py`), not two headings —
+        # so ONE H2 can match both. `## Open investigations / next steps` does
+        # exactly that and exists in this corpus
+        # (`claudedocs/archive/handoff-browser-bridge-gates-and-deploys-2026-08-02.md`).
+        # A resolved `### ` block holding a done ranked item is then booked in
+        # BOTH step-1 buckets, and summing them promised 1,746 B out of a 1,048 B
+        # document — round 1's F5 outcome verbatim: evict everything named and
+        # still be red. Reproduced, and pinned by
+        # `test_a_heading_matching_BOTH_step1_detectors_is_not_double_counted`.
+        # ⚠ The re-add trigger is NOT "a new bucket joins step 1" (round 3's
+        # wording); it is a DOCUMENT putting investigations and ranked items under
+        # one heading, which needs no code change at all.
+        lines = merged_text.splitlines(keepends=True)
+        spans = sorted((x[AUDIT_SPAN_INDEX[k][0]], x[AUDIT_SPAN_INDEX[k][1]])
+                       for k in ("resolved", "done") for x in a[k])
+        merged_spans: list[list[int]] = []
+        for s_, e_ in spans:
+            if merged_spans and s_ <= merged_spans[-1][1]:
+                merged_spans[-1][1] = max(merged_spans[-1][1], e_)
+            else:
+                merged_spans.append([s_, e_])
+        step1_b = sum(len("".join(lines[s_:e_]).encode()) for s_, e_ in merged_spans)
+        net = max(0, step1_b - mod.RESUME_COST * len(a["done"]))
+        # 🔴 NET, and the shortfall is stated rather than implied. Quoting a gross
+        # number that does not actually clear the overage sends an author cutting
+        # and leaves them still red — the one outcome worse than saying nothing.
+        if net >= over_by > 0:
+            out.append(f"    → {net:,} B net, which CLEARS the {over_by:,} B you are over by.")
+        elif over_by > 0:
+            out.append(f"    → {net:,} B net, which does NOT clear the {over_by:,} B you are "
+                       f"over by; steps 2-4 of the playbook cover the rest.")
+        else:
+            out.append(f"    → {net:,} B net available before you need the ladder at all.")
+        # 🔴 CONDITIONAL, and the unconditional version was a real defect (round 0,
+        # F4): it explained a charge that had not been applied, on a note whose
+        # whole argument is that a line printing every time is a line nobody
+        # reads. `net` is only charged for completed RANKS, so the sentence
+        # belongs only when that row is present.
+        if any(label == "completed ranked items" for label, *_ in step1):
+            out.append("    Net of 200 B per evicted rank: the NUMBER must stay (it is "
+                       "half a claim-work slug).")
+        # Reported, never promised: step 2 is a MOVE to `refs/` that must leave a
+        # pointer, so these bytes are not recovered at face value — and the
+        # playbook keeps gotchas in the doc. Counting them toward "CLEARS" is the
+        # defect this split fixes; naming them is still useful.
+        # 🔴 PER BUCKET, because the two step-2 buckets take OPPOSITE advice and a
+        # single trailer necessarily mis-states one of them. Round 2 replaced the
+        # blanket "never a delete" line with a blanket "step 2 MOVES dated
+        # evidence to refs/" — which, on a doc whose only step-2 content is
+        # `retracted`, told the author to move the gotchas the playbook keeps.
+        # That is round 1's F4 in a third spelling, and it is why this is split.
+        # 🔴 `retracted` is NOT prescribed either way: the playbook lists
+        # "superseded or retracted reasoning" as demotable AND says gotchas stay
+        # in the doc, and these bullets are BOTH by construction. The tool states
+        # the tension and leaves the call to the author rather than resolving a
+        # contradiction it has no standing to resolve.
+        counted_spans = {(x[AUDIT_SPAN_INDEX[k][0]], x[AUDIT_SPAN_INDEX[k][1]])
+                         for k in ("resolved", "done") for x in a[k]}
+        for label, b, n, unit, _s in step2:
+            key = "retracted" if label.startswith("retracted") else "dated"
+            i, j = AUDIT_SPAN_INDEX[key]
+            dup = any((x[i], x[j]) in counted_spans for x in a[key])
+            advice = ("JUDGEMENT: the playbook calls retracted reasoning demotable AND "
+                      "keeps gotchas in the doc; these are both"
+                      if key == "retracted" else
+                      "MOVE to `claudedocs/refs/<topic>.md`, leave a pointer")
+            out.append(f"    ALSO {label:<21}{b:>9,} B  ({n} {unit}{'' if n == 1 else 's'})"
+                       f"  — step 2, NOT counted above")
+            out.append(f"         {advice}"
+                       + ("  ⚠ the SAME block already counted above" if dup else ""))
+        return "\n".join(out)
+    except (Exception, SystemExit):
+        # 🔴 `SystemExit` IS NOT AN `Exception` — it derives from BaseException,
+        # and `handoff-audit.py`'s own `_load_sibling()` raises exactly that, at
+        # MODULE level, when `scripts/skill-audit.py` is missing. So a bare
+        # `except Exception` left the one import failure this function is most
+        # likely to meet uncaught, on the WRITE PATH, where it kills the write
+        # `budget_warning` is only decorating. Round 1 of #1815, F3.
+        # KeyboardInterrupt is deliberately NOT caught: a human interrupting the
+        # write must still interrupt it.
+        return ""
 
 
 def budget_warning(relpath: str, merged_text: str, base_text: str, *,
@@ -2864,6 +3077,9 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
     if after > allowance:
         which = ("its grandfathered allowance" if grandfathered
                  else "the handoff-document ceiling")
+        # Computed ONCE: `evictable_note` execs the auditor module, so calling it
+        # twice to test-then-use would pay that twice on the write path.
+        note = evictable_note(merged_text, after - allowance)
         return "\n".join([
             f"🔴 THIS UPDATE PUTS THE DOC OVER ITS SIZE BUDGET: {after:,} B "
             f"against {which} of {allowance:,} B, over by {after - allowance:,} B "
@@ -2874,6 +3090,7 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
             "number is LAST: evict what has CLOSED (usually the whole answer), then "
             "demote dated evidence to `claudedocs/refs/<topic>.md` leaving a pointer, "
             "then split by initiative.",
+            *([note] if note else []),
             "  🔴 Do NOT satisfy it by deleting an open investigation, a gotcha or a "
             "ruled-out theory — those are the sections whose whole value is that a "
             "future session does not repeat the work.",
@@ -2900,9 +3117,24 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
                 "red `main`." if gated else
                 "no gate enforces it here, so this is a note about readability, "
                 "not a deadline.")
-        return (f"⚠ Size: {after:,} B of {allowance:,} B "
+        head = (f"⚠ Size: {after:,} B of {allowance:,} B "
                 f"({sign}{delta:,} B this update) — {headroom:,} B left. The next "
                 f"update or two will go over; {tail}")
+        # 🔴 GATED ONLY, for the ungated arm's stated reason: outside devrc the
+        # ladder has no authority, and a breakdown keyed to its step 1 would be
+        # prescribing where that arm deliberately only reports. Here it is the
+        # CHEAPEST moment to act — the tail above says so — so the number belongs.
+        note = evictable_note(merged_text, 0) if gated else ""
+        if note:
+            # 🔴 ONE COPY PER ARM. The over-budget arm states this prohibition in
+            # its own block; round 3 put a second copy inside the note, which
+            # made that arm print two near-identical 🔴 lines two lines apart —
+            # the "a line that prints every time is a line nobody reads" failure
+            # this module argues against (round 4, 🟢-3). The near arm carried
+            # NONE after round 2 moved it, so it gets its own here.
+            note += ("\n    🔴 Do NOT satisfy a budget by deleting an open investigation, "
+                     "a gotcha or a ruled-out theory.")
+        return f"{head}\n{note}" if note else head
     return ""
 
 

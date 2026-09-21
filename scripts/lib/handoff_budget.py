@@ -35,6 +35,18 @@ import math
 # and the exact ledger line to paste; that is the authority.
 MAX_BYTES = 65_536
 
+# 🔴 WHERE THE GATE THAT ENFORCES `MAX_BYTES` LIVES, relative to a repo root.
+# It is HERE, beside the number it enforces, because two tools must answer "does
+# a gate read THIS repo?" and a second copy is how they come to disagree:
+# `handoff_doc.gate_enforces_budget()` re-exports it, and `handoff-audit.py`
+# resolves it against each AUDITED root. That distinction is the whole point —
+# asking whether the file exists next to the SCRIPT answers a question about the
+# script's own checkout and is true in every devrc clone, which made the banner
+# claim a gate for corpora nothing enforces (round 1 of #1815, F1). The cost of
+# that class is recorded in `gate_enforces_budget`'s own docstring: civitai/cli
+# #618, 35,517 B evicted against a gate that could not see the repo.
+GATE_RELPATH = "scripts/tests/test_handoff_doc_size.py"
+
 # The quantum a grandfathered allowance is rounded up to. See "WHY THE ALLOWANCE
 # IS QUANTISED" above. One step is ~1.2 median documents, so it is a real
 # working margin rather than a rounding artefact.
