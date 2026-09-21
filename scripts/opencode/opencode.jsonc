@@ -140,6 +140,12 @@
     "max_bytes": 24576
   },
 
+  // Insert pasted text inline instead of collapsing it to `[Pasted ~N lines]`
+  // (trigger: >=3 lines or >150 chars; upstream thresholds are hardcoded).
+  "experimental": {
+    "disable_paste_summary": true
+  },
+
   "watcher": {
     "ignore": [
       "node_modules/**",
