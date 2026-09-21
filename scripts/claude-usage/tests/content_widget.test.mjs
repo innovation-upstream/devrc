@@ -439,8 +439,11 @@ function cssRules(src) {
 
 /** Every class content_widget.js puts on the CARD element itself when the
  * snapshot is stale: `card.className = "card" + (model.stale ? " stale" : "")`.
- * Nothing else is on that element, which is what makes the subset test below
- * a statement about the card rather than about a spelling. */
+ * That assignment is the element's whole class list in this state, which is
+ * what makes the subset test below a statement about the card rather than
+ * about a spelling. ⚠ It is the STALE card only -- the DEAD card is built by
+ * a different writer (`box.className = "card dead"`), so `dead` is not
+ * missing from this list, it is out of its scope. */
 const CARD_CLASSES = ["card", "stale"];
 
 /** Would this selector match the stale CARD ELEMENT itself?

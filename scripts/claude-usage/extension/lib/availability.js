@@ -410,6 +410,17 @@ export function isActiveRecord(record, accounts, lastActiveOrg) {
  * ⚠ A free row with no usable weekly reading is "ok", not "unknown". The
  * verdict itself is the affirmative claim being made; amber would report doubt
  * about the one row the operator is meant to act on.
+ *
+ * ⚠ THE VERDICT OUTRANKS STALENESS, and that now reaches the CARD. `blocked`
+ * returns "crit" and `free` returns its band above, both BEFORE the stale
+ * check below -- and widget.js:381 routes the non-exempt card headline
+ * through this same call, so a stale non-exempt card takes the row's colour
+ * where it used to grey. Nothing about the card's staleness is withdrawn:
+ * `model.stale` is unchanged and content_widget.js:261 still puts `.stale`
+ * on it, so what renders is a DIMMED card with a SATURATED dot rather than a
+ * dimmed card with a grey one. Greying it back would give one record two
+ * colours across the card and the row again; widget.test.mjs pins the pair on
+ * a stale free and a stale blocked record.
  */
 export function toneForRow(record, verdict, isStaleFn, now) {
   const state = verdict && verdict.state;

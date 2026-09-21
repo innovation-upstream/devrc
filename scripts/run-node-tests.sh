@@ -401,7 +401,34 @@ SUITES=(
   #           = 14 - min(50, 1) = 14 - 1 = 13 (unchanged);
   # tests: 257 - min(50, max(1, 257/20)) = 257 - min(50, max(1, 12.85))
   #           = 257 - min(50, 12.85) = 257 - 12.85 = 244.15 -> 245.
-  "scripts/claude-usage/tests|13|245"
+  #
+  # Re-measured 2026-09-20 after round 4. The file COUNT did not move;
+  # 257 -> 258, +1:
+  #   +1  R4-1 -- routing the non-exempt card headline through `toneForRow`
+  #       also transferred that function's rule that the VERDICT outranks
+  #       STALENESS (availability.js returns "crit" for BLOCKED and the free
+  #       band for FREE, both before its stale check). That is what makes the
+  #       card agree with the row, but no test pinned it: the R3-F1 test's
+  #       card-vs-row pair uses a fixture measured 1h ago, so staleness was a
+  #       pinned constant and the suite was structurally blind to it.
+  #       MEASURED: the mutant `tone: exempt ? toneFor(...) : (stale ?
+  #       "stale" : toneForRow(...))` -- the "fix" a maintainer writes on
+  #       seeing a saturated dot on a dimmed card -- passed all 257 tests,
+  #       silently re-opening the card-vs-row colour split. One test, carrying
+  #       the same colour-pair assertion on a FREE and on a BLOCKED record
+  #       measured 8h ago against the 6h STALE_AFTER_MS, plus one INVARIANT
+  #       GUARD that the exempt card still greys on staleness.
+  # The three prose corrections in the same commit (widget.js's "no longer
+  # colours anything", README's "two consumers", content_widget.test.mjs's
+  # "nothing else is on that element") are reword-only and move no count.
+  # MEASURED by this runner: 14 files / 258 tests. Floors, by the formula at
+  # the top of this block (this runner prints no replacement of its own --
+  # only the pytest one does):
+  # files: 14 - min(50, max(1, 14/20)) = 14 - min(50, max(1, 0.7))
+  #           = 14 - min(50, 1) = 14 - 1 = 13 (unchanged);
+  # tests: 258 - min(50, max(1, 258/20)) = 258 - min(50, max(1, 12.9))
+  #           = 258 - min(50, 12.9) = 258 - 12.9 = 245.1 -> 246.
+  "scripts/claude-usage/tests|13|246"
   # The clickup skill's hermetic gates (help-coverage: showUsage() is complete;
   # state-paths: no state path resolves inside the read-only skill dir,
   # including a structural seam walk over every module in the tree; js-source:

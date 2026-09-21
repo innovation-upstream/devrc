@@ -129,12 +129,17 @@ session window reset 2h ago at 95% and the weekly window reset 30m ago at
 stored record: the card's verdict was `free`, its session row read
 `AVAILABLE` in green, and its headline was **`crit`** — a red pill for a free
 account — while the same record's other-account row, same storage and same
-`now`, was `ok`. Both card reads now go through the verdict for a non-exempt
-record. The two consumers that still read the record raw are the ones the
-exemption names: the card of the **active** account (the probe re-measures it
-within seconds) and the **toolbar badge**, which reads
-`accounts[lastActiveOrg]` and nothing else, so it is only ever about that same
-active account.
+`now`, was `ok`. Both card *colour* reads now go through the verdict for a
+non-exempt record. Three consumers still read the record raw: the card of the
+**active** account (the probe re-measures it within seconds) and the
+**toolbar badge**, which reads `accounts[lastActiveOrg]` and nothing else, so
+it is only ever about that same active account — both of them the ones the
+exemption names — plus the collapsed **pill's text**, `pill: pillText(record)`
+at `lib/widget.js:385`, which is not exempt and is not a colour. It shows the
+last measured session percentage on a non-exempt free record; that is
+deliberate, for the same reason the rows keep their raw values, and whether a
+percentage is the right thing to show there is undecided (the code says so at
+that line).
 
 ⚠ **There is no `+N more` cap.** The widget drew at most four other-account
 rows and summarised the rest as a count that nothing could expand, so any row

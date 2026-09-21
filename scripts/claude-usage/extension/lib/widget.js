@@ -604,8 +604,9 @@ function blockedUntil(v, now) {
  * "resets soon" with a countdown and left the row RED, because the row's tone
  * was a second, separate raw read. That half is closed: the tone above now
  * bands `verdict.weeklyBindingPct` for a non-exempt record, so a spent weekly
- * percentage no longer colours anything. Reading this note as covering the
- * colour is what made it look shut; it never did.
+ * percentage no longer colours a NON-EXEMPT row. The exempt branch of that
+ * same `rowTone` call still bands `wkPct` raw. Reading this note as covering
+ * the colour is what made it look shut; it never did.
  *
  * NOT FIXED HERE, deliberately. A previous round left the weekly window's
  * elapsed-reset shape alone reasoning that "a weekly countdown renders only

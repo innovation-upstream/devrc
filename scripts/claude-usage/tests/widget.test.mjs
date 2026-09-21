@@ -760,6 +760,77 @@ test("🔴 REGRESSION: the CARD's headline tone is not reddened by evidence its 
     "the weekly row's string residue changed; re-derive the sweep rather than editing it");
 });
 
+test("🔴 REGRESSION: a STALE non-exempt card takes the row's colour -- the verdict outranks staleness", () => {
+  // The same card-vs-row colour pair as the test above, on the ONE dimension
+  // that one holds constant. Its fixtures are all measured 1h ago, so
+  // staleness is a pinned constant there and the suite could not see this.
+  //
+  // 🔴 WHAT THIS EXISTS TO STOP. Routing the card headline through
+  // `toneForRow` also transferred that function's rule that the VERDICT
+  // outranks staleness -- `availability.js` returns "crit" for BLOCKED and
+  // the free band for FREE, both BEFORE its stale check. That is what makes
+  // the card agree with the row, and it is invisible: `model.stale` is still
+  // true, content_widget.js still puts `.stale` on the card, so the card is
+  // still DIMMED. Only the dot changes, from grey to saturated. A maintainer
+  // reading that as a bug writes
+  //     tone: exempt ? toneFor(...) : (stale ? "stale" : toneForRow(...))
+  // which re-opens the card-vs-row split this whole change exists to close.
+  // MEASURED: that mutant passed all 257 tests before this one existed.
+  //
+  // Both fixtures are measured 8h ago against a 6h STALE_AFTER_MS -- past it
+  // by a margin, and not a multiple of it, so neither sits on the boundary.
+  const STALE_H = 8;
+  const pairFor = (r, uuid) => {
+    const active = acct(ORG_A, NAME_A, 37, 8, iso(NOW + 3 * HOUR), 0);
+    const other = W.widgetModel(active, NOW, {
+      accounts: { [ORG_A]: active, [uuid]: r }, lastActiveOrg: ORG_A,
+    }).others[0];
+    return { card: ghostCard(r, uuid), other };
+  };
+
+  // FREE and stale. Watched RED at 3f0a5506: card "stale", row "ok".
+  // The raw session 93 would band "warn" and the raw staleness "stale"; the
+  // verdict is free, so the card bands the weekly 23 like the row does.
+  const freeStale = acct(ORG_B, NAME_B, 93, 23, iso(NOW - 2 * HOUR), STALE_H);
+  const free = pairFor(freeStale, ORG_B);
+  assert.equal(free.card.rows[0].value, "AVAILABLE", "precondition: the verdict is free");
+  assert.equal(free.card.stale, true, "precondition: the card is still flagged stale");
+  assert.equal(free.other.state, "free", "precondition: the row under test is free");
+  assert.equal(free.card.tone, free.other.tone,
+    `stale FREE record: card "${free.card.tone}" vs other-account row `
+    + `"${free.other.tone}" for one record at one now`);
+  assert.equal(free.card.tone, "ok",
+    `a stale free card painted "${free.card.tone}" -- the verdict must outrank staleness`);
+
+  // BLOCKED and stale. Watched RED at 3f0a5506: card "stale", row "crit".
+  // The percentages are CALM here on purpose, so only the verdict can
+  // produce "crit" -- a mutant banding the raw record cannot land on it.
+  const blockedStale = acct(ORG_C, NAME_C, 31, 64, iso(NOW - 3 * HOUR), STALE_H, (r) => {
+    r.weekly.lockedReason = "Weekly limit reached.";
+  });
+  const blocked = pairFor(blockedStale, ORG_C);
+  assert.equal(blocked.card.rows[0].value, "BLOCKED", "precondition: the verdict is blocked");
+  assert.equal(blocked.card.stale, true, "precondition: the card is still flagged stale");
+  assert.equal(blocked.other.state, "blocked", "precondition: the row under test is blocked");
+  assert.equal(blocked.card.tone, blocked.other.tone,
+    `stale BLOCKED record: card "${blocked.card.tone}" vs other-account row `
+    + `"${blocked.other.tone}" for one record at one now`);
+  assert.equal(blocked.card.tone, "crit",
+    `a stale blocked card painted "${blocked.card.tone}" -- a greyed-out lock reads as "no `
+    + 'current reading", not as "you cannot use this account"');
+
+  // ⚠ INVARIANT GUARD (green at 3f0a5506): the ACTIVE account keeps the raw
+  // read, staleness included. Its exemption is not conditioned on freshness
+  // here, and withdrawing it would split the card from the toolbar badge.
+  const activeStale = acct(ORG_A, NAME_A, 31, 64, iso(NOW - 3 * HOUR), STALE_H, (r) => {
+    r.weekly.lockedReason = "Weekly limit reached.";
+  });
+  assert.equal(
+    W.widgetModel(activeStale, NOW,
+      { accounts: { [ORG_A]: activeStale }, lastActiveOrg: ORG_A }).tone,
+    "stale", "the exempt card stopped greying on staleness");
+});
+
 test("🔴 REGRESSION: a weekly-blocked account is sorted BELOW a usable one", () => {
   // Watched RED at b97190c8: the blocked account read "free" and took row 1,
   // above an account at 12% that actually works.
