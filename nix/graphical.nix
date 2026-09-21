@@ -629,6 +629,45 @@ let
       { button = "left"; cmd = "${scriptsDir}/i3status-gamemode --toggle"; }
     ];
   };
+  # stt-voice (BOTH hosts): the state pill for hold-to-talk voice input.
+  #   idle / unreadable ->  empty (hidden — CALM-bar rule; the hotkey is
+  #                         always available, so a hidden pill needs no
+  #                         off-state affordance, unlike gamemode's)
+  #   recording         ->  ` 󰍬 REC 42s ` Critical
+  #   transcribing      ->  ` 󰍬 stt … `  Warning
+  #   error             ->  ` 󰍬 stt! `   Critical
+  #
+  # STATE IS THE TOOL'S, READ-ONLY. scripts/i3status-stt reads
+  # ~/.cache/stt-voice/state.json — one local file per tick, no poller, no
+  # network — and the Go tool (stt-voice, on PATH via nix/pkgs/tools)
+  # signals `pkill -RTMIN+20 i3status-rs` after every state write, so
+  # transitions are instant without a poller. While recording the tool's
+  # supervisor signals once per second so the elapsed count ticks; `interval`
+  # is only a backstop (a crashed supervisor's state is repaired by the
+  # script's own kill -0 check). Signal 20 is the next free real-time signal
+  # (10-14, 16-17 poller, 15 notifs, 18 gamemode, 19 runaways) — pinned
+  # UNIQUE across every block and the poller by test_i3_stt_voice.py.
+  #
+  # 🔴 A DEAD PID HIDES THE PILL. A recording row carries the supervisor's
+  # pid; the script's kill -0 check maps a dead pid to idle, so a crashed
+  # recorder can NEVER leave a stale red REC pill (the bar-side half of the
+  # repair; the Go tool repairs its own reads too).
+  #
+  # 🔴 UNCONDITIONAL on purpose, in BOTH places — this entry and the
+  # `home.file` below. Hold-to-talk works on any host with a mic and the i3
+  # hotkey (BOTH hosts carry the $mod+m pair in nix/i3/config.nix); gating
+  # only ONE of the two is what ships a block pointing at a script that was
+  # never deployed. NOT isLaptop-gated, per the feature spec.
+  sttBlock = {
+    block = "custom";
+    command = "${scriptsDir}/i3status-stt";
+    json = true;
+    interval = 30;
+    signal = 20;
+    click = [
+      { button = "left"; cmd = "${scriptsDir}/i3status-stt --toggle"; }
+    ];
+  };
   # runaways: workbench only. Count of runaway processes (sustained high CPU),
   # as decided by `scripts/syshealth` — the poller renders that verdict and owns
   # no predicate of its own. Hide-at-zero; red when >0.
@@ -736,7 +775,7 @@ let
     ++ lib.optionals (!isLaptop) [ airvpnBlock runawaysBlock ]
     ++ [ timeBlock ]
     ++ lib.optionals (!isLaptop) [ claudeRunsBlock rigcontrolBlock ]
-    ++ [ gamemodeBlock notifsBlock ];
+    ++ [ gamemodeBlock notifsBlock sttBlock ];
 in
 lib.mkIf isNixOS {
   programs.i3status-rust = {
@@ -849,6 +888,17 @@ lib.mkIf isNixOS {
   # `command`, a broken click is invisible until someone tries it mid-game.
   home.file.".config/i3status-rust/scripts/i3status-gamemode" = {
     source = ../scripts/i3status-gamemode;
+    executable = true;
+  };
+  # stt-voice: see `sttBlock` above. UNCONDITIONAL, matching the block's
+  # presence in the unconditional half of `blocks` — a narrower gate here
+  # than there means a host renders a `custom` block whose command does not
+  # exist. It is ALSO the block's own left-click target (`… --toggle`), so a
+  # narrower gate would ship a pill that renders on a host where clicking it
+  # does nothing — and unlike a broken `command`, a broken click is invisible
+  # until someone tries it mid-recording.
+  home.file.".config/i3status-rust/scripts/i3status-stt" = {
+    source = ../scripts/i3status-stt;
     executable = true;
   };
   # load: see `loadBlock` above. UNCONDITIONAL, matching the block's presence in

@@ -190,6 +190,23 @@
       };
 
       # ---------------------------------------------------------------------
+      # stt-voice — hold-to-talk voice input (nix/pkgs/tools/stt-voice). Same
+      # overlay pattern as mention-review: the derivation is LOCAL to this
+      # repo, so the overlay makes `pkgs.stt-voice` resolve for every
+      # consumer at once — `nix/pkgs/tools/default.nix` (the deployed binary
+      # on PATH) and `checks.gotests` (whose vendor copy must be THE set the
+      # binary is built from).
+      #
+      # 🔴 IT CAN EVALUATE TO `null`, for the same reason mention-review's
+      # can: the version is read out of the Go source, and a derivation that
+      # cannot state truthfully what it is building is not installed (the
+      # consumer in tools/default.nix filters nulls).
+      # ---------------------------------------------------------------------
+      sttVoiceOverlay = final: _prev: {
+        stt-voice = import ./nix/pkgs/tools/stt-voice { pkgs = final; };
+      };
+
+      # ---------------------------------------------------------------------
       # opencode held at 1.18.29 because 1.18.30 cannot run a prompt at all.
       # The full measurement, the upstream issue and the removal recipe are on
       # the `nixpkgs-opencode-1_18_29` input above — read that before touching
@@ -215,7 +232,7 @@
       pkgs = import nixpkgs {
         inherit system;
         config.allowUnfree = true;
-        overlays = [ mentionReviewOverlay opencodePinOverlay ];
+        overlays = [ mentionReviewOverlay sttVoiceOverlay opencodePinOverlay ];
       };
       # Same allowUnfree treatment for the frozen 1.57 nixpkgs — the browser
       # bundle is unfree there too, and an --impure fallback would make the
@@ -803,9 +820,15 @@
             export GOCACHE="$TMPDIR/go-build"
             export GOPATH="$TMPDIR/go"
             # The vendor tree, copied WRITABLE — the store copy is read-only and
-            # the go tool wants to stat/lock inside it.
+            # the go tool wants to stat/lock inside it. ONE COPY PER MODULE:
+            # both modules are built by buildGoModule from their own go.sum,
+            # and a tier that vendors a DIFFERENT dependency set than the
+            # binary it ships would compile different code with nothing
+            # saying so.
             cp -r ${pkgs.mention-review.goModules} src/nix/pkgs/tools/mention-review/src/vendor
             chmod -R u+w src/nix/pkgs/tools/mention-review/src/vendor
+            cp -r ${pkgs.stt-voice.goModules} src/nix/pkgs/tools/stt-voice/src/vendor
+            chmod -R u+w src/nix/pkgs/tools/stt-voice/src/vendor
             export GOFLAGS="-mod=vendor"
             export GOPROXY=off
             cd src
