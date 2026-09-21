@@ -115,7 +115,8 @@ neither.
   per-extension **Site access** setting (`Details` → `Site access`), which
   the browser holds per profile and which can differ between machines
   running the identical build. The laptop's fix cleared injections there
-  the same day; the workbench stayed blind until its own fix.
+  the same day; **the workbench is still blind pending its own fix** —
+  check the host you are on before trusting either half of this sentence.
 - **Recovery (operator, ~30 s, on the host you are driving):**
   `brave://extensions` → Browser Bridge (command channel) → `Details` →
   **Site access** → **On all sites**. If still refused: reload ↻ the
