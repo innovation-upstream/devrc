@@ -9,7 +9,7 @@ Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md` (`reference/…` paths
 below resolve from that bridge dir).
 
 Measured live 2026-09-20 on the laptop's `work` instance
-(`/client/T05SM1Z372B/C095BTGHK5G`, #datapacket-civit). The running client is
+(`/client/<teamId>/<channelId>`, `#<channel>`). The running client is
 Slack's NEW app (`html` root carries `data-app="client-v2"`) — the old
 `data-qa=virt-list-item` / `message-input` selectors are GONE (counted 0).
 
@@ -52,7 +52,7 @@ CSP. The deterministic alternatives, in order:
 - A wake'd `text` read of a channel IS the thread-activity summary: each
   thread-bearing message block reads `<body> → "N replies" → "Last reply <age>
   ago" → "View thread"`. Enumerate those blocks for "recent thread activity"
-  without opening anything (measured on #datapacket-civit: the recent window
+  without opening anything (measured on the same channel: the recent window
   carried a 7-replies thread, last reply 24 days, and a 3-replies thread,
   last reply 6 days).
 - Thread CONTENT is not in the main channel DOM — the drawer is its own flow
@@ -78,8 +78,8 @@ CSP. The deterministic alternatives, in order:
 ## Workspace switching
 
 - The deterministic lane is open-by-URL:
-  `https://app.slack.com/client/<teamId>/<channelId>` (the live one is
-  `T05SM1Z372B`). ⚠ UNMEASURED: the workspace-switcher UI flow (the rail's
+  `https://app.slack.com/client/<teamId>/<channelId>` (read the live ids from
+  the operator's live tab url). ⚠ UNMEASURED: the workspace-switcher UI flow (the rail's
   workspace button → picker) — measure before driving it on the live tab.
 
 ## 🔴 Secrets

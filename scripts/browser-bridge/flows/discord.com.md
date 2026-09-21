@@ -10,7 +10,7 @@ Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md` (`reference/…` paths
 below resolve from that bridge dir).
 
 Measured live 2026-09-20 on the laptop's `work` instance (channel
-`/channels/<guild>/<channel>`, `#notes`). Facts below were each reproduced with
+`/channels/<guild>/<channel>`). Facts below were each reproduced with
 the bridge op named beside them; anything not yet reproduced is `⚠`.
 
 ---
@@ -22,7 +22,7 @@ channel lane — the URL carries everything, so no channel-list clicks are
 needed. The guild rail and channel list are NOT reliable to drive blind: the
 sidebar tree renders near the viewport, and unread markers live in
 `aria-label`s, not text (`js` saw `[role=treeitem]` = 44 nodes whose labels
-read "Unread messages, Civitai Internal" etc.). To find a guild/channel id:
+read "Unread messages, <guild name>" etc.). To find a guild/channel id:
 read the current url from `context`, or search from the user's own Discord.
 
 ## Reads: hidden vs wake'd

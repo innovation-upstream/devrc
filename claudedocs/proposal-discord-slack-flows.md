@@ -1,7 +1,9 @@
 # Proposal: flows for Discord and Slack (browser-bridge)
 
-Derived from live recon 2026-09-20 (workbench, instance `work`, extension build
-`66b98084daecd880` current). Companion to the flows rename
+Derived from live recon 2026-09-20 (workbench, instance `work` — messaging ops
+only, since injection was refused on every host that day; the seed docs' page
+reads ran on the laptop's `work` instance after the operator's Site-access fix;
+extension build `66b98084daecd880` current). Companion to the flows rename
 (`reference/sites/` → `flows/`, field `site_notes` → `site_flows`).
 
 ## Measured current state
@@ -9,7 +11,7 @@ Derived from live recon 2026-09-20 (workbench, instance `work`, extension build
 - Bridge connected and current; messaging ops (`health`/`tabs`/`context`/`ping`)
   all answer.
 - **Discord tab is live**: `https://discord.com/channels/<guild>/<channel>`
-  (`#notes`, "Zacx's server"); title shape `(3685) Discord | #notes | …` — the
+  (`#<channel>`, `<guild>`); title shape `(N) Discord | #<channel> | …` — the
   leading `(N)` is the unread badge.
 - **No Slack tab is open** in this instance — `app.slack.com` will need one
   (either Zach opens it, or we `open https://app.slack.com/client` into an owned
