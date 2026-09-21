@@ -48,15 +48,27 @@ notifications and repo browse are dropped.
   doc had that wrong, and a kickoff line propagated it.** Its branch predated three of the
   parent's newest commits (`b17cf93f`, `26228216`, `17b6ff96`), so it conflicted against its own
   base before `main` ever entered it. Merged parent-tip-then-`main` in a throwaway worktree.
-- ✅ **Merged tree verified locally: `648 passed, 2 skipped in 99.51s`** across
-  `test_mention_open` + `test_mention_scan` + `test_mutation_battery_anchors`, at base
-  `6ee5ff68`. That is **8 ABOVE the 640/2 the pre-`#1813` tree gives** — a number that did not
-  move would mean the branch's own tests never ran. ⚠ **Dev-host tier ONLY**; the `nix build`
-  sandbox tier that Tekton runs was NOT run here, and the two are blind to different things.
+- ✅ **Merged tree verified locally: `648 passed, 2 skipped`** across `test_mention_open` +
+  `test_mention_scan` + `test_mutation_battery_anchors`, at base `6ee5ff68`. That is **7 above
+  the `641 passed, 2 skipped` the pre-`#1813` tree gives** — a number that did not move would
+  mean the branch's own tests never ran. Collection: **643 → 650**. ⚠ **Dev-host tier ONLY**;
+  the `nix build` sandbox tier that Tekton runs was NOT run here, and the two are blind to
+  different things.
+  🔴 **AN EARLIER VERSION OF THIS BULLET SAID `640/2` AND A DELTA OF 8, AND IT WAS FALSE —
+  I COPIED IT OUT OF THIS DOC'S OWN `How to verify` BLOCK INSTEAD OF MEASURING IT.** That
+  block's `640 passed / 2 skipped; collection … = 642` was true of an OLDER tree and had gone
+  stale; restating it beside a freshly measured 648 dressed a stored number as a measurement.
+  Caught by `/audit-pr` round 0 on `#1820`, which measured 641/2 two ways; confirmed here by a
+  third full run and by collection counts. **This doc already carries the general rule — "A
+  STORED MEASUREMENT IS NOT A LIVE ONE" — and the trap is that the stored number was in THIS
+  FILE, where it reads as the project's own answer rather than as a claim to re-derive.**
 - ⚠ **(A) SHIPPED NARROWER THAN OPTION (A) AS WRITTEN — rank only, no class column**
-  (`a70839af`). Option (A) offered *"class **and/or** rank"*. Measured: the click-time class of
-  the picked row is `below` **56** vs `plausible` **17**, so a class column would read "the
-  ranker does not trust this" on the WANTED row ~3 times in 4.
+  (`a70839af`). Option (A) offered *"class **and/or** rank"*; shipping both was the implementer's
+  reading, and `/audit-pr` round 0 logged the class field as UNATTRIBUTED. **The OPERATOR chose
+  rank** — that is the author of record for the narrowing, and a sha is not. Measured: the
+  click-time class of the picked row is `below` **56** vs `plausible` **17**, so a class column
+  would read "the ranker does not trust this" on the WANTED row ~3 times in 4. 🔴 **Do not
+  "restore" the class column on the strength of that deviation** — it was declined, not omitted.
 - ⚠ **`#1812` MERGED WITHOUT ITS ROUND-3 DELTA AUDIT, AND THE LADDER'S OWN RULE SAYS A CLEAN
   ROUND ENDS IT — round 2 was NOT clean.** The merge followed this doc's rank 1 and the
   operator's kickoff, and the round-3 item was `forcing: none`/advisory; recording it so the
@@ -114,32 +126,17 @@ notifications and repo browse are dropped.
 - **Next probe:** open a throwaway PR in a scratch repo and drive `c` (comment) then `m`
   (merge) against it. **Operator-only** — an agent must not run a live write verb.
 
-### 🔴 The 422's actual cause was never determined — the response body is unrecoverable
-- as-of: 2026-09-18
-- **Symptom + exact repro:** operator pressed `m` on devrc#1760 from the laptop and the screen
-  showed only "unprocessable entity". Not reproducible now — the PR is merged.
-- **Observed (with values):** `~/.config/mention-open/picks.jsonl` on the laptop records two
-  OPENS of `innovation-upstream/devrc#1760`, at `2026-09-18T01:56:05Z` and `01:56:50Z`. PR #1758
-  merged at `01:56:30Z` (moving `main`); #1760 merged at `01:58:42Z`. So both opens bracket a
-  base-branch move by 25 s before / 20 s after.
-- **Ruled out:** a read failure — the GraphQL panel query and `GET /pulls/N/files?per_page=100`
-  both succeeded against devrc at the time. via: measurement
-- **Ruled out:** a merge-method problem — devrc enables squash, merge AND rebase
-  (`gh api /repos/.../devrc`), and the laptop has no `~/.config/mention-review/config.json`, so
-  the declared default `squash` was used. via: measurement
-- **Ruled out:** that the timeline PROVES base-recompute — it does not. `picks.jsonl` is a
-  repo-resolution pick log (`scripts/mention-open.py:138`, one line per repo picked); it records
-  no keypress and no write outcome, so two entries prove two OPENS, not two merge presses.
-  via: code
-- 🔴 **NOT established: which verb produced the text.** A failed merge renders as
-  `FAILED — MergePR: ERROR — <detail>` in the NOTICE bar (`internal/ui/write.go:311-313`), not as
-  a card; the GraphQL `Fetch` path is the one that draws a card. The operator's report names the
-  merge, and that is the only evidence for the verb. via: code
-- **Leading hypothesis:** a merge dispatched into GitHub's post-base-move mergeability recompute.
-  Consistent with the timeline; **not** measured, because the 422 body was never captured.
-- **Next probe:** none available retrospectively — the body is gone. The shipped renderer now
-  surfaces `errors[]`, so **the next occurrence names its own reason**. If it recurs, capture the
-  card verbatim before anything else; that single string settles this block.
+### EVICTED — the 422 diagnosis block (2026-09-21, byte ceiling)
+- The 2026-09-18 block "The 422's actual cause was never determined". 🔴 Evicted by `/audit-pr`
+  round 0 on `#1820`, which measured it as the doc's last CLOSED-but-retained block (1,168 B)
+  while headroom was 1,294 B. Its conclusion is already carried above: the 422 arc is CLOSED
+  (`#1761` → `1ff1bd6e`, the renderer discarded `errors[]`). Its ruled-outs — a read failure, a
+  merge-method problem, and that the `picks.jsonl` timeline PROVES base-recompute (it does not:
+  two entries prove two OPENS, not two merge presses) — are in `git log -p` on this file.
+- 🔴 **THE ONE LIVE INSTRUCTION IT CARRIED, KEPT because eviction must not delete it:** the cause
+  was never established and the body is unrecoverable, but the shipped renderer now surfaces
+  `errors[]`, so **the next occurrence names its own reason. If it recurs, capture the card
+  verbatim before anything else** — that single string settles it.
 
 ### 🔴 Why right-aligning the rank marker moves fzf's ranking — MECHANISM UNKNOWN
 - as-of: 2026-09-20
@@ -164,16 +161,20 @@ notifications and repo browse are dropped.
   at constant digits AND width ⇒ it is in fzf's scorer, worth reporting upstream.
 
 ## Next steps (ranked)
-1. **Merge `#1813` once its four Tekton legs report on head `8c5fda78`.** Last step of symptom 1
-   and of the arc. Then `scripts/ship.sh`, and verify by CONTENT — `bin/mention-review` is a
-   `makeWrapper` script, so grep the WRAPPED binary with a positive control first. Repo: devrc.
-   IN FLIGHT: devrc#1813. 🔴 **Read the legs on THAT sha** — this branch has never had CI on any
-   head, so there is no prior green to lean on, and the repo's measured red rate is ~42% noise:
-   read the failing test's NAME and ask whether a 3-file picker diff can reach it before
-   debugging. ⚠ The base branch was **auto-deleted by a repo setting** when `#1812` merged (not
-   by a `--delete-branch` flag) and `#1813` retargeted to `main` rather than closing — the
-   stacked-parent hazard did not fire, but do not read that as the rule having protected it.
-   forcing: user — the operator chose (D) then (A) on 2026-09-20; this PR is that decision.
+1. **SHIP symptom 1 to both hosts and verify it by CONTENT.** ✅ The merge half is CLOSED —
+   `#1813` merged as `7f39fda7` off head `8c5fda78` with all four Tekton legs green
+   (`pytests` collected **23,831**, up 28 from `#1812`'s 23,803, so the branch's own tests
+   demonstrably ran). What REMAINS is `scripts/ship.sh` and the verification, which had not been
+   done when this was written. Repo: devrc. 🔴 **Read every per-host line, never the final
+   verdict** — one skip hides among greens. 🔴 **`--version` cannot answer "is it deployed"**:
+   `bin/mention-review` is a `makeWrapper` script, so follow `exec -a` to
+   `bin/.mention-review-wrapped` and grep THAT, positive control first. ⚠ The picker half
+   (`scripts/mention-open.py`) is live with **no switch** — the Alacritty wrapper execs the
+   working tree — so a `git pull` of the primary clone already activates it; the switch is for
+   the Go binary. ⚠ Do not ship while an agent is mid-run in this repo: a switch blanks
+   `~/.nix-profile` for ~31–35 s and every bare-command invocation dies "command not found".
+   forcing: user — the operator chose (D) then (A) on 2026-09-20; shipping is that decision
+   reaching the machine they actually use.
 2. **Round 3 delta audit of `#1813`, scoped to round 2's fixes plus the two merge commits.**
    Round 2 returned findings, so the ladder's rule says another round follows; a clean round
    ends it. Range is now `2f9af4f8..8c5fda78` (was `..9c4bb252`) and **includes `b116179f` +
@@ -194,9 +195,12 @@ notifications and repo browse are dropped.
 - 🔴 **NO `LICENSE` FILE WHILE THE DERIVATION CLAIMS MIT** —
   `nix/pkgs/tools/mention-review/default.nix:146` declares `licenses.mit` with nothing backing
   it, and the repo is PUBLIC.
-- 🔴 **181+ agent worktrees registered in this clone**, oldest 2026-08-13; a stale worktree
-  holds its branch repo-globally. `scripts/worktree-prune` exists; not run. ⚠ This session added
-  **two more** (`/tmp/devrc-rank-T2Xs`, `/tmp/devrc-handoff-1kIX`) — remove them.
+- 🔴 **Agent worktrees accumulate in this clone and a stale one holds its branch repo-globally.**
+  🔴 **NO COUNT WRITTEN HERE** — every count this bullet has carried went stale within hours
+  (`181+` was already `348` registered when `/audit-pr` round 0 re-derived it), and unlike
+  `drift-check.sh` rc 17 below there is **no deadman**: `scripts/worktree-prune` exists but no
+  timer runs it. Count it yourself — `git -C $DEVRC worktree list --porcelain | grep -c '^worktree '`
+  — then run the pruner.
 - 🔴 **TEST-ISOLATION SEAM: every `ranges=` test in `test_mention_open.py` consumes
   `MO.PICKS_PATH`, which no autouse fixture redirects** — they read the operator's real
   `~/.config/mention-open/picks.jsonl`. Found by `/audit-pr` round 4, **pre-existing**, inert
@@ -707,49 +711,25 @@ notifications and repo browse are dropped.
   has grown reads `plausible` retrospectively. **Mechanism likely, NOT proven:** no historical
   table snapshots exist.
 
-- 🔴 **A SQUASHED PARENT RE-PRESENTS THE *SAME* CONFLICTS TO THE CHILD, AND THAT IS NOT A FAILED
-  RESOLUTION.** Merging the parent TIP into `#1813` conflicted in ONE file; committing that and
-  then merging `origin/main` conflicted in the **same three regions again**, because the squash
-  commit is not an ancestor of the parent-branch commits the child had just merged, so the merge
-  base fell back to old `main` and every parent-side hunk was re-offered. The two-step is still
-  right — parent-tip-first cut the conflict surface from **four files to one** — but budget for
-  resolving twice, and expect the second pass to be mechanical (*take HEAD*) only because the
-  first pass already decided the content.
-- 🔴 **THE ONLY REAL CONFLICT WAS SEMANTIC, AND *BOTH* SIDES WERE FALSE ON THE MERGED TREE —
-  taking either would have shipped a wrong comment through a clean `git` resolution.** The pty
-  readiness comment in `_fzf_interactive_first_row`:
-  - the parent's text says *"On THIS tree … round 2 got ZERO failures over 80 prompt-only
-    observations — so the rate does NOT reproduce here"*. True of the PARENT tree, where
-    `_eponymous_corpus` is a hardcoded f-string (`f"github 1234 — …/{r}/pull/1234"`) carrying
-    **no marker**. On the merged tree that corpus derives its rows from `picker_rows()` and calls
-    `MO.stamp_picker_markers`, so it **is** the marker-carrying corpus where the race was
-    measured biting 11–12 of 20. Verbatim it tells a maintainer the race does not bite in the one
-    file where it was measured biting.
-  - HEAD's text says the race is *"pre-existing, not something the row marker opened"*. The
-    parent's marker-free **0-of-80** is evidence against that.
-  **Resolved by scoping each measurement to its own corpus and WITHDRAWING the causal claim
-  rather than substituting a second one:** the marker's WIDTH is demonstrably not the variable
-  (12 of 20 at the shipped 5-byte rank-only width vs 11–12 at the ~16-byte class+rank one), but
-  0-of-80 and 12-of-20 differ by the *whole* change of corpus and nothing isolates the marker
-  inside it. `claude/RULES.md`'s "a clean git merge is not a clean merge", with the luck of
-  surfacing as a real conflict instead of auto-merging silently.
-- **Verify a conflict resolution by re-reading BOTH sides of a two-way pin, not just the file you
-  edited.** `PICKER_SH` (module) and `EXPECTED_PICKER_SH` (test) are pinned against each other by
-  `test_the_picker_SHELL_SCRIPT_stays_the_shape_it_is_pinned_to`, and the squash offered the same
-  conflict in EACH — resolving one and not the other is a red that reads like a payload bug. Both
-  resolved to `--nth=2..`, then re-grepped side by side.
+- 🔴 **THE PTY READINESS COMMENT IS SCOPED TO ITS CORPUS, AND THE TWO CORPORA DISAGREE — do not
+  "simplify" it back to one number.** `_fzf_interactive_first_row`'s comment now states the
+  prompt-only race rate against the corpus each reading was taken on, because `#1812`'s and
+  `#1813`'s texts contradicted each other on the merged tree. Here `_eponymous_corpus` derives
+  its rows from `picker_rows()` and calls `MO.stamp_picker_markers`, so it CARRIES the rank
+  marker and the rate is **11–12 of 20**; on the pre-`#1813` tree it was a hardcoded marker-free
+  f-string and `/audit-pr` round 2 measured **0 of 80**. The marker's WIDTH is not the variable
+  (12/20 at the shipped 5-byte rank-only width vs 11–12 at the ~16-byte class+rank one); what
+  separates the two readings is the whole change of corpus, and **nothing isolates the marker
+  inside it** — so the comment records that as unknown rather than naming a cause.
 - **`rerere` is enabled in this clone (`rerere.enabled=true`), and this doc already records it
   replaying a resolution from a different merge.** Disable it **per command**
   (`git -c rerere.enabled=false merge …`) — NEVER `git config --local`, because worktree config
-  writes the **common** git dir and would change the shared clone for every session.
-- **Check the docs in a stacked merge's conflict set explicitly.** Here both auto-merged to
-  byte-identical copies of `main`'s (`git diff origin/main -- <doc>` empty for each), which is the
-  good case — but this doc has an enforced byte ceiling, and one that merged to a UNION of two
-  versions would breach it without touching a line of code.
-- ⚠ **`gitenv(session)` printed `unattributed-observations=3` on a clean run** — `.git/config`
-  changed between tests with no test body running, and it could not attribute the write because
-  other sessions' processes sit in the repo. `attributed-violations=0`, mode `report(auto)`. A
-  REPORT, not a failure, and the expected shape on a shared box.
+  writes the **common** git dir and would change the shared clone for every session. 🔴 This is
+  the ONE lesson from that merge not already covered by `claude/RULES.md`; the others (squash vs
+  ancestry, a clean merge that is not a clean merge, two-way pins, stacked-merge doc checks) are
+  `RULES.md` §Git Workflow and the cairn `devrc/scripts` entry. **They were written out HERE and
+  cut by `/audit-pr` round 0** — 66% of that update's growth, into a doc whose own 🔴 rule 68
+  lines above says methodology goes to cairn. Do not re-add them.
 
 ## How to verify
 ```bash
@@ -766,7 +746,10 @@ gh api "/repos/innovation-upstream/devrc/commits/${H}/statuses" \
   --jq '.[] | "\(.context)\t\(.state)\t\(.updated_at)"' | sort -u
 
 # The suite on the merged tree, scope NAMED so the number reproduces: 648 passed / 2 skipped at
-#   base 6ee5ff68 — ABOVE the 640/2 the pre-#1813 tree gives, which is the point.
+#   base 6ee5ff68 (collection 650) — ABOVE the 641/2 (collection 643) the pre-#1813 tree gives,
+#   which is the point. 🔴 RE-DERIVE BOTH SIDES; do not copy either forward. The figure that
+#   stood here before was 640/2 and 642 collected, true of an older tree and stale by the time
+#   it was quoted beside a fresh number.
 nix develop $DEVRC -c python3 -m pytest \
   $DEVRC/scripts/tests/{test_mention_open,test_mention_scan,test_mutation_battery_anchors}.py -q
 
