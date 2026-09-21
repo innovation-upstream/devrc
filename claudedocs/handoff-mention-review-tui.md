@@ -117,24 +117,14 @@ notifications and repo browse are dropped.
   ceiling and the playbook says evict what has CLOSED before anything else — the
   surviving RESOLVED blocks carry both outcomes. History: `git log -p` this file.
 
-### 🔴 No write verb has ever executed against real GitHub
-- as-of: 2026-09-16
-- **Symptom + exact repro:** n/a — an untested path in shipped code, not a defect. The five
-  write verbs are exercised only against in-process fakes and `httptest`.
-- **Observed (with values):** the whole Go suite (231 tests) passes inside `nix build`'s
-  **network-less sandbox**, which is itself the proof no test reaches a real host. Four
-  additional locks: `App.runner` is `nil` in pure tests; the one end-to-end test asserts the
-  write ledger is *exactly* `[PostComment … body="ok"]`; `http.DefaultTransport` is replaced in
-  both network-reaching packages by a loopback-only transport; `cmd/*` is exempt with a stated
-  reason. **I verified the transport lock myself** — disarming it yields
-  `the guard let a request to api.github.com THROUGH`.
-- **Ruled out:** that the guard is vacuous — mutated it and watched the negative control fire.
-  ⚠ My FIRST mutant did not compile (orphaned `fmt`), which is not a result; a compiling
-  variant is what produced the kill. via: measurement
-- **Leading hypothesis:** none. `LiveRunner`'s three delegations and `ghapi`'s three endpoints
-  are plain code paths that have simply never run live.
-- **Next probe:** open a throwaway PR in a scratch repo and drive `c` (comment) then `m`
-  (merge) against it. **Operator-only** — an agent must not run a live write verb.
+### DEMOTED (still OPEN) — no write verb has ever executed against real GitHub
+- as-of: 2026-09-16 · **full block: `claudedocs/refs/mention-review-write-verbs-untested.md`**
+- 🔴 **NOT CLOSED — demoted, not evicted**, to leave this doc usable headroom. All five write
+  verbs (`c`/`a`/`R`/`v`/`m`) are exercised only against fakes; the Go suite runs in a
+  network-less sandbox, which is itself the proof nothing reaches a real host.
+- **Next probe: OPERATOR-ONLY.** Open a throwaway PR in a scratch repo and drive `c` then `m`.
+  🔴 An agent must not press a write key — they act on real GitHub as the operator. This is
+  why the item cannot close on its own.
 
 ### EVICTED — the 422 diagnosis block (2026-09-21, byte ceiling)
 - The 2026-09-18 block "The 422's actual cause was never determined". 🔴 Evicted by `/audit-pr`
@@ -172,10 +162,11 @@ notifications and repo browse are dropped.
    config (operator, 2026-09-21). `nix-instantiate --parse` OK; gotests `RESULT: PASS` 386,
    `SCOPE: FULL`, with the file inside `cleanSource`. Repo: devrc. IN FLIGHT: devrc#1828.
    forcing: security — a PUBLIC repo asserting a licence grant nobody had made.
-3. **Correct `proposal-mention-picker-visibility.md` once `#1829` lands.** §(B) attributes
-   below-dominance to a bad class term and explicitly rules out staleness; that is refuted
-   below. Leaving it steers the next session into demoting a term that is doing real work.
-   Repo: devrc.
+3. **Correct ONE SENTENCE in `proposal-mention-picker-visibility.md` once `#1829` lands** — the
+   `and **not** a stale-table artifact` clause in §(B), a wrong-clock error (refuted below).
+   🔴 **Nothing else there is wrong.** §(B) is the **`--no-sort`** option and the 54/17 table is
+   the evidence the operator REFUSED it on — NOT a diagnosis that the class term is bad;
+   demoting that term appears once, at `:272-278`, already **NOT DIAGNOSED**. Repo: devrc.
    ⚠ **Renumbering note, carried:** ranks here have been renumbered twice, each time against a
    MEASURED empty claim set (`claim-work --list` showing no live `mention-review-tui-*`). The
    rank is half a claim's identity — never renumber without that check.
@@ -721,8 +712,11 @@ notifications and repo browse are dropped.
   lines above says methodology goes to cairn. Do not re-add them.
 
 - 🔴 **`below`-DOMINANCE WAS A STALE-TABLE ARTIFACT, NOT A BAD SORT KEY AND NOT ClickUp IDS —
-  the proposal's rank-1 finding was MISATTRIBUTED, and its rebuttal of staleness is a
-  NON-SEQUITUR.** The argument that settles it is logical, not statistical: `CLASS_BELOW`
+  and the proposal's rebuttal of staleness is a NON-SEQUITUR.** ⚠ **An earlier draft also
+  called the proposal's finding MISATTRIBUTED; that was MY error** (round 0 on `#1829` caught
+  it) — the proposal never diagnosed the class term as bad, and **exactly one sentence there
+  is wrong**: the staleness clause. I mischaracterised it while charging it with
+  mischaracterisation. The mechanism argument is logical: `CLASS_BELOW`
   requires `max_ref < N`, so if a mention points at a **real, existing** item then the repo's
   TRUE max at click time was necessarily ≥ N. Click-time BELOW can therefore ONLY come from
   (a) a stale `known_ranges.json` or (b) a wrong repo. **Measured: of 100 distinct `(repo, n)`
@@ -750,11 +744,8 @@ notifications and repo browse are dropped.
   and re-measured the fastest over 31 days at 39.0/day, landing on `RANGE_GROWTH_PER_DAY =
   40.0`. A margin built on my number would have under-covered by 2.5×. **"One measurement is
   not a general claim" — committed by the briefer, caught by the implementer.**
-- ⚠ **Two `gh` instrument traps met while measuring this are in the CAIRN INDEX, not here**
-  (`devrc/scripts`, 2026-09-21) — per this doc's own routing rule: `gh pr diff <n> -- <path>`
-  silently ignores the pathspec, and an existence check built on `gh api --jq` reports EXISTS
-  for every 404 because the error body goes to stdout. Both were caught by controls, and the
-  second needed a NEGATIVE one.
+- ⚠ **Two `gh` instrument traps from this work are in cairn, not here** — `devrc/scripts`
+  2026-09-21, rev `610596953ba16646`.
 
 ## How to verify
 ```bash
