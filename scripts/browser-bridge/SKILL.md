@@ -42,14 +42,12 @@ ASSERT a non-zero content count in any `js` measurement. It also never sees
 ## 🔴 FLOWS: read the site's BEFORE acting on it
 
 Before the first click/type/js/upload/agent on any host, read
-`flows/<host>.md`, under `~/workspace/devrc/scripts/browser-bridge/`. Resolve
-it: a tab op's envelope carries `site_flows` naming the exact file (off a
-fresh `nav`, not a later `context` — committed urls lag), or pre-op
-look the host up in `flows/_index.json` (host-suffix keys, longest wins).
-Neither = none; absence means nothing. It holds that site's multi-step flows
-(sign-in, account switch, pickers, wizards) and the reads that lie there —
-skipping it is how a one-click flow gets reported to the operator as a
-blocker.
+`flows/<host>.md` in `scripts/browser-bridge/`. Resolve it: a tab op's envelope
+carries `site_flows` naming the exact file (off a fresh `nav`, not a later
+`context` — committed urls lag), or pre-op look the host up in
+`flows/_index.json` (host-suffix keys, longest wins). Neither = none;
+absence means nothing. It holds multi-step flows and the reads that lie
+there — skip it and a one-click flow gets reported as a blocker.
 
 ## Ops
 
@@ -60,8 +58,7 @@ split an unquoted `$F`). ⚠ an export outlives the call — env-routed ops say 
 on stderr.
 A toolbar-icon click copies `bw://<host>/<instance>/<tabId>` — one token that IS
 `--instance`+`--tab`, either side of the op; host verified; a foreign ref RUNS
-there over ssh (unreachable → rc 4 + paste). `<ref> context`
-resolves one. 🔴 For
+there over ssh (unreachable → rc 4 + paste). 🔴 For
 `type`/`js`/`eval`/`agent` it is a reference only BEFORE the op — after it, it is
 the text/goal you send. `agent` refuses a LEADING one, `--tab` and `--frame`.
 Result payloads land under `.result.data`.
@@ -124,7 +121,7 @@ users?" needs server-side evidence (RUM, metrics, pod health, anonymous `curl`).
 Their real browser, not a scratch VM: don't `nav` a tab that may hold unsaved work
 (a half-typed comment, a form) — `open` your own, or an obviously disposable one.
 Anything that takes their screen (`activate`, X-fallback) is governed by RULES.md
-→ "The Operator's Screen Is Not Yours To Take", which loads every session; the
+→ "The Operator's Screen Is Not Yours To Take"; the
 record/restore commands → `reference/spa-wake.md`.
 
 ## Reference files — load ONE only when its trigger fires
