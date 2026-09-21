@@ -354,7 +354,7 @@ let
     driver = "auto";
     format = " $icon $volume ";
   };
-  # airvpn: the HOST-level AirVPN WireGuard tunnel (the whole workbench routes
+  # airvpn: the HOST-level AirVPN WireGuard tunnel (the whole host routes
   # through AirVPN). REPLACES the decommissioned host Mullvad block. Default-OFF,
   # toggled from the menu. Credential-free render (reads ~/.cache/bar-status/
   # airvpn.json written by the poller's `airvpn` source); signal 10 (inherited
@@ -363,7 +363,11 @@ let
   # `AirVPN CC` when up+verified, RED on a leak, yellow on a down forwarded port,
   # soft-yellow `VPN?` on poller-stale. Left-click opens airvpn-menu (Connect/
   # Disconnect / switch server / verify exit-IP / forwarded-port / TUI); right-click
-  # floats the airvpn-detail TUI. WORKBENCH-ONLY (the tunnel + poller are there).
+  # floats the airvpn-detail TUI. On the WORKBENCH the cache writer is the
+  # poller's `airvpn` source; on the LAPTOP it is the dedicated
+  # `airvpn-status-poll` service (below) — each host's pill describes the
+  # tunnel of the machine it sits on. The laptop's tunnel is armed in
+  # `roaming` mode by nix/system/apply-airvpn-laptop.sh.
   airvpnBlock = {
     block = "custom";
     command = "${scriptsDir}/i3status-airvpn";
@@ -377,7 +381,8 @@ let
   };
   # Decoupled status-count blocks. The six GLOBAL-SERVICE ones render on BOTH
   # hosts (the laptop from a synced cache); only their CLICKS are workbench-only,
-  # because the targets are LAN-bound. airvpn + runaways stay workbench-only. These NEVER query a remote
+  # because the targets are LAN-bound. runaways stays workbench-only; airvpn
+  # renders on BOTH (each host's own tunnel). These NEVER query a remote
   # system per bar tick — they read a small JSON cache file written every ~45s by
   # the bar-status-poll systemd user timer (see below) and render it instantly, so
   # a slow/down source can never hang the bar. CALM: each is empty+invisible at
@@ -710,29 +715,13 @@ let
     ];
   };
 
-  # remote-airvpn: the workbench's HOST AirVPN pill, MIRRORED as its own
-  # laptop item from the same snapshot the `wb` pill reads. The rollup shows a
-  # block only while it is ALARMING — and `i3status-airvpn`'s steady states are
-  # icon-only — so a down tunnel was invisible there and the laptop had no
-  # airvpn item at all. The mirror renders the remote verdict verbatim
-  # (text, state and icon; the gather carries the glyph through). No thresholds
-  # here, for the same reason remoteHostBlock states above: the verdict comes
-  # from the remote bar's own command. Click → remote-host-detail, which is
-  # laptop-safe (no LAN target).
-  remoteAirvpnBlock = {
-    block = "custom";
-    command = "${scriptsDir}/i3status-remote-host --host workbench --block i3status-airvpn";
-    json = true;
-    interval = 30;
-    click = [
-      { button = "left"; cmd = remoteHostDetailCmd; }
-      { button = "right"; cmd = remoteHostDetailCmd; }
-    ];
-  };
+  # remote-airvpn (the PR #1839 mirror) is REMOVED: the laptop now runs its OWN
+  # host AirVPN tunnel + status writer and gets the REAL airvpnBlock below —
+  # a relayed mirror of the wrong machine's tunnel is worse than none.
 
   blocks =
     [ memoryBlock diskBlock scratchpadsBlock netBlock cpuBlock loadBlock temperatureBlock ]
-    ++ lib.optionals isLaptop [ remoteHostBlock remoteAirvpnBlock ]
+    ++ lib.optional isLaptop remoteHostBlock
     ++ lib.optional (!isLaptop) fansBlock
     ++ lib.optional (!isLaptop) gpuBlock
     ++ lib.optional isLaptop batteryBlock
@@ -751,11 +740,13 @@ let
     # client prod, and `bar_freshness` ages the synced payload exactly as it
     # would a local poll.
     ++ [ telemetryBlock alertsBlock civitaiBlock mailBlock clawgateBlock mediaBlock ]
-    # airvpn + runaways stay workbench-only: those ARE host-local facts. The
-    # laptop sees airvpn through BOTH the relayed `wb` rollup (alarms only)
-    # and the dedicated `remoteAirvpnBlock` mirror above (every steady state,
-    # icon included); runaways stays folded into the `wb` pill.
-    ++ lib.optionals (!isLaptop) [ airvpnBlock runawaysBlock ]
+    # airvpn + runaways: host-local facts, one bar each. The workbench's pills
+    # are its own; the LAPTOP now runs its own AirVPN tunnel + status writer and
+    # gets its own airvpnBlock below — the runaways fact stays folded into the
+    # `wb` pill there. `i3status-airvpn` stays in RELAY_BLOCKS, so the wb rollup
+    # still carries the WORKBENCH tunnel's alarms on the laptop.
+    ++ lib.optionals (!isLaptop) [ runawaysBlock ]
+    ++ lib.optional isLaptop airvpnBlock
     ++ [ timeBlock ]
     ++ lib.optionals (!isLaptop) [ claudeRunsBlock rigcontrolBlock ]
     ++ [ gamemodeBlock notifsBlock ];
@@ -819,7 +810,11 @@ lib.mkIf isNixOS {
   # i3 config — raw string. INERT until the system cutover (apply-i3-to-hm.sh).
   xdg.configFile."i3/config".text = import ./i3/config.nix { inherit isLaptop; };
 
-  # Host AirVPN block scripts (workbench-only), symlinked beside the generated TOML.
+  # Host AirVPN block scripts, symlinked beside the generated TOML — BOTH hosts.
+  # 🔴 WIDENED FROM `mkIf (!isLaptop)`: the laptop now runs its OWN host AirVPN
+  # tunnel (nix/system/apply-airvpn-laptop.sh) with the same block, menu, detail
+  # TUI and server manifest — reading a cache written by its own
+  # `airvpn-status-poll` writer (service + timer below), not the workbench poller.
   # airvpn-sudo is deliberately NOT symlinked here — it must stay at the stable,
   # sudoers-trusted /etc/nixos/i3blocks-scripts/airvpn-sudo path (a nix-store path
   # would break the NOPASSWD rule + change every rebuild), exactly like the old
@@ -827,19 +822,19 @@ lib.mkIf isNixOS {
   # (~/.cache/bar-status/airvpn.json) + the committed server manifest; no secret in
   # the store. The manifest is symlinked into scripts/data/ so airvpn-menu resolves
   # it relative to its own dir (MANIFEST = <script dir>/data/airvpn-servers.json).
-  home.file.".config/i3status-rust/scripts/i3status-airvpn" = lib.mkIf (!isLaptop) {
+  home.file.".config/i3status-rust/scripts/i3status-airvpn" = {
     source = ../scripts/i3status-airvpn;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/airvpn-menu" = lib.mkIf (!isLaptop) {
+  home.file.".config/i3status-rust/scripts/airvpn-menu" = {
     source = ../scripts/airvpn-menu;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/airvpn-detail" = lib.mkIf (!isLaptop) {
+  home.file.".config/i3status-rust/scripts/airvpn-detail" = {
     source = ../scripts/airvpn-detail;
     executable = true;
   };
-  home.file.".config/i3status-rust/scripts/data/airvpn-servers.json" = lib.mkIf (!isLaptop) {
+  home.file.".config/i3status-rust/scripts/data/airvpn-servers.json" = {
     source = ../scripts/data/airvpn-servers.json;
   };
   home.file.".config/i3status-rust/scripts/disk-detail" = {
@@ -1187,6 +1182,57 @@ lib.mkIf isNixOS {
     Timer = {
       OnStartupSec = "20s";
       OnUnitActiveSec = "45s";
+    };
+    Install = {
+      WantedBy = [ "timers.target" ];
+    };
+  };
+
+  # airvpn-status-poll — LAPTOP ONLY. The laptop runs no bar-status-poll (no
+  # LAN path to the polled endpoints), but its own host-AirVPN pill needs a
+  # cache writer. This 60s oneshot loads the workbench poller BY PATH
+  # (~/workspace/devrc, kept converged by ship.sh) and runs its
+  # run_source("airvpn", fetch_airvpn) — the SAME fetch/verdict/stale/carry/
+  # write code, one source. It signals the bar (SIGRTMIN+10), so the pill
+  # refreshes within a second of a Connect/Disconnect.
+  #
+  # 🔴 DELIBERATELY NOT a second bar-status-poll: the timer runs ONE source, so
+  # it cannot fight bar-remote-pull's install_poller_cache — the pull writes the
+  # six global-service caches into the same directory but NEVER airvpn.json
+  # (pinned by test_airvpn_laptop.py). The local_poller_is_running probe checks
+  # `bar-status-poll.timer`, which stays inactive here, correctly.
+  #
+  # Without the apply script's sudoers rule installed, `sudo -n airvpn-sudo
+  # status` fails cleanly and the pill reads "tunnel deliberately off" — never
+  # a fake all-clear.
+  systemd.user.services.airvpn-status-poll = lib.mkIf isLaptop {
+    Unit = {
+      Description = "Poll the laptop's host-AirVPN tunnel state → ~/.cache/bar-status/airvpn.json";
+    };
+    Service = {
+      Type = "oneshot";
+      TimeoutStartSec = 60;
+      # /run/wrappers/bin first for the setuid `sudo` wrapper: the writer runs
+      # `sudo -n airvpn-sudo status` (read-only `wg show`, NOPASSWD).
+      Environment = [
+        "PATH=/run/wrappers/bin:${lib.makeBinPath [ pkgs.python3 pkgs.iproute2 pkgs.coreutils ]}"
+        "HOME=%h"
+      ];
+      ExecStart = "${pkgs.python3}/bin/python3 %h/workspace/devrc/scripts/airvpn-status-poll";
+      X-Restart-Triggers = [
+        "${../scripts/airvpn-status-poll}"
+        "${../scripts/bar-status-poll}"
+        "${../scripts/airvpn-menu}"
+      ];
+    };
+  };
+  systemd.user.timers.airvpn-status-poll = lib.mkIf isLaptop {
+    Unit = {
+      Description = "Periodic timer for the laptop's AirVPN bar-status writer";
+    };
+    Timer = {
+      OnStartupSec = "30s";
+      OnUnitActiveSec = "60s";
     };
     Install = {
       WantedBy = [ "timers.target" ];

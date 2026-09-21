@@ -1835,6 +1835,9 @@ POLLER_LOADING_TESTS = {
                            "NOT patch the toast seam — PATH fixture only",
     "test_bar_url.py":     "loads the poller for _bar_url_action; does NOT patch "
                            "the toast seam — PATH fixture only",
+    "test_airvpn_laptop.py": "loads the poller to pin the WRITER identity: its "
+                             "airvpn-status-poll tests monkeypatch run_source "
+                             "in-process and launch nothing — PATH fixture only",
 }
 
 
@@ -1879,6 +1882,14 @@ def test_the_module_loader_scan_can_actually_find_something(tmp_path):
 # assembles its patterns — which keeps THIS file inside the scan's scope instead
 # of excluding it, so a real clobber added here would still be caught.
 PINNED_PATH_CLOBBERS = {
+    "test_airvpn_laptop.py": (
+        'PATH=":"' + '.join(dirs)',
+        "The airvpn-updown roaming tests run the REAL killswitch script under "
+        "STUB ip/wg/nft binaries, so the stub dir must come first in PATH and "
+        "the ambient PATH must not leak past it. Every retained entry is "
+        "resolved with shutil.which from the ambient PATH itself (no hardcoded "
+        "store/system path), so the clobber is the hermeticity control, not a "
+        "launcher: the script's only side effects are recorded by the stubs."),
     "test_tmux_reply_agent.py": (
         'PA' + 'TH=os.path.dirname(tmux_exe)',
         "task 524. The site is a FIXTURE, not a launcher: it reproduces the "

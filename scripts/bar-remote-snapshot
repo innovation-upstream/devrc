@@ -283,14 +283,6 @@ def run_block(command: str, env: dict, is_json: bool = True) -> dict:
         state=payload.get("state", "Idle"),
         rc=proc.returncode,
     )
-    # The glyph, though, DOES travel: `i3status-airvpn`'s steady states are
-    # icon-only (`{"text": ""}` when the tunnel is down), so a mirror pill
-    # rendering one relayed block verbatim would collapse to nothing without
-    # it. Carried only when present, so plain-text and failed entries keep
-    # their old shape.
-    icon = payload.get("icon")
-    if icon:
-        out["icon"] = icon
     return out
 
 
