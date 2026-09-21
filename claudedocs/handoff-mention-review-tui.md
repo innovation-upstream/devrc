@@ -22,42 +22,74 @@ notifications and repo browse are dropped.
 ## State now
 - 🔴 **THE ARC IS CLOSED** — the operator used `mention-review` for a real review **on a real
   screen** and reported **"done, working"** (2026-09-18); that is the `judgement` line this doc
-  froze at round 1. ⚠ **Stated at the scope of the evidence:** the condition also says *"beats
-  octo at reading a diff"*, and `"done, working"` carries no comparison. Pre-existing gap.
+  froze at round 1. ⚠ The condition also says *"beats octo at reading a diff"*, and
+  `"done, working"` carries no comparison. Pre-existing gap.
 - ✅ **CARRIED FORWARD — durable, would otherwise be dropped by the next replace:**
   `#1793` → `cee56910` (picker promotion, THREE gates narrower than authorised: promotes only
   when the ordering RAN, its top row is not already the pane guess, and that row is
   `CLASS_PLAUSIBLE` **and** uniquely separated) · `#1781` → `8d0984ba` · `#1772` → `2b131bf2` ·
-  `#1773` → `97c20d06` · `#1775` → `66e51d90`. 🔴 **`--version` CANNOT distinguish builds** —
-  verify by content with a positive control. **The picker is live with NO switch** — the
-  Alacritty wrapper execs `scripts/mention-open.py` from the WORKING TREE.
-- ✅ **SYMPTOM 1 — the arc's one unmet objective — IS DECIDED AND IMPLEMENTED.** Operator,
-  2026-09-20: **(D) then (A), (B) REFUSED**. Two STACKED PRs, both OPEN:
-  - **`#1812`** head **`b17cf93f`**, base `main`, `MERGEABLE`, **all four Tekton legs green**.
-    Payload is ONE executable line: `--bind="esc:print-query+abort"`, so an ESC records `queried`.
-  - **`#1813`** head **`9c4bb252`**, base is **`#1812`'s branch, not `main`**. **No CI posted on
-    that head — ABSENT, not green.** Every row carries its RANK (`1`,`2`,… / `-` unranked /
-    `?` unstamped-bug), `--nth=2..` keeping the marker out of fzf's haystack.
-  - 🔴 **DO NOT `gh pr merge --delete-branch` #1812 while #1813 is open** — GitHub auto-closes
-    a PR whose base branch is deleted and REFUSES to reopen it.
-- ⚠ **(A) SHIPPED NARROWER THAN OPTION (A) AS WRITTEN — rank only, no class column.** Option (A)
-  offered *"class **and/or** rank"*; shipping both was the implementer's reading, and `/audit-pr`
-  round 0 logged the class field as UNATTRIBUTED. Operator chose rank. Measured: the click-time
-  class of the picked row is `below` **56** vs `plausible` **17**, so a class column would read
-  "the ranker does not trust this" on the WANTED row ~3 times in 4.
-- ✅ **AUDIT LADDER RUN TO ROUND 2 ON BOTH PRs** (round 0 requirements/deletion, round 1 nine
-  axes blind, round 2 delta). Round-1 `audit-claims` blocks are POSTED on both (`payload=31` on
-  #1812, `payload=71` on #1813; classification decided once — payload is `scripts/mention-open.py`,
-  scaffolding is `scripts/tests/**` and `claudedocs/**`). **Both round 2s found things needing
-  fixing, so NEITHER ladder returned a clean round.** All findings fixed and pushed. Suites:
-  #1812 `650 passed / 2 skipped`, #1813 `657 / 2`, dev-host tier only — not a gate verdict.
-- **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5**. Its positive control
-  shows the board is reachable, but a wrong session id also answers 200 with an empty array, so
-  this is NOT a clean bill of health.
-- 🔴 **THIS SESSION'S METHODOLOGY LESSONS ARE IN THE CAIRN INDEX, NOT HERE** — `devrc/scripts`
-  and `devrc/tests`, both 2026-09-21, carrying the fzf contract (abort is FOUR keys; bind ACTION
+  `#1773` → `97c20d06` · `#1775` → `66e51d90` · **`#1812` → `6ee5ff68`**. 🔴 **`--version`
+  CANNOT distinguish builds** — verify by content with a positive control. **The picker is live
+  with NO switch** — the Alacritty wrapper execs `scripts/mention-open.py` from the WORKING TREE.
+- ✅ **SYMPTOM 1 — the arc's one unmet objective — IS DECIDED AND HALF-LANDED.** Operator,
+  2026-09-20: **(D) then (A), (B) REFUSED**.
+  - **`#1812` MERGED as squash `6ee5ff68` (2026-09-21)**, `--delete-branch` NOT passed. Payload
+    is ONE executable line: `--bind="esc:print-query+abort"`, so an ESC records `queried`.
+    🔴 **Verified by CONTENT, never ancestry** (a squash is never an ancestor of its branch):
+    `git diff 17b6ff96 origin/main -- scripts/mention-open.py scripts/tests/test_mention_open.py`
+    is EMPTY, positive control `git grep -c 'def ' origin/main -- scripts/mention-open.py` = 61.
+    Four Tekton legs green **on that exact head sha**, read per-context from
+    `/commits/<sha>/statuses` — never the roll-up, which maps `error` onto `failure`.
+  - **`#1813` PUSHED, awaiting CI — head now `8c5fda78`** (was `9c4bb252`), base auto-retargeted
+    to `main`. Every row carries its RANK (`1`,`2`,… / `-` unranked / `?` unstamped-bug), with
+    `--nth=2..` keeping the marker out of fzf's haystack. Net payload vs `main`: **3 files,
+    +554/−21**.
+- 🔴 **`#1813` WAS `CONFLICTING`/`DIRTY`, NOT MERELY "NO CI POSTED" — the previous update of this
+  doc had that wrong, and a kickoff line propagated it.** Its branch predated three of the
+  parent's newest commits (`b17cf93f`, `26228216`, `17b6ff96`), so it conflicted against its own
+  base before `main` ever entered it. Merged parent-tip-then-`main` in a throwaway worktree.
+- ✅ **SHIPPED AND VERIFIED ON BOTH HOSTS (2026-09-21) — SYMPTOM 1 IS CLOSED, AND SO IS THE ARC'S
+  LAST OPEN OBJECTIVE.** `ship.sh` rc=0, both hosts at `8f95c342`, cross-host agreement asserted
+  (`2 hosts compared, both at 8f95c342`); **every per-host line read**, both `✅ VERIFIED`,
+  `0 dangling` / `0 stale` managed artifacts on each. ⚠ Both hosts print the prefix **`[nixos]`**
+  — a grep for `^\[workbench\]`/`^\[laptop\]` matches NOTHING and reads exactly like a clean run.
+  Verified by CONTENT, not `--version`: wrapped binary
+  `/nix/store/al42…-mention-review-0.3.0/bin/.mention-review-wrapped`, positive control
+  `usage: mention-review` = **1**, `ReadIntents` = **2**; and the picker is live from the WORKING
+  TREE (`~/.config/alacritty` wrapper execs `$DEVRC/scripts/mention-open.py`, which carries
+  `picker_marker`, `PICKER_MARKER_RANK_W` and 10 `--nth=2..` hits).
+- ✅ **Merged tree verified locally: `648 passed, 2 skipped`** across `test_mention_open` +
+  `test_mention_scan` + `test_mutation_battery_anchors`, at base `6ee5ff68`. That is **7 above
+  the `641 passed, 2 skipped` the pre-`#1813` tree gives** — a number that did not move would
+  mean the branch's own tests never ran. Collection: **643 → 650**. ⚠ **Dev-host tier ONLY**;
+  the `nix build` sandbox tier that Tekton runs was NOT run here, and the two are blind to
+  different things.
+  🔴 **AN EARLIER VERSION OF THIS BULLET SAID `640/2` AND A DELTA OF 8, AND IT WAS FALSE —
+  I COPIED IT OUT OF THIS DOC'S OWN `How to verify` BLOCK INSTEAD OF MEASURING IT.** That
+  block's `640 passed / 2 skipped; collection … = 642` was true of an OLDER tree and had gone
+  stale; restating it beside a freshly measured 648 dressed a stored number as a measurement.
+  Caught by `/audit-pr` round 0 on `#1820`, which measured 641/2 two ways; confirmed here by a
+  third full run and by collection counts. **This doc already carries the general rule — "A
+  STORED MEASUREMENT IS NOT A LIVE ONE" — and the trap is that the stored number was in THIS
+  FILE, where it reads as the project's own answer rather than as a claim to re-derive.**
+- ⚠ **(A) SHIPPED NARROWER THAN OPTION (A) AS WRITTEN — rank only, no class column**
+  (`a70839af`). Option (A) offered *"class **and/or** rank"*; shipping both was the implementer's
+  reading, and `/audit-pr` round 0 logged the class field as UNATTRIBUTED. **The OPERATOR chose
+  rank** — that is the author of record for the narrowing, and a sha is not. Measured: the
+  click-time class of the picked row is `below` **56** vs `plausible` **17**, so a class column
+  would read "the ranker does not trust this" on the WANTED row ~3 times in 4. 🔴 **Do not
+  "restore" the class column on the strength of that deviation** — it was declined, not omitted.
+- ⚠ **`#1812` MERGED WITHOUT ITS ROUND-3 DELTA AUDIT, AND THE LADDER'S OWN RULE SAYS A CLEAN
+  ROUND ENDS IT — round 2 was NOT clean.** The merge followed this doc's rank 1 and the
+  operator's kickoff, and the round-3 item was `forcing: none`/advisory; recording it so the
+  gap is a decision on the record rather than an omission nobody noticed.
+- **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5** again. Its positive
+  control (2 links for a different session) shows the board is reachable, but a wrong session id
+  also answers 200 with an empty array, so this is NOT a clean bill of health.
+- 🔴 **METHODOLOGY LESSONS ARE IN THE CAIRN INDEX, NOT HERE** — `devrc/scripts` and
+  `devrc/tests`, both 2026-09-21, carrying the fzf contract (abort is FOUR keys; bind ACTION
   ORDER is load-bearing and a reorder is silent; `--nth` excludes a marker from MATCHING but not
-  RANKING) and the control-design lesson below. `cairn recall --repo ~/workspace/devrc`.
+  RANKING). `cairn recall --repo ~/workspace/devrc`.
 
 ## Open investigations — live diagnosis state
 
@@ -104,32 +136,17 @@ notifications and repo browse are dropped.
 - **Next probe:** open a throwaway PR in a scratch repo and drive `c` (comment) then `m`
   (merge) against it. **Operator-only** — an agent must not run a live write verb.
 
-### 🔴 The 422's actual cause was never determined — the response body is unrecoverable
-- as-of: 2026-09-18
-- **Symptom + exact repro:** operator pressed `m` on devrc#1760 from the laptop and the screen
-  showed only "unprocessable entity". Not reproducible now — the PR is merged.
-- **Observed (with values):** `~/.config/mention-open/picks.jsonl` on the laptop records two
-  OPENS of `innovation-upstream/devrc#1760`, at `2026-09-18T01:56:05Z` and `01:56:50Z`. PR #1758
-  merged at `01:56:30Z` (moving `main`); #1760 merged at `01:58:42Z`. So both opens bracket a
-  base-branch move by 25 s before / 20 s after.
-- **Ruled out:** a read failure — the GraphQL panel query and `GET /pulls/N/files?per_page=100`
-  both succeeded against devrc at the time. via: measurement
-- **Ruled out:** a merge-method problem — devrc enables squash, merge AND rebase
-  (`gh api /repos/.../devrc`), and the laptop has no `~/.config/mention-review/config.json`, so
-  the declared default `squash` was used. via: measurement
-- **Ruled out:** that the timeline PROVES base-recompute — it does not. `picks.jsonl` is a
-  repo-resolution pick log (`scripts/mention-open.py:138`, one line per repo picked); it records
-  no keypress and no write outcome, so two entries prove two OPENS, not two merge presses.
-  via: code
-- 🔴 **NOT established: which verb produced the text.** A failed merge renders as
-  `FAILED — MergePR: ERROR — <detail>` in the NOTICE bar (`internal/ui/write.go:311-313`), not as
-  a card; the GraphQL `Fetch` path is the one that draws a card. The operator's report names the
-  merge, and that is the only evidence for the verb. via: code
-- **Leading hypothesis:** a merge dispatched into GitHub's post-base-move mergeability recompute.
-  Consistent with the timeline; **not** measured, because the 422 body was never captured.
-- **Next probe:** none available retrospectively — the body is gone. The shipped renderer now
-  surfaces `errors[]`, so **the next occurrence names its own reason**. If it recurs, capture the
-  card verbatim before anything else; that single string settles this block.
+### EVICTED — the 422 diagnosis block (2026-09-21, byte ceiling)
+- The 2026-09-18 block "The 422's actual cause was never determined". 🔴 Evicted by `/audit-pr`
+  round 0 on `#1820`, which measured it as the doc's last CLOSED-but-retained block (1,168 B)
+  while headroom was 1,294 B. Its conclusion is already carried above: the 422 arc is CLOSED
+  (`#1761` → `1ff1bd6e`, the renderer discarded `errors[]`). Its ruled-outs — a read failure, a
+  merge-method problem, and that the `picks.jsonl` timeline PROVES base-recompute (it does not:
+  two entries prove two OPENS, not two merge presses) — are in `git log -p` on this file.
+- 🔴 **THE ONE LIVE INSTRUCTION IT CARRIED, KEPT because eviction must not delete it:** the cause
+  was never established and the body is unrecoverable, but the shipped renderer now surfaces
+  `errors[]`, so **the next occurrence names its own reason. If it recurs, capture the card
+  verbatim before anything else** — that single string settles it.
 
 ### 🔴 Why right-aligning the rank marker moves fzf's ranking — MECHANISM UNKNOWN
 - as-of: 2026-09-20
@@ -154,42 +171,55 @@ notifications and repo browse are dropped.
   at constant digits AND width ⇒ it is in fzf's scorer, worth reporting upstream.
 
 ## Next steps (ranked)
-1. **Merge `#1812`, then `#1813`.** `#1812` is green on all four legs and `MERGEABLE`; merge it
-   **without** `--delete-branch`, or retarget `#1813` first (`gh pr edit 1813 --base main`). Then
-   re-check `#1813` — `mergeable` reads `UNKNOWN` (a recompute, poll it) and **no CI has posted on
-   `9c4bb252`**. After both land: `scripts/ship.sh`, then verify by CONTENT — `bin/mention-review`
-   is a `makeWrapper` script, so grep the WRAPPED binary with a positive control first.
-   Repo: devrc. IN FLIGHT: devrc#1812, devrc#1813.
-   forcing: user — the operator chose (D) then (A) on 2026-09-20; these PRs are that decision.
-2. **Round 3 delta audits, scoped to round 2's fixes only.** Both round 2s returned findings, so
-   the ladder's rule says another round follows; a clean round ends it. Ranges
-   `bd437b53..b17cf93f` (#1812) and `2f9af4f8..9c4bb252` (#1813). Post each round's `audit-claims`
-   block BEFORE dispatching — a delta with no parseable block is REFUSED, and a MISSING
-   INTERMEDIATE one does NOT refuse, it silently anchors older and widens the range. Repo: devrc.
-   forcing: none — advisory; nothing external waits on it.
-3. **Decide whether `below`-dominance is the real defect.** The picked row's class is `below` 56 /
+1. **Decide whether `below`-dominance is the real defect.** The picked row's class is `below` 56 /
    `plausible` 17, and the proposal flags that NOT DIAGNOSED and *"a bigger finding than symptom
    1"*. Cheap mechanical test already exists: re-run the causal replay with the class term demoted
    below distance/score and read top-1 against the 12.7% observed. Untested mechanism worth trying
    first: many clicked `#N` are clawgate/ClickUp ids, not GitHub numbers, so no repo's range is
    relevant. Repo: devrc.
+   ⚠ **This was rank 3 until symptom 1 closed; it is rank 1 because it is the only item carrying
+   an external forcing function, not because anything new happened to it.** Renumbered against a
+   MEASURED empty claim set — `claim-work --list` showed `mention-review-tui-1` released and no
+   other `mention-review-tui-*` claim live at that moment.
    forcing: regression — the shipped sort key ranks by a term that disagrees with 77% of real
    picks; #1813 makes that disagreement visible without fixing it.
+2. **Round 3 delta audit of `#1813`, scoped to round 2's fixes plus the two merge commits.**
+   Round 2 returned findings, so the ladder's rule says another round follows; a clean round
+   ends it. Range is now `2f9af4f8..8c5fda78` (was `..9c4bb252`) and **includes `b116179f` +
+   `8c5fda78`, which are merges** — a delta audit over a merge range reads differently, so state
+   the range you actually gave it. Post the `audit-claims` block BEFORE dispatching: a delta with
+   no parseable block is REFUSED, and a MISSING INTERMEDIATE one does NOT refuse — it silently
+   anchors older and widens the range. ⚠ **`#1813` IS MERGED** (`7f39fda7`), so this audits
+   shipped code — a finding here is a follow-up PR, not a change to a pending one. Repo: devrc.
+   forcing: none — advisory; nothing external waits on it. **Ranked BELOW an item with a real
+   forcing function deliberately**: a `forcing: none` item is not eligible to be worked, so
+   putting it first would have pointed the next session's `claim-work` at a non-workable rank.
 ## Defects (batched)
 - 🔴 **NO `LICENSE` FILE WHILE THE DERIVATION CLAIMS MIT** —
   `nix/pkgs/tools/mention-review/default.nix:146` declares `licenses.mit` with nothing backing
   it, and the repo is PUBLIC.
-- 🔴 **181+ agent worktrees registered in this clone**, oldest 2026-08-13; a stale worktree
-  holds its branch repo-globally. `scripts/worktree-prune` exists; not run.
+- 🔴 **Agent worktrees accumulate in this clone and a stale one holds its branch repo-globally.**
+  🔴 **NO COUNT WRITTEN HERE** — every count this bullet has carried went stale within hours
+  (`181+` was already `348` registered when `/audit-pr` round 0 re-derived it), and unlike
+  `drift-check.sh` rc 17 below there is **no deadman**: `scripts/worktree-prune` exists but no
+  timer runs it. Count it yourself — `git -C $DEVRC worktree list --porcelain | grep -c '^worktree '`
+  — then run the pruner.
 - 🔴 **TEST-ISOLATION SEAM: every `ranges=` test in `test_mention_open.py` consumes
   `MO.PICKS_PATH`, which no autouse fixture redirects** — they read the operator's real
   `~/.config/mention-open/picks.jsonl`. Found by `/audit-pr` round 4, **pre-existing**, inert
   for those tests (Tier B sits below class and distance and cannot move a uniquely-PLAUSIBLE
   top row). Worth closing on its own.
+- ⚠ **A COMMENT ON `main` COUNTS THREE GUARDS AND THEN LISTS TWO.** `scripts/mention-open.py`
+  (search `THREE guards catch it`) reads *"THREE guards catch it … (the whole-string
+  `EXPECTED_PICKER_SH` pin, and `_ESC_PRINTS_QUERY` …), but **neither** was CHOSEN for that."*
+  The parenthetical enumerates two and the conclusion says "neither" — the correction to THREE
+  landed in the lead sentence and was never carried into the list. **Pre-existing on `main`,
+  byte-identical there — NOT a merge artifact** (checked, because it first surfaced inside a
+  conflict resolution and read like one). Name the third guard or revert the count.
 - ⚠ **`drift-check.sh` rc 17 on BOTH hosts, and the two have DIVERGED from each other** on
   `homelab-talos/containers/clawgate`. 🔴 **No ranked item, and NO COUNTS WRITTEN HERE** — the
   deadman reports it every 6 h with live numbers, and an earlier draft's counts were stale
-  within hours (round 0 re-derived one of the three as already wrong). Run the checker.
+  within hours. Run the checker.
 - Pre-existing and known: `ghapi_test.go`/`argv_test.go` not `gofmt`-clean (confirmed on `main`
   at `2b131bf2`); four scanner limits documented in `detailrouting_test.go`; two guards at
   `scripts/tests/test_mention_review.py:122` and `:361` claiming more than they check.
@@ -684,24 +714,49 @@ notifications and repo browse are dropped.
   has grown reads `plausible` retrospectively. **Mechanism likely, NOT proven:** no historical
   table snapshots exist.
 
+- 🔴 **THE PTY READINESS COMMENT IS SCOPED TO ITS CORPUS, AND THE TWO CORPORA DISAGREE — do not
+  "simplify" it back to one number.** `_fzf_interactive_first_row`'s comment now states the
+  prompt-only race rate against the corpus each reading was taken on, because `#1812`'s and
+  `#1813`'s texts contradicted each other on the merged tree. Here `_eponymous_corpus` derives
+  its rows from `picker_rows()` and calls `MO.stamp_picker_markers`, so it CARRIES the rank
+  marker and the rate is **11–12 of 20**; on the pre-`#1813` tree it was a hardcoded marker-free
+  f-string and `/audit-pr` round 2 measured **0 of 80**. The marker's WIDTH is not the variable
+  (12/20 at the shipped 5-byte rank-only width vs 11–12 at the ~16-byte class+rank one); what
+  separates the two readings is the whole change of corpus, and **nothing isolates the marker
+  inside it** — so the comment records that as unknown rather than naming a cause.
+- **`rerere` is enabled in this clone (`rerere.enabled=true`), and this doc already records it
+  replaying a resolution from a different merge.** Disable it **per command**
+  (`git -c rerere.enabled=false merge …`) — NEVER `git config --local`, because worktree config
+  writes the **common** git dir and would change the shared clone for every session. 🔴 This is
+  the ONE lesson from that merge not already covered by `claude/RULES.md`; the others (squash vs
+  ancestry, a clean merge that is not a clean merge, two-way pins, stacked-merge doc checks) are
+  `RULES.md` §Git Workflow and the cairn `devrc/scripts` entry. **They were written out HERE and
+  cut by `/audit-pr` round 0** — 66% of that update's growth, into a doc whose own 🔴 rule 68
+  lines above says methodology goes to cairn. Do not re-add them.
+
 ## How to verify
 ```bash
-# 🔴 `--version` CANNOT answer "is it deployed". Follow the WRAPPER; POSITIVE CONTROL FIRST.
-B=$(readlink -f "$(command -v mention-review)")
-R=$(grep -oE '/nix/store/[a-z0-9]+-mention-review[^/]*/bin/\.mention-review-wrapped' "$B"|tail -1)
-grep -ac 'usage: mention-review' "$R"                            # POSITIVE CONTROL — must be 1
-grep -c 'nth=2\.\.' $DEVRC/scripts/mention-open.py               # the marker gate — NON-ZERO
-grep -c 'esc:print-query+abort' $DEVRC/scripts/mention-open.py   # the ESC bind — NON-ZERO
+# 🔴 `#1812` landed — by CONTENT, never ancestry (a squash is never an ancestor).
+#   POSITIVE CONTROL FIRST or the emptiness below is a fact about the instrument.
+git -C $DEVRC grep -c 'def ' origin/main -- scripts/mention-open.py        # must be non-zero
+git -C $DEVRC diff 17b6ff96 origin/main -- \
+  scripts/mention-open.py scripts/tests/test_mention_open.py               # must be EMPTY
 
-# The suite, scope NAMED so the number reproduces (657 passed / 2 skipped on #1813):
+# `#1813`'s CI, per-context on its own head — NEVER `/commits/<sha>/status` (the roll-up maps
+#   `error` onto `failure`, so it reads RED for a merely superseded run).
+H=$(gh pr view 1813 --json headRefOid --jq .headRefOid); echo "${H}"   # expect 8c5fda78…
+gh api "/repos/innovation-upstream/devrc/commits/${H}/statuses" \
+  --jq '.[] | "\(.context)\t\(.state)\t\(.updated_at)"' | sort -u
+
+# The suite on the merged tree, scope NAMED so the number reproduces: 648 passed / 2 skipped at
+#   base 6ee5ff68 (collection 650) — ABOVE the 641/2 (collection 643) the pre-#1813 tree gives,
+#   which is the point. 🔴 RE-DERIVE BOTH SIDES; do not copy either forward. The figure that
+#   stood here before was 640/2 and 642 collected, true of an older tree and stale by the time
+#   it was quoted beside a fresh number.
 nix develop $DEVRC -c python3 -m pytest \
-  $DEVRC/scripts/tests/{test_mention_open,test_mention_scan,test_mutation_battery_anchors,test_handoff_doc_size}.py \
-  -q -p no:cacheprovider
+  $DEVRC/scripts/tests/{test_mention_open,test_mention_scan,test_mutation_battery_anchors}.py -q
 
-# 🔴 AFTER ANY EDIT NEAR `picked_ordered` OR `PICKER_SH` — anchor guard FIRST, then the rows it
-#   names. Gating `picked_ordered` took K88 to 0x, where a row scores SURVIVED testing nothing.
-nix develop $DEVRC -c python3 -m pytest $DEVRC/scripts/tests/test_mutation_battery_anchors.py -q
-PYTHONDONTWRITEBYTECODE=1 nix develop $DEVRC -c python3 \
-  $DEVRC/scripts/tests/mutation_battery_mentions.py --only K48,K49,K50,K54,K56,K88,K89
-git -C <worktree> status --porcelain -- scripts/mention-open.py   # MUST be empty afterwards
+# 🔴 The two pinned picker strings must stay IDENTICAL — one hit in EACH file.
+git -C $DEVRC grep -n 'bind="esc:print-query+abort" --nth=2\.\.' -- \
+  scripts/mention-open.py scripts/tests/test_mention_open.py
 ```
