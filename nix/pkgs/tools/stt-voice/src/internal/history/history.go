@@ -99,6 +99,12 @@ func Append(base string, e Entry) error {
 		tmp.Close()
 		return err
 	}
+	// Match state.Set's durability: Close flushes to page cache only, so a
+	// crash between Close and Rename could leave a truncated history file.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
