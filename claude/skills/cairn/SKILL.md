@@ -174,6 +174,9 @@ run as "no *detectable* new open-coded reader", never as proof there is none.
 
 `~/.claude/skills/cairn/reference/operator-surface.md` — the pod, `seed.sh`, `verify-byte-identity.sh`
 and its measured coverage gap, `build-push.sh`, `cairn-cutover.py`, the backup
-CronJob, and 🔴 **the token file is read ONCE at startup**: editing the secret
-changes nothing until the pod is replaced, and the wrong replacement command
-costs two rollouts. Load it before touching the deployment.
+CronJob, and 🔴 **the token file RELOADS ON SIGHUP** — a credential change needs
+no pod replacement and causes no outage, a REFUSED reload leaves the old rows
+serving, and the `listening on` banner is a STALE read of the credential set
+afterwards. ⚠ This line said the file is *read ONCE at startup* until
+2026-09-22; that described the retired Python server and a session planned an
+unnecessary outage around it. Load the reference before touching the deployment.
