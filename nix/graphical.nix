@@ -1262,10 +1262,17 @@ lib.mkIf isNixOS {
     Service = {
       Type = "oneshot";
       TimeoutStartSec = 60;
-      # /run/wrappers/bin first for the setuid `sudo` wrapper: the writer runs
-      # `sudo -n airvpn-sudo status` (read-only `wg show`, NOPASSWD).
+      # /run/wrappers/bin first for the setuid `sudo` wrapper. bash and
+      # wireguard-tools are NOT optional here: `airvpn-sudo`'s shebang is
+      # `#!/usr/bin/env bash` and its `wg` calls resolve from PATH — the
+      # original minimal PATH (wrappers+python3+iproute2+coreutils) had
+      # NEITHER, so every unit-side `wg show airvpn dump` died with
+      # `env: bash: not found` (rc 127) and the writer degraded to
+      # iface-only facts (`US?`, verdict unknown). MEASURED 2026-09-21
+      # with a unit-env repro; the workbench poller unit's PATH already
+      # carried bash via pollPyEnv, which is why only the laptop saw it.
       Environment = [
-        "PATH=/run/wrappers/bin:${lib.makeBinPath [ pkgs.python3 pkgs.iproute2 pkgs.coreutils ]}"
+        "PATH=/run/wrappers/bin:${lib.makeBinPath [ pkgs.python3 pkgs.iproute2 pkgs.coreutils pkgs.bash pkgs.wireguard-tools ]}"
         "HOME=%h"
       ];
       ExecStart = "${pkgs.python3}/bin/python3 %h/workspace/devrc/scripts/airvpn-status-poll";
