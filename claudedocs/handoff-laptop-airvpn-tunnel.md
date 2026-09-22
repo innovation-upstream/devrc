@@ -23,7 +23,7 @@ unaffected while the tunnel is up.
 ## State now
 - Branch / PR: `devrc` `main` at `c55c401d` (#1849); ALL session PRs merged: #1839 (mirror, now REPLACED), #1840 (real laptop tunnel), #1844/#1845 (apply-script fixes), #1846 (writer PATH), #1847 (manifest country_code), #1848/#1849 (nebula split-tunnel pin). No open PRs.
 - Laptop (this host): tunnel **UP** (reconnect 22:18:33) with the nebula pin LIVE (`ip rule`: `500: from all uidrange 991-991 lookup main`; nebula uid 991), killswitch armed roaming (`LAN allowed = 192.168.1.0/24 derived from wlp170s0`), exit IP US through tunnel, nebula ssh + LAN direct both work while up. Helpers at `/etc/nixos/i3blocks-scripts/` refreshed 22:05 (dash-form uidrange). `/etc/wireguard/airvpn.conf`: roaming PostUp/PreDown hooks present, `DNS` line REMOVED (host has no systemd-resolved; dnsmasq→public resolver rides the tunnel).
-- Verified during up windows: exit IP via ipinfo (US, AS62744), `ip route get 24.79.61.66 uid 991` → `via 192.168.1.1 dev wlp170s0` while `ip route get 1.1.1.1` → `dev airvpn table 51820` (the split is exact), ping workbench 0% loss ~134–147ms (= no-tunnel baseline), writer/pill grammar honest (`off` dim icon, `US?` up-unverified, `airvpn ?` named).
+- Verified during up windows: exit IP via ipinfo (US, AS62744), `ip route get <home-public-ip> uid 991` → `via 192.168.1.1 dev wlp170s0` while `ip route get 1.1.1.1` → `dev airvpn table 51820` (the split is exact), ping workbench 0% loss ~134–147ms (= no-tunnel baseline), writer/pill grammar honest (`off` dim icon, `US?` up-unverified, `airvpn ?` named).
 - Workbench: primary clone is BEHIND — last `ship.sh` ran at #1846 (`a2f45567`); #1847/#1848/#1849 are ff-merged locally on the laptop only. Its stable-path `/etc/nixos/i3blocks-scripts/airvpn-updown` predates BOTH the roaming port AND the nebula pin (latent re-degradation, see Defects).
 - Deploy honesty: every piece live-verified against the real path on the laptop (not inferred); the workbench half is UNVERIFIED since #1847 (needs `scripts/ship.sh`).
 - 🔴 `/etc/nixos/i3blocks-scripts/` copies are NOT ship-managed — every `airvpn-updown` change needs an operator `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown` (or an apply-script re-run) PER HOST. Today this bit twice (stale helper → no nebula pin).
@@ -73,7 +73,7 @@ unaffected while the tunnel is up.
 ```bash
 # tunnel + split-tunnel, with the tunnel UP:
 ip link show airvpn && ip rule | rg 500          # pin present: uidrange 991-991 lookup main
-ip route get 24.79.61.66 uid 991                  # → via <gw> dev wlp170s0 (NOT airvpn)
+ip route get <home-public-ip> uid 991                  # → via <gw> dev wlp170s0 (NOT airvpn)
 ip route get 1.1.1.1 | head -1                    # → dev airvpn table 51820
 curl -s https://ipinfo.io/json | jq -r .country   # → US
 ssh zach@10.42.0.30 'echo nebula-ok'              # nebula path alive with tunnel up
