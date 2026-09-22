@@ -85,12 +85,18 @@ if grep -q 'airvpn-host.nix' "${NIXOS_DIR}/configuration.nix"; then
     echo "      already imported"
 else
     cp "${CONFIG:-$NIXOS_DIR/configuration.nix}" "${NIXOS_DIR}/configuration.nix.bak.airvpn-host" 2>/dev/null || true
+    # 🔴 Match the CLOSER line, not the opener: this host's configuration.nix
+    # (measured 2026-09-21) splits `imports =` and `[` across two lines, so an
+    # opener regex requiring `[$` on the same line matched NOTHING and the
+    # module was silently not imported — the rebuild would then succeed without
+    # the sudoers rule. POSIX character classes (not `\s`) so busybox/mawk also
+    # parse it. The state machine: after ANY imports opener, insert before the
+    # first standalone `];` line — entry lines carry trailing comments and
+    # never look like a closer.
     awk '
-        /^\s*imports\s*=\s*\[/ {
-            in_imports=1; print; next
-        }
-        in_imports && !done && /\]/ {
-            sub(/\]/, "      ./airvpn-host.nix\n    ]"); done=1; print; next
+        /^[[:space:]]*imports[[:space:]]*=/ { in_imports = 1; print; next }
+        in_imports && !done && /^[[:space:]]*\][[:space:]]*;/ {
+            print "      ./airvpn-host.nix"; done = 1; print; next
         }
         { print }
     ' "${NIXOS_DIR}/configuration.nix" > "${NIXOS_DIR}/configuration.nix.tmp.airvpn"
@@ -98,6 +104,14 @@ else
     rm -f "${NIXOS_DIR}/configuration.nix.tmp.airvpn"
     if ! grep -q 'airvpn-host.nix' "${NIXOS_DIR}/configuration.nix"; then
         echo "      could not insert the import. Add   ./airvpn-host.nix   to imports in ${NIXOS_DIR}/configuration.nix manually, then re-run." >&2
+        exit 5
+    fi
+    # The edited file is about to feed nixos-rebuild — make sure it PARSES
+    # before that, restoring the backup rather than handing the rebuild a
+    # syntax error.
+    if ! nix-instantiate --parse "${NIXOS_DIR}/configuration.nix" >/dev/null 2>&1; then
+        echo "      edited configuration.nix does not PARSE — restoring backup; add the import manually" >&2
+        cp "${NIXOS_DIR}/configuration.nix.bak.airvpn-host" "${NIXOS_DIR}/configuration.nix" 2>/dev/null || true
         exit 5
     fi
 fi
