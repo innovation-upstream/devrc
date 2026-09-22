@@ -48,10 +48,10 @@ if [[ ! -f "$CONF" ]]; then
     exit 3
 fi
 
-echo "[1/5] Locking $CONF to 0600 root:root..."
+echo "[1/6] Locking $CONF to 0600 root:root..."
 chown root:root "$CONF"; chmod 0600 "$CONF"
 
-echo "[2/5] Appending ROAMING PostUp/PreDown hooks to $CONF..."
+echo "[2/6] Appending ROAMING PostUp/PreDown hooks to $CONF..."
 if grep -q 'airvpn-updown' "$CONF"; then
     if grep -q 'airvpn-updown up %i roaming' "$CONF"; then
         echo "      already present (roaming) — leaving untouched"
@@ -74,12 +74,30 @@ else
     fi
 fi
 
-echo "[3/5] Installing airvpn-sudo + airvpn-updown to ${HELPER_DIR}..."
+# 🔴 HOSTS WITHOUT systemd-resolved: wg-quick calls `resolvconf` for the conf's
+# `DNS =` line, and on this laptop (NetworkManager dns=none + a local dnsmasq at
+# 127.0.0.1, no resolved unit) that call FAILS and wg-quick ABORTS, tearing the
+# interface back down — measured 2026-09-21, first connect failed exactly there.
+# The right move on such a host is NOT to install a resolver: the host already
+# has one, its upstream is a PUBLIC RESOLVER (dnsmasq forwards off-LAN, not to
+# the router), and the killswitch forces that upstream THROUGH the tunnel while
+# up
+# — so dropping the line keeps DNS working and tunnel-routed. Measured live:
+# with the line removed, connect succeeds and queries egress at the VPN IP.
+if ! systemctl cat systemd-resolved.service >/dev/null 2>&1; then
+    echo "      no systemd-resolved on this host — dropping the conf's DNS line (wg-quick would abort on resolvconf)"
+    if grep -q '^DNS[[:space:]]*=' "$CONF"; then
+        ( umask 077; cp "$CONF" "${CONF}.bak.airvpn-dns" )
+        sed -i '/^DNS[[:space:]]*=/d' "$CONF"
+    fi
+fi
+
+echo "[3/6] Installing airvpn-sudo + airvpn-updown to ${HELPER_DIR}..."
 mkdir -p "${HELPER_DIR}"
 install -m 0755 -o root -g root "${REPO}/scripts/airvpn-sudo"   "${HELPER_DIR}/airvpn-sudo"
 install -m 0755 -o root -g root "${REPO}/scripts/airvpn-updown" "${HELPER_DIR}/airvpn-updown"
 
-echo "[4/5] Installing the system module + sudoers rule (airvpn-host.nix)..."
+echo "[4/6] Installing the system module + sudoers rule (airvpn-host.nix)..."
 install -m 0644 -o root -g root "${REPO}/nix/system/airvpn-host.nix" "${MODULE}"
 if grep -q 'airvpn-host.nix' "${NIXOS_DIR}/configuration.nix"; then
     echo "      already imported"
@@ -116,8 +134,12 @@ else
     fi
 fi
 
-echo "[5/5] nixos-rebuild switch..."
+echo "[5/6] nixos-rebuild switch..."
 nixos-rebuild switch
+
+echo "[6/6] host-level sanity: sudoers rule resolves, NOPASSWD works..."
+sudo -n /etc/nixos/i3blocks-scripts/airvpn-sudo status >/dev/null 2>&1 \
+    || { echo "      WARNING: sudo -n airvpn-sudo status failed — the sudoers rule may not be live (did the rebuild complete?)" >&2; }
 
 cat <<'EOF'
 
