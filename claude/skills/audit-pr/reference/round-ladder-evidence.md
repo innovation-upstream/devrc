@@ -293,6 +293,42 @@ patch" and "rebind the whole stale snapshot" byte-identical.
 
 ---
 
+## The edit under test DISARMS the mutant — and `survived=0` still prints
+
+Behind **"a review fix RESETS the gate"**, but a distinct failure: the fix does not make a mutant
+*survive*, it makes the mutant **stop applying at all**, and the headline number does not move.
+
+Measured 2026-09-22, `talos-infra` `tests/mutants-cnpg-retention.sh`. Unsuspending three CronJobs
+(three `suspend: true` → `false`, deadman threshold `params: [1]` → `[4]`) took the battery from
+`killed=45 survived=0 broken=0` to `killed=42 survived=0 **broken=3**`. The three that stopped
+applying were **precisely the three guarding the invariant being changed** — they matched on the
+literals `params: [1]` and `^  suspend: true$`, and the edit removed every instance of both.
+
+🔴 **`survived=0` is unchanged, so the usual read — "no survivors ⇒ green" — is exactly wrong.**
+A mutant whose pattern no longer matches scores NOTHING, and its absence produces no output of its
+own. This battery happens to *report* `broken=N`, which is good harness design and is the only
+reason it was caught; a battery that merely skips a non-matching mutant would have printed a fully
+green result.
+
+**The controls, both cheap:**
+
+- **Read `broken`, not only `survived`.**
+- **Compare `killed` against the BASE** — run the battery in a pristine worktree of the base ref
+  first, and treat any drop as an edit having disarmed a guard. The absolute number means nothing
+  on its own; only the delta against base does.
+
+⚠️ **Fixing it may mean flipping a mutant's DIRECTION, not just its pattern.** Post-rollout the
+dangerous mis-edit was the mirror image of the pre-rollout one — *suspending* a store without
+*lowering* the threshold, which leaves the deadman demanding a series that no longer exists, so it
+fires forever and gets muted. Re-pointing the regex alone would have re-armed a guard against a
+hazard that no longer exists while leaving the live one uncovered.
+
+**Generalise past mutation testing:** any guard keyed on a literal in the file it guards is
+disarmed by editing that literal, and the disarming is silent because a guard's absence emits
+nothing. The same shape reaches grep-based CI checks, `git grep` invariants and ledger files.
+
+---
+
 ## Pricing a defect from the CONSUMING code — the worked example
 
 Behind **"verifying that a value is USED is not verifying what its ABSENCE costs"**. An audit
