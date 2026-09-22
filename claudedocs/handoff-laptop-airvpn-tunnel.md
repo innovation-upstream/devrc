@@ -44,6 +44,45 @@ unaffected while the tunnel is up.
 - **Ruled out:** writer env PATH (was a REAL second bug, fixed in #1846 — `sudo -n airvpn-sudo status` died rc 127 `env: bash: not found` under the unit's PATH) — `via: measurement`.
 - **Next probe:** on the next tunnel-up writer poll (~60s after Connect): `python3 -c "import json; d=json.load(open('/home/zach/.cache/bar-status/airvpn.json')); print(d['verdict'], d['server'], d['country_code'])"` — expect `verified Chamaeleon us`; pill `US`. **Not yet observed while up** (the 22:18 reconnect predates no manifest issue — it simply wasn't re-read).
 
+### This doc leaked the home public IP to a PUBLIC repo; scrubbed at HEAD, NOT revoked
+as-of: 2026-09-22
+🔴 **WRITTEN BY A DIFFERENT SESSION than the one that authored this doc**, and deliberately
+appended here rather than in a new doc: the leak came out of THIS effort, so the next
+person working the tunnel is the one who must not put the value back. Only
+append-bucket sections are touched — this arc's `State now`, `Next steps` and
+`How to verify` are untouched and still belong to its author.
+
+- **Symptom + exact repro:** `main`'s `tekton/devrc-pytests` leg had been RED since
+  `3bd6fc22` (the commit that landed this doc), on
+  `test_no_unallowlisted_public_ip_literal_is_committed`. Reproduce with
+  `nix develop $DEVRC -c python3 -m pytest scripts/tests/test_no_public_ips.py -q`
+  against any tree at or after that commit.
+- **Observed (with values):** the repo is `visibility: PUBLIC`, `isPrivate=false`; the
+  HEAD copy of this file answered **200** unauthenticated from
+  `raw.githubusercontent.com`; **9** commits carry the value per `git log -S … --all`,
+  the oldest well before this doc and two of them `untracked files on …` (stash-shaped),
+  so it reached history by more than one route. The file was **NOT** in `PENDING_SCRUB`,
+  so this was a NEW leak the gate blocked rather than tracked debt. `via: measurement`
+- **Ruled out — that it was CI noise.** The measured red rate on this repo is ~42%, and
+  that is exactly the trap. A control run on a PRISTINE `origin/main` worktree failed the
+  SAME test identically, which is what proved it real and not caused by the PR under
+  test. 🔴 On that same PR an EARLIER red was genuinely the PR's fault — two reds,
+  opposite verdicts, only the control separated them. `via: measurement`
+- **Ruled out — that scrubbing HEAD revokes the disclosure.** It does not. The four
+  content gates read `git ls-files` and are blind to git history (devrc `CLAUDE.md` →
+  `SECRETS.md`, "Dead credentials in reachable history"). `via: doc`
+- **Ruled out — a history rewrite as the remedy.** Considered and DECLINED by the
+  operator: it force-pushes a public repo, breaks every clone and fork, and does not
+  un-index an address that is already public. `via: change`
+- **Leading hypothesis:** rotating the address is the only action that actually revokes
+  it. Whether that is worth doing is a judgement about the operator's ISP and threat
+  model, not a measurement.
+- **Next probe:** none for the diagnosis — it is closed. The ACTION is `devrc#1853`
+  (branch `fix/scrub-public-ip-airvpn-handoff`), OPEN and MERGEABLE at the time of
+  writing. Merge it, then re-run the gate on `origin/main` (not on the branch) and expect
+  green. 🔴 It is the only PR from that session where `/audit-pr` round 0 is still
+  actionable.
+
 ## Next steps (ranked)
 1. Converge the WORKBENCH: `scripts/ship.sh` (its tree is at `a2f45567`, three behind), then refresh its stable-path helper — `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown` (workbench) — else its next tunnel-up window re-measures today's nebula regression.
    `forcing: regression` — the same measured degradation mechanism (b5fb6a0c), one tunnel-up window away on the second host.
@@ -68,6 +107,33 @@ unaffected while the tunnel is up.
 - `sudo` from the units logs `PWD=/` — a root-privileged `airvpn-sudo down` with `PWD=/` in the journal was the OPERATOR's pill-menu Disconnect (session-3.scope), not a service or test. Don't misread that log line again.
 - The pill's `?` on `US?` is the UNVERIFIED marker (exit IP ≠ entry IP and no server cc), NOT the stale marker — two different `?`s in one block's grammar.
 - `--block` mirror machinery from #1839 was REMOVED, not left dead; `i3status-airvpn` stays in RELAY_BLOCKS so the `wb` rollup still carries the workbench tunnel's alarms on the laptop.
+
+- 🔴 **DO NOT PUT THE REAL ADDRESS BACK IN THIS DOC.** The split-tunnel verification needs
+  two probe targets and they are NOT the same kind of thing, which is why the fix is
+  asymmetric: the HOME public IP is a real endpoint and is now `<home-public-ip>` (the
+  gate's own remedy: *"if you are tempted to pin a real endpoint, the answer is an env
+  var, not a pin"*), while the Cloudflare resolver is not an endpoint of ours, is not a
+  disclosure, and carries a path-scoped ALLOWLIST entry instead. If you need the commands
+  to be copy-pasteable, put the address in a shell variable at run time — do not inline it.
+- 🔴 **THE EXPLANATION OF A LEAK IS ONE OF THE PLACES THE LEAK SPREADS TO.** The first PR
+  body for #1853 quoted the address and was REFUSED by the `bash-guard` PreToolUse hook;
+  the first commit message had the same defect and had already been PUSHED, and was
+  amended + force-pushed (`--force-with-lease`, unmerged branch, no PR yet). The gate's
+  own `PENDING_SCRUB` header warns about this for the tracking file — it is equally true
+  of a commit message or a PR body on a public repo. The guard was the only thing that
+  caught it.
+- 🔴 **The ALLOWLIST is keyed on `(relpath, value)`, NEVER the value alone** — the gate's
+  header records that a value-only exemption is repo-wide by construction and once let an
+  audit mutant through. And never write the offending literal into the gate or its ledger:
+  `PENDING_SCRUB` is pinned by COUNT precisely so the tracking file does not become a
+  fresh copy of the leak.
+- ⚠ **A green run of that gate is a claim about `git ls-files` only** — blind to history
+  and to anything gitignored. Not a clean repo.
+- ⚠ **The same line also carries a private `192.168.1.1`.** RFC1918, correctly not
+  flagged, not a disclosure — noted so nobody "fixes" it and widens the diff.
+- ⚠ **A permanently-red gate is the real defect here, not the IP.** It had been red for
+  days; the `main-green-check` deadman REPORTS and never fixes, so nothing forced it to be
+  cleared, and the standing cost is that every session learns to click through a red.
 
 ## How to verify
 ```bash
