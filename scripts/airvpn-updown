@@ -206,7 +206,7 @@ case "$action" in
         # must never fail the tunnel bring-up).
         NEBULA_UID="$(id -u "${NEBULA_USER}" 2>/dev/null || true)"
         if [[ -n "$NEBULA_UID" ]]; then
-            ip rule add uidrange "$NEBULA_UID" "$NEBULA_UID" lookup main priority 500 2>/dev/null \
+            ip rule add uidrange "${NEBULA_UID}-${NEBULA_UID}" lookup main priority 500 2>/dev/null \
                 && log "up: nebula transport pinned to main table (uid ${NEBULA_UID} @ prio 500)" \
                 || log "WARNING: nebula uid rule not installed (already present, or ip rule failed)"
         fi
@@ -263,7 +263,7 @@ NFT
         # outlive this script's owner. Best-effort del, mirrored to the add.
         _nebula_uid="$(id -u "${NEBULA_USER}" 2>/dev/null || true)"
         [[ -n "$_nebula_uid" ]] && \
-            ip rule del uidrange "$_nebula_uid" "$_nebula_uid" lookup main priority 500 2>/dev/null || true
+            ip rule del uidrange "${_nebula_uid}-${_nebula_uid}" lookup main priority 500 2>/dev/null || true
         # endpoint bypass /32 (if any) — best-effort cleanup by removing non-default
         # /32s we might have added is unnecessary; wg-quick down drops the iface and
         # its table. Leave LAN /24 (it is the normal connected route).

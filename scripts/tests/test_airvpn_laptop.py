@@ -322,7 +322,7 @@ def test_the_up_path_pins_nebula_transport_to_the_main_table():
             _, _, ip_rules = _run_updown(tmp, mode)
             joined = {" ".join(r) for r in ip_rules}
             assert any(
-                "rule add uidrange 998 998 lookup main priority 500" in r
+                "rule add uidrange 998-998 lookup main priority 500" in r
                 for r in joined), (mode, joined)
 
 
@@ -333,7 +333,7 @@ def test_the_down_path_unpins_the_nebula_rule():
         ip_rules = _run_updown_down(tmp, "roaming")
         joined = {" ".join(r) for r in ip_rules}
         assert any(
-            "rule del uidrange 998 998 lookup main priority 500" in r
+            "rule del uidrange 998-998 lookup main priority 500" in r
             for r in joined), joined
 
 
