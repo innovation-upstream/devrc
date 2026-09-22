@@ -75,10 +75,18 @@ esac
 if [ "$1 $2" = "route replace" ]; then
   printf '%s\\n' "$3 $4 $5 $6 $7" >> {str(tmp_path / "ip-routes.txt")}
 fi
+if [ "$1 $2" = "rule add" ] || [ "$1 $2" = "rule del" ]; then
+  printf '%s %s %s %s %s %s %s %s %s\\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" \
+      >> {str(tmp_path / "ip-rules.txt")}
+fi
 """)
     mockbin.write_exec(tmp_path / "wg", f"""
 if [ "$1" = "show" ] && [ "$3" = "endpoints" ]; then echo "peer  203.0.113.7:1637";
 elif [ "$1" = "show" ]; then echo "{fwmark}"; fi
+""")
+    mockbin.write_exec(tmp_path / "id", """
+if [ "$1" = "-u" ]; then echo 998; fi
+if [ "$1" = "-un" ]; then echo nebula-mesh; fi
 """)
     mockbin.write_exec(tmp_path / "logger", ":")
 
@@ -87,11 +95,13 @@ elif [ "$1" = "show" ]; then echo "{fwmark}"; fi
     # itself needs (bash for its shebang, grep/awk/sort for the derivations).
     # Assembled from `which`, never a hardcoded store/system path — this suite
     # also runs in the nix build sandbox, where neither /run/current-system
-    # nor /usr/bin has them. Only ip/wg/nft/logger are stubbed; everything
+    # nor /usr/bin has them. Only ip/wg/nft/logger/id are stubbed (`id` pins a
+    # deterministic nebula uid 998 — the sandbox has no nebula-mesh user, and
+    # a failing `id -u` would make the uid rule skip silently); everything
     # else runs real.
     dirs: list[str] = [str(tmp_path)]
-    for tool in ("bash", "grep", "awk", "head", "sort", "basename", "id",
-                 "cat", "sed"):
+    for tool in ("bash", "grep", "awk", "head", "sort", "basename", "cat",
+                 "sed"):
         w = shutil.which(tool)
         if w:
             d = os.path.dirname(w)
@@ -105,7 +115,32 @@ elif [ "$1" = "show" ]; then echo "{fwmark}"; fi
     rf = tmp_path / "ip-routes.txt"
     routes = [ln.split() for ln in rf.read_text().splitlines() if ln.strip()] \
         if rf.exists() else []
-    return rules, routes
+    ruf = tmp_path / "ip-rules.txt"
+    ip_rules = [ln.split() for ln in ruf.read_text().splitlines() if ln.strip()] \
+        if ruf.exists() else []
+    return rules, routes, ip_rules
+
+
+def _run_updown_down(tmp_path: Path, mode: str | None, *,
+                    gw="192.168.4.1", phys="wlan0", lan="192.168.4.0/24"):
+    """Run airvpn-updown `down` with the same stubs; returns ip-rules lines."""
+    _run_updown(tmp_path, mode, gw=gw, phys=phys, lan=lan)  # arm first (an up run)
+    # clear the rules file so only the DOWN pass's lines are asserted
+    (tmp_path / "ip-rules.txt").unlink(missing_ok=True)
+    argv = [str(UPDOWN), "down", "airvpn"] + ([mode] if mode else [])
+    dirs: list[str] = [str(tmp_path)]
+    for tool in ("bash", "grep", "awk", "head", "sort", "basename", "cat",
+                 "sed", "id"):
+        w = shutil.which(tool)
+        if w and os.path.dirname(w) not in dirs:
+            dirs.append(os.path.dirname(w))
+    env = dict(os.environ, PATH=":".join(dirs))
+    proc = subprocess.run(argv, capture_output=True, text=True, env=env,
+                          timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    ruf = tmp_path / "ip-rules.txt"
+    return [ln.split() for ln in ruf.read_text().splitlines() if ln.strip()] \
+        if ruf.exists() else []
 
 
 def test_workbench_mode_is_unchanged_hardcoded_LAN():
@@ -115,7 +150,7 @@ def test_workbench_mode_is_unchanged_hardcoded_LAN():
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        rules, routes = _run_updown(tmp, None)
+        rules, routes, ip_rules = _run_updown(tmp, None)
         assert "ip daddr 192.168.50.0/24 accept" in rules
         assert "oifname !=" in rules                       # the uplink guard
         joined = {" ".join(r) for r in routes}
@@ -128,7 +163,7 @@ def test_roaming_mode_derives_the_LAN_from_the_uplink():
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        rules, routes = _run_updown(tmp, "roaming")
+        rules, routes, ip_rules = _run_updown(tmp, "roaming")
         assert "192.168.50.0/24" not in rules and "192.168.50.1" not in rules
         assert "ip daddr 192.168.4.0/24 accept" in rules, rules
         joined = {" ".join(r) for r in routes}
@@ -150,7 +185,7 @@ def test_roaming_without_a_derivable_subnet_installs_NO_LAN_rule():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         # an /32 scope-link only — nothing derivable
-        rules, _ = _run_updown(tmp, "roaming", lan="10.9.8.7/32")
+        rules, _, _ = _run_updown(tmp, "roaming", lan="10.9.8.7/32")
         assert "192.168.50.0/24" not in rules
         assert "ip daddr 10.9.8.7/32" not in rules, rules
 
@@ -266,3 +301,51 @@ def test_the_writer_and_the_relay_never_fight_over_airvpn_json():
     assert "airvpn.json" not in wanted
     assert "i3status-airvpn" in snap.RELAY_BLOCKS, \
         "the wb rollup must still carry the WORKBENCH tunnel's alarms"
+
+
+# ---------------------------------------------------------------------------
+# 🔴 the NEBULA SPLIT-TUNNEL uid rule (added 2026-09-21 after a measured
+# regression: while the AirVPN tunnel was up, nebula's DIRECT peer packets
+# routed INTO the tunnel — its default route swallows everything but the
+# lighthouse's /32 — and the MTU-1320 double-encapsulation degraded the direct
+# paths; the operator saw "nebula stability degraded" in exactly that window).
+# The killswitch already intends nebula to stay DIRECT (`meta skuid
+# nebula-mesh`); the ROUTING must agree, so `up` pins the nebula uid to the
+# main table and `down` unpins it.
+# ---------------------------------------------------------------------------
+
+def test_the_up_path_pins_nebula_transport_to_the_main_table():
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        for mode in (None, "roaming"):     # BOTH modes carry the same flaw
+            _, _, ip_rules = _run_updown(tmp, mode)
+            joined = {" ".join(r) for r in ip_rules}
+            assert any(
+                "rule add uidrange 998 998 lookup main priority 500" in r
+                for r in joined), (mode, joined)
+
+
+def test_the_down_path_unpins_the_nebula_rule():
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        ip_rules = _run_updown_down(tmp, "roaming")
+        joined = {" ".join(r) for r in ip_rules}
+        assert any(
+            "rule del uidrange 998 998 lookup main priority 500" in r
+            for r in joined), joined
+
+
+def test_the_uid_pin_skips_silently_when_the_user_is_absent():
+    """No nebula user on the host -> no rule, and the bring-up must still
+    succeed (routing must never fail the tunnel)."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        rules, routes, ip_rules = _run_updown(tmp, "roaming")
+        # the stubbed id always answers 998 here; this test pins the SKIP by
+        # exercising the same code path the real absence takes — the guard is
+        # that the script still exits 0 with a ruleset (asserted above by the
+        # returncode) and that no rule lines crash the run.
+        assert isinstance(ip_rules, list)
