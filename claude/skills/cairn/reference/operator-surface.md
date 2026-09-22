@@ -28,7 +28,7 @@ and coordinated with other sessions over a disruption that was never necessary.
 
 The live pod is the **Go** server (`cairn-store-go`). It says so itself — the
 last field of its startup line is `reload=SIGHUP` — and `installReload` in
-`cmd/cairn-server/main.go` re-reads the token file on `SIGHUP`, logging one of
+`<cairn>/cmd/cairn-server/main.go` re-reads the token file on `SIGHUP`, logging one of
 two verdicts:
 
 ```
@@ -124,9 +124,9 @@ them apart, and none should claim to.** `cairn doctor` reports the set and names
 both readings.
 
 A scope is created on the pod by whatever first writes an entry into it. The
-token allowlist is static, in the secret, and read once (above) — so a scope can
-exist in the store and be invisible to your credential until somebody edits the
-secret and replaces the pod.
+token allowlist is static, in the secret, and reloaded on `SIGHUP` (above) — so a
+scope can exist in the store and be invisible to your credential until somebody
+edits the secret and the pod re-reads it.
 
 The store-wide `entry-files=` count in `X-Store-Snapshot` is **not** filtered by
 the allowlist — a deliberate, documented residual count leak — which is the only
@@ -157,7 +157,7 @@ cairn create --scope <scope> --ref <ref> --file <entry.md>
 | answer | meaning | remedy |
 |---|---|---|
 | **201** | allowlisted; the scope simply had no entries | done — that WAS the fix. No secret edit, no pod restart. |
-| **rc 6 `[not-found]`** | not in your token row (on the create path, the allowlist arm is the ONLY 404 — see `SKILL.md`) | edit the secret, replace the pod, re-run |
+| **rc 6 `[not-found]`** | not in your token row (on the create path, the allowlist arm is the ONLY 404 — see `SKILL.md`) | edit the secret, `SIGHUP` the pod (above), re-run |
 
 ⚠ **Two earlier drafts of this block were wrong in OPPOSITE directions**, which is
 why it now routes off a probe rather than off a classification. The first said the
@@ -200,7 +200,7 @@ READS and **false for `cairn create`**: `create_entry` does
 scope with no directory. So the sequence is:
 
 1. add the scope to the token row in the secret,
-2. replace the pod (the token file is read ONCE — see above),
+2. `SIGHUP` the pod so it re-reads the token file (see above — no replacement needed),
 3. `cairn create --scope <new> --ref <ref> --file <path>` → **201**.
 
 `seed.sh` is for pushing a whole local tree and carries the overwrite hazard
