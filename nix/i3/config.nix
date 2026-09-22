@@ -372,8 +372,8 @@ bindsym $mod+Return exec [ ! "$I3CONFIG_DEFAULT_TERMINAL" = "" ] && $I3CONFIG_DE
 # names is the TUI's own Esc key, inside the transcript window only.
 #
 # The TUI floats centered via the for_window rule below (class="stt-voice").
-bindsym $mod+m exec --no-startup-id stt-voice start
-bindsym --release $mod+m exec --no-startup-id stt-voice stop
+bindsym $mod+equal exec --no-startup-id stt-voice start
+bindsym --release $mod+equal exec --no-startup-id stt-voice stop
 
 # Kill focused window
 bindsym $mod+Shift+q kill
@@ -419,7 +419,6 @@ bindsym $mod+f fullscreen toggle
 # tabbed moved off $mod+w (was) so Alt+w passes through to tmux scratch11 (Wheat)
 bindsym $mod+Shift+t layout tabbed
 bindsym $mod+e layout toggle split
-bindsym $mod+equal exec --no-startup-id ~/workspace/devrc/scripts/i3-grid
 
 # Floating
 bindsym $mod+Shift+space floating toggle
