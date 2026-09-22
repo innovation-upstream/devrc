@@ -169,6 +169,26 @@ RULES: list[dict] = [
          apply=(r"--claims-file\b|<the PR's head sha>"
                 r"|zero placeholders|placeholders? remain"
                 r"|headRefOid,baseRefName")),
+    # --- added for #1850's two rules. Both WRITTEN 2026-09-22, so `fired` is
+    # expected to be 0 on the first sweep; UNFIRED means "nobody has violated it
+    # yet", not that the row is broken (blind spot 4). Each `apply` is anchored on
+    # the rule's own DISTINCTIVE artifact — `range-diff` as the remedy, `headRefOid`
+    # as the stamped field — because the generic words these two are about
+    # ("rebase", "anchor", "emit", "refresh") saturate the pre-origin corpus and
+    # would mark the row UNRELIABLE and withhold its number (blind spot 3).
+    dict(id="rebase-reanchors-round-scope",
+         name="a rebase re-points the delta round's anchor and silently widens its SCOPE",
+         probe="A REBASE RE-POINTS THE ANCHOR",
+         apply=(r"range-diff\b"
+                r"|re-?point\w*[^.]{0,40}anchor"
+                r"|anchor[^.]{0,60}rebased twin"
+                r"|no longer an ancestor of HEAD")),
+    dict(id="emit-after-head-refreshes",
+         name="do not emit the claims block until headRefOid has refreshed",
+         probe="so do not emit until that sha has REFRESHED",
+         apply=(r"headRefOid\b[^.]{0,60}(stamp|refresh)"
+                r"|pre-rebase sha\b"
+                r"|git/refs/heads/")),
     dict(id="reconstruct-from-diff", name="reconstruct a lost claims block from the DIFF, not a handoff's prose",
          probe="derive it from the DIFF, never from a handoff's prose",
          apply=(r"derive it from the DIFF|reconstruct\w*[^.]{0,60}from the diff"

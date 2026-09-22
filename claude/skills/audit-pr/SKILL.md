@@ -82,13 +82,11 @@ payload COUNT's base; this is the round's own SCOPE. **Carry the anchor across t
 `git range-diff <old-base>..<old-tip> <new-base>..<new-tip>`, confirm every commit maps `=`, read the
 new sha off the matching row, and record the mapping on the PR so the next round is not re-deriving it.
 
-🔴 **And do not emit the block until GitHub's PR object has caught up with the push.** `--emit-claims`
-stamps `<to>` from `headRefOid`, and `pulls/<n>.head.sha` lags `git/refs/heads/<branch>` by minutes
-after a force-push — measured 8+ min on that same PR, with the ref already correct throughout. In that
-window the flag stamps the PRE-rebase sha into `<to>` (it warns on stderr — read it), `--round <n+1>`
-refuses to anchor on HEAD at all, and any webhook-driven CI has not fired either, so an empty rollup
-there means "not triggered", never "passed". **Read the ref API to confirm a push landed; read the PR
-to learn whether anything downstream can act on it yet.**
+🔴 **`--emit-claims` stamps `<to>` from `headRefOid`, so do not emit until that sha has REFRESHED.**
+The pre-push-head lag itself is already covered under *Merge time* below — the consequence here is
+the tooling one: emit inside that window and the block records the **pre-rebase** sha, while
+`--round <n+1>` refuses to anchor on HEAD at all. The flag warns on stderr; read it. Confirm a push
+landed by reading `git/refs/heads/<branch>`, not the PR.
 
 🔴 **Reconstructing a lost block: derive it from the DIFF, never from a handoff's prose.** Prose says
 why a fix is correct, which is exactly the framing a blind round must not receive — three framed
