@@ -3,7 +3,7 @@
 The feature spans four layers that must agree or it ships dead in one of four
 ways, each of which is SILENT (no switch failure, no error anywhere):
 
-  1. THE HOTKEY. `$mod+m` press = start, `--release` = stop. A missing or
+  1. THE HOTKEY. `$mod+equal` press = start, `--release` = stop. A missing or
      typo'd half means hold-to-talk records forever, or never starts, and i3
      says nothing. Also: the key must collide with nothing (i3 takes the LAST
      binding for a keyspec — a later duplicate would silently replace one of
@@ -58,7 +58,7 @@ MAIN_GO = PKG_DIR / "src" / "cmd" / "stt-voice" / "main.go"
 BLOCK_SCRIPT_REL = "scripts/i3status-stt"
 BLOCK_SCRIPT = REPO / BLOCK_SCRIPT_REL
 
-STT_KEY = "$mod+m"
+STT_KEY = "$mod+equal"
 STT_START = "exec --no-startup-id stt-voice start"
 STT_STOP = "exec --no-startup-id stt-voice stop"
 GAME_MODE = "game"          # test_i3_game_mode.py owns the mode itself
@@ -104,7 +104,7 @@ def _bindings_by_mode(cfg: str) -> dict:
 
 def test_the_binding_parser_sees_the_modes_that_are_actually_there():
     """🔴 POSITIVE CONTROL for `_bindings_by_mode`. Every guard below says
-    "the stt pair is the ONLY thing on $mod+m" and "the game-mode keys are not
+    "the stt pair is the ONLY thing on $mod+equal" and "the game-mode keys are not
     claimed" — a parser that returned an empty default mode, or folded every
     binding into the default mode, would satisfy all of them silently."""
     modes = _bindings_by_mode(_render(False))
@@ -144,7 +144,7 @@ def test_the_press_and_release_bindsym_pairs_exist_on_BOTH_hosts(is_laptop):
 def test_the_stt_key_is_claimed_by_nothing_else_and_claims_nothing(is_laptop):
     """🔴 Two directions, both derived:
 
-    - the stt pair is the ONLY thing bound to `$mod+m` in the default mode
+    - the stt pair is the ONLY thing bound to `$mod+equal` in the default mode
       (i3 takes the LAST binding for a keyspec, so a later duplicate would
       silently kill one half of hold-to-talk);
     - the game-mode escape keys (Pause / Scroll_Lock, which live ONLY inside
