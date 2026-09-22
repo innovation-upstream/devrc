@@ -23,7 +23,7 @@ unaffected while the tunnel is up.
 ## State now
 - Branch / PR: `devrc` `main` at `c55c401d` (#1849); ALL session PRs merged: #1839 (mirror, now REPLACED), #1840 (real laptop tunnel), #1844/#1845 (apply-script fixes), #1846 (writer PATH), #1847 (manifest country_code), #1848/#1849 (nebula split-tunnel pin). No open PRs.
 - Laptop (this host): tunnel **UP** (reconnect 22:18:33) with the nebula pin LIVE (`ip rule`: `500: from all uidrange 991-991 lookup main`; nebula uid 991), killswitch armed roaming (`LAN allowed = 192.168.1.0/24 derived from wlp170s0`), exit IP US through tunnel, nebula ssh + LAN direct both work while up. Helpers at `/etc/nixos/i3blocks-scripts/` refreshed 22:05 (dash-form uidrange). `/etc/wireguard/airvpn.conf`: roaming PostUp/PreDown hooks present, `DNS` line REMOVED (host has no systemd-resolved; dnsmasq→public resolver rides the tunnel).
-- Verified during up windows: exit IP via ipinfo (US, AS62744), `ip route get 24.79.61.66 uid 991` → `via 192.168.1.1 dev wlp170s0` while `ip route get 1.1.1.1` → `dev airvpn table 51820` (the split is exact), ping workbench 0% loss ~134–147ms (= no-tunnel baseline), writer/pill grammar honest (`off` dim icon, `US?` up-unverified, `airvpn ?` named).
+- Verified during up windows: exit IP via ipinfo (US, AS62744), `ip route get <home-public-ip> uid 991` → `via 192.168.1.1 dev wlp170s0` while `ip route get 1.1.1.1` → `dev airvpn table 51820` (the split is exact), ping workbench 0% loss ~134–147ms (= no-tunnel baseline), writer/pill grammar honest (`off` dim icon, `US?` up-unverified, `airvpn ?` named).
 - Workbench: primary clone is BEHIND — last `ship.sh` ran at #1846 (`a2f45567`); #1847/#1848/#1849 are ff-merged locally on the laptop only. Its stable-path `/etc/nixos/i3blocks-scripts/airvpn-updown` predates BOTH the roaming port AND the nebula pin (latent re-degradation, see Defects).
 - Deploy honesty: every piece live-verified against the real path on the laptop (not inferred); the workbench half is UNVERIFIED since #1847 (needs `scripts/ship.sh`).
 - 🔴 `/etc/nixos/i3blocks-scripts/` copies are NOT ship-managed — every `airvpn-updown` change needs an operator `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown` (or an apply-script re-run) PER HOST. Today this bit twice (stale helper → no nebula pin).
@@ -43,6 +43,45 @@ unaffected while the tunnel is up.
 - **Observed (with values):** `server=Chamaeleon cc=None verdict=unknown handshake_age=21` before the fix; post-fix lookup returns Chamaeleon with `country_code: "us"`.
 - **Ruled out:** writer env PATH (was a REAL second bug, fixed in #1846 — `sudo -n airvpn-sudo status` died rc 127 `env: bash: not found` under the unit's PATH) — `via: measurement`.
 - **Next probe:** on the next tunnel-up writer poll (~60s after Connect): `python3 -c "import json; d=json.load(open('/home/zach/.cache/bar-status/airvpn.json')); print(d['verdict'], d['server'], d['country_code'])"` — expect `verified Chamaeleon us`; pill `US`. **Not yet observed while up** (the 22:18 reconnect predates no manifest issue — it simply wasn't re-read).
+
+### This doc leaked the home public IP to a PUBLIC repo; scrubbed at HEAD, NOT revoked
+as-of: 2026-09-22
+🔴 **WRITTEN BY A DIFFERENT SESSION than the one that authored this doc**, and deliberately
+appended here rather than in a new doc: the leak came out of THIS effort, so the next
+person working the tunnel is the one who must not put the value back. Only
+append-bucket sections are touched — this arc's `State now`, `Next steps` and
+`How to verify` are untouched and still belong to its author.
+
+- **Symptom + exact repro:** `main`'s `tekton/devrc-pytests` leg had been RED since
+  `3bd6fc22` (the commit that landed this doc), on
+  `test_no_unallowlisted_public_ip_literal_is_committed`. Reproduce with
+  `nix develop $DEVRC -c python3 -m pytest scripts/tests/test_no_public_ips.py -q`
+  against any tree at or after that commit.
+- **Observed (with values):** the repo is `visibility: PUBLIC`, `isPrivate=false`; the
+  HEAD copy of this file answered **200** unauthenticated from
+  `raw.githubusercontent.com`; **9** commits carry the value per `git log -S … --all`,
+  the oldest well before this doc and two of them `untracked files on …` (stash-shaped),
+  so it reached history by more than one route. The file was **NOT** in `PENDING_SCRUB`,
+  so this was a NEW leak the gate blocked rather than tracked debt. `via: measurement`
+- **Ruled out — that it was CI noise.** The measured red rate on this repo is ~42%, and
+  that is exactly the trap. A control run on a PRISTINE `origin/main` worktree failed the
+  SAME test identically, which is what proved it real and not caused by the PR under
+  test. 🔴 On that same PR an EARLIER red was genuinely the PR's fault — two reds,
+  opposite verdicts, only the control separated them. `via: measurement`
+- **Ruled out — that scrubbing HEAD revokes the disclosure.** It does not. The four
+  content gates read `git ls-files` and are blind to git history (devrc `CLAUDE.md` →
+  `SECRETS.md`, "Dead credentials in reachable history"). `via: doc`
+- **Ruled out — a history rewrite as the remedy.** Considered and DECLINED by the
+  operator: it force-pushes a public repo, breaks every clone and fork, and does not
+  un-index an address that is already public. `via: change`
+- **Leading hypothesis:** rotating the address is the only action that actually revokes
+  it. Whether that is worth doing is a judgement about the operator's ISP and threat
+  model, not a measurement.
+- **Next probe:** none for the diagnosis — it is closed. The ACTION is `devrc#1853`
+  (branch `fix/scrub-public-ip-airvpn-handoff`), OPEN and MERGEABLE at the time of
+  writing. Merge it, then re-run the gate on `origin/main` (not on the branch) and expect
+  green. 🔴 It is the only PR from that session where `/audit-pr` round 0 is still
+  actionable.
 
 ## Next steps (ranked)
 1. Converge the WORKBENCH: `scripts/ship.sh` (its tree is at `a2f45567`, three behind), then refresh its stable-path helper — `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown` (workbench) — else its next tunnel-up window re-measures today's nebula regression.
@@ -69,11 +108,38 @@ unaffected while the tunnel is up.
 - The pill's `?` on `US?` is the UNVERIFIED marker (exit IP ≠ entry IP and no server cc), NOT the stale marker — two different `?`s in one block's grammar.
 - `--block` mirror machinery from #1839 was REMOVED, not left dead; `i3status-airvpn` stays in RELAY_BLOCKS so the `wb` rollup still carries the workbench tunnel's alarms on the laptop.
 
+- 🔴 **DO NOT PUT THE REAL ADDRESS BACK IN THIS DOC.** The split-tunnel verification needs
+  two probe targets and they are NOT the same kind of thing, which is why the fix is
+  asymmetric: the HOME public IP is a real endpoint and is now `<home-public-ip>` (the
+  gate's own remedy: *"if you are tempted to pin a real endpoint, the answer is an env
+  var, not a pin"*), while the Cloudflare resolver is not an endpoint of ours, is not a
+  disclosure, and carries a path-scoped ALLOWLIST entry instead. If you need the commands
+  to be copy-pasteable, put the address in a shell variable at run time — do not inline it.
+- 🔴 **THE EXPLANATION OF A LEAK IS ONE OF THE PLACES THE LEAK SPREADS TO.** The first PR
+  body for #1853 quoted the address and was REFUSED by the `bash-guard` PreToolUse hook;
+  the first commit message had the same defect and had already been PUSHED, and was
+  amended + force-pushed (`--force-with-lease`, unmerged branch, no PR yet). The gate's
+  own `PENDING_SCRUB` header warns about this for the tracking file — it is equally true
+  of a commit message or a PR body on a public repo. The guard was the only thing that
+  caught it.
+- 🔴 **The ALLOWLIST is keyed on `(relpath, value)`, NEVER the value alone** — the gate's
+  header records that a value-only exemption is repo-wide by construction and once let an
+  audit mutant through. And never write the offending literal into the gate or its ledger:
+  `PENDING_SCRUB` is pinned by COUNT precisely so the tracking file does not become a
+  fresh copy of the leak.
+- ⚠ **A green run of that gate is a claim about `git ls-files` only** — blind to history
+  and to anything gitignored. Not a clean repo.
+- ⚠ **The same line also carries a private `192.168.1.1`.** RFC1918, correctly not
+  flagged, not a disclosure — noted so nobody "fixes" it and widens the diff.
+- ⚠ **A permanently-red gate is the real defect here, not the IP.** It had been red for
+  days; the `main-green-check` deadman REPORTS and never fixes, so nothing forced it to be
+  cleared, and the standing cost is that every session learns to click through a red.
+
 ## How to verify
 ```bash
 # tunnel + split-tunnel, with the tunnel UP:
 ip link show airvpn && ip rule | rg 500          # pin present: uidrange 991-991 lookup main
-ip route get 24.79.61.66 uid 991                  # → via <gw> dev wlp170s0 (NOT airvpn)
+ip route get <home-public-ip> uid 991                  # → via <gw> dev wlp170s0 (NOT airvpn)
 ip route get 1.1.1.1 | head -1                    # → dev airvpn table 51820
 curl -s https://ipinfo.io/json | jq -r .country   # → US
 ssh zach@10.42.0.30 'echo nebula-ok'              # nebula path alive with tunnel up
