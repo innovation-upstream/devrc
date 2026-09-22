@@ -73,6 +73,21 @@ headRefOid,baseRefName`), then assert **zero** placeholders remain. It is a work
 replacement: the block still lives nowhere durable, so the next session pays the reconstruction
 again.
 
+🔴 **A REBASE RE-POINTS THE ANCHOR, AND NOTHING IN THE TOOLING NOTICES.** A delta round resolves as
+`<the claims block's from>..HEAD`. After a rebase that `from` is no longer an ancestor of HEAD, so
+re-using it silently widens the round from one commit to one commit **plus every upstream commit the
+rebase pulled in** — 23 of them on `civitai/civitai#5018`, 2026-09-22 — and the brief reads as an
+ordinary delta. **This is NOT the `<base>` re-anchor clause further down**: that one is about the
+payload COUNT's base; this is the round's own SCOPE. **Carry the anchor across to its rebased twin** —
+`git range-diff <old-base>..<old-tip> <new-base>..<new-tip>`, confirm every commit maps `=`, read the
+new sha off the matching row, and record the mapping on the PR so the next round is not re-deriving it.
+
+🔴 **`--emit-claims` stamps `<to>` from `headRefOid`, so do not emit until that sha has REFRESHED.**
+The pre-push-head lag itself is already covered under *Merge time* below — the consequence here is
+the tooling one: emit inside that window and the block records the **pre-rebase** sha, while
+`--round <n+1>` refuses to anchor on HEAD at all. The flag warns on stderr; read it. Confirm a push
+landed by reading `git/refs/heads/<branch>`, not the PR.
+
 🔴 **Reconstructing a lost block: derive it from the DIFF, never from a handoff's prose.** Prose says
 why a fix is correct, which is exactly the framing a blind round must not receive — three framed
 audits confirmed a claim that one blind pass refuted. `git diff <from> <to>` yields what was
