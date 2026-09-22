@@ -208,7 +208,12 @@ LIVE 2026-06-15, each with its own staleness rule). Parked: the context-capturin
   Check before building anything civit-side — the catalog is
   `datapacket-talos:clusters/production/apps/AGENTIC_LEVERAGE.md` (VERIFIED present
   2026-08-26). The `next-lever` skill that used to front it is RETIRED — gone from
-  `origin/main` and deployed on neither host — so reach the catalog by path, not by skill.
+  devrc's global skill set and deployed on neither host — so reach the catalog by
+  path, not by skill. ⚠ That sentence undercounted the retirement for months:
+  both `next-lever` and `app-perf-next-lever` ALSO lived as project-local
+  `.claude/skills/` tracked on `talos-infra` trunk, so new sessions in
+  `civit/datapacket-talos` kept listing them; removed there 2026-09-21
+  (d49a5b1f9, also cleaned CLAUDE.md's `/next-lever` routing row).
 - **Existing artifacts:** `perf-deep-dive` runbook + `homelab-observability-read` profile
   (perf-deep-dive is a **manual tool**, not a loop).
 
