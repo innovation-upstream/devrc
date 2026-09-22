@@ -45,26 +45,30 @@ retractions are exactly what #1815 carries. If the operator disagrees, the remed
 close this doc as NOT ADDRESSED and open a new one, not to restore an unrunnable check.
 
 ## State now
-- 🔴 **THIS ARC IS CLOSED. Verdict: ADDRESSED.** Its closing condition was verified
-  clause by clause at `b1bee35b`: (a) **devrc#1815 MERGED**; (b) workbench, laptop and
-  `origin/main` **all at `b1bee35b`**; (c) `readlink -f ~/.claude/skills/handoff/SKILL.md`
-  resolves into `/nix/store` at **20,176 B on BOTH machines**, matching `origin/main`.
-  Nothing below re-opens it.
-- **Shipped and live:** P4 (step 5 routes to `handoff-audit.py`; that tool's stale
-  "no gate measures a handoff doc" banner corrected, then made per-audited-root) and
-  P1′ (`budget_warning()` prints THIS doc's closed-byte backlog). Plus the `CLAUDE.md`
-  worktree rule ported from `datapacket-talos` #10 and sharpened for devrc.
-- **Deleted by measurement, not by preference:** P2 (gotcha staleness — max age 39d, the
-  14d window would flag 55%), P1-as-written (`refs/` is measurably outside the
-  `handoff_search` corpus), P3 (the `DOD` block already prints the remedy and the only
-  increment left is the judgement itself).
-- **Audit:** round 0 + four adversarial rounds, 2🔴 → 0 → 0 → 0, payload 289 → 195 → 81
-  → 64. Stopped on round 4's own recommendation and its stated reason.
-- ✅ **The rescued branches are NO LONGER LOAD-BEARING.** `#1819` landed the
-  `browser-bridge` `flows/` rename that existed nowhere else, so
-  `origin/rescued-stt-and-browser-flows` and `origin/rescued-shared-branch-20260920` are
-  superseded — every path they protected is on `main`. They are harmless refs; deleting
-  them is the operator's call, not mine.
+- 🔴 **ARC CLOSED (verdict ADDRESSED) AND FULLY LANDED. Nothing from it is in flight.**
+  All three PRs merged, shipped and verified by CONTENT on `origin/main`:
+  **#1815 `d9216e5e`** (P4 + P1′ + the multi-session worktree rule) ·
+  **#1821 `8f95c342`** (the `/the-algorithm` pass: advice deleted, −178/+42) ·
+  **#1822 `98aa7b06`** (this doc's CLOSED verdict).
+- **Deployed and verified LIVE on both hosts** at `8f95c342`: `ship.sh` rc 0, every per-host
+  line read (620/579 artifacts resolve, 0 dangling, 0 stale, no skips). The live note from
+  the deployed copy prints **numbers only**; the laptop greps **0** advice strings and **1**
+  numbers block. `readlink -f ~/.claude/skills/handoff/SKILL.md` → `/nix/store` at
+  **20,176 B on both machines**, matching `origin/main`.
+- **Base clone re-synced** to `98aa7b06` on `main`. My 2 stray worktrees removed and 5 merged
+  local branches deleted; the 2 dirty paths (`claudedocs/scope-chief-*`) were dirty before
+  this arc started and are NOT mine.
+- ✅ **Rank 1 of the previous version of this list is DONE** — #1821 merged, shipped,
+  verified. The list below is what actually remains.
+- ✅ **The rescue branches are superseded and need no action**: `#1819` landed the
+  `browser-bridge` `flows/` rename that existed nowhere else, so every path
+  `origin/rescued-stt-and-browser-flows` and `origin/rescued-shared-branch-20260920`
+  protected is on `main`. They are harmless refs; deleting them is the operator's call.
+  ⚠ `rescued-workbench-main-2026-08-02` is **not from this arc** — do not sweep it up.
+- **No `clawgate-task:` field**, and that is a real reading rather than a blank: `resolve`
+  exited **6** — one task linked (#574, a browser-bridge SSH ref) and **NONE worked**
+  (0 created, 1 read). It is not this session's subject, so nothing was recorded and no task
+  was created.
 
 ## Open investigations — live diagnosis state
 
@@ -139,22 +143,30 @@ close this doc as NOT ADDRESSED and open a new one, not to restore an unrunnable
   which of the four detectors actually fires per-doc rather than corpus-wide.
 
 ## Next steps (ranked)
-🔴 **NONE OF THESE BELONG TO THIS ARC — it is CLOSED and FROZEN.** They are recorded here
-so they are not lost, and a session picking one up is starting a NEW arc.
-1. **Merge devrc#1821** — the `/the-algorithm` pass over what this arc shipped: deletes the
-   advice surface from `evictable_note` (−178/+42), because 7 of this arc's 10 audit
-   findings were caused by it and the eviction ladder is already owned by
-   `test_handoff_doc_size.py`. CI was pending at close.
-   forcing: user — the operator asked for the pass and approved merging it.
-2. **Decide round 0's F2, which #1821 has SIMPLIFIED to one line.** F2 argued: withhold the
-   PRESCRIPTION from ungated repos, print the NUMBERS. #1821 deletes the prescription
-   entirely, so the objection it rested on is gone — what remains is whether to drop the
-   `if gated` on a numbers-only note. `homelab-talos` holds **370,563 B** of closed content
-   the withholding currently hides.
+🔴 **NONE OF THESE BELONG TO THIS ARC — it is CLOSED and FROZEN AT ROUND 1.** They are
+recorded so they are not lost; a session picking one up is starting a NEW arc and should say
+so. Both of the first two are ONE-LINE operator decisions, not engineering work.
+1. **Decide F2 — and note that #1821 SHRANK it to one line.** F2 (round 0 of #1815) argued:
+   withhold the PRESCRIPTION from ungated repos, print the NUMBERS. #1821 deleted the
+   prescription entirely, so the objection it rested on no longer exists. What remains is
+   whether to drop `if gated` on a numbers-only note in
+   `scripts/lib/handoff_doc.py::budget_warning` (the near-headroom arm). Blast radius:
+   `homelab-talos` holds **370,563 B** of closed content the withholding hides today, and
+   **107 of 108** ungated size warnings fired outside devrc.
    forcing: user — it reverses a requirement whose author is a measured incident
-   (`civitai/cli#618`), which is not an agent's call.
-3. Re-measure the corpus in ~2 weeks: evictable backlog (468,110 B at round 0) and docs over
-   the hard cap (28). If neither moves, P1′ informed nobody and should be deleted.
+   (`civitai/cli#618`), which is not an agent's call to take.
+2. **Ratify or reverse the closing-condition correction.** Round 1 froze this arc's
+   condition as "P1 merged AND the corpus APPEND share below 70%", which was
+   unsatisfiable — P1 is retracted and the metric could only fall by performing the
+   forbidden demotion. An agent re-aimed it at the arc's actual deliverable and closed on
+   the corrected line. The strict reading of frozen-at-round-1 says close this doc **NOT
+   ADDRESSED** and open a new arc instead. Reversing changes the VERDICT only; the shipped
+   work is unaffected either way.
+   forcing: user — an agent corrected its own finish line, which the operator may not accept.
+3. Re-measure the corpus in ~2 weeks and decide whether P1′ earned its place: the evictable
+   backlog (**468,110 B / 14.1%** at round 0) and docs over the hard cap (**28**). If
+   neither number moved, the note informed nobody and should be deleted rather than
+   elaborated — `python3 $DEVRC/scripts/handoff-audit.py $DEVRC/claudedocs`.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -349,34 +361,43 @@ so they are not lost, and a session picking one up is starting a NEW arc.
   rewrite, and that session then landed its own work as `#1819`. Preserving the TIP rather
   than the commit you noticed is what made the second one survivable.
 
+- 🔴 **THE HEADLINE RESULT IS THAT MOST OF THIS SHOULD NOT HAVE BEEN BUILT — and that is a
+  success, not a failure.** Four items proposed: two shipped, two deleted by measurement;
+  then `/the-algorithm` deleted most of one that HAD shipped (−178/+42). What survives is
+  ~80 lines doing the one thing nothing else did — reporting how much of a doc has closed.
+  **The expensive part was the measuring, and it repeatedly said DON'T.**
+- 🔴 **THE DEFECT GENERATOR WAS PROSE, AND THE ATTRIBUTION IS WHAT FOUND IT.** Five audit
+  rounds; nearly every finding sat in the PREVIOUS round's comments rather than its logic.
+  Attributing all ten of #1815's findings to their causing surface gave **7 advice / 3
+  numbers** — and the advice existed only because this code copied an eviction ladder that
+  `test_handoff_doc_size.py` already owned. **One rule, one place; I made it two, then spent
+  four rounds keeping the copy true.** When a ladder keeps finding things, attribute the
+  findings to a SURFACE before writing another fix.
+- 🔴 **I ADDED A GUARD TO FIX A COSMETIC DUPLICATION IN AN ADVISORY LINE** —
+  `test_each_arm_carries_exactly_one_prohibition` — which is the-algorithm step 5 ("the fix
+  for over-guarding is NEVER another guard") violated inside the very effort applying it.
+  Deleted by the pass. The tell: the thing being guarded changed nothing a reader does.
+- 🔴 **A METRIC CAN SELECT THE HARMFUL ACTION.** This arc's round-1 closing condition made
+  the one action its own playbook forbids the CHEAPEST way to satisfy it. **When freezing a
+  closing condition, ask which action most cheaply satisfies the metric, and whether you
+  would accept that action.**
+- **`/the-algorithm` run retroactively works, with a caveat worth stating**: the skill says
+  it is "an in-the-moment gate, not a bulk retroactive audit", so a retro pass gets
+  hindsight bias free — the findings look obvious only because the audit rounds surfaced
+  them first. It still paid: it deleted a surface four rounds of correctness auditing had
+  only been making *more correct*.
+
 ## How to verify
-Re-derive every number in the proposal:
 ```bash
-# (1) APPEND-bucket share — uses the tool's own classifier, not a heading grep
-python3 - <<'PY'
-import importlib.util, pathlib
-from collections import Counter
-R = pathlib.Path("/home/zach/workspace/devrc")
-spec = importlib.util.spec_from_file_location("hd", R / "scripts/lib/handoff_doc.py")
-hd = importlib.util.module_from_spec(spec); spec.loader.exec_module(hd)
-tot = Counter(); n = 0
-for d in sorted((R / "claudedocs").glob("handoff-*.md")):
-    _pre, secs = hd.split_sections(hd.split_front_matter(d.read_text(errors="replace"))[1])
-    for heading, body in secs:
-        b = len(("\n".join(body) if isinstance(body, list) else str(body)).encode())
-        tot["APPEND" if hd.append_bucket(heading) else "REPLACE"] += b; n += b
-print(tot, f"APPEND share {100*tot['APPEND']/n:.0f}%")
-PY
+# the arc's closing condition, all three clauses
+gh pr view 1815 --repo innovation-upstream/devrc --json state --jq .state          # MERGED
+git -C $DEVRC rev-parse --short HEAD; ssh zach@10.42.0.100 'git -C ~/workspace/devrc rev-parse --short HEAD'
+readlink -f ~/.claude/skills/handoff/SKILL.md && wc -c < ~/.claude/skills/handoff/SKILL.md   # /nix/store, 20,176 B
 
-# (2) closing-condition coverage — through the AUTHORITY, with real-text controls
-#     positive control: handoff-audit-pr-ladder.md MUST be declared
-#     negative control: handoff-laptop-freezes.md MUST NOT be
+# the advice is gone from main and the numbers survive
+git -C $DEVRC show origin/main:scripts/lib/handoff_doc.py | grep -cE 'JUDGEMENT: the playbook|NOT counted above'   # 0
+git -C $DEVRC show origin/main:scripts/lib/handoff_doc.py | grep -c 'Evictable in THIS doc'                        # 1
 
-# (3) guard firing — tool output only, deduped by tool_use_id
-find ~/.claude/projects -name '*.jsonl' -print0 | xargs -0 grep -l 'handoff_doc\.py' | wc -l   # 1,328
+# the note as a live consumer sees it
+python3 $DEVRC/scripts/handoff-audit.py $DEVRC/claudedocs/handoff-audit-pr-ladder.md
 ```
-Controls that MUST hold before any of these numbers is readable: negative control
-`status=zzz-not-a-real-status` → 0; positive control `proposed`+`written` → 3,124.
-
-The proposal itself: `git -C $DEVRC show fcd0ad12 --stat` and
-`$DEVRC/claudedocs/proposal-handoff-resume-prune.md`.
