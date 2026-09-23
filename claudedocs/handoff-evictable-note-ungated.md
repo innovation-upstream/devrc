@@ -49,40 +49,42 @@ docs**; note the relationship and leave both.
   ```
 
 ## State now
-- 🔴 **devrc#1826 is MERGED** — squash `62e811e9`, 2026-09-21T07:28:55Z, verified by CONTENT on
-  `origin/main` (both `over_by=0` call sites present at `handoff_doc.py:3073` and `:3146`); a
-  squash never makes the head an ancestor, so ancestry is not the check. All four Tekton legs
-  green at the final head `a1f59620`.
-- **The arc's closing condition is NOT yet met**: clause (a) is satisfied, clause (b) —
-  `ship.sh` converging both hosts — is not. Nothing of this change runs on either machine until
-  it does.
+- ✅ **THIS ARC IS CLOSED. Verdict: ADDRESSED.** The closing condition was run on BOTH machines
+  on 2026-09-21 and returned **MET** on each — it asserts all three clauses at once (the note
+  prints, no deficit wording, no prescription).
+  - (a) **devrc#1826 MERGED** — squash `62e811e9`, verified by CONTENT on `origin/main` (both
+    `over_by=0` call sites present); a squash never makes the head an ancestor, so ancestry is
+    not the check. All four Tekton legs green at the final head `a1f59620`.
+  - (b) **`scripts/ship.sh` converged both hosts** to `e6bd3592` — every per-host line read, not
+    the verdict: workbench and laptop each `✅ VERIFIED — on branch main at origin/main +
+    switched`, 620 / 579 managed artifacts resolving, 0 dangling, 0 stale.
+- **Re-verified 2026-09-23**: both PRs still `MERGED`, the two `over_by=0` call sites still on
+  `origin/main`, and **nothing has touched `handoff_doc.py` or `test_handoff_doc.py` since the
+  merge**. ⚠ The laptop is now 1 commit behind `origin/main` — a LATER, unrelated commit
+  (`#1853`), not drift in this work; it needs an ordinary ship and does not reopen this arc.
 - **Shipped behaviour:** the ungated over-budget arm passes `over_by=0`, so its note reports what
   has closed and asserts no shortfall against a ceiling that block says nothing enforces. The
   gated arm keeps its shortfall. Two ladder-pointers deleted from `evictable_note` itself.
-- 🔴 **REACH IS 13 DOCS, NOT 31 — the figure that decided this arc was wrong.** Measured through
-  `budget_warning`, the only caller: **13 of homelab-talos's 70** live handoff docs. `31` is the
-  `evictable_note`-non-empty set; the other 18 are UNDER budget, so `budget_warning` returns `""`
-  for them before and after. The operator approved F2 on a brief quoting **370,563 B**; the
-  withheld set was 13 documents. No byte total is recorded in the source — it is corpus-volatile
-  (218,883 B at one reading, 198,483 B an hour earlier).
-- **Audited rounds 0–2, ladder CLOSED on the attribution gate** (not on a clean round). Round 0
-  corrected the reach figure and found the deficit assertion. Rounds 1 and 2 each found only
-  false claims in the previous round's own prose and changed **zero executable payload lines** —
-  two consecutive, which is the gate. No round found a 🔴. The payload was correct from round 1
-  and never moved again.
+- 🔴 **REACH IS 13 DOCS, NOT 31** — measured through `budget_warning`, the only caller. `31` is
+  the `evictable_note`-non-empty set; the other 18 are UNDER budget, so `budget_warning` returns
+  `""` for them before and after. The operator approved F2 on a brief quoting **370,563 B**; the
+  withheld set was 13 documents. No byte total is recorded in the source — it is corpus-volatile.
+- **Audited rounds 0–2, ladder CLOSED on the attribution gate**, not on a clean round. Rounds 1
+  and 2 each found only false claims in the previous round's own prose and changed **zero
+  executable payload lines** — two consecutive, which is the gate. No round found a 🔴. The
+  payload was correct from round 1 and never moved again.
 
 ## Next steps (ranked)
-1. **`scripts/ship.sh` both hosts, then run the closing-condition check in `## Goal`.** Read every
-   per-host line, not the final verdict — one skip hides among greens. Both hosts were behind at
-   hand-off (workbench `98aa7b06`, laptop `8f95c342`). This is the only thing between here and
-   ADDRESSED.
-   forcing: user — the operator decided F2 explicitly (ratify/reverse prompt, 2026-09-21,
-   answer "Drop the gate — print numbers everywhere"), and this is its delivery. ⚠ That
-   decision was taken on a brief quoting 370,563 B; the real withheld set was 13 docs.
-2. **One corpus pass, at the ~2026-10-04 deletion trigger**, covering both open questions — they
-   need the same measurement and are one item, not two. (a) Feed the rank-3 trigger inherited from
+✅ **The former rank 1 (`ship.sh` + the closing-condition check) is DONE** — completed 2026-09-21,
+result above. It is struck from the queue rather than left listed: an item that has landed but is
+still advertised is what makes a second session re-do it, and the claim lock cannot catch that
+because `--release` is called exactly when the item completes. This arc's own predecessor
+(`handoff-handoff-resume-prune.md`) carried two such items for two days.
+
+1. **One corpus pass, at the ~2026-10-04 deletion trigger**, covering both open questions — they
+   need the same measurement and are one item, not two. (a) Feed the trigger inherited from
    `handoff-handoff-resume-prune.md`: *"if neither moves, P1′ informed nobody and should be
-   deleted."* 🔴 **Evaluate it against 13 docs, not 31** — round 0 flagged that this PR widened
+   deleted."* 🔴 **Evaluate it against 13 docs, not 31** — round 0 flagged that #1826 widened
    `evictable_note`'s blast radius before its own deletion trigger fired. (b) While the corpus is
    loaded, sweep for the same leak class elsewhere: what other text does an UNGATED repo's author
    see, and does any of it name a devrc-only artifact?
@@ -186,6 +188,14 @@ docs**; note the relationship and leave both.
 - ⚠ **`scoped-tests.sh` refuses this diff by design** (`scripts/lib/**` is a shared surface, exit
   4). Blast radius was established directly instead: `budget_warning` has one non-test caller;
   the other two repo hits for these names are an unrelated function and a comment.
+
+- 🔴 **I SHIPPED THE EXACT DEFECT I HAD JUST WRITTEN A RULE AGAINST, IN THIS DOC, ONE SECTION
+  APART.** The closeout of the predecessor arc's queue (devrc#1855) added the rule *"closing an
+  item means editing the queue, in the same session that finishes it"* — while THIS doc's rank 1
+  had been complete for two days and its `State now` still read *"the closing condition is NOT yet
+  met"*. Found only because the operator asked whether anything was outstanding. **Writing the
+  rule is not applying it: sweep YOUR OWN artifacts for the shape in the same pass, because the
+  document you are editing is the one you are least likely to re-read.**
 
 ## How to verify
 ```bash
