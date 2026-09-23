@@ -4434,11 +4434,18 @@ ROWS = [
     # (the refusal says `payload=0` where it should say the field is absent
     # and the diff earned the zero), and a legacy pair over an UNCLASSIFIABLE
     # diff fires the gate on two unknowns.
+    # 🔴 A THIRD WIDENING IN ROUND 25, AND IT IS A REAL ONE. The
+    # unearned-ledger report has a distinct row for a LEGACY block — "with no
+    # `payload=` field", never "beside `payload=None`" — and this mutation
+    # makes the absent field parse as 0, so that row renders a count the
+    # comment never carried. A *report* now detects the fail-closed read, not
+    # only the gate: that is coverage this row did not have.
     ("G3  an ABSENT payload field reads as a measured zero",
      {"test_the_gate_FAILS_OPEN_on_a_block_that_carries_no_payload_field",
       "test_the_payload_field_the_emitter_writes_is_the_one_its_parser_reads",
       "test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field",
-      "test_an_UNRECOGNISED_file_type_is_UNMEASURED_and_fails_OPEN"},
+      "test_an_UNRECOGNISED_file_type_is_UNMEASURED_and_fails_OPEN",
+      "test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF"},
      absent_payload_field_reads_as_zero),
     ("G4  a no-count emit writes a ZERO instead of the placeholder",
      {"test_the_payload_field_the_emitter_writes_is_the_one_its_parser_reads"},
@@ -4519,8 +4526,18 @@ ROWS = [
     # `test_every_command_a_refusal_prescribes_actually_runs` now carries a
     # REFUSAL 3b case, so a self-range that is accepted returns 5 where that
     # case expects 4.
+    # 🔴 ROUND 25 ADDED THREE KILLERS, AND ONE OF THEM IS THE WHOLE ARGUMENT
+    # FOR NOT SHIPPING A SECOND REFUSAL.
+    # `…ALL_self_range_ladder_is_ALREADY_refused_by_the_shipped_pair_check`
+    # asserts that an all-unearned ladder returns 4 at every round >= 2 BECAUSE
+    # this check fires — so disabling the check is exactly the state in which
+    # that argument would be false, and it must go red there. The other two are
+    # the #687-shape rows, which assert rc 4 for the same reason.
     ("U8  a self-range in the gate's own pair is accepted",
      {"test_a_SELF_RANGE_in_a_block_the_gate_reads_is_an_INPUT_refusal",
+      "test_a_ladder_whose_EVERY_block_is_a_self_range_says_so_on_stderr",
+      "test_an_ALL_self_range_ladder_is_ALREADY_refused_by_the_shipped_pair_check",
+      "test_the_block_the_operator_PASTES_carries_the_unearned_ledger_note",
       "test_every_command_a_refusal_prescribes_actually_runs"},
      a_self_range_in_the_gates_own_pair_is_accepted),
     ("U9  the file header is matched BEFORE the hunk",
@@ -4535,8 +4552,15 @@ ROWS = [
     ("U12 a COMBINED merge diff is counted anyway",
      {"test_a_COMBINED_merge_diff_is_UNMEASURED_rather_than_miscounted"},
      a_combined_merge_diff_is_counted_anyway),
+    # 🔴 ROUND 25 GAVE THIS ROW A SECOND KILLER, AND THE SCOPE IT GUARDS IS NOW
+    # LOAD-BEARING TWICE OVER. Widening the refusal to the whole corpus does not
+    # merely refuse a run nothing consults — it DELETES the unearned-ledger
+    # report's entire reason to exist, because every ladder the report is for
+    # would be refused instead of reported. The mixed-shape row asserts rc 0 and
+    # a rendered brief, so it goes red there.
     ("U13 the self-range refusal covers the WHOLE corpus",
-     {"test_a_SELF_RANGE_the_gate_does_NOT_read_is_reported_and_not_refused"},
+     {"test_a_SELF_RANGE_the_gate_does_NOT_read_is_reported_and_not_refused",
+      "test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF"},
      the_self_range_refusal_covers_the_WHOLE_corpus),
     ("U14 `*` becomes a comment prefix",
      {"test_the_classifier_reads_a_changed_line_the_way_git_wrote_it"},
