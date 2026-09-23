@@ -398,51 +398,73 @@ def test_a_COMPUTED_ref_gets_the_exemption_too(home, empty_repo, spelling):
         str(empty_repo / "claudedocs" / DOC)], "spelling %r lost the exemption" % spelling
 
 
-def test_the_scan_cap_BOUNDS_the_search(home, empty_repo):
-    """🔴 THE ONLY GUARD ROUNDS 1-2 KEPT, AND IT WAS PINNED IN NEITHER DIRECTION.
+@pytest.mark.parametrize("spelling", [
+    '"${B}"', "'${B}'", '"$B"', "'$B'",
+    '"$(git rev-parse HEAD)"', "'$(git rev-parse HEAD)'",
+    '"`git rev-parse HEAD`"', "'`git rev-parse HEAD`'",
+    '"refs/heads/docs/handoff-x"',          # 🔴 a quoted LITERAL, not a computed ref
+    "'origin/main'",                        # 🔴 the same, single-quoted
+])
+def test_a_QUOTED_ref_loses_the_exemption(home, empty_repo, spelling):
+    """🔴 A DECLARED NARROWING, PINNED SO IT CANNOT DRIFT — AND WIDER THAN FIRST WRITTEN.
 
-    Round 2 DELETED `LINE_CONTINUATION_RX` on the stated ground that "a mutant joining
-    every newline left the whole suite green". Round 3 applied that same criterion to
-    `GIT_VERB_SCAN_CAP` — the guard round 2 kept and promoted to "THE WHOLE FIX" — and
-    got the same answer: `GIT_VERB_SCAN_CAP = 10**9` SURVIVED, and deleting the
-    truncation outright (`head = cmd[:start]`) SURVIVED. Only `cap = 1` died, which
-    proves the constant is READ, not that it BOUNDS anything. A criterion applied to
-    the thing you deleted and not to the thing you kept is not a criterion.
+    `REF_PREFIX_RX`'s token class excludes `"'=(` to kill a quadratic (see the
+    constant). The rule is mechanical: a ref token whose LAST character is one of those
+    four loses the exemption. Ordinary shell QUOTING puts a `"` or `'` there, so this is
+    not limited to COMPUTED refs — a quoted LITERAL flips too, which is why the last two
+    rows are here. All ten spellings below flip; every unquoted one still arms and is
+    pinned by `test_a_COMPUTED_ref_gets_the_exemption_too`.
 
-    Both directions, because a one-sided pin is what got us here:
-      * BEYOND the cap the exemption is NOT granted — kills an inert or deleted cap;
-      * WITHIN it the exemption IS granted — kills a cap so small it bounds everything,
-        which is the mutant that already died and is the cheap way to be green.
+    🔴 THIS TEST EXISTS BECAUSE THE SUITE WAS GREEN EITHER WAY. Every parametrized case
+    in the original was UNQUOTED, so the narrowing was invisible to it. Round 0 of #1811
+    found the PR claiming it still accepted "every computed ref"; round 1 found the
+    follow-up claim ("the quoted COMPUTED ref") still too narrow, and the accompanying
+    "corpus incidence is ZERO" simply false. A narrowing nothing asserts is a narrowing
+    nobody can see.
 
-    The doc is absent from `empty_repo`, so the exemption is the ONLY thing that can
-    make this arm: the assertions read arming directly rather than through a proxy.
+    ⚠ ROUND 1'S REPLACEMENT FOR THAT ZERO — a bare "it is 2" — IS RETRACTED TOO, not as
+    false but as unquotable: it shipped with no method, no date and no corpus size.
+    Re-derived 2026-09-23 over 6,621 transcripts (including `subagents/`, which sit at
+    DEPTH 4): **6 sites across 3 sessions, 5 of them THIS ARC'S OWN probes, exactly ONE
+    genuine** — 2026-09-15, session `f0decd34`, a real
+    `git show <ref>:claudedocs/handoff-tmux-webapp.md`. The full method is in the guard
+    beside `REF_PREFIX_RX`; do not inherit the number from here, and note that probing
+    the narrowing ADDS to it. What this test pins is the BEHAVIOUR, which no count moves.
 
-    🔴 THE PADDING MUST NOT BE MADE OF PATH CHARACTERS, AND THE FIRST VERSION OF THIS
-    TEST WAS VACUOUS BECAUSE IT WAS. `HANDOFF_PATH_RX` opens with
-    `[A-Za-z0-9_.~@%+/-]*`, so a run of `y`s and `/`s before `claudedocs/` is swallowed
-    INTO THE MATCH — the head stayed 29 bytes, the cap was never exercised, and the
-    assertion passed because a directory did not exist. It was green, it killed
-    nothing, and only checking `m.start()` by hand showed it. The pad is therefore
-    placed where the head is: after the verb and before the `:` that terminates the
-    ref, so it lengthens the HEAD rather than the match.
+    Direction is fail-SAFE — a lost exemption makes the guard quieter, never blocking —
+    which is why it is accepted rather than fixed.
     """
-    resolved = [str(empty_repo / "claudedocs" / DOC)]
+    cmd = "git -C %s show %s:claudedocs/%s" % (empty_repo, spelling, DOC)
+    assert guard.handoff_read_docs(bash(cmd, cwd="/nowhere/else")) == []
 
-    def cmd_with_pad(n):
-        # head becomes `git -C <repo> show <n bytes>:` — the verb sits n bytes back.
-        return ("git -C %s show %s:claudedocs/%s"
-                % (empty_repo, "A" * n, DOC))
 
-    # WITHIN: the verb is inside the cap. Arms.
-    assert guard.handoff_read_docs(
-        bash(cmd_with_pad(100), cwd="/nowhere/else")) == resolved
+@pytest.mark.parametrize("seg,armed", [
+    ("git -C /r show origin/t", True),      # the ordinary shape
+    ("git -C /r cat-file -e HEAD", True),   # the other verb
+    ("show git", False),                    # 🔴 verb BEFORE git — the order case
+    ("showcase git show x", True),          # `showcase` is not the verb; the later one is
+    ("git a cat-file", True),               # verb after git, words between
+    ("git log --oneline", False),           # git, no read verb
+    ("cat-file git", False),                # verb before git again
+])
+def test_the_git_verb_check_still_requires_the_VERB_AFTER_the_git(home, empty_repo,
+                                                                  seg, armed):
+    """🔴 PINS THE ONLY THING THE ORIGINAL `\\bgit\\b.*?\\b(?:show|cat-file)\\b` SAID.
 
-    # BEYOND: the verb is pushed past the cap, so the capped head cannot see it.
-    # 🔴 The pad OVERSHOOTS the cap by a non-multiple (3x + 7) so the boundary is
-    # crossed rather than landed on — a fixture sitting exactly ON a limit is the other
-    # way a bound test goes vacuous.
-    assert guard.handoff_read_docs(
-        bash(cmd_with_pad(guard.GIT_VERB_SCAN_CAP * 3 + 7), cwd="/nowhere/else")) == []
+    That regex was replaced by two linear scans to delete `GIT_VERB_SCAN_CAP`. Its
+    entire semantic content was ORDER — a read verb must follow a `git` word — and the
+    replacement preserves it only because `GIT_VERB_RX.search(seg, g.end())` starts
+    after the `git`. Nothing asserted that: the equivalence was a throwaway probe, and
+    the constant's comment told the next reader to "re-run that comparison" against
+    something that existed in no test. Round 0 of #1811 called that out.
+
+    `show git` and `cat-file git` are the discriminating rows — a mutant that drops the
+    `g.end()` offset, or that tests the two predicates independently, goes green on
+    every other row and red only on these.
+    """
+    cmd = "%s foo:claudedocs/%s" % (seg, DOC)
+    got = guard.handoff_read_docs(bash(cmd, cwd=str(empty_repo)))
+    assert bool(got) is armed, "segment %r: expected armed=%s, got %r" % (seg, armed, got)
 
 
 def test_a_LATER_base_wins_when_the_earlier_one_lacks_the_doc(home, tmp_path, repo):
