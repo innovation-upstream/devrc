@@ -12393,11 +12393,11 @@ def test_the_prose_determination_is_UNCHANGED_by_the_measured_reading():
         )
 
 
-@pytest.mark.parametrize("diff,expected,why", [
+@pytest.mark.parametrize("diff,expected,expected_code,why", [
     (
         "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n"
         "--- not a file header, a REMOVED line reading `-- foo`\n",
-        1,
+        1, 1,
         "a removed line whose content starts with `--` renders as `--- …`, "
         "byte-identical to a diff file header. A parser that checks the "
         "header shape before it checks 'am I inside a hunk' drops the line "
@@ -12406,7 +12406,7 @@ def test_the_prose_determination_is_UNCHANGED_by_the_measured_reading():
     (
         "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n"
         "\n+x = 1\n",
-        1,
+        1, 1,
         "`'' in '+-'` is True, so the obvious membership spelling reads every "
         "EMPTY line of the diff as a blank changed line — which would inflate "
         "the code-line count for whichever file happened to be current and "
@@ -12415,7 +12415,7 @@ def test_the_prose_determination_is_UNCHANGED_by_the_measured_reading():
     (
         "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1,2 +1,2 @@\n"
         "-\t// an indented Go comment\n+\t// reworded\n",
-        0,
+        0, 2,
         "a line comment is still a comment when the diff column is followed "
         "by indentation, which is how every comment inside a function body "
         "appears",
@@ -12423,7 +12423,7 @@ def test_the_prose_determination_is_UNCHANGED_by_the_measured_reading():
     (
         "diff --git a/a.c b/a.c\n--- a/a.c\n+++ b/a.c\n@@ -1,2 +1,2 @@\n"
         "-  *p = old_value;\n+  *p = new_value;\n",
-        2,
+        2, 2,
         "`*` is NOT a comment prefix. A C block-comment continuation line "
         "starts with it and so does a pointer store; reading it as a comment "
         "would manufacture a zero out of executable C.",
@@ -12432,7 +12432,7 @@ def test_the_prose_determination_is_UNCHANGED_by_the_measured_reading():
         "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1,3 +1,3 @@\n"
         '-    """the docstring body, which is prose\n'
         '+    """the reworded docstring body\n',
-        2,
+        2, 2,
         "a docstring body is counted EXECUTABLE on purpose. Classifying it "
         "needs the whole file, not a hunk; over-counting keeps the gate "
         "SILENT, which is the fail-open direction, and the measured cost is "
@@ -12440,15 +12440,25 @@ def test_the_prose_determination_is_UNCHANGED_by_the_measured_reading():
     ),
 ])
 def test_the_classifier_reads_a_changed_line_the_way_git_wrote_it(
-        diff, expected, why):
+        diff, expected, expected_code, why):
     """🔴 THE FIVE READINGS A NAIVE PARSER GETS WRONG, each with its own row.
 
     Every one of these is a case where the WRONG answer is a plausible one, and
     three of the five fail towards a manufactured zero — which ends a
     converging ladder.
+
+    🔴 BOTH NUMBERS ARE ASSERTED, AND THE SECOND ONE WAS ADDED BECAUSE A MUTANT
+    SURVIVED. Pinning `executable` alone, the `'' in '+-'` substring mutant
+    scored SURVIVED against a fully green suite: reading the diff's blank line
+    as a changed line adds a BLANK, which is non-executable, so the executable
+    count never moves — only `code_lines` does. A fixture that can only ever
+    observe one of the two numbers cannot see a mutant that moves the other,
+    which is `claude/RULES.md`'s mutation-sweep blind spot in its own shape.
     """
     churn = ad.classify_diff(diff)
-    assert churn.executable == expected, f"{why}\n  got: {churn}"
+    assert (churn.executable, churn.code_lines) == (expected, expected_code), (
+        f"{why}\n  got: {churn}"
+    )
 
 
 def test_a_COMBINED_merge_diff_is_UNMEASURED_rather_than_miscounted():

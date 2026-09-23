@@ -4138,6 +4138,11 @@ ROWS = [
       # claim is "here is everything that went red", and a set trimmed to the
       # ones that feel on-topic is the row lying about what it saw.
       "test_the_F1_gap_concession_is_as_wide_as_the_gap",
+      # Round 24's guard, recorded the same way. It asserts the section is
+      # BYTE-IDENTICAL across three readings of the round's diff — the claim
+      # that the measured payload unit has not reached gate 3 — and it slices
+      # on the same heading, so a wholesale deletion takes it too.
+      "test_the_prose_determination_is_UNCHANGED_by_the_measured_reading",
       "test_the_section_says_HOW_to_settle_the_WHOLE_PROSE_condition"},
      det_section_dropped),
     # ⚠ Q3 AND Q13 ARE NOT DUPLICATES, and the overlap is the point. Q3
@@ -4156,16 +4161,22 @@ ROWS = [
     # the population statement now also drops the concession, and the guard
     # over the concession fails. That is a true report about what this mutation
     # deletes, not over-coverage to be hidden by narrowing either test.
+    # 🔴 ROUND 24 ADDED THE THIRD KILLER, MEASURED. The new guard pins that all
+    # five shipped determination constants are still in the section, so a
+    # dropped conjunct fails it — which is the guard doing exactly what it
+    # says, not a loss of isolation: every killer here is about the section.
     ("Q4  the prose-ONLY condition dropped from the section",
      {"test_the_prose_determination_ships_on_emit_claims_from_round_2_and_NOT_before",
-      "test_the_F1_gap_concession_is_as_wide_as_the_gap"},
+      "test_the_F1_gap_concession_is_as_wide_as_the_gap",
+      "test_the_prose_determination_is_UNCHANGED_by_the_measured_reading"},
      det_prose_only_condition_dropped),
     # Q5/Q6 are round-0 finding F2 as mutants. The graft at `4552b745` shows
     # `..._ships_its_RESTRAINING_half_too` raising on an ABSENT surface there
     # rather than failing on the defect, so it is filed as a guard and these
     # rows are its evidence instead.
     ("Q5  the four restraints dropped from the shipped section",
-     {"test_the_determination_ships_its_RESTRAINING_half_too"},
+     {"test_the_determination_ships_its_RESTRAINING_half_too",
+      "test_the_prose_determination_is_UNCHANGED_by_the_measured_reading"},
      det_restraints_dropped),
     ("Q6  the restraints ship but nothing says they are CONJUNCTS",
      {"test_the_determination_ships_its_RESTRAINING_half_too"},
@@ -4271,18 +4282,42 @@ ROWS = [
     # added a test that asserts the GATE still answers 5 on a firing corpus, so
     # a gate that never fires now fails it too. The row still isolates what it
     # names — every one of the four is about the gate firing.
+    # 🔴 AND SIX MORE IN ROUND 24, MEASURED — the set below is what the harness
+    # REPORTED, and it is one NARROWER than this row was first written with.
+    # The six are the new tests that assert the gate FIRES: four do so directly,
+    # and two (`…arm_the_gate`, `…EXECUTABLE_line_still_reads_non_zero`) via a
+    # POSITIVE CONTROL, without which their does-not-fire assertions would be
+    # indistinguishable from a reading wired to nothing.
+    # 🔴 `…UNRECOGNISED_file_type…` IS DELIBERATELY NOT HERE, and it was
+    # predicted to be: its assertions are rc 0 and a brief — which a gate that
+    # never fires satisfies — and it carries no control of that shape. The row
+    # came back WRONG-KILLER and the PREDICTION was corrected, never the set.
     ("G1  the gate never fires — the verdict inverted",
      {"test_the_attribution_gate_refuses_a_round_after_two_zero_payload_rounds",
       "test_the_gate_needs_two_CONSECUTIVE_zero_rounds_and_nothing_less",
       "test_the_gate_override_is_refused_without_a_reason_and_records_one_given",
-      "test_the_gates_verdict_and_an_input_refusal_are_DIFFERENT_numbers"},
+      "test_the_gates_verdict_and_an_input_refusal_are_DIFFERENT_numbers",
+      "test_two_rounds_that_changed_only_COMMENTS_arm_the_gate",
+      "test_a_round_that_changed_an_EXECUTABLE_line_still_reads_non_zero",
+      "test_a_prose_only_round_is_UNMEASURED_so_gate_3_keeps_its_population",
+      "test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field",
+      "test_a_measured_NON_zero_never_overrules_a_STATED_zero",
+      "test_a_SELF_RANGE_in_a_block_the_gate_reads_is_an_INPUT_refusal"},
      gate_never_fires),
     ("G2  ONE zero round ends the ladder (`and` -> `or`)",
      {"test_the_gate_needs_two_CONSECUTIVE_zero_rounds_and_nothing_less"},
      gate_fires_on_one_zero_round),
+    # 🔴 TWO MORE IN ROUND 24, MEASURED — and they are a genuine WIDENING of
+    # this row's coverage rather than noise. With an absent field read as a
+    # stated 0, the legacy corpus stops being attributed to the MEASUREMENT
+    # (the refusal says `payload=0` where it should say the field is absent
+    # and the diff earned the zero), and a legacy pair over an UNCLASSIFIABLE
+    # diff fires the gate on two unknowns.
     ("G3  an ABSENT payload field reads as a measured zero",
      {"test_the_gate_FAILS_OPEN_on_a_block_that_carries_no_payload_field",
-      "test_the_payload_field_the_emitter_writes_is_the_one_its_parser_reads"},
+      "test_the_payload_field_the_emitter_writes_is_the_one_its_parser_reads",
+      "test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field",
+      "test_an_UNRECOGNISED_file_type_is_UNMEASURED_and_fails_OPEN"},
      absent_payload_field_reads_as_zero),
     ("G4  a no-count emit writes a ZERO instead of the placeholder",
      {"test_the_payload_field_the_emitter_writes_is_the_one_its_parser_reads"},
@@ -4320,18 +4355,35 @@ ROWS = [
     # Several of them are deliberately WIDE: breaking the measured reading in
     # one direction moves every test that drives it, and a narrow set written
     # from a guess reports WRONG-KILLER on a correct tree.
+    # 🔴 THE FOUR WIDE SETS BELOW ARE WHAT THE HARNESS REPORTED, not what was
+    # predicted — every one of these rows was first written with a narrow set
+    # and came back EXTRA-KILLER. The extra killers are POSITIVE CONTROLS: five
+    # of the new tests assert, as their control, that the comment-only corpus
+    # DOES fire, so any mutant that stops the measured reading working fails
+    # them too. That is the controls doing their job, and the rows still
+    # isolate what they name — each set is about the measured reading.
     ("U1  a measured zero never overrules a stated count",
      {"test_two_rounds_that_changed_only_COMMENTS_arm_the_gate",
-      "test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field"},
+      "test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field",
+      "test_a_prose_only_round_is_UNMEASURED_so_gate_3_keeps_its_population",
+      "test_a_round_that_changed_an_EXECUTABLE_line_still_reads_non_zero"},
      the_measured_zero_never_overrules_a_stated_count),
     ("U2  the measurement overrules in BOTH directions",
-     {"test_a_measured_NON_zero_never_overrules_a_STATED_zero"},
+     {"test_a_measured_NON_zero_never_overrules_a_STATED_zero",
+      "test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field",
+      "test_two_rounds_that_changed_only_COMMENTS_arm_the_gate"},
      the_measurement_overrules_in_BOTH_directions),
     ("U3  a measured zero only fills in an ABSENT field",
-     {"test_two_rounds_that_changed_only_COMMENTS_arm_the_gate"},
+     {"test_two_rounds_that_changed_only_COMMENTS_arm_the_gate",
+      "test_a_prose_only_round_is_UNMEASURED_so_gate_3_keeps_its_population",
+      "test_a_round_that_changed_an_EXECUTABLE_line_still_reads_non_zero"},
      the_measured_zero_only_fills_in_an_absent_field),
     ("U4  the reading is taken over the DELTA range",
-     {"test_the_measured_range_is_the_blocks_OWN_from_to_and_not_the_delta"},
+     {"test_the_measured_range_is_the_blocks_OWN_from_to_and_not_the_delta",
+      "test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field",
+      "test_a_prose_only_round_is_UNMEASURED_so_gate_3_keeps_its_population",
+      "test_a_round_that_changed_an_EXECUTABLE_line_still_reads_non_zero",
+      "test_two_rounds_that_changed_only_COMMENTS_arm_the_gate"},
      the_reading_is_taken_over_the_DELTA_range),
     ("U5  a measured zero needs a `payload=` field to exist",
      {"test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field"},
@@ -4342,8 +4394,13 @@ ROWS = [
     ("U7  an unrecognised file type is GUESSED to be `#`-commented",
      {"test_an_UNRECOGNISED_file_type_is_UNMEASURED_and_fails_OPEN"},
      an_unrecognised_file_type_is_guessed_to_be_hash_commented),
+    # 🔴 THE SECOND KILLER IS MEASURED AND IS THE CLASS GUARD DOING ITS JOB:
+    # `test_every_command_a_refusal_prescribes_actually_runs` now carries a
+    # REFUSAL 3b case, so a self-range that is accepted returns 5 where that
+    # case expects 4.
     ("U8  a self-range in the gate's own pair is accepted",
-     {"test_a_SELF_RANGE_in_a_block_the_gate_reads_is_an_INPUT_refusal"},
+     {"test_a_SELF_RANGE_in_a_block_the_gate_reads_is_an_INPUT_refusal",
+      "test_every_command_a_refusal_prescribes_actually_runs"},
      a_self_range_in_the_gates_own_pair_is_accepted),
     ("U9  the file header is matched BEFORE the hunk",
      {"test_the_classifier_reads_a_changed_line_the_way_git_wrote_it"},
