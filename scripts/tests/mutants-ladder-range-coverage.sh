@@ -92,7 +92,7 @@ ROWS=0
 # below, counts the module, and fails with the replacement value. Two instances
 # of a too-low floor silently widening have already been recorded in
 # `mutants-audit-ladder.sh`; this is pinned from the first commit instead.
-MIN_TESTS=33
+MIN_TESTS=34
 failing() {
   local out n f total
   out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$SUITE" \
@@ -444,10 +444,19 @@ run "a PARTIAL ladder is reported as wholly unearned" \
 # That scope is wrong here: the reading is over BLOCKS and needs no commits, so
 # `L.reason is None` drops exactly the ladders whose control is zero BECAUSE of
 # their self-ranges — #687's shape.
-run "the census is scoped to MEASURED ladders only" \
-    test_the_unearned_census_DENOMINATOR_includes_unmeasurable_ladders "$LRC" \
+run "the census is scoped to ladders that PASSED the control" \
+    test_the_unearned_census_DENOMINATOR_includes_REFUSED_ladders "$LRC" \
     '    unearned = [L for L in ladders if L.self_ranges]' \
-    '    unearned = [L for L in ladders if L.self_ranges and L.reason is None]'
+    '    unearned = [L for L in ladders if L.self_ranges and L.control_churn]'
+
+# 🔴 THE SECOND `Ladder` CONSTRUCTION. `main` builds one directly for a PR with
+# no head sha, and that path took the `()` default until this change — the
+# reading is over BLOCKS, so no head and no checkout are needed and there is no
+# state in which an empty answer is the honest one.
+run "the no-head-sha path stops reading its own blocks" \
+    test_a_ladder_with_NO_HEAD_SHA_still_reports_its_self_ranges "$LRC" \
+    '                self_ranges_of(ad, f.get("comments") or []),' \
+    '                (),'
 
 echo
 echo "== controls (must kill NOTHING) =="

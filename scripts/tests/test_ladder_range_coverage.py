@@ -1092,33 +1092,88 @@ def test_a_ladder_with_NO_self_range_prints_NO_unearned_report(lrc, ad,
     assert L.self_ranges == ()
 
 
-def test_the_unearned_census_DENOMINATOR_includes_unmeasurable_ladders(lrc):
-    """🔴 EVERY OTHER CENSUS HERE IS SCOPED TO `L.reason is None`; THIS IS NOT.
+def test_a_ladder_with_NO_HEAD_SHA_still_reports_its_self_ranges(lrc, ad,
+                                                                 tmp_path):
+    """🔴 THE SECOND `Ladder` CONSTRUCTION, WHICH NEVER PARSED THE BLOCKS.
 
-    The reading is over BLOCKS and needs no commits present, so excluding the
-    unmeasurable ladders would make the rate a function of what happened to be
-    fetched — and would drop #687's exact shape, whose control is zero BECAUSE
-    of the self-ranges.
+    `main` builds a Ladder directly when the facts carry no head sha — the tail
+    adjacency is unmeasurable without one — and that path took the `()` default
+    for `self_ranges`, so a PR whose every block is `audited=X..X` reported a
+    CLEAN ledger purely because `gh` returned no head. The reading is over
+    BLOCKS: no head, no checkout and no network are needed, so there is no
+    state in which that answer is the honest one.
 
-    Driven through `render` with constructed ladders so the claim is about the
-    denominator and not about any git fixture.
+    Driven through `main --facts-file` with a runner that REFUSES to spawn, so
+    the claim is that the reading needs no git at all and not merely that it
+    happens to work.
     """
-    broken = lrc.Ladder(687, "b" * 40, "main", 2, 2, 1, [], 0, 0, 0,
-                        (0, 0), (0, 0), None, [], [],
-                        (lrc.SelfRange(1, "1" * 8, 0),
-                         lrc.SelfRange(2, "2" * 8, 3)))
-    unmeasurable = lrc.Ladder(331, "c" * 40, "main", 1, 0, None, [], None,
-                              None, None, (0, 0), (0, 0),
-                              "no two-sha block", [], [],
-                              (lrc.SelfRange(8, "8" * 8, 0),))
-    healthy = lrc.Ladder(1, "d" * 40, "main", 1, 1, 1, [], 10, 0, 0,
-                         (0, 0), (0, 0), None, [], [])
-    rendered = lrc.render([broken, unmeasurable, healthy], [])
-    assert "UNEARNED-LEDGER CENSUS: 2 of 3 ladder(s)" in rendered, rendered
-    assert "#687  ALL blocks  round(s) 1, 2" in rendered, rendered
-    assert "#331" in rendered, (
-        "an UNMEASURABLE ladder's broken blocks were dropped from the census, "
-        f"which makes the count a function of what was fetched:\n{rendered}"
+    f = tmp_path / "facts.json"
+    f.write_text(json.dumps([{
+        "pr": 687, "base": "main", "comments": [
+            _self_block(1, "1" * 8, payload=0),
+            _self_block(2, "2" * 8, payload=7),
+        ],
+    }]), encoding="utf-8")
+
+    def refusing_runner(cmd, cwd=None):          # noqa: ARG001
+        raise AssertionError(f"the no-head path spawned {cmd}")
+
+    out = []
+
+    class _S:
+        def write(self, text):
+            out.append(text)
+
+    rc = lrc.main(["--facts-file", str(f), "--repo-dir", str(tmp_path)],
+                  runner=refusing_runner, out_stream=_S(), err_stream=_S())
+    text = "".join(out)
+    assert "no head sha" in text, (
+        f"the fixture did not reach the no-head-sha path:\n{text}"
     )
+    assert "UNEARNED LEDGER — 2 of" in text, (
+        "a PR with no head sha reported a clean ledger while every one of its "
+        f"blocks records a zero-commit range:\n{text}"
+    )
+    assert "UNEARNED-LEDGER CENSUS: 1 of 1 ladder(s)" in text, text
+    assert rc in (lrc.EXIT_OK, lrc.EXIT_NOTHING_MEASURABLE, lrc.EXIT_REFUSED), rc
+    assert ad
+
+
+def test_the_unearned_census_DENOMINATOR_includes_REFUSED_ladders(lrc, ad,
+                                                                  base_repo):
+    """🔴 EVERY OTHER CENSUS HERE IS SCOPED TO A MEASURED LADDER; THIS IS NOT.
+
+    A REFUSED ladder — one whose positive control measured zero — is exactly
+    `ZacxDev/homelab-infra` #687's shape, because an all-self-range ladder's
+    control is zero BY CONSTRUCTION. Scoping the census to ladders that passed
+    the control would therefore drop the worst case in the corpus, and make the
+    count a function of what happened to be fetched.
+
+    Built from a REAL refused ladder rather than a constructed one, so the
+    state under test is one `measure_ladder` can actually produce.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    r2_to = _commit(repo, "b.py", 10, "round 2 fix")
+    refused = lrc.measure_ladder(
+        ad, lrc.real_runner, str(repo), 687, r2_to, "main",
+        [_self_block(1, base, payload=0), _self_block(2, r1_to, payload=7)])
+    healthy = lrc.measure_ladder(
+        ad, lrc.real_runner, str(repo), 1, r2_to, "main",
+        [_block(1, base, r1_to), _block(2, r1_to, r2_to)])
+
+    assert refused.reason is None and not refused.control_churn, (
+        "the fixture is not a REFUSED ladder, so the scope under test is never "
+        f"exercised (reason={refused.reason!r} control={refused.control_churn})"
+    )
+    assert healthy.control_churn > 0, "the second ladder is not a measured one"
+
+    rendered = lrc.render([refused, healthy], [])
+    assert "UNEARNED-LEDGER CENSUS: 1 of 2 ladder(s)" in rendered, rendered
+    assert "#687  ALL blocks  round(s) 1, 2" in rendered, (
+        "a REFUSED ladder's broken blocks were dropped from the census, which "
+        f"is the one shape the census exists for:\n{rendered}"
+    )
+    assert "1 of them have NO valid payload record at all" in rendered
     # 🔴 The default keeps a ladder constructed without the field OUT of it.
     assert healthy.self_ranges == ()

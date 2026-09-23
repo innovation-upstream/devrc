@@ -317,6 +317,29 @@ def classify_gap_commits(runner, repo_dir, frm, to, base):
     return commits, None
 
 
+def self_ranges_of(ad, comment_texts):
+    """-> the `SelfRange` rows for a set of comments. NO git, NO head sha.
+
+    🔴 EXTRACTED BECAUSE A SECOND CALLER EXISTS AND IT WAS SILENTLY EMPTY.
+    `main` builds a `Ladder` directly for a PR with NO head sha — the tail
+    adjacency cannot be measured without one — and that path never parsed the
+    blocks at all, so `self_ranges` took its `()` default and the census
+    reported a clean ledger for a PR whose comments it had in hand. The reading
+    is over BLOCKS: it needs neither a head nor a checkout, so there is no state
+    in which that answer is the honest one.
+
+    🔴 THE PREDICATE IS `audit_dispatch`'s, NOT A LOCAL `==`. An 8-char
+    `audited=` abbreviation must compare equal to a 40-char sha, and a second
+    dialect of that comparison is the thing this whole file imports rather than
+    re-types.
+    """
+    blocks, _malformed = ad.parse_claims_blocks(comment_texts)
+    return tuple(
+        SelfRange(b.round_no, b.audited_from, b.payload)
+        for b in sorted(ad.self_range_blocks(blocks), key=lambda b: b.round_no)
+    )
+
+
 def _classify(ad, runner, repo_dir, frm, to, base):
     """-> (label, RangeChurn|None, reason|None) for one adjacency."""
     if ad.same_commit(frm, to):
@@ -364,14 +387,10 @@ def measure_ladder(ad, runner, repo_dir, pr, head, base, comment_texts):
     # the adjacencies rather than folded into them, because neither has a SIZE:
     # there is no second sha to measure to.
     bare = [b.round_no for b in blocks if not (b.audited_from and b.audited_to)]
-    # 🔴 THE UNEARNED-LEDGER READING, through the SHARED predicate. `same_commit`
-    # is `audit_dispatch`'s — an 8-char `audited=` abbreviation must compare
-    # equal to a 40-char sha, and re-typing that comparison here as `==` would
-    # be a second dialect of the one rule this file exists not to fork.
-    self_ranges = tuple(
-        SelfRange(b.round_no, b.audited_from, b.payload)
-        for b in sorted(ad.self_range_blocks(blocks), key=lambda b: b.round_no)
-    )
+    # 🔴 THE UNEARNED-LEDGER READING. One writer — `self_ranges_of` — because
+    # `main` computes the same thing for a PR with no head sha, and a second
+    # spelling is a second thing to get wrong at the site that has to be right.
+    self_ranges = self_ranges_of(ad, comment_texts)
     # Stable sort on the round number, so a duplicate round (#958 posted two
     # `round=3` blocks) keeps the order it was seen in rather than being
     # reordered by sha.
@@ -1046,6 +1065,13 @@ def main(argv=None, runner=real_runner, out_stream=sys.stdout,
                 "no head sha — the TAIL adjacency (last block → head) cannot be "
                 "measured, and that is where a ladder's final round's fixes sit",
                 [], [],
+                # 🔴 NOT the `()` DEFAULT. This path has the comments in hand,
+                # and the unearned-ledger reading needs no head sha and no
+                # checkout — so leaving it defaulted reported a PR whose blocks
+                # are all `audited=X..X` as having a clean ledger, purely
+                # because `gh` gave no head. Found by asking which Ladder
+                # constructions exist, not by a test.
+                self_ranges_of(ad, f.get("comments") or []),
             ))
             continue
         ladders.append(measure_ladder(
