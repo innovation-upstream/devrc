@@ -3745,8 +3745,10 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 # all, which is why SKILL.md can name the directory once and
                 # never grow again as sites are added. See _annotate_site_flows.
                 # Its return is the value it SET — captured for the telemetry
-                # emit so the row records exactly what the caller was shown,
-                # from the registry's own lookup and nothing else.
+                # emit, so the row records what the REGISTRY resolved for the
+                # caller and never an extension-supplied value: a result that
+                # pre-carries a foreign `site_flows` key keeps it in the
+                # envelope only; the telemetry row carries nothing.
                 flows_path = _annotate_site_flows(result, domain)
                 log("cmd_ok", op=op)
                 if op == "activate":
