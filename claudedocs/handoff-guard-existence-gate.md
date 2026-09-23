@@ -22,27 +22,31 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   🔴 FROZEN AT ROUND 1.
 
 ## State now
-- **`#1811` OPEN at `ca5e1eea`, `MERGEABLE CLEAN`, and ✅ ALL FOUR SANDBOX CHECKS GREEN**
-  (`pytests`, `nodetests`, `gotests`, `cairn-client-runs`) — re-read 2026-09-23. That is the
-  tier every round of BOTH ladders said it could not verify, and it is now clean on this head.
-- **Audit ladder on `#1811`: rounds 0 and 1 done, both with findings, both fixed.**
-  `c37d515e` deletion · `f97aa7c9` doc · `680826a5` round-0 fixes · `ca5e1eea` round-1 fixes.
-  Claims block posted for round 1 (`payload=60`, `audited=680826a5..ca5e1eea`).
-  🔴 **ROUND 2 HAS NOT RUN.** Round 1 returned findings that needed fixing, so by the
-  ladder's own rule this is not the last round.
-- **`#1799` (the parent) is MERGED (`a371da4e`) AND DEPLOYED to both hosts**, verified at the
-  consumer. `#1811` is NOT deployed — the hook is a `home.file` copy, so merge → pull →
-  `ship.sh`, or both hosts keep running `#1799`'s version.
-- ⚠ `main` has moved a long way since this doc was last written (now `1c7ad1b9`); `#1811`
-  is many commits behind. `mergeStateStatus=CLEAN` speaks to CONFLICTS only, never to
-  whether the merged tree is green.
-- **Housekeeping done:** the scratch worktrees `devrc-guard-base`, `devrc-algo-mut` and
-  `devrc-guard-exist` are removed; their dirty files were byte-identical to `origin/main`
-  or to `ca5e1eea` and were copied to the session scratchpad first. `devrc-algo` (the live
-  `#1811` worktree) remains. `devrc-guardfix` belongs to another session — left alone.
-- **No `clawgate-task:` field**, deliberately: `clawgate_handoff.sh resolve` found one task
-  linked to this session (`#321`) with `role=read` and NONE worked. Reading a task is not
-  doing its work.
+- **`#1811` head is `41cef3db`** — round 2's four fixes landed and are pushed. Tests at that
+  sha on a clean tree: **3,298 passed** (hook tests + `test_handoff_doc_size.py`) and **101
+  passed** (guard module alone), both identical to the round-2 baseline at `b599278c`.
+- 🔴 **CI is PENDING on `41cef3db`** (all four re-queued 17:13Z by the fix commit),
+  `mergeStateStatus=UNSTABLE`. It was **green on `b599278c`** at 06:56Z — that green is a
+  claim about the PREVIOUS head and does not transfer. Re-read before merging.
+- 🔴 **THE LADDER IS STOPPED BY OPERATOR DECISION — not by a mechanism firing.** Round 2
+  returned findings, so the findings-keyed rule says another round. The operator chose to
+  fix the four and stop. **Neither documented stop mechanism actually applied** — see the
+  Gotchas entry; recording it as a criterion that fired would be the exact class of false
+  claim this ladder spent three rounds removing.
+- **`#1799` (the parent) is MERGED (`a371da4e`) and DEPLOYED to both hosts.** Its closing
+  condition was re-run LIVE this session, not taken from the doc: deployed copy
+  `/nix/store/py0j13ik…-hm_handoffwriteguard.py`, `_read_off_a_ref` = 6; probe returns `[]`
+  for an absent doc and a path for a real one, with the positive control firing. **ADDRESSED
+  — that arc is CLOSED.**
+- **`#1811` is NOT deployed.** The hook is a `home.file` copy, so the sequence is merge →
+  pull → `ship.sh` → confirm the deployed copy has no `GIT_VERB_SCAN_CAP`. Until then both
+  hosts run `#1799`'s version.
+- Branch is **44 commits behind `main`** (merge-base `b289a9fe`); `strict` is false, so the
+  green is a claim about the branch, never about the tree the merge creates.
+- **Still no `clawgate-task:` field, and the reason CHANGED.** `clawgate_handoff.sh resolve`
+  now exits **5 — NOTHING RESOLVED, 0 tasks for this session** (the earlier doc recorded one
+  `role=read` task, `#321`). An unknown session id also answers 200 with an empty array, so
+  this zero cannot distinguish "touched no task" from "wrong id". Not a clean bill of health.
 
 ## Open investigations — live diagnosis state
 
@@ -125,24 +129,20 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   settle. The question was retired by deleting its subject.
 
 ## Next steps (ranked)
-1. **Run round 2 on `#1811` as a DELTA over `680826a5..ca5e1eea`, or take the operator
-   decision to stop the ladder and merge.** The ladder rule says a round that found things
-   is not the last; the counter-argument is that rounds 0 and 1 found NO code defects — the
-   code is verified clean on every correctness axis (equivalence exact over ~11k exhaustive
-   sequences + 400k random strings; zero commands newly arm; both new tests kill their
-   mutants by their own assertions; fail-open across 31 hostile payloads) and **every
-   finding in both rounds was prose that has now been corrected three times.** That is the
-   documented non-terminating shape. If merging: `gh pr merge 1811 --squash`, verify by
-   CONTENT (a squash is never an ancestor), then `ship.sh` both hosts, then confirm the
-   deployed copy has NO `GIT_VERB_SCAN_CAP`.
-   forcing: gate — a fleet-wide Stop hook sitting unmerged with two audit rounds paid for,
-   on a branch many commits behind a `main` that has moved.
+1. **Merge `#1811` and ship both hosts.** Wait for CI on `41cef3db` (pending at time of
+   writing), merge `--squash`, then verify **by CONTENT, never ancestry** — a squash is
+   never an ancestor of its base — then `scripts/ship.sh` and confirm the deployed copy has
+   no `GIT_VERB_SCAN_CAP` with `readlink -f` as the arbiter, never a diff. Post the round-2
+   `audit-claims` block as an ISSUE comment first (`--round 2 --audited b599278c --payload
+   88`); a block posted as a REVIEW is invisible to the next round's assembler.
+   forcing: gate — a fleet-wide Stop hook, firing after every tool call of every session,
+   sitting unmerged with three audit rounds paid for.
 2. **Operator call: lift `test_the_hook_spawns_no_subprocess_on_any_path`?** An OBSERVATION
    from `#1092`'s body frozen into a prohibition, wider than the `shutil` standard the same
    file uses for the same hot path. Lifting it allows `git cat-file -e <ref>:<path>`, making
-   the ref exemption VERIFIED instead of shape-matched — which would have prevented the
-   `handoff-x.md` false firing this arc actually hit. 🔴 Round 0 of `#1811` independently
-   named this as the one requirement it would drop, and noted no round has escalated it.
+   the ref exemption VERIFIED instead of shape-matched. 🔴 **The evidence for this got
+   stronger: the residual fired a SECOND time, on a real session, on 2026-09-23** — see the
+   Gotchas entry. It is no longer hypothetical.
    forcing: user — reopens the fix shape the operator originally chose; not mine to take.
 
 ## Gotchas / decisions / dead-ends
@@ -349,6 +349,91 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   this host (every `mkOutOfStoreSymlink` target resolves into that tree, `claim-work`
   included). All work in this arc already used worktrees; the rule is recorded because the
   next session will want to write the doc and must not do it in the primary clone.
+
+- ✅ **THE SANDBOX TIER — the gap EVERY round of BOTH ladders named it could not speak for —
+  WENT GREEN, and here is the history so it survives the next status replace.** All four
+  checks (`pytests`, `nodetests`, `gotests`, `cairn-client-runs`) reported `success` on
+  `ca5e1eea` at **2026-09-20T20:05Z**, and again on `b599278c` at **2026-09-23T06:56Z**
+  (`pytests collected=23818 passed=23814 failed=0`; `nodetests 1608/1608`; `gotests 386/386`).
+  🔴 **Each green is a claim about THAT head only.** Measured twice this arc: pushing the
+  docs commit that RECORDED the green re-queued all four and put the PR back to `UNSTABLE`,
+  and the round-2 fix commit did it again. **Writing the green down is what invalidates it** —
+  re-read the statuses on the head you are actually about to merge.
+- 🔴 **THE STOP WAS AN OPERATOR DECISION AND NEITHER DOCUMENTED MECHANISM APPLIED — written
+  down because claiming otherwise is the failure this ladder exists to catch.** (a) The
+  **prose escape hatch** governs "a PR whose WHOLE DIFF is prose, never merely one whose
+  PAYLOAD is"; round 2's delta carries an executable test change (the 3→10 parametrization
+  widening), so `#1811` is outside that population by the rule's own words. (b) The
+  **attribution gate** fires on two consecutive rounds changing zero PAYLOAD lines; round
+  2's fixes touch comments inside `handoff-write-guard.py`, which is the payload file, so
+  the count is 88 and non-zero. What IS true, measured both rounds: **zero EXECUTABLE
+  payload lines moved in either round** — `git diff <range> -- scripts/claude-hooks/handoff-write-guard.py
+  | grep -E '^[+-]' | grep -vE '^[+-][[:space:]]*#'` returns EMPTY for `680826a5..b599278c`
+  (60 lines) and for `b599278c..41cef3db` (88 lines). Rounds 0, 1 and 2 found **zero code
+  defects** between them. That is the honest basis for stopping, and it is a different claim
+  from "the gate fired".
+- 🔴 **THE DECLARED RESIDUAL OVER-MATCH FIRED ON A REAL SESSION — SECOND OBSERVED INSTANCE,
+  2026-09-23, and it was this session's own verification probe.** Running the doc's own
+  **How to verify** block armed the Stop guard on `handoff-no-such-doc.md`, a doc that has
+  never existed, because the probe line is
+  `git -C ~/workspace/devrc show HEAD:claudedocs/handoff-no-such-doc.md` — a `<ref>:` prefix
+  plus a git object-read verb. Dismissed with
+  `handoff-write-guard.py --dismiss handoff-no-such-doc.md --session <id>`. 🔴 **The doc's
+  own verification procedure trips the residual the doc declares**, so every session that
+  follows it pays one false arming. Rank 2 is the decision about closing it.
+- 🔴 **`resume-state.sh` COMPARES ONLY AGAINST `origin/main`, so an arc whose doc lives on
+  its OWN OPEN PR reads as current when it is not.** This session opened with
+  `handoff-read: working-tree copy (identical to origin/main)` and `DRIFT (none detected)` —
+  both true, and both misleading: the authoritative copy was the **+93/−40 rewrite on the
+  unmerged branch** (`b599278c`), which already carried the `✅ RESOLVED` block retiring the
+  cap-inert investigation and a different ranked list. The tell is a `docs(handoff)` commit
+  in `git log origin/main..origin/<branch>`. **Check whether the arc's own PR rewrites its
+  handoff before trusting a clean DRIFT.**
+- 🔴 **A COUNT CAN INFLATE ITSELF, AND THIS ONE DID — the `gh pr edit` that PUBLISHED the
+  previous count is one of the sites it counts.** The "N real sites flip" figure rises every
+  time this arc writes it down. Re-derived 2026-09-23: **6 sites across 3 sessions, of which
+  5 are this arc's own and exactly ONE is genuine** (2026-09-15, session `f0decd34`, a real
+  `git show <ref>:claudedocs/handoff-tmux-webapp.md` from another session). Round 2's brief
+  said "4 genuine", which reads as four real-world sites when only one is. The claim now
+  carries method, date and corpus size in all four copies (source, test docstring, doc, PR
+  body) — the rule the same file states at `:1004-1008` and that this count had not been
+  given.
+- 🔴 **TWO FIGURES DISAGREED FOR A METHOD REASON, NOT A DRIFT REASON — do not "resolve" a
+  number before asking what each side measured.** The doc's `29,039 B` and the auditor's
+  `27,856 B` are the SAME corpus measured differently: the guard scans the **comment-stripped**
+  command (`:1024`), round 1 measured the **raw** one. Both reproduce, 29,039 raw / 27,856
+  stripped. Treating either as stale would have written a third wrong number.
+- ⚠ **Three inherited figures did NOT reproduce and are now dated rather than inherited:**
+  the site count is **130** over all match sites / **98** restricted to handoff-basename
+  sites the guard acts on (neither the round-1 `108` nor the round-2 `114`);
+  `REF_PREFIX_RX` costs **0.137 ms** at a 64 KB head, not `0.98 ms` (the conclusion is
+  unaffected and in fact stronger, since `HANDOFF_PATH_RX` is 2,193 ms). Two figures were
+  deliberately NOT re-derived and are flagged as such in the PR body so they are not read as
+  re-confirmed: the `1,598 / 1,636 ms` cap-vs-no-cap pair, and round 1's `27.9× at k=6,400`
+  (a different quantity from the re-measured 33.0×, which is uncapped-vs-capped).
+- 🔴 **NO BOUNDED-TAIL FIX IS KNOWN TO BE BOTH SUFFICIENT AND ANSWER-PRESERVING, and the
+  source now says exactly that rather than reaching for a fourth justification.** The
+  previous note claimed the fix "IS available and is answer-preserving" because
+  `REF_PREFIX_RX` is `\Z`-anchored — true of ONE of the three scans in `_read_off_a_ref`;
+  `SEGMENT_SPLIT_RX.split(head)[-1]` and the `GIT_WORD`/`GIT_VERB` pair are not tail-bound-safe.
+  Counter-example, reproduced and now runnable in **How to verify**: head
+  `"git show " + "z"*5000 + " ref:"` → full head `True`, `head[-4096:]` `False`. The boundary
+  is **pad=4083**, the first head longer than the window — i.e. the instant `git show` falls
+  out of it, so ANY bound can hide the verb. The "reach for it if reach ever changes" pointer
+  was DELETED rather than re-aimed: a maintainer taking it up would have re-derived the
+  deleted cap's bug.
+- 🔴 **THE FAIL-SAFE FRAMING HAS A FLOOR AND NOW STATES IT.** "A blown hook loses an ARMING
+  (silent, fail-safe) rather than hanging a turn" holds only ABOVE the CLI's hook timeout.
+  Below it there is no lost arming and no silence — there is unbounded turn latency on a hook
+  that fires after every tool call. Measured, cap vs no cap, verdicts identical at every k:
+  k=200 → 10.4/8.9 ms (1.2×) · **k=400 → 39.6/20.0 ms, the knee** · k=1,600 → 659/91 ms
+  (7.3×) · k=6,400 → 12,653/384 ms (33×). Corpus max is k=18, so incidence today is zero.
+- 🔴 **A GLOB THAT MISSES A WHOLE DIRECTORY LEVEL RETURNS A CONFIDENT ZERO, NOT AN ERROR.**
+  The round-2 fix pass first globbed `projects/*/subagents/*.jsonl` and matched **zero** of
+  5,626 subagent transcripts — they sit at **depth 4** — while reporting a total computed off
+  993 files. Every corpus scan now asserts a NON-EMPTY subagent set as a positive control.
+  Same family as the `grep -r`/`.gitignore` blindness: the answer is a claim about the
+  instrument's VIEW, never about the corpus.
 
 ## How to verify
 ```bash
