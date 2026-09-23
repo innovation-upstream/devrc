@@ -21,12 +21,11 @@ unaffected while the tunnel is up.
   — no MTU/routing churn.
 
 ## State now
-- Branch / PR: `devrc` `main` at `c55c401d` (#1849); ALL session PRs merged: #1839 (mirror, now REPLACED), #1840 (real laptop tunnel), #1844/#1845 (apply-script fixes), #1846 (writer PATH), #1847 (manifest country_code), #1848/#1849 (nebula split-tunnel pin). No open PRs.
-- Laptop (this host): tunnel **UP** (reconnect 22:18:33) with the nebula pin LIVE (`ip rule`: `500: from all uidrange 991-991 lookup main`; nebula uid 991), killswitch armed roaming (`LAN allowed = 192.168.1.0/24 derived from wlp170s0`), exit IP US through tunnel, nebula ssh + LAN direct both work while up. Helpers at `/etc/nixos/i3blocks-scripts/` refreshed 22:05 (dash-form uidrange). `/etc/wireguard/airvpn.conf`: roaming PostUp/PreDown hooks present, `DNS` line REMOVED (host has no systemd-resolved; dnsmasq→public resolver rides the tunnel).
-- Verified during up windows: exit IP via ipinfo (US, AS62744), `ip route get <home-public-ip> uid 991` → `via 192.168.1.1 dev wlp170s0` while `ip route get 1.1.1.1` → `dev airvpn table 51820` (the split is exact), ping workbench 0% loss ~134–147ms (= no-tunnel baseline), writer/pill grammar honest (`off` dim icon, `US?` up-unverified, `airvpn ?` named).
-- Workbench: primary clone is BEHIND — last `ship.sh` ran at #1846 (`a2f45567`); #1847/#1848/#1849 are ff-merged locally on the laptop only. Its stable-path `/etc/nixos/i3blocks-scripts/airvpn-updown` predates BOTH the roaming port AND the nebula pin (latent re-degradation, see Defects).
-- Deploy honesty: every piece live-verified against the real path on the laptop (not inferred); the workbench half is UNVERIFIED since #1847 (needs `scripts/ship.sh`).
-- 🔴 `/etc/nixos/i3blocks-scripts/` copies are NOT ship-managed — every `airvpn-updown` change needs an operator `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown` (or an apply-script re-run) PER HOST. Today this bit twice (stale helper → no nebula pin).
+- Branch / PR: `devrc` `main` at `de2e1087` — `scripts/ship.sh` run rc=0 this session: BOTH hosts converged + switched at `de2e1087`, cross-host sha agreement verified. (Handoff's "workbench 3 behind at `a2f45567`" was STALE — git was already converged; only the stable-path helper lagged.)
+- Workbench helper refresh BLOCKED on sudo: `ssh zach@10.42.0.30 'sudo -n install ...'` → `sudo: a password is required`. Its `/etc/nixos/i3blocks-scripts/airvpn-updown` is still the Jul 21 copy (11,306 B, 0 `uidrange` lines) vs laptop's synced 16,099 B (3 uidrange lines). Laptop helper verified IN SYNC. Operator deferred the sudo step.
+- Laptop tunnel DOWN right now (`ip link show airvpn` → absent); killswitch helpers converged.
+- NEW arc opened this session: mesh-wide nebula flap ("connection keeps hanging and recovering"), root cause FOUND (measured, see investigation) but fix NOT applied — user dismissed the fix-confirmation question.
+- Untracked in laptop tree: `nix/system/apply-networkmanager-openvpn.sh` (unrelated, not nix-read).
 
 ## Open investigations — live diagnosis state
 <!-- as-of: 2026-09-21 -->
@@ -83,22 +82,32 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
   green. 🔴 It is the only PR from that session where `/audit-pr` round 0 is still
   actionable.
 
+<!-- as-of: 2026-09-23 -->
+### Nebula mesh flaps: "connection keeps hanging and recovering" — ROOT CAUSE MEASURED, fix not applied
+- as-of: 2026-09-23
+- **Symptom + exact repro:** laptop↔workbench over nebula drops for ~30–60 s windows, then recovers. Repro: `ping -c 4 -i 0.3 10.42.0.30` loops — measured at 17:15:34–17:15:52 CDT a 100%-loss window of ~7 samples between clean stretches; `ssh zach@10.42.0.30` times out during banner exchange for minutes at a time (17:58–18:03, five consecutive rc=255) then succeeds.
+- **Observed (with values):** failing set is exactly the LIGHTHOUSES: `ping 10.42.0.1` (homelab lighthouse) and `10.42.0.2` (Hetzner lighthouse) 100% loss from BOTH laptop and workbench; `10.42.0.30` (workbench) and `10.42.0.20` (prod-gw) reachable with 0% loss (~137 ms / ~109 ms). Gateway pod (`nebula-gateway-5fpfv`, kubectl `-n nebula`, node `talos-jkj-deb` 192.168.50.94) log: `Tunnel status certName=zach-laptop tunnelCheck="map[method:active state:dead]"` (19:03:22Z) and `Host roamed ... newAddr="10.244.0.220:50519"` (19:05:09Z). Workbench log: my handshakes arrive `from="100.71.230.83:41232"` (my TAILSCALE addr) and lighthouse parsed garbage `from 10.244.0.220:54949: header is too short` (22:15:25Z) — `10.244.0.220` = `tailscale-subnet-router-5f4658c69f-2g99j` pod (kubectl field-selector lookup, 15d old, 0 restarts). Laptop routing: `ip route get 192.168.50.94` → `dev tailscale0 table 52`; `ip route show table 52` → `192.168.50.0/24 dev tailscale0` (rule 5270).
+- **Ruled out:** lighthouse pods down — kubectl `-n nebula` shows both `nebula-lighthouse-xl58z` and `nebula-gateway-5fpfv` Running 0 restarts; via: measurement. Gateway node dead — workbench pings `192.168.50.94` at 0.1 ms and `24.79.61.66` at 1.0 ms; via: measurement. Tailscale broken — `tailscale status` shows subnet-router `active; direct`; via: measurement. talosctl route to node internals — `talosctl -n 192.168.50.94 netstat` fails `tls: expired certificate` (client cert expiry, separate defect); via: command.
+- **Leading hypothesis (high confidence, measured):** laptop's tailscale subnet route `192.168.50.0/24 → tailscale0` intercepts nebula's UDP to `192.168.50.94:4242`, so stage-1s ride the subnet-router POD and arrive at nebula pods sourced from bogus addrs (`100.71.230.83`, `10.244.0.220`). Peers "roam" my identity onto those paths; when the tailscale path churns the roamed paths die → hang; a fresh handshake over a live path (WAN `38.187.27.246`, seen in lighthouse log at 19:02:55Z) → recover. Lighthouse ICMP failing is likely the same arrival-path corruption, and every node's hostmap resolution degrades with the lighthouse tunnels.
+- **Next probe:** `sudo ip rule add to 192.168.50.94 priority 5150 lookup main` (needs operator sudo; reversible with `ip rule del priority 5150`), then 10-min `ping -c 60 -i 1 10.42.0.30` loss check + one ssh burst. NOTE: `ip route show table main` has NO 192.168.50.0/24 route, so lookup main sends it via the default gw (WAN/hairpin) — if hairpin UDP fails, the alternative is a tailscale route exclusion for UDP:4242 or pinning the laptop's tunnel remotes out of table 52.
+
 ## Next steps (ranked)
-1. Converge the WORKBENCH: `scripts/ship.sh` (its tree is at `a2f45567`, three behind), then refresh its stable-path helper — `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown` (workbench) — else its next tunnel-up window re-measures today's nebula regression.
-   `forcing: regression` — the same measured degradation mechanism (b5fb6a0c), one tunnel-up window away on the second host.
-2. `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown` on the LAPTOP was done 22:05 — re-run after any future `airvpn-updown` change (this file is operator-managed at the stable path by design).
-   `forcing: none` — standing rule, nothing pending.
-3. Silence the gateway v6-remote noise (open investigation above) — nebula config in `homelab-talos` (advertise v4 only from the gateway, or v6-listen on the laptop).
+1. Operator: refresh the workbench stable-path helper — `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown` (on workbench; sudo needs a password over ssh, deferred this session). Verify: `cmp -s /etc/nixos/i3blocks-scripts/airvpn-updown ~/workspace/devrc/scripts/airvpn-updown && echo SYNC`.
+   `forcing: regression`
+2. Apply + evaluate the nebula flap fix probe (root cause measured, see investigation): the `ip rule` pin above, then decide the permanent form (a fixed `ip rule`/`route` in the laptop's nebula unit or a tailscale exclusion) in whichever repo owns the laptop's nebula unit.
+   `forcing: incident`
+3. Silence the gateway v6-remote noise — nebula config in `homelab-talos` (advertise v4 only from the gateway, or v6-listen on the laptop).
    `forcing: none`
-4. Re-run `scripts/data/refresh-airvpn-servers` from a host with qBit-pod access and bake country_code the supported way — its `_from_github` fallback is DEAD (gluetun ships `servers.go` now; raw URLs 404) and the pod moved off `media-stack` (ns absent on the workbench k3s and the talos homelab; `minio-thc-media-ssd` exists but no qbit/gluetun pods found there). 1 of 255 servers has no `country_code`.
+4. Re-run `scripts/data/refresh-airvpn-servers` from a host with qBit-pod access and bake country_code the supported way (its `_from_github` fallback is DEAD).
    `forcing: none`
-5. `i3status-airvpn`'s no-country-code fallback abbreviates the full country NAME (`"United States"[:2]` → `UN` — observed as pill `UN?` before #1847). One-line fix if it ever shows again; with cc baked it should be unreachable.
+5. `i3status-airvpn`'s no-country-code fallback abbreviates the full country NAME (`"United States"[:2]` → `UN`). One-line fix if it ever shows again; with cc baked it should be unreachable.
    `forcing: none`
 
 ## Defects (batched)
-- Workbench's stable-path `airvpn-updown` is stale (no roaming mode, no nebula pin) — closed by next-step 1's two commands. The general hazard: `/etc/nixos/i3blocks-scripts/` copies are NOT ship-managed nor covered by `drift-check.sh` rc 17 (that gate covers `nix/pkgs` srcDirs only) — stable-path helpers can rot silently on any host.
+- talosctl client cert EXPIRED (`tls: expired certificate` against 192.168.50.94) — blocks all node-level debugging from this host.
+- Workbench's stable-path `airvpn-updown` is stale (no roaming mode, no nebula pin) — closed by next-step 1's one command. General hazard: `/etc/nixos/i3blocks-scripts/` copies are NOT ship-managed nor covered by `drift-check.sh` rc 17 — stable-path helpers can rot silently on any host.
 - `refresh-airvpn-servers --from-github` fallback rotted (gluetun moved to `servers.go`); the kube source still works from the workbench.
-- The mockbin `ip` stub accepts any arg shape — it validated the uidrange intent but could NOT catch the real-syntax bug (#1849). Any future `ip rule`/`nft` change needs a live unprivileged syntax probe (valid syntax → `Operation not permitted`; invalid → parse error) before merge.
+- The mockbin `ip` stub accepts any arg shape — any future `ip rule`/`nft` change needs a live unprivileged syntax probe before merge.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 The laptop has NO systemd-resolved: NetworkManager `dns=none` + local dnsmasq (`127.0.0.1` → public resolver). wg-quick ABORTS on the conf's `DNS =` line (`resolvconf` fails, interface torn down in the same invocation — measured on first connect). The apply script now strips that line when resolved is absent. Do NOT re-add DNS to the laptop conf.
@@ -135,17 +144,23 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
   days; the `main-green-check` deadman REPORTS and never fixes, so nothing forced it to be
   cleared, and the standing cost is that every session learns to click through a red.
 
+- `kubectl get pods -A` on `$KC_HOMELAB` TIMES OUT (rc 124, >90 s) — use `kubectl get pods -n <ns>` or a `--field-selector` instead; `kubectl get ds/deploy/cm -A` works fine.
+- `env KUBECONFIG=... kubectl ...` — bare `KUBECONFIG=... kubectl` in a compound command parses as a command name (timeout: 'failed to run command'); must use `env`.
+- The gateway/lighthouse nebula pods are distroless — `kubectl exec ... -- ping/ls/nebula` all fail (`executable file not found`); logs are the only window.
+- The two pods share one node (`talos-jkj-deb` / 192.168.50.94) and the lighthouse config's static_host_map only carries `10.42.0.2 → 5.161.118.55:4242`; the gateway config's comment says LAN IP is used deliberately ("NAT hairpinning won't work") — consistent with the hairpin half of the flap.
+- `sudo -n` over ssh to the workbench fails (password required) — sudo-touching steps are operator-run, hand over the exact command.
+- (carried) Laptop has NO systemd-resolved — do NOT re-add `DNS` to the laptop wg conf.
+- (carried) The pill's `?` on `US?` is the UNVERIFIED marker, not the stale marker.
+- (carried) DO NOT put the real home public IP back in this doc; use `<home-public-ip>` / a runtime shell variable.
+
 ## How to verify
 ```bash
-# tunnel + split-tunnel, with the tunnel UP:
-ip link show airvpn && ip rule | rg 500          # pin present: uidrange 991-991 lookup main
-ip route get <home-public-ip> uid 991                  # → via <gw> dev wlp170s0 (NOT airvpn)
-ip route get 1.1.1.1 | head -1                    # → dev airvpn table 51820
-curl -s https://ipinfo.io/json | jq -r .country   # → US
-ssh zach@10.42.0.30 'echo nebula-ok'              # nebula path alive with tunnel up
-# pill (after ~60s post-connect):
-python3 -c "import json; d=json.load(open('~/.cache/bar-status/airvpn.json')); print(d['up'], d['verdict'], d['server'], d['country_code'])"
-# writer + timer:
-systemctl --user list-timers airvpn-status-poll.timer --no-pager | head -3
+# mesh stability after the fix (want 0% loss over 60 samples):
+ping -c 60 -i 1 10.42.0.30 | tail -1
+# ssh burst (want rc=0, no banner-exchange timeouts):
+for i in 1 2 3 4 5; do ssh -o ConnectTimeout=10 zach@10.42.0.30 'true'; echo rc=$?; sleep 2; done
+# lighthouse tunnels (want 0% loss — currently 100% from BOTH hosts):
+ping -c 5 -i 0.3 10.42.0.1; ping -c 5 -i 0.3 10.42.0.2
+# ship state (want both hosts at one sha):
+scripts/ship.sh
 ```
-Killswitch re-test protocol: `claude/skills/bar/reference/airvpn.md` (laptop section). Instant bail that KEEPS the tunnel: `sudo nft delete table inet airvpn_ks`; full teardown: `sudo /etc/nixos/i3blocks-scripts/airvpn-sudo down`.
