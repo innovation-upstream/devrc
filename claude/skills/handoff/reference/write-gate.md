@@ -950,9 +950,23 @@ matching 7/7.
 What counts as sensitive is a property of the repository, not of this tool: one
 repo's denied-identifier set is another's ordinary vocabulary. So the gate
 resolves a scanner out of `--repo`, from a **closed set of three declared
-relative paths** (`tests/leakscan.py`, `scripts/leakscan.py`, `leakscan.py`),
-first hit wins — a lookup, never a glob, because a glob finds a fixture or a
-README and then attributes its exit code to your delta.
+relative paths** (`<target-repo>/tests/leakscan.py`,
+`<target-repo>/scripts/leakscan.py`, `<target-repo>/leakscan.py`), first hit
+wins — a lookup, never a glob, because a glob finds a fixture or a README and
+then attributes its exit code to your delta.
+
+⚠ THE `<target-repo>/` PREFIX IS LOAD-BEARING PROSE, NOT DECORATION, and a gate
+in this repository is what taught it. Written bare — the middle candidate
+without its prefix — the token reads as a path *here*; this repo has no such
+file, so `test_no_new_dead_paths` failed with `a doc claims a file that does not
+exist`. It was right twice over: it caught a real ambiguity, and the sentence it
+caught is the one whose entire point is that the scanner belongs to the OTHER
+repo. `doc-path-ignore.list` offers a silent exemption and says to prefer fixing
+the doc; this is why.
+
+🔴 AND THE FIRST DRAFT OF THIS VERY PARAGRAPH FAILED THE SAME GATE, by spelling
+the bare token in order to explain it. Describe the shape, never instantiate it
+— an example that IS the thing it forbids is the thing it forbids.
 
 A repo with no scanner **passes**, and says so: `NO SCANNER FOUND … PASS BY
 ABSENCE, not a clean result`. Refusing there would make the tool unusable in
