@@ -1212,19 +1212,26 @@ def _flows_doc_path(host: str) -> str:
     return f"{_FLOWS_REL_PREFIX}/{best_name}"
 
 
-def _annotate_site_flows(result, host: str) -> None:
+def _annotate_site_flows(result, host: str) -> str:
     """Add `site_flows` to a result ENVELOPE when the host has a flow doc.
 
     Additive and single-field, in the spirit of the extension's advisory `note:`
     on a hidden-tab read. On a miss it does nothing whatsoever — no key, no
     null — so every existing envelope field and every unregistered host's bytes
     are unchanged.
+
+    Returns the path it set ("" when nothing was set), so the telemetry emit
+    can ride the SAME value the envelope got without reading the envelope
+    back — an extension-supplied result that pre-carried a foreign
+    `site_flows` key can therefore never leak into activity.events; the
+    registry's own lookup is the only source.
     """
     if not isinstance(result, dict):
-        return
+        return ""
     path = _flows_doc_path(host)
     if path:
         result["site_flows"] = path
+    return path
 
 
 def _session_hash(session_id) -> str:
@@ -1384,8 +1391,11 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
         if se is None:
             return
         # METADATA ONLY — op/key/outcome/(bare)domain, plus the caller's session
-        # TIER and (joinable tier, non-nested only) its agent session id. Never
-        # page content.
+        # TIER and (joinable tier, non-nested only) its agent session id. Call
+        # sites may merge further METADATA-ONLY keys via `extra`: the throttle
+        # path ({reason, sess}), upload's file PATH, activate's consent flag,
+        # and the RESOLVED flow-doc filename (`site_flows` — a repo-relative
+        # path, never page content). Never page content.
         payload = {"op": op, "key": key, "outcome": outcome}
         if domain:
             payload["domain"] = domain
@@ -3621,6 +3631,11 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             # which path (ok / refused / throttled) the request takes below.
             emulate_extra = _emulate_extra(body) if op == "emulate" else None
             outcome, exit_code, domain = "ok", 0, ""
+            # Captured before submit so the field is present regardless of
+            # which path (ok / refused / throttled) the request takes below;
+            # only the success path ever fills it (a refused command never
+            # produced an envelope, so nothing was routed).
+            flows_path = ""
             # `release` is server-side: drop the session's ownership without ever
             # touching the real Brave tab or the extension. `target` (the popped
             # --instance routing hint) SCOPES it to one profile — see
@@ -3729,7 +3744,14 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 # this host is registered; an unregistered host gets no field at
                 # all, which is why SKILL.md can name the directory once and
                 # never grow again as sites are added. See _annotate_site_flows.
-                _annotate_site_flows(result, domain)
+                # Its return is the value it SET — captured for the telemetry
+                # emit, so the row records what the REGISTRY resolved for the
+                # caller and never an extension-supplied value. A result that
+                # pre-carries a foreign `site_flows` key: on an UNREGISTERED
+                # host it keeps the foreign key in the envelope (and the row
+                # records nothing); on a REGISTERED host the annotation
+                # OVERWRITES it — envelope and row both carry registry truth.
+                flows_path = _annotate_site_flows(result, domain)
                 log("cmd_ok", op=op)
                 if op == "activate":
                     # Chrome-side activate only set the tab active WITHIN its
@@ -3789,6 +3811,15 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             if op == "upload":
                 log("upload", outcome=outcome, domain=domain, path=upload_path,
                     key=(target or ""))
+            if flows_path:
+                # The flow-doc routing rides the cmd event — a repo-relative
+                # FILENAME, the same metadata class as the bare domain (no
+                # page content). This is what makes "are the flows docs
+                # actually routed/used" answerable from activity.events;
+                # without it the routing existed only in the response
+                # envelope, invisible to every downstream query.
+                extra = dict(extra or {})
+                extra["site_flows"] = flows_path
             emit_cmd_event(op=op, key=(target or ""), outcome=outcome,
                            duration_ms=int((time.monotonic() - t0) * 1000),
                            domain=domain, exit_code=exit_code, extra=extra,
