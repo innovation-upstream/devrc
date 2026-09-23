@@ -1693,6 +1693,65 @@ def test_cmd_ok_emits_one_metadata_event(telemetry):
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
+def test_cmd_ok_emits_site_flows_exactly_when_the_host_is_registered(
+        telemetry, tmp_path, monkeypatch):
+    """The flows-telemetry contract, TWO-WAY: a REGISTERED host's cmd event
+    carries the resolved flow-doc path; an UNREGISTERED host's carries NO
+    `site_flows` key. Presence AND absence are pinned, so a routing regression
+    in either direction fails — a payload that always carried the key would
+    make every host look routed, and one that never did would hide the flows
+    docs' real usage from activity.events.
+
+    HERMETIC REGISTRY — `_FLOWS_DIR` is pinned to a registry THIS test owns,
+    not the production default. Load-bearing, not hygiene: the default is a
+    stable absolute path under `Path.home()`, so in the nix sandbox ($HOME is
+    an empty tmp dir) the registry parses to {} and the routed half fails —
+    and on a dev host it would grade the operator's primary clone, flapping
+    with its uncommitted edits. Same pin as test_site_flows.py's autouse
+    fixture, scoped to this test so the other telemetry tests keep grading
+    their unregistered hosts against the default.
+
+    The row selection uses `where=_routed_to(...)` per the file's own rule —
+    the two commands differ by ROUTING KEY, so a total per-row predicate
+    separates them; a bare positional `_wait_events(d, 2)` would both invite
+    the neighbour-row misattribution this file documents and trip the
+    positional-reader ratchet.
+    """
+    spool_dir = telemetry
+    reg = tmp_path / "flows"
+    reg.mkdir()
+    (reg / "_index.json").write_text(json.dumps(
+        {"sites": {"civitai.com": "civitai.com.md"}}))
+    monkeypatch.setattr(S, "_FLOWS_DIR", reg)
+    monkeypatch.setattr(S, "_flows_index_cache", None)
+    srv, _ = _serve()
+    a = FakeExtension(srv, instance_id="a", label="alpha",
+                      executor=lambda c: {"url": "https://civitai.com/models"})
+    b = FakeExtension(srv, instance_id="b", label="beta",
+                      executor=lambda c: {"url": "https://unregistered.example.test/x"})
+    a.start(); b.start()
+    try:
+        assert _wait_count(srv, 2) is not None
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "target": "alpha"})
+        assert st == 200
+        # The envelope the caller saw carries the routing...
+        assert body["result"]["site_flows"] == "flows/civitai.com.md"
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "target": "beta"})
+        assert st == 200
+        # ...and the unregistered twin carries nothing (annotation is additive).
+        assert "site_flows" not in body["result"], body["result"]
+        ev_a = _wait_ops(spool_dir, "getHtml", where=_routed_to("alpha"))
+        ev_b = _wait_ops(spool_dir, "getHtml", where=_routed_to("beta"))
+        p_a = json.loads(ev_a[0]["payload"])
+        p_b = json.loads(ev_b[0]["payload"])
+        assert p_a["domain"] == "civitai.com"
+        assert p_a["site_flows"] == "flows/civitai.com.md"
+        assert p_b["domain"] == "unregistered.example.test"
+        assert "site_flows" not in p_b, p_b
+    finally:
+        a.stop(); b.stop(); srv.shutdown(); srv.server_close()
+
+
 def test_cmd_ok_no_url_uses_op_as_text_and_omits_domain(telemetry):
     """A result with no url (e.g. tabs) → text falls back to the op, and the
     payload carries no domain key."""

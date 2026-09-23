@@ -3307,8 +3307,11 @@ class TestBlockedCommitLeavesNoTrace:
             raise OSError("disk full")
 
         monkeypatch.setattr(Path, "write_bytes", boom)
+        # `staged=True`: this is the failed-COMMIT arm, where the tool really did
+        # `git add` the path. The rule (o) arm passes False and is pinned by
+        # `TestTheRollbackOnlyUnstagesWhatThisRunStaged`.
         note = hd._undo_write(repo, doc, "claudedocs/handoff-sample-topic.md",
-                              original)
+                              original, True)
 
         assert "still MODIFIED" in note, note
         assert "still STAGED" not in note, (
@@ -7983,6 +7986,21 @@ print("  vendor/notes.md:4 denied-identifier pre-existing")
 sys.exit({code})
 '''
 
+#: 🔴 THE NON-ZERO EXIT CODES THE REFUSAL FIXTURES SPAN, DECLARED ONCE.
+#:
+#: The gate refuses on ANY non-zero exit, so there is no rc-2 BRANCH to test —
+#: but a suite whose every refusing fixture exits 1 is structurally unable to
+#: see a `!= 1` (or `== 1`) mutant, and that is not a hypothetical: with the
+#: literals inline, normalising the two `code=2` occurrences to `code=1` made
+#: the mutant survive a 490-test green run. The set is declared here and pinned
+#: by `test_the_declared_set_spans_two_distinct_non_zero_codes`, so collapsing
+#: it fails loudly instead of silently emptying the tests that consume it.
+#:
+#: 2 is not decoration either: cairn's real `tests/leakscan.py` exits 2 for
+#: "could not vouch — one of my own controls misbehaved", which is a different
+#: thing to approve than "I found something".
+LEAK_REFUSING_CODES = (1, 2)
+
 #: An identifier the fake scanner denies. Synthetic, and it never reaches a
 #: commit in any test here.
 DENIED_TOKEN = "redacted-canary-scope"
@@ -8101,14 +8119,19 @@ class TestTheGateRefusesOnANYNonZeroExit:
     already printed each make it the wrong guess. The gate now refuses on ANY
     non-zero exit, and the already-red tree is cleared by an OPERATOR, below.
 
-    🔴 THIS CLASS'S SCANNER EXITS **2**, AND THAT IS NOT DECORATION. Every other
-    fixture in this block exits 1. There is no rc-2 branch left to test — under
-    a flat refuse "2 also refuses" is true by construction — but a reader who
-    re-introduces a `== 1` (or `!= 1`) comparison is the failure this block's
-    prose warns about, and a suite whose every non-zero fixture is 1 CANNOT see
-    that mutant. Two distinct codes across the block costs nothing and kills it.
-    MEASURED: with `run.code == 0` mutated to `run.code != 1`, the first test
-    below dies; with every fixture at 1 it survives a fully green suite.
+    🔴 THIS CLASS'S SCANNER EXITS `LEAK_REFUSING_CODES[-1]`, AND THAT IS NOT
+    DECORATION. There is no rc-2 branch left to test — under a flat refuse "2
+    also refuses" is true by construction — but a reader who re-introduces a
+    `== 1` (or `!= 1`) comparison is the failure this block's prose warns about,
+    and a suite whose every non-zero fixture is 1 CANNOT see that mutant.
+
+    🔴 AND THE CODE IS TAKEN FROM THE DECLARED SET RATHER THAN TYPED, because
+    the literal was measured to be the ONLY thing killing that mutant. MEASURED
+    at 977a7a99: with `run.code == 0` mutated to `run.code != 1`, 2 failed / 488
+    passed — but with the mutant AND both `_ALWAYS_SRC.format(code=2)`
+    occurrences normalised to `code=1`, **490 passed / 0 failed**. A class
+    docstring was the whole guard. `LEAK_REFUSING_CODES` and
+    `TestTheRefusingExitCodesAreASPANNotALiteral` make the property mechanical.
     """
 
     def test_a_tree_that_was_ALREADY_red_is_REFUSED(
@@ -8117,7 +8140,7 @@ class TestTheGateRefusesOnANYNonZeroExit:
         """🔴 THE BEHAVIOUR CHANGE, AND THE DELTA HERE IS CLEAN. The refusal is
         entirely pre-existing — precisely the case the old shape waved through
         with `LEAK GATE COULD NOT ATTRIBUTE`, at `status=written`."""
-        install_scanner(repo, _ALWAYS_SRC.format(code=2))
+        install_scanner(repo, _ALWAYS_SRC.format(code=LEAK_REFUSING_CODES[-1]))
         before = doc_of(repo)
         shas_before = commit_shas(repo)
 
@@ -8140,7 +8163,7 @@ class TestTheGateRefusesOnANYNonZeroExit:
         """A refusal the operator cannot act on is not one — and for an
         already-red tree the only way past is a flag, so the refusal spells it.
         """
-        install_scanner(repo, _ALWAYS_SRC.format(code=2))
+        install_scanner(repo, _ALWAYS_SRC.format(code=LEAK_REFUSING_CODES[-1]))
         res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
         assert hd.LEAK_PRE_EXISTING_FLAG in res.stderr, res.stderr
 
@@ -8201,10 +8224,14 @@ class TestTheOperatorOptInClearsAnAlreadyRedTree:
 
         monkeypatch.setattr(hd, "run_leak_scanner", boom)
         verdict = hd.leak_gate(
-            repo, "claudedocs/handoff-sample-topic.md", scanner, approved=True)
+            repo, "claudedocs/handoff-sample-topic.md",
+            hd.find_leak_scanner(repo), approved=True)
         assert "status=leak-refused" in verdict.refusal, verdict
         assert "CANNOT READ IS NOT A PASS" in verdict.refusal, verdict
         assert verdict.notes == "", verdict
+        assert verdict.trailer == "", (
+            "an arm with no verdict stamped the commit as approved", verdict)
+        assert scanner.is_file(), "the fixture never installed a scanner"
 
     def test_the_flag_is_OFF_by_default(self, repo: Path, tmp_path: Path) -> None:
         """INVARIANT GUARD on the argparse declaration: `store_true`, so a run
@@ -8260,7 +8287,10 @@ class TestTheScannerLookupIsAClosedSet:
             scratch = repo / rel
             scratch.parent.mkdir(parents=True, exist_ok=True)
             scratch.write_text("", encoding="utf-8")
-            assert hd.find_leak_scanner(repo) is not None, rel
+            found = hd.find_leak_scanner(repo)
+            assert found.path is not None, rel
+            assert found.rel == rel, found
+            assert found.unusable == "", found
             scratch.unlink()
 
     def test_an_undeclared_path_is_NOT_a_scanner(self, repo: Path) -> None:
@@ -8281,7 +8311,13 @@ class TestTheScannerLookupIsAClosedSet:
             p = repo / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("", encoding="utf-8")
-        assert hd.find_leak_scanner(repo) is None
+        found = hd.find_leak_scanner(repo)
+        assert found.path is None, found
+        # 🔴 AND NOT AS AN UNUSABLE ONE EITHER. An undeclared path must read as
+        # a genuine ABSENCE, not as the "something is there and cannot be run"
+        # refusal — otherwise adding a file at a path this set does not declare
+        # would start refusing writes in every repo that has one.
+        assert found.unusable == "", found
 
 
 class TestAScannerThatCannotBeRunIsARefusal:
@@ -8310,8 +8346,10 @@ class TestAScannerThatCannotBeRunIsARefusal:
             raise hd.ScannerUnusable("it did not finish within 300s")
 
         monkeypatch.setattr(hd, "run_leak_scanner", boom)
+        assert scanner.is_file(), "the fixture never installed a scanner"
         verdict = hd.leak_gate(
-            repo, "claudedocs/handoff-sample-topic.md", scanner, approved=False)
+            repo, "claudedocs/handoff-sample-topic.md",
+            hd.find_leak_scanner(repo), approved=False)
         assert "status=leak-refused" in verdict.refusal, verdict
         assert "CANNOT READ IS NOT A PASS" in verdict.refusal, verdict
         assert verdict.notes == "", verdict
@@ -8384,3 +8422,484 @@ class TestRuleODidNotMoveTheOtherExits:
         assert res.returncode == hd.EXIT_FAIL, (res.returncode, res.stderr)
         assert "status=failed" in res.stderr, res.stderr
         assert doc_of(repo) == before
+
+
+# --------------------------------------------------------------------------
+# rule (o), round 2: the findings a full adversarial audit of the gate raised.
+#
+# 🔴 EVERY CLASS BELOW IS A REGRESSION TEST, NOT AN INVARIANT GUARD, and each
+# was WATCHED RED on 977a7a99 — the commit that shipped the gate. The matrix is
+# in the PR. What they have in common is the shape `claude/RULES.md` names: the
+# gate's own prose claimed a property the code did not have, so the tests pin
+# the PROPERTY rather than the wording that asserted it.
+# --------------------------------------------------------------------------
+
+#: A scanner that writes bytes no UTF-8 decoder accepts, and refuses.
+#:
+#: 🔴 REALISTIC RATHER THAN TEXTBOOK: `caf\xe9` is latin-1, which is what a
+#: scanner gets when it reads a repository file with `errors=` unset and prints
+#: the offending line back. The gate runs whatever the TARGET repo ships and
+#: captures both its streams, so the decoder it uses is a property of this tool,
+#: not of the scanner.
+_NON_UTF8_SRC = (
+    "import sys\n"
+    "sys.stdout.buffer.write("
+    "b'fakescan: 1 finding(s) - REFUSING\\n')\n"
+    "sys.stdout.buffer.write(b'  vendor/notes.md:4 denied-identifier caf\\xe9-scope\\n')\n"
+    "sys.stdout.buffer.flush()\n"
+    "sys.exit(1)\n"
+)
+
+#: A scanner whose VERDICT is on stdout and whose NOISE is on stderr, in the
+#: shape cairn's real `tests/leakscan.py` produces: one `COULD NOT READ …`
+#: warning per unreadable file, on stderr, unbounded.
+_NOISY_STDERR_SRC = '''\
+import sys
+from pathlib import Path
+
+TOKEN = {token!r}
+root = Path(__file__).resolve().parent.parent
+hits = []
+for p in sorted(root.rglob("*.md")):
+    if ".git" in p.parts:
+        continue
+    text = p.read_text(encoding="utf-8", errors="replace")
+    for n, line in enumerate(text.splitlines(), 1):
+        if TOKEN in line:
+            hits.append("%s:%d denied-identifier %s" % (p.relative_to(root), n, line.strip()))
+for h in hits:
+    print("  " + h)
+if hits:
+    print("fakescan: %d finding(s) - REFUSING" % len(hits))
+for i in range({noise}):
+    print("COULD NOT READ vendor/broken-%d.md: dangling symlink" % i, file=sys.stderr)
+sys.exit(1 if hits else 0)
+'''
+
+#: A scanner that fails IN-PROCESS: the interpreter starts, the program does
+#: not. `ImportError` is the realistic one — a scanner importing a dependency
+#: the target checkout does not have.
+_BROKEN_IMPORT_SRC = "import nonexistent_module_xyz_for_this_test\n"
+
+
+class TestANonUtf8ScannerIsARefusalAndNotACrash:
+    """🔴 `status=failed` READS AS `NOTHING HAPPENED`, SO IT MUST BE THAT — and
+    a decoder that raises inside the gate broke exactly that invariant.
+
+    MEASURED at 977a7a99 with the scanner below: `UnicodeDecodeError` is a
+    `ValueError`, so it escaped `run_leak_scanner`, `leak_gate` AND `main`'s
+    `except (GitError, OSError)`. The run ended rc 1 — a code the exit model
+    does not define — with a bare traceback, and `git status --porcelain` showed
+    the unvouched doc STILL WRITTEN.
+
+    ⚠ REACHABILITY IS STATED, NOT OVERCLAIMED. No scanner was found in the wild
+    that does this; cairn's reads with `errors="replace"`. The claim this test
+    pins is narrower and is the one that matters: this gate executes whatever
+    the target repository ships and captures both of its streams, so the bytes
+    it decodes are not under this tool's control.
+    """
+
+    def test_the_run_refuses_cleanly(self, repo: Path, tmp_path: Path) -> None:
+        install_scanner(repo, _NON_UTF8_SRC)
+        before = doc_of(repo)
+        shas_before = commit_shas(repo)
+
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
+
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stdout, res.stderr)
+        assert "Traceback" not in res.stderr, res.stderr
+        assert "status=leak-refused" in res.stderr, res.stderr
+        assert doc_of(repo) == before, "the unvouched delta was left in the doc"
+        assert commit_shas(repo) == shas_before
+
+    def test_and_the_undecodable_bytes_still_reach_the_operator(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """A refusal the operator cannot act on is not one, so the replacement
+        character is the right outcome and dropping the line is not."""
+        install_scanner(repo, _NON_UTF8_SRC)
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
+        assert "denied-identifier" in res.stderr, res.stderr
+        assert "REFUSING" in res.stderr, res.stderr
+
+
+class TestTheRollbackOnlyUnstagesWhatThisRunStaged:
+    """🔴 A ROLLBACK THAT TOUCHES SOMEONE ELSE'S INDEX ENTRY IS THE DEFECT IT
+    WAS WRITTEN TO AVOID, one level down.
+
+    `_undo_write` was built for the failed-COMMIT arm, where this tool really
+    had `git add`ed the path. Rule (o) gave it a SECOND caller on a path where
+    nothing was ever staged — and it still ran `git restore --staged`, which in
+    a shared checkout resets an index entry another session wrote.
+
+    MEASURED at 977a7a99: staged before `['claudedocs/handoff-sample-topic.md']`
+    → rc 13 → staged after `[]`, while the run printed `nothing from this run is
+    left staged or written` — true as written, and concealing a change that was
+    not from this run.
+    """
+
+    RELPATH = "claudedocs/handoff-sample-topic.md"
+
+    def _stage_another_sessions_edit(self, repo: Path) -> bytes:
+        doc = repo / self.RELPATH
+        doc.write_bytes(
+            doc.read_bytes() + b"\n<!-- another session's staged edit -->\n")
+        _sh("git", "add", "--", self.RELPATH, cwd=repo)
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == [self.RELPATH], (
+            "the fixture never staged anything, so this test proves nothing: "
+            f"{staged}")
+        return doc.read_bytes()
+
+    def test_a_pre_staged_edit_survives_the_leak_refusal(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        token_scanner(repo)
+        before = self._stage_another_sessions_edit(repo)
+
+        res = run_tool(repo, "--confirm", update=leaky_update(tmp_path))
+
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stderr)
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == [self.RELPATH], (
+            "the rollback unstaged a path this run never staged:\n" + res.stderr)
+        assert (repo / self.RELPATH).read_bytes() == before, (
+            "the rollback did not restore the bytes this run found")
+
+    def test_and_the_rollback_line_does_not_claim_an_unstage_it_did_not_do(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 A COMMENT IS A CLAIM AND SO IS A PRINTED LINE. `restored and
+        unstaged` on a path that was never staged is the sentence that made the
+        silent unstage above read as correct behaviour."""
+        token_scanner(repo)
+        self._stage_another_sessions_edit(repo)
+        res = run_tool(repo, "--confirm", update=leaky_update(tmp_path))
+        assert "unstaged" not in res.stderr, (
+            "claimed an unstage on a run that staged nothing:\n" + res.stderr)
+        assert "rolled back" in res.stderr, res.stderr
+
+    def test_the_failed_COMMIT_arm_still_unstages_what_it_DID_stage(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE CONTROL FOR THE FIX: narrowing the rollback must not disarm
+        the arm it was written for. Here the tool reaches `git add` itself and
+        the commit is refused by a hook, so the unstage is this run's own."""
+        token_scanner(repo)
+        write_exec(repo / ".git" / "hooks" / "pre-commit",
+                   "echo 'blocked by guard' >&2\nexit 1\n")
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
+        assert res.returncode == hd.EXIT_FAIL, (res.returncode, res.stderr)
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == [], f"paths left STAGED after a blocked commit: {staged}"
+
+
+class TestTheVerdictSurvivesANoisyStream:
+    """🔴 A TAIL OVER TWO CONCATENATED STREAMS CAN CONTAIN NEITHER THE FINDING
+    NOR THE VERDICT.
+
+    `ScanRun.output` was `stdout + stderr` with stderr LAST, so a scanner
+    writing 20+ warning lines to stderr pushed every line of stdout out of the
+    20-line tail. MEASURED at 977a7a99 in cairn's own shape — finding and
+    `REFUSING` on stdout, 25 `COULD NOT READ …` warnings on stderr, which
+    cairn's scanner really does emit: the refusal contained NEITHER
+    `denied-identifier` NOR `REFUSING`, only broken-symlink warnings.
+    """
+
+    def _noisy(self, repo: Path, noise: int = 25) -> Path:
+        return install_scanner(
+            repo, _NOISY_STDERR_SRC.format(token=DENIED_TOKEN, noise=noise))
+
+    def test_the_refusal_carries_the_finding_and_the_verdict(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        self._noisy(repo)
+        res = run_tool(repo, "--confirm", update=leaky_update(tmp_path))
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stderr)
+        assert DENIED_TOKEN in res.stderr, res.stderr
+        assert "denied-identifier" in res.stderr, res.stderr
+        assert "REFUSING" in res.stderr, res.stderr
+
+    def test_the_noise_is_not_simply_dropped(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE OTHER DIRECTION, AND IT IS A REAL RISK OF THE FIX: keeping the
+        verdict by discarding stderr would hide the `could not read` warnings
+        that explain WHY a scan is incomplete. Both streams are tailed."""
+        self._noisy(repo)
+        res = run_tool(repo, "--confirm", update=leaky_update(tmp_path))
+        assert "COULD NOT READ" in res.stderr, res.stderr
+        assert "earlier line(s)" in res.stderr, (
+            "25 stderr lines against a 20-line cap elided nothing:\n" + res.stderr)
+
+    def test_the_approved_note_carries_them_too(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """Same elision, same reason: an operator approving a refusal through
+        must be able to see what they approved."""
+        self._noisy(repo)
+        res = run_tool(repo, "--confirm", hd.LEAK_PRE_EXISTING_FLAG,
+                       update=leaky_update(tmp_path))
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert "REFUSING" in res.stdout, res.stdout
+        assert "COULD NOT READ" in res.stdout, res.stdout
+
+
+class TestAPresentButUnrunnableScannerIsNotAnABSENCE:
+    """🔴 `PASS BY ABSENCE` IS A STATEMENT ABOUT THE REPOSITORY, AND
+    `is_file()` CANNOT MAKE IT.
+
+    `is_file()` is False for three different worlds and only one of them is
+    "this repo has no scanner". MEASURED at 977a7a99 for both of the others:
+    `find_leak_scanner → None`, rc 0, and the run printed `NO SCANNER FOUND in
+    <repo> — looked for tests/leakscan.py` — a false statement — while a delta
+    carrying a denied identifier landed.
+
+    Both are reachable without anyone doing anything odd: a sparse or partial
+    checkout that does not materialise `tests/`, a scanner inside a submodule
+    (`git worktree add` populates none, and this tool's own `status=behind`
+    advice tells the operator to write from a throwaway worktree), or a broken
+    symlink after a tree move.
+    """
+
+    def test_a_DIRECTORY_at_the_declared_path_refuses(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        (repo / "tests" / "leakscan.py").mkdir(parents=True)
+        before = doc_of(repo)
+        res = run_tool(repo, "--confirm", update=leaky_update(tmp_path))
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stdout, res.stderr)
+        assert "NO SCANNER FOUND" not in res.stdout, res.stdout
+        assert "not a regular file" in res.stderr, res.stderr
+        assert doc_of(repo) == before, "the unscanned delta was written"
+
+    def test_a_DANGLING_SYMLINK_at_the_declared_path_refuses(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 `exists()` FOLLOWS THE LINK AND IS FALSE HERE TOO, so the only
+        question that separates `nothing here` from `a link to nothing` is
+        `is_symlink()`. A gate that asked `exists()` would still call this an
+        absence."""
+        (repo / "tests").mkdir(parents=True, exist_ok=True)
+        (repo / "tests" / "leakscan.py").symlink_to("target-that-is-not-there.py")
+        before = doc_of(repo)
+        res = run_tool(repo, "--confirm", update=leaky_update(tmp_path))
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stdout, res.stderr)
+        assert "NO SCANNER FOUND" not in res.stdout, res.stdout
+        assert "symlink" in res.stderr, res.stderr
+        assert doc_of(repo) == before, "the unscanned delta was written"
+
+    def test_a_GENUINELY_absent_scanner_still_passes_by_absence(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """THE NEGATIVE CONTROL. Refusing on absence would make the tool
+        unusable in most repositories — the permanently-red gate."""
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert "NO SCANNER FOUND" in res.stdout, res.stdout
+
+    def test_the_opt_in_does_NOT_clear_a_present_but_unrunnable_scanner(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """Same arm as a hang or a launch failure: no verdict was produced, so
+        there is nothing an operator can have read and approved."""
+        (repo / "tests" / "leakscan.py").mkdir(parents=True)
+        res = run_tool(repo, "--confirm", hd.LEAK_PRE_EXISTING_FLAG,
+                       update=leaky_update(tmp_path))
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stderr)
+
+
+class TestTheApprovedThroughDecisionIsDurable:
+    """🔴 A DECISION THAT EXISTS ONLY ON STDOUT IS NOT RECOVERABLE FROM THE
+    ARTIFACT IT PRODUCED.
+
+    A pushed handoff approved past a refusing scanner was indistinguishable in
+    `git log` from one the scanner vouched for: the commit carried the subject
+    and `Claude-Session-Id:` and nothing else. The one durable route — the
+    transcript — is TRUNCATED: `scripts/transcript-push.sh` ships only the last
+    `TAIL_BYTES`, so an approval early in a long session is unrecoverable.
+
+    The trailer reuses `session_trailer.append_trailer`, which already composes
+    with the `prepare-commit-msg` hook. One rule, one place.
+    """
+
+    def _body(self, repo: Path) -> str:
+        return _sh("git", "log", "-1", "--format=%B", cwd=repo)
+
+    def test_an_approved_run_stamps_the_commit(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        install_scanner(repo, _ALWAYS_SRC.format(code=1))
+        res = run_tool(repo, "--confirm", hd.LEAK_PRE_EXISTING_FLAG,
+                       update=clean_update(tmp_path))
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        body = self._body(repo)
+        assert f"{hd.LEAK_TRAILER_KEY}:" in body, body
+        assert "tests/leakscan.py" in body, body
+        assert "exit=1" in body, body
+
+    @pytest.mark.parametrize("code", LEAK_REFUSING_CODES)
+    def test_the_stamp_carries_the_scanner_s_OWN_exit_code(
+        self, repo: Path, tmp_path: Path, code: int
+    ) -> None:
+        """🔴 NOT A BOOLEAN. `exit=2` is `could not vouch — a control of the
+        scanner's own misbehaved`, which is a different thing to approve than
+        `exit=1 — I found something`, and a reader of `git log` has to be able
+        to tell them apart.
+
+        🔴 PARAMETRISED OVER THE DECLARED SET RATHER THAN OVER ONE LITERAL, for
+        the reason `TestTheRefusingExitCodesAreASPANNotALiteral` exists: a
+        fixture that can only ever produce one value cannot see a mutant that
+        hardcodes that value. With the set guaranteed to span two distinct
+        codes, a stamp hardcoding either one fails on the other."""
+        install_scanner(repo, _ALWAYS_SRC.format(code=code))
+        run_tool(repo, "--confirm", hd.LEAK_PRE_EXISTING_FLAG,
+                 update=clean_update(tmp_path))
+        assert f"exit={code}" in self._body(repo), self._body(repo)
+
+    def test_a_CLEAN_run_is_not_stamped(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE NEGATIVE CONTROL, AND THE WHOLE POINT. A trailer on every
+        commit distinguishes nothing; the absence is what makes the presence
+        readable."""
+        token_scanner(repo)
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert hd.LEAK_TRAILER_KEY not in self._body(repo), self._body(repo)
+
+    def test_a_run_with_NO_scanner_is_not_stamped_either(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """PASS BY ABSENCE is not an approval, and must not read as one."""
+        run_tool(repo, "--confirm", update=update_file)
+        assert hd.LEAK_TRAILER_KEY not in self._body(repo), self._body(repo)
+
+    def test_the_session_trailer_still_lands_beside_it(
+        self, repo: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """🔴 TWO WRITERS, ONE MESSAGE. `append_trailer` is used for both, so
+        the second must not displace the first — the seam a separate appender
+        would have broken."""
+        install_scanner(repo, _ALWAYS_SRC.format(code=1))
+        sid = "ses_0123456789abcdef"
+        env = dict(os.environ, **GIT_ENV, CLAUDE_CODE_SESSION_ID=sid)
+        argv = [sys.executable, str(TOOL), "--repo", str(repo), "--topic",
+                "sample-topic", "--update", str(clean_update(tmp_path)),
+                "--advanced", "the drain loop is fixed", "--confirm",
+                hd.LEAK_PRE_EXISTING_FLAG]
+        res = subprocess.run(argv, capture_output=True, text=True, env=env)
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        body = self._body(repo)
+        assert sid in body, body
+        assert f"{hd.LEAK_TRAILER_KEY}:" in body, body
+
+
+class TestTheOptInsScopeIsDeclaredRatherThanImplied:
+    """🔴 THE CLASSIFICATION HAS NO RELIABLE FORM, AND SAYING SO IS THE FIX.
+
+    `ScannerUnusable` is raised for exactly two things: `OSError` on spawn, and
+    a timeout. Every IN-PROCESS failure — `ImportError`, `SyntaxError`, a
+    missing dependency, an unsupported interpreter — reaches this gate as a
+    non-zero EXIT CODE, which is indistinguishable from `I ran and found
+    something`. Distinguishing them would mean parsing the scanner's output,
+    and this gate has to work against a scanner it has never seen.
+
+    So the flag DOES clear an in-process failure. The help text and
+    `write-gate.md` §H now say that instead of the opposite, and the
+    approved-through note warns the operator on screen. MEASURED at 977a7a99:
+    with the flag, rc 0 and `status=written` printing `LEAK GATE APPROVED
+    THROUGH` for a gate that never scanned anything — silently.
+    """
+
+    def test_an_in_process_failure_refuses_without_the_flag(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        install_scanner(repo, _BROKEN_IMPORT_SRC)
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stderr)
+        # The scanner's own traceback is what tells the operator it never ran.
+        assert "ModuleNotFoundError" in res.stderr, res.stderr
+
+    def test_the_flag_clears_it_and_the_note_SAYS_it_might_not_have_scanned(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        install_scanner(repo, _BROKEN_IMPORT_SRC)
+        res = run_tool(repo, "--confirm", hd.LEAK_PRE_EXISTING_FLAG,
+                       update=clean_update(tmp_path))
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert "APPROVED THROUGH" in res.stdout, res.stdout
+        # 🔴 THE WARNING IS THE FIX, so it is what is asserted. The gate cannot
+        # tell "I found something" from "I never started", so the operator has
+        # to be told — and the scanner's own traceback has to be under it, or
+        # the warning is one they cannot check.
+        assert "MAY NEVER HAVE SCANNED" in res.stdout, (
+            "the note let an unscanned tree read as an approved finding:\n"
+            + res.stdout)
+        assert "ModuleNotFoundError" in res.stdout, res.stdout
+
+    def test_the_help_text_does_not_claim_what_the_code_cannot_do(self) -> None:
+        """🔴 THE CLAIM THAT WAS FALSE. The flag's help said it `Does NOT apply
+        when the scanner could not be RUN at all` — true only of a spawn failure
+        and a timeout, and read by anyone as covering every way a scanner fails
+        to run. A guard on the WORDS is walkable by rewording, so this pins the
+        two mechanisms the exception really covers, which is a claim about the
+        code rather than about a sentence."""
+        help_text = hd.build_parser().format_help()
+        start = help_text.index(hd.LEAK_PRE_EXISTING_FLAG)
+        assert "could not be RUN at all" not in help_text[start:], help_text
+        assert "start" in help_text[start:] or "spawn" in help_text[start:], (
+            help_text[start:])
+
+
+class TestTheRefusingExitCodesAreASPANNotALiteral:
+    """🔴 THE `!= 1` MUTANT WAS KILLED BY A BARE FIXTURE LITERAL.
+
+    MEASURED at 977a7a99: with `run.code == 0` mutated to `run.code != 1`, 2
+    failed / 488 passed — but with the mutant AND the two `_ALWAYS_SRC.format(
+    code=2)` occurrences normalised to `code=1`, **490 passed / 0 failed**. The
+    discrimination rode entirely on two occurrences of the literal `2`, pinned
+    by a class docstring and nothing else, and no test asserted the refusal
+    header's `exit=<n>` field at all.
+
+    The property is now mechanical: the fixture set spans at least two distinct
+    non-zero codes, and each one's own value is asserted to reach the operator.
+    """
+
+    def test_the_declared_set_spans_two_distinct_non_zero_codes(self) -> None:
+        """🔴 THE GUARD THE LITERALS NEEDED. Collapsing the set to one value —
+        the edit that made the mutant survive — fails HERE, loudly, instead of
+        silently emptying the tests below."""
+        distinct = {c for c in LEAK_REFUSING_CODES if c != 0}
+        assert len(distinct) >= 2, (
+            "every refusing fixture uses one exit code, so a `!= <that code>` "
+            f"mutant survives the whole suite: {LEAK_REFUSING_CODES}")
+
+    @pytest.mark.parametrize("code", LEAK_REFUSING_CODES)
+    def test_each_code_refuses_and_the_header_carries_it(
+        self, repo: Path, tmp_path: Path, code: int
+    ) -> None:
+        install_scanner(repo, _ALWAYS_SRC.format(code=code))
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stderr)
+        assert f"exit={code}" in res.stderr, (
+            f"the refusal never names the scanner's own exit code {code}:\n"
+            + res.stderr)
+
+    @pytest.mark.parametrize("code", LEAK_REFUSING_CODES)
+    def test_the_approved_note_carries_it_too(
+        self, repo: Path, tmp_path: Path, code: int
+    ) -> None:
+        install_scanner(repo, _ALWAYS_SRC.format(code=code))
+        res = run_tool(repo, "--confirm", hd.LEAK_PRE_EXISTING_FLAG,
+                       update=clean_update(tmp_path))
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert f"exited {code}" in res.stdout, res.stdout
