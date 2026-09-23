@@ -1384,8 +1384,11 @@ def emit_cmd_event(op: str, key: str, outcome: str, duration_ms: int,
         if se is None:
             return
         # METADATA ONLY — op/key/outcome/(bare)domain, plus the caller's session
-        # TIER and (joinable tier, non-nested only) its agent session id. Never
-        # page content.
+        # TIER and (joinable tier, non-nested only) its agent session id. Call
+        # sites may merge further METADATA-ONLY keys via `extra`: the throttle
+        # path ({reason, sess}), upload's file PATH, activate's consent flag,
+        # and the RESOLVED flow-doc filename (`site_flows` — a repo-relative
+        # path, never page content). Never page content.
         payload = {"op": op, "key": key, "outcome": outcome}
         if domain:
             payload["domain"] = domain
@@ -3621,6 +3624,11 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             # which path (ok / refused / throttled) the request takes below.
             emulate_extra = _emulate_extra(body) if op == "emulate" else None
             outcome, exit_code, domain = "ok", 0, ""
+            # Captured before submit so the field is present regardless of
+            # which path (ok / refused / throttled) the request takes below;
+            # only the success path ever fills it (a refused command never
+            # produced an envelope, so nothing was routed).
+            flows_path = ""
             # `release` is server-side: drop the session's ownership without ever
             # touching the real Brave tab or the extension. `target` (the popped
             # --instance routing hint) SCOPES it to one profile — see
@@ -3730,6 +3738,11 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 # all, which is why SKILL.md can name the directory once and
                 # never grow again as sites are added. See _annotate_site_flows.
                 _annotate_site_flows(result, domain)
+                # Read the routing BACK off the annotated envelope — the
+                # telemetry records what the caller was actually shown, not
+                # what would route if asked again. Empty for an unregistered
+                # host (the annotation never sets the key).
+                flows_path = result.get("site_flows", "")
                 log("cmd_ok", op=op)
                 if op == "activate":
                     # Chrome-side activate only set the tab active WITHIN its
@@ -3789,6 +3802,15 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
             if op == "upload":
                 log("upload", outcome=outcome, domain=domain, path=upload_path,
                     key=(target or ""))
+            if flows_path:
+                # The flow-doc routing rides the cmd event — a repo-relative
+                # FILENAME, the same metadata class as the bare domain (no
+                # page content). This is what makes "are the flows docs
+                # actually routed/used" answerable from activity.events;
+                # without it the routing existed only in the response
+                # envelope, invisible to every downstream query.
+                extra = dict(extra or {})
+                extra["site_flows"] = flows_path
             emit_cmd_event(op=op, key=(target or ""), outcome=outcome,
                            duration_ms=int((time.monotonic() - t0) * 1000),
                            domain=domain, exit_code=exit_code, extra=extra,

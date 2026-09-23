@@ -1693,6 +1693,46 @@ def test_cmd_ok_emits_one_metadata_event(telemetry):
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
+def test_cmd_ok_emits_site_flows_exactly_when_the_host_is_registered(telemetry):
+    """The flows-telemetry contract, TWO-WAY: a REGISTERED host's cmd event
+    carries the resolved flow-doc path; an UNREGISTERED host's carries NO
+    `site_flows` key. Presence AND absence are pinned, so a routing regression
+    in either direction fails — a payload that always carried the key would
+    make every host look routed, and one that never did would hide the flows
+    docs' real usage from activity.events.
+
+    The value is read back from the ANNOTATED envelope (what the caller was
+    actually shown), not recomputed at the emit site. It is a repo-relative
+    FILENAME — the same metadata class as the bare domain; no page content.
+    """
+    spool_dir = telemetry
+    srv, _ = _serve()
+    a = FakeExtension(srv, instance_id="a", label="alpha",
+                      executor=lambda c: {"url": "https://civitai.com/models"})
+    b = FakeExtension(srv, instance_id="b", label="beta",
+                      executor=lambda c: {"url": "https://unregistered.example.test/x"})
+    a.start(); b.start()
+    try:
+        assert _wait_count(srv, 2) is not None
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "target": "alpha"})
+        assert st == 200
+        # The envelope the caller saw carries the routing...
+        assert body["result"]["site_flows"] == "flows/civitai.com.md"
+        st, body = _req(srv, "POST", "/cmd", {"op": "getHtml", "target": "beta"})
+        assert st == 200
+        # ...and the unregistered twin carries nothing (annotation is additive).
+        assert "site_flows" not in body["result"], body["result"]
+        evs = _wait_events(spool_dir, 2)
+        assert len(evs) == 2, evs
+        p_by_domain = {json.loads(e["payload"])["domain"]: json.loads(e["payload"])
+                       for e in evs}
+        assert p_by_domain["civitai.com"]["site_flows"] == "flows/civitai.com.md"
+        assert "site_flows" not in p_by_domain["unregistered.example.test"], \
+            p_by_domain["unregistered.example.test"]
+    finally:
+        a.stop(); b.stop(); srv.shutdown(); srv.server_close()
+
+
 def test_cmd_ok_no_url_uses_op_as_text_and_omits_domain(telemetry):
     """A result with no url (e.g. tabs) → text falls back to the op, and the
     payload carries no domain key."""
