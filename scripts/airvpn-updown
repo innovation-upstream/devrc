@@ -52,6 +52,18 @@ set -uo pipefail
 
 action="${1:-}"
 IFACE="${2:-airvpn}"
+# MODE: empty (the workbench, hardcoded home-LAN bypasses) or `roaming` (a
+# laptop whose LAN changes with every network). In roaming mode the LAN router
+# IS the default gateway and the LAN subnet is DERIVED from the uplink iface's
+# connected route at PostUp time — a hardcoded 192.168.50.0/24 on a roaming
+# host would allow whatever stranger's network happens to use that range and
+# bypass nothing on the one you are actually on. Everything fail-closed (the
+# uplink guard, the physical-NIC derivation, the fallback ruleset) is UNCHANGED
+# in both modes: only WHICH LAN is allowed moves, never WHETHER the uplink is
+# policed. A derived subnet that cannot be found degrades to NO LAN rule —
+# the gateway rule (below) still allows DNS/DHCP to the router, and everything
+# else stays dropped. Fail-closed, again.
+MODE="${3:-}"
 
 # The split-tunnel bypass destinations (mirror the old Mullvad conf). Everything
 # INTERNAL (nebula overlay, k3s pod/service CIDRs, CNI bridges) needs no entry here:
@@ -85,7 +97,7 @@ table inet ${KS_TABLE} {
         type filter hook output priority 0; policy accept;
         oifname { "lo", "${IFACE}", "nebula.mesh", "cni0", "flannel.1", "docker0" } accept
         meta skuid "${NEBULA_USER}" accept
-        ip daddr ${LAN_SUBNET} accept
+        $( [[ -n "$LAN_SUBNET" ]] && echo "ip daddr ${LAN_SUBNET} accept" )
         ip daddr ${NEBULA_LIGHTHOUSE} accept
         drop
     }
@@ -120,6 +132,19 @@ endpoint_ip() {
     wg show "$IFACE" endpoints 2>/dev/null | awk '{print $2}' | sed 's/:[0-9]*$//' | head -1
 }
 
+# ROAMING: the uplink iface's connected subnet (e.g. 192.168.1.0/24), derived
+# from `ip route` at PostUp time — never a hardcoded range. Only scope-link
+# routes with a real prefix (not a /32) qualify; empty on any doubt, and the
+# caller then installs NO LAN rule (the gateway itself stays allowed).
+derive_lan_subnet() {
+    local sub
+    sub="$(ip -o -4 route show dev "$PHYS" scope link 2>/dev/null \
+        | awk '{print $1}' \
+        | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$' \
+        | awk -F/ '$2 > 0 && $2 < 32' | head -1)"
+    [[ "$sub" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]] && echo "$sub"
+}
+
 case "$action" in
     up)
         GW="$(orig_gw)"; PHYS="$(orig_if)"
@@ -134,18 +159,56 @@ case "$action" in
 
         # --- split-tunnel bypass routes (need ONE gateway; skip + warn if absent,
         #     but STILL arm the killswitch below so we never fail OPEN) -------------
+        if [[ "$MODE" == "roaming" ]]; then
+            # The LAN moves with the network: the router IS the default gateway
+            # (already allowed by the ruleset's `ip daddr ${GW}` rule and on the
+            # connected route, so no /32 bypass), and the local subnet is
+            # DERIVED from the uplink. The lighthouse + endpoint bypasses apply
+            # unchanged; a subnet that cannot be derived installs NO LAN rule.
+            LAN_ROUTER=""
+            LAN_SUBNET="$(derive_lan_subnet)"
+            [[ -n "$LAN_SUBNET" ]] \
+                && log "roaming: LAN allowed = ${LAN_SUBNET} (derived from ${PHYS})" \
+                || log "WARNING: roaming: could not derive the local subnet — NO LAN rule installed (gateway only, fail-closed)"
+        fi
         if [[ -n "$GW" && -n "$PHYS" ]]; then
             echo "$GW"   > "$GW_FILE"
             echo "$PHYS" > "$IFACE_FILE"
             EP="$(endpoint_ip)"
             [[ -n "$EP" ]] && ip route replace "$EP" via "$GW" dev "$PHYS" 2>/dev/null || true
-            ip route replace "$LAN_ROUTER"        via "$GW" dev "$PHYS" 2>/dev/null || true
+            [[ -n "$LAN_ROUTER" ]] && \
+                ip route replace "$LAN_ROUTER" via "$GW" dev "$PHYS" 2>/dev/null || true
             ip route replace "$NEBULA_LIGHTHOUSE" via "$GW" dev "$PHYS" 2>/dev/null || true
             # LAN /24 stays direct via the connected route; assert it explicitly too.
-            ip route replace "$LAN_SUBNET" dev "$PHYS" scope link 2>/dev/null || true
+            [[ -n "$LAN_SUBNET" && -z "$MODE" ]] && \
+                ip route replace "$LAN_SUBNET" dev "$PHYS" scope link 2>/dev/null || true
         else
             EP=""
             log "WARNING: no default gateway/iface — split-tunnel bypass routes NOT set; arming killswitch anyway (fail-closed)"
+        fi
+
+        # 🔴 NEBULA SPLIT-TUNNEL (uid policy rule). The wg-quick default route
+        # swallows nebula's DIRECT peer packets (only the LIGHTHOUSE gets a /32
+        # bypass — peer IPs are dynamic), so while the tunnel is up, nebula's
+        # transport double-tunnels through AirVPN's MTU-1320 path and fragments
+        # nebula's ~1300-MTU datagrams: direct paths degrade to loss/latency
+        # spikes while relay paths (via the bypassed lighthouse) stay healthy.
+        # MEASURED on the laptop 2026-09-21: zero nebula send errors all
+        # evening, then 4 within the tunnel-up hour + 10 in the next one, with
+        # handshake churn for the whole window. The KILLSWITCH already intends
+        # nebula to stay DIRECT (its `meta skuid nebula-mesh` accept rule on the
+        # physical uplink) — this rule makes the ROUTING agree with it: pin the
+        # nebula user's packets to the main table (physical default route) at a
+        # priority far below wg-quick's own (32765/32766), so they never reach
+        # the tunnel table. Applies in BOTH modes — the workbench carries the
+        # same latent flaw. `uidrange` needs iproute2; a resolved UID of nothing
+        # (user absent) skips it, as does an add failure (best-effort — routing
+        # must never fail the tunnel bring-up).
+        NEBULA_UID="$(id -u "${NEBULA_USER}" 2>/dev/null || true)"
+        if [[ -n "$NEBULA_UID" ]]; then
+            ip rule add uidrange "${NEBULA_UID}-${NEBULA_UID}" lookup main priority 500 2>/dev/null \
+                && log "up: nebula transport pinned to main table (uid ${NEBULA_UID} @ prio 500)" \
+                || log "WARNING: nebula uid rule not installed (already present, or ip rule failed)"
         fi
 
         # --- fail-closed killswitch (nftables) — polices ALL physical NICs --------
@@ -173,7 +236,7 @@ table inet ${KS_TABLE} {
         ${UPLINK_GUARD}
         # On a physical NIC, allow only the legitimate un-tunnelled flows; drop rest.
         $( [[ -n "$FWMARK" && "$FWMARK" != "off" ]] && echo "meta mark ${FWMARK} accept" )
-        ip daddr ${LAN_SUBNET} accept
+        $( [[ -n "$LAN_SUBNET" ]] && echo "ip daddr ${LAN_SUBNET} accept" )
         meta skuid "${NEBULA_USER}" accept
         ip daddr ${NEBULA_LIGHTHOUSE} accept
         $( [[ -n "$EP" ]] && echo "ip daddr ${EP} accept" )
@@ -191,8 +254,16 @@ NFT
     down)
         nft delete table inet "$KS_TABLE" 2>/dev/null || true
         for dst in "$NEBULA_LIGHTHOUSE" "$LAN_ROUTER"; do
-            ip route del "$dst" 2>/dev/null || true
+            [[ -n "$dst" ]] && ip route del "$dst" 2>/dev/null || true
         done
+        # 🔴 Remove the nebula uid pin (added at up). NOT deleting it here leaves
+        # the policy rule orphaned after every tunnel session — it is harmless
+        # while no tunnel exists (main IS the default table anyway), but it
+        # would silently re-arm the OLD resolved uid across user changes and
+        # outlive this script's owner. Best-effort del, mirrored to the add.
+        _nebula_uid="$(id -u "${NEBULA_USER}" 2>/dev/null || true)"
+        [[ -n "$_nebula_uid" ]] && \
+            ip rule del uidrange "${_nebula_uid}-${_nebula_uid}" lookup main priority 500 2>/dev/null || true
         # endpoint bypass /32 (if any) — best-effort cleanup by removing non-default
         # /32s we might have added is unnecessary; wg-quick down drops the iface and
         # its table. Leave LAN /24 (it is the normal connected route).
@@ -200,7 +271,7 @@ NFT
         log "down: killswitch disarmed, bypass routes removed"
         ;;
     *)
-        echo "usage: airvpn-updown {up|down} <iface>" >&2
+        echo "usage: airvpn-updown {up|down} <iface> [roaming]" >&2
         exit 1
         ;;
 esac

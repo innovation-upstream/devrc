@@ -110,6 +110,11 @@ ALLOWLIST = {
         "refs file, which moved the literal with it. The pin follows the TEXT, not the path "
         "it used to live at — deleting it instead would have left the demoted copy unpinned",
     ("scripts/tests/test_airvpn_menu.py", "1.1.1.1"): "public resolver as a 'some public IP' fixture",
+    ("claudedocs/handoff-laptop-airvpn-tunnel.md", "1.1.1.1"):
+        "public resolver as the 'this SHOULD leave via the tunnel' probe target in "
+        "the split-tunnel verification. Its counterpart in that doc was the home "
+        "public IP — a real endpoint — which was SCRUBBED rather than pinned here; "
+        "the pair is the worked example of this file's two kinds",
     ("nix/system/apply-dns-travel.sh", "8.8.8.8"): "public resolver written into a travel DNS config",
     ("nix/system/apply-travel-prep.sh", "8.8.8.8"): "public resolver written into a travel DNS config",
     ("scripts/browser-bridge/server.py", "8.8.8.8"): "UDP-connect egress-iface probe (no packet is sent)",

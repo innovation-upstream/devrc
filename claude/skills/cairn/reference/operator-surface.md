@@ -17,27 +17,67 @@ visibility; this file covers what has no command.
 | the cutover | `scripts/cairn-cutover.py` | dry-run by default; owns the freeze/unfreeze of the pre-cutover mirror |
 | the backup | CronJob `subsystem-store-backup` in the same namespace | daily 03:45 UTC (homelab-infra) |
 
-## 🔴 The token file is read ONCE, at startup
+## 🔴 The token file RELOADS ON SIGHUP — no pod replacement, no outage
 
-`server.py::load_tokens` runs in `main()` and there is **no SIGHUP, no reload,
-no watch**. Editing the Kubernetes secret changes nothing about the running
-process — the pod is still authorising against the rows it parsed when it
-started.
+⚠ **THIS SECTION SAID THE OPPOSITE UNTIL 2026-09-22, AND THE OLD TEXT IS
+RETRACTED.** It read *"`server.py::load_tokens` runs in `main()` and there is no
+SIGHUP, no reload, no watch"*, and prescribed replacing the pod. That described
+the **retired Python server**. It is kept here as a heading rather than deleted
+because it was load-bearing: a whole session planned a store outage around it,
+and coordinated with other sessions over a disruption that was never necessary.
 
-Two consequences, both measured and recorded in
-`claudedocs/handoff-cairn-phase3.md`:
+The live pod is the **Go** server (`cairn-store-go`). It says so itself — the
+last field of its startup line is `reload=SIGHUP` — and `installReload` in
+`<cairn>/cmd/cairn-server/main.go` re-reads the token file on `SIGHUP`, logging one of
+two verdicts:
+
+```
+subsystem-store-api: token reload: LOADED <n> identities [<fp>:<id>,…] (was <m> […])
+subsystem-store-api: token reload: REFUSED …
+```
+
+The Secret is mounted as a **plain directory** (no `subPath`), so kubelet
+propagates an edited Secret into the mounted file. A credential change is
+therefore zero-downtime:
+
+```bash
+# 1. edit the SOPS secret, 2. let Flux reconcile, then:
+kubectl -n subsystem-store exec deploy/subsystem-store-api -- \
+  sh -c 'grep -c . /run/secrets/subsystem-store/token'   # wait for the MOUNT
+kubectl -n subsystem-store exec deploy/subsystem-store-api -- sh -c 'kill -HUP 1'
+kubectl -n subsystem-store logs deploy/subsystem-store-api | grep 'token reload' | tail -1
+```
+
+🔴 **Poll the MOUNTED FILE, not the Secret object.** Measured 2026-09-22: Flux
+had applied the new rows while `/run/secrets/subsystem-store/token` still held
+the old ones for ~60–90 s, and a `SIGHUP` inside that window re-reads the OLD
+file and reports a perfectly healthy `LOADED`.
+
+🔴 **A `REFUSED` reload leaves the previously-loaded rows SERVING**, so
+attempting one is safe — it cannot take the store down. That is the asymmetry
+that makes `SIGHUP` strictly better than a replacement, and it is the opposite
+of the startup case below.
+
+🔴 **The `listening on` banner is a STALE read of the credential set after any
+reload.** It is printed once, at process start. Measured 2026-09-22: it still
+named a token that had since been REVOKED, while the last `token reload:` line
+named the live pair — so `grep -m1 'listening on'` is exactly the wrong read.
+**Take the LAST `token reload:` line**, or ask the API with the token itself.
+
+Still true, and only about a **restart**:
 
 * A malformed row is `EXIT_CONFIG` (**78**, `sysexits.h EX_CONFIG`) and the
   process refuses to start. With `strategy: Recreate` at `replicas: 1` there is
   no second pod, so **the store stays DOWN** — it does not fall back to the old
-  rows and it does not fall back to no auth.
-* Replace the pod with **`kubectl delete pod`, not `rollout restart`**. Under
-  `Recreate` the latter costs two rollouts (see homelab-infra's `CLAUDE.md`),
-  i.e. two outages where one was needed.
+  rows and it does not fall back to no auth. This is why a bad row is far more
+  dangerous at restart than at reload.
+* If you do replace the pod, use **`kubectl delete pod`, not `rollout restart`**.
+  Under `Recreate` the latter costs two rollouts (see homelab-infra's
+  `CLAUDE.md`), i.e. two outages where one was needed.
 
-So: edit the secret, then delete the pod, then re-run `cairn doctor` and read
-the `pod` check. A `PROBLEM` there naming HTTP 401/403 is the credential; an
-`UNMEASURED` naming a connection failure is the pod not coming back.
+After either route, re-run `cairn doctor` and read the `pod` check. A `PROBLEM`
+naming HTTP 401/403 is the credential; an `UNMEASURED` naming a connection
+failure is the pod not coming back.
 
 ⚠ **A 403 from this host's edge is not a token rejection.** Measured against the
 live host with the same token: curl's default User-Agent → 200, urllib's default
@@ -84,9 +124,9 @@ them apart, and none should claim to.** `cairn doctor` reports the set and names
 both readings.
 
 A scope is created on the pod by whatever first writes an entry into it. The
-token allowlist is static, in the secret, and read once (above) — so a scope can
-exist in the store and be invisible to your credential until somebody edits the
-secret and replaces the pod.
+token allowlist is static, in the secret, and reloaded on `SIGHUP` (above) — so a
+scope can exist in the store and be invisible to your credential until somebody
+edits the secret and the pod re-reads it.
 
 The store-wide `entry-files=` count in `X-Store-Snapshot` is **not** filtered by
 the allowlist — a deliberate, documented residual count leak — which is the only
@@ -117,7 +157,7 @@ cairn create --scope <scope> --ref <ref> --file <entry.md>
 | answer | meaning | remedy |
 |---|---|---|
 | **201** | allowlisted; the scope simply had no entries | done — that WAS the fix. No secret edit, no pod restart. |
-| **rc 6 `[not-found]`** | not in your token row (on the create path, the allowlist arm is the ONLY 404 — see `SKILL.md`) | edit the secret, replace the pod, re-run |
+| **rc 6 `[not-found]`** | not in your token row (on the create path, the allowlist arm is the ONLY 404 — see `SKILL.md`) | edit the secret, `SIGHUP` the pod (above), re-run |
 
 ⚠ **Two earlier drafts of this block were wrong in OPPOSITE directions**, which is
 why it now routes off a probe rather than off a classification. The first said the
@@ -160,7 +200,7 @@ READS and **false for `cairn create`**: `create_entry` does
 scope with no directory. So the sequence is:
 
 1. add the scope to the token row in the secret,
-2. replace the pod (the token file is read ONCE — see above),
+2. `SIGHUP` the pod so it re-reads the token file (see above — no replacement needed),
 3. `cairn create --scope <new> --ref <ref> --file <path>` → **201**.
 
 `seed.sh` is for pushing a whole local tree and carries the overwrite hazard

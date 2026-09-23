@@ -94,9 +94,18 @@ test("the closure walker actually walks -- positive control", () => {
   // nothing. This asserts the instrument CAN see a transitive dependency: the
   // ONLY way severity.js enters the set is via widget.js importing it.
   const closure = importClosure(["lib/widget.js"]);
-  assert.ok(closure.size >= 4, `walked only ${closure.size} file(s)`);
+  assert.ok(closure.size >= 5, `walked only ${closure.size} file(s)`);
   assert.ok(closure.has("lib/severity.js"),
     "the walker must reach a SECOND-level import, not just the root");
+  // lib/availability.js is the module the other-accounts section is built on,
+  // and it is reachable ONLY through widget.js -- the same shape as the
+  // severity.js omission that made the widget dead on arrival in round 1.
+  assert.ok(closure.has("lib/availability.js"),
+    "the walker no longer reaches the availability module");
+  // And it pulls in a THIRD level: availability.js -> timefmt.js. A walker
+  // that stopped at depth 2 would pass every assertion above.
+  assert.ok(closure.has("lib/timefmt.js"),
+    "the walker must follow an import of an import of the root");
   // A third assertion lived here -- that content_widget.js does not name
   // severity.js directly -- and it was VACUOUS: content_widget.js is a classic
   // content script whose static-import set the test below separately asserts

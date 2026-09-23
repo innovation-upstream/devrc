@@ -20,7 +20,20 @@ observes nothing. The one act that provably DID happen in both failures is the r
 so the read is what arms this hook:
 
     clawgatectl task get <N>          # the SKILL's own step 1
+    muster task get <N>               # the same verb on the extracted CLI (below)
     curl … /api/tasks/<N>[/…]         # the same read, before clawgatectl existed
+    curl … /api/v1/tasks/<N>[/…]      # …and a versioned mount, if muster picks one
+
+🔴 THE TRIGGER NAMES TWO BINARIES BECAUSE THE RENAME IS A SILENT KILL. The tasks half
+of clawgate is being extracted into `muster` (`github.com/ZacxDev/muster`), CLI binary
+`muster`, same verbs. Every arming pattern here used to spell `clawgatectl` literally,
+so after the rename `tracked_ids` would stay empty and Stop would return before
+reaching any verdict — not a block, not a notice, NOTHING, which is also exactly what
+a correctly-written-back session looks like. Both spellings therefore land BEFORE the
+rename, from one tuple (`TASK_CLI_NAMES`) that also drives which clients the live read
+tries. The live read additionally honours `CLAWGATE_TASKS_API_URL` from the SAME
+`~/.claude/clawgate.env`; `CLAWGATE_API_URL` is NOT repointed, because
+`clawgate-hook.sh` reads it for `/api/send` — permission routing, which stays.
 
 WHAT FIRES IT — THREE CONDITIONS, ALL REQUIRED
 -----------------------------------------------
@@ -60,6 +73,14 @@ client, unparseable JSON — all of those mean "could not measure", and this hoo
 so out loud with a NON-BLOCKING notice rather than going silent. RULES.md: an empty
 result cannot distinguish two mechanisms, and reporting silence for "the board is
 down" is reporting the same observable as "the ritual was followed".
+
+🔴 THAT NOTICE IS FAIL-OPEN, RE-DECIDED RATHER THAN INHERITED, AND IT NAMES THE
+ENDPOINT. The full argument is in `unknown_text`'s docstring; the short version is that
+a hard block on an unreachable task API would wedge every session that ever read a card
+— during the cutover, all of them at once — with a remedy that runs against the same
+unreachable server. What fail-open costs is that "the board blipped" and "this guard is
+pointed at a server that no longer serves tasks" produce the same notice; that is closed
+by printing the resolved endpoint and the variable it came from, not by escalating.
 
 ESCALATION LADDER — per session, per task id
 ---------------------------------------------
@@ -577,6 +598,27 @@ STATE_TTL_SECS = 14 * 24 * 3600
 # PermissionRequest hook reads; see the clawgate skill.
 CLAWGATE_ENV = "~/.claude/clawgate.env"
 
+# 🔴 THE TASK BOARD'S BASE URL, IN PREFERENCE ORDER — AND `CLAWGATE_API_URL` IS NOT
+# REPOINTED, DELIBERATELY. That variable is read by `clawgate-hook.sh` for
+# `POST /api/send`, i.e. permission routing, which is the product's whole point and
+# does NOT move to muster. Repointing it at muster would be the obvious one-line fix
+# and it would break the highest-traffic surface on the box. So the tasks API gets its
+# OWN key in the SAME file: `_env_file` is a generic `KEY=VALUE` parser, so adding one
+# costs no parsing change and no second file.
+#
+# Unset -> this list falls through to `CLAWGATE_API_URL` and everything behaves exactly
+# as it did, which is what makes the change safe to land before muster exists.
+TASK_API_URL_VARS = ("CLAWGATE_TASKS_API_URL", "CLAWGATE_API_URL")
+# Same shape for the bearer token: muster may reuse clawgate's hook token or mint its
+# own (unsettled in the extraction plan), so BOTH are supported and the specific one
+# wins. Nothing here ever prints a token.
+TASK_TOKEN_VARS = ("CLAWGATE_TASKS_HOOK_TOKEN", "CLAWGATE_HOOK_TOKEN")
+# The one path the curl fallback fetches. Only ONE spelling is possible here — a
+# fallback has to pick — and this is the one the extraction plan's evidence says
+# survives the carve. `TASK_API_PATH_RX` above is the (wider) pattern used to RECOGNISE
+# a read someone else performed; this is the URL this hook itself builds.
+TASK_API_PATH_FMT = "/api/tasks/%d"
+
 # Where the ritual this hook enforces is written down. BOTH spellings are printed:
 # the deployed path is what the model can open right now, the repo path is what it
 # edits. Same idiom as clawgate-task-interview-guard.py's FLOW_DEPLOYED/FLOW_REPO —
@@ -596,14 +638,49 @@ FLOW_REPO = "devrc/claude/skills/clawgate/flows/task-pickup.md"
 # claimed a card. `task get` with a non-numeric argument is not a read of task N
 # either — there is no such task.
 # --------------------------------------------------------------------------- #
-TASK_GET_RX = re.compile(r"\bclawgatectl\s+task\s+get\s+(\d+)\b")
-# `\b` after the id is what keeps `/api/tasks/193abc` out while admitting the
-# trailing segment shapes that exist. `/api/tasks/<id>/comments` is one of them — it
-# is 405 on GET (POST-only, per the clawgate skill's task-api reference), so as a
-# READ it cannot occur; what it really matches is a curl POSTING a comment, which is
-# the write-back itself. Admitting that is harmless in both directions: the live read
-# then finds the comment and the guard stays silent.
-TASK_API_RX = re.compile(r"/api/tasks/(\d+)\b")
+#
+# 🔴 BOTH CLI SPELLINGS, AND THE SECOND ONE IS HERE BEFORE IT EXISTS. The tasks half
+# of clawgate is being extracted into `muster` (`github.com/ZacxDev/muster`), whose
+# binary is `muster` and whose read verb is the same words (`muster task get <N>`).
+# This regex keyed on the literal `clawgatectl`, so after the rename it would have
+# matched nothing: `tracked_ids` stays empty, the Stop path returns before any live
+# read, and the hook reaches NO VERDICT AT ALL — not a block, not even a notice. That
+# is the worst failure this file has available, because "silent" is also what a
+# correctly-written-back session looks like. Widened BEFORE the rename so no window
+# exists in which it is inert.
+#
+# 🔴 ONE TUPLE, THREE CONSUMERS. TASK_CLI_NAMES drives this regex AND the ordered
+# client list `_read_task` tries AND nothing else — a name repeated at N sites goes
+# stale at N-1 of them, and here every staleness is a silent allow.
+TASK_CLI_NAMES = ("clawgatectl", "muster")
+_TASK_CLI_ALT = "|".join(TASK_CLI_NAMES)
+TASK_GET_RX = re.compile(r"\b(?:" + _TASK_CLI_ALT + r")\s+task\s+get\s+(\d+)\b")
+
+# 🔴 THE BINARY NAME MUST BE FOLLOWED BY THE VERB. A command that merely mentions
+# `muster` — `grep -rn muster …`, a commit message about the extraction, `muster
+# roll` — does NOT arm the guard, and that matters far more for `muster` than it did
+# for `clawgatectl`: the word is ordinary English and the migration makes it frequent.
+# What this pattern CANNOT separate is the full verb phrase appearing inside a quoted
+# string (`git commit -m "muster task get 633 rename"`), which arms the guard. That is
+# unchanged, pre-existing behaviour — `task_read_ids` deliberately does no literal
+# stripping, unlike `is_work` — and the direction is loud (a spurious live read that
+# usually finds the card clean), never silent.
+
+# The task API path, as a PATTERN. `\b` after the id is what keeps `/api/tasks/193abc`
+# out while admitting the trailing segment shapes that exist. `/api/tasks/<id>/comments`
+# is one of them — it is 405 on GET (POST-only, per the clawgate skill's task-api
+# reference), so as a READ it cannot occur; what it really matches is a curl POSTING a
+# comment, which is the write-back itself. Admitting that is harmless in both
+# directions: the live read then finds the comment and the guard stays silent.
+#
+# 🔴 `/api/v1/tasks/<id>` is INSURANCE, not a measurement. muster is a package carve of
+# the same handlers, and the extraction plan's repoint table changes only each
+# producer's BASE URL — so `/api/tasks/<id>` is the path muster is expected to keep,
+# and it already matches. The versioned alternative costs one group and covers the one
+# plausible way that expectation is wrong. A DIFFERENT mount point would need this
+# constant widened again; until then the curl half of the trigger is blind to it.
+TASK_API_PATH_RX = r"/api(?:/v\d+)?/tasks"
+TASK_API_RX = re.compile(TASK_API_PATH_RX + r"/(\d+)\b")
 
 # Tool calls that ARE work, by name.
 WORK_TOOLS = ("Edit", "Write", "NotebookEdit")
@@ -1177,7 +1254,22 @@ def is_work(data):
 # The live read — the measurement, not an inference
 # --------------------------------------------------------------------------- #
 class LiveReadError(Exception):
-    """Could not measure. NEVER silence: the caller emits a non-blocking notice."""
+    """Could not measure. NEVER silence: the caller emits a non-blocking notice.
+
+    🔴 IT CARRIES THE ENDPOINT IT COULD NOT REACH, and that is the whole reason this
+    class has a body. The degraded path is FAIL-OPEN by decision (see `unknown_text`),
+    so the only thing separating "the board is down for a minute" from "this guard is
+    pointed at a server that no longer serves tasks" is the text of the notice. Without
+    the endpoint those two read identically — the empty-result trap in RULES.md — and
+    the second one is the failure a rename actually produces.
+
+    `str(e)` is unchanged (the message alone), so every existing caller and assertion
+    that reads the message still reads exactly the message.
+    """
+
+    def __init__(self, message, endpoint=None):
+        super().__init__(message)
+        self.endpoint = endpoint
 
 
 def _env_file(path=CLAWGATE_ENV):
@@ -1206,17 +1298,59 @@ def _scrub(s, limit=120):
     return " ".join((s or "").split())[:limit]
 
 
-def _via_clawgatectl(task_id, timeout):
-    proc = _sp().run(["clawgatectl", "task", "get", str(int(task_id))],
-                          capture_output=True, text=True, timeout=timeout)
+def _first_set(conf, names):
+    """(value, which name it came from) for the first non-empty key in `names`."""
+    for name in names:
+        value = conf.get(name)
+        if value:
+            return value, name
+    return None, None
+
+
+def task_endpoint(task_id, env_path=CLAWGATE_ENV):
+    """The task-API URL this hook WOULD read, as a string an operator can act on.
+
+    🔴 Resolved from the env file rather than from whichever client happened to run,
+    because the diagnostic has to be available even when NO client ran. Names the
+    variable it came from: "which of two URLs is this guard using" is precisely the
+    question a half-finished cutover raises, and a bare URL does not answer it.
+
+    Never includes a token. `env_path` is reported UNEXPANDED (the default is the
+    tilde form) so the notice does not splice $HOME into text the model may quote on.
+    """
+    url, var = _first_set(_env_file(env_path), TASK_API_URL_VARS)
+    if not url:
+        return ("unresolved: %s names none of %s"
+                % (env_path, " / ".join(TASK_API_URL_VARS)))
+    return "%s%s (from %s in %s)" % (url.rstrip("/"),
+                                     TASK_API_PATH_FMT % int(task_id), var, env_path)
+
+
+def _via_cli(binary, task_id, timeout, api_url=None):
+    """One task read through one CLI binary — `clawgatectl` or `muster`.
+
+    🔴 `--api-url` is passed ONLY for `CLAWGATE_TASKS_API_URL`, never for
+    `CLAWGATE_API_URL`. Both CLIs already read `CLAWGATE_API_URL` out of the same env
+    file themselves (clawgatectl's `config.go` precedence is file -> env -> flag), so
+    passing it would be a second spelling of a default. The TASKS key is the one they
+    do NOT know about, so it is the one that has to arrive on the command line — and
+    because the flag wins over the file, it points whichever binary runs at the server
+    that actually holds the tasks. That is what makes the client ORDER below
+    unimportant for correctness: the URL decides the board, the binary is transport.
+    """
+    argv = [binary]
+    if api_url:
+        argv += ["--api-url", api_url]
+    argv += ["task", "get", str(int(task_id))]
+    proc = _sp().run(argv, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
-        raise LiveReadError("clawgatectl rc=%d %s"
-                            % (proc.returncode, _scrub(proc.stderr)))
+        raise LiveReadError("%s rc=%d %s"
+                            % (binary, proc.returncode, _scrub(proc.stderr)))
     return json.loads(proc.stdout)
 
 
 def _via_curl(task_id, timeout, env_path=CLAWGATE_ENV, why=None):
-    """The fallback for a host with no `clawgatectl` on PATH.
+    """The fallback for a host with no task CLI on PATH.
 
     That used to say "the laptop today — its homelab-talos checkout predates the
     command, so nix does not build it", and that is now STALE: `clawgatectl` was
@@ -1234,16 +1368,20 @@ def _via_curl(task_id, timeout, env_path=CLAWGATE_ENV, why=None):
     repo whole sessions.
     """
     conf = _env_file(env_path)
-    url = conf.get("CLAWGATE_API_URL")
-    token = conf.get("CLAWGATE_HOOK_TOKEN")
+    # 🔴 The TASKS-specific keys win, and `CLAWGATE_API_URL` is the FALLBACK, not the
+    # target. See TASK_API_URL_VARS for why repointing that key is forbidden.
+    url = _first_set(conf, TASK_API_URL_VARS)[0]
+    token = _first_set(conf, TASK_TOKEN_VARS)[0]
     if not url or not token:
-        raise LiveReadError("%s has no API url/token (first client: %s)"
-                            % (os.path.expanduser(env_path),
-                               why or "clawgatectl not on PATH"))
+        raise LiveReadError(
+            "%s has no API url/token for the task board (wanted one of %s plus one "
+            "of %s) (first client: %s)"
+            % (os.path.expanduser(env_path), " / ".join(TASK_API_URL_VARS),
+               " / ".join(TASK_TOKEN_VARS), why or "no task CLI was reached"))
     cfg = "".join([
         "silent\n", "fail\n",
         "max-time = %d\n" % max(1, int(timeout)),
-        'url = "%s/api/tasks/%d"\n' % (url.rstrip("/"), int(task_id)),
+        'url = "%s%s"\n' % (url.rstrip("/"), TASK_API_PATH_FMT % int(task_id)),
         'header = "Authorization: Bearer %s"\n' % token,
     ])
     # 🔴 `timeout + CURL_KILL_MARGIN_SECS`, not `timeout`: curl's own `max-time` above
@@ -1258,29 +1396,79 @@ def _via_curl(task_id, timeout, env_path=CLAWGATE_ENV, why=None):
 
 
 def live_task(task_id, timeout=PER_TASK_TIMEOUT_SECS, env_path=CLAWGATE_ENV):
-    """Live re-read of one task. Raises LiveReadError when it cannot be measured."""
+    """Live re-read of one task. Raises LiveReadError when it cannot be measured.
+
+    🔴 EVERY LiveReadError THAT LEAVES HERE CARRIES THE ENDPOINT. Resolved once, up
+    front, from the env file — so it is present even on the paths where no client ran
+    at all, which are exactly the paths a misconfiguration produces.
+    """
+    endpoint = task_endpoint(task_id, env_path)
+    try:
+        return _read_task(task_id, timeout, env_path)
+    except LiveReadError as e:
+        if getattr(e, "endpoint", None) is None:
+            e.endpoint = endpoint
+        raise
+
+
+def _read_task(task_id, timeout, env_path):
+    """Try each task CLI in order, then curl. Raises LiveReadError."""
     # Bound BEFORE the try: the `except subprocess.TimeoutExpired` clauses below name
     # the module attribute, and an except clause is evaluated even when the exception
     # came from the import itself — at which point a still-None `subprocess` would
     # raise AttributeError out of the handler and defeat the fail-open contract.
+    #
+    # 🔴 PYRIGHT FLAGS BOTH OF THOSE CLAUSES (`reportOptionalMemberAccess`,
+    # "TimeoutExpired is not a known attribute of None") AND IT IS A FALSE POSITIVE —
+    # triaged, not waved off, and recorded here so the next reviewer does not re-derive
+    # it. `subprocess` is a module-level `None` that `_sp()` rebinds via `global`;
+    # Pyright cannot narrow a global reassigned inside a helper. The rows pre-date this
+    # file's muster widening (measured: same rule, same two clauses, at 1274/1284 of
+    # 23b898d5 — the widening moved them, it did not introduce them).
+    #
+    # 🔴 THE HANDLERS THEMSELVES WERE GENUINELY UNTESTED UNTIL THAT REVIEW, WHICH IS A
+    # DIFFERENT FACT FROM THE FINDING BEING WRONG. The suite's only timeout tests
+    # assert the NUMBERS handed to `run`. Three cases now drive a REAL hang through a
+    # REAL `subprocess.run(timeout=…)` and assert the exception TYPE, so an unbound
+    # global would surface as exactly the AttributeError Pyright predicts:
+    # `test_a_hanging_task_CLI_becomes_a_timeout_LiveReadError_not_an_AttributeError`,
+    # its `_CURL_` twin, and `test_the_NEGATIVE_CONTROL_the_hang_stub_really_hangs`
+    # (without which a stub that exits instantly would pass them on the `rc=` branch).
+    #
+    # 🔴 THIS CALL IS AN INVARIANT GUARD, NOT COVERED CODE, AND THE BATTERY SAYS SO.
+    # Removing it kills NOTHING (`mutants-muster-hook-guards.sh` row W14, a deliberate
+    # documented survivor): `_via_cli` calls `_sp()` itself, so by the time `run` raises
+    # the global is bound anyway. The only input that could kill it is a failing stdlib
+    # import, which cannot be produced. Two free lines against an unreachable hazard —
+    # do not "close the gap", and do not count it as coverage.
     _sp()
-    why = None
+    # Only the TASKS-specific override is handed to the CLI; see `_via_cli`.
+    api_url = _env_file(env_path).get(TASK_API_URL_VARS[0])
+    # 🔴 EVERY client's failure is carried forward, not just the first. With one client
+    # "first client: …" was the whole diagnosis; with two, reporting only one of them
+    # points at the wrong subsystem — the exact shape that has cost this repo whole
+    # sessions, one client wider.
+    whys = []
+    for binary in TASK_CLI_NAMES:
+        try:
+            return _via_cli(binary, task_id, timeout, api_url=api_url)
+        except LiveReadError as e:
+            whys.append(str(e))
+        except FileNotFoundError:
+            whys.append("%s not on PATH" % binary)   # not built on this host
+        except subprocess.TimeoutExpired:
+            raise LiveReadError("%s timed out after %ss" % (binary, timeout))
+        except Exception as e:            # noqa: BLE001 — unparseable stdout, etc.
+            raise LiveReadError("%s: %s" % (type(e).__name__, e))
     try:
-        return _via_clawgatectl(task_id, timeout)
-    except LiveReadError as e:
-        why = str(e)
-    except FileNotFoundError:
-        why = "clawgatectl not on PATH"   # no clawgatectl on this host
-    except subprocess.TimeoutExpired:
-        raise LiveReadError("clawgatectl timed out after %ss" % timeout)
-    except Exception as e:                # noqa: BLE001 — unparseable stdout, etc.
-        raise LiveReadError("%s: %s" % (type(e).__name__, e))
-    try:
-        return _via_curl(task_id, timeout, env_path=env_path, why=why)
+        return _via_curl(task_id, timeout, env_path=env_path,
+                         why="; ".join(whys) or None)
     except LiveReadError:
         raise
     except FileNotFoundError:
-        raise LiveReadError("neither clawgatectl nor curl is available")
+        raise LiveReadError("no task client is available: none of %s, and curl is "
+                            "absent too (%s)"
+                            % (", ".join(TASK_CLI_NAMES), "; ".join(whys)))
     except subprocess.TimeoutExpired:
         raise LiveReadError("curl timed out after %ss" % timeout)
     except Exception as e:                # noqa: BLE001
@@ -1489,7 +1677,32 @@ def authored_text(task_id, session_id=""):
     return "\n".join(lines)
 
 
-def unknown_text(task_id, first_read_ts, error, session_id=""):
+def unknown_text(task_id, first_read_ts, error, session_id="", endpoint=None):
+    """The "could not measure" notice. 🔴 STILL FAIL-OPEN, AND DELIBERATELY SO.
+
+    An unreachable board yields a NON-BLOCKING notice on its own counter, not
+    `{"decision":"block"}`. That was re-decided, not inherited, while widening this
+    file for the muster extraction, and the reasoning is:
+
+      * A hard block on an unreachable task API WEDGES EVERY SESSION that ever read a
+        card. During the cutover the board is expected to be briefly unreachable, and
+        the failure would land on every session at once, on a path the operator cannot
+        clear from inside the blocked turn. The remedy this hook prints is itself a
+        `task comment` against the same unreachable server, so a block would be
+        unanswerable as well as universal.
+      * The thing a block buys is forcing the model to act. There is nothing correct
+        for it to DO here: nobody knows whether a write-back is owed.
+      * The hazard fail-open actually carries is not silence — it is
+        INDISTINGUISHABILITY, "the board blipped" reading identically to "this guard
+        is pointed at a server that no longer serves tasks". That is closed by naming
+        the ENDPOINT rather than by escalating the rung, which is why the endpoint
+        line below is not decoration.
+
+    So the trade is stated rather than hidden: a task API that is down for a whole
+    session is reported three times and then goes quiet, and the write-back for that
+    session is unenforced. Accepted, because the alternative is a self-inflicted
+    outage of every session on the box.
+    """
     # 🔴 THE SENTENCE MUST BE TRUE IN BOTH CONTEXTS IT IS READ IN. This text is emitted
     # on its own as a `systemMessage` (the turn does end) AND spliced into a
     # `decision:"block"` reason whenever some OTHER task is blocking — `stop_decision`
@@ -1503,12 +1716,19 @@ def unknown_text(task_id, first_read_ts, error, session_id=""):
         "(%(err)s). This is a NOTICE, not a block — nothing is being asserted about "
         "the card, because nothing could be measured, and this notice on its own "
         "does not hold the turn open.\n"
+        "Endpoint it could not read: %(endpoint)s\n"
+        "🔴 If that endpoint is the WRONG SERVER — e.g. the task board has moved and "
+        "%(tasks_var)s is not set in %(env)s — then this guard is misconfigured rather "
+        "than the board being down, and it will keep reporting UNVERIFIED for every "
+        "task until it is pointed at the right one.\n"
         "If this session did work on task %(id)d, write it back:\n"
         "  clawgatectl task comment %(id)d --body \"…\"\n"
         "  clawgatectl task status %(id)d ready_for_review\n"
         "If it did not, silence it for this session with:\n"
         "  %(dismiss)s"
         % {"id": int(task_id), "ts": first_read_ts, "err": _scrub(str(error), 160),
+           "endpoint": endpoint or "unresolved (the reader failed before one was bound)",
+           "tasks_var": TASK_API_URL_VARS[0], "env": CLAWGATE_ENV,
            "dismiss": dismiss_cmd(task_id, session_id)}
     )
 
@@ -1684,7 +1904,11 @@ def stop_decision(data, reader=None, budget=STOP_BUDGET_SECS,
             # never enforced — and never at the expense of the block budget that a
             # measured miss will need if the board comes back later in this session.
             if escalate(bump_fires(state_dir, tid, "unknown")) != "silent":
-                notices.append(unknown_text(tid, first_read_ts, err, session_id))
+                # The endpoint rides on the exception, so the notice can say WHICH
+                # server was unreachable — the only thing separating a blip from a
+                # guard pointed at the wrong board. See `unknown_text`.
+                notices.append(unknown_text(tid, first_read_ts, err, session_id,
+                                            endpoint=getattr(err, "endpoint", None)))
             continue
         rung = escalate(bump_fires(state_dir, tid))
         if rung == "silent":

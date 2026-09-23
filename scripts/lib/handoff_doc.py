@@ -238,6 +238,8 @@ EXIT CODES
  10  unevidenced     — rule (k): an elimination names no way it was eliminated
  11  undefined-done  — rule (m): the arc names no closing condition
  12  rank-growth     — rule (n): the queue's `forcing: none` half grew
+ 13  leak-refused    — rule (o): the repo's own leak scanner would not vouch for
+     the delta, or could not be run at all; the write is rolled back
 """
 
 from __future__ import annotations
@@ -371,6 +373,39 @@ operator or a red gate can add as many ranks as they like. What is ratcheted is
 the SELF-GENERATED half, which the 75-day arc study found growing 2–6 items a
 round and reaching 54–84 in the worst arcs while under a third of the items
 carried any forcing function at all.
+"""
+
+EXIT_LEAK_REFUSED = 13
+"""Rule (o). The repo's OWN leak scanner would not vouch for the delta.
+
+🔴 WHY THIS IS CODE RATHER THAN A SENTENCE. This module commits AND pushes in
+ONE call under `--confirm --push`, so there is no window in which a human can
+scan between the two. Four `denied-identifier` leak events have landed on
+handoff deltas and ONE of them reached `main` of a PUBLIC repository. The
+standing remedy had been written as a SENTENCE in the handoff document three
+times, in three wordings, and no code ran it. Prose an agent can read and then
+not follow is what this module exists to replace — the same argument the eight
+rules above are made of.
+
+🔴 ONE CLASS, TWO CAUSES, and both print `status=leak-refused` because the
+verdict is the GATE's, not the scanner's: the scanner REFUSED the delta, or it
+could not be run and therefore never read it. Nothing is written on either arm —
+the doc is rolled back to the bytes this process found.
+
+🔴 ZERO IS THE ONLY PASS, AND THAT IS THE NON-OBVIOUS HALF OF IT. Any non-zero
+exit refuses; there is no `== 1` comparison here and there must not be one.
+`tests/leakscan.py` exits **2** for "could not vouch" — one of its OWN controls
+misbehaved — and its docstring says in as many words that 2 is not a clean
+result. A reader who has not been told that is exactly the reader who narrows
+the comparison to the code a scanner "normally" uses.
+
+🔴 ONE OPERATOR OPT-IN, `--leak-pre-existing-approved`, FOR THE ALREADY-RED
+TREE. The gate refuses on any non-zero exit and does NOT try to work out whether
+this delta caused it — see `leak_gate` for why that attribution was a guess. The
+target tree can be red for something this call did not cause, and the honest
+answer to that is an operator who read the output and said so, recorded on the
+run. It does not cover the arm where the scanner could not be RUN: there is no
+verdict to have read.
 """
 
 
@@ -2902,9 +2937,6 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         rows = [r for r in rows if r[1] > 0]
         if not rows:
             return ""
-        rows = [r for r in rows if r[1] > 0]
-        if not rows:
-            return ""
         out = ["  Evictable in THIS doc, measured:"]
         for label, b, n, unit in rows:
             out.append(f"    {label:<24}{b:>9,} B  ({n} {unit}{'' if n == 1 else 's'})")
@@ -2966,13 +2998,34 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         # 🔴 NET, and the shortfall is stated rather than implied. Quoting a gross
         # number that does not actually clear the overage sends an author cutting
         # and leaves them still red — the one outcome worse than saying nothing.
+        # 🔴 SCOPED TO THE `over_by > 0` CALLERS, which since #1826 means the
+        # GATED over-budget arm alone. The two `over_by=0` callers — the near
+        # arm, and the UNGATED over-budget arm — deliberately take the `else`
+        # branch and state no relation to any overage. For the near arm there
+        # is no overage to relate to. For the ungated arm it is a choice: no
+        # gate will go red there, so "still red" cannot happen, and the arm's
+        # own comment explains why it declines to assert a deficit against a
+        # ceiling nothing enforces. ⚠ The COST is real and is recorded there:
+        # 12 of the 13 docs that arm newly reaches have `net < over_by`, and
+        # it is the reader who must subtract. Round 1 of #1826 found this
+        # comment asserting, unscoped, a rule that its newest caller breaks.
+        # 🔴 NO POINTER TO THE PLAYBOOK OR THE LADDER ON THESE LINES, and their
+        # removal is what let this note reach the UNGATED arms at all. Both were
+        # decoration on a number — "steps 2-4 of the playbook cover the rest" on
+        # the shortfall case, "before you need the ladder at all" on the zero
+        # case — and both named a remediation ladder that lives in a test only
+        # devrc ships. In a repo without it they are the civitai/cli#618 failure
+        # in miniature: an authoritative-sounding step nobody's gate requires.
+        # In a repo WITH it they were a second copy of what the over-budget arm
+        # already prints in full, three lines above. One rule, one place: the
+        # ladder belongs to `test_handoff_doc_size.py`, this note to the numbers.
         if net >= over_by > 0:
             out.append(f"    → {net:,} B net, which CLEARS the {over_by:,} B you are over by.")
         elif over_by > 0:
-            out.append(f"    → {net:,} B net, which does NOT clear the {over_by:,} B you are "
-                       f"over by; steps 2-4 of the playbook cover the rest.")
+            out.append(f"    → {net:,} B net, which does NOT clear the {over_by:,} B "
+                       f"you are over by.")
         else:
-            out.append(f"    → {net:,} B net available before you need the ladder at all.")
+            out.append(f"    → {net:,} B net already closed in this document.")
         # 🔴 CONDITIONAL, and the unconditional version was a real defect (round 0,
         # F4): it explained a charge that had not been applied, on a note whose
         # whole argument is that a line printing every time is a line nobody
@@ -3025,8 +3078,34 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
         # word "RED". Outside devrc that ladder has no authority: it cites a
         # playbook in a test the repo does not ship. The SIZE still transfers
         # (measured across the other repos' corpora), so the number stays.
+        #
+        # 🔴 THE NOTE PRINTS HERE, BY THE OPERATOR'S REVERSAL — but with
+        # `over_by=0`, so that THE NOTE names no threshold. Scope that claim
+        # to the NOTE and nothing wider: the head line in this arm's own
+        # `return` states the overage outright (`over by {N} B`), deliberately and
+        # unchanged, and `test_EVERY_branch_that_names_the_gate_is_repo_aware`
+        # pins it (`assert "over by 1 B" in ungated_over`). An earlier
+        # wording of THIS comment said the arm names no threshold, which that
+        # test falsifies — round 1 of #1826. (No line number here: this
+        # ladder has now produced three non-reproducing counts, so the test
+        # is named and nothing else is claimed about where it sits.)
+        # What `over_by=0` buys is that the note does not ADD a second,
+        # louder deficit ("does NOT clear the N B you are over by") on top of
+        # it: that is the civitai/cli#618 pressure shape with the
+        # prescription removed and the false-consequence framing kept.
+        # ⚠ `gate_enforces_budget` above and the paragraph above DISAGREE
+        # about which half of #618 did the damage, and #618's own body
+        # settles neither. This arm assumes the worse case.
+        # ⚠ CONSEQUENCE, STATED BECAUSE IT IS A REAL COST: with `0` the note
+        # reports what has closed without relating it to the overage, and on
+        # the corpus this change was justified by, 12 of the 13 docs that now
+        # print a note have `net < over_by`. The reader must subtract the two
+        # numbers themselves. See the NET comment above `evictable_note`'s
+        # three-way branch, which is scoped to the `over_by > 0` callers for
+        # exactly this reason.
         which = ("its grandfathered allowance" if grandfathered
                  else "the handoff-document ceiling")
+        note = evictable_note(merged_text, 0)
         return "\n".join([
             f"⚠ SIZE ONLY, NO GATE: {after:,} B against {which} of "
             f"{allowance:,} B, over by {after - allowance:,} B "
@@ -3035,6 +3114,7 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
             "only the tree it lives in — nothing will go red and nothing is "
             "inherited by anyone. Treat it as JUDGEMENT about what the next "
             "session has to read, not as a build to fix.",
+            *([note] if note else []),
         ])
 
     if after > allowance:
@@ -3083,17 +3163,22 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
         head = (f"⚠ Size: {after:,} B of {allowance:,} B "
                 f"({sign}{delta:,} B this update) — {headroom:,} B left. The next "
                 f"update or two will go over; {tail}")
-        # 🔴 GATED ONLY, for the ungated arm's stated reason: outside devrc the
-        # ladder has no authority, and a breakdown keyed to its step 1 would be
-        # prescribing where that arm deliberately only reports. Here it is the
-        # CHEAPEST moment to act — the tail above says so — so the number belongs.
+        # 🔴 UNCONDITIONAL, by the operator's reversal. Already `over_by=0`
+        # here, so THE NOTE has always named no threshold — which is why it
+        # needed no change when the ungated OVER arm was corrected to match
+        # it. ⚠ Scoped to the note: this arm's own head line does state one
+        # (`{after} B of {allowance} B … {headroom} B left`), and an earlier
+        # wording of this comment claimed the arm rendered "numbers without a
+        # threshold" outright, which that line falsifies — round 1 of #1826.
+        # The gated/ungated split survives where it is still about a gate:
+        # `tail` just above, and the GRANDFATHERED arm ABOVE this one.
         # ⚠ NO PROHIBITION HERE. One was added in round 4 and is removed by the
         # /the-algorithm pass: the eviction ladder — including "do NOT satisfy
         # this by deleting an open investigation, a gotcha or a ruled-out
         # theory" — belongs to `test_handoff_doc_size.py`, which the over-budget
         # arm already cites. Restating it here is the second copy that made this
         # advice wrong four times; this arm carried none before the note existed.
-        note = evictable_note(merged_text, 0) if gated else ""
+        note = evictable_note(merged_text, 0)
         return f"{head}\n{note}" if note else head
     return ""
 
@@ -3736,6 +3821,31 @@ COMMIT_LANDED_NOTE = (
 )
 
 
+def restore_doc_bytes(doc: Path, original: bytes | None) -> bool:
+    """Put `doc` back to `original`, `None` meaning "it did not exist". True if
+    that worked.
+
+    🔴 THE `None`-MEANS-UNLINK CONVENTION IS WHY THIS IS A NAMED FUNCTION. A
+    copy that wrote `b""` instead of unlinking would leave behind a file the run
+    created, which is exactly the "a failure writes nothing" property this
+    module is built on. ⚠ It has ONE caller again — `_undo_write`, after a
+    commit that never happened. It had two while `leak_gate` un-wrote the doc to
+    take a baseline scan; that scan is gone. Kept named rather than inlined
+    because the convention, not the call count, is the thing worth stating once.
+
+    Non-raising for `_undo_write`'s reason: it runs on error paths, where a
+    rollback that threw would replace the caller's diagnosis with its own.
+    """
+    try:
+        if original is None:
+            doc.unlink(missing_ok=True)
+        else:
+            doc.write_bytes(original)
+    except OSError:
+        return False
+    return True
+
+
 def _undo_write(
     repo: Path, doc: Path, relpath: str, original: bytes | None
 ) -> str:
@@ -3764,12 +3874,7 @@ def _undo_write(
             git(repo, "reset", "--quiet", "HEAD", "--", relpath)
         except (GitError, OSError):
             left.append(f"still STAGED: {relpath}")
-    try:
-        if original is None:
-            doc.unlink(missing_ok=True)
-        else:
-            doc.write_bytes(original)
-    except OSError:
+    if not restore_doc_bytes(doc, original):
         left.append(f"still MODIFIED: {relpath}")
     if left:
         # 🔴 EMIT ADVICE ONLY FOR THE HALF THAT ACTUALLY FAILED. The two halves
@@ -3824,6 +3929,311 @@ def _undo_write(
         "run is left staged or written — re-running is safe and will not append "
         "the update twice.)"
     )
+
+
+# --- rule (o): the repo's OWN leak scanner reads the delta before the commit --
+#
+# 🔴 THE TARGET REPO'S SCANNER, NEVER A SCANNER THIS TOOL SHIPS. This module
+# writes handoff docs into many repositories, and what counts as sensitive is a
+# property of the repository, not of the tool: one repo's denied-identifier set
+# is another repo's ordinary vocabulary. So the gate RESOLVES a scanner out of
+# the repo the doc lives in, and a repo that has none PASSES. Refusing there
+# would make the tool unusable in most repos and would be the permanently-red
+# gate `claude/RULES.md` says trains everyone to route around.
+#
+# 🔴 THE CLOSED SET IS A LOOKUP, NOT A SEARCH, and it is now ONE path. A glob
+# for `*leak*` would pick up a fixture, a README or another tool's helper and
+# then run it as this repo's gate — and the hazard is not only a glob's. The set
+# declared three paths; MEASURED across 175 checkouts, `scripts/leakscan.py` and
+# a ROOT `leakscan.py` existed in ZERO of them, so they bought no repository any
+# coverage, while a root-level `leakscan.py` is exactly where a FIXTURE or an
+# EXAMPLE sits — a smaller version of the thing the paragraph above rejects a
+# glob for. The survivor is `.py` by construction, which is why the scanner is
+# launched with `sys.executable`. Adding a candidate is adding a program this
+# tool will EXECUTE in someone else's repository; measure that it exists first.
+LEAKSCAN_CANDIDATES = ("tests/leakscan.py",)
+
+#: Wall-clock ceiling on one scan. A scanner that hangs must not hang a handoff
+#: — and it must not PASS one either: a timeout raises `ScannerUnusable`, which
+#: is a refusal.
+#:
+#: ⚠ 300 IS UNATTRIBUTED — nobody derived it, and this line says so rather than
+#: inventing a derivation. The only measurement beside it is the ~2.0s the real
+#: scanner takes on the tree this was built against. It is kept because a
+#: generous ceiling fails in the safe, loud direction (on a hang, not on a slow
+#: machine), which is a reason to keep the number, not a reason it is the right
+#: one.
+LEAKSCAN_TIMEOUT_SECONDS = 300
+
+#: How many of the scanner's own lines a refusal prints before eliding. Same
+#: reasoning as `DROPPED_SHOWN_MAX`: the block is an aid to recognising what to
+#: fix, not an inventory, and the elision line carries the command that shows
+#: the rest.
+LEAKSCAN_SHOWN_MAX = 20
+
+#: 🔴 THE OPERATOR OPT-IN FOR AN ALREADY-RED TREE, and it is rule (n)'s shape
+#: rather than a second spelling of the same idea: a deliberately long
+#: `--…-approved` flag held in a constant, declared `store_true`, and named by
+#: the refusal it overrides. `claude/RULES.md`: one rule, one place — two
+#: override conventions in one parser is how the next one gets invented too.
+LEAK_PRE_EXISTING_FLAG = "--leak-pre-existing-approved"
+
+
+class ScanRun(typing.NamedTuple):
+    """One scanner invocation: its exit code and everything it printed.
+
+    🔴 STDOUT AND STDERR ARE CONCATENATED, NOT INTERLEAVED, and that is fine for
+    the only thing read off `output`: display. Nothing here parses the format —
+    `claude/RULES.md`: parsing a tool's output makes its FORMAT a dependency you
+    did not pin, and this gate has to work against a scanner it has never seen.
+    """
+
+    code: int
+    output: str
+
+
+class ScannerUnusable(RuntimeError):
+    """The scanner could not be RUN, so it never read the delta at all.
+
+    Distinct from "the scanner refused": a refusal is an answer. This is the
+    absence of one, and it is still a refusal on THIS gate — a gate that cannot
+    read is not a pass. Kept separate from `GitError` so `main`'s `status=failed`
+    handler cannot swallow it and report a git problem.
+    """
+
+
+def find_leak_scanner(repo: Path) -> Path | None:
+    """The target repo's own leak scanner, or None if it has none."""
+    for rel in LEAKSCAN_CANDIDATES:
+        candidate = repo / rel
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def run_leak_scanner(scanner: Path, repo: Path) -> ScanRun:
+    """Run `scanner` over `repo` as it stands. Raises `ScannerUnusable`.
+
+    No arguments are passed. A repo-local scanner's argument surface is its own
+    business — `tests/leakscan.py` takes `--self-test`/`--quiet` and neither is
+    ours to choose — and an unrecognised flag would make argparse exit 2, which
+    this gate reads as a refusal. The bare invocation is the one every candidate
+    is guaranteed to understand.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(scanner)],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            timeout=LEAKSCAN_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise ScannerUnusable(
+            f"it did not finish within {LEAKSCAN_TIMEOUT_SECONDS}s"
+        ) from None
+    except OSError as exc:
+        raise ScannerUnusable(f"it could not be started: {exc}") from None
+    return ScanRun(proc.returncode, proc.stdout + proc.stderr)
+
+
+class LeakVerdict(typing.NamedTuple):
+    """`refusal` is stderr and means NOTHING may be written; `notes` is stdout
+    on a run that proceeds. Exactly one of them is non-empty."""
+
+    refusal: str
+    notes: str
+
+
+def leak_absent_note(repo: Path) -> str:
+    """🔴 A PASS BY ABSENCE IS NOT A CLEAN RESULT, AND IT SAYS SO.
+
+    Most repositories have no scanner, so this is the ordinary line. It exists
+    because `claude/RULES.md`'s reassuring-zero rule applies to a gate that
+    silently did not run exactly as much as to one wired to nothing: a run that
+    printed nothing here would be indistinguishable from a scanned, clean delta.
+    """
+    return (
+        f"leakscan: NO SCANNER FOUND in {repo} — looked for "
+        + ", ".join(LEAKSCAN_CANDIDATES)
+        + ".\n  This delta was NOT scanned for sensitive content. That is a PASS "
+        "BY ABSENCE, not a clean result."
+    )
+
+
+def leak_clean_note(scanner: Path, repo: Path, relpath: str) -> str:
+    return (
+        f"leakscan: {_scanner_rel(scanner, repo)} exited 0 with this delta "
+        f"written into {relpath} — the repo's OWN gate vouches for it."
+    )
+
+
+def _scanner_rel(scanner: Path, repo: Path) -> str:
+    try:
+        return str(scanner.relative_to(repo))
+    except ValueError:  # pragma: no cover — `find_leak_scanner` builds it from repo
+        return str(scanner)
+
+
+def _rerun_hint(scanner: Path, repo: Path) -> str:
+    return f"{sys.executable} {_scanner_rel(scanner, repo)}   # from {repo}"
+
+
+def _scanner_tail(run: ScanRun) -> tuple[list[str], int]:
+    """The last `LEAKSCAN_SHOWN_MAX` lines of a scan, and how many were dropped.
+
+    The TAIL rather than the head: every scanner here ends with its verdict, and
+    a head-first elision cuts exactly that off. One place, because both the
+    refusal and the approved-through note print the same thing for the same
+    reason — the operator has to see what was refused.
+    """
+    lines = run.output.splitlines()
+    shown = lines[-LEAKSCAN_SHOWN_MAX:]
+    return shown, len(lines) - len(shown)
+
+
+def leak_refusal_report(
+    scanner: Path, repo: Path, relpath: str, run: ScanRun
+) -> str:
+    """The scanner would not vouch for the tree with this delta in it.
+
+    🔴 THE SCANNER'S OWN LINES ARE REPRODUCED, and the trade is deliberate: a
+    refusal that does not say which line and which rule is one the operator
+    cannot act on. It does re-state the flagged text into this transcript — but
+    that text is already in the operator's own scratch file and was about to be
+    committed, so the transcript is not where it becomes public; the commit is,
+    and that is the thing this refusal stops.
+
+    🔴 IT CLAIMS THE SCANNER REFUSED, NOT THAT THIS DELTA CAUSED IT. The gate
+    makes no attribution, so the message offers BOTH remedies and does not
+    pretend to know which one applies: fix the scratch file, or — if the tree
+    was already red — say so explicitly with the flag.
+    """
+    shown, elided = _scanner_tail(run)
+    rel = _scanner_rel(scanner, repo)
+    return (
+        f"status=leak-refused scanner={rel} exit={run.code}\n"
+        f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+        f"  {rel} exits {run.code} on this tree with the delta written into "
+        f"{relpath}, so the repo's OWN gate will not vouch for what was about "
+        f"to be committed and pushed.\n"
+        f"  🔴 ZERO IS THE ONLY PASS. A scanner that exits 2 is saying `could "
+        f"not vouch` — a control of its own misbehaved — which is not a clean "
+        f"result either.\n"
+        f"  The last {len(shown)} line(s) it printed:\n"
+        + "".join(f"    {line}\n" for line in shown)
+        + (
+            f"    … and {elided} earlier line(s) — see them all with:\n"
+            f"      {_rerun_hint(scanner, repo)}\n"
+            if elided
+            else ""
+        )
+        + f"  Fix the SCRATCH FILE (--update), not {relpath}, and re-run: the "
+        f"doc was rolled back to the bytes this run found, so nothing has to be "
+        f"undone first.\n"
+        f"  🔴 IF THIS TREE WAS ALREADY RED for something this handoff did not "
+        f"cause, that is an OPERATOR DECISION and not a guess this tool may "
+        f"make for you: read the lines above, then re-run with "
+        f"{LEAK_PRE_EXISTING_FLAG}, which records on the run that it was "
+        f"approved through. A handoff delta is the exact path four leak events "
+        f"took, one of them onto a PUBLIC repository's mainline."
+    )
+
+
+def leak_approved_note(
+    scanner: Path, repo: Path, relpath: str, run: ScanRun
+) -> str:
+    """The scanner refused and the OPERATOR approved it through. WRITTEN.
+
+    🔴 AN APPROVED-THROUGH RUN MUST NOT READ LIKE A CLEAN ONE, and that is the
+    whole reason this is a flag rather than an attribution heuristic. Both end
+    `status=written`; only this one carries the flag's own name, the scanner's
+    exit code and its output, so a reader of the transcript afterwards can tell
+    which decision was made and re-take it.
+    """
+    shown, elided = _scanner_tail(run)
+    rel = _scanner_rel(scanner, repo)
+    return (
+        f"🔴 LEAK GATE APPROVED THROUGH by {LEAK_PRE_EXISTING_FLAG} — {rel} "
+        f"exited {run.code} with this delta written into {relpath}, and the "
+        f"write went ahead anyway.\n"
+        f"  This is an OPERATOR DECISION, not a clean result: the repo's own "
+        f"gate refused, and the flag asserts a human read that refusal and "
+        f"judged it PRE-EXISTING in this tree rather than caused by this "
+        f"delta.\n"
+        f"  ⚠ NOTHING HERE CHECKED THAT. The gate does not compare scans, so "
+        f"what was approved is everything below, whatever produced it.\n"
+        f"  The last {len(shown)} line(s) {rel} printed"
+        + (f" ({elided} earlier line(s) elided)" if elided else "")
+        + ":\n"
+        + "".join(f"    {line}\n" for line in shown)
+        + f"  Full output: {_rerun_hint(scanner, repo)}"
+    )
+
+
+def leak_unscannable_report(
+    scanner: Path, repo: Path, relpath: str, reason: str
+) -> str:
+    """The scanner could not be run, so it never read the delta."""
+    rel = _scanner_rel(scanner, repo)
+    return (
+        f"status=leak-refused scanner={rel}\n"
+        f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+        f"  {rel} exists, so this repository HAS a leak gate — but this run "
+        f"could not get a verdict out of it: {reason}.\n"
+        f"  🔴 A GATE THAT CANNOT READ IS NOT A PASS. `could not vouch` and "
+        f"`clean` are different answers, and only one of them lets a delta onto "
+        f"a shared branch.\n"
+        f"  The delta was rolled back. Fix the scanner — it is the same gate "
+        f"this repo's CI runs — then re-run:\n"
+        f"      {_rerun_hint(scanner, repo)}"
+    )
+
+
+def leak_gate(
+    repo: Path, relpath: str, scanner: Path | None, approved: bool
+) -> LeakVerdict:
+    """Rule (o). Run the repo's own scanner over the tree with the delta already
+    written into it, and refuse unless it exits 0. This gate does not touch the
+    file — the CALLER owns both the write and the rollback.
+
+    🔴 FLAT REFUSE ON ANY NON-ZERO EXIT, AND NO ATTRIBUTION. That is a DECISION,
+    not a simplification, and the shape it replaced is why. A whole-tree scanner
+    cannot be asked about one file — `tests/leakscan.py` takes no paths at all,
+    it enumerates the repo from its own location — so "did THIS delta cause it?"
+    can only be a comparison between two scans, and that comparison is a guess:
+    a concurrent writer in a shared checkout, a scanner whose rule set grew
+    between the runs, or a new finding whose line is byte-identical to one the
+    scan was already printing each make it the WRONG guess. The previous shape
+    took that guess and, when it could not decide, printed a banner and
+    committed AND pushed anyway. Never ship a delta while the scanner refuses.
+
+    🔴 THE ALREADY-RED TREE IS AN OPERATOR DECISION, WHICH IS WHAT KEEPS THIS
+    OFF THE PERMANENTLY-RED LIST. A target tree can be red for something this
+    call did not cause; with no way past, the gate would be unclearable and
+    `claude/RULES.md` says such a gate trains everyone to route around it.
+    `--leak-pre-existing-approved` is that way past — explicit, and recorded in
+    the run's own output by `leak_approved_note`, so an approved-through run is
+    distinguishable afterwards from a clean one.
+
+    ⚠ THE OPT-IN DOES NOT COVER THE UNRUNNABLE ARM, deliberately. A scanner that
+    hung or could not be started never produced a verdict, so there is nothing
+    for an operator to have read and approved — and approving an absence is the
+    reassuring zero this gate exists to refuse to print.
+    """
+    if scanner is None:
+        return LeakVerdict("", leak_absent_note(repo))
+    try:
+        run = run_leak_scanner(scanner, repo)
+    except ScannerUnusable as exc:
+        return LeakVerdict(
+            leak_unscannable_report(scanner, repo, relpath, str(exc)), ""
+        )
+    if run.code == 0:
+        return LeakVerdict("", leak_clean_note(scanner, repo, relpath))
+    if approved:
+        return LeakVerdict("", leak_approved_note(scanner, repo, relpath, run))
+    return LeakVerdict(leak_refusal_report(scanner, repo, relpath, run), "")
 
 
 def uncommitted_paths(repo: Path) -> list[str]:
@@ -4012,6 +4422,17 @@ def build_parser() -> argparse.ArgumentParser:
         "self-generated (`forcing: none`) ranked item the document did not have. "
         "This is the OPERATOR OPT-IN the arc study asks for — the default path "
         "for an audit finding is a `## Defects (batched)` entry, not a new rank.",
+    )
+    p.add_argument(
+        LEAK_PRE_EXISTING_FLAG,
+        action="store_true",
+        help="override the status=leak-refused refusal: proceed even though the "
+        "TARGET repo's own leak scanner exits non-zero, asserting that a human "
+        "read its output and judged the finding PRE-EXISTING in that tree rather "
+        "than caused by this delta. The run RECORDS that it was approved "
+        "through, so it does not read afterwards as a clean scan. Does NOT apply "
+        "when the scanner could not be RUN at all — there is no verdict to "
+        "approve.",
     )
     p.add_argument(
         "--push",
@@ -4693,9 +5114,30 @@ def main(argv: list[str] | None = None) -> int:
     # `status=failed` reads as "nothing happened"; it must therefore BE that.
     original: bytes | None = doc.read_bytes() if doc.exists() else None
     committed = False
+    # 🔴 RESOLVED BEFORE THE WRITE so a repo with no scanner costs nothing but a
+    # `Path.is_file()`, and so the refusal below cannot be a surprise about where
+    # the scanner was expected to be.
+    scanner = find_leak_scanner(repo)
     try:
         doc.parent.mkdir(parents=True, exist_ok=True)
         doc.write_text(merged_text, encoding="utf-8")
+        # ---- rule (o): the repo's own leak scanner reads the delta ----------
+        # 🔴 AFTER THE WRITE AND BEFORE THE `git add`, because the scanner reads
+        # the WORKING TREE — `tests/leakscan.py` enumerates `--cached --others`
+        # and then reads the bytes on disk, so the delta is only visible to it
+        # once it is written. Staging first would add nothing and would leave a
+        # staged path behind on the refusal, which is the shape
+        # `TestBlockedCommitLeavesNoTrace` exists for.
+        verdict = leak_gate(
+            repo, relpath, scanner, args.leak_pre_existing_approved
+        )
+        if verdict.refusal:
+            print(
+                f"{verdict.refusal}{_undo_write(repo, doc, relpath, original)}",
+                file=sys.stderr,
+            )
+            return EXIT_LEAK_REFUSED
+        print(verdict.notes)
         git(repo, "add", "--", relpath)
         subject = f"docs(handoff): {args.advanced.strip().splitlines()[0]}"[:100]
         # 🔴 THE TRUNCATION IS ON THE SUBJECT, AND THE TRAILER IS ADDED AFTER IT.

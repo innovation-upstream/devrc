@@ -49,6 +49,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1441,7 +1442,12 @@ def test_live_task_raises_when_there_is_no_client_at_all(tmp_path, monkeypatch):
                     "CLAWGATE_HOOK_TOKEN=t\n")
     with pytest.raises(guard.LiveReadError) as e:
         guard.live_task(196, timeout=5, env_path=str(envf))
-    assert "neither clawgatectl nor curl" in str(e.value)
+    msg = str(e.value)
+    # 🔴 EVERY client is named, not just the first. With two CLIs plus curl, a message
+    # naming one of them points at the wrong subsystem.
+    assert "no task client is available" in msg
+    for binary in ("clawgatectl", "muster", "curl"):
+        assert binary in msg, (binary, msg)
 
 
 def test_live_task_raises_when_the_env_file_has_no_credentials(tmp_path,
@@ -1468,7 +1474,11 @@ def test_a_FAILING_clawgatectl_is_not_reported_as_an_ABSENT_one(tmp_path,
         guard.live_task(197, timeout=5, env_path=str(tmp_path / "nope.env"))
     msg = str(e.value)
     assert "clawgatectl rc=3" in msg and "no token file" in msg
-    assert "not on PATH" not in msg
+    # 🔴 Scoped to THIS binary. `muster` genuinely IS absent in this fixture and the
+    # message correctly says so; the claim being pinned is that the binary which
+    # RAN AND FAILED is not reported as missing.
+    assert "clawgatectl not on PATH" not in msg
+    assert "muster not on PATH" in msg
 
 
 def test_live_task_raises_on_unparseable_stdout(tmp_path, monkeypatch):
@@ -2087,12 +2097,12 @@ def test_scrub_truncates_and_a_failing_client_cannot_flood_the_transcript(tmp_pa
     _isolated_path(monkeypatch, b)
     with pytest.raises(guard.LiveReadError) as e:
         guard.live_task(197, timeout=5, env_path=str(tmp_path / "nope.env"))
-    # The surfacing error is the SECOND client's, carrying the first's message
-    # inside `(first client: …)` — so the scrubbed text is bounded on both sides
-    # rather than running to the end of the string.
+    # The surfacing error is the LAST client's, carrying every earlier client's
+    # message inside `(first client: …)`, `; `-separated — so the scrubbed text is
+    # bounded on both sides rather than running to the end of the string.
     msg = str(e.value)
     assert "clawgatectl rc=9" in msg
-    tail = msg.split("clawgatectl rc=9 ", 1)[1].rsplit(")", 1)[0]
+    tail = msg.split("clawgatectl rc=9 ", 1)[1].split("; ", 1)[0].rsplit(")", 1)[0]
     assert "\n" not in tail and "\r" not in tail
     assert len(tail) == 120, tail
     assert tail.startswith("l1 l2 ")
@@ -3585,3 +3595,496 @@ def test_the_INVARIANT_GUARD_the_dismiss_ESCAPE_still_reaches_the_model_at_fire_
     assert after.returncode == 0
     assert after.stdout == ""
     assert after.stderr == ""
+
+
+# =========================================================================== #
+# 21. THE `muster` EXTRACTION — the widening that must land BEFORE the rename
+#
+# 🔴 WHAT IS BEING DEFENDED HERE IS AN ABSENCE OF SILENCE. Every arming pattern in
+# this hook used to spell `clawgatectl` literally. Rename the CLI and `tracked_ids`
+# stays empty, so `stop_decision` returns before the live read and the hook reaches
+# NO VERDICT AT ALL — not a block, not even a notice. That observable is identical to
+# a session that wrote back correctly, which is the empty-result trap in RULES.md and
+# the worst failure this file has available. Every case below was measured RED at
+# devrc 23b898d5 (the commit before this widening) and green at HEAD.
+#
+# 🔴 THE IDS ARE 7xx, DISTINCT FROM EVERY OTHER FIXTURE AND FROM EVERY CONSTANT. 193
+# and 194 are the incident ids the rest of this file uses; MAX_TASKS is 5, MAX_FIRES 3,
+# MAX_BLOCKS 1. Nothing below can be satisfied by a value it collides with.
+# =========================================================================== #
+MUSTER_READ_ID = 701
+MUSTER_API_ID = 702
+MUSTER_URL = "http://muster.invalid:8"
+CLAWGATE_URL = "http://clawgate.invalid:9"
+MUSTER_TOKEN = "tok-muster-AAA"
+CLAWGATE_TOKEN = "tok-clawgate-BBB"
+
+
+def test_the_cli_name_ledger_is_pinned_in_BOTH_directions():
+    """🔴 A LEDGER, NOT A SPOT CHECK. It fails when the tuple GROWS (a third spelling
+    arrived and nothing reviewed what it now arms) and when it SHRINKS (a spelling was
+    dropped and every read through it is silently unobserved). The shrink direction is
+    the one the rename would have produced.
+
+    LITERALS, never `guard.TASK_CLI_NAMES` on both sides — an expectation read out of
+    the module under test asserts only that the module agrees with itself.
+    """
+    assert guard.TASK_CLI_NAMES == ("clawgatectl", "muster")
+    assert guard.TASK_API_URL_VARS == ("CLAWGATE_TASKS_API_URL", "CLAWGATE_API_URL")
+    assert guard.TASK_TOKEN_VARS == ("CLAWGATE_TASKS_HOOK_TOKEN",
+                                     "CLAWGATE_HOOK_TOKEN")
+    assert guard.TASK_API_PATH_FMT == "/api/tasks/%d"
+
+
+def test_the_SEAM_every_cli_name_both_arms_the_trigger_and_is_tried_as_a_client(
+        tmp_path, monkeypatch):
+    """🔴 PINS THE RELATIONSHIP, NOT EITHER SIDE. `TASK_CLI_NAMES` has two consumers —
+    the arming regex and the ordered client list the live read walks — and a name
+    present in one but not the other is the isolation-seam failure RULES.md names: each
+    half tests clean, the pair is broken. A name that ARMS but is never TRIED yields an
+    endless "UNVERIFIED"; a name that is TRIED but never ARMS yields silence.
+
+    Driven over the tuple itself, so a third spelling is covered the moment it is added
+    rather than needing a new case nobody remembers to write.
+    """
+    for binary in guard.TASK_CLI_NAMES:
+        # half 1: the read arms the guard
+        assert guard.task_read_ids(bash("%s task get %d" % (binary, MUSTER_READ_ID))) \
+            == [MUSTER_READ_ID], binary
+        # half 2: the live read actually invokes this binary
+        b = tmp_path / ("seam-" + binary)
+        b.mkdir()
+        mockbin.write_exec(b / binary, _sh_json(task(task_id=MUSTER_READ_ID)))
+        monkeypatch.setenv("PATH", str(b))
+        got = guard.live_task(MUSTER_READ_ID, timeout=5,
+                             env_path=str(tmp_path / "absent.env"))
+        assert got["id"] == MUSTER_READ_ID, binary
+
+
+@pytest.mark.parametrize("cmd,expected", [
+    ("muster task get 701", [701]),
+    ("muster task get 7 | jq .", [7]),
+    ("muster  task   get  42", [42]),
+    ("/nix/store/abc/bin/muster task get 703", [703]),
+    ("clawgatectl task get 701; muster task get 704", [701, 704]),
+    # the versioned mount, if muster picks one
+    ('curl -sf http://muster.invalid/api/v1/tasks/702 -H "Authorization: Bearer x"',
+     [702]),
+    ("curl -sf http://muster.invalid/api/v1/tasks/702/comments", [702]),
+])
+def test_a_read_arms_the_guard_for_the_muster_spellings(cmd, expected):
+    assert guard.task_read_ids(bash(cmd)) == expected
+
+
+@pytest.mark.parametrize("cmd", [
+    # 🔴 THE OVER-MATCH CONTROLS, AND THEY MATTER MORE FOR `muster` THAN THEY EVER DID
+    # FOR `clawgatectl`: "muster" is an ordinary English word and the extraction makes
+    # it a frequent one. The binary name alone must never arm a hook that can BLOCK.
+    "muster",
+    "muster roll",
+    "muster task ls --status open --limit 3",
+    "muster dispatch 705",
+    "muster task get abc",
+    "muster task get",
+    "grep -rn muster /home/zach/workspace/homelab-talos",
+    "echo 'the muster extraction is planned for next week'",
+    "curl -sf http://muster.invalid/api/v1/tasks",
+    "curl -sf http://muster.invalid/api/v1/tasks?summary=1",
+    "curl -sf http://muster.invalid/api/v1/tasks/702abc",
+    "curl -sf http://muster.invalid/api/v2tasks/702",
+    "muster task create --body 'get 701'",
+])
+def test_the_word_muster_alone_does_NOT_arm_the_guard(cmd):
+    assert guard.task_read_ids(bash(cmd)) == []
+
+
+def test_THE_SILENT_NO_VERDICT_CASE_a_muster_read_plus_work_still_reaches_a_verdict(
+        home):
+    """🔴 THE ONE THAT MATTERS. Not "the regex matches" — the WHOLE path: a real
+    PostToolUse recording a `muster task get` read, real work after it, then Stop
+    reaching a measured verdict against a card with zero comments.
+
+    RED at 23b898d5: `("silent", "")`, because `TASK_GET_RX` spelled `clawgatectl` and
+    nothing was tracked, so the live reader was never even called. A "silent" here is
+    indistinguishable from a session that wrote back — which is why the assertion is on
+    BOTH the verdict AND `reader.calls`.
+    """
+    r = Reader(result=task(comments=[], task_id=MUSTER_READ_ID))
+    guard.post_tool_use(bash("muster task get %d" % MUSTER_READ_ID), now=READ_EPOCH)
+    guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/x"}),
+                        now=WORK_EPOCH)
+    kind, text = guard.stop_decision(payload("Stop"), reader=r)
+    assert r.calls == [(MUSTER_READ_ID, pytest.approx(5.0, abs=0.5))], r.calls
+    assert kind == "block", (kind, text)
+    assert "write-back MISSING for task %d" % MUSTER_READ_ID in text
+
+
+def test_the_same_path_through_the_VERSIONED_API_also_reaches_a_verdict(home):
+    r = Reader(result=task(comments=[], task_id=MUSTER_API_ID))
+    guard.post_tool_use(
+        bash("curl -s %s/api/v1/tasks/%d" % (MUSTER_URL, MUSTER_API_ID)),
+        now=READ_EPOCH)
+    guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/y"}),
+                        now=WORK_EPOCH)
+    kind, text = guard.stop_decision(payload("Stop"), reader=r)
+    assert [c[0] for c in r.calls] == [MUSTER_API_ID]
+    assert kind == "block", (kind, text)
+
+
+def test_the_REGRESSION_CONTROL_the_clawgatectl_spelling_still_reaches_a_verdict(home):
+    """Green at 23b898d5 and green now. Without it, "muster works" could be true of a
+    file that had stopped observing the spelling actually in production today."""
+    r = Reader(result=task(comments=[], task_id=193))
+    guard.post_tool_use(bash("clawgatectl task get 193"), now=READ_EPOCH)
+    guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/z"}),
+                        now=WORK_EPOCH)
+    kind, _ = guard.stop_decision(payload("Stop"), reader=r)
+    assert [c[0] for c in r.calls] == [193]
+    assert kind == "block"
+
+
+def test_the_NEGATIVE_CONTROL_a_prose_mention_of_muster_reaches_no_verdict(home):
+    """The other direction of the same wiring, so "it reached a verdict" above is not
+    a harness that reaches one for everything. A commit whose MESSAGE mentions muster
+    is work, not a pickup — nothing is tracked and the reader is never called."""
+    r = Reader(result=task(comments=[]))
+    guard.post_tool_use(bash("echo 'the muster extraction is planned'"),
+                        now=READ_EPOCH)
+    guard.post_tool_use(bash("git commit -m 'docs: the muster plan'"), now=WORK_EPOCH)
+    assert guard.stop_decision(payload("Stop"), reader=r) == ("silent", "")
+    assert r.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# The live read reaching muster: the SECOND base URL, and `--api-url`
+# --------------------------------------------------------------------------- #
+def _envfile(tmp_path, name, **pairs):
+    f = tmp_path / name
+    f.write_text("".join("%s=%s\n" % kv for kv in pairs.items()))
+    return f
+
+
+def test_the_TASKS_url_is_passed_to_the_cli_as_api_url(tmp_path, monkeypatch):
+    """🔴 `CLAWGATE_TASKS_API_URL` HAS TO ARRIVE ON THE COMMAND LINE. Both CLIs read
+    `CLAWGATE_API_URL` out of the same env file themselves, but neither knows about the
+    TASKS key — so without the flag the new variable is inert and the guard keeps
+    reading the OLD board, reporting a missing write-back for a comment that landed on
+    the new one. Asserted on the stub's recorded argv, with the positive control first.
+    """
+    b = _bin(tmp_path)
+    argv_log = tmp_path / "cli-argv.log"
+    mockbin.write_exec(b / "clawgatectl",
+                       'echo "$@" >> %s\n' % json.dumps(str(argv_log))
+                       + _sh_json(task(task_id=MUSTER_READ_ID)))
+    _isolated_path(monkeypatch, b)
+    envf = _envfile(tmp_path, "tasks.env",
+                    CLAWGATE_API_URL=CLAWGATE_URL,
+                    CLAWGATE_HOOK_TOKEN=CLAWGATE_TOKEN,
+                    CLAWGATE_TASKS_API_URL=MUSTER_URL)
+    assert guard.live_task(MUSTER_READ_ID, timeout=5,
+                           env_path=str(envf))["id"] == MUSTER_READ_ID
+    argv = argv_log.read_text()
+    # POSITIVE CONTROL FIRST: a stub that logged nothing satisfies any `not in`.
+    assert "task get %d" % MUSTER_READ_ID in argv, argv
+    assert "--api-url %s" % MUSTER_URL in argv, argv
+    # 🔴 ...and the permission-routing URL is NOT what the CLI was pointed at.
+    assert CLAWGATE_URL not in argv, argv
+
+
+def test_WITHOUT_the_tasks_url_no_api_url_flag_is_invented(tmp_path, monkeypatch):
+    """The negative half. `CLAWGATE_API_URL` is what both CLIs already resolve on their
+    own, so passing it would be a second spelling of a default — and a second place for
+    the value to be wrong. Today's hosts have only this key, so this is the case in
+    production right now."""
+    b = _bin(tmp_path)
+    argv_log = tmp_path / "cli-argv-2.log"
+    mockbin.write_exec(b / "clawgatectl",
+                       'echo "$@" >> %s\n' % json.dumps(str(argv_log))
+                       + _sh_json(task(task_id=706)))
+    _isolated_path(monkeypatch, b)
+    envf = _envfile(tmp_path, "plain.env",
+                    CLAWGATE_API_URL=CLAWGATE_URL,
+                    CLAWGATE_HOOK_TOKEN=CLAWGATE_TOKEN)
+    assert guard.live_task(706, timeout=5, env_path=str(envf))["id"] == 706
+    argv = argv_log.read_text()
+    assert "task get 706" in argv, argv          # positive control
+    assert "--api-url" not in argv, argv
+
+
+def test_the_curl_fallback_prefers_the_TASKS_url_and_the_TASKS_token(tmp_path,
+                                                                    monkeypatch):
+    """🔴 FOUR PAIRWISE-DISTINCT VALUES, so a mutant that reads the wrong key cannot
+    produce the right string by accident. Both the URL and the token have a
+    tasks-specific spelling because the extraction plan leaves it unsettled whether
+    muster reuses clawgate's hook token or mints its own; the specific one wins, the
+    generic one is the FALLBACK, and `CLAWGATE_API_URL` is never repointed."""
+    b = _bin(tmp_path)
+    cfg_log = tmp_path / "curl-cfg-muster.log"
+    argv_log = tmp_path / "curl-argv-muster.log"
+    mockbin.write_exec(b / "curl",
+                       'echo "$@" >> %s\n' % json.dumps(str(argv_log))
+                       + _sh_capture_stdin(cfg_log)
+                       + _sh_json(task(task_id=MUSTER_API_ID)))
+    _isolated_path(monkeypatch, b)
+    envf = _envfile(tmp_path, "both.env",
+                    CLAWGATE_API_URL=CLAWGATE_URL,
+                    CLAWGATE_HOOK_TOKEN=CLAWGATE_TOKEN,
+                    CLAWGATE_TASKS_API_URL=MUSTER_URL,
+                    CLAWGATE_TASKS_HOOK_TOKEN=MUSTER_TOKEN)
+    got = guard.live_task(MUSTER_API_ID, timeout=5, env_path=str(envf))
+    assert got["id"] == MUSTER_API_ID
+    cfg = cfg_log.read_text()
+    # POSITIVE CONTROL FIRST.
+    assert "%s/api/tasks/%d" % (MUSTER_URL, MUSTER_API_ID) in cfg, cfg
+    assert MUSTER_TOKEN in cfg, cfg
+    # ...then the two exclusions: neither generic value was used.
+    assert CLAWGATE_URL not in cfg, cfg
+    assert CLAWGATE_TOKEN not in cfg, cfg
+    # ...and the token is still never in argv.
+    assert MUSTER_TOKEN not in argv_log.read_text()
+
+
+def test_the_curl_fallback_still_works_with_ONLY_the_generic_keys(tmp_path,
+                                                                 monkeypatch):
+    """The compatibility half: an env file that has never heard of muster must behave
+    exactly as it did. This is every host today."""
+    b = _bin(tmp_path)
+    cfg_log = tmp_path / "curl-cfg-legacy.log"
+    mockbin.write_exec(b / "curl",
+                       _sh_capture_stdin(cfg_log) + _sh_json(task(task_id=707)))
+    _isolated_path(monkeypatch, b)
+    envf = _envfile(tmp_path, "legacy.env",
+                    CLAWGATE_API_URL=CLAWGATE_URL,
+                    CLAWGATE_HOOK_TOKEN=CLAWGATE_TOKEN)
+    assert guard.live_task(707, timeout=5, env_path=str(envf))["id"] == 707
+    cfg = cfg_log.read_text()
+    assert "%s/api/tasks/707" % CLAWGATE_URL in cfg, cfg
+    assert CLAWGATE_TOKEN in cfg, cfg
+
+
+def test_live_task_falls_through_to_muster_when_clawgatectl_is_ABSENT(tmp_path,
+                                                                     monkeypatch):
+    """After the rename `clawgatectl` may not exist at all. The chain must reach the
+    second CLI before it reaches curl — otherwise a host with `muster` installed and no
+    credentials in the env file could never measure anything."""
+    b = _bin(tmp_path)
+    mockbin.write_exec(b / "muster", _sh_json(task(task_id=708)))
+    _isolated_path(monkeypatch, b)
+    assert guard.live_task(708, timeout=5,
+                           env_path=str(tmp_path / "absent.env"))["id"] == 708
+
+
+def test_live_task_falls_through_to_muster_when_clawgatectl_EXITS_NONZERO(tmp_path,
+                                                                         monkeypatch):
+    """The mid-cutover shape: `clawgatectl` is still installed but its board no longer
+    holds the task, so it 404s. `muster` answers."""
+    b = _bin(tmp_path)
+    mockbin.write_exec(b / "clawgatectl", "echo 'task not found' >&2\nexit 4\n")
+    mockbin.write_exec(b / "muster", _sh_json(task(task_id=709)))
+    _isolated_path(monkeypatch, b)
+    assert guard.live_task(709, timeout=5,
+                           env_path=str(tmp_path / "absent.env"))["id"] == 709
+
+
+# --------------------------------------------------------------------------- #
+# The degraded path stays FAIL-OPEN — and says WHICH endpoint it could not reach
+# --------------------------------------------------------------------------- #
+def test_task_endpoint_names_the_url_AND_the_variable_it_came_from(tmp_path):
+    """🔴 THE URL ALONE IS NOT THE DIAGNOSTIC. "which of two base URLs is this guard
+    using" is exactly the question a half-finished cutover raises, so the variable name
+    is part of the answer. Three distinct states, three distinct strings."""
+    tasks = _envfile(tmp_path, "e1.env", CLAWGATE_API_URL=CLAWGATE_URL,
+                     CLAWGATE_TASKS_API_URL=MUSTER_URL)
+    got = guard.task_endpoint(MUSTER_API_ID, env_path=str(tasks))
+    assert "%s/api/tasks/%d" % (MUSTER_URL, MUSTER_API_ID) in got, got
+    assert "CLAWGATE_TASKS_API_URL" in got, got
+    assert CLAWGATE_URL not in got, got
+
+    legacy = _envfile(tmp_path, "e2.env", CLAWGATE_API_URL=CLAWGATE_URL)
+    got = guard.task_endpoint(MUSTER_API_ID, env_path=str(legacy))
+    assert "%s/api/tasks/%d" % (CLAWGATE_URL, MUSTER_API_ID) in got, got
+    assert "CLAWGATE_API_URL" in got, got
+
+    got = guard.task_endpoint(MUSTER_API_ID, env_path=str(tmp_path / "nothing.env"))
+    assert "unresolved" in got, got
+    assert "CLAWGATE_TASKS_API_URL" in got, got
+    # 🔴 never a token, on any of the three paths
+    for tok in (MUSTER_TOKEN, CLAWGATE_TOKEN):
+        assert tok not in got
+
+
+def test_every_LiveReadError_carries_the_endpoint_it_could_not_reach(tmp_path,
+                                                                    monkeypatch):
+    """🔴 RESOLVED UP FRONT, so it is present even when NO client ran — which is the
+    state a misconfiguration produces. Driven through the real chain with a curl that
+    exits 7, the commonest shape of an unreachable board."""
+    b = _bin(tmp_path)
+    mockbin.write_exec(b / "curl", _sh_capture_stdin(tmp_path / "sink7.log")
+                       + "exit 7\n")
+    _isolated_path(monkeypatch, b)
+    envf = _envfile(tmp_path, "unreach.env", CLAWGATE_API_URL=CLAWGATE_URL,
+                    CLAWGATE_HOOK_TOKEN=CLAWGATE_TOKEN,
+                    CLAWGATE_TASKS_API_URL=MUSTER_URL,
+                    CLAWGATE_TASKS_HOOK_TOKEN=MUSTER_TOKEN)
+    with pytest.raises(guard.LiveReadError) as e:
+        guard.live_task(710, timeout=5, env_path=str(envf))
+    assert "curl rc=7" in str(e.value)
+    assert "%s/api/tasks/710" % MUSTER_URL in e.value.endpoint, e.value.endpoint
+    assert "CLAWGATE_TASKS_API_URL" in e.value.endpoint
+
+
+def test_the_endpoint_is_bound_even_when_NO_client_ran_at_all(tmp_path, monkeypatch):
+    """The case a failing client cannot cover: nothing on PATH, so the only thing that
+    can name the endpoint is the env file read before the attempt."""
+    b = _bin(tmp_path)
+    _isolated_path(monkeypatch, b)
+    envf = _envfile(tmp_path, "noclient.env", CLAWGATE_TASKS_API_URL=MUSTER_URL,
+                    CLAWGATE_TASKS_HOOK_TOKEN=MUSTER_TOKEN)
+    with pytest.raises(guard.LiveReadError) as e:
+        guard.live_task(711, timeout=5, env_path=str(envf))
+    assert "%s/api/tasks/711" % MUSTER_URL in e.value.endpoint, e.value.endpoint
+
+
+def test_an_unreachable_board_is_a_systemMessage_that_NAMES_the_endpoint(home,
+                                                                        capsys):
+    """🔴 THE FAIL-OPEN DECISION, ASSERTED ON THE EMITTED JSON. An unreachable task API
+    stays a NOTICE — a block would wedge every session that ever read a card, all at
+    once during the cutover, with a remedy that runs against the same dead server. What
+    the notice must NOT be is indistinguishable from a flake, so the endpoint and the
+    variable to set are in the text. Both halves in one test, because they are one
+    trade: the rung is only defensible BECAUSE the text is diagnosable."""
+    err = guard.LiveReadError("curl rc=7", endpoint="%s/api/tasks/%d (from "
+                              "CLAWGATE_TASKS_API_URL in ~/.claude/clawgate.env)"
+                              % (MUSTER_URL, MUSTER_READ_ID))
+    r = Reader(raises=err)
+    guard.post_tool_use(bash("muster task get %d" % MUSTER_READ_ID), now=READ_EPOCH)
+    guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/x"}),
+                        now=WORK_EPOCH)
+    verdict = guard.stop_decision(payload("Stop"), reader=r)
+    out = emitted(capsys, verdict)
+    # 🔴 SOMETHING WAS EMITTED, ASSERTED FIRST — and that ordering is a fix, not a
+    # formality. `forces_a_continuation(None)` is False, so a regression to SILENCE
+    # satisfies the "does not block" claim below vacuously; only the next line would
+    # have caught it, and it would have reported `TypeError: 'NoneType' is not
+    # iterable` rather than "expected a notice, got silence". Found by a Pyright row
+    # (`sorted` over `Any | None`) during review, not by a failing test.
+    assert out is not None, "the unreachable board emitted NOTHING — silence is the " \
+                            "one verdict this rung may never produce"
+    # 🔴 NOT a block: run through the REAL writer and the REAL continuation rule.
+    assert not forces_a_continuation(out), out
+    assert sorted(out) == ["systemMessage"], out
+    text = out["systemMessage"]
+    assert "UNVERIFIED for task %d" % MUSTER_READ_ID in text
+    assert "%s/api/tasks/%d" % (MUSTER_URL, MUSTER_READ_ID) in text, text
+    assert "CLAWGATE_TASKS_API_URL" in text, text
+    assert "~/.claude/clawgate.env" in text, text
+
+
+def test_a_MEASURED_missing_writeback_still_blocks_so_the_notice_is_not_the_only_rung(
+        home, capsys):
+    """The positive control for the test above: same wiring, a reader that MEASURES a
+    card with zero comments, and the verdict does force a continuation. Without this
+    pair, "the unknown path does not block" is satisfied by a hook that never blocks."""
+    r = Reader(result=task(comments=[], task_id=MUSTER_READ_ID))
+    guard.post_tool_use(bash("muster task get %d" % MUSTER_READ_ID), now=READ_EPOCH)
+    guard.post_tool_use(payload(tool_name="Edit", tool_input={"file_path": "/x"}),
+                        now=WORK_EPOCH)
+    out = emitted(capsys, guard.stop_decision(payload("Stop"), reader=r))
+    assert forces_a_continuation(out), out
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE TWO TIMEOUT HANDLERS, DRIVEN BY A REAL `subprocess.TimeoutExpired`
+#
+# Raised by a Pyright review of the widening: `subprocess` is a module-level
+# `None` bound lazily by `_sp()`, so `except subprocess.TimeoutExpired` reads as
+# `reportOptionalMemberAccess`. If `subprocess` COULD still be None there, the
+# except clause itself raises `AttributeError` — i.e. the timeout path CRASHES
+# instead of degrading to the notice it was designed to produce, in a guard whose
+# whole contract is fail-open.
+#
+# 🔴 THE FINDING IS A FALSE POSITIVE, BUT THE HANDLERS WERE GENUINELY UNTESTED,
+# AND THOSE ARE DIFFERENT FACTS. `_read_task` calls `_sp()` unconditionally before
+# either `try`, so the global is bound; Pyright cannot see a global rebound inside
+# a helper. But the only timeout tests in this file
+# (`test_the_curl_wait_OUTLIVES_curls_own_max_time` and its positive control)
+# assert the NUMBERS handed to `run` and never raise the exception, so nothing had
+# ever executed lines 1435/1448. A green suite of 371 tests was evidence about the
+# happy path.
+#
+# So these two drive a REAL hang through a REAL `subprocess.run(timeout=…)` and
+# assert the exception TYPE: `LiveReadError`, never `AttributeError`. That makes
+# the test the reachability proof for the Pyright row as well as the coverage for
+# the handler — if the global were unbound, the assertion fails with the very
+# error the review predicted.
+#
+# 🔴 THE STUB HANGS ON A FIFO, USING ONLY POSIX BUILTINS. `_isolated_path` strips
+# PATH to the stub dir, so `sleep` is NOT FOUND and a stub that calls it exits
+# instantly — which would make these tests pass for the wrong reason (a fast
+# non-zero exit is the `rc=` path, not the timeout path). `read` is a builtin and
+# a read from a writer-less FIFO blocks forever at zero CPU, in both tiers.
+# --------------------------------------------------------------------------- #
+HANG_TIMEOUT = 0.05          # distinct from PER_TASK_TIMEOUT_SECS (5.0) and from 1
+
+
+def _hang_stub(tmp_path, name, bindir):
+    """An executable at `bindir/name` that blocks until it is killed."""
+    fifo = tmp_path / ("hang-fifo-" + name)
+    os.mkfifo(str(fifo))
+    # POSIX `read` builtin on a FIFO nobody writes to: blocks, spawns nothing,
+    # burns no CPU, and needs no binary on the stripped PATH.
+    return mockbin.write_exec(bindir / name, "read __x < %s\n" % fifo)
+
+
+def test_a_hanging_task_CLI_becomes_a_timeout_LiveReadError_not_an_AttributeError(
+        tmp_path, monkeypatch):
+    b = _bin(tmp_path)
+    _hang_stub(tmp_path, "clawgatectl", b)
+    _isolated_path(monkeypatch, b)
+    envf = _envfile(tmp_path, "hang-cli.env", CLAWGATE_TASKS_API_URL=MUSTER_URL,
+                   CLAWGATE_TASKS_HOOK_TOKEN=MUSTER_TOKEN)
+    with pytest.raises(guard.LiveReadError) as e:
+        guard.live_task(712, timeout=HANG_TIMEOUT, env_path=str(envf))
+    # 🔴 The TYPE is the claim. An unbound `subprocess` global would surface as
+    # AttributeError out of the handler, and `pytest.raises(LiveReadError)` would
+    # report it — which is exactly the failure the Pyright row describes.
+    assert "clawgatectl timed out after %ss" % HANG_TIMEOUT in str(e.value), str(e.value)
+    # ...and the degraded notice is still diagnosable: the endpoint survives the
+    # timeout path, not only the rc!=0 path.
+    assert "%s/api/tasks/712" % MUSTER_URL in e.value.endpoint, e.value.endpoint
+
+
+def test_a_hanging_CURL_becomes_a_timeout_LiveReadError_not_an_AttributeError(
+        tmp_path, monkeypatch):
+    """The second handler, on the fallback leg. No task CLI exists, so the chain
+    reaches curl; curl hangs and `subprocess.run` kills it at
+    `timeout + CURL_KILL_MARGIN_SECS`."""
+    b = _bin(tmp_path)
+    _hang_stub(tmp_path, "curl", b)
+    _isolated_path(monkeypatch, b)
+    envf = _envfile(tmp_path, "hang-curl.env", CLAWGATE_TASKS_API_URL=MUSTER_URL,
+                   CLAWGATE_TASKS_HOOK_TOKEN=MUSTER_TOKEN)
+    with pytest.raises(guard.LiveReadError) as e:
+        guard.live_task(713, timeout=HANG_TIMEOUT, env_path=str(envf))
+    assert "curl timed out after %ss" % HANG_TIMEOUT in str(e.value), str(e.value)
+    assert "%s/api/tasks/713" % MUSTER_URL in e.value.endpoint, e.value.endpoint
+
+
+def test_the_NEGATIVE_CONTROL_the_hang_stub_really_hangs(tmp_path, monkeypatch):
+    """🔴 WITHOUT THIS THE TWO ABOVE COULD PASS FOR THE WRONG REASON. A stub that
+    exits instantly (the shape `sleep 5` takes on a stripped PATH — command not
+    found, rc 127) lands on the `rc=` branch, and a test that only checked for a
+    LiveReadError would be green having never touched the timeout handler. So:
+    the same stub, given a generous timeout, must NOT raise at all within it —
+    it must be the WAIT that ends the process, not the process."""
+    b = _bin(tmp_path)
+    _hang_stub(tmp_path, "clawgatectl", b)
+    _isolated_path(monkeypatch, b)
+    start = time.monotonic()
+    with pytest.raises(guard.LiveReadError) as e:
+        guard.live_task(714, timeout=0.4, env_path=str(tmp_path / "absent.env"))
+    elapsed = time.monotonic() - start
+    # It timed out (not `rc=127`), and it took AT LEAST the timeout to do so.
+    assert "timed out after 0.4s" in str(e.value), str(e.value)
+    assert "rc=" not in str(e.value), str(e.value)
+    assert elapsed >= 0.4, elapsed

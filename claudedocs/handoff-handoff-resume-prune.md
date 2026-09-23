@@ -141,20 +141,30 @@ close this doc as NOT ADDRESSED and open a new one, not to restore an unrunnable
 ## Next steps (ranked)
 🔴 **NONE OF THESE BELONG TO THIS ARC — it is CLOSED and FROZEN.** They are recorded here
 so they are not lost, and a session picking one up is starting a NEW arc.
-1. **Merge devrc#1821** — the `/the-algorithm` pass over what this arc shipped: deletes the
-   advice surface from `evictable_note` (−178/+42), because 7 of this arc's 10 audit
-   findings were caused by it and the eviction ladder is already owned by
-   `test_handoff_doc_size.py`. CI was pending at close.
-   forcing: user — the operator asked for the pass and approved merging it.
-2. **Decide round 0's F2, which #1821 has SIMPLIFIED to one line.** F2 argued: withhold the
-   PRESCRIPTION from ungated repos, print the NUMBERS. #1821 deletes the prescription
-   entirely, so the objection it rested on is gone — what remains is whether to drop the
-   `if gated` on a numbers-only note. `homelab-talos` holds **370,563 B** of closed content
-   the withholding currently hides.
-   forcing: user — it reverses a requirement whose author is a measured incident
-   (`civitai/cli#618`), which is not an agent's call.
-3. Re-measure the corpus in ~2 weeks: evictable backlog (468,110 B at round 0) and docs over
-   the hard cap (28). If neither moves, P1′ informed nobody and should be deleted.
+
+✅ **RANKS 1 AND 2 ARE DONE — do NOT re-work them.** They stayed on this list as live items
+after they had landed, which is the duplicate-work hazard this queue exists to prevent: the
+claim lock is released on completion, so nothing else would have stopped a `/resume` here
+from re-doing them.
+- ~~**1. Merge devrc#1821**~~ — MERGED 2026-09-21T03:31Z, before the session that closed
+  this arc began.
+- ~~**2. Decide round 0's F2**~~ — the operator answered **"Drop the gate — print numbers
+  everywhere"** on 2026-09-21 and it SHIPPED: devrc#1826 (squash `62e811e9`), audited
+  rounds 0–2, merged with all four Tekton legs green, converged to both hosts, closing
+  condition verified MET on each. 🔴 **Its successor arc is
+  `claudedocs/handoff-evictable-note-ungated.md`** — read that, not this, for anything about
+  `evictable_note`'s gating.
+  🔴 **THE 370,563 B FIGURE THIS ITEM QUOTED IS WRONG AND IS WHAT THE OPERATOR DECIDED ON.**
+  See the gotcha below.
+
+1. **One corpus pass at the ~2026-10-04 deletion trigger** — the only item still open, carried
+   here from the old rank 3. Re-measure the evictable backlog (468,110 B at round 0) and the
+   docs over the hard cap (28). If neither moves, P1′ informed nobody and should be deleted.
+   🔴 **Evaluate the trigger against 13 docs, not 31** — #1826 round 0 measured that
+   `budget_warning`, the only caller, reaches 13 of homelab-talos's 70 docs, and flagged that
+   #1826 widened `evictable_note`'s blast radius before its own deletion trigger had fired.
+   Tracked as rank 2 of `handoff-evictable-note-ungated.md`; recorded in both places because
+   the trigger was defined here.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -348,6 +358,25 @@ so they are not lost, and a session picking one up is starting a NEW arc.
   committed onto this branch twice; both commits were preserved on origin BEFORE any
   rewrite, and that session then landed its own work as `#1819`. Preserving the TIP rather
   than the commit you noticed is what made the second one survivable.
+
+- 🔴 **THE `370,563 B` IN THIS DOC'S OLD RANK 2 WAS THE WRONG NUMBER FOR THE DECISION IT
+  DROVE, AND IT IS THE FIGURE THE OPERATOR WAS SHOWN.** It came from `handoff-audit.py`'s
+  gross over ALL FOUR buckets. The quantity the item was actually about — what the `if gated`
+  withholding HID — is what `budget_warning` would newly print, and that is **13 of
+  homelab-talos's 70 live handoff docs**, not the 31 an early draft of #1826 also claimed.
+  The other 18 are UNDER budget, so `budget_warning` returns `""` for them whether gated or
+  not; nothing was ever being withheld from those authors. Caught by #1826 round 0 re-deriving
+  it rather than accepting the quoted value. **A byte total is not recorded anywhere in the
+  source: it is corpus-volatile** (218,883 B and 198,483 B, an hour apart).
+  **The transferable half: a number in a ranked item is a CLAIM, and it is the one a decision
+  gets taken on** — this one sat in a `forcing: user` item explicitly written to hand a
+  judgement to the operator, which is the worst place for an unverified figure.
+- 🔴 **A RANKED LIST IS A SHARED QUEUE, AND "DONE" MUST BE WRITTEN INTO IT — THE LOCK CANNOT
+  DO IT FOR YOU.** `claim-work --release` is called exactly when an item COMPLETES, so the
+  moment an item is finished it becomes invisible to the lock AND still reads as open on the
+  list. Ranks 1 and 2 above sat completed-but-advertised for two days. The `gh pr list` sweep
+  does not catch it either once the PR has MERGED and its branch is deleted. **Closing an item
+  means editing the queue, in the same session that finishes it.**
 
 ## How to verify
 Re-derive every number in the proposal:

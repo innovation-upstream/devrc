@@ -21,75 +21,45 @@ notifications and repo browse are dropped.
 
 ## State now
 - 🔴 **THE ARC IS CLOSED** — the operator used `mention-review` for a real review **on a real
-  screen** and reported **"done, working"** (2026-09-18); that is the `judgement` line this doc
-  froze at round 1. ⚠ The condition also says *"beats octo at reading a diff"*, and
-  `"done, working"` carries no comparison. Pre-existing gap.
+  screen** and reported **"done, working"** (2026-09-18). ⚠ The condition also says *"beats octo
+  at reading a diff"*, and that carries no comparison. Pre-existing gap.
 - ✅ **CARRIED FORWARD — durable, would otherwise be dropped by the next replace:**
-  `#1793` → `cee56910` (picker promotion, THREE gates narrower than authorised: promotes only
-  when the ordering RAN, its top row is not already the pane guess, and that row is
-  `CLASS_PLAUSIBLE` **and** uniquely separated) · `#1781` → `8d0984ba` · `#1772` → `2b131bf2` ·
-  `#1773` → `97c20d06` · `#1775` → `66e51d90` · **`#1812` → `6ee5ff68`**. 🔴 **`--version`
-  CANNOT distinguish builds** — verify by content with a positive control. **The picker is live
-  with NO switch** — the Alacritty wrapper execs `scripts/mention-open.py` from the WORKING TREE.
-- ✅ **SYMPTOM 1 — the arc's one unmet objective — IS DECIDED AND HALF-LANDED.** Operator,
-  2026-09-20: **(D) then (A), (B) REFUSED**.
-  - **`#1812` MERGED as squash `6ee5ff68` (2026-09-21)**, `--delete-branch` NOT passed. Payload
-    is ONE executable line: `--bind="esc:print-query+abort"`, so an ESC records `queried`.
-    🔴 **Verified by CONTENT, never ancestry** (a squash is never an ancestor of its branch):
-    `git diff 17b6ff96 origin/main -- scripts/mention-open.py scripts/tests/test_mention_open.py`
-    is EMPTY, positive control `git grep -c 'def ' origin/main -- scripts/mention-open.py` = 61.
-    Four Tekton legs green **on that exact head sha**, read per-context from
-    `/commits/<sha>/statuses` — never the roll-up, which maps `error` onto `failure`.
-  - **`#1813` PUSHED, awaiting CI — head now `8c5fda78`** (was `9c4bb252`), base auto-retargeted
-    to `main`. Every row carries its RANK (`1`,`2`,… / `-` unranked / `?` unstamped-bug), with
-    `--nth=2..` keeping the marker out of fzf's haystack. Net payload vs `main`: **3 files,
-    +554/−21**.
-- 🔴 **`#1813` WAS `CONFLICTING`/`DIRTY`, NOT MERELY "NO CI POSTED" — the previous update of this
-  doc had that wrong, and a kickoff line propagated it.** Its branch predated three of the
-  parent's newest commits (`b17cf93f`, `26228216`, `17b6ff96`), so it conflicted against its own
-  base before `main` ever entered it. Merged parent-tip-then-`main` in a throwaway worktree.
-- ✅ **SHIPPED AND VERIFIED ON BOTH HOSTS (2026-09-21) — SYMPTOM 1 IS CLOSED, AND SO IS THE ARC'S
-  LAST OPEN OBJECTIVE.** `ship.sh` rc=0, both hosts at `8f95c342`, cross-host agreement asserted
-  (`2 hosts compared, both at 8f95c342`); **every per-host line read**, both `✅ VERIFIED`,
-  `0 dangling` / `0 stale` managed artifacts on each. ⚠ Both hosts print the prefix **`[nixos]`**
-  — a grep for `^\[workbench\]`/`^\[laptop\]` matches NOTHING and reads exactly like a clean run.
-  Verified by CONTENT, not `--version`: wrapped binary
-  `/nix/store/al42…-mention-review-0.3.0/bin/.mention-review-wrapped`, positive control
-  `usage: mention-review` = **1**, `ReadIntents` = **2**; and the picker is live from the WORKING
-  TREE (`~/.config/alacritty` wrapper execs `$DEVRC/scripts/mention-open.py`, which carries
-  `picker_marker`, `PICKER_MARKER_RANK_W` and 10 `--nth=2..` hits).
-- ✅ **Merged tree verified locally: `648 passed, 2 skipped`** across `test_mention_open` +
-  `test_mention_scan` + `test_mutation_battery_anchors`, at base `6ee5ff68`. That is **7 above
-  the `641 passed, 2 skipped` the pre-`#1813` tree gives** — a number that did not move would
-  mean the branch's own tests never ran. Collection: **643 → 650**. ⚠ **Dev-host tier ONLY**;
-  the `nix build` sandbox tier that Tekton runs was NOT run here, and the two are blind to
-  different things.
-  🔴 **AN EARLIER VERSION OF THIS BULLET SAID `640/2` AND A DELTA OF 8, AND IT WAS FALSE —
-  I COPIED IT OUT OF THIS DOC'S OWN `How to verify` BLOCK INSTEAD OF MEASURING IT.** That
-  block's `640 passed / 2 skipped; collection … = 642` was true of an OLDER tree and had gone
-  stale; restating it beside a freshly measured 648 dressed a stored number as a measurement.
-  Caught by `/audit-pr` round 0 on `#1820`, which measured 641/2 two ways; confirmed here by a
-  third full run and by collection counts. **This doc already carries the general rule — "A
-  STORED MEASUREMENT IS NOT A LIVE ONE" — and the trap is that the stored number was in THIS
-  FILE, where it reads as the project's own answer rather than as a claim to re-derive.**
-- ⚠ **(A) SHIPPED NARROWER THAN OPTION (A) AS WRITTEN — rank only, no class column**
-  (`a70839af`). Option (A) offered *"class **and/or** rank"*; shipping both was the implementer's
-  reading, and `/audit-pr` round 0 logged the class field as UNATTRIBUTED. **The OPERATOR chose
-  rank** — that is the author of record for the narrowing, and a sha is not. Measured: the
-  click-time class of the picked row is `below` **56** vs `plausible` **17**, so a class column
-  would read "the ranker does not trust this" on the WANTED row ~3 times in 4. 🔴 **Do not
-  "restore" the class column on the strength of that deviation** — it was declined, not omitted.
-- ⚠ **`#1812` MERGED WITHOUT ITS ROUND-3 DELTA AUDIT, AND THE LADDER'S OWN RULE SAYS A CLEAN
-  ROUND ENDS IT — round 2 was NOT clean.** The merge followed this doc's rank 1 and the
-  operator's kickoff, and the round-3 item was `forcing: none`/advisory; recording it so the
-  gap is a decision on the record rather than an omission nobody noticed.
-- **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5** again. Its positive
-  control (2 links for a different session) shows the board is reachable, but a wrong session id
-  also answers 200 with an empty array, so this is NOT a clean bill of health.
-- 🔴 **METHODOLOGY LESSONS ARE IN THE CAIRN INDEX, NOT HERE** — `devrc/scripts` and
-  `devrc/tests`, both 2026-09-21, carrying the fzf contract (abort is FOUR keys; bind ACTION
-  ORDER is load-bearing and a reorder is silent; `--nth` excludes a marker from MATCHING but not
-  RANKING). `cairn recall --repo ~/workspace/devrc`.
+  `#1793` → `cee56910` (picker promotion, THREE gates narrower than authorised) · `#1781` →
+  `8d0984ba` · `#1772` → `2b131bf2` · `#1773` → `97c20d06` · `#1775` → `66e51d90` · `#1812` →
+  `6ee5ff68` · `#1813` → `7f39fda7` · **`#1828` → `23b898d5`** · **`#1831` → `b84745f2`**.
+  🔴 **`--version` CANNOT distinguish builds** — verify by content with a positive control.
+  **The picker is live with NO switch** — the Alacritty wrapper execs `scripts/mention-open.py`
+  from the WORKING TREE. 🔴 **METHODOLOGY LESSONS GO TO THE CAIRN INDEX, NOT HERE** —
+  `devrc/scripts` + `devrc/tests`, carrying the **fzf contract** (abort is FOUR keys; the bind's
+  ACTION ORDER is load-bearing and a reorder is SILENT; `--nth` excludes the marker from
+  MATCHING but **not** from RANKING) and the two `gh` instrument traps (rev `610596953ba16646`).
+- ✅ **SYMPTOM 1 IS SHIPPED AND VERIFIED** — `#1812` + `#1813`, both hosts, verified by CONTENT
+  (wrapped binary `usage: mention-review` = 1 as positive control, `ReadIntents` = 2).
+  **Operator, 2026-09-20: (D) then (A), with (B) `--no-sort` REFUSED** — and the marker shipped
+  RANK-ONLY, no class column (`a70839af`), because the click-time class of the picked row is
+  `below` 56 vs `plausible` 17, so a class column would have read "the ranker does not trust
+  this" on the WANTED row ~3 times in 4. 🔴 Do not "restore" the class column: it was declined.
+- ✅ **`#1828` MERGED — the MIT claim is backed.** `nix/pkgs/tools/mention-review/src/LICENSE`,
+  scoped to the Go module by operator decision, **not** the repo root: the grant covers what the
+  derivation ships and not the personal config. Verified with a NEGATIVE control — there is no
+  root `LICENSE` on `main`, and GitHub's repo `license` stays `null`, which is correct.
+- ✅ **`#1831` MERGED, SHIPPED AND VERIFIED — the ranges table now refreshes 4-HOURLY.**
+  `OnCalendar = "*-*-* 00/4:00:00"`. `ship.sh` rc=0, both hosts at `b84745f2`, every per-host
+  line read, cross-host agreement asserted. **Verified on BOTH hosts by the unit itself**, not
+  by `list-timers`' NEXT column: `systemctl --user show … -p TimersCalendar` →
+  `OnCalendar=*-*-* 00/4:00:00`, timer `active/waiting`, service exited 0.
+  🔴 **THE PAYOFF IS MEASURED, NOT INFERRED:** `known_ranges.json` recorded
+  `innovation-upstream/devrc` at **1809** when round 0 caught it — while PRs up to `#1831` were
+  open against that repo — and reads **1832 on both hosts** after the switch.
+- 🔴 **`#1829` IS A DRAFT, DELIBERATELY — `/audit-pr` round 0 returned `deletion candidate` and
+  the operator chose "timer first, then re-scope" (2026-09-21).** Its diagnosis holds and was
+  verified independently of the implementer (0 of 6 wrong-repo gaps leak at the ceiling margin;
+  `IMPOSSIBLE` preserved at `max_ref == 0`; Tier A median unchanged at 1.0, mean 3.52 → 3.99;
+  regression matrix **red at `3fa77f49` (40 of 51) → green at HEAD (51/51)**, with 8
+  assertion-shaped failures at base distinct from 22 `AttributeError` / 14 `TypeError`). What
+  it needs is in the PR comment; summarised as rank 1.
+- **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5** again. An unknown
+  session id also answers 200 with an empty array, so this is NOT a clean bill of health.
 
 ## Open investigations — live diagnosis state
 
@@ -117,24 +87,14 @@ notifications and repo browse are dropped.
   ceiling and the playbook says evict what has CLOSED before anything else — the
   surviving RESOLVED blocks carry both outcomes. History: `git log -p` this file.
 
-### 🔴 No write verb has ever executed against real GitHub
-- as-of: 2026-09-16
-- **Symptom + exact repro:** n/a — an untested path in shipped code, not a defect. The five
-  write verbs are exercised only against in-process fakes and `httptest`.
-- **Observed (with values):** the whole Go suite (231 tests) passes inside `nix build`'s
-  **network-less sandbox**, which is itself the proof no test reaches a real host. Four
-  additional locks: `App.runner` is `nil` in pure tests; the one end-to-end test asserts the
-  write ledger is *exactly* `[PostComment … body="ok"]`; `http.DefaultTransport` is replaced in
-  both network-reaching packages by a loopback-only transport; `cmd/*` is exempt with a stated
-  reason. **I verified the transport lock myself** — disarming it yields
-  `the guard let a request to api.github.com THROUGH`.
-- **Ruled out:** that the guard is vacuous — mutated it and watched the negative control fire.
-  ⚠ My FIRST mutant did not compile (orphaned `fmt`), which is not a result; a compiling
-  variant is what produced the kill. via: measurement
-- **Leading hypothesis:** none. `LiveRunner`'s three delegations and `ghapi`'s three endpoints
-  are plain code paths that have simply never run live.
-- **Next probe:** open a throwaway PR in a scratch repo and drive `c` (comment) then `m`
-  (merge) against it. **Operator-only** — an agent must not run a live write verb.
+### DEMOTED (still OPEN) — no write verb has ever executed against real GitHub
+- as-of: 2026-09-16 · **full block: `claudedocs/refs/mention-review-write-verbs-untested.md`**
+- 🔴 **NOT CLOSED — demoted, not evicted**, to leave this doc usable headroom. All five write
+  verbs (`c`/`a`/`R`/`v`/`m`) are exercised only against fakes; the Go suite runs in a
+  network-less sandbox, which is itself the proof nothing reaches a real host.
+- **Next probe: OPERATOR-ONLY.** Open a throwaway PR in a scratch repo and drive `c` then `m`.
+  🔴 An agent must not press a write key — they act on real GitHub as the operator. This is
+  why the item cannot close on its own.
 
 ### EVICTED — the 422 diagnosis block (2026-09-21, byte ceiling)
 - The 2026-09-18 block "The 422's actual cause was never determined". 🔴 Evicted by `/audit-pr`
@@ -148,81 +108,49 @@ notifications and repo browse are dropped.
   `errors[]`, so **the next occurrence names its own reason. If it recurs, capture the card
   verbatim before anything else** — that single string settles it.
 
-### 🔴 Why right-aligning the rank marker moves fzf's ranking — MECHANISM UNKNOWN
-- as-of: 2026-09-20
-- **Symptom + exact repro:** rendering the rank `f"{rank:>3}"` instead of `f"{rank:<3}"` changes
-  fzf's output order. 120-row synthetic corpus, 20 queries,
-  `fzf --filter <q> -i --tiebreak=end --nth=2..`, marker present in both arms.
-- **Observed (with values):** right-aligned — top-1 changed on **7 of 20**, tail on 13 of 20.
-  Left-aligned — top-1 on **0 of 20**, tail on 1 of 20. Match SET identical 20/20 both. fzf
-  0.74.4. via: measurement
-- **Ruled out:** that the marker becomes MATCHABLE under right alignment — this was the shipped
-  explanation and it is FALSE. A query matching only the marker digits returns **0 rows under
-  BOTH alignments**; positive control, 1 row with `--nth` dropped. via: measurement
-- **Ruled out:** that field-1 WIDTH explains it. Width genuinely does reach fzf's positional
-  tiebreak (identical field-2.. text at widths 3 vs 6 inverts; input order once equalised, and
-  under `--tiebreak=index`) — but `:<3` and `:>3` are the SAME width, so offsets are unchanged
-  between the two alignments. via: measurement
-- **Leading hypothesis:** none. Recorded as unknown deliberately — the first explanation read as
-  well as a true one and was wrong; a second invented under pressure would be a hypothesis
-  wearing a comment's clothes.
-- **Next probe:** `fzf --filter` both alignments over a corpus where every rank has the SAME
-  digit count (ranks 100–199). Difference vanishes ⇒ digit-count variation is the cause; persists
-  at constant digits AND width ⇒ it is in fzf's scorer, worth reporting upstream.
+### DEMOTED (still OPEN) — why right-aligning the rank marker moves fzf's ranking
+- as-of: 2026-09-20 · **full block: `claudedocs/refs/mention-picker-fzf-alignment.md`**
+- 🔴 **NOT CLOSED — demoted, not evicted** (playbook step 2), because both CLOSED blocks were
+  already evicted and a budget may not be paid with an open investigation.
+- `f"{rank:>3}"` vs `f"{rank:<3}"` changes fzf's order — right moved top-1 on **7 of 20**, left
+  on **0 of 20** (fzf 0.74.4, same width, identical match set); shipped code uses `:<` on that.
+  **Both plausible mechanisms are RULED OUT** and the leading hypothesis is deliberately none.
+- **Next probe:** re-run both alignments over ranks 100–199 (constant digit count).
 
 ## Next steps (ranked)
-1. **Decide whether `below`-dominance is the real defect.** The picked row's class is `below` 56 /
-   `plausible` 17, and the proposal flags that NOT DIAGNOSED and *"a bigger finding than symptom
-   1"*. Cheap mechanical test already exists: re-run the causal replay with the class term demoted
-   below distance/score and read top-1 against the 12.7% observed. Untested mechanism worth trying
-   first: many clicked `#N` are clawgate/ClickUp ids, not GitHub numbers, so no repo's range is
-   relevant. Repo: devrc.
-   ⚠ **This was rank 3 until symptom 1 closed; it is rank 1 because it is the only item carrying
-   an external forcing function, not because anything new happened to it.** Renumbered against a
-   MEASURED empty claim set — `claim-work --list` showed `mention-review-tui-1` released and no
-   other `mention-review-tui-*` claim live at that moment.
-   forcing: regression — the shipped sort key ranks by a term that disagrees with 77% of real
-   picks; #1813 makes that disagreement visible without fixing it.
-2. **Round 3 delta audit of `#1813`, scoped to round 2's fixes plus the two merge commits.**
-   Round 2 returned findings, so the ladder's rule says another round follows; a clean round
-   ends it. Range is now `2f9af4f8..8c5fda78` (was `..9c4bb252`) and **includes `b116179f` +
-   `8c5fda78`, which are merges** — a delta audit over a merge range reads differently, so state
-   the range you actually gave it. Post the `audit-claims` block BEFORE dispatching: a delta with
-   no parseable block is REFUSED, and a MISSING INTERMEDIATE one does NOT refuse — it silently
-   anchors older and widens the range. ⚠ **`#1813` IS MERGED** (`7f39fda7`), so this audits
-   shipped code — a finding here is a follow-up PR, not a change to a pending one. Repo: devrc.
-   forcing: none — advisory; nothing external waits on it. **Ranked BELOW an item with a real
-   forcing function deliberately**: a `forcing: none` item is not eligible to be worked, so
-   putting it first would have pointed the next session's `claim-work` at a non-workable rank.
+1. **Re-scope `#1829` against the now-4-hourly cadence, then land it.** Repo: devrc.
+   IN FLIGHT: devrc#1829 (DRAFT). Three changes, all from round 0 and all detailed in the PR
+   comment: **(a)** drop `PLAUSIBLE_MARGIN_MAX = 60` for
+   `margin = ceil(min(age_days, REFRESH_INTERVAL_DAYS) * RANGE_GROWTH_PER_DAY)` — the interval
+   is the unit's own period, i.e. observable state rather than a tunable, so the one
+   admittedly-unprincipled constant disappears and headroom under the 74 bound widens from 14 to
+   34; **(b)** add a `margin` or `table_age` key to `order_dims` — as written, `picked_class`
+   silently begins reporting the POST-margin class under the same field name, **destroying the
+   instrument that measured the defect** (nobody could then separate "the ranking improved" from
+   "the classifier was widened"); **(c)** reconcile the four denominators (71 / 100 / 115 / 121)
+   — state whether the 6 `below` from the current-table replay are the SAME six as the 6
+   API-confirmed non-existent. If they are, the decomposition is complete.
+   forcing: regression — the sort key filed real references BELOW, reproduced live at 1809 vs
+   1828; `#1831` shrinks that window but does not close the refresh-broken one.
+2. **Correct ONE SENTENCE in `proposal-mention-picker-visibility.md`** — the `and **not** a
+   stale-table artifact` clause in §(B), a wrong-clock error. 🔴 **Nothing else there is wrong**;
+   see the Gotchas entry before touching anything else in that file. Repo: devrc.
+   forcing: none — the code is fixed either way; this is the prose catching up.
 ## Defects (batched)
-- 🔴 **NO `LICENSE` FILE WHILE THE DERIVATION CLAIMS MIT** —
-  `nix/pkgs/tools/mention-review/default.nix:146` declares `licenses.mit` with nothing backing
-  it, and the repo is PUBLIC.
-- 🔴 **Agent worktrees accumulate in this clone and a stale one holds its branch repo-globally.**
-  🔴 **NO COUNT WRITTEN HERE** — every count this bullet has carried went stale within hours
-  (`181+` was already `348` registered when `/audit-pr` round 0 re-derived it), and unlike
-  `drift-check.sh` rc 17 below there is **no deadman**: `scripts/worktree-prune` exists but no
-  timer runs it. Count it yourself — `git -C $DEVRC worktree list --porcelain | grep -c '^worktree '`
-  — then run the pruner.
-- 🔴 **TEST-ISOLATION SEAM: every `ranges=` test in `test_mention_open.py` consumes
-  `MO.PICKS_PATH`, which no autouse fixture redirects** — they read the operator's real
-  `~/.config/mention-open/picks.jsonl`. Found by `/audit-pr` round 4, **pre-existing**, inert
-  for those tests (Tier B sits below class and distance and cannot move a uniquely-PLAUSIBLE
-  top row). Worth closing on its own.
-- ⚠ **A COMMENT ON `main` COUNTS THREE GUARDS AND THEN LISTS TWO.** `scripts/mention-open.py`
-  (search `THREE guards catch it`) reads *"THREE guards catch it … (the whole-string
-  `EXPECTED_PICKER_SH` pin, and `_ESC_PRINTS_QUERY` …), but **neither** was CHOSEN for that."*
-  The parenthetical enumerates two and the conclusion says "neither" — the correction to THREE
-  landed in the lead sentence and was never carried into the list. **Pre-existing on `main`,
-  byte-identical there — NOT a merge artifact** (checked, because it first surfaced inside a
-  conflict resolution and read like one). Name the third guard or revert the count.
-- ⚠ **`drift-check.sh` rc 17 on BOTH hosts, and the two have DIVERGED from each other** on
-  `homelab-talos/containers/clawgate`. 🔴 **No ranked item, and NO COUNTS WRITTEN HERE** — the
-  deadman reports it every 6 h with live numbers, and an earlier draft's counts were stale
-  within hours. Run the checker.
-- Pre-existing and known: `ghapi_test.go`/`argv_test.go` not `gofmt`-clean (confirmed on `main`
-  at `2b131bf2`); four scanner limits documented in `detailrouting_test.go`; two guards at
-  `scripts/tests/test_mention_review.py:122` and `:361` claiming more than they check.
+- 🔴 **THE DEVRC CI GATE COULD NOT RUN, TWICE IN A ROW, ON A ONE-LINE DIFF — and it is a known,
+  UNFIXED issue with an open PR.** `#1831` head `79e0b655` → `devrc-ci-h6w2g` gate
+  `TaskRunTimeout` (statuses stuck `pending` ~60 min); head `d5f8ea99` → `devrc-ci-vc65z`, all
+  four legs `error`: *"NO CAPACITY: <leg> — the gate never started (queued past its deadline).
+  Not a code failure."* 🔴 **MEASURED AT THE TIME: nodes were at 8–37% CPU / 5–33% memory**, so
+  this is NOT congestion — it matches **`#1787`** (*"retract the congestion claim — the gate pod
+  was too big to schedule"*), which is still OPEN. 51 PipelineRuns ran in the preceding ~2 h
+  across all repos (14 devrc: 7 succeeded, 4 failed, 3 cancelled), so the pipeline works; these
+  two runs never got to run. It will keep costing every devrc PR until `#1787` is acted on.
+- ⚠ **`test_custom_tool_copied_into_scratch_project` FLAKED on `main`** —
+  `scripts/browser-bridge/tests/test_browser_agent.py`, 1 failed of 23,828 at `23b898d5`
+  (`devrc-ci-kg7pl`, gate `StepFailed`), and **green one commit later at `ad80c30d`** off a
+  docs-only change that cannot have fixed it. It shells out to opencode, so it is
+  timing/environment sensitive. Not a regression; worth de-flaking.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **"Local git first (~0ms)" is WRONG on the FIRST read, and that framing came from me.**
@@ -733,6 +661,76 @@ notifications and repo browse are dropped.
   `RULES.md` §Git Workflow and the cairn `devrc/scripts` entry. **They were written out HERE and
   cut by `/audit-pr` round 0** — 66% of that update's growth, into a doc whose own 🔴 rule 68
   lines above says methodology goes to cairn. Do not re-add them.
+
+- 🔴 **`below`-DOMINANCE WAS A STALE-TABLE ARTIFACT, NOT A BAD SORT KEY AND NOT ClickUp IDS —
+  and the proposal's rebuttal of staleness is a NON-SEQUITUR.** ⚠ **An earlier draft also
+  called the proposal's finding MISATTRIBUTED; that was MY error** (round 0 on `#1829` caught
+  it) — the proposal never diagnosed the class term as bad, and **exactly one sentence there
+  is wrong**: the staleness clause. I mischaracterised it while charging it with
+  mischaracterisation. The mechanism argument is logical: `CLASS_BELOW`
+  requires `max_ref < N`, so if a mention points at a **real, existing** item then the repo's
+  TRUE max at click time was necessarily ≥ N. Click-time BELOW can therefore ONLY come from
+  (a) a stale `known_ranges.json` or (b) a wrong repo. **Measured: of 100 distinct `(repo, n)`
+  picks, 94 exist and 6 do not** — so (b) is ~6% and the rest of the BELOW mass is (a).
+  - §(B) says *"not a stale-table artifact — refreshed by a daily timer, last run within 5h of
+    the measurement"*. The telemetry `klass` is recorded at **click** time; the table's
+    freshness at **measurement** time cannot speak to it. Right fact, wrong clock.
+  - 🔴 **The proposal states the SAME quantity twice with OPPOSITE answers and never
+    reconciles them:** §1.4 *"104 plausible, 5 below"* vs §(B) *"below 54, plausible 17"*. §1.4
+    RECOMPUTES with a current table (washing staleness out); §(B) reads click-time telemetry
+    (preserving it). An independent replay of 121 picks against today's table gives **115
+    plausible / 6 below**, corroborating §1.4 — so **the two differ by exactly the staleness**,
+    which is the whole finding sitting unnoticed inside one document.
+  - ⚠ **The stale side is an UPPER-BOUNDING ARGUMENT, not an observation.** `picks.jsonl`
+    stores `(t, repo, n)` with no `max_ref`, and no historical table snapshots exist, so the
+    click-time gap distribution is **unrecoverable**. Only the wrong-repo side is measured.
+- **The six wrong-repo gaps are a ONE-SIDED bound, which is what makes the ceiling safe.**
+  Today's gaps are `1810, 183, 171, 135, 79, 74`. `gap = n − max_ref` shrinks monotonically as
+  `max_ref` grows, so **today's 74 is a LOWER bound on the click-time gap** — at click time
+  `max_ref` was smaller and the gap larger. A ceiling of 60 < 74 therefore holds a fortiori,
+  and the implementer's stated worry that "the ceiling depends on 74 being right" is retired.
+- 🔴 **I BRIEFED A ONE-DAY GROWTH FIGURE AS IF IT WERE A RATE, AND IT WAS ~2.5× LOW.** I told
+  the implementer "~14/day" from a single day's observation of one repo. It measured 14 days
+  across the eight busiest repos (34.1 / 23.2 / 11.2 / 10.9 / 10.4 / 8.9 / 4.8 / 0.0 per day)
+  and re-measured the fastest over 31 days at 39.0/day, landing on `RANGE_GROWTH_PER_DAY =
+  40.0`. A margin built on my number would have under-covered by 2.5×. **"One measurement is
+  not a general claim" — committed by the briefer, caught by the implementer.**
+- ⚠ **Two `gh` instrument traps from this work are in cairn, not here** — `devrc/scripts`
+  2026-09-21, rev `610596953ba16646`.
+
+- 🔴 **`below`-DOMINANCE HAD A THIRD MECHANISM NEITHER DOCUMENT NAMED, AND THE CHEAPEST FIX WAS
+  A TIMER PERIOD NOBODY HAD QUESTIONED.** The proposal offered "the class term is wrong" and
+  "clicked `#N` are ClickUp ids"; both are wrong. The class term is sound and the numbers were
+  real GitHub numbers — the TABLE was a day stale. `/audit-pr` round 0 then found the fix
+  underneath the fix: `nix/home.nix` carried `OnCalendar = "*-*-* 07:00:00"` with the comment
+  *"Daily."* and **no argument for daily over anything else**, while the picker's class is
+  `max_ref >= N` — so **the table's AGE is the ranking's error term**. One line beat ~20 payload
+  lines and two constants. **Ask what the period is, before sizing a tolerance against it.**
+- 🔴 **A SIBLING PR's SUCCESS PROVES THE SYSTEM IS UP, NOT THAT YOUR RUN IS FINE — I called a
+  FAILED run "just slow" on exactly that inference.** `#1830` settled green while `#1831` sat
+  `pending`, and I read that as "the pipeline is healthy, so `#1831` is merely slow". The
+  PipelineRun object had read `Tasks Completed: 2 (Failed: 1), Incomplete: 1` the whole time.
+  **The GitHub status is a report; the PipelineRun is the authority** —
+  `kubectl get pipelinerun -n tekton-ci` (🔴 **`tekton-ci`, NOT `tekton-pipelines`** — the wrong
+  namespace returns a confident `No resources found`).
+- 🔴 **POSTING A PR COMMENT THROUGH A SHELL IS A PUBLISH, AND MINE PUBLISHED A HOLE.** A
+  replacement formula written inside backticks in a DOUBLE-QUOTED zsh string was executed as
+  command substitution and vanished: the comment posted as *"in favour of ."* — the one sentence
+  it existed to deliver — with only `command not found: margin` on stderr to say so. **Use
+  `gh ... -F body=@<file>`**, which takes shell quoting out of the path entirely, and re-read
+  the posted body before moving on.
+- 🔴 **THE STALE NUMBER THAT FOOLED ME WAS IN THIS FILE'S OWN `How to verify` BLOCK.** I wrote
+  that the merged tree's suite was "8 above the 640/2 the pre-`#1813` tree gives"; it is
+  **641/2, delta 7**. The 640 came from no measurement at all — I copied it out of this doc,
+  where it had been true of an OLDER tree, and set it beside a freshly measured 648. The general
+  rule was already recorded here; what it missed is that **a stored number sitting in the
+  project's own doc reads as the project's ANSWER rather than as a claim to re-derive.**
+  Re-derive BOTH sides of any delta you quote. (Closed: corrected in `#1820`.)
+- ⚠ **A NEGATIVE CONTROL CAN BE TOO LOOSE TO MEAN ANYTHING.** Verifying `#1831` landed, I
+  grepped `main` for the OLD value `*-*-* 07:00:00` expecting zero hits and got one — from the
+  comment I had just written quoting it. A control that matches PROSE CITING the hazard cannot
+  distinguish it from the hazard. Anchor on the assignment (`^\s*OnCalendar\s*=`), not the
+  string.
 
 ## How to verify
 ```bash

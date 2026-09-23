@@ -35,10 +35,14 @@ CSP. The deterministic alternatives, in order:
   owned tab: nav to the channel → wake → four 4 s retries, an inline
   `--wake=6000` read, then a trusted click on a channel anchor — the read
   stayed rail-only (~300 B) throughout. Slack client-v2 gates its message-list
-  render on real visibility, which emulation does not satisfy. Consequence:
+  render on real visibility, which emulation does not satisfy. The measured
+  escape (2026-09-21): `activate --focus` on the owned tab — REAL tab
+  activation plus the i3 raise — hydrated the SAME tab that `wake` had left
+  rail-only through every retry; the gate is real document visibility.
+  `activate` takes the operator's screen: record the active window +
+  workspace first, restore them after, never make it routine. Without it,
   do channel READS on a tab that is already hydrated (the operator's live
-  Slack tab, read-only) — do not burn minutes retrying a fresh hidden tab,
-  and do not conclude breakage from it.
+  Slack tab, read-only) — and never conclude breakage from a rail-only read.
 - A hidden read on a HYDRATED tab answers with the workspace RAIL only
   (`Search`, `DMs`, `Activity`, `Files`, `Later`, `Agents & tools`,
   workspace switcher) — not the message pane.
@@ -55,15 +59,25 @@ CSP. The deterministic alternatives, in order:
   without opening anything (measured on the same channel: the recent window
   carried a 7-replies thread, last reply 24 days, and a 3-replies thread,
   last reply 6 days).
-- Thread CONTENT is not in the main channel DOM — the drawer is its own flow
-  and needs a trusted `click` on `View thread`, which must happen in a tab
-  this session owns... which is exactly the tab that will not hydrate (above).
-  ⚠ UNMEASURED: the drawer read. The untested escape is `activate` on the
-  owned tab (a real focus steal — operator's call, never routine).
+- Thread CONTENT is not in the main channel DOM — the drawer is its own flow.
+  Measured 2026-09-21 in a hydrated owned tab: the rail is the entry point —
+  `Threads` is a `DIV[role=treeitem]` with the stable id `#Vall_threads`
+  (`data-qa=virtual-list-item` — a DIFFERENT token from the retired
+  `virt-list-item` three chars shorter at :14; do not confuse the pair when
+  re-verifying, only the long form is live here); a trusted click opens the
+  Threads list, and
+  a trusted click on a list row opens THAT thread's drawer: header with
+  channel + participants, every reply with author + timestamp, a
+  `Show N more replies` expander, and the reply composer with the
+  `Also send to <channel>` affordance — the read that lies, confirmed
+  present. No `View thread` button exists anywhere in this client's message
+  pane (0 matches across `a`/`button`/`[role=button]`) — the rail is how a
+  thread opens.
 - The `Threads` rail item aggregates every thread the user is in across
-  channels, sorted by recency — the natural lane for "thread activity"
-  beyond one channel. ⚠ UNMEASURED: its read (same drawer/hydration
-  constraints).
+  channels — the natural lane for "thread activity" beyond one channel.
+  Measured: trusted click on `#Vall_threads` opens the list; rows are
+  `[role=listitem]` with dynamic `threads_view_*` ids carrying channel +
+  participants + preview (measured newest-first on the first two entries).
 
 ## Composer (Quill)
 
@@ -79,8 +93,12 @@ CSP. The deterministic alternatives, in order:
 
 - The deterministic lane is open-by-URL:
   `https://app.slack.com/client/<teamId>/<channelId>` (read the live ids from
-  the operator's live tab url). ⚠ UNMEASURED: the workspace-switcher UI flow (the rail's
-  workspace button → picker) — measure before driving it on the live tab.
+  the operator's live tab url). The switcher UI, measured 2026-09-21: the
+  button is `[aria-label^="Switch workspaces"]` and carries NO
+  `aria-expanded` — assert the picker by its APPEARANCE (`role=menu`/
+  `role=dialog` nodes with `role=menuitem`s, incl. `Add a workspace` and the
+  workspace list), never by the attribute; `key Escape` closes it and the
+  pane returns to the previous view.
 
 ## 🔴 Secrets
 

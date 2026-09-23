@@ -41,6 +41,25 @@
     .row1 { display: flex; justify-content: space-between; gap: 8px; }
     .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .asof { color: #a89984; white-space: nowrap; }
+    .rename {
+      padding: 0 5px;
+      line-height: 1.2;
+      color: #a89984;
+      background: transparent;
+      border-color: transparent;
+      flex: 0 0 auto;
+    }
+    .rename:hover { background: #3c3836; color: #ebdbb2; }
+    .labelinput {
+      font: inherit;
+      flex: 1 1 auto;
+      min-width: 0;
+      background: #1d2021;
+      color: #ebdbb2;
+      border: 1px solid #504945;
+      border-radius: 4px;
+      padding: 1px 5px;
+    }
     .metrics { display: flex; gap: 14px; margin-top: 4px; color: #d5c4a1; }
     .stale { color: #928374; font-style: italic; }
     .spark { margin-top: 4px; }

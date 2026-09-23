@@ -2,6 +2,8 @@
 
 Loaded on demand from the `bar` skill. Covers the workbench's whole-host AirVPN WireGuard
 tunnel and the `airvpn` bar pill (signal **10**, `scripts/i3status-airvpn`, net_vpn).
+BOTH hosts now run this stack (the laptop since 2026-09-21, in `roaming` mode — see the
+laptop section at the bottom); each host's pill describes THAT machine's tunnel.
 
 ## The pill
 **HOST** AirVPN WireGuard pill, **state-driven**, replaces the decommissioned host Mullvad.
@@ -81,3 +83,30 @@ A LAN-only test CANNOT reach the nebula direct-punch lockout mode, so it is NOT 
 - connect / disconnect (NOPASSWD): `sudo /etc/nixos/i3blocks-scripts/airvpn-sudo {up,down}`.
   `down` also force-deletes `airvpn_ks` (orphan guard for when `wg-quick down` no-ops on an
   already-gone iface).
+
+## The LAPTOP's tunnel (ROAMING mode)
+- **Pill + menu identical to the workbench's** (`i3status-airvpn` + `airvpn-menu` +
+  `airvpn-detail` + the manifest deploy on both hosts). The cache writer is the laptop's own:
+  **`airvpn-status-poll`** (systemd-user service+timer, 60s, `isLaptop`) — it loads the
+  workbench poller BY PATH and runs its `run_source("airvpn", fetch_airvpn)`, so the fetch/
+  verdict/stale/carry/write semantics are THE SAME CODE, one source. The laptop runs no
+  `bar-status-poll`; the pull's `install_poller_cache` never writes `airvpn.json` (pinned), so
+  the two writers share `~/.cache/bar-status/` without ever sharing a file.
+- **Setup (Zach's secret + one sudo step):** generate a NEW-device AirVPN WireGuard config
+  (a SEPARATE device from the workbench's) → `/etc/wireguard/airvpn.conf`, then
+  `sudo bash nix/system/apply-airvpn-laptop.sh` (installs the helpers + sudoers + rebuild).
+  Default-OFF, like the workbench.
+- 🔴 **ROAMING MODE is the laptop's killswitch difference.** `airvpn-updown` takes a third
+  arg: `up %i roaming` (in the conf's PostUp/PreDown, which the apply script writes). Roaming
+  mode DERIVES the allowed LAN from the uplink's connected route at PostUp and treats the
+  default gateway as the LAN router — no 192.168.50.0/24 anywhere, so the killswitch is
+  correct on any network (a hardcoded home LAN on a roaming host would allow a stranger's
+  192.168.50.0/24 and bypass nothing on the real one). **Everything fail-closed is unchanged**:
+  the uplink guard, the physical-NIC derivation, the fallback ruleset. An underivable subnet
+  degrades to NO LAN rule (gateway-only) — never to the hardcoded LAN, never to fail-open.
+  Pinned by `test_airvpn_laptop.py` (workbench mode byte-unchanged + derived-LAN + degrade).
+- 🔴 **Re-test protocol — SAME FIVE STEPS as above, LAN-FIRST.** The first connection must
+  happen on the home LAN (it is the recovery path), and step 5 (off-LAN `ssh zach@10.42.0.30`
+  through nebula) matters MORE on the laptop: it is the machine that roams. The k3s check
+  (step 2) does not apply to the laptop — it runs no cluster; substitute: nebula intact
+  (step 3) + exit IP (step 4) + off-LAN ssh (step 5) from the tunnel-up state.
