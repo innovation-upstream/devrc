@@ -122,8 +122,14 @@ notifications and repo browse are dropped.
    two-way against `nix/home.nix`'s `OnCalendar` with BOTH controls; (b) emit `margin` on
    `order_dims` AND the pre-margin class on the click row — **the PR's "one key fixes it" is
    wrong**, `plausibility=plausible, margin=8` is still ambiguous; (c) DONE, see Gotchas;
-   (d) fix the four stale "daily" claims `#1831` left in `mention-open.py`.
-   ⚠ **Do not re-cite the 19-gap reproduction as margin-covered — 19 > 8.** Use the aggregate.
+   (d) fix the **seven** stale "daily" claims in `mention-open.py` (lines 310, 332, 864, 3287,
+   3301, 3691, 3704 on `main` — 3301 is a USER-FACING runtime string, not a comment).
+   ⚠ **The reproduction everyone remembers — table 0.71 d old, head 1809 against `#1828`, so a
+   gap of 19 — is NOT margin-covered any more (19 > 8); `#1831` is what fixed it.** Cite the
+   aggregate below instead. ⚠ Round 0's red-at-base matrix (`3fa77f49`, 40 of 51 → 51/51, with 8
+   assertion-shaped failures distinct from 22 `AttributeError`/14 `TypeError`; `IMPOSSIBLE`
+   preserved at `max_ref == 0`; Tier A median 1.0, mean 3.52 → 3.99) was verified INDEPENDENTLY
+   of the implementer and must be RE-DERIVED at the new numbers, not carried forward.
    forcing: regression — the sort key filed real references BELOW; `#1831` fixes at most 5 of
    the 59 measured stale-table cases, so 54 still need the margin.
 2. **Correct ONE SENTENCE in `proposal-mention-picker-visibility.md`** — the `and **not** a
@@ -324,9 +330,6 @@ notifications and repo browse are dropped.
   inside `move()`. It came from MY brief wording it loosely; the fixer checked, found it
   imprecise, and substituted a DIFFERENT wrong name. **If you cannot state a true reason, write
   that it has none.**
-- ✅ **MEASURED — time-to-first-paint ~1.0s** (3 runs, 8-file PR, 100ms poll). Against this doc's
-  own 0.66–0.90s REST-diff figure that is essentially ONE round-trip: the program adds almost
-  nothing. Phase 3 cannot improve the first read.
 
 - 🔴 **THE #1761 LADDER RAN FIVE ROUNDS (0–4) AND EVERY FINDING WAS CREATED OR MISSED BY THE
   ROUND BEFORE IT.** Round 0 questioned the requirement and killed a guard that was structurally
@@ -405,7 +408,7 @@ notifications and repo browse are dropped.
   with a positive control first.
 
 - 🔴 **RETRACTED — "the FIRST read is already at the floor and cannot be meaningfully improved"
-  and "Phase 3 cannot improve the first read" (both above, in this section) ARE FALSE. MEASURED
+  and "Phase 3 cannot improve the first read" (the first still above; both quoted here) ARE FALSE. MEASURED
   AND REFUTED 2026-09-18: `1,212 ms → 735 ms`, a 39% cut on the FIRST read.** Those sentences
   were written from a `~1.0s` time-to-first-paint reading that never distinguished *first frame
   on screen* from *diff readable*. The cold open was making **two sequential round-trips**:
@@ -650,11 +653,14 @@ notifications and repo browse are dropped.
   - ⚠ **The stale side is an UPPER-BOUNDING ARGUMENT, not an observation.** `picks.jsonl`
     stores `(t, repo, n)` with no `max_ref`, and no historical table snapshots exist, so the
     click-time gap distribution is **unrecoverable**. Only the wrong-repo side is measured.
-- **The six wrong-repo gaps are a ONE-SIDED bound, which is what makes the ceiling safe.**
-  Today's gaps are `1810, 183, 171, 135, 79, 74`. `gap = n − max_ref` shrinks monotonically as
-  `max_ref` grows, so **today's 74 is a LOWER bound on the click-time gap** — at click time
-  `max_ref` was smaller and the gap larger. A ceiling of 60 < 74 therefore holds a fortiori,
-  and the implementer's stated worry that "the ceiling depends on 74 being right" is retired.
+- 🔴 **RETRACTED 2026-09-23 — "A ceiling of 60 < 74 therefore holds a fortiori, and the
+  implementer's stated worry that 'the ceiling depends on 74 being right' is retired" IS FALSE,
+  and so is the gap list it rested on** (the same six, restated in the ERODING-LEDGER bullet
+  below). It claimed the one-sided bound "is what makes the ceiling safe". The monotonicity is
+  right and the CONCLUSION is backwards — `gap = n − max_ref`
+  shrinks as `max_ref` grows, so a FASTER refresh makes the gaps SMALLER, not larger. Re-measured
+  at the 4-hourly cadence the minimum is **43** (table) / **37** (live), and **a ceiling of 60
+  leaks 2 of the 6**. See the ERODING-LEDGER bullet below, which supersedes this one entirely.
 - 🔴 **I BRIEFED A ONE-DAY GROWTH FIGURE AS IF IT WERE A RATE, AND IT WAS ~2.5× LOW.** I told
   the implementer "~14/day" from a single day's observation of one repo. It measured 14 days
   across the eight busiest repos (34.1 / 23.2 / 11.2 / 10.9 / 10.4 / 8.9 / 4.8 / 0.0 per day)
@@ -705,15 +711,21 @@ notifications and repo browse are dropped.
   grows, so **`#1831`'s faster refresh RAISED `max_ref` and thereby SHRANK the separation the
   ceiling was sized against.** Use the LIVE column — the table converges toward it.
   🔴 **This RETIRES round 0's "0 of 6 wrong-repo gaps leak at the ceiling margin":** at margin
-  **60, 2 of the 6 now leak into PLAUSIBLE** (gaps 43 and 60 — the predicate is
+  **60, 2 of the 6 now leak into PLAUSIBLE** (TABLE-column gaps 43 and 60; the LIVE column's
+  leakers are 37 and 60 — the predicate is
   `max_ref + margin >= n`, so `margin >= gap` leaks). At the margin a 4-hourly table actually
   produces (7–8), **0 of 6 leak**. So the `60` ceiling is not merely dead in normal operation, it
   is demonstrably WRONG in the only state where it binds. **A constant sized against a measured
   minimum of a MOVING quantity is a decaying guard — derive it from the period instead.**
 - 🔴 **THE TIMER DOES NOT SUBSUME THE MARGIN, AND THIS IS THE NUMBER THAT SETTLES IT.** Of the
   59 stale-table `below` clicks, **54 involve a ref created LESS THAN 4 HOURS before the click**
-  — inside one refresh interval of the new cadence — so **`#1831` alone would have fixed at most
-  5 of 59.** All 59 exist on GitHub; `created_at` resolved 59 of 59, ref age at click **under
+  — inside one refresh interval of the new cadence. 🔴 **CORRECTED 2026-09-23: this doc first
+  said "`#1831` alone would have fixed at most 5 of 59", and that is WRONG BY ~3× IN THE
+  MARGIN'S FAVOUR.** A click lands `BELOW` iff `table_age > ref_age`, NOT iff the ref is older
+  than one interval: table age at an arbitrary click is ~U(0, 4h15m), so a ref created `t` ago is
+  already captured with probability ≈ `min(t/4.25h, 1)`. The timer fixes the 5 outright **plus an
+  expected ~5–10 more** — **~10–15 of 59, not 5** — leaving ~44–49 for the margin. Still a real
+  win; the headline overstated it ~3×. ⚠ The exact sum needs the per-click `t_i`, on the laptop. All 59 exist on GitHub; `created_at` resolved 59 of 59, ref age at click **under
   24 h in every case, median 22 minutes, max 9.2 h**. A newly-observed 7th `below` is the
   textbook case: gap **3**, ref created **94 seconds** before the click, table 3.6 h old.
 - 🔴 **ITEM 3's ANSWER IS CONTAINMENT, NOT EQUALITY — and the equality was an accident of
@@ -724,22 +736,16 @@ notifications and repo browse are dropped.
   `6 below` is a ROW count out of 121, the `6 non-existent` a DISTINCT-PAIR count out of 100 —
   comparable only because each of those six pairs happened to be clicked exactly once. The next
   corpus where a bad ref is clicked twice breaks it silently.
-- **Wrong-repo is proven STRUCTURALLY, not by a 404 alone:** all six clicked numbers are **above
-  their repo's highest EVER-allocated ref** (GraphQL live max), so **no refresh at any cadence
-  can rescue them**. Three instruments agreeing — parsed `gh` 404, raw `-i` status line, live
-  max — with all 13 corpus repos returning 200 at repo level, so every issue-level 404 is a real
-  absence rather than an access failure.
-- ⚠ **THE CLICK-TIME GAP MAGNITUDE IS UNRECOVERABLE, BUT THE CLICK-TIME CLASS IS NOT.**
-  `picks.jsonl` stores `(t, repo, n)` with no `max_ref` and no historical table snapshots exist,
-  so every gap figure is measured against today's table or live GitHub — both **LOWER bounds** on
-  the click-time gap. The *class*, though, was recorded in telemetry at click time, so the
-  below→plausible transition is a direct observation. ⚠ **35 picks predate the telemetry
-  emitter**, so click-time statistics cover 86 of 137 rows and are a TAIL sample, not a random
-  one; and 25 more telemetry rows carry no `plausibility` dim because it is gated on `ordered`.
-- ⚠ **THE "71" IS A MOVING COUNTER, AND TWO CORRECT QUOTES OF IT DISAGREE.** It is a cumulative
-  telemetry read: `below 53 / plausible 17` at end of 09-19, `56 / 17` at end of 09-20. The PR's
-  **54/17 = 71** and this doc's **56/17 = 73** are the same counter read hours apart on
-  2026-09-20. Both are right for their moment. **Date a denominator or it reads as a constant.**
+- **Wrong-repo is proven STRUCTURALLY, not by a 404:** all six clicked numbers are **above their
+  repo's highest EVER-allocated ref**, so **no refresh at any cadence can rescue them** — which
+  is why the 6 and the 59 need different remedies.
+- ⚠ **THE GAP MAGNITUDE IS UNRECOVERABLE (see the UPPER-BOUNDING bullet above), BUT THE
+  CLICK-TIME CLASS IS NOT** — the class was recorded in telemetry AT click time, so the
+  below→plausible transition is a direct observation rather than a bound. ⚠ **The coverage, with
+  its arithmetic shown because an earlier draft of this line did not reconcile:** 137 picks − 35
+  predating the telemetry emitter = **102 joined**; of those, **86** carry a `plausibility` dim
+  (equivalently 111 telemetry rows − 25 gated out by `ordered` = 86). So click-time statistics
+  cover 86 of 137 and are a TAIL sample, not a random one.
 - ⚠ **`picks.jsonl` IS ON THE LAPTOP, NOT THE WORKBENCH** (absent here; 137 rows there as of
   2026-09-23). Any replay of the operator's real click log needs `ssh zach@10.42.0.100`. And
   `dismissed` clicks write no `picks.jsonl` row at all, so that log structurally cannot measure
