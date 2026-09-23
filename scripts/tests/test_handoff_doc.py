@@ -1495,7 +1495,11 @@ class TestRuleFDidNotMoveTheExitCodes:
         # and `EXIT_RANK_GROWTH = 12`. Same reading as the entry above — the
         # injectivity loop ran FIRST and passed, so these are two genuinely new
         # codes rather than a collision wearing a count failure.
-        assert len(codes) == 12, f"the EXIT_* constant set changed: {codes}"
+        # 12 -> 13, 2026-09-22: rule (o) adds `EXIT_LEAK_REFUSED = 13`. Same
+        # reading as the two entries above — the injectivity loop ran FIRST and
+        # passed, so this is a genuinely new code rather than a collision
+        # wearing a count failure.
+        assert len(codes) == 13, f"the EXIT_* constant set changed: {codes}"
 
     def test_the_exit_code_constants_did_not_move(self) -> None:
         """Their VALUES, not just their names — a caller reads the number."""
@@ -1514,6 +1518,10 @@ class TestRuleFDidNotMoveTheExitCodes:
         # quoted in `claude/skills/handoff/SKILL.md`'s step-5 legend, which is
         # the prose that goes stale when an unpinned value moves.
         assert (hd.EXIT_UNDEFINED_DONE, hd.EXIT_RANK_GROWTH) == (11, 12)
+        # Rule (o)'s code, pinned for the identical reason: `SKILL.md`'s step-5
+        # legend quotes the literal 13, and an unpinned value moves while the
+        # prose that quotes it stays behind.
+        assert hd.EXIT_LEAK_REFUSED == 13
 
     def test_the_prose_quotes_the_CONSTANT_not_a_stale_literal(self) -> None:
         """🔴 PROSE AGAINST THE CONSTANT, not prose against prose.
@@ -7911,3 +7919,444 @@ def test_a_heading_matching_BOTH_step1_detectors_is_not_double_counted():
     assert "does NOT clear" in note, (
         "a document smaller than the overage was reported as clearing it:\n" + note
     )
+
+
+# --------------------------------------------------------------------------
+# rule (o): the target repo's OWN leak scanner reads the delta
+#
+# 🔴 THE INCIDENT. This module commits AND pushes in one call under
+# `--confirm --push`, so there is no window in which a human can scan between
+# the two. Four `denied-identifier` leak events landed on handoff deltas and one
+# reached `main` of a PUBLIC repository. The remedy had been written as a
+# SENTENCE in the handoff document three times, in three wordings, and no code
+# ran it — `grep -c leakscan` over this module was 0.
+#
+# 🔴 WHAT THESE TESTS ARE AND ARE NOT. They are the WIRING half: a fake scanner
+# whose verdict the harness controls, so every branch is reachable and fast. The
+# closing condition the queue actually named — "a delta carrying a known-denied
+# identifier is refused by the tool, WATCHED" — is an END-TO-END run against
+# cairn's REAL `tests/leakscan.py`, recorded in the PR that added this file. A
+# stub proves the wiring; it cannot prove the thing the four incidents were about.
+# --------------------------------------------------------------------------
+
+#: A scanner that REFUSES only when `token` is somewhere in the repo's markdown.
+#:
+#: 🔴 DELTA-DEPENDENT ON PURPOSE. A stub that always refuses cannot tell the
+#: attributing half of `leak_gate` from a gate that refuses everything, and a
+#: gate that refuses everything is the permanently-red one `claude/RULES.md`
+#: says trains people to route around. `_ALWAYS_SRC` below is the always-refusing
+#: stub, used for the one case where "already red" is the point.
+_TOKEN_SCANNER_SRC = '''\
+import sys
+from pathlib import Path
+
+TOKEN = {token!r}
+CODE = {code}
+root = Path(__file__).resolve().parent.parent
+hits = []
+for p in sorted(root.rglob("*.md")):
+    if ".git" in p.parts:
+        continue
+    text = p.read_text(encoding="utf-8", errors="replace")
+    for n, line in enumerate(text.splitlines(), 1):
+        if TOKEN in line:
+            hits.append("%s:%d denied-identifier %s" % (p.relative_to(root), n, line.strip()))
+print("fakescan: 1 rule, 2 controls, both behaved")
+for h in hits:
+    print("  " + h)
+if hits:
+    print("fakescan: %d finding(s) - REFUSING" % len(hits))
+    sys.exit(CODE)
+print("fakescan: 0 findings")
+sys.exit(0)
+'''
+
+#: A scanner whose verdict does NOT depend on the delta — the "this tree was
+#: already red" world. Its output is fixed, so `new_output_lines` is empty and
+#: the exit code does not move: both tells say "not this write".
+_ALWAYS_SRC = '''\
+import sys
+print("fakescan: 1 finding(s) in a file this delta never touched")
+print("  vendor/notes.md:4 denied-identifier pre-existing")
+sys.exit({code})
+'''
+
+#: An identifier the fake scanner denies. Synthetic, and it never reaches a
+#: commit in any test here.
+DENIED_TOKEN = "redacted-canary-scope"
+
+
+def install_scanner(repo: Path, body: str, rel: str = "tests/leakscan.py") -> Path:
+    """Put a fake leak scanner where `find_leak_scanner` looks for one."""
+    p = repo / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def token_scanner(repo: Path, code: int = 1, token: str = DENIED_TOKEN,
+                  rel: str = "tests/leakscan.py") -> Path:
+    return install_scanner(
+        repo, _TOKEN_SCANNER_SRC.format(token=token, code=code), rel)
+
+
+def leaky_update(tmp_path: Path, token: str = DENIED_TOKEN) -> Path:
+    """An ordinary, otherwise-valid delta that carries a denied identifier."""
+    return write_delta(
+        tmp_path,
+        "leaky.md",
+        UPDATE_DOC + f"\n## Gotchas / decisions / dead-ends\n"
+        f"- the store is reached at scope `{token}`, which is the bit that "
+        f"must never ship\n",
+    )
+
+
+def clean_update(tmp_path: Path) -> Path:
+    return write_delta(
+        tmp_path,
+        "clean.md",
+        UPDATE_DOC + "\n## Gotchas / decisions / dead-ends\n"
+        "- the store is reached at scope `alpha-notes`, which is synthetic\n",
+    )
+
+
+class TestTheFakeScannerIsAnInstrument:
+    """🔴 VALIDATE THE INSTRUMENT BEFORE READING ITS VERDICT. Every assertion
+    below about the gate is really an assertion about this stub, until the stub
+    is shown to go both red AND green on the tree the gate will hand it."""
+
+    def test_negative_control_the_stub_refuses_a_denied_identifier(
+        self, repo: Path
+    ) -> None:
+        scanner = token_scanner(repo)
+        (repo / "claudedocs" / "planted.md").write_text(
+            f"scope: {DENIED_TOKEN}\n", encoding="utf-8")
+        out = subprocess.run([sys.executable, str(scanner)], cwd=repo,
+                             capture_output=True, text=True)
+        assert out.returncode == 1, (out.returncode, out.stdout, out.stderr)
+        assert DENIED_TOKEN in out.stdout, out.stdout
+
+    def test_positive_control_the_stub_passes_a_tree_without_it(
+        self, repo: Path
+    ) -> None:
+        """A scanner that only ever refuses is not an instrument either — the
+        pair is what makes the refusals below mean something."""
+        scanner = token_scanner(repo)
+        out = subprocess.run([sys.executable, str(scanner)], cwd=repo,
+                             capture_output=True, text=True)
+        assert out.returncode == 0, (out.returncode, out.stdout, out.stderr)
+        assert "0 findings" in out.stdout, out.stdout
+
+
+class TestTheLeakGateRefusesADeltaTheScannerDenies:
+    """The regression half: RED on pre-change code, which had no gate at all."""
+
+    def test_a_delta_carrying_a_denied_identifier_is_refused(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        token_scanner(repo)
+        before = doc_of(repo)
+        shas_before = commit_shas(repo)
+
+        res = run_tool(repo, "--confirm", update=leaky_update(tmp_path))
+
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stdout, res.stderr)
+        assert "status=leak-refused" in res.stderr, res.stderr
+        # 🔴 THE SCANNER'S OWN LINE, not a summary: a refusal that does not say
+        # which line and which rule is one the operator cannot act on.
+        assert DENIED_TOKEN in res.stderr, res.stderr
+        assert "denied-identifier" in res.stderr, res.stderr
+        # …and NOTHING WRITTEN, which is this module's standing property.
+        assert doc_of(repo) == before, "the refused delta was left in the doc"
+        assert commit_shas(repo) == shas_before, "a commit was made despite the refusal"
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == [], f"paths left STAGED after the refusal: {staged}"
+
+    def test_exit_2_from_the_scanner_is_also_a_refusal(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 `could not vouch` IS NOT A PASS. cairn's scanner exits 2 when one
+        of its OWN controls misbehaved, and its docstring says in as many words
+        that 2 is not a clean result. Zero is the only pass."""
+        token_scanner(repo, code=2)
+
+        res = run_tool(repo, "--confirm", update=leaky_update(tmp_path))
+
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stdout, res.stderr)
+        assert "exit=2" in res.stderr, res.stderr
+        assert "ZERO IS THE ONLY PASS" in res.stderr, res.stderr
+
+    def test_the_refusal_is_reachable_ONLY_through_rule_o(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 PROVE THE GUARD REACHABLE, NOT MERELY BREAKABLE. The same delta
+        with NO scanner in the repo reaches `status=written` — so the refusal
+        above is rule (o) firing, not some neighbouring rule refusing the
+        fixture for a reason of its own (an unforced rank, a missing `via:`,
+        a stale base). Without this control the test above is green whether or
+        not the gate exists."""
+        res = run_tool(repo, "--confirm", update=leaky_update(tmp_path))
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert "status=written" in res.stdout, res.stdout
+
+
+class TestTheGateIsScopedToTheDelta:
+    """🔴 THE SCOPING DECISION, AND WHY IT IS NOT "REFUSE ON ANY NON-ZERO".
+
+    The target tree may be red for something this call did not cause. Refusing
+    there would block a legitimate handoff and train the next person to route
+    around the gate — worse than no gate. So the gate is differential: it asks
+    whether the scan says anything about THIS write that it does not say
+    without it.
+    """
+
+    def test_a_tree_that_was_ALREADY_red_does_not_block_the_handoff(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        install_scanner(repo, _ALWAYS_SRC.format(code=1))
+
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
+
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert "status=written" in res.stdout, res.stdout
+        # 🔴 AND IT SAYS SO. A gate that silently declined to attribute is
+        # indistinguishable from one that vouched.
+        assert "COULD NOT ATTRIBUTE" in res.stdout, res.stdout
+        assert "CANNOT SEE" in res.stdout, res.stdout
+
+    def test_the_same_ALWAYS_red_scanner_still_catches_a_code_that_MOVES(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """The other side of the boundary above: "already red" is not a blanket
+        exemption. A scan whose CODE moves because of this delta is attributed
+        to it even though the tree was refusing before."""
+        # Red before (a planted file the delta never touches) AND red for a
+        # second, delta-caused reason, with a different code.
+        token_scanner(repo, code=2)
+        (repo / "claudedocs" / "planted.md").write_text(
+            f"pre-existing: {DENIED_TOKEN}\n", encoding="utf-8")
+        # Sanity: the tree already refuses without any delta.
+        pre = subprocess.run([sys.executable, str(repo / "tests/leakscan.py")],
+                             cwd=repo, capture_output=True, text=True)
+        assert pre.returncode == 2, pre.stdout
+
+        res = run_tool(repo, "--confirm", update=leaky_update(tmp_path))
+
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stdout, res.stderr)
+        # The NEW line is the delta's, and it is what is shown.
+        assert "claudedocs/handoff-sample-topic.md" in res.stderr, res.stderr
+
+    def test_new_output_lines_is_ORDERED_and_set_based(self) -> None:
+        """Unit: the attribution primitive. Nothing here parses a format —
+        a line present in one run and absent from the other is the whole rule,
+        which is what makes it work for a scanner this tool has never seen."""
+        assert hd.new_output_lines("a\nb\n", "a\nb\n") == []
+        assert hd.new_output_lines("a\nb\n", "a\nc\nb\nd\n") == ["c", "d"]
+        # A line REMOVED by the delta is not a finding about the delta.
+        assert hd.new_output_lines("a\nb\n", "a\n") == []
+
+    def test_caused_by_this_write_needs_only_ONE_tell(self) -> None:
+        """Both tells are load-bearing and neither subsumes the other."""
+        silent_1 = hd.ScanRun(1, "")
+        silent_0 = hd.ScanRun(0, "")
+        assert hd.caused_by_this_write(silent_0, silent_1), (
+            "a scanner that prints NOTHING still answers with its exit code")
+        noisy_before = hd.ScanRun(1, "one\n")
+        noisy_after = hd.ScanRun(1, "one\ntwo\n")
+        assert hd.caused_by_this_write(noisy_before, noisy_after), (
+            "a tree already at exit 1 can still GAIN a finding")
+        assert not hd.caused_by_this_write(noisy_before, noisy_before)
+
+
+class TestARepoWithNoScannerPasses:
+    """🔴 MOST REPOSITORIES HAVE NONE. Refusing there would make the tool
+    unusable and would be the permanently-red gate everyone learns to click
+    through."""
+
+    def test_the_write_lands(self, repo: Path, update_file: Path) -> None:
+        """INVARIANT GUARD — green at `origin/main` too, because there was no
+        gate to get in the way. It pins that rule (o) did not change the
+        ordinary path; it is NOT regression coverage for the leak itself."""
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert "status=written" in res.stdout, res.stdout
+
+    def test_and_it_says_the_delta_was_NOT_scanned(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 A PASS BY ABSENCE IS NOT A CLEAN RESULT. A run that printed
+        nothing here would be indistinguishable from a scanned, clean delta —
+        `claude/RULES.md`'s reassuring-zero rule, applied to a gate that
+        silently did not run."""
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert "NO SCANNER FOUND" in res.stdout, res.stdout
+        assert "PASS BY ABSENCE" in res.stdout, res.stdout
+        for candidate in hd.LEAKSCAN_CANDIDATES:
+            assert candidate in res.stdout, (candidate, res.stdout)
+
+    def test_a_clean_delta_under_a_REAL_scanner_still_lands(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """THE NEGATIVE CONTROL FOR THE WHOLE GATE: a gate that refuses
+        everything is not a gate."""
+        token_scanner(repo)
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert "status=written" in res.stdout, res.stdout
+        assert "exited 0 with this delta" in res.stdout, res.stdout
+
+
+class TestTheScannerLookupIsAClosedSet:
+    def test_each_declared_candidate_is_found(self, repo: Path) -> None:
+        for rel in hd.LEAKSCAN_CANDIDATES:
+            scratch = repo / rel
+            scratch.parent.mkdir(parents=True, exist_ok=True)
+            scratch.write_text("", encoding="utf-8")
+            assert hd.find_leak_scanner(repo) is not None, rel
+            scratch.unlink()
+
+    def test_an_undeclared_path_is_NOT_a_scanner(self, repo: Path) -> None:
+        """NEGATIVE CONTROL: a lookup, not a search. A glob for `*leak*` would
+        find a fixture or a README and attribute its exit code to this delta."""
+        (repo / "tools").mkdir()
+        (repo / "tools" / "leakscan.py").write_text("", encoding="utf-8")
+        assert hd.find_leak_scanner(repo) is None
+
+    def test_the_first_declared_hit_wins(self, repo: Path) -> None:
+        for rel in hd.LEAKSCAN_CANDIDATES:
+            p = repo / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("", encoding="utf-8")
+        found = hd.find_leak_scanner(repo)
+        assert found == repo / hd.LEAKSCAN_CANDIDATES[0], found
+
+
+class TestAScannerThatCannotBeRunIsARefusal:
+    """🔴 A GATE THAT CANNOT READ IS NOT A PASS, and this is the hole the
+    differential would otherwise have: a scanner that hangs, or cannot be
+    started, answers IDENTICALLY on both runs — same code, same (empty) output —
+    so the attribution logic would call it "not this write" and let the delta
+    through. `run_leak_scanner` raises instead, and the raise is a refusal
+    before any baseline is taken.
+    """
+
+    def test_a_real_timeout_really_raises(self, repo: Path, monkeypatch) -> None:
+        """The raise itself, driven by a real sleeping process rather than
+        asserted. Timeout pinned down to 1s so the test costs a second."""
+        scanner = install_scanner(repo, "import time\ntime.sleep(30)\n")
+        monkeypatch.setattr(hd, "LEAKSCAN_TIMEOUT_SECONDS", 1)
+        with pytest.raises(hd.ScannerUnusable) as exc:
+            hd.run_leak_scanner(scanner, repo)
+        assert "did not finish within 1s" in str(exc.value)
+
+    def test_the_gate_turns_that_raise_into_a_refusal(
+        self, repo: Path, monkeypatch
+    ) -> None:
+        scanner = install_scanner(repo, "import sys\nsys.exit(0)\n")
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        original = doc.read_bytes()
+
+        def boom(_scanner: Path, _repo: Path) -> hd.ScanRun:
+            raise hd.ScannerUnusable("it did not finish within 300s")
+
+        monkeypatch.setattr(hd, "run_leak_scanner", boom)
+        verdict = hd.leak_gate(
+            repo, doc, "claudedocs/handoff-sample-topic.md", original,
+            "merged\n", scanner,
+        )
+        assert "status=leak-refused" in verdict.refusal, verdict
+        assert "CANNOT READ IS NOT A PASS" in verdict.refusal, verdict
+        assert verdict.notes == "", verdict
+
+    def test_a_baseline_that_cannot_be_taken_is_a_refusal_too(
+        self, repo: Path, monkeypatch
+    ) -> None:
+        """The second arm: the delta scan answered (non-zero) and the run that
+        would ATTRIBUTE it did not. Refusing is the only honest verdict — the
+        alternative is passing a delta nothing could clear."""
+        scanner = install_scanner(repo, "import sys\nsys.exit(1)\n")
+        doc = repo / "claudedocs" / "handoff-sample-topic.md"
+        original = doc.read_bytes()
+        calls: list[int] = []
+
+        def once(_scanner: Path, _repo: Path) -> hd.ScanRun:
+            calls.append(1)
+            if len(calls) == 1:
+                return hd.ScanRun(1, "something\n")
+            raise hd.ScannerUnusable("it could not be started: boom")
+
+        monkeypatch.setattr(hd, "run_leak_scanner", once)
+        verdict = hd.leak_gate(
+            repo, doc, "claudedocs/handoff-sample-topic.md", original,
+            "merged\n", scanner,
+        )
+        assert "status=leak-refused" in verdict.refusal, verdict
+        assert "baseline" in verdict.refusal, verdict
+        # 🔴 THE CALLER'S INVARIANT: `main` owns the rollback and expects the
+        # doc to hold the MERGED text on return, whatever the verdict.
+        assert doc.read_text(encoding="utf-8") == "merged\n"
+
+
+class TestTheGateRunsOnTheCONFIRMEDWriteOnly:
+    def test_a_proposal_run_scans_nothing(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """The default mode writes NOTHING — not the doc, not a commit — so
+        there is no delta on disk to scan and nothing to refuse. `tree_hash`
+        either side is the same instrument `TestDeclineWritesNothing` uses.
+
+        INVARIANT GUARD: green at `origin/main` as well — the proposal run
+        wrote nothing there either. It exists so the gate cannot start writing
+        on the path whose whole contract is that it does not.
+        """
+        token_scanner(repo)
+        before_hash = tree_hash(repo)
+        res = run_tool(repo, update=leaky_update(tmp_path))
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert "status=proposed" in res.stdout, res.stdout
+        assert tree_hash(repo) == before_hash, "the proposal run wrote something"
+
+    def test_a_local_only_confirm_is_gated_too(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 `--confirm` WITHOUT `--push` still makes a real commit, and a
+        commit is one `git push` away from the thing the four incidents were.
+        Gating only the push would be gating the wrong half."""
+        token_scanner(repo)
+        res = run_tool(repo, "--confirm", update=leaky_update(tmp_path))
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stderr)
+
+
+class TestRuleODidNotMoveTheOtherExits:
+    """INVARIANT GUARDS, all three — green at `origin/main` too. The neighbours, re-pinned. Rule (o) sits inside the write block, which is
+    the one place every earlier refusal has already returned from — but a new
+    `return` there is exactly the shape that has silently renumbered a status
+    in this module before."""
+
+    def test_no_advance_is_still_4(self, repo: Path, update_file: Path) -> None:
+        assert run_tool(repo, update=update_file,
+                        advanced=None).returncode == hd.EXIT_NO_ADVANCE
+
+    def test_no_change_is_still_5(self, repo: Path, tmp_path: Path) -> None:
+        same = write_delta(tmp_path, "same.md", BASE_GOAL_SECTION)
+        assert run_tool(repo, "--confirm",
+                        update=same).returncode == hd.EXIT_NO_CHANGE
+
+    def test_a_blocked_commit_is_still_3_with_a_scanner_present(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE ORDER PIN. The scan runs BEFORE the `git add`, so a clean
+        delta whose COMMIT is refused must still reach `status=failed` (3) and
+        still roll back — the gate must not have swallowed that path."""
+        token_scanner(repo)
+        write_exec(repo / ".git" / "hooks" / "pre-commit",
+                   "echo 'blocked by guard' >&2\nexit 1\n")
+        before = doc_of(repo)
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
+        assert res.returncode == hd.EXIT_FAIL, (res.returncode, res.stderr)
+        assert "status=failed" in res.stderr, res.stderr
+        assert doc_of(repo) == before
