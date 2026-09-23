@@ -3847,14 +3847,25 @@ def restore_doc_bytes(doc: Path, original: bytes | None) -> bool:
 
 
 def _undo_write(
-    repo: Path, doc: Path, relpath: str, original: bytes | None
+    repo: Path, doc: Path, relpath: str, original: bytes | None, staged: bool
 ) -> str:
-    """Undo the doc write + `git add` after a commit that never happened.
+    """Undo the doc write, and the `git add` IF THIS RUN MADE ONE.
 
     🔴 PATH-LIMITED, exactly like the commit it is undoing. A blanket
     `git reset` would unstage a co-worker's staged files as a side effect of OUR
     failure — trading one shared-checkout defect for a worse one. `git restore
     --staged -- <path>` touches only the index entry for that path.
+
+    🔴 AND PATH-LIMITED IS NOT ENOUGH: `staged` IS REQUIRED BECAUSE THE INDEX
+    ENTRY FOR *OUR OWN PATH* CAN BE SOMEONE ELSE'S. This function had ONE caller
+    — the failed-commit arm, where the tool really had `git add`ed — and rule (o)
+    gave it a second on a path where nothing was ever staged. It still ran
+    `restore --staged`. MEASURED with another session's staged edit to the same
+    doc present beforehand: staged before `[<relpath>]` → rc 13 → staged after
+    `[]`, while the run printed "nothing from this run is left staged or
+    written" — true as written, and concealing a change that was not from this
+    run. The parameter is REQUIRED rather than defaulted so a third caller has to
+    answer the question instead of inheriting an answer.
 
     Best-effort and non-raising: this runs on an error path, and a rollback that
     threw would replace the caller's real diagnosis with its own. Whatever it
@@ -3862,18 +3873,19 @@ def _undo_write(
     would be the same defect one level down.
     """
     left: list[str] = []
-    try:
-        # Unstage first: if restoring the bytes fails we still want the index
-        # clean, because a staged path is the half that another session's
-        # `git commit` picks up.
-        git(repo, "restore", "--staged", "--", relpath)
-    except (GitError, OSError):
-        # `git restore` predates nothing we support, but a very old git or a
-        # path git no longer knows about can still refuse.
+    if staged:
         try:
-            git(repo, "reset", "--quiet", "HEAD", "--", relpath)
+            # Unstage first: if restoring the bytes fails we still want the index
+            # clean, because a staged path is the half that another session's
+            # `git commit` picks up.
+            git(repo, "restore", "--staged", "--", relpath)
         except (GitError, OSError):
-            left.append(f"still STAGED: {relpath}")
+            # `git restore` predates nothing we support, but a very old git or a
+            # path git no longer knows about can still refuse.
+            try:
+                git(repo, "reset", "--quiet", "HEAD", "--", relpath)
+            except (GitError, OSError):
+                left.append(f"still STAGED: {relpath}")
     if not restore_doc_bytes(doc, original):
         left.append(f"still MODIFIED: {relpath}")
     if left:
@@ -3900,17 +3912,36 @@ def _undo_write(
             # so move any explanation into the message body above instead.
             fixes.append(f"    git -C {repo} restore --staged -- {relpath}")
         if any(s.startswith("still MODIFIED") for s in left):
-            fixes.append(
-                f"    # the doc did not exist before this run — delete it:\n"
-                f"    rm -f -- {doc}"
-                if original is None
-                else
-                "    # its previous content is the bytes this process read, and "
-                "they are\n    # not necessarily in git. Run the unstage line "
-                "above FIRST — until you do,\n    # the index still holds THIS "
-                "run's merged text, so `git restore -- <path>`\n    # would "
-                "restore that and look like it worked. Only after unstaging,\n"                "    # and only if the doc was clean at HEAD, is it safe."
-            )
+            if original is None:
+                fixes.append(
+                    f"    # the doc did not exist before this run — delete it:\n"
+                    f"    rm -f -- {doc}"
+                )
+            elif staged:
+                fixes.append(
+                    "    # its previous content is the bytes this process read, "
+                    "and they are\n    # not necessarily in git. Run the unstage "
+                    "line above FIRST — until you do,\n    # the index still "
+                    "holds THIS run's merged text, so `git restore -- <path>`\n"
+                    "    # would restore that and look like it worked. Only "
+                    "after unstaging,\n    # and only if the doc was clean at "
+                    "HEAD, is it safe."
+                )
+            else:
+                # 🔴 THE SAME ADVICE IS WRONG WHEN THIS RUN STAGED NOTHING.
+                # There is no unstage line above to run first, and the index
+                # entry — if there is one — is SOMEONE ELSE'S. Telling the
+                # operator to `git restore` here would restore another session's
+                # staged edit over the bytes this process read, and look like it
+                # worked. The advice printed on a degraded path must not be the
+                # thing that loses the work.
+                fixes.append(
+                    "    # its previous content is the bytes this process read, "
+                    "and they are\n    # not necessarily in git. This run staged "
+                    "NOTHING, so do not\n    # `git restore -- <path>`: that "
+                    "takes the INDEX's copy, which may be\n    # another "
+                    "session's staged edit. Restore the bytes by hand."
+                )
         return (
             "\n🔴 ROLLBACK INCOMPLETE — the commit did not happen, but this tree "
             "was left changed: " + "; ".join(left) + "\n"
@@ -3919,15 +3950,29 @@ def _undo_write(
             "commit.\n" + "\n".join(fixes)
         )
     # 🔴 Deliberately NOT "byte-identical": two measured exceptions. If the doc
-    # was STAGED-modified before the run, `restore --staged` resets its index
-    # entry to HEAD rather than to that staged content; and a `claudedocs/`
-    # directory this run created is not removed. Both are harmless, and neither
-    # is what the sentence would be claiming. A comment is a claim — say the
-    # thing that is true, which is the thing the caller actually needs.
+    # was STAGED-modified before the run AND this run staged it too,
+    # `restore --staged` resets its index entry to HEAD rather than to that
+    # staged content; and a `claudedocs/` directory this run created is not
+    # removed. Both are harmless, and neither is what the sentence would be
+    # claiming. A comment is a claim — say the thing that is true, which is the
+    # thing the caller actually needs.
+    #
+    # 🔴 AND THE SENTENCE SPLITS ON `staged` FOR THE SAME REASON THE CODE DOES.
+    # "restored and unstaged … nothing from this run is left staged" was printed
+    # on a run that staged nothing — literally true, and it read as a report that
+    # the index had been cleaned, which is how a silent unstage of ANOTHER
+    # session's entry went unnoticed. Claim only the half that happened.
+    if staged:
+        return (
+            "\n(rolled back: the doc was restored and unstaged, so nothing from "
+            "this run is left staged or written — re-running is safe and will "
+            "not append the update twice.)"
+        )
     return (
-        "\n(rolled back: the doc was restored and unstaged, so nothing from this "
-        "run is left staged or written — re-running is safe and will not append "
-        "the update twice.)"
+        "\n(rolled back: the doc was restored to the bytes this run found. This "
+        "run staged nothing, so the index was not touched — any staged change to "
+        "this path is someone else's and is still there. Re-running is safe and "
+        "will not append the update twice.)"
     )
 
 
@@ -3979,17 +4024,37 @@ LEAKSCAN_SHOWN_MAX = 20
 LEAK_PRE_EXISTING_FLAG = "--leak-pre-existing-approved"
 
 
-class ScanRun(typing.NamedTuple):
-    """One scanner invocation: its exit code and everything it printed.
+#: 🔴 THE TRAILER KEY THAT MAKES AN APPROVED-THROUGH RUN READABLE FROM THE
+#: ARTIFACT, and it exists because stdout is not a durable record. The decision
+#: used to live only in the run's own output: a pushed handoff approved past a
+#: refusing scanner was indistinguishable in `git log` from one the scanner
+#: vouched for. The transcript is not the answer either — `transcript-push.sh`
+#: ships only a bounded TAIL, so an approval early in a long session is gone.
+LEAK_TRAILER_KEY = "Leak-Gate-Approved"
 
-    🔴 STDOUT AND STDERR ARE CONCATENATED, NOT INTERLEAVED, and that is fine for
-    the only thing read off `output`: display. Nothing here parses the format —
-    `claude/RULES.md`: parsing a tool's output makes its FORMAT a dependency you
-    did not pin, and this gate has to work against a scanner it has never seen.
+
+class ScanRun(typing.NamedTuple):
+    """One scanner invocation: its exit code and each stream it printed.
+
+    🔴 THE STREAMS ARE KEPT APART, AND A CONCATENATION IS WHAT THIS REPLACED.
+    `stdout + stderr` was display-only and looked harmless — but the refusal
+    shows a TAIL, and stderr sat last, so any scanner writing more than
+    `LEAKSCAN_SHOWN_MAX` warning lines to stderr pushed every line of stdout out
+    of it. MEASURED in cairn's own shape (finding and `REFUSING` on stdout, 25
+    `COULD NOT READ …` warnings on stderr, which its scanner really does emit):
+    the tail contained NEITHER the finding NOR the verdict. A repo with 20+
+    unreadable files therefore produced a refusal the operator could not act on,
+    which is the failure this gate's design explicitly rejects.
+
+    Still nothing PARSES either stream — `claude/RULES.md`: parsing a tool's
+    output makes its FORMAT a dependency you did not pin, and this gate has to
+    work against a scanner it has never seen. Keeping them apart is about which
+    lines survive an elision, not about reading them.
     """
 
     code: int
-    output: str
+    stdout: str
+    stderr: str
 
 
 class ScannerUnusable(RuntimeError):
@@ -3999,16 +4064,58 @@ class ScannerUnusable(RuntimeError):
     absence of one, and it is still a refusal on THIS gate — a gate that cannot
     read is not a pass. Kept separate from `GitError` so `main`'s `status=failed`
     handler cannot swallow it and report a git problem.
+
+    🔴 IT COVERS EXACTLY TWO MECHANISMS — an `OSError` raising the process, and
+    a timeout — AND THAT IS A CEILING, NOT AN OVERSIGHT. Every IN-PROCESS
+    failure (`ImportError`, `SyntaxError`, a missing dependency, an interpreter
+    that cannot run the file) reaches this gate as a non-zero EXIT CODE, which
+    is indistinguishable from "I ran and found something". Telling those apart
+    would mean parsing the scanner's output. So the classification has NO
+    reliable form, and every arm that turns on it — the opt-in's scope, the
+    flag's help text, `write-gate.md` §H — says that rather than implying a
+    completeness it cannot deliver.
     """
 
 
-def find_leak_scanner(repo: Path) -> Path | None:
-    """The target repo's own leak scanner, or None if it has none."""
+class ScannerLookup(typing.NamedTuple):
+    """What the closed-set lookup found at the ONE declared relative path.
+
+    🔴 THREE FIELDS RATHER THAN `Path | None`, BECAUSE `is_file()` ANSWERS A
+    NARROWER QUESTION THAN THE ONE THE ABSENCE NOTE GOES ON TO STATE. `is_file()`
+    is False for three different worlds and only one of them is "this repository
+    has no scanner": it is also False for a DIRECTORY at that path and for a
+    DANGLING SYMLINK. Both were MEASURED to print `NO SCANNER FOUND … looked for
+    tests/leakscan.py` — a false statement — and to let the delta land unscanned.
+
+    `path` non-None ⇒ a regular file we can run. `unusable` non-empty ⇒ something
+    IS there and cannot be run, which is the `ScannerUnusable` arm reached
+    without spawning anything. Both empty ⇒ a genuine absence.
+    """
+
+    path: Path | None
+    rel: str
+    unusable: str
+
+
+def find_leak_scanner(repo: Path) -> ScannerLookup:
+    """The target repo's own leak scanner, and what is at that path if not one.
+
+    🔴 `exists()` FOLLOWS THE LINK, so it is False for a dangling symlink too —
+    which makes `is_symlink()` the only question that separates "nothing here"
+    from "a link to nothing". A gate that branched on `exists()` alone would
+    still call a broken symlink an absence, and a broken symlink is the
+    realistic one: it is what a tree move leaves behind.
+    """
     for rel in LEAKSCAN_CANDIDATES:
         candidate = repo / rel
         if candidate.is_file():
-            return candidate
-    return None
+            return ScannerLookup(candidate, rel, "")
+        if candidate.is_symlink() and not candidate.exists():
+            return ScannerLookup(
+                None, rel, "it is a symlink whose target does not exist")
+        if candidate.exists():
+            return ScannerLookup(None, rel, "it is not a regular file")
+    return ScannerLookup(None, "", "")
 
 
 def run_leak_scanner(scanner: Path, repo: Path) -> ScanRun:
@@ -4019,6 +4126,21 @@ def run_leak_scanner(scanner: Path, repo: Path) -> ScanRun:
     ours to choose — and an unrecognised flag would make argparse exit 2, which
     this gate reads as a refusal. The bare invocation is the one every candidate
     is guaranteed to understand.
+
+    🔴 `errors="replace"`, AND A STRICT DECODER WAS A WRITE-LEAKING DEFECT. This
+    gate runs whatever the target repository ships and captures BOTH its streams,
+    so the bytes decoded here are not under this tool's control. MEASURED: a
+    scanner emitting one latin-1 byte raised `UnicodeDecodeError` — a `ValueError`
+    — which escaped this function, `leak_gate` AND `main`'s
+    `except (GitError, OSError)`, ending the run at rc 1 (a code the exit model
+    does not define) with a bare traceback and THE UNVOUCHED DOC STILL WRITTEN.
+    That breaks the invariant the write block is built on: `status=failed` reads
+    as "nothing happened", so it must BE that.
+
+    ⚠ REACHABILITY IS STATED HONESTLY RATHER THAN CLAIMED: no scanner was found
+    in the wild that does this, and cairn's own reads with `errors="replace"`.
+    The undecodable line still reaches the operator, with U+FFFD where the byte
+    was — a mangled line they can act on beats a traceback they cannot.
     """
     try:
         proc = subprocess.run(
@@ -4026,6 +4148,7 @@ def run_leak_scanner(scanner: Path, repo: Path) -> ScanRun:
             cwd=str(repo),
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=LEAKSCAN_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
@@ -4034,15 +4157,21 @@ def run_leak_scanner(scanner: Path, repo: Path) -> ScanRun:
         ) from None
     except OSError as exc:
         raise ScannerUnusable(f"it could not be started: {exc}") from None
-    return ScanRun(proc.returncode, proc.stdout + proc.stderr)
+    return ScanRun(proc.returncode, proc.stdout, proc.stderr)
 
 
 class LeakVerdict(typing.NamedTuple):
     """`refusal` is stderr and means NOTHING may be written; `notes` is stdout
-    on a run that proceeds. Exactly one of them is non-empty."""
+    on a run that proceeds. Exactly one of those two is non-empty.
+
+    `trailer` is the DURABLE half and is non-empty on exactly one arm: an
+    approved-through run. It is the trailer VALUE, not the line —
+    `commit_message` owns the key and the formatting, so there is one appender.
+    """
 
     refusal: str
     notes: str
+    trailer: str = ""
 
 
 def leak_absent_note(repo: Path) -> str:
@@ -4061,48 +4190,71 @@ def leak_absent_note(repo: Path) -> str:
     )
 
 
-def leak_clean_note(scanner: Path, repo: Path, relpath: str) -> str:
+def leak_clean_note(rel: str, relpath: str) -> str:
     return (
-        f"leakscan: {_scanner_rel(scanner, repo)} exited 0 with this delta "
+        f"leakscan: {rel} exited 0 with this delta "
         f"written into {relpath} — the repo's OWN gate vouches for it."
     )
 
 
-def _scanner_rel(scanner: Path, repo: Path) -> str:
-    try:
-        return str(scanner.relative_to(repo))
-    except ValueError:  # pragma: no cover — `find_leak_scanner` builds it from repo
-        return str(scanner)
-
-
-def _rerun_hint(scanner: Path, repo: Path) -> str:
-    return f"{sys.executable} {_scanner_rel(scanner, repo)}   # from {repo}"
+def _rerun_hint(rel: str, repo: Path) -> str:
+    return f"{sys.executable} {rel}   # from {repo}"
 
 
 def _scanner_tail(run: ScanRun) -> tuple[list[str], int]:
-    """The last `LEAKSCAN_SHOWN_MAX` lines of a scan, and how many were dropped.
+    """The last `LEAKSCAN_SHOWN_MAX` lines of EACH stream, and how many dropped.
 
-    The TAIL rather than the head: every scanner here ends with its verdict, and
-    a head-first elision cuts exactly that off. One place, because both the
-    refusal and the approved-through note print the same thing for the same
-    reason — the operator has to see what was refused.
+    🔴 PER-STREAM, AND A PER-RUN TAIL IS WHAT THIS REPLACED. The earlier version
+    tailed `stdout + stderr` as one string under a docstring claiming "every
+    scanner here ends with its verdict" — a claim about the SCANNER that the
+    concatenation made false about the TEXT: stderr sat last, so 20 warning
+    lines on stderr evicted the whole of stdout. Tailing each stream separately
+    is what makes the verdict survive a noisy one, and it is why the streams are
+    kept apart on `ScanRun` at all.
+
+    ⚠ THE CLAIM THIS DOCSTRING NOW MAKES IS THE WEAKER, TRUE ONE: the tail of a
+    stream is where a scanner that ends with a verdict puts it. Nothing here
+    knows which stream any given scanner uses, which is exactly why both are
+    shown rather than one being chosen.
+
+    Each stream gets its own header line naming how much of it survived, so a
+    reader can tell an elision from a silent stream. Both headers and lines come
+    back in one list — the callers indent it and print it, and neither parses it.
     """
-    lines = run.output.splitlines()
-    shown = lines[-LEAKSCAN_SHOWN_MAX:]
-    return shown, len(lines) - len(shown)
+    shown: list[str] = []
+    elided = 0
+    for label, text in (("stdout", run.stdout), ("stderr", run.stderr)):
+        lines = text.splitlines()
+        if not lines:
+            continue
+        tail = lines[-LEAKSCAN_SHOWN_MAX:]
+        elided += len(lines) - len(tail)
+        shown.append(
+            f"--- {label}: last {len(tail)} of {len(lines)} line(s) ---")
+        shown.extend(tail)
+    return shown, elided
 
 
 def leak_refusal_report(
-    scanner: Path, repo: Path, relpath: str, run: ScanRun
+    rel: str, repo: Path, relpath: str, run: ScanRun
 ) -> str:
     """The scanner would not vouch for the tree with this delta in it.
 
     🔴 THE SCANNER'S OWN LINES ARE REPRODUCED, and the trade is deliberate: a
     refusal that does not say which line and which rule is one the operator
-    cannot act on. It does re-state the flagged text into this transcript — but
-    that text is already in the operator's own scratch file and was about to be
-    committed, so the transcript is not where it becomes public; the commit is,
-    and that is the thing this refusal stops.
+    cannot act on.
+
+    ⚠ THE JUSTIFICATION FOR THAT TRADE IS NARROWER THAN IT WAS WRITTEN, and the
+    two halves it overclaimed are worth knowing before widening what is printed.
+    (1) The flagged text is NOT necessarily the operator's own about-to-be-
+    committed content: the scanner reads the whole TREE, so a finding can come
+    from an untracked, unrelated file this handoff never displayed and was never
+    going to commit. (2) The transcript is not a private channel either —
+    `scripts/transcript-push.sh` exports a bounded tail of every transcript, to
+    a self-hosted authenticated store rather than a public one. So the honest
+    statement of the trade is: this moves flagged text from the repository into
+    a session transcript that is itself exported, in exchange for a refusal the
+    operator can act on — and it stops the COMMIT, which is the public one.
 
     🔴 IT CLAIMS THE SCANNER REFUSED, NOT THAT THIS DELTA CAUSED IT. The gate
     makes no attribution, so the message offers BOTH remedies and does not
@@ -4110,7 +4262,6 @@ def leak_refusal_report(
     was already red — say so explicitly with the flag.
     """
     shown, elided = _scanner_tail(run)
-    rel = _scanner_rel(scanner, repo)
     return (
         f"status=leak-refused scanner={rel} exit={run.code}\n"
         f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
@@ -4119,12 +4270,16 @@ def leak_refusal_report(
         f"to be committed and pushed.\n"
         f"  🔴 ZERO IS THE ONLY PASS. A scanner that exits 2 is saying `could "
         f"not vouch` — a control of its own misbehaved — which is not a clean "
-        f"result either.\n"
-        f"  The last {len(shown)} line(s) it printed:\n"
+        f"result either. A non-zero exit can ALSO mean the scanner failed "
+        f"before it read anything (a bad import, a syntax error): the exit code "
+        f"cannot tell those apart, so read the lines below rather than the "
+        f"number.\n"
+        f"  What it printed (last {LEAKSCAN_SHOWN_MAX} line(s) of each "
+        f"stream):\n"
         + "".join(f"    {line}\n" for line in shown)
         + (
             f"    … and {elided} earlier line(s) — see them all with:\n"
-            f"      {_rerun_hint(scanner, repo)}\n"
+            f"      {_rerun_hint(rel, repo)}\n"
             if elided
             else ""
         )
@@ -4134,25 +4289,30 @@ def leak_refusal_report(
         f"  🔴 IF THIS TREE WAS ALREADY RED for something this handoff did not "
         f"cause, that is an OPERATOR DECISION and not a guess this tool may "
         f"make for you: read the lines above, then re-run with "
-        f"{LEAK_PRE_EXISTING_FLAG}, which records on the run that it was "
-        f"approved through. A handoff delta is the exact path four leak events "
-        f"took, one of them onto a PUBLIC repository's mainline."
+        f"{LEAK_PRE_EXISTING_FLAG}, which records on the run AND in the commit "
+        f"that it was approved through. A handoff delta is the exact path four "
+        f"leak events took, one of them onto a PUBLIC repository's mainline."
     )
 
 
 def leak_approved_note(
-    scanner: Path, repo: Path, relpath: str, run: ScanRun
+    rel: str, repo: Path, relpath: str, run: ScanRun
 ) -> str:
     """The scanner refused and the OPERATOR approved it through. WRITTEN.
 
     🔴 AN APPROVED-THROUGH RUN MUST NOT READ LIKE A CLEAN ONE, and that is the
     whole reason this is a flag rather than an attribution heuristic. Both end
     `status=written`; only this one carries the flag's own name, the scanner's
-    exit code and its output, so a reader of the transcript afterwards can tell
-    which decision was made and re-take it.
+    exit code and its output.
+
+    ⚠ AND THIS NOTE IS NOT THE DURABLE HALF. stdout survives only as long as the
+    transcript, which `transcript-push.sh` ships as a bounded TAIL — so an
+    approval early in a long session is unrecoverable from it. The COMMIT
+    TRAILER (`LEAK_TRAILER_KEY`) is what makes the decision readable off the
+    artifact itself; this note is what makes it readable at the moment it is
+    taken. Two readers, two channels, and neither is the other's backup.
     """
     shown, elided = _scanner_tail(run)
-    rel = _scanner_rel(scanner, repo)
     return (
         f"🔴 LEAK GATE APPROVED THROUGH by {LEAK_PRE_EXISTING_FLAG} — {rel} "
         f"exited {run.code} with this delta written into {relpath}, and the "
@@ -4163,35 +4323,49 @@ def leak_approved_note(
         f"delta.\n"
         f"  ⚠ NOTHING HERE CHECKED THAT. The gate does not compare scans, so "
         f"what was approved is everything below, whatever produced it.\n"
-        f"  The last {len(shown)} line(s) {rel} printed"
-        + (f" ({elided} earlier line(s) elided)" if elided else "")
-        + ":\n"
+        f"  🔴 AND THE SCANNER MAY NEVER HAVE SCANNED. A non-zero exit is all "
+        f"this gate sees, and a scanner that died on an import, a syntax error "
+        f"or a missing dependency exits non-zero without reading one byte of "
+        f"the tree — indistinguishable here from a finding. Read the lines "
+        f"below before trusting that anything was examined.\n"
+        f"  What {rel} printed (last {LEAKSCAN_SHOWN_MAX} line(s) of each "
+        f"stream"
+        + (f"; {elided} earlier line(s) elided" if elided else "")
+        + "):\n"
         + "".join(f"    {line}\n" for line in shown)
-        + f"  Full output: {_rerun_hint(scanner, repo)}"
+        + f"  Full output: {_rerun_hint(rel, repo)}"
     )
 
 
 def leak_unscannable_report(
-    scanner: Path, repo: Path, relpath: str, reason: str
+    rel: str, repo: Path, relpath: str, reason: str
 ) -> str:
-    """The scanner could not be run, so it never read the delta."""
-    rel = _scanner_rel(scanner, repo)
+    """The scanner could not be run, so it never read the delta.
+
+    ⚠ NAMED FOR WHAT IT COVERS, WHICH IS LESS THAN THE NAME SUGGESTS: the two
+    mechanisms `ScannerUnusable` can see (a spawn failure, a timeout) plus the
+    two `find_leak_scanner` can see without spawning anything (a directory, a
+    dangling symlink). An in-process failure is NOT here — it exits non-zero and
+    is classified a refusal, which the operator opt-in can clear. See
+    `ScannerUnusable`.
+    """
     return (
         f"status=leak-refused scanner={rel}\n"
         f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
-        f"  {rel} exists, so this repository HAS a leak gate — but this run "
-        f"could not get a verdict out of it: {reason}.\n"
+        f"  {rel} IS PRESENT, so this repository declares a leak gate — but "
+        f"this run could not get a verdict out of it: {reason}.\n"
         f"  🔴 A GATE THAT CANNOT READ IS NOT A PASS. `could not vouch` and "
         f"`clean` are different answers, and only one of them lets a delta onto "
-        f"a shared branch.\n"
+        f"a shared branch — and `{LEAK_PRE_EXISTING_FLAG}` does not reach this "
+        f"arm: there is no verdict for anyone to have read and approved.\n"
         f"  The delta was rolled back. Fix the scanner — it is the same gate "
         f"this repo's CI runs — then re-run:\n"
-        f"      {_rerun_hint(scanner, repo)}"
+        f"      {_rerun_hint(rel, repo)}"
     )
 
 
 def leak_gate(
-    repo: Path, relpath: str, scanner: Path | None, approved: bool
+    repo: Path, relpath: str, lookup: ScannerLookup, approved: bool
 ) -> LeakVerdict:
     """Rule (o). Run the repo's own scanner over the tree with the delta already
     written into it, and refuse unless it exits 0. This gate does not touch the
@@ -4212,28 +4386,45 @@ def leak_gate(
     OFF THE PERMANENTLY-RED LIST. A target tree can be red for something this
     call did not cause; with no way past, the gate would be unclearable and
     `claude/RULES.md` says such a gate trains everyone to route around it.
-    `--leak-pre-existing-approved` is that way past — explicit, and recorded in
-    the run's own output by `leak_approved_note`, so an approved-through run is
-    distinguishable afterwards from a clean one.
+    `--leak-pre-existing-approved` is that way past — explicit, recorded in the
+    run's own output by `leak_approved_note` AND stamped on the commit by
+    `LEAK_TRAILER_KEY`, so an approved-through run is distinguishable afterwards
+    from a clean one both at the moment it is taken and from the artifact.
 
-    ⚠ THE OPT-IN DOES NOT COVER THE UNRUNNABLE ARM, deliberately. A scanner that
-    hung or could not be started never produced a verdict, so there is nothing
-    for an operator to have read and approved — and approving an absence is the
-    reassuring zero this gate exists to refuse to print.
+    ⚠ THE OPT-IN'S SCOPE IS NARROWER THAN "ANYTHING THAT WENT WRONG", AND SAYING
+    SO IS THE POINT. It does not cover the arms that produced NO verdict — a
+    hang, a spawn failure, or a declared path that is not a runnable file — for
+    the obvious reason that there is nothing for an operator to have read and
+    approved. It DOES cover an in-process failure (a bad import, a syntax error,
+    a missing dependency), because such a scanner exits non-zero and that is
+    indistinguishable here from a finding. That is not a gap this code can close:
+    the classification has no reliable form without parsing output this gate has
+    to work without. What closes it instead is telling the operator —
+    `leak_approved_note` says the scanner may never have scanned, and the help
+    text and `write-gate.md` §H say the same thing rather than the opposite.
     """
-    if scanner is None:
+    if lookup.unusable:
+        return LeakVerdict(
+            leak_unscannable_report(
+                lookup.rel, repo, relpath, lookup.unusable), ""
+        )
+    if lookup.path is None:
         return LeakVerdict("", leak_absent_note(repo))
     try:
-        run = run_leak_scanner(scanner, repo)
+        run = run_leak_scanner(lookup.path, repo)
     except ScannerUnusable as exc:
         return LeakVerdict(
-            leak_unscannable_report(scanner, repo, relpath, str(exc)), ""
+            leak_unscannable_report(lookup.rel, repo, relpath, str(exc)), ""
         )
     if run.code == 0:
-        return LeakVerdict("", leak_clean_note(scanner, repo, relpath))
+        return LeakVerdict("", leak_clean_note(lookup.rel, relpath))
     if approved:
-        return LeakVerdict("", leak_approved_note(scanner, repo, relpath, run))
-    return LeakVerdict(leak_refusal_report(scanner, repo, relpath, run), "")
+        return LeakVerdict(
+            "",
+            leak_approved_note(lookup.rel, repo, relpath, run),
+            f"{lookup.rel} exit={run.code}",
+        )
+    return LeakVerdict(leak_refusal_report(lookup.rel, repo, relpath, run), "")
 
 
 def uncommitted_paths(repo: Path) -> list[str]:
@@ -4429,10 +4620,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="override the status=leak-refused refusal: proceed even though the "
         "TARGET repo's own leak scanner exits non-zero, asserting that a human "
         "read its output and judged the finding PRE-EXISTING in that tree rather "
-        "than caused by this delta. The run RECORDS that it was approved "
-        "through, so it does not read afterwards as a clean scan. Does NOT apply "
-        "when the scanner could not be RUN at all — there is no verdict to "
-        "approve.",
+        "than caused by this delta. AN OPERATOR'S CALL, NOT AN AGENT'S. The run "
+        "records it on stdout AND stamps `Leak-Gate-Approved: <scanner> "
+        "exit=<n>` on the commit, so it does not read afterwards as a clean "
+        "scan. SCOPE: it clears any NON-ZERO EXIT, which includes a scanner that "
+        "died on a bad import or a syntax error and read nothing — the exit code "
+        "cannot tell that from a finding, so read the output, not the number. It "
+        "does NOT reach the arms that produced no exit code at all: a hang, a "
+        "failure to start the process, or a declared scanner path that is not a "
+        "runnable file.",
     )
     p.add_argument(
         "--push",
@@ -4479,8 +4675,11 @@ def resolve_session_id(env: typing.Mapping[str, str] | None = None) -> str:
         return ""
 
 
-def commit_message(subject: str, session_id: str | None = None) -> str:
-    """`subject`, carrying exactly one `Claude-Session-Id:` trailer when known.
+def commit_message(
+    subject: str, session_id: str | None = None, leak_trailer: str = ""
+) -> str:
+    """`subject`, carrying exactly one `Claude-Session-Id:` trailer when known,
+    and a `Leak-Gate-Approved:` trailer when rule (o) was approved through.
 
     🔴 THE TRAILER IS WHAT MAKES A HANDOFF DOC'S ARC RECONSTRUCTIBLE — it is the
     WRITER half `scripts/lib/handoff_arc.py` reads, and the half that includes
@@ -4500,11 +4699,31 @@ def commit_message(subject: str, session_id: str | None = None) -> str:
 
     The clones this function exists FOR are the ones with no hook: this arc's own
     originating commit is unstamped for exactly that reason.
+
+    🔴 `leak_trailer` IS THE ONLY DURABLE RECORD THAT RULE (o) WAS APPROVED
+    THROUGH. `/handoff` is driven by an AGENT, not by a human at a terminal, so
+    `--leak-pre-existing-approved` is a flag an agent can reach on its own — for
+    a gate whose stated stake is a public repository. The escape is kept (an
+    unclearable gate is the permanently-red one everyone routes around) and the
+    RECORDING side is closed instead: an approved-through push is visible in
+    `git log` forever, whereas the run's stdout survives only in a transcript
+    `scripts/transcript-push.sh` ships as a bounded TAIL. It carries the scanner
+    and its exit code so the decision can be re-taken rather than merely noticed.
+
+    🔴 SAME APPENDER, SECOND KEY — NOT A SECOND APPENDER.
+    `session_trailer.append_trailer` already composes with the
+    `prepare-commit-msg` hook and is idempotent per key, so passing `key=` is
+    what makes two writers coexist in one message. `claude/RULES.md`: one rule,
+    one place. Its own validity check is opaque-string discipline — it rejects
+    only what would forge or truncate a trailer line — so a value like
+    `tests/leakscan.py exit=2` passes without anyone teaching it a new shape.
     """
     sid = resolve_session_id() if session_id is None else session_id
-    if not sid:
-        return subject
-    return session_trailer.append_trailer(subject, sid)
+    message = subject if not sid else session_trailer.append_trailer(subject, sid)
+    if leak_trailer:
+        message = session_trailer.append_trailer(
+            message, leak_trailer, key=LEAK_TRAILER_KEY)
+    return message
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -5114,10 +5333,16 @@ def main(argv: list[str] | None = None) -> int:
     # `status=failed` reads as "nothing happened"; it must therefore BE that.
     original: bytes | None = doc.read_bytes() if doc.exists() else None
     committed = False
+    # 🔴 THIS RUN'S OWN STAGING, TRACKED RATHER THAN ASSUMED. `_undo_write` used
+    # to unstage unconditionally, which on the rule (o) path reset an index entry
+    # this run never wrote — in a shared checkout, someone else's. The flag flips
+    # on the line AFTER `git add` returns, so an `add` that itself failed leaves
+    # it False.
+    staged = False
     # 🔴 RESOLVED BEFORE THE WRITE so a repo with no scanner costs nothing but a
     # `Path.is_file()`, and so the refusal below cannot be a surprise about where
     # the scanner was expected to be.
-    scanner = find_leak_scanner(repo)
+    lookup = find_leak_scanner(repo)
     try:
         doc.parent.mkdir(parents=True, exist_ok=True)
         doc.write_text(merged_text, encoding="utf-8")
@@ -5129,22 +5354,24 @@ def main(argv: list[str] | None = None) -> int:
         # staged path behind on the refusal, which is the shape
         # `TestBlockedCommitLeavesNoTrace` exists for.
         verdict = leak_gate(
-            repo, relpath, scanner, args.leak_pre_existing_approved
+            repo, relpath, lookup, args.leak_pre_existing_approved
         )
         if verdict.refusal:
             print(
-                f"{verdict.refusal}{_undo_write(repo, doc, relpath, original)}",
+                f"{verdict.refusal}"
+                f"{_undo_write(repo, doc, relpath, original, staged)}",
                 file=sys.stderr,
             )
             return EXIT_LEAK_REFUSED
         print(verdict.notes)
         git(repo, "add", "--", relpath)
+        staged = True
         subject = f"docs(handoff): {args.advanced.strip().splitlines()[0]}"[:100]
-        # 🔴 THE TRUNCATION IS ON THE SUBJECT, AND THE TRAILER IS ADDED AFTER IT.
-        # `[:100]` bounds the summary line; applying it to the whole message
-        # would have cut the trailer off exactly when the summary was longest,
+        # 🔴 THE TRUNCATION IS ON THE SUBJECT, AND THE TRAILERS ARE ADDED AFTER
+        # IT. `[:100]` bounds the summary line; applying it to the whole message
+        # would have cut a trailer off exactly when the summary was longest,
         # i.e. silently and on the busiest commits.
-        message = commit_message(subject)
+        message = commit_message(subject, leak_trailer=verdict.trailer)
         # Path-limited on purpose: exactly one commit, carrying exactly the
         # diff that was shown, even if the caller had other work staged.
         git(repo, "commit", "-m", message, "--", relpath)
@@ -5156,7 +5383,7 @@ def main(argv: list[str] | None = None) -> int:
         # would DISCARD a committed change — the opposite of the fix.
         note = (
             COMMIT_LANDED_NOTE if committed
-            else _undo_write(repo, doc, relpath, original)
+            else _undo_write(repo, doc, relpath, original, staged)
         )
         print(f"status=failed\n{exc}{note}", file=sys.stderr)
         return EXIT_FAIL
