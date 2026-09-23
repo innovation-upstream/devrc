@@ -298,6 +298,29 @@ RULES: list[dict] = [
     dict(id="payload-not-extension", name="the unit is THIS PR's payload, never a file extension",
          probe="never a file extension",
          apply=r"never a file extension|ambiguous is not zero"),
+    # 🔴 THE MEASURED READING — three rows, because each is a separate
+    # instruction a round can be checked against, and each probe is chosen to
+    # sit WHOLLY ON ONE LINE of the skill. That is not cosmetic: paragraphs are
+    # split on blank lines and matched with the newlines still in them, so a
+    # probe straddling a wrap silently stops matching. This ledger's previous
+    # coverage of the enforcement paragraph was exactly that — an accidental
+    # match on `base-is-current-tip`'s "not a zero", broken by a reflow and
+    # found only because the reverse-direction test went red.
+    dict(id="measured-executable-zero",
+         name="a MEASURED zero — no executable line changed — overrules a stated count",
+         probe="a MEASURED zero can overrule it",
+         apply=(r"measured 0 executable|no executable line|executable lines? "
+                r"changed|measured zero")),
+    dict(id="measured-reading-is-weaker",
+         name="the mechanical reading is STRICTLY WEAKER and never classifies payload",
+         probe="it is strictly WEAKER — it never",
+         apply=(r"strictly weaker|never classifies payload|prose[- ]only round|"
+                r"unmeasured")),
+    dict(id="self-range-refused",
+         name="`audited=X..X` is an INPUT refusal (4), never the gate's verdict (5)",
+         probe="IS REFUSED (exit 4), and that is NOT the gate's verdict",
+         apply=(r"self[- ]range|audited=(\w+)\.\.\1\b|spans zero commits|"
+                r"earned by nothing")),
     dict(id="decide-once-revert-test", name="decide payload/scaffolding ONCE at round 1 — the REVERT TEST",
          probe="REVERT TEST", apply=r"revert test"),
     dict(id="one-number-one-name", name="ONE NUMBER, ONE NAME",
