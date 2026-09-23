@@ -206,7 +206,19 @@ SKILL_RELS = (
 # counted m, NOT 164 + 17. That distinction is the one the three paragraphs
 # above record going wrong, and the arithmetic happens to differ here: 164 + 17
 # is 181, which would have been one too high and refused every run.
-MIN_TESTS = 180
+# 🔴 RAISED AGAIN 2026-09-23, 180 -> 187, at m = 196 — COUNTED the same way,
+# from a green run of the module (`196 passed`) put through the same formula,
+# `196 - min(50, max(1, 196 // 20))` = 196 - 9 = 187. Seven node ids were added
+# by `feat/unearned-ledger-detection`; the number is still the formula's output
+# on a counted m, NOT 180 + 7 (which is 187 only by coincidence — the floor is
+# a function of the CURRENT measurement, and the two agreeing here is not a
+# method). 🔴 AND IT WAS CI THAT CAUGHT IT, NOT THE AUTHOR: the gate lives in
+# `test_mutation_battery_anchors.py`, which is in NEITHER the five modules that
+# change touched NOR `scoped-tests.sh`'s selection for it — the mapper selects
+# files that NAME what changed, and that module names the HARNESS rather than
+# the target. Assume a change adding tests to `test_audit_dispatch.py` needs
+# this literal moved, and run that module by hand.
+MIN_TESTS = 187
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
