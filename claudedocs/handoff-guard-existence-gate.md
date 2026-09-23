@@ -22,16 +22,27 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   🔴 FROZEN AT ROUND 1.
 
 ## State now
-- ✅ **`#1799` MERGED (`a371da4e`) AND DEPLOYED TO BOTH HOSTS**, verified at the consumer:
-  store path moved, `_read_off_a_ref` 0 → 6, and the original symptom reproduced-and-gone
-  with a positive control beside it. Sandbox tier on the merged head:
-  `collected=24037 passed=24032 skipped=4 failed=1`, that one failure inherited.
-- **`#1811` OPEN** — `/the-algorithm` steps 1–3 applied to what the ladder left behind.
-  DELETES `GIT_VERB_SCAN_CAP`, its truncation and its test; makes `REF_PREFIX_RX` and the
-  git-verb check linear. Net −77 lines before round 0's fixes. Round 0 ran: 7 findings,
-  no 🔴, verdict *deletion candidate* — all addressed.
-- ⚠ **`#1811` is NOT merged and NOT deployed.** The hook is a `home.file` copy: merge →
-  pull → `home-manager switch`/`ship.sh`, or both hosts keep running `#1799`'s version.
+- **`#1811` OPEN at `ca5e1eea`, `MERGEABLE CLEAN`, and ✅ ALL FOUR SANDBOX CHECKS GREEN**
+  (`pytests`, `nodetests`, `gotests`, `cairn-client-runs`) — re-read 2026-09-23. That is the
+  tier every round of BOTH ladders said it could not verify, and it is now clean on this head.
+- **Audit ladder on `#1811`: rounds 0 and 1 done, both with findings, both fixed.**
+  `c37d515e` deletion · `f97aa7c9` doc · `680826a5` round-0 fixes · `ca5e1eea` round-1 fixes.
+  Claims block posted for round 1 (`payload=60`, `audited=680826a5..ca5e1eea`).
+  🔴 **ROUND 2 HAS NOT RUN.** Round 1 returned findings that needed fixing, so by the
+  ladder's own rule this is not the last round.
+- **`#1799` (the parent) is MERGED (`a371da4e`) AND DEPLOYED to both hosts**, verified at the
+  consumer. `#1811` is NOT deployed — the hook is a `home.file` copy, so merge → pull →
+  `ship.sh`, or both hosts keep running `#1799`'s version.
+- ⚠ `main` has moved a long way since this doc was last written (now `1c7ad1b9`); `#1811`
+  is many commits behind. `mergeStateStatus=CLEAN` speaks to CONFLICTS only, never to
+  whether the merged tree is green.
+- **Housekeeping done:** the scratch worktrees `devrc-guard-base`, `devrc-algo-mut` and
+  `devrc-guard-exist` are removed; their dirty files were byte-identical to `origin/main`
+  or to `ca5e1eea` and were copied to the session scratchpad first. `devrc-algo` (the live
+  `#1811` worktree) remains. `devrc-guardfix` belongs to another session — left alone.
+- **No `clawgate-task:` field**, deliberately: `clawgate_handoff.sh resolve` found one task
+  linked to this session (`#321`) with `role=read` and NONE worked. Reading a task is not
+  doing its work.
 
 ## Open investigations — live diagnosis state
 
@@ -114,16 +125,23 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   settle. The question was retired by deleting its subject.
 
 ## Next steps (ranked)
-1. **Merge `#1811`, then `scripts/ship.sh` both hosts.** Read every per-host line, then
-   confirm the deployed copy has NO `GIT_VERB_SCAN_CAP` constant — `readlink -f` is the
-   arbiter, never a diff.
-   forcing: gate — a fleet-wide Stop hook whose deployed copy carries a cap, a truncation
-   and a test that this repo has decided should not exist.
+1. **Run round 2 on `#1811` as a DELTA over `680826a5..ca5e1eea`, or take the operator
+   decision to stop the ladder and merge.** The ladder rule says a round that found things
+   is not the last; the counter-argument is that rounds 0 and 1 found NO code defects — the
+   code is verified clean on every correctness axis (equivalence exact over ~11k exhaustive
+   sequences + 400k random strings; zero commands newly arm; both new tests kill their
+   mutants by their own assertions; fail-open across 31 hostile payloads) and **every
+   finding in both rounds was prose that has now been corrected three times.** That is the
+   documented non-terminating shape. If merging: `gh pr merge 1811 --squash`, verify by
+   CONTENT (a squash is never an ancestor), then `ship.sh` both hosts, then confirm the
+   deployed copy has NO `GIT_VERB_SCAN_CAP`.
+   forcing: gate — a fleet-wide Stop hook sitting unmerged with two audit rounds paid for,
+   on a branch many commits behind a `main` that has moved.
 2. **Operator call: lift `test_the_hook_spawns_no_subprocess_on_any_path`?** An OBSERVATION
-   from `#1092`'s body frozen into a prohibition, and wider than the `shutil` standard the
-   same file uses for the same hot path. Lifting it allows `git cat-file -e <ref>:<path>`,
-   making the ref exemption VERIFIED instead of shape-matched — which would have prevented
-   the `handoff-x.md` false firing this arc actually hit. 🔴 Round 0 of `#1811` independently
+   from `#1092`'s body frozen into a prohibition, wider than the `shutil` standard the same
+   file uses for the same hot path. Lifting it allows `git cat-file -e <ref>:<path>`, making
+   the ref exemption VERIFIED instead of shape-matched — which would have prevented the
+   `handoff-x.md` false firing this arc actually hit. 🔴 Round 0 of `#1811` independently
    named this as the one requirement it would drop, and noted no round has escalated it.
    forcing: user — reopens the fix shape the operator originally chose; not mine to take.
 
@@ -236,29 +254,64 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   `scripts/claude-hooks/**`. `cairn-client-runs`, `gotests` and `nodetests` all success.
   Waiting ~20 minutes for that verdict is the only reason the merge was not blind.
 
+- 🔴 **THE QUADRATIC DID NOT LEAVE, IT MOVED — AND I DELETED THE COMMENT THAT SAID SO.**
+  The scans are linear PER CALL; `_read_off_a_ref` runs once per `HANDOFF_PATH_RX` match, so
+  k matches x a full-head scan is O(n²) per COMMAND — round 1 measured **27.9x at k=6,400 /
+  261 KB**. The deleted comment had it exactly right ("IS PER CALL, NOT PER COMMAND … what
+  the cap buys is the complexity CLASS"). **Three drafts of that justification, each
+  falsified by the next round:** wrong operand → per-call-licensing-per-command → the one
+  that survives. Reaching for a better reason is what regenerates the error.
+- 🔴 **THE ARGUMENT THAT SURVIVES: THE CAP NEVER DELIVERED WHAT IT WAS CREDITED WITH.** It
+  did not bound `HANDOFF_PATH_RX` (`:287`), which is ITSELF O(n²) on a long path-class run
+  and dominates the hot path. MEASURED on `git show <64 KB of 'a'>:claudedocs/handoff-x.md`:
+  **1,598 ms WITH the cap, 1,636 ms without** — no material difference. ⚠ That also bounds
+  how strong ANY perf claim about this file can be, and the `HANDOFF_PATH_RX` quadratic is
+  pre-existing in BOTH trees — unreached, unfixed, and NOT this arc's to close.
+- 🔴 **I WROTE THE CORRECT FIX AND REVERTED IT, ON PURPOSE.** A bounded-tail for
+  `REF_PREFIX_RX` is answer-preserving (it is `\Z`-anchored, so only the trailing token can
+  match). It was reverted because it added code PLUS two new two-way ledgers to bound a case
+  measured as unreachable (corpus max 18 matches/command, ~34 KB) on a PostToolUse-only path
+  whose failure is a LOST ARMING, not a hung turn. Applying `/the-algorithm` to my own fix is
+  what caught it. Recorded in-source for whoever finds reach has changed.
+- 🔴 **"CORPUS INCIDENCE IS ZERO" WAS FALSE AND THE MISS HAD A MECHANISM.** Round 1
+  re-derived INCLUDING `subagents/` transcripts (one level deeper than `projects/*/*.jsonl`):
+  **2** sites flip, not 0, and only one is this arc's probe. The other is a genuine ref-read
+  from a DIFFERENT session five days earlier —
+  `subprocess.run(['git','-C',R,'show',ref+':claudedocs/handoff-tmux-webapp.md'])`, token
+  ending in `'`. The narrowing has already cost a real arming once. It is also not "the
+  QUOTED COMPUTED ref": ordinary shell QUOTING supplies the trailing quote, so a quoted
+  LITERAL flips too. All ten spellings are now pinned.
+- 🔴 **ROUND 0 SOLVED THE MUTANT THIS ARC HAD LEFT OPEN, AND THE ANSWER WAS A BROKEN
+  HARNESS.** `test_the_scan_cap_BOUNDS_the_search` built its pad as
+  `"A" * (GIT_VERB_SCAN_CAP * 3 + 7)`; under `CAP = 10**9` that is a **3,000,000,007-byte
+  string**. The hang was the FIXTURE allocating 3 GB. A fixture parameterised on the constant
+  being mutated SCALES WITH IT and can never observe the mutation. It also refuted the
+  recorded hypothesis (hidden superlinearity in `COMMENT_PAT`/`_bases`) which, had it been
+  true, would have made the deletion unsafe.
+- 🔴 **A CLAIM IN A TITLE IS A CLAIM.** `#1811`'s title said it deleted "the scan cap, its
+  test **and its ranked follow-up**"; the diff touched two code files and never this doc, so
+  rank 1 survived on `main` pointing at a constant the same PR removed. Found by round 0, not
+  by the author. Fixed in `f97aa7c9` — in the PR that caused it.
+- ⚠ **`~/workspace/devrc` IS NOW OFF-LIMITS FOR WRITES** (CLAUDE.md, 2026-09-20): no
+  `commit`/`add`/`checkout`/`switch`/`stash` in the primary clone — every change goes through
+  a throwaway worktree off `origin/main`, because a checkout there changes LIVE behaviour on
+  this host (every `mkOutOfStoreSymlink` target resolves into that tree, `claim-work`
+  included). All work in this arc already used worktrees; the rule is recorded because the
+  next session will want to write the doc and must not do it in the primary clone.
+
 ## How to verify
 ```bash
-# the defect and the fix, against whichever copy you mean — run BEFORE and AFTER a switch
-python3 - <<'PY'
-import importlib.machinery, importlib.util, os
-H = os.path.expanduser("~/.claude/hooks/handoff-write-guard.py")   # or the branch copy
-ld = importlib.machinery.SourceFileLoader("g", H)
-sp = importlib.util.spec_from_file_location("g", H, loader=ld)
-m = importlib.util.module_from_spec(sp); ld.exec_module(m)
-def probe(cmd):
-    return m.handoff_read_docs({"tool_name": "Bash", "tool_input": {"command": cmd},
-                                "cwd": os.path.expanduser("~/workspace/devrc")})
-print("absent doc, plain    ->", probe('grep -rn "claudedocs/handoff-no-such-doc.md" .'))
-print("real doc             ->", probe('cat claudedocs/handoff-guard-existence-gate.md'))
-print("absent doc, off a ref->", probe('git -C ~/workspace/devrc show HEAD:claudedocs/handoff-no-such-doc.md'))
-PY
-# AFTER the fix: [] · [<path>] · [<path>]
-# 🔴 The THIRD line still arms by design — that is the declared residual over-match, and it
-#    is the one that actually fired on this session. Rank 3 above is the decision about it.
+# #1811's state and its sandbox tier — the tier both ladders could not speak for
+gh pr view 1811 --repo innovation-upstream/devrc --json state,mergeable,mergeStateStatus
+S=$(gh pr view 1811 --repo innovation-upstream/devrc --json headRefOid --jq .headRefOid)
+gh api "/repos/innovation-upstream/devrc/commits/$S/statuses" \
+  --jq 'group_by(.context)[]|max_by(.created_at)|"\(.context)=\(.state)"'
 
-# the deployed copy is the new one — readlink is the arbiter, never a diff
-grep -c _read_off_a_ref "$(readlink -f ~/.claude/hooks/handoff-write-guard.py)"
-
+# the guard module on the PR branch
 nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc-guard-exist/scripts/claude-hooks/tests/test_handoff_write_guard.py -q
+  ~/workspace/devrc-algo/scripts/claude-hooks/tests/test_handoff_write_guard.py -q   # 101 passed
+
+# the cap really is gone from the branch, and still present in the DEPLOYED copy
+grep -c GIT_VERB_SCAN_CAP ~/workspace/devrc-algo/scripts/claude-hooks/handoff-write-guard.py  # comments only
+grep -c GIT_VERB_SCAN_CAP "$(readlink -f ~/.claude/hooks/handoff-write-guard.py)"             # >0 until shipped
 ```
