@@ -343,12 +343,33 @@ DASH_C_RX = re.compile(r"(?:^|\s)-C\s*(\S+)")
 # `'`, so a quoted LITERAL goes too (`git show "refs/heads/docs/handoff-x":` flips).
 # All ten quoted spellings flip; every UNQUOTED spelling (`$B`, `${B}`, `$(…)`,
 # backticks, plain refs) still arms.
-# 🔴 AND THE INCIDENCE IS NOT ZERO — THAT CLAIM WAS FALSE AND IT MATTERED. Re-derived
-# by round 1 of #1811 over the transcripts INCLUDING `subagents/`: **2** real sites
-# flip, and only one is this arc's own probe. The other is a genuine ref-read from a
-# different session five days before this PR —
-# `subprocess.run(['git','-C',R,'show',ref+':claudedocs/handoff-tmux-webapp.md'])`,
-# whose token ends in `'`. So this narrowing has already cost a real arming once.
+# 🔴 AND THE INCIDENCE IS NOT ZERO — THAT CLAIM WAS FALSE AND IT MATTERED. But its
+# REPLACEMENT shipped as a bare "**2** real sites", carrying no method, no date and no
+# corpus size — the exact defect this same file forbids in those words under
+# "NO COUNT IS QUOTED HERE ON PURPOSE" (`:1058`, in `handoff_read_docs`). It is
+# RETRACTED as a quotable number and re-derived here, with its method:
+#
+#   MEASURED 2026-09-23 over **6,621** transcripts — `~/.claude/projects/*/*.jsonl` plus
+#   `~/.claude/projects/*/*/subagents/*.jsonl`. ⚠ SUBAGENTS SIT AT DEPTH 4: a
+#   `*/subagents/*.jsonl` glob matches **ZERO** of the 5,628 of them and still prints a
+#   confident total. Unit: every Bash `tool_use` command containing `claudedocs/`,
+#   COMMENT_PAT-stripped and scanned exactly as `handoff_read_docs` scans it (`:1024`);
+#   a site is one match whose basename passes `HANDOFF_BASENAME_RX` and where the WIDE
+#   `[^\s:]+` token class WOULD have granted the exemption this class denies, counted
+#   distinct by (session, token, ref-context).
+#   RESULT: **6 sites across 3 sessions — and 5 of the 6 are THIS ARC'S OWN PROBES**
+#   (three author-session sites on 2026-09-20, two audit-round-2 sites on 2026-09-23).
+#   **EXACTLY ONE IS GENUINE**: 2026-09-15, session `f0decd34`,
+#   `subprocess.run(['git','-C',R,'show',ref+':claudedocs/handoff-tmux-webapp.md'])`,
+#   token ending in `'`. That one is the load-bearing half — the incidence is not zero,
+#   and the narrowing has cost a real arming once.
+#
+# 🔴 THE COUNT INFLATES ITSELF, WHICH IS WHY IT MUST SHIP WITH ITS DATE AND ITS ARC-OWN
+# SPLIT. Every probe of this narrowing writes a NEW flipping site into the corpus, and
+# one of the three 2026-09-20 sites is the `gh pr edit` that published the previous
+# count — WRITING THE NUMBER DOWN INCREMENTED IT. A later re-derivation that omits the
+# split will read the growth as real incidence and be wrong. Re-measure; state the split.
+#
 # It is still ACCEPTED — the direction is fail-SAFE (a lost exemption makes the guard
 # quieter, never blocking) and the alternative reinstates a quadratic — but it is a
 # measured cost, not a free one, and it is PINNED by
@@ -415,13 +436,54 @@ SEGMENT_SPLIT_RX = re.compile(r"[;&|\n]")
 # `git show <64 KB of 'a'>:claudedocs/handoff-x.md`: **1,598 ms WITH the cap, 1,636 ms
 # without** — no material difference, because the cap was bounding the cheap half.
 # What makes the residual acceptable is REACH, stated as such rather than dressed up as
-# linearity: corpus max is 18 matches/command and ~34 KB, `stop_decision` never calls
-# this path so the cost is PostToolUse-only, and a blown hook loses an ARMING (silent,
-# fail-safe) rather than hanging a turn.
-# ⚠ A bounded-tail fix IS available and is answer-preserving (`REF_PREFIX_RX` is
-# `\Z`-anchored, so only the trailing token can match). It was written and then REVERTED:
-# it adds code plus two new two-way ledgers to bound an unreachable case, which is the
-# over-guarding this deletion exists to undo. Reach for it if reach ever changes.
+# linearity: re-derived 2026-09-23 over 6,621 transcripts (method beside `REF_PREFIX_RX`,
+# `:351`; ⚠ line refs in this file drift — grep the quoted heading, do not trust the number),
+# corpus max
+# is **18** matches/command and a **33,673 B** command, and `stop_decision` never calls
+# this path so the cost is PostToolUse-only.
+#
+# 🔴 THE "FAIL-SAFE" FRAMING HAS A FLOOR, AND HERE IS THE NUMBER IT WAS MISSING. "A blown
+# hook loses an ARMING (silent, fail-safe) rather than hanging a turn" is true only ABOVE
+# the CLI's hook timeout. BELOW it nothing is lost and nothing is silent: it is pure turn
+# latency, on a hook that fires after EVERY tool call. MEASURED 2026-09-23 in this
+# worktree on `"git show ref:claudedocs/handoff-x.md " * k`, uncapped vs a 4096 B head
+# cap, VERDICTS IDENTICAL AT EVERY k (best of 3 up to k=1600; SINGLE run above that, so
+# read the top row as an order of magnitude, not a constant — a loaded box moves it):
+#     k=  200 (  7.4 KB)     10.4 ms vs   8.9 ms   1.2x
+#     k=  400 ( 14.8 KB)     39.6 ms vs  20.0 ms   2.0x   <- divergence starts here
+#     k= 1600 ( 59.2 KB)    659   ms vs  90.6 ms   7.3x
+#     k= 6400 (236.8 KB) 12,653   ms vs 383.5 ms  33.0x
+# So the threshold the "if reach ever changes" pointer needs is **k≈400**: below it the
+# cap bought nothing measurable, above it the cost is latency the operator pays and never
+# sees. Corpus max is k=18, so incidence today is zero — but that is reach, not safety.
+#
+# ⚠ NO BOUNDED-TAIL FIX IS CURRENTLY KNOWN TO BE BOTH SUFFICIENT AND ANSWER-PRESERVING,
+# AND AN EARLIER DRAFT OF THIS NOTE ASSERTED THE OPPOSITE. That draft read "a bounded-tail
+# fix IS available and is answer-preserving (`REF_PREFIX_RX` is `\Z`-anchored, so only the
+# trailing token can match)". 🔴 THE `\Z` ARGUMENT IS WRONG, AND IT IS WRONG BY SCOPE:
+# `\Z` covers ONE of the THREE scans `_read_off_a_ref` runs. The other two —
+# `SEGMENT_SPLIT_RX.split(head)[-1]` and the `GIT_WORD_RX`/`GIT_VERB_RX` pair — read the
+# head from the LEFT, so a tail bound changes what they see. MEASURED 2026-09-23:
+#     head = "git show " + "z"*5000 + " ref:"
+#     full head -> True        head[-4096:] -> False
+# The `git show` is truncated away, so the segment scan finds no verb and the exemption is
+# silently lost. The boundary is exact and unsurprising once seen: it diverges at
+# pad=4083, the first head longer than the 4096 B window, i.e. the instant the verb falls
+# out of it. Any head longer than the bound can hide the verb; there is no safe bound.
+# 🔴 AND BOUNDING `REF_PREFIX_RX` ALONE — the only scan the `\Z` argument covers — DOES NOT
+# DELIVER THE FIX EITHER. MEASURED 2026-09-23 on a 64 KiB head
+# (`"git show " + "a"*65536 + ":"`), best of 3 for the two cheap scans, SINGLE run for the
+# expensive one:
+#     REF_PREFIX_RX.search              0.137 ms
+#     SEGMENT_SPLIT + GIT_WORD/GIT_VERB 0.138 ms
+#     HANDOFF_PATH_RX.finditer      2,193     ms   <- four orders of magnitude
+# So the two options are: bound the whole head and lose answers, or bound the scan the
+# `\Z` argument licenses and save 0.137 ms of a 2,193 ms cost. Neither is both.
+# 🔴 SO DO NOT "REACH FOR THE BOUNDED-TAIL FIX" IF REACH CHANGES — there is no worked fix
+# to reach for, and re-deriving one from the `\Z` argument regenerates the exact
+# head-truncation bug the deleted cap had. The cost lives in `HANDOFF_PATH_RX` (`:287`),
+# which no tail bound on this helper reaches; measure there first. A fix WAS written and
+# reverted during this arc, and what it bought was never established.
 #
 # 🔴 EQUIVALENCE WAS MEASURED, NOT ASSUMED — including the cases that distinguish
 # ORDER, which is the whole content of the original `.*?`. Those are pinned by

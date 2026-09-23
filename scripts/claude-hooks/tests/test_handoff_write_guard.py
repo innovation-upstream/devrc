@@ -419,8 +419,17 @@ def test_a_QUOTED_ref_loses_the_exemption(home, empty_repo, spelling):
     in the original was UNQUOTED, so the narrowing was invisible to it. Round 0 of #1811
     found the PR claiming it still accepted "every computed ref"; round 1 found the
     follow-up claim ("the quoted COMPUTED ref") still too narrow, and the accompanying
-    "corpus incidence is ZERO" simply false — it is 2, one of them a genuine ref-read
-    from another session. A narrowing nothing asserts is a narrowing nobody can see.
+    "corpus incidence is ZERO" simply false. A narrowing nothing asserts is a narrowing
+    nobody can see.
+
+    ⚠ ROUND 1'S REPLACEMENT FOR THAT ZERO — a bare "it is 2" — IS RETRACTED TOO, not as
+    false but as unquotable: it shipped with no method, no date and no corpus size.
+    Re-derived 2026-09-23 over 6,621 transcripts (including `subagents/`, which sit at
+    DEPTH 4): **6 sites across 3 sessions, 5 of them THIS ARC'S OWN probes, exactly ONE
+    genuine** — 2026-09-15, session `f0decd34`, a real
+    `git show <ref>:claudedocs/handoff-tmux-webapp.md`. The full method is in the guard
+    beside `REF_PREFIX_RX`; do not inherit the number from here, and note that probing
+    the narrowing ADDS to it. What this test pins is the BEHAVIOUR, which no count moves.
 
     Direction is fail-SAFE — a lost exemption makes the guard quieter, never blocking —
     which is why it is accepted rather than fixed.

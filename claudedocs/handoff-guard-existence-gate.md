@@ -240,10 +240,29 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   **A claim in a title is a claim.**
 - ⚠ **The cap was retired on the WRONG OPERAND'S numbers.** The argument was "the largest
   SEGMENT ever scanned is 296 B against a 4096 B cap" — 296 B is exact, and irrelevant: the
-  cap truncated the HEAD. Re-derived 2026-09-20 over all 6,626 transcripts, 21,291 match
-  sites: head max **29,039 B**, p99 3,111 B, and **108 sites exceeded the cap**. The
-  deletion is still right, but because the scans are now linear — never because the input
-  is small. As first written the argument would have licensed deleting the cap WITHOUT the
+  cap truncated the HEAD. Re-derived **2026-09-23** over **6,621** transcripts
+  (`~/.claude/projects/*/*.jsonl` + `*/*/subagents/*.jsonl`), scanning each Bash command
+  exactly as `handoff_read_docs` does — `COMMENT_PAT`-stripped, then `HANDOFF_PATH_RX`:
+  **23,964 match sites, head max 27,856 B, p99 3,144 B, 130 sites over the 4,096 B cap**
+  (restricted to the handoff-basename sites the guard acts on: 20,793 sites, **98** over
+  the cap).
+  🔴 **RETRACTED IN PLACE — this bullet used to end "The deletion is still right, but
+  because the scans are now linear — never because the input is small." THAT IS DRAFT 2,
+  AND IT IS REFUTED FURTHER DOWN THIS SAME LIST** (see *"THE QUADRATIC DID NOT LEAVE, IT
+  MOVED"*). The scans are linear PER CALL; the conclusion is about the COMMAND, which is
+  O(n²). It stood here as a bare assertion ABOVE its own refutation with no marker, so a
+  top-down reader met the wrong version first — which is why the retraction is written
+  here rather than only where the refutation lives. The argument that survives is
+  *"THE ARGUMENT THAT SURVIVES: THE CAP NEVER DELIVERED WHAT IT WAS CREDITED WITH"*.
+  ⚠ **The round-1 figures this bullet carried — `29,039 B` / `108 sites` / `21,291 sites`
+  / p99 `3,111 B` — are replaced, and the discrepancy is METHOD, not corpus drift.**
+  Measuring both ways over the same corpus minutes apart: head max is **29,039 B** over
+  the RAW command and
+  **27,856 B** over the COMMENT-STRIPPED one the guard actually scans. Round 1 quoted the
+  raw number for a scan that never sees it. (Round 2's auditor independently got 27,856 B /
+  114 sites; the 114 did not reproduce here — I get 130 over all sites, 98 over acted-on
+  ones. Corpus grows daily, so treat the site count as dated, never as a constant.)
+  As first written the argument would have licensed deleting the cap WITHOUT the
   changes that make it safe.
 - 🔴 **THE SANDBOX TIER WAS THE GAP EVERY AUDIT ROUND NAMED, AND CLOSING IT IS WHAT THE
   MERGE RESTED ON — carried here because it is EVIDENCE, and `State now` is a REPLACE
@@ -267,20 +286,52 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   **1,598 ms WITH the cap, 1,636 ms without** — no material difference. ⚠ That also bounds
   how strong ANY perf claim about this file can be, and the `HANDOFF_PATH_RX` quadratic is
   pre-existing in BOTH trees — unreached, unfixed, and NOT this arc's to close.
-- 🔴 **I WROTE THE CORRECT FIX AND REVERTED IT, ON PURPOSE.** A bounded-tail for
-  `REF_PREFIX_RX` is answer-preserving (it is `\Z`-anchored, so only the trailing token can
-  match). It was reverted because it added code PLUS two new two-way ledgers to bound a case
-  measured as unreachable (corpus max 18 matches/command, ~34 KB) on a PostToolUse-only path
-  whose failure is a LOST ARMING, not a hung turn. Applying `/the-algorithm` to my own fix is
-  what caught it. Recorded in-source for whoever finds reach has changed.
-- 🔴 **"CORPUS INCIDENCE IS ZERO" WAS FALSE AND THE MISS HAD A MECHANISM.** Round 1
-  re-derived INCLUDING `subagents/` transcripts (one level deeper than `projects/*/*.jsonl`):
-  **2** sites flip, not 0, and only one is this arc's probe. The other is a genuine ref-read
-  from a DIFFERENT session five days earlier —
+- 🔴 **"I WROTE THE CORRECT FIX AND REVERTED IT" — RETRACTED. The fix was never shown to be
+  correct, and the `\Z` argument for it is WRONG BY SCOPE.** This bullet claimed a
+  bounded-tail for `REF_PREFIX_RX` "is answer-preserving (it is `\Z`-anchored, so only the
+  trailing token can match)". `\Z` covers **one of the three** scans `_read_off_a_ref` runs;
+  `SEGMENT_SPLIT_RX.split(head)[-1]` and the `GIT_WORD_RX`/`GIT_VERB_RX` pair read the head
+  from the LEFT. Counter-example, measured 2026-09-23 —
+  `head = "git show " + "z"*5000 + " ref:"` gives **True on the full head, False on
+  `head[-4096:]`** (the `git show` is truncated away). The boundary is exact: it diverges at
+  `pad=4083`, the first head longer than the 4,096 B window — i.e. ANY head longer than the
+  bound can hide the verb, so no bound is safe.
+  And bounding `REF_PREFIX_RX` **alone** — all the `\Z` argument licenses — does not deliver
+  the fix either: at a 64 KB head it costs **0.137 ms**, the segment+git scans **0.138 ms**,
+  and `HANDOFF_PATH_RX` **2,193 ms**. So: bound the whole head and lose answers, or bound the
+  cheap scan and save 0.137 ms of 2,193. **No bounded-tail fix is currently known to be both
+  sufficient and answer-preserving**, and the in-source note no longer tells anyone to reach
+  for one — re-deriving it from `\Z` regenerates the deleted cap's own bug. Reverting it was
+  still right (corpus max 18 matches/command, 33,673 B, PostToolUse-only), but for reach, not
+  for correctness. **This is the fourth draft of this justification; the first three were each
+  falsified by the next round. "No argument is known to work" is the finding.**
+- 🔴 **THE "FAIL-SAFE" EXCUSE HAS A FLOOR, NOW NAMED.** "A blown hook loses an ARMING
+  (silent, fail-safe) rather than hanging a turn" holds only ABOVE the CLI's hook timeout;
+  below it there is no lost arming and no silence, just turn latency on a hook that fires
+  after every tool call. Measured 2026-09-23, uncapped vs a 4,096 B head cap, **verdicts
+  identical throughout**: k=200 10.4 vs 8.9 ms (1.2x), **k=400 39.6 vs 20.0 ms — divergence
+  starts here**, k=1,600 659 vs 91 ms (7.3x), k=6,400 12,653 vs 384 ms (33x). Corpus max is
+  k=18, so incidence today is zero — but the "if reach ever changes" pointer now has its
+  threshold, **k≈400**, instead of none. ⚠ Best of 3 up to k=1,600, single run above; the
+  milliseconds are load-dependent, the RATIO and the k≈400 knee are the claim.
+- 🔴 **"CORPUS INCIDENCE IS ZERO" WAS FALSE AND THE MISS HAD A MECHANISM — BUT ROUND 1'S
+  REPLACEMENT, A BARE "IT IS 2", IS RETRACTED TOO.** Not as false: as unquotable. It shipped
+  with no method, no date and no corpus size, in an arc whose own source file says
+  in those words that such a count "cannot be re-checked". Re-derived **2026-09-23** over
+  **6,621** transcripts (`projects/*/*.jsonl` + `projects/*/*/subagents/*.jsonl` — ⚠
+  subagents are at **DEPTH 4**; a `*/subagents/*.jsonl` glob matches **zero** of the 5,628
+  and still prints a confident total, which bit this round's first pass), counting sites the
+  WIDE `[^\s:]+` class would exempt and this class denies:
+  **6 sites across 3 sessions — 5 of them THIS ARC'S OWN probes, exactly ONE genuine**
+  (2026-09-15, session `f0decd34`,
   `subprocess.run(['git','-C',R,'show',ref+':claudedocs/handoff-tmux-webapp.md'])`, token
-  ending in `'`. The narrowing has already cost a real arming once. It is also not "the
-  QUOTED COMPUTED ref": ordinary shell QUOTING supplies the trailing quote, so a quoted
-  LITERAL flips too. All ten spellings are now pinned.
+  ending in `'`). The load-bearing half survives: not zero, and the narrowing has cost a real
+  arming once.
+  🔴 **THE COUNT INFLATES ITSELF — one of the 2026-09-20 sites IS the `gh pr edit` that
+  published the previous count.** Writing the number down incremented it. Any re-derivation
+  must state the arc-own split or it will read self-inflation as real growth.
+  It is also not "the QUOTED COMPUTED ref": ordinary shell QUOTING supplies the trailing
+  quote, so a quoted LITERAL flips too. All ten spellings are now pinned.
 - 🔴 **ROUND 0 SOLVED THE MUTANT THIS ARC HAD LEFT OPEN, AND THE ANSWER WAS A BROKEN
   HARNESS.** `test_the_scan_cap_BOUNDS_the_search` built its pad as
   `"A" * (GIT_VERB_SCAN_CAP * 3 + 7)`; under `CAP = 10**9` that is a **3,000,000,007-byte
@@ -310,6 +361,26 @@ gh api "/repos/innovation-upstream/devrc/commits/$S/statuses" \
 # the guard module on the PR branch
 nix develop ~/workspace/devrc -c python3 -m pytest \
   ~/workspace/devrc-algo/scripts/claude-hooks/tests/test_handoff_write_guard.py -q   # 101 passed
+
+# round 2's counter-example: a bounded tail is NOT answer-preserving. Prints True/False.
+nix develop ~/workspace/devrc -c python3 -c '
+import importlib.util as u
+P="/home/zach/workspace/devrc-algo/scripts/claude-hooks/handoff-write-guard.py"
+s=u.spec_from_file_location("g",P)
+g=u.module_from_spec(s); s.loader.exec_module(g)
+def p(h):
+    if not h.endswith(":") or not g.REF_PREFIX_RX.search(h): return False
+    seg=g.SEGMENT_SPLIT_RX.split(h)[-1]; m=g.GIT_WORD_RX.search(seg)
+    return bool(m) and bool(g.GIT_VERB_RX.search(seg,m.end()))
+h="git show "+"z"*5000+" ref:"; print(p(h), p(h[-4096:]))'   # -> True False
+
+# the corpus numbers (6,621 transcripts / 6 flip sites / head max 27,856 B). ⚠ subagents
+# are at DEPTH 4 — `*/subagents/*.jsonl` matches ZERO and still prints a total. Assert it.
+#   files = glob('~/.claude/projects/*/*.jsonl') + glob('~/.claude/projects/*/*/subagents/*.jsonl')
+#   assert len(files) > 6000        # positive control; a bare zero is not a measurement
+# then, per Bash tool_use command containing 'claudedocs/':
+#   stripped = re.sub(COMMENT_PAT, " ", cmd); HANDOFF_PATH_RX.finditer(stripped)
+# and count sites where the WIDE [^\s:]+ ref class exempts but REF_PREFIX_RX does not.
 
 # the cap really is gone from the branch, and still present in the DEPLOYED copy
 grep -c GIT_VERB_SCAN_CAP ~/workspace/devrc-algo/scripts/claude-hooks/handoff-write-guard.py  # comments only
