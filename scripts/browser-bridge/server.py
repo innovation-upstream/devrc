@@ -3746,9 +3746,11 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 # never grow again as sites are added. See _annotate_site_flows.
                 # Its return is the value it SET — captured for the telemetry
                 # emit, so the row records what the REGISTRY resolved for the
-                # caller and never an extension-supplied value: a result that
-                # pre-carries a foreign `site_flows` key keeps it in the
-                # envelope only; the telemetry row carries nothing.
+                # caller and never an extension-supplied value. A result that
+                # pre-carries a foreign `site_flows` key: on an UNREGISTERED
+                # host it keeps the foreign key in the envelope (and the row
+                # records nothing); on a REGISTERED host the annotation
+                # OVERWRITES it — envelope and row both carry registry truth.
                 flows_path = _annotate_site_flows(result, domain)
                 log("cmd_ok", op=op)
                 if op == "activate":
