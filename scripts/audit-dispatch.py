@@ -1452,6 +1452,96 @@ def self_range_blocks(blocks):
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 THE UNEARNED LEDGER — a whole ladder's payload RECORD, not the gate's pair.
+# --------------------------------------------------------------------------- #
+# The refusal above covers the two blocks the gate ARITHMETIC reads, and that is
+# the right scope for a refusal. It leaves a different question unanswered, and
+# nothing asked it: **how much of this ladder's payload record was measured over
+# nothing at all?**
+#
+# 🔴 MEASURED 2026-09-23 over a 241-ladder corpus (25 repos, 3,758 comments):
+# NINE ladders carry at least one self-range block — `civitai/civitai` #4652,
+# #4806, #4879, `civitai/civitai-developer-docs` #80,
+# `civitai/gpu-fleet-infra` #331, `innovation-upstream/devrc` #1274,
+# `vetrllc/vetr-api` #184, `ZacxDev/homelab-infra` #687 and `ZacxDev/naida-ai`
+# #233. On #687 ALL FOUR blocks are self-ranges: its entire payload record is
+# unearned across four rounds, on a PR shipping ~1,147 lines, and nobody noticed
+# — because the only thing that would have said so is the pair refusal, and that
+# fires when somebody tries to assemble ANOTHER round, which nobody did.
+#
+# So this is a REPORT and deliberately not a second refusal. Three reasons, and
+# the third is the decisive one:
+#   * the expensive direction in this whole subsystem is the FALSE STOP — the
+#     skill rejects a round cap outright, and refusing over ladder HISTORY would
+#     block an operator mid-work over a comment they may not own;
+#   * a self-range further back is a broken RECORD, and a record is fixed by
+#     editing the comment, not by ending the ladder;
+#   * 🔴 AND THE ALL-UNEARNED CASE IS ALREADY REFUSED, BY CONSTRUCTION. If every
+#     ranged block is a self-range then the NEWEST one is too, and the newest
+#     block is always in `gate_relevant_self_ranges`' pair — so any round >= 2
+#     assembled against such a ladder returns 4 already. A new refusal for "every
+#     block is a self-range" would be unreachable at round >= 2 and WRONG below
+#     it (rounds 0 and 1 consume no prior block). Pinned by
+#     `test_an_ALL_self_range_ladder_is_ALREADY_refused_by_the_shipped_pair_check`.
+UnearnedLedger = namedtuple(
+    "UnearnedLedger", "self_ranges ranged rounds every_ranged_block"
+)
+
+UNEARNED_LEDGER_HEAD = (
+    "## 🔴 PART OF THIS LADDER'S PAYLOAD RECORD WAS MEASURED OVER ZERO COMMITS"
+)
+
+
+def unearned_ledger(blocks):
+    """-> `UnearnedLedger` over EVERY parseable block, gate-relevant or not.
+
+    🔴 THE DENOMINATOR IS BLOCKS THAT CARRY A RANGE, NOT BLOCKS. A bare
+    `audited=<sha>` names no range at all, so it can be neither earned nor
+    unearned by this reading — folding it into the denominator would make an
+    all-self-range ladder that also posted one bare block report as PARTIAL,
+    which is the flattering answer. It is a different defect with a different
+    fix and `parse_claims_blocks`/`ladder-range-coverage.py` already report it.
+
+    `every_ranged_block` is False for an empty corpus on purpose: `all([])` is
+    True, and "every block of no blocks is unearned" is a claim about nothing.
+    """
+    ranged = [b for b in blocks if b.audited_from and b.audited_to]
+    selves = [b for b in ranged if same_commit(b.audited_from, b.audited_to)]
+    return UnearnedLedger(
+        self_ranges=selves,
+        ranged=len(ranged),
+        rounds=sorted({b.round_no for b in selves}),
+        every_ranged_block=bool(ranged) and len(selves) == len(ranged),
+    )
+
+
+def _unearned_rounds_phrase(un):
+    """`round 4` / `rounds 1, 2, 3 and 4` — read by stderr AND by the brief."""
+    rounds = [str(r) for r in un.rounds]
+    if len(rounds) == 1:
+        return f"round {rounds[0]}"
+    return f"rounds {', '.join(rounds[:-1])} and {rounds[-1]}"
+
+
+def unearned_ledger_summary(un):
+    """-> the ONE sentence both surfaces lead with, or "" when nothing is wrong.
+
+    🔴 ONE RULE, ONE PLACE. The stderr report and the brief section print the
+    same count, and a second spelling of "N of M" is a second thing to get
+    wrong — `claude/RULES.md` is explicit that a predicate open-coded at two
+    sites is wrong at one of them.
+    """
+    if not un.self_ranges:
+        return ""
+    return (
+        f"{len(un.self_ranges)} of this ladder's {un.ranged} block(s) carrying "
+        f"a range record a SELF-RANGE (`audited=X..X`): "
+        f"{_unearned_rounds_phrase(un)}. Those rounds' `payload=` counts were "
+        "measured over ZERO commits and are NOT evidence."
+    )
+
+
+# --------------------------------------------------------------------------- #
 # 🔴 THE ATTRIBUTION GATE — the skill's stop condition, as a BRANCH.
 # --------------------------------------------------------------------------- #
 # `claude/skills/audit-pr/SKILL.md`: "Two consecutive rounds whose fixes changed
@@ -1658,7 +1748,8 @@ Facts = namedtuple(
     "pr repo title base_ref url round_no cwd_repo_dir cwd_repo_slug repo_relation "
     "worktree branch dirty prev_sha emit_from claims claims_round checklist "
     "ledger assembled_at claims_source head_check base_assumed "
-    "base_assumed_reason repo_unknown_reason round_zero payload gate_override",
+    "base_assumed_reason repo_unknown_reason round_zero payload gate_override "
+    "unearned",
     # `round_zero` is appended LAST and defaulted so the two existing
     # constructions — one here, one in the suite — keep working unchanged. It is
     # None for every round except 0, and None AT round 0 means the skill was
@@ -1668,7 +1759,13 @@ Facts = namedtuple(
     # the same meaning for None: no `--payload` was stated (so the emitted block
     # carries a PLACEHOLDER and the next round's gate cannot evaluate this
     # round), and no `--override-attribution-gate` was passed.
-    defaults=(None, None, None),
+    #
+    # `unearned` is appended last for the same reason and carries an
+    # `UnearnedLedger`. None means this run never computed one — which
+    # `render_unearned_ledger` treats exactly like "nothing unearned": SILENT.
+    # Printing a section off a reading nobody made would be the reassuring zero
+    # this module refuses everywhere else.
+    defaults=(None, None, None, None),
 )
 # 🔴 `repo_unknown_reason` — ROUND 13'S NINTH INSTANCE, AND THE THIRD IN THIS
 # EXACT FAMILY. `no_sha_reason` was `headRefOid`, `base_assumed_reason` was
@@ -4743,6 +4840,77 @@ def render_gate_override(facts):
     ])
 
 
+def render_unearned_ledger(facts):
+    """The unearned-ledger report IN THE BRIEF — "" when nothing is unearned.
+
+    🔴 A BROKEN RECORD THAT ONLY THE OPERATOR'S TERMINAL EVER SAW IS A BROKEN
+    RECORD NOBODY FIXED. The bystander warning has always gone to stderr, which
+    the next auditor never reads and the PR never carries — so on
+    `ZacxDev/homelab-infra` #687 four consecutive rounds each recorded
+    `audited=X..X`, each posted a `payload=` beside it, and four auditors in a
+    row were handed a ladder whose whole payload record was unearned with
+    nothing in the brief saying so.
+
+    🔴 IT IS ADDRESSED TO THE AUDITOR, NOT ONLY TO THE RECORD. The auditor is
+    asked to state the ladder's stop condition in its report; a stop attributed
+    to a `payload=0` that spans zero commits is a stop computed over nothing,
+    and the auditor is the one reader positioned to say so before it is acted on.
+
+    🔴 AND IT IS NOT A REFUSAL. See `unearned_ledger` for the argument — the
+    all-unearned case the refusal WOULD be for is already returned as 4 by the
+    shipped pair check, and everything narrower is a record fixed by editing a
+    comment rather than by ending a ladder.
+    """
+    un = facts.unearned
+    if un is None or not un.self_ranges:
+        return ""
+    lines = [
+        UNEARNED_LEDGER_HEAD,
+        "",
+        unearned_ledger_summary(un),
+        "",
+    ]
+    if un.every_ranged_block:
+        lines += [
+            "🔴 **EVERY block this ladder posted that carries a range is one of "
+            "them, so this ladder has NO valid payload record at all** — not a "
+            "partial one. Nothing here has ever been attributed to a measured "
+            "diff, and no `payload=` number on this PR may be quoted as "
+            "evidence of anything.",
+            "",
+        ]
+    lines += [
+        "The blocks, as posted:",
+        "",
+    ]
+    lines += [
+        f"    round {b.round_no} — `audited={b.audited_from}..{b.audited_to}`"
+        + (f", beside `payload={b.payload}`" if b.payload is not None
+           else ", with no `payload=` field")
+        for b in sorted(un.self_ranges, key=lambda b: b.round_no)
+    ]
+    lines += [
+        "",
+        "Both ends of each of those ranges name ONE commit. A range spanning "
+        "zero commits cannot contain the round's own fixes, so the count beside "
+        "it was earned by nothing — `a structural zero is not a measured zero`. "
+        "**This is a broken RECORD, not a finished ladder**: the rounds it "
+        "describes may well have changed a great deal.",
+        "",
+        "🔴 **What this does NOT say.** It does not say those rounds found "
+        "nothing, and it does not end this ladder. It says the ledger cannot "
+        "answer what they changed. If this round's report reaches for a "
+        "`payload=` figure from any round named above, say instead that the "
+        "figure is unmeasured — and if you are about to attribute a stop to "
+        "one, that stop is arithmetic over nothing.",
+        "",
+        "Fix the record by editing each comment so `audited=` reads <the tip "
+        "that round's audit READ>..<the head its fixes PRODUCED> — two "
+        "different shas.",
+    ]
+    return "\n".join(lines)
+
+
 def render_brief(facts):
     if facts.round_no == 0:
         kind = "ROUND 0 — REQUIREMENTS & DELETION pass (NOT a correctness audit)"
@@ -4770,6 +4938,11 @@ def render_brief(facts):
         render_invariants(),
         render_checklist(facts),
         render_ledger(facts),
+        # 🔴 IMMEDIATELY AFTER THE LEDGER, AND THAT PLACEMENT IS THE POINT. THE
+        # LEDGER is the section that hands the auditor payload numbers; this one
+        # says which of the ladder's recorded numbers are not numbers. Put it
+        # later and the reader has already formed a view.
+        render_unearned_ledger(facts),
         render_gate_override(facts),
         # 🔴 THE PROSE DETERMINATION IS NOT HERE, AND ITS ABSENCE IS THE FIX.
         # It shipped here in this PR's first draft and round-0 finding F2 caught
@@ -4870,6 +5043,15 @@ def emit_claims_skeleton(facts, head_sha):
             "  🔴 attribution gate OVERRIDDEN for this round — stated reason: "
             f"{facts.gate_override}"
         )
+    # 🔴 THE UNEARNED-LEDGER RECORD, ON THE ARTEFACT THAT LANDS ON THE PR. The
+    # brief goes to one auditor and is gone; this text is pasted into a comment
+    # and is what the NEXT reader of #687 meets. Same two-readers argument the
+    # override record makes one line up, and OUTSIDE the fence for the same
+    # mechanical reason: a non-numbered line INSIDE the body is folded into the
+    # claim above it by `_items_from_body`.
+    if facts.unearned is not None and facts.unearned.self_ranges:
+        lines.append("  🔴 UNEARNED LEDGER — " + unearned_ledger_summary(
+            facts.unearned))
     lines += [
         "",
         f"```audit-claims round={facts.round_no} payload={payload} "
@@ -5816,6 +5998,25 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
     # block no arithmetic consults is the permanently-red gate `claude/
     # RULES.md` forbids — and 2 of 159 corpus rounds carry one.
     degenerate = gate_relevant_self_ranges(blocks, args.round_no)
+    # 🔴 THE WHOLE-LADDER READING, COMPUTED BEFORE EITHER REPORT AND PRINTED
+    # FIRST. The bystander sentence below is per-block and scoped to the blocks
+    # the gate does NOT read; this one is the CORPUS answer and covers the
+    # degenerate pair too, so a run that refuses at 4 still tells the operator
+    # how much of the record behind that pair was unearned. On #687 that is the
+    # difference between "round 4 is broken" and "all four rounds are".
+    unearned = unearned_ledger(blocks)
+    if unearned.self_ranges:
+        print("⚠ UNEARNED LEDGER — " + unearned_ledger_summary(unearned),
+              file=err_stream)
+        if unearned.every_ranged_block:
+            print(
+                "🔴 EVERY block on this PR that carries a range is a "
+                "self-range, so this ladder has NO valid payload record at "
+                "all. Measured in the wild on `ZacxDev/homelab-infra` #687: "
+                "four rounds, four self-ranges, ~1,147 lines shipped, and "
+                "nobody noticed.",
+                file=err_stream,
+            )
     # The other half of the same predicate: a self-range the gate will NOT read
     # is a broken record and nothing more, so it is REPORTED and the run
     # continues. Reported at all because it is silent otherwise — the round it
@@ -5834,8 +6035,15 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             )
             + ". Both ends name one commit, so that block records a round "
             "whose range spans nothing. It is not one of the two blocks the "
-            "attribution gate reads, so this run continues — but the record "
-            "is wrong and any count beside it was earned by nothing.",
+            "attribution gate reads, so IT does not refuse this run — but the "
+            "record is wrong and any count beside it was earned by nothing.",
+            # 🔴 `IT does not refuse this run`, NOT `so this run continues`.
+            # The old wording was a claim about the RUN and it is false on the
+            # `ZacxDev/homelab-infra` #687 shape: every block is a self-range,
+            # so the two the gate reads are degenerate too and REFUSAL 3b
+            # returns 4 three lines below — while this sentence had just told
+            # the operator the run was continuing. A comment is a claim too,
+            # and this one is printed.
             file=err_stream,
         )
     if degenerate and brief_refused is None:
@@ -6094,6 +6302,11 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         # sentence in the brief and on the PR — the exact defect class this
         # module keeps finding (a field read as a stronger fact than it carries).
         gate_override=args.gate_override if stop.fires else None,
+        # 🔴 THE READING ITSELF, NOT A BOOLEAN. `render_unearned_ledger` names
+        # every offending round and its posted `payload=`, and a flag would have
+        # forced it to re-derive them from `blocks` — a second copy of the
+        # predicate, at the one site that has to be right.
+        unearned=unearned,
     )
 
     # 🔴 THE REFUSAL'S SCOPE IS THE BRIEF, AND ONLY THE BRIEF. A refused run

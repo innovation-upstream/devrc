@@ -943,3 +943,169 @@ def test_it_imports_the_churn_command_rather_than_carrying_a_copy():
     )
     assert "measure_range_churn" in src
     assert "parse_claims_blocks" in src
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE UNEARNED LEDGER — a round whose own `audited=X..X` spans zero commits.
+# --------------------------------------------------------------------------- #
+# That round's `payload=N` was measured over nothing, and on the PR it is
+# indistinguishable from a real count. Measured 2026-09-23 over 241 ladders /
+# 25 repos: NINE carry at least one; `ZacxDev/homelab-infra` #687 carries FOUR,
+# which is every block it posted, on a PR shipping ~1,147 lines.
+#
+# It belongs in THIS report and not in the sibling's frozen prose taxonomy: it
+# is a structural fact about a block's own range, exactly like `malformed` and
+# `bare` — "the #1233 hole by another route", one more route.
+
+
+def _self_block(round_no, sha, payload=None, claim="a claim"):
+    head = f"round={round_no}"
+    if payload is not None:
+        head += f" payload={payload}"
+    return (f"```audit-claims {head} audited={sha}..{sha}\n"
+            f"1. {claim}\n```\n")
+
+
+def test_a_self_range_block_is_RECORDED_and_NAMED_in_the_report(lrc, ad,
+                                                                base_repo):
+    """🔴 REGRESSION. Red at `c4490f07`, where `Ladder` had no such field.
+
+    A block recording `X..X` measured ZERO churn for its own range and simply
+    contributed nothing to the positive control — silently. The ladder rendered
+    exactly like a healthy one.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    r2_to = _commit(repo, "b.py", 10, "round 2 fix")
+    comments = [
+        _block(1, base, r1_to),
+        _self_block(2, r1_to, payload=7),   # degenerate: both ends one commit
+        _block(3, r1_to, r2_to),
+    ]
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 687, r2_to, "main",
+                           comments)
+    assert L.reason is None
+    assert L.control_churn > 0, "positive control: some block's range moves"
+    # 🔴 THE RENDERED REPORT FIRST, AND THE FIELD SECOND. A test that touches
+    # `L.self_ranges` before asserting on the output fails at the base with
+    # `AttributeError: 'Ladder' object has no attribute 'self_ranges'` — a
+    # claim about a symbol's absence, which is not evidence about behaviour.
+    rendered = lrc.render([L], [])
+    assert "UNEARNED LEDGER — 1 of 3 block(s)" in rendered, rendered
+    assert [(s.round_no, s.payload) for s in L.self_ranges] == [(2, 7)], (
+        f"the self-range block was not recorded: {L.self_ranges}"
+    )
+    assert "round 2" in rendered and "payload=7" in rendered, rendered
+    assert "EVERY block with a range" not in rendered, (
+        "a ladder with one broken round was described as having no valid "
+        f"payload record at all:\n{rendered}"
+    )
+    assert "UNEARNED-LEDGER CENSUS: 1 of 1 ladder(s)" in rendered, rendered
+
+
+def test_a_ladder_whose_EVERY_block_is_a_self_range_names_the_RIGHT_cause(
+        lrc, ad, base_repo):
+    """🔴 REGRESSION, and it is an EMPTY-RESULT defect, not only a missing line.
+
+    With every block degenerate the positive control is zero BY CONSTRUCTION —
+    and at `c4490f07` the report explained that zero with the one story it had:
+    "the PR's commits are almost certainly not present — see the fetch note".
+    That is FALSE here; every commit is in this checkout. Fetching would never
+    change it, because the comments are what is wrong.
+
+    `claude/RULES.md`: an EMPTY RESULT cannot distinguish two mechanisms. The
+    blocks themselves discriminate, so the branch reads them.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    r2_to = _commit(repo, "b.py", 10, "round 2 fix")
+    comments = [
+        _self_block(1, base, payload=0),
+        _self_block(2, r1_to, payload=7),
+        _self_block(3, r2_to, payload=0),
+    ]
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 687, r2_to, "main",
+                           comments)
+    assert L.control_churn == 0, (
+        "the fixture does not reproduce the zero control, so the branch under "
+        "test is never reached"
+    )
+    rendered = lrc.render([L], [])
+    assert "UNEARNED LEDGER — 3 of 3 block(s)" in rendered, rendered
+    assert [s.round_no for s in L.self_ranges] == [1, 2, 3]
+    assert "EVERY block with a range is one of them" in rendered, rendered
+    assert "CAUSE: every block's range is DEGENERATE" in rendered, rendered
+    assert "Fetching will not change it" in rendered, rendered
+    assert "commits are almost certainly not" not in rendered, (
+        "the zero control was still explained as absent commits, which is the "
+        f"wrong mechanism and sends the operator to fetch:\n{rendered}"
+    )
+    assert "1 of them have NO valid payload record at all" in rendered
+
+
+def test_the_absent_commits_cause_is_UNCHANGED_when_the_blocks_are_healthy(
+        lrc, ad, base_repo):
+    """🔴 THE OTHER SIDE OF THE SAME BRANCH — and the reachability control.
+
+    A zero control with HEALTHY block ranges still means the commits are not
+    here, and that sentence must be unchanged. Without this, the test above is
+    satisfied by a report that stopped offering the fetch advice at all.
+    """
+    repo, base = base_repo
+    absent_a, absent_b = "a" * 40, "b" * 40
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 5, absent_b, "main",
+                           [_block(1, absent_a, absent_b)])
+    assert not L.control_churn
+    rendered = lrc.render([L], [])
+    assert "commits are almost certainly not" in rendered, rendered
+    assert "CAUSE: every block's range is DEGENERATE" not in rendered
+    assert L.self_ranges == (), "the fixture accidentally carries a self-range"
+    assert base
+
+
+def test_a_ladder_with_NO_self_range_prints_NO_unearned_report(lrc, ad,
+                                                               base_repo):
+    """🔴 THE SILENT CASE. A section that fires on a healthy ladder is the
+    permanently-red one `claude/RULES.md` says trains a reader to skip it."""
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    r2_to = _commit(repo, "b.py", 10, "round 2 fix")
+    L = lrc.measure_ladder(
+        ad, lrc.real_runner, str(repo), 1, r2_to, "main",
+        [_block(1, base, r1_to), _block(2, r1_to, r2_to)])
+    rendered = lrc.render([L], [])
+    assert "UNEARNED LEDGER" not in rendered, rendered
+    assert "UNEARNED-LEDGER CENSUS" not in rendered, rendered
+    assert L.self_ranges == ()
+
+
+def test_the_unearned_census_DENOMINATOR_includes_unmeasurable_ladders(lrc):
+    """🔴 EVERY OTHER CENSUS HERE IS SCOPED TO `L.reason is None`; THIS IS NOT.
+
+    The reading is over BLOCKS and needs no commits present, so excluding the
+    unmeasurable ladders would make the rate a function of what happened to be
+    fetched — and would drop #687's exact shape, whose control is zero BECAUSE
+    of the self-ranges.
+
+    Driven through `render` with constructed ladders so the claim is about the
+    denominator and not about any git fixture.
+    """
+    broken = lrc.Ladder(687, "b" * 40, "main", 2, 2, 1, [], 0, 0, 0,
+                        (0, 0), (0, 0), None, [], [],
+                        (lrc.SelfRange(1, "1" * 8, 0),
+                         lrc.SelfRange(2, "2" * 8, 3)))
+    unmeasurable = lrc.Ladder(331, "c" * 40, "main", 1, 0, None, [], None,
+                              None, None, (0, 0), (0, 0),
+                              "no two-sha block", [], [],
+                              (lrc.SelfRange(8, "8" * 8, 0),))
+    healthy = lrc.Ladder(1, "d" * 40, "main", 1, 1, 1, [], 10, 0, 0,
+                         (0, 0), (0, 0), None, [], [])
+    rendered = lrc.render([broken, unmeasurable, healthy], [])
+    assert "UNEARNED-LEDGER CENSUS: 2 of 3 ladder(s)" in rendered, rendered
+    assert "#687  ALL blocks  round(s) 1, 2" in rendered, rendered
+    assert "#331" in rendered, (
+        "an UNMEASURABLE ladder's broken blocks were dropped from the census, "
+        f"which makes the count a function of what was fetched:\n{rendered}"
+    )
+    # 🔴 The default keeps a ladder constructed without the field OUT of it.
+    assert healthy.self_ranges == ()

@@ -321,6 +321,16 @@ RULES: list[dict] = [
          probe="IS REFUSED (exit 4), and that is NOT the gate's verdict",
          apply=(r"self[- ]range|audited=(\w+)\.\.\1\b|spans zero commits|"
                 r"earned by nothing")),
+    # 🔴 THE UNEARNED-LEDGER REPORT. Distinct from `self-range-refused` one row
+    # up, and deliberately so: that rule is about the gate's PAIR and exits 4,
+    # this one is about the rest of the ladder's HISTORY and exits nothing. The
+    # firing signal is a runner declining to quote a `payload=` it was told is
+    # unmeasured — which is what #687 needed and nobody did.
+    dict(id="unearned-ledger-not-evidence",
+         name="a `payload=` from a self-range round is UNMEASURED — do not quote it",
+         probe='"Reported" now means THREE places',
+         apply=(r"unearned ledger|measured over zero commits|"
+                r"are not evidence|arithmetic over zero commits")),
     dict(id="decide-once-revert-test", name="decide payload/scaffolding ONCE at round 1 — the REVERT TEST",
          probe="REVERT TEST", apply=r"revert test"),
     dict(id="one-number-one-name", name="ONE NUMBER, ONE NAME",

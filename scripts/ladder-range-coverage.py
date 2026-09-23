@@ -135,11 +135,38 @@ Adjacency = namedtuple(
     "Adjacency",
     "label frm to from_round to_round added deleted commits reason gap_commits"
 )
+# 🔴 `self_ranges` — A SELF-RANGE BLOCK IS A ROUND WHOSE LEDGER IS UNEARNED.
+# `audited=X..X` spans zero commits, so the `payload=N` that round posted beside
+# it was measured over nothing and is indistinguishable, on the PR, from a real
+# one. It belongs in THIS report and not in `ladder-stop-rationale.py`'s frozen
+# prose taxonomy: it is a STRUCTURAL fact about a block's own range, which is
+# exactly what `malformed` and `bare` already are — "the #1233 hole by another
+# route", one more route.
+#
+# 🔴 AND IT IS THE THIRD DISTINCT MECHANISM BEHIND A ZERO POSITIVE CONTROL,
+# which is why it is a field and not a print. `control_churn == 0` used to be
+# explained by exactly one story — "the PR's commits are not in this checkout" —
+# and on a ladder where every block is a self-range that story is FALSE: the
+# control is zero because every range is DEGENERATE, in a checkout that may hold
+# every commit. `claude/RULES.md`: an empty result cannot distinguish two
+# mechanisms, so the render branches on which one the blocks themselves prove.
+# Measured on `ZacxDev/homelab-infra` #687 — all four blocks self-ranges.
+#
+# It carries `(round_no, sha, payload)` per offending block rather than a count:
+# a count cannot be checked against the PR, and every other classification in
+# this file prints the evidence a reader would need to overturn it.
+SelfRange = namedtuple("SelfRange", "round_no sha payload")
+
 Ladder = namedtuple(
     "Ladder",
     "pr head base blocks_total blocks_used first_round adjacencies "
     "control_churn uncovered_added uncovered_deleted interior tail "
-    "reason malformed bare",
+    "reason malformed bare self_ranges",
+    # Defaulted so every positional construction that predates this field — in
+    # this module and in the suite — keeps working unchanged. `()` is the
+    # honest default: "no self-range was found", which is also what a caller
+    # that never looked should render as, i.e. nothing.
+    defaults=((),),
 )
 
 
@@ -337,6 +364,14 @@ def measure_ladder(ad, runner, repo_dir, pr, head, base, comment_texts):
     # the adjacencies rather than folded into them, because neither has a SIZE:
     # there is no second sha to measure to.
     bare = [b.round_no for b in blocks if not (b.audited_from and b.audited_to)]
+    # 🔴 THE UNEARNED-LEDGER READING, through the SHARED predicate. `same_commit`
+    # is `audit_dispatch`'s — an 8-char `audited=` abbreviation must compare
+    # equal to a 40-char sha, and re-typing that comparison here as `==` would
+    # be a second dialect of the one rule this file exists not to fork.
+    self_ranges = tuple(
+        SelfRange(b.round_no, b.audited_from, b.payload)
+        for b in sorted(ad.self_range_blocks(blocks), key=lambda b: b.round_no)
+    )
     # Stable sort on the round number, so a duplicate round (#958 posted two
     # `round=3` blocks) keeps the order it was seen in rather than being
     # reordered by sha.
@@ -350,7 +385,7 @@ def measure_ladder(ad, runner, repo_dir, pr, head, base, comment_texts):
             f"({len(blocks)} block(s) parsed). A bare `audited=<sha>` names no "
             "range, so it cannot be chained and this report has nothing to "
             "measure between",
-            malformed, bare,
+            malformed, bare, self_ranges,
         )
 
     adjacencies, uncovered_a, uncovered_d = [], 0, 0
@@ -424,6 +459,7 @@ def measure_ladder(ad, runner, repo_dir, pr, head, base, comment_texts):
         pr, head, base, len(blocks), len(usable), usable[0].round_no,
         adjacencies, control, uncovered_a, uncovered_d,
         (interior_a, interior_d), (tail_a, tail_d), None, malformed, bare,
+        self_ranges,
     )
 
 
@@ -599,6 +635,30 @@ def render(ladders, notes):
         if L.malformed or L.bare:
             out.append("    Both are the #1233 hole by another route: a round "
                        "that contributes no range.")
+        # 🔴 BEFORE the UNMEASURABLE / REFUSED early-returns below, because an
+        # unearned ledger is a finding about the BLOCKS and is true whether or
+        # not the commits are in this checkout. Printed after them it would be
+        # silent on exactly the ladder — #687's shape — where every block is a
+        # self-range and the control is therefore zero.
+        if L.self_ranges:
+            every = len(L.self_ranges) == L.blocks_used if L.blocks_used else False
+            out.append(f"  🔴 UNEARNED LEDGER — {len(L.self_ranges)} of "
+                       f"{L.blocks_used} block(s) with a range record a "
+                       "SELF-RANGE `audited=X..X`, which spans")
+            out.append("    ZERO commits. Each round's `payload=` beside it was "
+                       "measured over nothing and is NOT")
+            out.append("    evidence. It is a broken RECORD, not a finished "
+                       "ladder — those rounds may have changed a lot.")
+            for s in L.self_ranges:
+                pay = (f"payload={s.payload}" if s.payload is not None
+                       else "no `payload=` field")
+                out.append(f"       round {s.round_no}  "
+                           f"audited={s.sha[:8]}..{s.sha[:8]}  ({pay})")
+            if every:
+                out.append("    🔴 EVERY block with a range is one of them, so "
+                           "this ladder has NO valid payload record")
+                out.append("    at all. That is `ZacxDev/homelab-infra` #687's "
+                           "shape.")
         if L.reason:
             out.append(f"  UNMEASURABLE — {L.reason}")
             out.append("")
@@ -615,9 +675,21 @@ def render(ladders, notes):
                        "block's own range")
             out.append("    has any churn in this checkout, so an uncovered total "
                        "of 0 here would be a zero")
-            out.append("    from nothing rather than a tight chain. The PR's "
-                       "commits are almost certainly not")
-            out.append("    present — see the fetch note above.")
+            out.append("    from nothing rather than a tight chain.")
+            # 🔴 TWO MECHANISMS PRODUCE THIS ZERO AND THEY NEED OPPOSITE FIXES —
+            # `claude/RULES.md`, "an EMPTY RESULT cannot distinguish two
+            # mechanisms". Absent commits are fixed by fetching; an all-self-range
+            # ladder is fixed by editing the comments, and fetching will never
+            # move it. The blocks themselves discriminate, so the branch reads
+            # them rather than reaching for the story that was here first.
+            if L.self_ranges and len(L.self_ranges) == L.blocks_used:
+                out.append("    CAUSE: every block's range is DEGENERATE (see "
+                           "UNEARNED LEDGER above), so the control is")
+                out.append("    zero BY CONSTRUCTION. Fetching will not change "
+                           "it — the comments are what is wrong.")
+            else:
+                out.append("    The PR's commits are almost certainly not "
+                           "present — see the fetch note above.")
             out.append("")
             continue
         measured += 1
@@ -839,6 +911,50 @@ def render(ladders, notes):
         out.append("  mode-only or pure-rename change, and a binary-only change "
                    "(numstat prints `-` for")
         out.append("  binary and the churn counts that as 0).")
+
+    # 🔴 THE UNEARNED-LEDGER CENSUS — a COUNTABLE class, which is the point.
+    # #687 sat with all four of its blocks unearned across four rounds because
+    # nothing counted them: the per-PR line above makes it visible to whoever
+    # runs one PR, and this makes "ladder with an unearned ledger" a number a
+    # corpus run reports without a human noticing it.
+    #
+    # 🔴 DENOMINATOR = EVERY LADDER THIS RUN LOOKED AT, INCLUDING THE
+    # UNMEASURABLE AND REFUSED ONES. The reading is over BLOCKS, so it is
+    # available for a ladder whose commits are absent — excluding those would
+    # make the rate a function of what happened to be fetched, and would drop
+    # #687's exact shape, whose control is zero BECAUSE of the self-ranges.
+    # Every other census in this file is scoped to `L.reason is None`; this one
+    # is deliberately not, and says so.
+    unearned = [L for L in ladders if L.self_ranges]
+    if unearned:
+        all_unearned = [
+            L for L in unearned
+            if L.blocks_used and len(L.self_ranges) == L.blocks_used
+        ]
+        out.append("")
+        out.append(f"🔴 UNEARNED-LEDGER CENSUS: {len(unearned)} of "
+                   f"{len(ladders)} ladder(s) in this run carry at least one "
+                   "SELF-RANGE")
+        out.append("   block — a round whose `audited=X..X` spans zero commits, "
+                   "so its `payload=` was")
+        out.append("   measured over nothing. DENOMINATOR is every ladder "
+                   "examined, not only the measured")
+        out.append("   ones: this reading is over BLOCKS and needs no commits "
+                   "present.")
+        for L in unearned:
+            marker = ("ALL blocks" if L in all_unearned
+                      else f"{len(L.self_ranges)} of {L.blocks_used}")
+            out.append(f"     #{L.pr}  {marker}  round(s) "
+                       + ", ".join(str(s.round_no) for s in L.self_ranges))
+        out.append(f"   🔴 {len(all_unearned)} of them have NO valid payload "
+                   "record at all — every block with a")
+        out.append("   range is a self-range. That ladder's whole ledger is "
+                   "unearned.")
+        out.append("   ⚠ A FLOOR. A self-range is only visible where the block "
+                   "PARSED; a malformed or")
+        out.append("   review-comment block is invisible here exactly as it is "
+                   "everywhere else in this")
+        out.append("   report.")
     return "\n".join(out)
 
 

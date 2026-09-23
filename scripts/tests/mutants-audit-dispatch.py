@@ -2944,6 +2944,106 @@ def a_negative_payload_count_is_accepted(t):
     )
 
 
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE UNEARNED LEDGER (UL-series) — the WHOLE ladder's payload record.
+#
+# `ZacxDev/homelab-infra` #687 carried four rounds, every one of them recording
+# `audited=X..X`, and nothing said so anywhere the operator or the next auditor
+# would look. These rows mutate the reading and each of its three surfaces —
+# stderr, the brief, and the block that gets pasted onto the PR — so "the report
+# is guarded" can be re-derived rather than believed.
+#
+# 🔴 EACH TARGETS THE NARROWEST EXPRESSION THAT CAN BE WRONG. `claude/RULES.md`
+# is explicit that removing a guard TOGETHER WITH ITS ENCLOSING CONDITION proves
+# nothing about the guard: it dies for the wrong reason. So UL1 moves one
+# predicate inside a comprehension, UL4 moves one comparison, and neither
+# deletes the branch it lives in.
+
+
+def the_denominator_counts_blocks_not_ranges(t):
+    """UL1 — a bare `audited=<sha>` is folded into the range denominator.
+
+    The flattering direction: a wholly unearned ladder that also posted one
+    rangeless block then reports as PARTIAL, and `every_ranged_block` goes
+    False on exactly the corpus the report exists for.
+    """
+    return _swap(
+        t,
+        "    ranged = [b for b in blocks if b.audited_from and b.audited_to]",
+        "    ranged = list(blocks)",
+    )
+
+
+def the_brief_never_reports_an_unearned_ledger(t):
+    """UL2 — the brief section is suppressed, which is the #687 state exactly.
+
+    Not a deletion of the renderer: the function stays, is still called, and
+    still returns a string. Only the section's CONTENT goes.
+    """
+    return _swap(
+        t,
+        '    if un is None or not un.self_ranges:\n        return ""\n',
+        '    if True:\n        return ""\n',
+    )
+
+
+def stderr_never_reports_an_unearned_ledger(t):
+    """UL3 — the operator's terminal loses the corpus summary.
+
+    The per-block bystander sentence survives, so this isolates the WHOLE-LADDER
+    reading from the pair-scoped one the previous round shipped.
+    """
+    return _swap(
+        t,
+        '    if unearned.self_ranges:\n        print("⚠ UNEARNED LEDGER — "',
+        '    if False:\n        print("⚠ UNEARNED LEDGER — "',
+    )
+
+
+def a_partial_ladder_reads_as_wholly_unearned(t):
+    """UL4 — `== len(ranged)` becomes `>= 1`.
+
+    One comparison, inside the branch that already ran. A ladder with ONE broken
+    round then reports as having no valid payload record at all — the direction
+    that would make the loudest sentence in the report unreliable.
+    """
+    return _swap(
+        t,
+        "        every_ranged_block=bool(ranged) and len(selves) == len(ranged),",
+        "        every_ranged_block=bool(ranged) and len(selves) >= 1,",
+    )
+
+
+def the_pasted_block_drops_the_unearned_note(t):
+    """UL5 — the note is emitted for the brief and NOT for the PR.
+
+    #687's whole failure is that the only artefact saying so was one terminal.
+    """
+    return _swap(
+        t,
+        "    if facts.unearned is not None and facts.unearned.self_ranges:\n"
+        '        lines.append("  🔴 UNEARNED LEDGER — " + unearned_ledger_summary(',
+        "    if False:\n"
+        '        lines.append("  🔴 UNEARNED LEDGER — " + unearned_ledger_summary(',
+    )
+
+
+def the_unearned_heading_is_reworded(t):
+    """UL6 — the shipped heading drifts from the literal the suite pins.
+
+    The reachability control for that pin: a reworded heading must be caught by
+    the two-way check and not only by the tests that grep for it, or the three
+    regression rows would go red with the wrong diagnosis.
+    """
+    return _swap(
+        t,
+        '    "## 🔴 PART OF THIS LADDER\'S PAYLOAD RECORD WAS MEASURED OVER '
+        'ZERO COMMITS"\n',
+        '    "## 🔴 SOME ROUNDS OF THIS LADDER LOOK UNUSUAL"\n',
+    )
+
+
 # (label, expected killer set, mutation)
 ROWS = [
     ("D1  delete clause read-only",
@@ -4304,6 +4404,27 @@ ROWS = [
       "test_a_measured_NON_zero_never_overrules_a_STATED_zero",
       "test_a_SELF_RANGE_in_a_block_the_gate_reads_is_an_INPUT_refusal"},
      gate_never_fires),
+    # 🔴 THE UNEARNED-LEDGER ROWS. See the UL-series banner above the mutation
+    # functions for why each targets the narrowest expression rather than the
+    # branch it lives in.
+    ("UL1 the range denominator counts rangeless blocks",
+     {"test_the_unearned_reading_counts_RANGES_and_not_blocks"},
+     the_denominator_counts_blocks_not_ranges),
+    ("UL2 the BRIEF never reports an unearned ledger",
+     {"test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF"},
+     the_brief_never_reports_an_unearned_ledger),
+    ("UL3 stderr never reports the whole-ladder reading",
+     {"test_a_ladder_whose_EVERY_block_is_a_self_range_says_so_on_stderr", "test_the_unearned_ledger_strings_are_the_scripts_own"},
+     stderr_never_reports_an_unearned_ledger),
+    ("UL4 a PARTIAL ladder reads as wholly unearned",
+     {"test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF"},
+     a_partial_ladder_reads_as_wholly_unearned),
+    ("UL5 the PASTED block drops the unearned note",
+     {"test_the_block_the_operator_PASTES_carries_the_unearned_ledger_note"},
+     the_pasted_block_drops_the_unearned_note),
+    ("UL6 the shipped heading drifts from the pinned literal",
+     {"test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF", "test_the_unearned_ledger_strings_are_the_scripts_own"},
+     the_unearned_heading_is_reworded),
     ("G2  ONE zero round ends the ladder (`and` -> `or`)",
      {"test_the_gate_needs_two_CONSECUTIVE_zero_rounds_and_nothing_less"},
      gate_fires_on_one_zero_round),
