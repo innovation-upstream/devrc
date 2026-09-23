@@ -12453,9 +12453,16 @@ UNEARNED_ALL_FOUR = [
     payload_block(4, PAYLOAD_NONZERO_A, "4444dddd", "4444dddd"),
 ]
 
-# One self-range on a round the gate does NOT read, two healthy rounds after it.
+# Self-ranges on rounds the gate does NOT read, two healthy rounds after them.
 # That is the shape of EIGHT of the nine measured ladders.
+#
+# 🔴 ROUND 1 IS THE **LEGACY** SPELLING — a block with NO `payload=` field at
+# all. Every block posted before #1765 is that shape, so it is most of the real
+# history, and the report has a distinct branch for it ("with no `payload=`
+# field", not "beside `payload=None`"). Carrying it in this fixture is what
+# makes that branch reachable instead of merely present.
 UNEARNED_MIXED = [
+    payload_block(1, None, "eeee5555", "eeee5555", field=False),
     payload_block(2, PAYLOAD_NONZERO_B, "dddd4444", "dddd4444"),
     payload_block(3, PAYLOAD_NONZERO_C, "aaaa1111", "bbbb2222"),
     payload_block(4, PAYLOAD_NONZERO_A, "bbbb2222", "cccc3333"),
@@ -12516,7 +12523,7 @@ def test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF():
         f"it is not told any round's `payload=` is unmeasured:\n{out[-2000:]}"
     )
     section = out[out.index(EXPECTED_UNEARNED_HEAD):]
-    assert "1 of this ladder's 3 block(s)" in section, (
+    assert "2 of this ladder's 4 block(s)" in section, (
         f"the brief section does not print the count over its denominator:"
         f"\n{section[:900]}"
     )
@@ -12527,6 +12534,17 @@ def test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF():
     assert f"payload={PAYLOAD_NONZERO_B}" in section, (
         "the brief section does not print the count that round POSTED, which "
         f"is the number a reader would otherwise quote:\n{section[:900]}"
+    )
+    # 🔴 THE LEGACY BRANCH. A block with no `payload=` field must be described
+    # as having none — `payload=None` would read as a posted count of None, and
+    # that shape is most of the real corpus.
+    assert "round 1" in section and "with no `payload=` field" in section, (
+        "a LEGACY self-range block (no `payload=` field at all) is not "
+        f"described as one:\n{section[:900]}"
+    )
+    assert "payload=None" not in section, (
+        f"an absent `payload=` field was rendered as a posted value:\n"
+        f"{section[:900]}"
     )
     assert "EVERY block" not in section, (
         "a ladder with ONE broken round is described as having no valid "

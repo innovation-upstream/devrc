@@ -980,6 +980,10 @@ def test_a_self_range_block_is_RECORDED_and_NAMED_in_the_report(lrc, ad,
     comments = [
         _block(1, base, r1_to),
         _self_block(2, r1_to, payload=7),   # degenerate: both ends one commit
+        # 🔴 THE LEGACY SPELLING — a self-range with NO `payload=` field at all.
+        # Every block posted before #1765 is that shape, so it is most of the
+        # real corpus, and the row for it must not read `payload=None`.
+        _self_block(4, r2_to),
         _block(3, r1_to, r2_to),
     ]
     L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 687, r2_to, "main",
@@ -991,11 +995,20 @@ def test_a_self_range_block_is_RECORDED_and_NAMED_in_the_report(lrc, ad,
     # `AttributeError: 'Ladder' object has no attribute 'self_ranges'` — a
     # claim about a symbol's absence, which is not evidence about behaviour.
     rendered = lrc.render([L], [])
-    assert "UNEARNED LEDGER — 1 of 3 block(s)" in rendered, rendered
-    assert [(s.round_no, s.payload) for s in L.self_ranges] == [(2, 7)], (
+    assert "UNEARNED LEDGER — 2 of 4 block(s)" in rendered, rendered
+    assert [(s.round_no, s.payload) for s in L.self_ranges] == [(2, 7),
+                                                                (4, None)], (
         f"the self-range block was not recorded: {L.self_ranges}"
     )
     assert "round 2" in rendered and "payload=7" in rendered, rendered
+    assert "round 4" in rendered and "no `payload=` field" in rendered, (
+        "a LEGACY self-range (no `payload=` field) is not described as one:"
+        f"\n{rendered}"
+    )
+    assert "payload=None" not in rendered, (
+        f"an absent `payload=` field was rendered as a posted value:\n"
+        f"{rendered}"
+    )
     assert "EVERY block with a range" not in rendered, (
         "a ladder with one broken round was described as having no valid "
         f"payload record at all:\n{rendered}"
