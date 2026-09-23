@@ -134,8 +134,22 @@ converts that into "the ladder ENDS".
    there would be a FALSE POSITIVE on a correct value. The downstream cost is
    bounded and correctly attributed: `rev-list` exits 128 and the ledger prints
    COULD NOT MEASURE naming the command, one round later.
+3b. **A DEGENERATE SELF-RANGE in a block the gate READS is refused, exit 4.**
+   `audited=X..X` spans zero commits, so the round it records changed nothing
+   by construction and a `payload=0` beside it was earned by nothing — measured
+   in the wild on `ZacxDev/naida-ai` #233 r5 and `civitai/gpu-fleet-infra` #331
+   r8, both posting exactly that. `PROSE_DETERMINATION_STRUCTURAL_ZERO` named
+   the hazard ("a structural zero is not a measured zero") and nothing rejected
+   it, so two consecutive such blocks would have fired item 4 on two zeros
+   nobody measured. It is item 3's family and NOT item 4's for the reason item
+   3 gives about the fifth site: 4 says the RECORD is broken, fix the comment;
+   5 says the LADDER is over, stop auditing. 🔴 SCOPED TO THE PAIR THE GATE
+   READS — 3 of 159 corpus rounds carry a self-range and both measured
+   instances are the FINAL block of a closed ladder, so refusing every run
+   whose history contains one is a permanently-red gate. A self-range further
+   back is REPORTED and the run continues.
 4. **The ATTRIBUTION GATE refuses a delta brief (exit 5)** when the two most
-   recent blocks BOTH record `payload=0` for CONSECUTIVE rounds. That is the
+   recent blocks BOTH read zero for CONSECUTIVE rounds. That is the
    skill's own stop condition, and until this existed nothing evaluated it:
    MEASURED on `civitai/talos-infra` #1531, whose round 2 ledger said "zero
    payload lines changed" and whose rounds 3-11 each said the same — twelve
@@ -157,6 +171,23 @@ converts that into "the ladder ENDS".
    🔴 EXIT 5 IS THIS GATE'S AND NOTHING ELSE'S. An EMPTY reason is item 3's
    exit 4 — an input refusal, not a verdict — so a caller reading 5 may act on
    "the ladder is done" without also reading the stderr.
+   🔴 "ZERO" IS TWO READINGS NOW, AND THE SECOND ONE IS MEASURED HERE. The
+   gate did exactly what it said for 4.5 days — 0 of 99 ladders continued past
+   two consecutive `payload=0`, 6 qualifying ladders all stopped, 0 false
+   positives, 0 overrides in 564 invocations — while its TARGET PATHOLOGY
+   recurred at least nine times inside that window, because the stated count's
+   unit counts a COMMENT LINE inside a payload file. `ZacxDev/naida-ai` #242
+   rounds 3-6 changed 0 non-comment lines each and were reported 53/82/48/48;
+   `civitai/talos-infra` #1590 rounds 2-4 likewise, at 50/37/31, and its runner
+   wrote on the PR that the gate "CANNOT fire here … I deliberately did NOT
+   reclassify to 'executable lines only' to force it". Nobody inflated a
+   number; the defeat was in the unit, and a prose rule was read, quoted and
+   declined. So a round ALSO reads zero when this script re-runs that round's
+   own `audited=<from>..<to>` range and finds no EXECUTABLE line changed — see
+   `payload_reading` for why that implication runs one way only, and
+   `classify_diff` for what it refuses to classify. Every unknown there is an
+   UNMEASURED that falls back to the stated count, so the fail-open contract
+   above is unchanged in every direction.
 
 🔴 EVERY NUMBER HERE IS ABOUT THE PR, NOT ABOUT YOUR CHECKOUT
 -------------------------------------------------------------
@@ -186,6 +217,12 @@ naming that cause when it does not hold.
   refusal 4 above — and it is also the mechanical half of the skill's "ONE
   NUMBER, ONE NAME" rule, which devrc #1132 broke by carrying "payload lines"
   and "executable payload" with different values on one prose line.
+  🔴 AND IT NOW MEASURES SOMETHING STRICTLY WEAKER BESIDE IT. It still does not
+  classify payload vs scaffolding — nothing here does — but it does decide,
+  mechanically, whether a round changed any EXECUTABLE line at all over its own
+  range, which is a question needing no such classification. Zero there forces
+  zero in the payload subset; non-zero there says nothing about it. That is the
+  whole asymmetry, and `payload_reading` is where it lives.
 * **It does not `git fetch`.** The brief it writes forbids the auditor from
   writing to the shared checkout; doing it here would be the same write. `<base>`
   is therefore only as current as the operator's last fetch, and the brief SAYS
@@ -1062,6 +1099,359 @@ def round_one_anchor(blocks):
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 THE UNIT THE GATE COUNTS IN — MEASURED, NOT ONLY DECLARED.
+# --------------------------------------------------------------------------- #
+# THE GATE WORKED AS SPECIFIED AND ITS TARGET PATHOLOGY RECURRED NINE MORE
+# TIMES, INVISIBLE TO IT. Measured over the 4.5 days after the gate shipped:
+# 0 of 99 ladders continued past two consecutive `payload=0`, 6 qualifying
+# ladders all stopped there, 0 false positives, 0 overrides in 564 invocations,
+# 138/139 blocks carrying `payload=`. And in the same window:
+#
+#   * `ZacxDev/naida-ai` #242 rounds 3-6 changed 0 non-comment lines each and
+#     were reported 53 / 82 / 48 / 48.
+#   * `civitai/gpu-fleet-infra` #331 rounds 2-7 touched only a runbook while the
+#     shipped payload (6 lines of one file) was unchanged since round 1.
+#   * `civitai/talos-infra` #1590 rounds 2-4 changed 0 non-comment lines and
+#     were reported 50 / 37 / 31. Its operator wrote, on the PR: "The
+#     attribution gate CANNOT fire here — the prose lives inside a payload
+#     file, so every round changes payload lines by construction. I deliberately
+#     did NOT reclassify to 'executable lines only' to force it."
+#   * devrc #1793 rounds 3-4 and devrc #1826 round 2, the same shape.
+#
+# 🔴 NOBODY INFLATED A NUMBER. The arithmetic is faithful to the unit each
+# author declared, and that unit counts a comment line and a prose line inside a
+# payload file. Under it every prose round scores non-zero forever and the gate
+# can never fire — so the defeat is in the UNIT, not in anyone's honesty, and
+# #1590's paragraph is the proof that restating the unit in prose does not
+# close it: the rule was read, quoted, and consciously declined.
+#
+# 🔴 WHAT IS MEASURED HERE IS STRICTLY WEAKER THAN "PAYLOAD", AND THAT IS WHAT
+# MAKES IT SOUND. This module still does not classify payload vs scaffolding —
+# that is the human's call and `--payload N` still carries it. What it can
+# decide mechanically is whether a round changed any EXECUTABLE line at all,
+# over every file in the range, payload and scaffolding alike. The implication
+# runs one way only:
+#
+#     executable lines changed over the WHOLE range == 0
+#         ⇒ executable payload lines changed == 0
+#
+# because the payload files are a SUBSET of the range's files. So a measured
+# zero may REFUTE a stated non-zero count; a measured non-zero may never refute
+# a stated zero, and does not try to. No payload classification is needed in
+# either direction, which is the reason this can exist at all —
+# `PROSE_DETERMINATION_POPULATION` records that a rule needing one cannot be
+# evaluated over a population nobody can enumerate.
+#
+# 🔴 IT MUST NOT REACH THE PROSE LADDER, AND THE RULE THAT KEEPS IT OUT IS
+# MECHANICAL. `claude/skills/audit-pr/SKILL.md` is explicit that "a rule keyed
+# to file type reads every round of those as zero and stops a ladder that is
+# working", and the whole premise of the prose determination (gate 3) is that on
+# a prose payload the attribution gate CANNOT fire. A round whose range touches
+# no recognised code file at all is therefore UNMEASURED here — never zero — so
+# a ladder whose every round is prose is untouched by this and still ends on
+# gate 3's stated criterion. That is asserted, not assumed:
+# `test_a_prose_only_round_is_UNMEASURED_so_gate_3_keeps_its_population`.
+#
+# 🔴 EVERY AMBIGUITY RESOLVES TO UNMEASURED, WHICH FAILS OPEN. A file type this
+# table does not recognise, a combined diff, a git that would not run — each
+# returns a REASON and no number, and `attribution_stop` then falls back to
+# whatever the operator stated. "A zero you did not watch the command EARN is
+# not a zero" applies to this reading exactly as it applies to `payload=`.
+_COMMENT_HASH = ("#",)
+_COMMENT_SLASH = ("//",)
+_COMMENT_DASH = ("--",)
+_COMMENT_SEMI = (";",)
+
+# 🔴 LINE-comment prefixes ONLY, and the omissions are deliberate. `/*`, `*`,
+# `*/`, `"""`, `'''` and `<!--` are NOT here: a line inside a C block comment or
+# a Python docstring is counted EXECUTABLE, which OVER-counts. Over-counting
+# makes the measurement non-zero, which makes the gate NOT fire — the fail-open
+# direction. Adding `*` would be the opposite and would be a defect: `*p = 5;`
+# is executable C that starts with it, so a real statement would be read as a
+# comment and could manufacture a zero nobody earned.
+EXECUTABLE_SUFFIX_COMMENTS = {
+    ".py": _COMMENT_HASH, ".pyi": _COMMENT_HASH, ".sh": _COMMENT_HASH,
+    ".bash": _COMMENT_HASH, ".zsh": _COMMENT_HASH, ".rb": _COMMENT_HASH,
+    ".pl": _COMMENT_HASH, ".pm": _COMMENT_HASH, ".yaml": _COMMENT_HASH,
+    ".yml": _COMMENT_HASH, ".toml": _COMMENT_HASH, ".ini": _COMMENT_HASH,
+    ".cfg": _COMMENT_HASH, ".conf": _COMMENT_HASH, ".tf": _COMMENT_HASH,
+    ".tfvars": _COMMENT_HASH, ".nix": _COMMENT_HASH, ".r": _COMMENT_HASH,
+    ".jl": _COMMENT_HASH, ".ex": _COMMENT_HASH, ".exs": _COMMENT_HASH,
+    ".go": _COMMENT_SLASH, ".js": _COMMENT_SLASH, ".mjs": _COMMENT_SLASH,
+    ".cjs": _COMMENT_SLASH, ".ts": _COMMENT_SLASH, ".tsx": _COMMENT_SLASH,
+    ".jsx": _COMMENT_SLASH, ".c": _COMMENT_SLASH, ".h": _COMMENT_SLASH,
+    ".cc": _COMMENT_SLASH, ".cpp": _COMMENT_SLASH, ".hpp": _COMMENT_SLASH,
+    ".hh": _COMMENT_SLASH, ".java": _COMMENT_SLASH, ".rs": _COMMENT_SLASH,
+    ".cs": _COMMENT_SLASH, ".kt": _COMMENT_SLASH, ".kts": _COMMENT_SLASH,
+    ".scala": _COMMENT_SLASH, ".swift": _COMMENT_SLASH,
+    ".proto": _COMMENT_SLASH, ".php": _COMMENT_SLASH, ".dart": _COMMENT_SLASH,
+    ".groovy": _COMMENT_SLASH, ".jsonc": _COMMENT_SLASH,
+    ".sql": _COMMENT_DASH, ".lua": _COMMENT_DASH, ".hs": _COMMENT_DASH,
+    ".elm": _COMMENT_DASH,
+    ".el": _COMMENT_SEMI, ".lisp": _COMMENT_SEMI, ".clj": _COMMENT_SEMI,
+    ".cljs": _COMMENT_SEMI, ".edn": _COMMENT_SEMI,
+}
+EXECUTABLE_BASENAME_COMMENTS = {
+    "Dockerfile": _COMMENT_HASH, "Makefile": _COMMENT_HASH,
+    "makefile": _COMMENT_HASH, "GNUmakefile": _COMMENT_HASH,
+    ".gitignore": _COMMENT_HASH, ".dockerignore": _COMMENT_HASH,
+    ".envrc": _COMMENT_HASH, ".gitattributes": _COMMENT_HASH,
+}
+# 🔴 RECOGNISED AS PROSE, WHICH IS NOT THE SAME AS RECOGNISED AS ZERO. These
+# never contribute an executable line, and a round that touches ONLY these is
+# UNMEASURED — see the block comment above. They are enumerated rather than
+# folded into "unknown" so the two UNMEASURED reasons stay distinguishable in
+# the report: "I do not know what this file is" and "this round was prose" ask
+# for different things from the operator.
+PROSE_SUFFIXES = frozenset({
+    ".md", ".markdown", ".txt", ".rst", ".adoc", ".asciidoc", ".org",
+})
+
+ExecChurn = namedtuple(
+    "ExecChurn",
+    "executable code_lines prose_lines unknown_lines code_files unknown_paths "
+    "reason",
+)
+
+
+def _unmeasured(reason):
+    return ExecChurn(None, None, None, None, None, (), reason)
+
+
+def classify_changed_path(path):
+    """-> `'code'`, `'prose'` or `'unknown'` for one diff path.
+
+    Pure, and the ONLY place a file type is decided. The basename table is
+    consulted before the suffix table so `Dockerfile.base` and `Makefile` are
+    not read as suffix-less unknowns.
+    """
+    name = (path or "").rsplit("/", 1)[-1]
+    if name in EXECUTABLE_BASENAME_COMMENTS:
+        return "code"
+    dot = name.rfind(".")
+    suffix = name[dot:].lower() if dot > 0 else ""
+    if suffix in EXECUTABLE_SUFFIX_COMMENTS:
+        return "code"
+    if suffix in PROSE_SUFFIXES:
+        return "prose"
+    return "unknown"
+
+
+def _comment_prefixes(path):
+    name = (path or "").rsplit("/", 1)[-1]
+    if name in EXECUTABLE_BASENAME_COMMENTS:
+        return EXECUTABLE_BASENAME_COMMENTS[name]
+    dot = name.rfind(".")
+    suffix = name[dot:].lower() if dot > 0 else ""
+    return EXECUTABLE_SUFFIX_COMMENTS.get(suffix, ())
+
+
+def classify_diff(diff_text):
+    """-> `ExecChurn` over one unified diff. Pure and independently testable.
+
+    🔴 THE `in_hunk` FLAG IS LOAD-BEARING AND IS TESTED ON THE `-` SIDE. A
+    REMOVED line whose content is `-- foo` renders as `--- foo`, which is
+    byte-identical to a file header; a parser that checks `startswith('--- ')`
+    before it checks "am I inside a hunk" silently drops that line AND
+    re-points the current path at the string that followed it. So the
+    inside-a-hunk branch is asked FIRST, at every line.
+
+    🔴 `line[:1] in ('+', '-')` AND NOT `line[:1] in '+-'`. The obvious
+    spelling is a substring test, `'' in '+-'` is True, and every EMPTY line of
+    the diff would then be read as a changed line with empty content — a blank,
+    so non-executable, so it would quietly inflate `code_lines` for whichever
+    file happened to be current and could turn an UNMEASURED prose-only round
+    into a MEASURED ZERO.
+    """
+    files, executable = {}, 0
+    code_lines = prose_lines = unknown_lines = 0
+    unknown_paths, old_path, path, in_hunk = set(), None, None, False
+    for line in (diff_text or "").splitlines():
+        if line.startswith("diff --cc ") or line.startswith("diff --combined"):
+            # A COMBINED diff has one +/- column per parent, so column 0 does
+            # not mean what this parser reads it as. `--remerge-diff` is asked
+            # for precisely to avoid this shape; meeting one anyway means the
+            # git that ran did something else, and a number from it would be
+            # arithmetic on the wrong columns.
+            return _unmeasured(
+                "the diff carries a COMBINED merge diff (`diff --cc`), whose "
+                "+/- columns are per-parent and are not the columns this "
+                "reader counts"
+            )
+        if line.startswith("diff --git "):
+            old_path, path, in_hunk = None, None, False
+            continue
+        if in_hunk and line[:1] in ("+", "-"):
+            kind = classify_changed_path(path)
+            if kind == "prose":
+                prose_lines += 1
+            elif kind == "unknown":
+                unknown_lines += 1
+                unknown_paths.add(path or "<unnamed>")
+            else:
+                code_lines += 1
+                files[path] = files.get(path, 0) + 1
+                content = line[1:].strip()
+                prefixes = _comment_prefixes(path)
+                if content and not content.startswith(prefixes):
+                    executable += 1
+            continue
+        if line.startswith("--- "):
+            old_path = _strip_diff_prefix(line[4:].strip())
+            continue
+        if line.startswith("+++ "):
+            new_path = _strip_diff_prefix(line[4:].strip())
+            path = old_path if new_path is None else new_path
+            continue
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+    total = code_lines + prose_lines + unknown_lines
+    if unknown_lines:
+        return ExecChurn(
+            None, code_lines, prose_lines, unknown_lines, len(files),
+            tuple(sorted(unknown_paths)),
+            f"{unknown_lines} changed line(s) are in {len(unknown_paths)} "
+            "file(s) whose type this script does not recognise, so it cannot "
+            "say whether they are executable: "
+            + ", ".join(sorted(unknown_paths)[:5]),
+        )
+    if total == 0:
+        return ExecChurn(
+            None, 0, 0, 0, 0, (),
+            "the diff for this range carries no changed line at all, so there "
+            "is nothing to classify — an empty reading is not a measured zero",
+        )
+    if not files:
+        return ExecChurn(
+            None, 0, prose_lines, 0, 0, (),
+            f"this round changed {prose_lines} line(s) and every one of them "
+            "is in a PROSE file, so 'executable lines' is not a meaningful "
+            "unit for it — that is the prose determination's population, not "
+            "this gate's",
+        )
+    return ExecChurn(
+        executable, code_lines, prose_lines, 0, len(files), (), None,
+    )
+
+
+def _strip_diff_prefix(token):
+    """`a/foo.py` / `b/foo.py` -> `foo.py`; `/dev/null` -> None."""
+    if token == "/dev/null":
+        return None
+    if token.startswith("a/") or token.startswith("b/"):
+        return token[2:]
+    return token
+
+
+def measure_executable_churn(runner, repo_dir, frm, to, base):
+    """-> `ExecChurn` over `<frm>..<to> --not <base>`, or a REASON and no number.
+
+    The same command and the same read rules as `measure_range_churn` — rc 0
+    and silent stderr, because "a failed command is not a zero" — with `-p`
+    instead of `--numstat`, since this question is about the CONTENT of the
+    changed lines and numstat has thrown it away.
+
+    A DIFFERENT function rather than a parameter on that one: the callers want
+    opposite things from every failure. The ledger reports COULD NOT MEASURE to
+    a human who then reads the file list; this one feeds a REFUSAL, so each of
+    its unknowns has to resolve to "the gate stays silent" and be nameable in
+    the sentence that says so.
+    """
+    if not frm or not to:
+        return _unmeasured(
+            "the block records no two-sha range, so this round's own fix "
+            "commits cannot be identified"
+        )
+    if same_commit(frm, to):
+        return _unmeasured(
+            f"`{frm}..{to}` is a SELF-RANGE — both ends name one commit, so it "
+            "spans nothing and any count off it is structural, not measured"
+        )
+    rc, out, err = runner([
+        "git", "-C", repo_dir, "log", "--format=", "--remerge-diff", "-p",
+        "--no-color", f"{frm}..{to}", "--not", base,
+    ])
+    if rc != 0:
+        return _unmeasured(
+            f"`git log -p --remerge-diff {frm}..{to} --not {base}` exited "
+            f"{rc}: {(err or out).strip() or 'no output'}"
+        )
+    if err.strip():
+        return _unmeasured(
+            "the diff command exited 0 but wrote to STDERR, so its output is "
+            f"not trustworthy: {err.strip()}"
+        )
+    return classify_diff(out)
+
+
+def measure_rounds_executable_churn(runner, repo_dir, blocks, base, rounds):
+    """-> `{round_no: ExecChurn}` for the rounds the gate is about to read.
+
+    Scoped to `rounds` rather than to the whole corpus on purpose: a ladder can
+    carry a dozen blocks and each measurement is a `git log -p` over a range,
+    while the gate reads exactly two. Measuring the other ten would be work
+    whose result nothing consults.
+
+    🔴 THE RANGE IS THE BLOCK'S OWN `<from>..<to>`, WHICH IS THAT ROUND'S FIX
+    RANGE AND NOT THE NEXT ROUND'S DELTA. `range_anchor`'s docstring states the
+    semantics once: "`audited=<from>..<to>` records that the round's fix took
+    the tree from `<from>` — the tip that round's AUDIT read — to `<to>`, the
+    head its fixes produced." So `<from>..<to>` IS the question "what did round
+    N's fixes change", asked of round N's own record.
+    """
+    measured = {}
+    for b in blocks:
+        if b.round_no not in rounds:
+            continue
+        measured[b.round_no] = measure_executable_churn(
+            runner, repo_dir, b.audited_from, b.audited_to, base
+        )
+    return measured
+
+
+# 🔴 A SELF-RANGE IN A BLOCK THE GATE READS IS AN INPUT REFUSAL, NOT A VERDICT.
+# `audited=X..X` spans zero commits, so the round it records cannot have changed
+# anything and a `payload=0` beside it was earned by nothing. Measured in the
+# wild on `ZacxDev/naida-ai` #233 round 5 and `civitai/gpu-fleet-infra` #331
+# round 8. `PROSE_DETERMINATION_STRUCTURAL_ZERO` already names the hazard —
+# "a structural zero is not a measured zero" — and until now nothing rejected
+# it, so two consecutive such rounds would have fired the gate on two zeros
+# nobody earned, in the one direction the skill says costs the most.
+#
+# 🔴 SCOPED TO THE BLOCKS THE GATE WOULD READ, AND NOT TO THE CORPUS. A
+# self-range on round 8 of a ladder now at round 12 is a broken record and gets
+# a warning; only one that can reach the gate's own arithmetic is refused,
+# because refusing a run over a block nothing consults is the permanently-red
+# gate `claude/RULES.md` forbids. Every other block keeps parsing, unchanged.
+def gate_relevant_self_ranges(blocks, round_no):
+    """-> the blocks `attribution_stop` would read that record `X..X`."""
+    if round_no < 2:
+        return []
+    by_round = {}
+    for b in blocks:
+        by_round[b.round_no] = b
+    if not by_round:
+        return []
+    newest = by_round[max(by_round)]
+    pair = [b for b in (by_round.get(newest.round_no - 1), newest) if b]
+    return [
+        b for b in pair
+        if b.audited_from and b.audited_to
+        and same_commit(b.audited_from, b.audited_to)
+    ]
+
+
+def self_range_blocks(blocks):
+    """-> every block recording `X..X`, for the report. See above for the split."""
+    return [
+        b for b in blocks
+        if b.audited_from and b.audited_to
+        and same_commit(b.audited_from, b.audited_to)
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # 🔴 THE ATTRIBUTION GATE — the skill's stop condition, as a BRANCH.
 # --------------------------------------------------------------------------- #
 # `claude/skills/audit-pr/SKILL.md`: "Two consecutive rounds whose fixes changed
@@ -1095,14 +1485,73 @@ def round_one_anchor(blocks):
 # blocks from a previous ladder is a refusal the operator cannot act on.
 ATTRIBUTION_STOP_ROUNDS = 2
 
-AttributionStop = namedtuple("AttributionStop", "fires newer older why")
+# `read_older` / `read_newer` are the `PayloadReading` each block resolved to,
+# carried out so the REFUSAL can print WHICH source each round's zero came
+# from. Defaulted to None so the fail-open early returns — which have no pair
+# to read — construct unchanged.
+AttributionStop = namedtuple(
+    "AttributionStop", "fires newer older why read_older read_newer",
+    defaults=(None, None),
+)
+
+# `value` is the count the gate compares against 0, `source` is WHERE it came
+# from, and `detail` is the phrase the refusal prints for that round.
+PayloadReading = namedtuple("PayloadReading", "value source detail")
 
 
-def attribution_stop(blocks, round_no):
+def payload_reading(block, churn=None):
+    """-> `PayloadReading` for one block: the count the gate must act on.
+
+    🔴 A MEASURED ZERO MAY REFUTE A STATED NON-ZERO; A MEASURED NON-ZERO MAY
+    NEVER REFUTE A STATED ZERO. The two readings are not symmetric because the
+    measurement is strictly WIDER than the stated one: it counts executable
+    lines over the whole range — payload and scaffolding together — so zero
+    there forces zero in the payload subset, while non-zero there says nothing
+    about the subset at all. Inverting either half would be a defect:
+    overriding a stated 0 upward would disarm the gate the operator armed by
+    hand, and refusing to override a stated non-zero downward is precisely the
+    state nine ladders ran in.
+
+    🔴 AND IT APPLIES WHERE NO COUNT WAS STATED. A legacy block carries no
+    `payload=` field at all; a measured zero over its own recorded range is
+    still a zero somebody's git EARNED, so it counts. That is what lets this
+    reach a ladder whose rounds were posted before any of it existed.
+    """
+    stated = block.payload
+    measured_zero = (
+        churn is not None and churn.reason is None and churn.executable == 0
+    )
+    if stated == 0:
+        agrees = " and the measured diff agrees" if measured_zero else ""
+        return PayloadReading(0, "stated", f"`payload=0`{agrees}")
+    if measured_zero:
+        posted = (
+            f"`payload={stated}` as posted, but " if stated is not None
+            else "no `payload=` field, and "
+        )
+        return PayloadReading(
+            0, "measured",
+            f"{posted}MEASURED 0 executable lines over "
+            f"`{block.audited_from}..{block.audited_to}` "
+            f"({churn.code_lines} changed line(s) across {churn.code_files} "
+            "code file(s), every one blank or a comment)",
+        )
+    if stated is not None:
+        return PayloadReading(stated, "stated", f"`payload={stated}`")
+    return PayloadReading(
+        None, "none",
+        "no readable `payload=` field, and the diff could not be classified"
+        + (f" ({churn.reason})" if churn is not None else ""),
+    )
+
+
+def attribution_stop(blocks, round_no, measured=None):
     """-> AttributionStop over the blocks a delta round would be framed on.
 
     Pure and independently testable, like `parse_claims_blocks`: a refusal is
-    only trustworthy if it can be driven with no network and no PR.
+    only trustworthy if it can be driven with no network and no PR. `measured`
+    is `{round_no: ExecChurn}` — computed by the caller precisely so this stays
+    pure — and omitting it reproduces the stated-count-only behaviour exactly.
 
     `why` is populated on BOTH paths — it says why the gate fired, or which of
     the fail-open states this corpus is in. A refusal that cannot say what it
@@ -1139,26 +1588,40 @@ def attribution_stop(blocks, round_no):
             f"round {newer.round_no - 1} was read, so there is no pair of "
             "CONSECUTIVE rounds to compare",
         )
-    if newer.payload is None or older.payload is None:
+    measured = measured or {}
+    read_older = payload_reading(older, measured.get(older.round_no))
+    read_newer = payload_reading(newer, measured.get(newer.round_no))
+    if read_newer.value is None or read_older.value is None:
         missing = [
-            f"round {b.round_no}" for b in (older, newer) if b.payload is None
+            f"round {b.round_no} ({r.detail})"
+            for b, r in ((older, read_older), (newer, read_newer))
+            if r.value is None
         ]
         return AttributionStop(
             False, newer, older,
-            "no readable `payload=` field on " + " and ".join(missing)
-            + " — an ABSENT field is not a zero",
+            "no count this gate may act on for " + " and ".join(missing)
+            + " — an ABSENT field is not a zero, and neither is a diff nobody "
+            "could classify",
         )
-    if newer.payload == 0 and older.payload == 0:
+    if read_newer.value == 0 and read_older.value == 0:
+        sources = {read_older.source, read_newer.source}
+        how = (
+            "both STATED" if sources == {"stated"}
+            else "both MEASURED" if sources == {"measured"}
+            else "one STATED and one MEASURED"
+        )
         return AttributionStop(
             True, newer, older,
-            f"rounds {older.round_no} and {newer.round_no} both record "
-            "`payload=0`",
+            f"rounds {older.round_no} and {newer.round_no} both changed zero "
+            f"payload lines ({how})",
+            read_older, read_newer,
         )
     return AttributionStop(
         False, newer, older,
-        f"round {older.round_no} records `payload={older.payload}` and round "
-        f"{newer.round_no} records `payload={newer.payload}` — a round that "
+        f"round {older.round_no} reads {read_older.value} and round "
+        f"{newer.round_no} reads {read_newer.value} — a round that "
         "touches payload never trips this",
+        read_older, read_newer,
     )
 
 
@@ -3536,6 +3999,12 @@ def payload_summary_line(facts, cumulative):
 # every_emit_claims_run_ships` asserts each of these is still verbatim in the
 # skill. Reword either side and the pair must be reworded together, in one
 # commit, which is the moment somebody notices the scope moved.
+# The section's own heading, hoisted so a test can locate the document gate 3
+# ships WITHOUT re-typing it — a second spelling of a heading is a second thing
+# to keep in step, and a guard that greps for the stale one asserts nothing.
+PROSE_DETERMINATION_HEAD = (
+    "## BEFORE YOU DECIDE WHETHER TO RUN ANOTHER ROUND — for a WHOLE-PROSE diff"
+)
 PROSE_DETERMINATION_THRESHOLD = (
     "**The reason is nameable when at least TWO-THIRDS of the attributable "
     "pre-image lines are ladder-authored**, and the count goes in the summary "
@@ -3885,7 +4354,7 @@ def render_prose_determination(round_no, emit_from, head_sha, anchor):
     return "\n".join([
         _bar(),
         "",
-        "## BEFORE YOU DECIDE WHETHER TO RUN ANOTHER ROUND — for a WHOLE-PROSE diff",
+        PROSE_DETERMINATION_HEAD,
         "",
         "🔴 **This is for YOU, the ladder runner, not for the auditor.** "
         + PROSE_DETERMINATION_POPULATION
@@ -4649,6 +5118,14 @@ OVERRIDE_FLAG = "--override-attribution-gate"
 OVERRIDE_REFUSAL_HEADER = (
     "🔴 REFUSING TO OVERRIDE the attribution gate"
 )
+# 🔴 A THIRD HEADER, BECAUSE IT IS A THIRD CLAIM. This one says the RECORD the
+# gate reads is broken (`audited=X..X`), which is the input-refusal family's
+# rc 4 — not `ATTRIBUTION_REFUSAL_HEADER`'s "the ladder has left the PR". They
+# demand opposite actions: fix the comment, versus stop auditing.
+SELF_RANGE_REFUSAL_HEADER = (
+    "🔴 REFUSING TO ASSEMBLE another round — A BLOCK THE GATE READS RECORDS A "
+    "SELF-RANGE"
+)
 
 # 🔴 A SEAM, NOT A CONVENIENCE — the same construction as the
 # `PROSE_DETERMINATION_*` constants above and for the same measured reason. This
@@ -4662,15 +5139,25 @@ OVERRIDE_REFUSAL_HEADER = (
 # skill by `test_the_payload_field_the_gate_enforces_is_documented_in_the_skill`,
 # and moving it needs both files in one commit.
 ATTRIBUTION_GATE_ENFORCEMENT = (
-    "🔴 **The gate is ENFORCED, and the number comes from YOU.** Post each "
-    "round's block with `--payload N` — the payload lines THAT round's fixes "
-    "changed, from your own classification of the ledger's file list — and the "
-    "assembler REFUSES the next round (exit 5) when the two most recent blocks "
-    "record `payload=0` for CONSECUTIVE rounds. **It fails OPEN:** a block with "
-    "no readable `payload=` field is not a zero, so an unstated count never "
-    "stops a ladder, and `--override-attribution-gate \"<why>\"` continues one "
-    "— with the reason required, and recorded in the brief and above the block "
-    "so it lands on the PR."
+    "🔴 **The gate is ENFORCED, the number comes from YOU, and a MEASURED zero "
+    "can overrule it.** Post each round's block with `--payload N` — the "
+    "payload lines THAT round's fixes changed, from your own classification of "
+    "the ledger's file list — and the assembler REFUSES the next round "
+    "(exit 5) when the two most recent blocks BOTH read zero for CONSECUTIVE "
+    "rounds. A round reads zero when you STATE `payload=0`, **and also when "
+    "the assembler re-runs that round's own `audited=<from>..<to>` range and "
+    "finds NO EXECUTABLE LINE CHANGED** — every changed line blank or a "
+    "line-comment. That may overrule a stated non-zero, because the payload "
+    "files are a subset of the range, so zero over the range forces zero in "
+    "the payload; the converse never holds, and a measured non-zero never "
+    "overrules a stated `payload=0`. **It fails OPEN in every direction:** an "
+    "absent or unreadable `payload=` field is not a zero, a range touching a "
+    "file type the classifier does not recognise is UNMEASURED, a round that "
+    "changed ONLY prose files is UNMEASURED — that is the prose "
+    "determination's population, not this gate's — and "
+    "`--override-attribution-gate \"<why>\"` continues a ladder, with the "
+    "reason required, and recorded in the brief and above the block so it "
+    "lands on the PR."
 )
 
 
@@ -5307,6 +5794,84 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         brief_refused = 2
 
     # ------------------------------------------------------------------ #
+    # 🔴 REFUSAL 3b — A DEGENERATE SELF-RANGE IN A BLOCK THE GATE READS.
+    # ------------------------------------------------------------------ #
+    # `audited=X..X` spans zero commits, so the round it records changed
+    # nothing by construction and any `payload=0` beside it was earned by
+    # nothing. Two consecutive such blocks would fire REFUSAL 4 below on two
+    # zeros nobody measured — a FALSE stop, which `claude/skills/audit-pr/
+    # SKILL.md` says is the failure direction that costs the most.
+    #
+    # 🔴 IT RETURNS 4 AND NOT `ATTRIBUTION_STOP_RC`, and the distinction is the
+    # same one PR #1768 drew: this is an INPUT refusal — the record on the PR
+    # is malformed and the operator must fix the comment — while 5 is the
+    # gate's VERDICT, "the ladder has left the PR, post the findings and stop".
+    # A caller reading 5 may act on the second; handed it for the first, it
+    # would end a ladder on the strength of a typo. Ordered BEFORE the gate for
+    # that reason: whichever fires first is the number the caller sees.
+    #
+    # 🔴 AND IT IS SCOPED TO THE PAIR THE GATE READS. See
+    # `gate_relevant_self_ranges`: a self-range further back in the ladder is
+    # reported as malformed and nothing more, because refusing a run over a
+    # block no arithmetic consults is the permanently-red gate `claude/
+    # RULES.md` forbids — and 2 of 159 corpus rounds carry one.
+    degenerate = gate_relevant_self_ranges(blocks, args.round_no)
+    # The other half of the same predicate: a self-range the gate will NOT read
+    # is a broken record and nothing more, so it is REPORTED and the run
+    # continues. Reported at all because it is silent otherwise — the round it
+    # describes recorded a range that could not contain its own fixes, and the
+    # next reader of that comment has no way to know.
+    bystanders = [
+        b for b in self_range_blocks(blocks) if b not in degenerate
+    ]
+    if bystanders:
+        print(
+            "⚠ "
+            + "; ".join(
+                f"round {b.round_no} records a SELF-RANGE "
+                f"`audited={b.audited_from}..{b.audited_to}`"
+                for b in bystanders
+            )
+            + ". Both ends name one commit, so that block records a round "
+            "whose range spans nothing. It is not one of the two blocks the "
+            "attribution gate reads, so this run continues — but the record "
+            "is wrong and any count beside it was earned by nothing.",
+            file=err_stream,
+        )
+    if degenerate and brief_refused is None:
+        print("\n".join([
+            f"{SELF_RANGE_REFUSAL_HEADER} for round {args.round_no} of PR "
+            f"#{args.pr}.",
+            "",
+        ] + [
+            f"  round {b.round_no} records `audited={b.audited_from}.."
+            f"{b.audited_to}` — both ends name ONE commit"
+            + (f", beside `payload={b.payload}`" if b.payload is not None
+               else "")
+            for b in degenerate
+        ] + [
+            "",
+            "  That range spans zero commits, so the round it records changed "
+            "nothing BY CONSTRUCTION. The attribution gate reads these two "
+            "blocks; a `payload=0` earned by an empty range is not a measured "
+            "zero, and two of them would end this ladder on arithmetic over "
+            "nothing.",
+            "",
+            "  🔴 This is an INPUT refusal, not the gate's verdict. The ladder "
+            "is not over — the RECORD of it is broken.",
+            "",
+            f"  Fix: edit that comment so `audited=` reads <the tip that "
+            "round's audit READ>..<the head its fixes PRODUCED> — two "
+            "different shas — or re-run "
+            f"`audit-dispatch.py {args.pr} --round {degenerate[-1].round_no} "
+            "--emit-claims --audited <the tip that round read>` and replace "
+            "the block with what it prints.",
+        ]), file=err_stream)
+        if not args.emit_claims:
+            return 4
+        brief_refused = 4
+
+    # ------------------------------------------------------------------ #
     # 🔴 REFUSAL 4 — THE ATTRIBUTION GATE. The ladder has left the PR.
     # ------------------------------------------------------------------ #
     # `attribution_stop` carries the whole decision and every fail-open state;
@@ -5316,7 +5881,35 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
     # also telling the operator their ladder is over. Fix the ledger, re-run,
     # and the gate then evaluates what is actually there — two refusals for two
     # different causes, in the order that makes the second one trustworthy.
-    stop = attribution_stop(blocks, args.round_no)
+    #
+    # 🔴 THE COUNT IS NOW READ FROM TWO PLACES, and the git half is computed
+    # HERE rather than inside the gate so `attribution_stop` stays pure. It
+    # measures only the two rounds the gate reads — see
+    # `measure_rounds_executable_churn` — and every failure it can have comes
+    # back as a REASON, which `payload_reading` resolves to the operator's own
+    # number. A run that cannot reach git therefore behaves exactly as it did
+    # before any of this existed.
+    #
+    # 🔴 HOISTED FROM THE LEDGER BLOCK BELOW RATHER THAN RE-SPELLED HERE. `or
+    # "main"` is a GUESS that decides which commits count as this round's
+    # payload, and `claude/RULES.md`'s "one rule, one place" is explicit that a
+    # predicate open-coded at a second site is wrong at one of them. Both
+    # readers now take the same three values from this one computation, and
+    # `base_assumed` travels with them so the brief still reports the guess.
+    base_ref = data.get("baseRefName") or "main"
+    base_assumed = not data.get("baseRefName")
+    base_for_range = f"origin/{base_ref}"
+    gate_rounds = {b.round_no for b in blocks}
+    if gate_rounds:
+        newest_round = max(gate_rounds)
+        gate_rounds = {newest_round, newest_round - 1}
+    exec_churn = (
+        measure_rounds_executable_churn(
+            runner, repo_dir, blocks, base_for_range, gate_rounds,
+        )
+        if args.round_no >= 2 and gate_rounds else {}
+    )
+    stop = attribution_stop(blocks, args.round_no, exec_churn)
     if stop.fires and brief_refused is None and not args.gate_override:
         print("\n".join([
             f"{ATTRIBUTION_REFUSAL_HEADER} for round {args.round_no} of PR "
@@ -5324,9 +5917,9 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             "",
             f"  read: {stop.why}",
             f"        round {stop.older.round_no} — "
-            f"{len(stop.older.items)} claim(s), `payload=0`",
+            f"{len(stop.older.items)} claim(s), {stop.read_older.detail}",
             f"        round {stop.newer.round_no} — "
-            f"{len(stop.newer.items)} claim(s), `payload=0`",
+            f"{len(stop.newer.items)} claim(s), {stop.read_newer.detail}",
             "",
             "  `claude/skills/audit-pr/SKILL.md`: two consecutive rounds whose "
             "fixes changed zero payload lines means the ladder is auditing "
@@ -5448,9 +6041,6 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
     # 🔴 ROUND 10 — THE DEFAULT IS RECORDED, not silently indistinguishable from
     # a reading. `or "main"` is a guess, and `--not <base>` is what decides which
     # commits count as this round's payload.
-    base_ref = data.get("baseRefName") or "main"
-    base_assumed = not data.get("baseRefName")
-    base_for_range = f"origin/{base_ref}"
     if args.round_no >= 2 and prev_sha:
         ledger = measure_ledger(
             runner, repo_dir, prev_sha, base_for_range, head_check

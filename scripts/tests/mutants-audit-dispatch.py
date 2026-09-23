@@ -197,7 +197,16 @@ SKILL_RELS = (
 # `172 - min(50, max(1, 172 // 20))` = 172 - 8 = 164. Two tests were added by
 # `fix/audit-dispatch-rc5-overload`; the number is still the formula's output
 # on a counted m, NOT 162 + 2.
-MIN_TESTS = 164
+# 🔴 RAISED AGAIN 2026-09-23, 164 -> 180, at m = 189 — COUNTED the same way,
+# from a green run of the module (`189 passed`, and `189 tests collected` on a
+# `--collect-only`) put through the same formula,
+# `189 - min(50, max(1, 189 // 20))` = 189 - 9 = 180. Seventeen node ids were
+# added by `feat/payload-unit-executable-lines` (thirteen functions, one of
+# them parametrized five ways); the number is still the formula's output on a
+# counted m, NOT 164 + 17. That distinction is the one the three paragraphs
+# above record going wrong, and the arithmetic happens to differ here: 164 + 17
+# is 181, which would have been one too high and refused every run.
+MIN_TESTS = 180
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -2558,11 +2567,18 @@ def gate_never_fires(t):
 
 
 def gate_fires_on_one_zero_round(t):
-    """G2 — `and` -> `or`: ONE zero round ends the ladder. Two is the floor."""
+    """G2 — `and` -> `or`: ONE zero round ends the ladder. Two is the floor.
+
+    🔴 RE-AIMED when the gate's unit stopped being the stated count alone. The
+    comparison moved from `newer.payload` to `read_newer.value`, and a mutator
+    whose target string no longer matches reports "the guard held" — so this
+    row was measured as DID NOT APPLY before it was re-pointed, by the
+    applicability sweep that runs before any test does.
+    """
     return _swap(
         t,
-        "    if newer.payload == 0 and older.payload == 0:",
-        "    if newer.payload == 0 or older.payload == 0:",
+        "    if read_newer.value == 0 and read_older.value == 0:",
+        "    if read_newer.value == 0 or read_older.value == 0:",
     )
 
 
@@ -2589,6 +2605,223 @@ def the_emitted_block_loses_its_override_record(t):
         '        )\n',
         "",
     )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE UNIT THE GATE COUNTS IN (U-series).
+#
+# The gate shipped in #1765 and did exactly what it said — 0 of 99 ladders
+# continued past two consecutive `payload=0` over 4.5 days — while its target
+# pathology recurred at least nine times inside that same window, because the
+# number it reads counts a COMMENT LINE inside a payload file. These rows break
+# the measured reading in each of the directions that would restore that state,
+# and in the two that would create the opposite failure: a manufactured zero
+# ending a converging ladder.
+# --------------------------------------------------------------------------- #
+_MEASURED_ZERO_BRANCH = (
+    '    if measured_zero:\n'
+    '        posted = (\n'
+    '            f"`payload={stated}` as posted, but " if stated is not None\n'
+    '            else "no `payload=` field, and "\n'
+    '        )\n'
+)
+
+
+def the_measured_zero_never_overrules_a_stated_count(t):
+    """U1 — the reading is computed and then not acted on.
+
+    The shipped defect itself, restored: every round's count comes from the
+    header again, so two rounds that changed zero executable lines while
+    stating 41 and 113 assemble a round 5 exactly as #242 and #1590 did.
+    """
+    return _swap(t, _MEASURED_ZERO_BRANCH,
+                 '    if measured_zero and False:\n        posted = ""\n')
+
+
+def the_measurement_overrules_in_BOTH_directions(t):
+    """U2 — the asymmetry inverted: the measured count wins unconditionally.
+
+    This is the plausible simplification, and it DISARMS the gate on the ladder
+    it was built for: the measurement counts executable lines over the whole
+    range, scaffolding included, so a round that states `payload=0` and rewrote
+    1,051 test lines — `civitai/cli` #498's rounds 4-10 — would read non-zero.
+    """
+    return _swap(
+        t,
+        '    stated = block.payload\n'
+        '    measured_zero = (\n',
+        '    stated = block.payload\n'
+        '    if churn is not None and churn.reason is None:\n'
+        '        return PayloadReading(churn.executable, "measured", "m")\n'
+        '    measured_zero = (\n',
+    )
+
+
+def the_measured_zero_only_fills_in_an_absent_field(t):
+    """U3 — it may supply a count but never CORRECT one.
+
+    The narrower reading somebody would write to feel safe, and it covers none
+    of the nine recurrences: all of them STATED a non-zero count.
+    """
+    return _swap(t, '    if measured_zero:\n',
+                 '    if measured_zero and stated is None:\n')
+
+
+def the_reading_is_taken_over_the_DELTA_range(t):
+    """U4 — the other anchor out of the same field.
+
+    `range_anchor` vs `emit_anchor` is the pair devrc #958 got wrong in the
+    other direction. Measuring `<to>..HEAD` asks what the NEXT round changed
+    and files the answer under this one.
+    """
+    return _swap(
+        t,
+        '            runner, repo_dir, b.audited_from, b.audited_to, base\n',
+        '            runner, repo_dir, b.audited_to, "HEAD", base\n',
+    )
+
+
+def a_measured_zero_needs_a_payload_field_to_exist(t):
+    """U5 — the legacy corpus goes back out of reach.
+
+    Every block posted before #1765 carries no `payload=` field, so requiring
+    one here makes the whole measured reading inert for them.
+    """
+    return _swap(
+        t,
+        '    measured_zero = (\n'
+        '        churn is not None and churn.reason is None and churn.executable == 0\n'
+        '    )\n',
+        '    measured_zero = (\n'
+        '        churn is not None and churn.reason is None\n'
+        '        and churn.executable == 0 and block.payload is not None\n'
+        '    )\n',
+    )
+
+
+def a_prose_only_round_is_read_as_a_measured_zero(t):
+    """U6 — the guard that keeps this out of gate 3's population, removed.
+
+    `render_prose_determination` ships "on a whole-prose diff every round
+    changes payload lines by construction, so the attribution gate cannot
+    fire" to every operator. Score a prose round zero and that sentence is
+    false, the hatch is double-handled, and a converging docs ladder stops at
+    round 3 — the false-stop direction the skill says costs the most.
+    """
+    return _swap(
+        t,
+        '    if not files:\n'
+        '        return ExecChurn(\n'
+        '            None, 0, prose_lines, 0, 0, (),\n',
+        '    if False:\n'
+        '        return ExecChurn(\n'
+        '            None, 0, prose_lines, 0, 0, (),\n',
+    )
+
+
+def an_unrecognised_file_type_is_guessed_to_be_hash_commented(t):
+    """U7 — the classifier guesses a comment syntax it was not given.
+
+    `#` is the most common line comment there is, so this is the guess someone
+    would actually make — and it manufactures a zero out of a file nobody
+    could classify.
+    """
+    return _swap(t, '    return "unknown"\n', '    return "code"\n')
+
+
+def a_self_range_in_the_gates_own_pair_is_accepted(t):
+    """U8 — the structural zero reaches the gate's arithmetic.
+
+    Measured in the wild on `ZacxDev/naida-ai` #233 r5 and
+    `civitai/gpu-fleet-infra` #331 r8, both `audited=X..X payload=0`.
+    """
+    return _swap(
+        t,
+        '    if round_no < 2:\n        return []\n',
+        '    if round_no < 2 or True:\n        return []\n',
+    )
+
+
+def the_self_range_refusal_covers_the_WHOLE_corpus(t):
+    """U13 — the scope widened to every block, which is a permanently-red gate.
+
+    3 of 159 corpus rounds carry a self-range and both measured instances are
+    the FINAL block of a closed ladder, so a run whose HISTORY contains one
+    would be refused for a record nothing consults.
+    """
+    return _swap(
+        t,
+        '    pair = [b for b in (by_round.get(newest.round_no - 1), newest) if b]\n',
+        '    pair = list(by_round.values())\n',
+    )
+
+
+def the_file_header_is_matched_before_the_hunk(t):
+    """U9 — the ordering trap, and it is silent in both of its effects.
+
+    A REMOVED line reading `-- foo` renders as `--- foo`, byte-identical to a
+    file header. Checked first, that line is dropped AND the current path is
+    re-pointed at the string after it.
+    """
+    return _swap(
+        t,
+        '        if in_hunk and line[:1] in ("+", "-"):\n',
+        '        if line.startswith("--- ") and not line.startswith("--- a/x"):\n'
+        '            old_path = _strip_diff_prefix(line[4:].strip())\n'
+        '            continue\n'
+        '        if in_hunk and line[:1] in ("+", "-"):\n',
+    )
+
+
+def the_changed_line_test_becomes_a_substring_membership(t):
+    """U10 — `line[:1] in "+-"`, which is True for the EMPTY string.
+
+    Every blank line of the diff then reads as a changed line with empty
+    content — a blank, so non-executable — inflating the code-line count for
+    whichever file happened to be current.
+    """
+    return _swap(
+        t,
+        '        if in_hunk and line[:1] in ("+", "-"):\n',
+        '        if in_hunk and line[:1] in "+-":\n',
+    )
+
+
+def a_failed_git_is_read_as_an_empty_diff(t):
+    """U11 — "a failed command is not a zero", removed.
+
+    The rule `measure_ledger` keeps for the same commands, because an
+    unwritable object store makes `--remerge-diff` UNDER-count at rc 0 while
+    printing a plausible diff.
+    """
+    return _swap(
+        t,
+        '    if rc != 0:\n'
+        '        return _unmeasured(\n'
+        '            f"`git log -p --remerge-diff {frm}..{to} --not {base}` exited "\n',
+        '    if False:\n'
+        '        return _unmeasured(\n'
+        '            f"`git log -p --remerge-diff {frm}..{to} --not {base}` exited "\n',
+    )
+
+
+def a_combined_merge_diff_is_counted_anyway(t):
+    """U12 — arithmetic on the wrong columns, silently, at rc 0."""
+    return _swap(
+        t,
+        '        if line.startswith("diff --cc ") or line.startswith("diff --combined"):\n',
+        '        if False:\n',
+    )
+
+
+def an_asterisk_becomes_a_comment_prefix(t):
+    """U14 — the one addition to the prefix table that is a DEFECT.
+
+    A C block-comment continuation line starts with `*` and so does a pointer
+    store: `*p = 5;`. Adding it reads executable C as a comment, which is the
+    direction that manufactures a zero.
+    """
+    return _swap(t, '_COMMENT_SLASH = ("//",)\n', '_COMMENT_SLASH = ("//", "*")\n')
 
 
 def the_empty_reason_refusal_returns_the_gates_verdict(t):
@@ -4083,6 +4316,53 @@ ROWS = [
       "test_the_gates_verdict_and_an_input_refusal_are_DIFFERENT_numbers",
       "test_the_gate_override_is_refused_without_a_reason_and_records_one_given"},
      the_empty_reason_refusal_returns_the_gates_verdict),
+    # 🔴 THE U-SERIES KILLER SETS ARE MEASURED BY THIS HARNESS, NOT PREDICTED.
+    # Several of them are deliberately WIDE: breaking the measured reading in
+    # one direction moves every test that drives it, and a narrow set written
+    # from a guess reports WRONG-KILLER on a correct tree.
+    ("U1  a measured zero never overrules a stated count",
+     {"test_two_rounds_that_changed_only_COMMENTS_arm_the_gate",
+      "test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field"},
+     the_measured_zero_never_overrules_a_stated_count),
+    ("U2  the measurement overrules in BOTH directions",
+     {"test_a_measured_NON_zero_never_overrules_a_STATED_zero"},
+     the_measurement_overrules_in_BOTH_directions),
+    ("U3  a measured zero only fills in an ABSENT field",
+     {"test_two_rounds_that_changed_only_COMMENTS_arm_the_gate"},
+     the_measured_zero_only_fills_in_an_absent_field),
+    ("U4  the reading is taken over the DELTA range",
+     {"test_the_measured_range_is_the_blocks_OWN_from_to_and_not_the_delta"},
+     the_reading_is_taken_over_the_DELTA_range),
+    ("U5  a measured zero needs a `payload=` field to exist",
+     {"test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field"},
+     a_measured_zero_needs_a_payload_field_to_exist),
+    ("U6  a prose-only round is read as a measured ZERO",
+     {"test_a_prose_only_round_is_UNMEASURED_so_gate_3_keeps_its_population"},
+     a_prose_only_round_is_read_as_a_measured_zero),
+    ("U7  an unrecognised file type is GUESSED to be `#`-commented",
+     {"test_an_UNRECOGNISED_file_type_is_UNMEASURED_and_fails_OPEN"},
+     an_unrecognised_file_type_is_guessed_to_be_hash_commented),
+    ("U8  a self-range in the gate's own pair is accepted",
+     {"test_a_SELF_RANGE_in_a_block_the_gate_reads_is_an_INPUT_refusal"},
+     a_self_range_in_the_gates_own_pair_is_accepted),
+    ("U9  the file header is matched BEFORE the hunk",
+     {"test_the_classifier_reads_a_changed_line_the_way_git_wrote_it"},
+     the_file_header_is_matched_before_the_hunk),
+    ("U10 the changed-line test becomes substring membership",
+     {"test_the_classifier_reads_a_changed_line_the_way_git_wrote_it"},
+     the_changed_line_test_becomes_a_substring_membership),
+    ("U11 a failed `git` is read as an empty diff",
+     {"test_a_failed_or_noisy_git_is_UNMEASURED_and_never_a_zero"},
+     a_failed_git_is_read_as_an_empty_diff),
+    ("U12 a COMBINED merge diff is counted anyway",
+     {"test_a_COMBINED_merge_diff_is_UNMEASURED_rather_than_miscounted"},
+     a_combined_merge_diff_is_counted_anyway),
+    ("U13 the self-range refusal covers the WHOLE corpus",
+     {"test_a_SELF_RANGE_the_gate_does_NOT_read_is_reported_and_not_refused"},
+     the_self_range_refusal_covers_the_WHOLE_corpus),
+    ("U14 `*` becomes a comment prefix",
+     {"test_the_classifier_reads_a_changed_line_the_way_git_wrote_it"},
+     an_asterisk_becomes_a_comment_prefix),
 ]
 
 

@@ -369,6 +369,19 @@ file type reads every round of those as zero and stops a ladder that is working.
 directions on ordinary names (reference file). A round's fix touches a handful of files — read the list and name each one
 payload or scaffolding. **Ambiguous is not zero**: the gate does not fire, and the ladder continues.
 
+🔴 **The assembler adds ONE mechanical reading beside yours, and it is strictly WEAKER — it never
+classifies payload.** It re-runs your round's own `audited=<from>..<to>` range and asks whether ANY
+changed line, in any file, is executable: not blank, not a line-comment (`#`, `//`, `--`, `;`, by
+file type). Zero there forces zero in the payload, because the payload files are a subset of the
+range — so a measured zero may overrule the count you stated, and a measured non-zero may never
+overrule a `payload=0` you stated. **This does NOT reinstate a file-extension rule**, and the two
+guards that keep it honest are the ones this section demands: a round that touched **only prose
+files is UNMEASURED, never zero** (that is the prose determination's population below), and a range
+carrying **any file type the table does not recognise is UNMEASURED**. Block comments, docstrings
+and prose held in a YAML scalar are counted EXECUTABLE on purpose — over-counting keeps the gate
+silent, which is the fail-open direction — so the reading misses some prose rounds and cannot
+manufacture a zero. The unit you REPORT is unchanged: payload lines, one number, one name.
+
 🔴 **DECIDE ONCE, AT ROUND 1, AND WRITE IT IN THE CLAIMS BLOCK.** A class that can be re-decided
 each round disarms the gate without anyone choosing to — measured on devrc #1132, where a shared
 test library was named scaffolding early and payload later, in a ladder whose summary claimed it
@@ -408,13 +421,38 @@ Stop.** File the remaining scaffolding findings as one follow-up task naming the
 its PR merges or a named reader dismisses it in writing. A round that touches payload never trips
 this.
 
-🔴 **The gate is ENFORCED, and the number comes from YOU.** Post each round's block with
-`--payload N` — the payload lines THAT round's fixes changed, from your own classification of the
-ledger's file list — and the assembler REFUSES the next round (exit 5) when the two most recent
-blocks record `payload=0` for CONSECUTIVE rounds. **It fails OPEN:** a block with no readable
-`payload=` field is not a zero, so an unstated count never stops a ladder, and
-`--override-attribution-gate "<why>"` continues one — with the reason required, and recorded in the
-brief and above the block so it lands on the PR.
+🔴 **The gate is ENFORCED, the number comes from YOU, and a MEASURED zero can overrule it.** Post
+each round's block with `--payload N` — the payload lines THAT round's fixes changed, from your own
+classification of the ledger's file list — and the assembler REFUSES the next round (exit 5) when
+the two most recent blocks BOTH read zero for CONSECUTIVE rounds. A round reads zero when you STATE
+`payload=0`, **and also when the assembler re-runs that round's own `audited=<from>..<to>` range and
+finds NO EXECUTABLE LINE CHANGED** — every changed line blank or a line-comment. That may overrule a
+stated non-zero, because the payload files are a subset of the range, so zero over the range forces
+zero in the payload; the converse never holds, and a measured non-zero never overrules a stated
+`payload=0`. **It fails OPEN in every direction:** an absent or unreadable `payload=` field is not a
+zero, a range touching a file type the classifier does not recognise is UNMEASURED, a round that
+changed ONLY prose files is UNMEASURED — that is the prose determination's population, not this
+gate's — and `--override-attribution-gate "<why>"` continues a ladder, with the reason required, and
+recorded in the brief and above the block so it lands on the PR.
+
+⚠ **The stated count was the ONLY unit for 4.5 days and the target pathology recurred ≥9 times
+inside it.** The gate did exactly what it said — 0 of 99 ladders continued past two consecutive
+`payload=0`, 6 qualifying ladders all stopped, 0 false positives, 0 overrides in 564 invocations —
+while `ZacxDev/naida-ai` #242 rounds 3–6 changed **0 non-comment lines each** and were reported
+53/82/48/48, `civitai/talos-infra` #1590 rounds 2–4 likewise (50/37/31), and devrc #1793 and #1826
+the same shape. Nobody inflated a number: the arithmetic was faithful to a unit that counts a
+comment line inside a payload file, and under that unit every prose round scores non-zero forever.
+#1590's runner wrote it out on the PR — *"the attribution gate **cannot** fire here… I deliberately
+did **not** reclassify to 'executable lines only' to force it"* — which is why the unit is now
+measured by the assembler and not only restated here.
+
+🔴 **`audited=X..X` IS REFUSED (exit 4), and that is NOT the gate's verdict.** A self-range spans
+zero commits, so the round it records changed nothing by construction and a `payload=0` beside it
+was earned by nothing — measured in the wild on `ZacxDev/naida-ai` #233 r5 and
+`civitai/gpu-fleet-infra` #331 r8, both posting `payload=0`. Two consecutive such blocks would have
+fired the gate on two zeros nobody measured. Exit 4 means *your record is broken, fix the comment*;
+exit 5 means *the ladder has left the PR, stop auditing*. Only the pair the gate reads is refused; a
+self-range further back is reported and the run continues.
 
 ⚠ **It was prose here until 2026-09-17, and prose lost.** MEASURED on `civitai/talos-infra` #1531:
 the condition was met **and stated in writing at the end of round 3** — round 2's ledger reads "zero
