@@ -7941,11 +7941,12 @@ def test_a_heading_matching_BOTH_step1_detectors_is_not_double_counted():
 
 #: A scanner that REFUSES only when `token` is somewhere in the repo's markdown.
 #:
-#: 🔴 DELTA-DEPENDENT ON PURPOSE. A stub that always refuses cannot tell the
-#: attributing half of `leak_gate` from a gate that refuses everything, and a
-#: gate that refuses everything is the permanently-red one `claude/RULES.md`
-#: says trains people to route around. `_ALWAYS_SRC` below is the always-refusing
-#: stub, used for the one case where "already red" is the point.
+#: 🔴 DELTA-DEPENDENT ON PURPOSE. A stub that always refuses would make every
+#: assertion below green whether or not the gate reads anything, and it cannot
+#: show the negative control — a clean delta LANDING — which is what separates
+#: this gate from the permanently-red one `claude/RULES.md` says trains people
+#: to route around. `_ALWAYS_SRC` below is the always-refusing stub, used for
+#: the already-red tree, which is the operator opt-in's whole subject.
 _TOKEN_SCANNER_SRC = '''\
 import sys
 from pathlib import Path
@@ -7972,8 +7973,9 @@ sys.exit(0)
 '''
 
 #: A scanner whose verdict does NOT depend on the delta — the "this tree was
-#: already red" world. Its output is fixed, so `new_output_lines` is empty and
-#: the exit code does not move: both tells say "not this write".
+#: already red" world, and the only world in which the operator opt-in is the
+#: right answer. Its finding names a file no delta here touches, so a reader of
+#: the test output can see that what was refused (or approved) is pre-existing.
 _ALWAYS_SRC = '''\
 import sys
 print("fakescan: 1 finding(s) in a file this delta never touched")
@@ -8073,21 +8075,6 @@ class TestTheLeakGateRefusesADeltaTheScannerDenies:
         staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
         assert staged == [], f"paths left STAGED after the refusal: {staged}"
 
-    def test_exit_2_from_the_scanner_is_also_a_refusal(
-        self, repo: Path, tmp_path: Path
-    ) -> None:
-        """🔴 `could not vouch` IS NOT A PASS. cairn's scanner exits 2 when one
-        of its OWN controls misbehaved, and its docstring says in as many words
-        that 2 is not a clean result. Zero is the only pass."""
-        token_scanner(repo, code=2)
-
-        res = run_tool(repo, "--confirm", update=leaky_update(tmp_path))
-
-        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
-            res.returncode, res.stdout, res.stderr)
-        assert "exit=2" in res.stderr, res.stderr
-        assert "ZERO IS THE ONLY PASS" in res.stderr, res.stderr
-
     def test_the_refusal_is_reachable_ONLY_through_rule_o(
         self, repo: Path, tmp_path: Path
     ) -> None:
@@ -8102,73 +8089,131 @@ class TestTheLeakGateRefusesADeltaTheScannerDenies:
         assert "status=written" in res.stdout, res.stdout
 
 
-class TestTheGateIsScopedToTheDelta:
-    """🔴 THE SCOPING DECISION, AND WHY IT IS NOT "REFUSE ON ANY NON-ZERO".
+class TestTheGateRefusesOnANYNonZeroExit:
+    """🔴 NO ATTRIBUTION — A DECISION, NOT A SIMPLIFICATION.
 
-    The target tree may be red for something this call did not cause. Refusing
-    there would block a legitimate handoff and train the next person to route
-    around the gate — worse than no gate. So the gate is differential: it asks
-    whether the scan says anything about THIS write that it does not say
-    without it.
+    An earlier shape scanned TWICE, with the delta and without it, and let the
+    write through when it could not tell the two runs apart. That arm shipped
+    the failure this rule exists to stop: an unattributable refusal printed a
+    banner and then committed AND pushed anyway. Attribution by comparing two
+    scans is a guess in any case — a concurrent writer, a scanner whose rule set
+    grew between the runs, or a finding whose line is byte-identical to one
+    already printed each make it the wrong guess. The gate now refuses on ANY
+    non-zero exit, and the already-red tree is cleared by an OPERATOR, below.
+
+    🔴 THIS CLASS'S SCANNER EXITS **2**, AND THAT IS NOT DECORATION. Every other
+    fixture in this block exits 1. There is no rc-2 branch left to test — under
+    a flat refuse "2 also refuses" is true by construction — but a reader who
+    re-introduces a `== 1` (or `!= 1`) comparison is the failure this block's
+    prose warns about, and a suite whose every non-zero fixture is 1 CANNOT see
+    that mutant. Two distinct codes across the block costs nothing and kills it.
+    MEASURED: with `run.code == 0` mutated to `run.code != 1`, the first test
+    below dies; with every fixture at 1 it survives a fully green suite.
     """
 
-    def test_a_tree_that_was_ALREADY_red_does_not_block_the_handoff(
+    def test_a_tree_that_was_ALREADY_red_is_REFUSED(
         self, repo: Path, tmp_path: Path
     ) -> None:
-        install_scanner(repo, _ALWAYS_SRC.format(code=1))
+        """🔴 THE BEHAVIOUR CHANGE, AND THE DELTA HERE IS CLEAN. The refusal is
+        entirely pre-existing — precisely the case the old shape waved through
+        with `LEAK GATE COULD NOT ATTRIBUTE`, at `status=written`."""
+        install_scanner(repo, _ALWAYS_SRC.format(code=2))
+        before = doc_of(repo)
+        shas_before = commit_shas(repo)
 
         res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
 
-        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
-        assert "status=written" in res.stdout, res.stdout
-        # 🔴 AND IT SAYS SO. A gate that silently declined to attribute is
-        # indistinguishable from one that vouched.
-        assert "COULD NOT ATTRIBUTE" in res.stdout, res.stdout
-        assert "CANNOT SEE" in res.stdout, res.stdout
-
-    def test_the_same_ALWAYS_red_scanner_still_catches_a_code_that_MOVES(
-        self, repo: Path, tmp_path: Path
-    ) -> None:
-        """The other side of the boundary above: "already red" is not a blanket
-        exemption. A scan whose CODE moves because of this delta is attributed
-        to it even though the tree was refusing before."""
-        # Red before (a planted file the delta never touches) AND red for a
-        # second, delta-caused reason, with a different code.
-        token_scanner(repo, code=2)
-        (repo / "claudedocs" / "planted.md").write_text(
-            f"pre-existing: {DENIED_TOKEN}\n", encoding="utf-8")
-        # Sanity: the tree already refuses without any delta.
-        pre = subprocess.run([sys.executable, str(repo / "tests/leakscan.py")],
-                             cwd=repo, capture_output=True, text=True)
-        assert pre.returncode == 2, pre.stdout
-
-        res = run_tool(repo, "--confirm", update=leaky_update(tmp_path))
-
         assert res.returncode == hd.EXIT_LEAK_REFUSED, (
             res.returncode, res.stdout, res.stderr)
-        # The NEW line is the delta's, and it is what is shown.
-        assert "claudedocs/handoff-sample-topic.md" in res.stderr, res.stderr
+        assert "status=leak-refused" in res.stderr, res.stderr
+        # The scanner's own line is reproduced, whatever it is about.
+        assert "pre-existing" in res.stderr, res.stderr
+        assert doc_of(repo) == before, "the refused delta was left in the doc"
+        assert commit_shas(repo) == shas_before, (
+            "a commit was made despite the refusal")
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == [], f"paths left STAGED after the refusal: {staged}"
 
-    def test_new_output_lines_is_ORDERED_and_set_based(self) -> None:
-        """Unit: the attribution primitive. Nothing here parses a format —
-        a line present in one run and absent from the other is the whole rule,
-        which is what makes it work for a scanner this tool has never seen."""
-        assert hd.new_output_lines("a\nb\n", "a\nb\n") == []
-        assert hd.new_output_lines("a\nb\n", "a\nc\nb\nd\n") == ["c", "d"]
-        # A line REMOVED by the delta is not a finding about the delta.
-        assert hd.new_output_lines("a\nb\n", "a\n") == []
+    def test_the_refusal_NAMES_the_operator_opt_in(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """A refusal the operator cannot act on is not one — and for an
+        already-red tree the only way past is a flag, so the refusal spells it.
+        """
+        install_scanner(repo, _ALWAYS_SRC.format(code=2))
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
+        assert hd.LEAK_PRE_EXISTING_FLAG in res.stderr, res.stderr
 
-    def test_caused_by_this_write_needs_only_ONE_tell(self) -> None:
-        """Both tells are load-bearing and neither subsumes the other."""
-        silent_1 = hd.ScanRun(1, "")
-        silent_0 = hd.ScanRun(0, "")
-        assert hd.caused_by_this_write(silent_0, silent_1), (
-            "a scanner that prints NOTHING still answers with its exit code")
-        noisy_before = hd.ScanRun(1, "one\n")
-        noisy_after = hd.ScanRun(1, "one\ntwo\n")
-        assert hd.caused_by_this_write(noisy_before, noisy_after), (
-            "a tree already at exit 1 can still GAIN a finding")
-        assert not hd.caused_by_this_write(noisy_before, noisy_before)
+
+class TestTheOperatorOptInClearsAnAlreadyRedTree:
+    """🔴 EXPLICIT AND RECORDED, AND IT IS RULE (n)'s SHAPE REUSED RATHER THAN A
+    SECOND SPELLING: a deliberately long `--…-approved` flag, `store_true`, held
+    in a module constant and named by the refusal it overrides."""
+
+    def test_the_SAME_delta_is_refused_without_the_flag_and_lands_with_it(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 BOTH HALVES IN ONE TEST, ON ONE FIXTURE. Split across two tests
+        the pair proves less: each could pass for a reason of its own (a
+        neighbouring rule refusing the fixture, a flag that disables the gate
+        rather than clearing this refusal). One delta, one scanner, one
+        difference — the flag."""
+        install_scanner(repo, _ALWAYS_SRC.format(code=1))
+        upd = clean_update(tmp_path)
+
+        refused = run_tool(repo, "--confirm", update=upd)
+        assert refused.returncode == hd.EXIT_LEAK_REFUSED, (
+            refused.returncode, refused.stderr)
+
+        res = run_tool(repo, "--confirm", hd.LEAK_PRE_EXISTING_FLAG, update=upd)
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert "status=written" in res.stdout, res.stdout
+
+    def test_an_approved_run_is_DISTINGUISHABLE_from_a_clean_one(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE POINT OF THE FLAG BEING RECORDED. Both runs end
+        `status=written`; a reader of the transcript afterwards must still be
+        able to tell which one the repo's own gate refused. The flag's own name
+        is on screen, and the clean run's `exited 0` line is NOT."""
+        install_scanner(repo, _ALWAYS_SRC.format(code=1))
+        approved = run_tool(
+            repo, "--confirm", hd.LEAK_PRE_EXISTING_FLAG,
+            update=clean_update(tmp_path))
+        assert "APPROVED THROUGH" in approved.stdout, approved.stdout
+        assert hd.LEAK_PRE_EXISTING_FLAG in approved.stdout, approved.stdout
+        assert "exited 0 with this delta" not in approved.stdout, approved.stdout
+        # …and the scanner's own words are under it, so what was approved is on
+        # screen rather than asserted.
+        assert "pre-existing" in approved.stdout, approved.stdout
+
+    def test_the_flag_does_NOT_clear_a_scanner_that_could_not_be_RUN(
+        self, repo: Path, monkeypatch
+    ) -> None:
+        """🔴 APPROVING AN ABSENCE IS THE REASSURING ZERO THIS GATE REFUSES TO
+        PRINT. A scanner that hung or could not start never produced a verdict,
+        so there is nothing an operator can have read and approved. The opt-in
+        covers a REFUSAL, never the absence of one."""
+        scanner = install_scanner(repo, "import sys\nsys.exit(0)\n")
+
+        def boom(_scanner: Path, _repo: Path) -> hd.ScanRun:
+            raise hd.ScannerUnusable("it did not finish within 300s")
+
+        monkeypatch.setattr(hd, "run_leak_scanner", boom)
+        verdict = hd.leak_gate(
+            repo, "claudedocs/handoff-sample-topic.md", scanner, approved=True)
+        assert "status=leak-refused" in verdict.refusal, verdict
+        assert "CANNOT READ IS NOT A PASS" in verdict.refusal, verdict
+        assert verdict.notes == "", verdict
+
+    def test_the_flag_is_OFF_by_default(self, repo: Path, tmp_path: Path) -> None:
+        """INVARIANT GUARD on the argparse declaration: `store_true`, so a run
+        that does not name the flag cannot be holding it. The pair above is the
+        behavioural claim; this pins that the default is not truthy by some
+        other route."""
+        args = hd.build_parser().parse_args(
+            ["--repo", str(repo), "--topic", "t", "--update", str(tmp_path)])
+        assert args.leak_pre_existing_approved is False
 
 
 class TestARepoWithNoScannerPasses:
@@ -8220,27 +8265,31 @@ class TestTheScannerLookupIsAClosedSet:
 
     def test_an_undeclared_path_is_NOT_a_scanner(self, repo: Path) -> None:
         """NEGATIVE CONTROL: a lookup, not a search. A glob for `*leak*` would
-        find a fixture or a README and attribute its exit code to this delta."""
-        (repo / "tools").mkdir()
-        (repo / "tools" / "leakscan.py").write_text("", encoding="utf-8")
-        assert hd.find_leak_scanner(repo) is None
+        find a fixture or a README and run it as this repo's gate.
 
-    def test_the_first_declared_hit_wins(self, repo: Path) -> None:
-        for rel in hd.LEAKSCAN_CANDIDATES:
+        🔴 THE THREE PATHS NAMED HERE ARE THE ONES THAT WERE DECLARED AND ARE
+        NOT ANY MORE, so this is the guard against re-adding them by reflex.
+        Measured across 175 checkouts, `scripts/leakscan.py` and a ROOT
+        `leakscan.py` existed in ZERO — they bought no coverage, and the root
+        one is where a FIXTURE or an EXAMPLE sits, which is the hazard the
+        no-glob rule is about, one size smaller.
+        """
+        for rel in ("tools/leakscan.py", "scripts/leakscan.py", "leakscan.py"):
+            assert rel not in hd.LEAKSCAN_CANDIDATES, (
+                f"{rel} is declared again — read `LEAKSCAN_CANDIDATES`' comment"
+            )
             p = repo / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("", encoding="utf-8")
-        found = hd.find_leak_scanner(repo)
-        assert found == repo / hd.LEAKSCAN_CANDIDATES[0], found
+        assert hd.find_leak_scanner(repo) is None
 
 
 class TestAScannerThatCannotBeRunIsARefusal:
-    """🔴 A GATE THAT CANNOT READ IS NOT A PASS, and this is the hole the
-    differential would otherwise have: a scanner that hangs, or cannot be
-    started, answers IDENTICALLY on both runs — same code, same (empty) output —
-    so the attribution logic would call it "not this write" and let the delta
-    through. `run_leak_scanner` raises instead, and the raise is a refusal
-    before any baseline is taken.
+    """🔴 A GATE THAT CANNOT READ IS NOT A PASS. `could not vouch` and `clean`
+    are different answers, and only one of them lets a delta onto a shared
+    branch — so `run_leak_scanner` raises rather than returning some code the
+    verdict could be read off. The opt-in does not reach this arm; that is
+    `TestTheOperatorOptInClearsAnAlreadyRedTree`'s last case.
     """
 
     def test_a_real_timeout_really_raises(self, repo: Path, monkeypatch) -> None:
@@ -8256,48 +8305,23 @@ class TestAScannerThatCannotBeRunIsARefusal:
         self, repo: Path, monkeypatch
     ) -> None:
         scanner = install_scanner(repo, "import sys\nsys.exit(0)\n")
-        doc = repo / "claudedocs" / "handoff-sample-topic.md"
-        original = doc.read_bytes()
 
         def boom(_scanner: Path, _repo: Path) -> hd.ScanRun:
             raise hd.ScannerUnusable("it did not finish within 300s")
 
         monkeypatch.setattr(hd, "run_leak_scanner", boom)
         verdict = hd.leak_gate(
-            repo, doc, "claudedocs/handoff-sample-topic.md", original,
-            "merged\n", scanner,
-        )
+            repo, "claudedocs/handoff-sample-topic.md", scanner, approved=False)
         assert "status=leak-refused" in verdict.refusal, verdict
         assert "CANNOT READ IS NOT A PASS" in verdict.refusal, verdict
         assert verdict.notes == "", verdict
-
-    def test_a_baseline_that_cannot_be_taken_is_a_refusal_too(
-        self, repo: Path, monkeypatch
-    ) -> None:
-        """The second arm: the delta scan answered (non-zero) and the run that
-        would ATTRIBUTE it did not. Refusing is the only honest verdict — the
-        alternative is passing a delta nothing could clear."""
-        scanner = install_scanner(repo, "import sys\nsys.exit(1)\n")
-        doc = repo / "claudedocs" / "handoff-sample-topic.md"
-        original = doc.read_bytes()
-        calls: list[int] = []
-
-        def once(_scanner: Path, _repo: Path) -> hd.ScanRun:
-            calls.append(1)
-            if len(calls) == 1:
-                return hd.ScanRun(1, "something\n")
-            raise hd.ScannerUnusable("it could not be started: boom")
-
-        monkeypatch.setattr(hd, "run_leak_scanner", once)
-        verdict = hd.leak_gate(
-            repo, doc, "claudedocs/handoff-sample-topic.md", original,
-            "merged\n", scanner,
-        )
-        assert "status=leak-refused" in verdict.refusal, verdict
-        assert "baseline" in verdict.refusal, verdict
-        # 🔴 THE CALLER'S INVARIANT: `main` owns the rollback and expects the
-        # doc to hold the MERGED text on return, whatever the verdict.
-        assert doc.read_text(encoding="utf-8") == "merged\n"
+        # 🔴 THE CALLER OWNS THE WRITE AND THE ROLLBACK, and that is now a
+        # PROPERTY rather than a sequencing promise: the gate takes no `doc` and
+        # no `original`, so nothing inside it can un-write the file and forget
+        # to put it back. The differential shape it replaced un-wrote the doc
+        # mid-gate and restored it in a `finally`. Nothing here asserts that —
+        # the signature does, and `test_a_delta_carrying_a_denied_identifier_is_
+        # refused` pins the end-to-end consequence.
 
 
 class TestTheGateRunsOnTheCONFIRMEDWriteOnly:
