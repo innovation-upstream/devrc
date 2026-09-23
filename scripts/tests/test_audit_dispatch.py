@@ -12580,12 +12580,22 @@ def test_a_ladder_with_NO_self_range_reports_NOTHING_anywhere():
         comments=healthy,
     )
     assert rc == 0, f"the healthy corpus did not assemble (rc {rc}):\n{err}"
+    # 🔴 SCOPED TO THIS REPORT'S OWN TOKENS, AND THE BARE WORD IS NOT ONE.
+    # `SELF-RANGE` alone is spelled by a DIFFERENT, pre-existing mechanism —
+    # `measure_executable_churn`'s unmeasured reason, reached whenever the
+    # round's range is degenerate for any cause. MEASURED by the battery:
+    # mutant `N1` (the range anchoring on `<to>` again) made `<anchor>..HEAD`
+    # degenerate and this control fired as an EXTRA-KILLER, i.e. it was
+    # asserting about a mechanism it does not guard. `claude/RULES.md`: a guard
+    # spelled over a WORD another feature can spell is not a guard. The three
+    # tokens below are emitted by the unearned-ledger report and by nothing
+    # else — `records a SELF-RANGE` is the bystander sentence's own phrase.
     for where, text in (("stderr", err), ("stdout", out)):
         assert "UNEARNED LEDGER" not in text, (
             f"the unearned-ledger report fired on a ladder with no self-range "
             f"at all, on {where}:\n{text[-1200:]}"
         )
-        assert "SELF-RANGE" not in text, (
+        assert "records a SELF-RANGE" not in text, (
             f"a healthy ladder was described as carrying a self-range on "
             f"{where}:\n{text[-1200:]}"
         )
