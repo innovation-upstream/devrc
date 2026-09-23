@@ -22,44 +22,38 @@ notifications and repo browse are dropped.
 ## State now
 - 🔴 **THE ARC IS CLOSED** — the operator used `mention-review` for a real review **on a real
   screen** and reported **"done, working"** (2026-09-18). ⚠ The condition also says *"beats octo
-  at reading a diff"*, and that carries no comparison. Pre-existing gap.
+  at reading a diff"*, and that carries no comparison. Pre-existing gap. **Everything below is a
+  NEW arc — picker ranking — not another round of this one.**
 - ✅ **CARRIED FORWARD — durable, would otherwise be dropped by the next replace:**
   `#1793` → `cee56910` (picker promotion, THREE gates narrower than authorised) · `#1781` →
   `8d0984ba` · `#1772` → `2b131bf2` · `#1773` → `97c20d06` · `#1775` → `66e51d90` · `#1812` →
-  `6ee5ff68` · `#1813` → `7f39fda7` · **`#1828` → `23b898d5`** · **`#1831` → `b84745f2`**.
+  `6ee5ff68` · `#1813` → `7f39fda7` · `#1828` → `23b898d5` (MIT LICENSE, scoped to the Go
+  module by operator decision; verified with a NEGATIVE control — no root `LICENSE`, repo
+  `license` stays `null`) · `#1831` → `b84745f2` (ranges table now refreshes **4-HOURLY**,
+  `OnCalendar = "*-*-* 00/4:00:00"`, `RandomizedDelaySec = 900`; both hosts verified by the
+  unit itself, not by `list-timers`' NEXT column. 🔴 **Payoff MEASURED, not inferred:** the
+  table recorded the busiest repo at **1809** when round 0 caught it — while PRs up to `#1831`
+  were open against it — and read **1832 on both hosts** after the switch).
   🔴 **`--version` CANNOT distinguish builds** — verify by content with a positive control.
   **The picker is live with NO switch** — the Alacritty wrapper execs `scripts/mention-open.py`
   from the WORKING TREE. 🔴 **METHODOLOGY LESSONS GO TO THE CAIRN INDEX, NOT HERE** —
   `devrc/scripts` + `devrc/tests`, carrying the **fzf contract** (abort is FOUR keys; the bind's
   ACTION ORDER is load-bearing and a reorder is SILENT; `--nth` excludes the marker from
   MATCHING but **not** from RANKING) and the two `gh` instrument traps (rev `610596953ba16646`).
-- ✅ **SYMPTOM 1 IS SHIPPED AND VERIFIED** — `#1812` + `#1813`, both hosts, verified by CONTENT
-  (wrapped binary `usage: mention-review` = 1 as positive control, `ReadIntents` = 2).
+- ✅ **SYMPTOM 1 IS SHIPPED AND VERIFIED** — `#1812` + `#1813`, both hosts, by CONTENT.
   **Operator, 2026-09-20: (D) then (A), with (B) `--no-sort` REFUSED** — and the marker shipped
-  RANK-ONLY, no class column (`a70839af`), because the click-time class of the picked row is
-  `below` 56 vs `plausible` 17, so a class column would have read "the ranker does not trust
-  this" on the WANTED row ~3 times in 4. 🔴 Do not "restore" the class column: it was declined.
-- ✅ **`#1828` MERGED — the MIT claim is backed.** `nix/pkgs/tools/mention-review/src/LICENSE`,
-  scoped to the Go module by operator decision, **not** the repo root: the grant covers what the
-  derivation ships and not the personal config. Verified with a NEGATIVE control — there is no
-  root `LICENSE` on `main`, and GitHub's repo `license` stays `null`, which is correct.
-- ✅ **`#1831` MERGED, SHIPPED AND VERIFIED — the ranges table now refreshes 4-HOURLY.**
-  `OnCalendar = "*-*-* 00/4:00:00"`. `ship.sh` rc=0, both hosts at `b84745f2`, every per-host
-  line read, cross-host agreement asserted. **Verified on BOTH hosts by the unit itself**, not
-  by `list-timers`' NEXT column: `systemctl --user show … -p TimersCalendar` →
-  `OnCalendar=*-*-* 00/4:00:00`, timer `active/waiting`, service exited 0.
-  🔴 **THE PAYOFF IS MEASURED, NOT INFERRED:** `known_ranges.json` recorded
-  `innovation-upstream/devrc` at **1809** when round 0 caught it — while PRs up to `#1831` were
-  open against that repo — and reads **1832 on both hosts** after the switch.
-- 🔴 **`#1829` IS A DRAFT, DELIBERATELY — `/audit-pr` round 0 returned `deletion candidate` and
-  the operator chose "timer first, then re-scope" (2026-09-21).** Its diagnosis holds and was
-  verified independently of the implementer (0 of 6 wrong-repo gaps leak at the ceiling margin;
-  `IMPOSSIBLE` preserved at `max_ref == 0`; Tier A median unchanged at 1.0, mean 3.52 → 3.99;
-  regression matrix **red at `3fa77f49` (40 of 51) → green at HEAD (51/51)**, with 8
-  assertion-shaped failures at base distinct from 22 `AttributeError` / 14 `TypeError`). What
-  it needs is in the PR comment; summarised as rank 1.
-- **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5** again. An unknown
-  session id also answers 200 with an empty array, so this is NOT a clean bill of health.
+  RANK-ONLY, no class column (`a70839af`). 🔴 Do not "restore" the class column: it was declined.
+- 🔴 **`#1829` IS IN FLIGHT — operator chose RE-SCOPE-AND-LAND (2026-09-23), over the standing
+  `deletion candidate` verdict, after seeing that the re-scope shrinks the margin ~5×.** An
+  implementer agent holds branch `fix-mention-picker-staleness-margin` in its own worktree;
+  **as of this writing it has NOT pushed** — `origin/…` is still `1a5ae937`, 34 behind `main`,
+  1 ahead. It was briefed to merge `main` in (MERGE not rebase; `rerere` disabled per command),
+  NOT to un-draft and NOT to merge.
+- ✅ **ITEM (c) IS MEASURED AND CLOSED — the below mass decomposes with ZERO residual, so no
+  third mechanism is required.** 65 click-time `below` = **59 stale-table + 6 wrong-repo**, both
+  sides positively identified rather than inferred from an absence. Numbers in Gotchas.
+- **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5** again (2026-09-23).
+  An unknown session id also answers 200 with an empty array, so this is NOT a clean bill.
 
 ## Open investigations — live diagnosis state
 
@@ -118,20 +112,20 @@ notifications and repo browse are dropped.
 - **Next probe:** re-run both alignments over ranks 100–199 (constant digit count).
 
 ## Next steps (ranked)
-1. **Re-scope `#1829` against the now-4-hourly cadence, then land it.** Repo: devrc.
-   IN FLIGHT: devrc#1829 (DRAFT). Three changes, all from round 0 and all detailed in the PR
-   comment: **(a)** drop `PLAUSIBLE_MARGIN_MAX = 60` for
-   `margin = ceil(min(age_days, REFRESH_INTERVAL_DAYS) * RANGE_GROWTH_PER_DAY)` — the interval
-   is the unit's own period, i.e. observable state rather than a tunable, so the one
-   admittedly-unprincipled constant disappears and headroom under the 74 bound widens from 14 to
-   34; **(b)** add a `margin` or `table_age` key to `order_dims` — as written, `picked_class`
-   silently begins reporting the POST-margin class under the same field name, **destroying the
-   instrument that measured the defect** (nobody could then separate "the ranking improved" from
-   "the classifier was widened"); **(c)** reconcile the four denominators (71 / 100 / 115 / 121)
-   — state whether the 6 `below` from the current-table replay are the SAME six as the 6
-   API-confirmed non-existent. If they are, the decomposition is complete.
-   forcing: regression — the sort key filed real references BELOW, reproduced live at 1809 vs
-   1828; `#1831` shrinks that window but does not close the refresh-broken one.
+1. **Finish landing `#1829` at the RE-DERIVED numbers.** Repo: devrc.
+   IN FLIGHT: devrc#1829 (DRAFT), implementer agent on `fix-mention-picker-staleness-margin`.
+   🔴 **Every number in that PR's comment and its ~480 test lines was computed against a DAILY
+   interval and is wrong** — `#1831` made the timer 4-hourly. Re-derived: `REFRESH_INTERVAL_DAYS`
+   = 0.177083 (4 h **plus** the 900 s jitter), max margin **8** (not 40), and the smallest
+   wrong-repo gap is **37** live (not 74), so headroom is **29**. Scope: (a) delete
+   `PLAUSIBLE_MARGIN_MAX`, cap via `ceil(min(age, REFRESH_INTERVAL_DAYS) * 40)`, pin the interval
+   two-way against `nix/home.nix`'s `OnCalendar` with BOTH controls; (b) emit `margin` on
+   `order_dims` AND the pre-margin class on the click row — **the PR's "one key fixes it" is
+   wrong**, `plausibility=plausible, margin=8` is still ambiguous; (c) DONE, see Gotchas;
+   (d) fix the four stale "daily" claims `#1831` left in `mention-open.py`.
+   ⚠ **Do not re-cite the 19-gap reproduction as margin-covered — 19 > 8.** Use the aggregate.
+   forcing: regression — the sort key filed real references BELOW; `#1831` fixes at most 5 of
+   the 59 measured stale-table cases, so 54 still need the margin.
 2. **Correct ONE SENTENCE in `proposal-mention-picker-visibility.md`** — the `and **not** a
    stale-table artifact` clause in §(B), a wrong-clock error. 🔴 **Nothing else there is wrong**;
    see the Gotchas entry before touching anything else in that file. Repo: devrc.
@@ -164,11 +158,6 @@ notifications and repo browse are dropped.
   0.58s cold**. The cost is GitHub round-trips at 0.5–0.9s each, made sequentially per
   navigation. A rewrite making the same sequential calls would feel identical — the win is
   prefetch/cache/parallelism.
-- 🔴 **`the-algorithm` has a gap this PR proved.** `keys_test.go` passes step 1 easily (the
-  stale-footer hazard is real and incident-backed) and is still nearly worthless — only a
-  mutation revealed it. The skill has no step saying *test the guard you just defended*.
-  A mutation pass belongs BETWEEN steps 1 and 2. Also, step 5's "the fix for over-guarding is
-  NEVER another guard" would wrongly forbid finishing the half-built deadman wiring.
 - 🔴 **Three inherited reds looked like this PR's own, in one session.** Each time the branch
   was behind `main` and the failing test named a file the diff never touched:
   `test_NO_TRACKED_FILE_ASSERTS…`, `test_every_mutation_anchor…`, and
@@ -239,17 +228,6 @@ notifications and repo browse are dropped.
   MUTATION revealed it. **A mutation pass belongs BETWEEN steps 1 and 2.** Separately, step 5's
   "the fix for over-guarding is NEVER another guard" read literally would have forbidden
   finishing the half-built deadman wiring, which was the right thing to do.
-- 🔴 **FOUR INHERITED REDS AND ONE SELF-CAUSED, AND THE SELF-CAUSED CAME LAST.** Three
-  branch-behind-main reds trained the reflex "the red is not ours"; the fourth WAS ours
-  (a fixture writing its own shebang). **Check whether the diff can reach the failing test
-  EVERY time, including after three consecutive noes.**
-- 🔴 **`test_no_test_writes_a_usr_bin_env_shebang_at_runtime` IS WIDER THAN ITS NAME** — it
-  rejects ANY self-written shebang, `#!/bin/sh` included (measured). The only remedy is
-  `testlib.mockbin.write_exec`, which owns the shebang.
-- **A guard that a change ADDS TO can be blinded by the addition.** Adding three names to
-  `gate.sh`'s refusal loop wrapped it onto a second line; the ledger's harvester anchored its
-  regex on ONE line, matched nothing, and silently stopped seeing the two variables it existed
-  to catch — *"the regex found no loop" and "the loop reads nothing" are the same empty set.*
 - **Phase 2 design call worth arguing with:** §3.7 said the merge method "is read from config,
   never guessed" but named no config. `internal/cfg` now splits **absent → declared default**
   from **present-but-unreadable → refuse**. The Lua could not make that split (it read a
@@ -349,18 +327,6 @@ notifications and repo browse are dropped.
 - ✅ **MEASURED — time-to-first-paint ~1.0s** (3 runs, 8-file PR, 100ms poll). Against this doc's
   own 0.66–0.90s REST-diff figure that is essentially ONE round-trip: the program adds almost
   nothing. Phase 3 cannot improve the first read.
-- 🔴 **I MANUFACTURED A 32.5s FALSE MEASUREMENT.** A `tmux send-keys 'q'` with no `Enter` left a
-  stray `q` on the command line, so the next send ran `qmention-review …`; my poll loop ran to
-  its 300×0.1s cap and I recorded the cap as the number. **The tell was three identical readings
-  equal to the ceiling.** Any bounded wait returns a plausible duration on failure unless success
-  is recorded separately — carry a `matched=0/1` flag and PRINT it.
-- **Driving the TUI from an agent works and is repeatable:** detached tmux on a PRIVATE socket
-  (`tmux -L <probe>`), `capture-pane -p` to read frames, `send-keys` to drive. Read the PANE
-  TITLE (`> 4 Diff <path>`) for state, never a fixed line number — a line probe conflates the
-  sticky file header with viewport content and invents findings. `kill-session`/`kill-server` on
-  the DEFAULT socket is blocked by a hook, correctly.
-- 🔴 **AN AGENT MUST NOT PRESS A WRITE KEY** (`c`/`a`/`R`/`v`/`m`) — they act on real GitHub as
-  the operator. Every dispatch this session carried that, and none was pressed.
 
 - 🔴 **THE #1761 LADDER RAN FIVE ROUNDS (0–4) AND EVERY FINDING WAS CREATED OR MISSED BY THE
   ROUND BEFORE IT.** Round 0 questioned the requirement and killed a guard that was structurally
@@ -731,6 +697,53 @@ notifications and repo browse are dropped.
   comment I had just written quoting it. A control that matches PROSE CITING the hazard cannot
   distinguish it from the hazard. Anchor on the assignment (`^\s*OnCalendar\s*=`), not the
   string.
+
+- 🔴 **THE WRONG-REPO GAP LEDGER ERODES BY CONSTRUCTION, AND ITS MINIMUM HAS ALREADY HALVED.**
+  `_WRONG_REPO_GAPS = (74, 79, 135, 171, 183, 1810)` in `#1829`'s tests is STALE. The same six
+  picks measured 2026-09-23: **43, 60, 104, 140, 152, 1810** against today's table; **37, 60, 98,
+  134, 146, 1810** against live `max_ref`. Mechanism: `gap = n - max_ref` and `max_ref` only
+  grows, so **`#1831`'s faster refresh RAISED `max_ref` and thereby SHRANK the separation the
+  ceiling was sized against.** Use the LIVE column — the table converges toward it.
+  🔴 **This RETIRES round 0's "0 of 6 wrong-repo gaps leak at the ceiling margin":** at margin
+  **60, 2 of the 6 now leak into PLAUSIBLE** (gaps 43 and 60 — the predicate is
+  `max_ref + margin >= n`, so `margin >= gap` leaks). At the margin a 4-hourly table actually
+  produces (7–8), **0 of 6 leak**. So the `60` ceiling is not merely dead in normal operation, it
+  is demonstrably WRONG in the only state where it binds. **A constant sized against a measured
+  minimum of a MOVING quantity is a decaying guard — derive it from the period instead.**
+- 🔴 **THE TIMER DOES NOT SUBSUME THE MARGIN, AND THIS IS THE NUMBER THAT SETTLES IT.** Of the
+  59 stale-table `below` clicks, **54 involve a ref created LESS THAN 4 HOURS before the click**
+  — inside one refresh interval of the new cadence — so **`#1831` alone would have fixed at most
+  5 of 59.** All 59 exist on GitHub; `created_at` resolved 59 of 59, ref age at click **under
+  24 h in every case, median 22 minutes, max 9.2 h**. A newly-observed 7th `below` is the
+  textbook case: gap **3**, ref created **94 seconds** before the click, table 3.6 h old.
+- 🔴 **ITEM 3's ANSWER IS CONTAINMENT, NOT EQUALITY — and the equality was an accident of
+  timing.** The 6 current-table `below` and the 6 API-confirmed non-existent are the same six at
+  the 121-row corpus the PR measured and at every size through 136; at row **137**, written
+  minutes into the measurement, a genuine fresh-PR click appeared and the sets diverged. State
+  `non-existent ⊆ below` **strictly**. ⚠ **And the comparison only ever worked by luck:** the
+  `6 below` is a ROW count out of 121, the `6 non-existent` a DISTINCT-PAIR count out of 100 —
+  comparable only because each of those six pairs happened to be clicked exactly once. The next
+  corpus where a bad ref is clicked twice breaks it silently.
+- **Wrong-repo is proven STRUCTURALLY, not by a 404 alone:** all six clicked numbers are **above
+  their repo's highest EVER-allocated ref** (GraphQL live max), so **no refresh at any cadence
+  can rescue them**. Three instruments agreeing — parsed `gh` 404, raw `-i` status line, live
+  max — with all 13 corpus repos returning 200 at repo level, so every issue-level 404 is a real
+  absence rather than an access failure.
+- ⚠ **THE CLICK-TIME GAP MAGNITUDE IS UNRECOVERABLE, BUT THE CLICK-TIME CLASS IS NOT.**
+  `picks.jsonl` stores `(t, repo, n)` with no `max_ref` and no historical table snapshots exist,
+  so every gap figure is measured against today's table or live GitHub — both **LOWER bounds** on
+  the click-time gap. The *class*, though, was recorded in telemetry at click time, so the
+  below→plausible transition is a direct observation. ⚠ **35 picks predate the telemetry
+  emitter**, so click-time statistics cover 86 of 137 rows and are a TAIL sample, not a random
+  one; and 25 more telemetry rows carry no `plausibility` dim because it is gated on `ordered`.
+- ⚠ **THE "71" IS A MOVING COUNTER, AND TWO CORRECT QUOTES OF IT DISAGREE.** It is a cumulative
+  telemetry read: `below 53 / plausible 17` at end of 09-19, `56 / 17` at end of 09-20. The PR's
+  **54/17 = 71** and this doc's **56/17 = 73** are the same counter read hours apart on
+  2026-09-20. Both are right for their moment. **Date a denominator or it reads as a constant.**
+- ⚠ **`picks.jsonl` IS ON THE LAPTOP, NOT THE WORKBENCH** (absent here; 137 rows there as of
+  2026-09-23). Any replay of the operator's real click log needs `ssh zach@10.42.0.100`. And
+  `dismissed` clicks write no `picks.jsonl` row at all, so that log structurally cannot measure
+  rejection — only the telemetry can.
 
 ## How to verify
 ```bash
