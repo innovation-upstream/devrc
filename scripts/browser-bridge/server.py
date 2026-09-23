@@ -1212,19 +1212,26 @@ def _flows_doc_path(host: str) -> str:
     return f"{_FLOWS_REL_PREFIX}/{best_name}"
 
 
-def _annotate_site_flows(result, host: str) -> None:
+def _annotate_site_flows(result, host: str) -> str:
     """Add `site_flows` to a result ENVELOPE when the host has a flow doc.
 
     Additive and single-field, in the spirit of the extension's advisory `note:`
     on a hidden-tab read. On a miss it does nothing whatsoever — no key, no
     null — so every existing envelope field and every unregistered host's bytes
     are unchanged.
+
+    Returns the path it set ("" when nothing was set), so the telemetry emit
+    can ride the SAME value the envelope got without reading the envelope
+    back — an extension-supplied result that pre-carried a foreign
+    `site_flows` key can therefore never leak into activity.events; the
+    registry's own lookup is the only source.
     """
     if not isinstance(result, dict):
-        return
+        return ""
     path = _flows_doc_path(host)
     if path:
         result["site_flows"] = path
+    return path
 
 
 def _session_hash(session_id) -> str:
@@ -3737,12 +3744,10 @@ def make_handler(registry: Registry, token: str, cmd_timeout: float,
                 # this host is registered; an unregistered host gets no field at
                 # all, which is why SKILL.md can name the directory once and
                 # never grow again as sites are added. See _annotate_site_flows.
-                _annotate_site_flows(result, domain)
-                # Read the routing BACK off the annotated envelope — the
-                # telemetry records what the caller was actually shown, not
-                # what would route if asked again. Empty for an unregistered
-                # host (the annotation never sets the key).
-                flows_path = result.get("site_flows", "")
+                # Its return is the value it SET — captured for the telemetry
+                # emit so the row records exactly what the caller was shown,
+                # from the registry's own lookup and nothing else.
+                flows_path = _annotate_site_flows(result, domain)
                 log("cmd_ok", op=op)
                 if op == "activate":
                     # Chrome-side activate only set the tab active WITHIN its

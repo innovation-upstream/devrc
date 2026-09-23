@@ -1693,7 +1693,8 @@ def test_cmd_ok_emits_one_metadata_event(telemetry):
         ext.stop(); srv.shutdown(); srv.server_close()
 
 
-def test_cmd_ok_emits_site_flows_exactly_when_the_host_is_registered(telemetry):
+def test_cmd_ok_emits_site_flows_exactly_when_the_host_is_registered(
+        telemetry, tmp_path, monkeypatch):
     """The flows-telemetry contract, TWO-WAY: a REGISTERED host's cmd event
     carries the resolved flow-doc path; an UNREGISTERED host's carries NO
     `site_flows` key. Presence AND absence are pinned, so a routing regression
@@ -1701,11 +1702,28 @@ def test_cmd_ok_emits_site_flows_exactly_when_the_host_is_registered(telemetry):
     make every host look routed, and one that never did would hide the flows
     docs' real usage from activity.events.
 
-    The value is read back from the ANNOTATED envelope (what the caller was
-    actually shown), not recomputed at the emit site. It is a repo-relative
-    FILENAME — the same metadata class as the bare domain; no page content.
+    HERMETIC REGISTRY — `_FLOWS_DIR` is pinned to a registry THIS test owns,
+    not the production default. Load-bearing, not hygiene: the default is a
+    stable absolute path under `Path.home()`, so in the nix sandbox ($HOME is
+    an empty tmp dir) the registry parses to {} and the routed half fails —
+    and on a dev host it would grade the operator's primary clone, flapping
+    with its uncommitted edits. Same pin as test_site_flows.py's autouse
+    fixture, scoped to this test so the other telemetry tests keep grading
+    their unregistered hosts against the default.
+
+    The row selection uses `where=_routed_to(...)` per the file's own rule —
+    the two commands differ by ROUTING KEY, so a total per-row predicate
+    separates them; a bare positional `_wait_events(d, 2)` would both invite
+    the neighbour-row misattribution this file documents and trip the
+    positional-reader ratchet.
     """
     spool_dir = telemetry
+    reg = tmp_path / "flows"
+    reg.mkdir()
+    (reg / "_index.json").write_text(json.dumps(
+        {"sites": {"civitai.com": "civitai.com.md"}}))
+    monkeypatch.setattr(S, "_FLOWS_DIR", reg)
+    monkeypatch.setattr(S, "_flows_index_cache", None)
     srv, _ = _serve()
     a = FakeExtension(srv, instance_id="a", label="alpha",
                       executor=lambda c: {"url": "https://civitai.com/models"})
@@ -1722,13 +1740,14 @@ def test_cmd_ok_emits_site_flows_exactly_when_the_host_is_registered(telemetry):
         assert st == 200
         # ...and the unregistered twin carries nothing (annotation is additive).
         assert "site_flows" not in body["result"], body["result"]
-        evs = _wait_events(spool_dir, 2)
-        assert len(evs) == 2, evs
-        p_by_domain = {json.loads(e["payload"])["domain"]: json.loads(e["payload"])
-                       for e in evs}
-        assert p_by_domain["civitai.com"]["site_flows"] == "flows/civitai.com.md"
-        assert "site_flows" not in p_by_domain["unregistered.example.test"], \
-            p_by_domain["unregistered.example.test"]
+        ev_a = _wait_ops(spool_dir, "getHtml", where=_routed_to("alpha"))
+        ev_b = _wait_ops(spool_dir, "getHtml", where=_routed_to("beta"))
+        p_a = json.loads(ev_a[0]["payload"])
+        p_b = json.loads(ev_b[0]["payload"])
+        assert p_a["domain"] == "civitai.com"
+        assert p_a["site_flows"] == "flows/civitai.com.md"
+        assert p_b["domain"] == "unregistered.example.test"
+        assert "site_flows" not in p_b, p_b
     finally:
         a.stop(); b.stop(); srv.shutdown(); srv.server_close()
 
