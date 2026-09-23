@@ -943,3 +943,237 @@ def test_it_imports_the_churn_command_rather_than_carrying_a_copy():
     )
     assert "measure_range_churn" in src
     assert "parse_claims_blocks" in src
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE UNEARNED LEDGER — a round whose own `audited=X..X` spans zero commits.
+# --------------------------------------------------------------------------- #
+# That round's `payload=N` was measured over nothing, and on the PR it is
+# indistinguishable from a real count. Measured 2026-09-23 over 241 ladders /
+# 25 repos: NINE carry at least one; `ZacxDev/homelab-infra` #687 carries FOUR,
+# which is every block it posted, on a PR shipping ~1,147 lines.
+#
+# It belongs in THIS report and not in the sibling's frozen prose taxonomy: it
+# is a structural fact about a block's own range, exactly like `malformed` and
+# `bare` — "the #1233 hole by another route", one more route.
+
+
+def _self_block(round_no, sha, payload=None, claim="a claim"):
+    head = f"round={round_no}"
+    if payload is not None:
+        head += f" payload={payload}"
+    return (f"```audit-claims {head} audited={sha}..{sha}\n"
+            f"1. {claim}\n```\n")
+
+
+def test_a_self_range_block_is_RECORDED_and_NAMED_in_the_report(lrc, ad,
+                                                                base_repo):
+    """🔴 REGRESSION. Red at `c4490f07`, where `Ladder` had no such field.
+
+    A block recording `X..X` measured ZERO churn for its own range and simply
+    contributed nothing to the positive control — silently. The ladder rendered
+    exactly like a healthy one.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    r2_to = _commit(repo, "b.py", 10, "round 2 fix")
+    comments = [
+        _block(1, base, r1_to),
+        _self_block(2, r1_to, payload=7),   # degenerate: both ends one commit
+        # 🔴 THE LEGACY SPELLING — a self-range with NO `payload=` field at all.
+        # Every block posted before #1765 is that shape, so it is most of the
+        # real corpus, and the row for it must not read `payload=None`.
+        _self_block(4, r2_to),
+        _block(3, r1_to, r2_to),
+    ]
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 687, r2_to, "main",
+                           comments)
+    assert L.reason is None
+    assert L.control_churn > 0, "positive control: some block's range moves"
+    # 🔴 THE RENDERED REPORT FIRST, AND THE FIELD SECOND. A test that touches
+    # `L.self_ranges` before asserting on the output fails at the base with
+    # `AttributeError: 'Ladder' object has no attribute 'self_ranges'` — a
+    # claim about a symbol's absence, which is not evidence about behaviour.
+    rendered = lrc.render([L], [])
+    assert "UNEARNED LEDGER — 2 of 4 block(s)" in rendered, rendered
+    assert [(s.round_no, s.payload) for s in L.self_ranges] == [(2, 7),
+                                                                (4, None)], (
+        f"the self-range block was not recorded: {L.self_ranges}"
+    )
+    assert "round 2" in rendered and "payload=7" in rendered, rendered
+    assert "round 4" in rendered and "no `payload=` field" in rendered, (
+        "a LEGACY self-range (no `payload=` field) is not described as one:"
+        f"\n{rendered}"
+    )
+    assert "payload=None" not in rendered, (
+        f"an absent `payload=` field was rendered as a posted value:\n"
+        f"{rendered}"
+    )
+    assert "EVERY block with a range" not in rendered, (
+        "a ladder with one broken round was described as having no valid "
+        f"payload record at all:\n{rendered}"
+    )
+    assert "UNEARNED-LEDGER CENSUS: 1 of 1 ladder(s)" in rendered, rendered
+
+
+def test_a_ladder_whose_EVERY_block_is_a_self_range_names_the_RIGHT_cause(
+        lrc, ad, base_repo):
+    """🔴 REGRESSION, and it is an EMPTY-RESULT defect, not only a missing line.
+
+    With every block degenerate the positive control is zero BY CONSTRUCTION —
+    and at `c4490f07` the report explained that zero with the one story it had:
+    "the PR's commits are almost certainly not present — see the fetch note".
+    That is FALSE here; every commit is in this checkout. Fetching would never
+    change it, because the comments are what is wrong.
+
+    `claude/RULES.md`: an EMPTY RESULT cannot distinguish two mechanisms. The
+    blocks themselves discriminate, so the branch reads them.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    r2_to = _commit(repo, "b.py", 10, "round 2 fix")
+    comments = [
+        _self_block(1, base, payload=0),
+        _self_block(2, r1_to, payload=7),
+        _self_block(3, r2_to, payload=0),
+    ]
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 687, r2_to, "main",
+                           comments)
+    assert L.control_churn == 0, (
+        "the fixture does not reproduce the zero control, so the branch under "
+        "test is never reached"
+    )
+    rendered = lrc.render([L], [])
+    assert "UNEARNED LEDGER — 3 of 3 block(s)" in rendered, rendered
+    assert [s.round_no for s in L.self_ranges] == [1, 2, 3]
+    assert "EVERY block with a range is one of them" in rendered, rendered
+    assert "CAUSE: every block's range is DEGENERATE" in rendered, rendered
+    assert "Fetching will not change it" in rendered, rendered
+    assert "commits are almost certainly not" not in rendered, (
+        "the zero control was still explained as absent commits, which is the "
+        f"wrong mechanism and sends the operator to fetch:\n{rendered}"
+    )
+    assert "1 of them have NO valid payload record at all" in rendered
+
+
+def test_the_absent_commits_cause_is_UNCHANGED_when_the_blocks_are_healthy(
+        lrc, ad, base_repo):
+    """🔴 THE OTHER SIDE OF THE SAME BRANCH — and the reachability control.
+
+    A zero control with HEALTHY block ranges still means the commits are not
+    here, and that sentence must be unchanged. Without this, the test above is
+    satisfied by a report that stopped offering the fetch advice at all.
+    """
+    repo, base = base_repo
+    absent_a, absent_b = "a" * 40, "b" * 40
+    L = lrc.measure_ladder(ad, lrc.real_runner, str(repo), 5, absent_b, "main",
+                           [_block(1, absent_a, absent_b)])
+    assert not L.control_churn
+    rendered = lrc.render([L], [])
+    assert "commits are almost certainly not" in rendered, rendered
+    assert "CAUSE: every block's range is DEGENERATE" not in rendered
+    assert L.self_ranges == (), "the fixture accidentally carries a self-range"
+    assert base
+
+
+def test_a_ladder_with_NO_self_range_prints_NO_unearned_report(lrc, ad,
+                                                               base_repo):
+    """🔴 THE SILENT CASE. A section that fires on a healthy ladder is the
+    permanently-red one `claude/RULES.md` says trains a reader to skip it."""
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    r2_to = _commit(repo, "b.py", 10, "round 2 fix")
+    L = lrc.measure_ladder(
+        ad, lrc.real_runner, str(repo), 1, r2_to, "main",
+        [_block(1, base, r1_to), _block(2, r1_to, r2_to)])
+    rendered = lrc.render([L], [])
+    assert "UNEARNED LEDGER" not in rendered, rendered
+    assert "UNEARNED-LEDGER CENSUS" not in rendered, rendered
+    assert L.self_ranges == ()
+
+
+def test_a_ladder_with_NO_HEAD_SHA_still_reports_its_self_ranges(lrc, ad,
+                                                                 tmp_path):
+    """🔴 THE SECOND `Ladder` CONSTRUCTION, WHICH NEVER PARSED THE BLOCKS.
+
+    `main` builds a Ladder directly when the facts carry no head sha — the tail
+    adjacency is unmeasurable without one — and that path took the `()` default
+    for `self_ranges`, so a PR whose every block is `audited=X..X` reported a
+    CLEAN ledger purely because `gh` returned no head. The reading is over
+    BLOCKS: no head, no checkout and no network are needed, so there is no
+    state in which that answer is the honest one.
+
+    Driven through `main --facts-file` with a runner that REFUSES to spawn, so
+    the claim is that the reading needs no git at all and not merely that it
+    happens to work.
+    """
+    f = tmp_path / "facts.json"
+    f.write_text(json.dumps([{
+        "pr": 687, "base": "main", "comments": [
+            _self_block(1, "1" * 8, payload=0),
+            _self_block(2, "2" * 8, payload=7),
+        ],
+    }]), encoding="utf-8")
+
+    def refusing_runner(cmd, cwd=None):          # noqa: ARG001
+        raise AssertionError(f"the no-head path spawned {cmd}")
+
+    out = []
+
+    class _S:
+        def write(self, text):
+            out.append(text)
+
+    rc = lrc.main(["--facts-file", str(f), "--repo-dir", str(tmp_path)],
+                  runner=refusing_runner, out_stream=_S(), err_stream=_S())
+    text = "".join(out)
+    assert "no head sha" in text, (
+        f"the fixture did not reach the no-head-sha path:\n{text}"
+    )
+    assert "UNEARNED LEDGER — 2 of" in text, (
+        "a PR with no head sha reported a clean ledger while every one of its "
+        f"blocks records a zero-commit range:\n{text}"
+    )
+    assert "UNEARNED-LEDGER CENSUS: 1 of 1 ladder(s)" in text, text
+    assert rc in (lrc.EXIT_OK, lrc.EXIT_NOTHING_MEASURABLE, lrc.EXIT_REFUSED), rc
+    assert ad
+
+
+def test_the_unearned_census_DENOMINATOR_includes_REFUSED_ladders(lrc, ad,
+                                                                  base_repo):
+    """🔴 EVERY OTHER CENSUS HERE IS SCOPED TO A MEASURED LADDER; THIS IS NOT.
+
+    A REFUSED ladder — one whose positive control measured zero — is exactly
+    `ZacxDev/homelab-infra` #687's shape, because an all-self-range ladder's
+    control is zero BY CONSTRUCTION. Scoping the census to ladders that passed
+    the control would therefore drop the worst case in the corpus, and make the
+    count a function of what happened to be fetched.
+
+    Built from a REAL refused ladder rather than a constructed one, so the
+    state under test is one `measure_ladder` can actually produce.
+    """
+    repo, base = base_repo
+    r1_to = _commit(repo, "a.py", 10, "round 1 fix")
+    r2_to = _commit(repo, "b.py", 10, "round 2 fix")
+    refused = lrc.measure_ladder(
+        ad, lrc.real_runner, str(repo), 687, r2_to, "main",
+        [_self_block(1, base, payload=0), _self_block(2, r1_to, payload=7)])
+    healthy = lrc.measure_ladder(
+        ad, lrc.real_runner, str(repo), 1, r2_to, "main",
+        [_block(1, base, r1_to), _block(2, r1_to, r2_to)])
+
+    assert refused.reason is None and not refused.control_churn, (
+        "the fixture is not a REFUSED ladder, so the scope under test is never "
+        f"exercised (reason={refused.reason!r} control={refused.control_churn})"
+    )
+    assert healthy.control_churn > 0, "the second ladder is not a measured one"
+
+    rendered = lrc.render([refused, healthy], [])
+    assert "UNEARNED-LEDGER CENSUS: 1 of 2 ladder(s)" in rendered, rendered
+    assert "#687  ALL blocks  round(s) 1, 2" in rendered, (
+        "a REFUSED ladder's broken blocks were dropped from the census, which "
+        f"is the one shape the census exists for:\n{rendered}"
+    )
+    assert "1 of them have NO valid payload record at all" in rendered
+    # 🔴 The default keeps a ladder constructed without the field OUT of it.
+    assert healthy.self_ranges == ()

@@ -9922,6 +9922,34 @@ RED_AT_BASE_R24: frozenset[str] = frozenset({
     "test_the_measured_range_is_the_blocks_OWN_from_to_and_not_the_delta",
 })
 
+# 🔴 ROUND 25's base is `c4490f07` — the tip of `main` when the unearned-ledger
+# report was written. MEASURED there the same way as every ref above: `git show
+# c4490f07:scripts/audit-dispatch.py` into a scratch tree with THIS module
+# copied in unchanged, under `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`:
+# **7 failed, 188 passed** on the first pass, reduced once the three tests below
+# stopped spelling the heading as `ad.UNEARNED_LEDGER_HEAD`. That spelling
+# change is the whole reason this comment exists: THREE of the seven were
+# `AttributeError` for a symbol the fix introduces — including the SILENT-case
+# control, which must be GREEN at the base — and this module's header says an
+# absence red is not evidence of anything.
+#
+# The THREE listed here each fail at the base on the ANSWER:
+#   * the #687 stderr report: rc 4 is already correct there, and the run prints
+#     only the per-block bystander sentence — no count, no denominator, and
+#     nothing saying EVERY block is degenerate;
+#   * the BRIEF section: the base's brief is assembled and simply does not
+#     contain it, so the auditor is handed the ladder's `payload=` record with
+#     no note that one round's was measured over nothing;
+#   * the PASTED BLOCK: the same, on the artefact that lands on the PR.
+#
+# The other four this round added are GUARDS and are in the ledger below, with
+# the reason each is one stated there.
+RED_AT_BASE_R25: frozenset[str] = frozenset({
+    "test_a_ladder_whose_EVERY_block_is_a_self_range_says_so_on_stderr",
+    "test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF",
+    "test_the_block_the_operator_PASTES_carries_the_unearned_ledger_note",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
@@ -9942,10 +9970,32 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "93685e1d": RED_AT_BASE_R22,
     "80379e83": RED_AT_BASE_R23,
     "532945d2": RED_AT_BASE_R24,
+    "c4490f07": RED_AT_BASE_R25,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
 INVARIANT_GUARDS_AND_LEDGERS = frozenset({
+    # 🔴 THE UNEARNED-LEDGER GUARDS (round 25), AND THEY ARE GUARDS FOR THREE
+    # DIFFERENT REASONS. Written out because the one-line version ("the rest
+    # error for want of a symbol") is FALSE for two of them, and this module
+    # has been burned by exactly that shape before:
+    #   * the SILENT-case control is GREEN at `c4490f07` and must stay so —
+    #     that IS its claim, that a healthy ladder reports nothing anywhere.
+    #     A report firing on a clean ladder is the permanently-red section
+    #     `claude/RULES.md` says trains a reader to skip it.
+    #   * the ALREADY-REFUSED row is GREEN at `c4490f07` in every assertion,
+    #     deliberately: it pins the argument for adding NO new refusal, which
+    #     is that the shipped pair check already returns 4 for an all-unearned
+    #     ladder at every round >= 2 and that refusing below round 2 would be
+    #     a stop the operator cannot act on. A red there would mean that
+    #     argument is wrong, which is why it may not be filed as a red.
+    #   * the DENOMINATOR row and the literal PIN both name symbols absent at
+    #     the base, so a red there is an AttributeError.
+    # Evidence: mutants UL1-UL6.
+    "test_a_ladder_with_NO_self_range_reports_NOTHING_anywhere",
+    "test_an_ALL_self_range_ladder_is_ALREADY_refused_by_the_shipped_pair_check",
+    "test_the_unearned_reading_counts_RANGES_and_not_blocks",
+    "test_the_unearned_ledger_strings_are_the_scripts_own",
     # The unit the gate counts in — guards, whose evidence is the mutation
     # battery rather than a base ref (each names a symbol absent at
     # `532945d2`, so a red there is an AttributeError and not an answer).
@@ -11117,6 +11167,31 @@ FIX_MATRIX = (
      "columns, silently, at rc 0",
      "test_a_COMBINED_merge_diff_is_UNMEASURED_rather_than_miscounted",
      "GUARD", "U12"),
+    # 🔴 ROUND 25 — THE UNEARNED LEDGER. The pair refusal #1856 shipped covers
+    # the two blocks the gate READS; nothing covered the ladder's HISTORY, and
+    # `ZacxDev/homelab-infra` #687 sat with all four of its blocks recording
+    # `audited=X..X` across four rounds with no surface saying so.
+    ("r25/1 a ladder's whole payload record could be unearned in silence",
+     "test_a_ladder_whose_EVERY_block_is_a_self_range_says_so_on_stderr",
+     "RED@c4490f07", "UL3"),
+    ("r25/2 the BRIEF the auditor reads never mentioned a self-range",
+     "test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF",
+     "RED@c4490f07", "UL2, UL4, UL6"),
+    ("r25/3 the block PASTED onto the PR carried no note either",
+     "test_the_block_the_operator_PASTES_carries_the_unearned_ledger_note",
+     "RED@c4490f07", "UL5"),
+    ("r25/4 a report that fires on a HEALTHY ladder is a red section nobody reads",
+     "test_a_ladder_with_NO_self_range_reports_NOTHING_anywhere",
+     "GUARD", "UL2, UL3, UL5"),
+    ("r25/5 an all-unearned refusal would be redundant above round 2 and wrong below",
+     "test_an_ALL_self_range_ladder_is_ALREADY_refused_by_the_shipped_pair_check",
+     "GUARD", "U8, U13"),
+    ("r25/6 a rangeless block would dilute the unearned denominator",
+     "test_the_unearned_reading_counts_RANGES_and_not_blocks",
+     "GUARD", "UL1"),
+    ("r25/7 a reworded heading would go red with the wrong diagnosis",
+     "test_the_unearned_ledger_strings_are_the_scripts_own",
+     "GUARD", "UL3, UL6"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor
@@ -12339,6 +12414,344 @@ def test_a_SELF_RANGE_the_gate_does_NOT_read_is_reported_and_not_refused():
     )
     assert ad.SELF_RANGE_REFUSAL_HEADER.split(" — ")[0] not in err, (
         f"a bystander self-range was reported as a refusal:\n{err}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE UNEARNED LEDGER — a ladder's payload RECORD, not the gate's pair.
+# --------------------------------------------------------------------------- #
+# The refusal above covers the two blocks the gate's arithmetic reads. It leaves
+# the WHOLE LADDER unanswered, and measured 2026-09-23 over a 241-ladder corpus
+# (25 repos, 3,758 comments) NINE ladders carry at least one self-range —
+# `ZacxDev/homelab-infra` #687 carries FOUR, which is every block it posted, on
+# a PR shipping ~1,147 lines, across four rounds nobody flagged.
+#
+# 🔴 THE FIXTURE SHAS ARE PAIRWISE DISTINCT AND NONE IS `aaaa1111`/`bbbb2222`/
+# `cccc3333`. A count mutant that hardcodes a round number, or a predicate that
+# happens to match the module's default block, cannot hide behind a fixture that
+# could only ever produce its own value.
+#
+# 🔴 LITERALS, FOR THE REASON `EXPECTED_GATE_RC` IS ONE. The regression tests
+# below must fail at `c4490f07` on the ANSWER — a brief and a pasted block that
+# say nothing — and a test spelled `EXPECTED_UNEARNED_HEAD` fails there with
+# `AttributeError: module 'audit_dispatch' has no attribute
+# 'UNEARNED_LEDGER_HEAD'`, which is a claim about a symbol's absence and not
+# about any behaviour. MEASURED: spelled that way, three of them errored at the
+# base — including the SILENT-case control, which must be GREEN there.
+# `test_the_unearned_ledger_strings_are_the_scripts_own` carries the two-way
+# check that these are still the script's own constants.
+EXPECTED_UNEARNED_HEAD = (
+    "## \U0001f534 PART OF THIS LADDER'S PAYLOAD RECORD WAS MEASURED OVER "
+    "ZERO COMMITS"
+)
+EXPECTED_UNEARNED_TAG = "UNEARNED LEDGER"
+
+UNEARNED_ALL_FOUR = [
+    payload_block(1, 0, "1111aaaa", "1111aaaa"),
+    payload_block(2, PAYLOAD_NONZERO_C, "2222bbbb", "2222bbbb"),
+    payload_block(3, 0, "3333cccc", "3333cccc"),
+    payload_block(4, PAYLOAD_NONZERO_A, "4444dddd", "4444dddd"),
+]
+
+# Self-ranges on rounds the gate does NOT read, two healthy rounds after them.
+# That is the shape of EIGHT of the nine measured ladders.
+#
+# 🔴 ROUND 1 IS THE **LEGACY** SPELLING — a block with NO `payload=` field at
+# all. Every block posted before #1765 is that shape, so it is most of the real
+# history, and the report has a distinct branch for it ("with no `payload=`
+# field", not "beside `payload=None`"). Carrying it in this fixture is what
+# makes that branch reachable instead of merely present.
+UNEARNED_MIXED = [
+    payload_block(1, None, "eeee5555", "eeee5555", field=False),
+    payload_block(2, PAYLOAD_NONZERO_B, "dddd4444", "dddd4444"),
+    payload_block(3, PAYLOAD_NONZERO_C, "aaaa1111", "bbbb2222"),
+    payload_block(4, PAYLOAD_NONZERO_A, "bbbb2222", "cccc3333"),
+]
+
+
+def test_a_ladder_whose_EVERY_block_is_a_self_range_says_so_on_stderr():
+    """🔴 REGRESSION, the `ZacxDev/homelab-infra` #687 shape. Red at `c4490f07`.
+
+    At the base this corpus printed only the per-block bystander sentence for
+    the two rounds outside the gate's pair — no count, no denominator, and
+    nothing at all saying that EVERY block on the PR records a range spanning
+    zero commits. Four rounds of auditors were handed that ladder and none was
+    told its whole payload record was unearned.
+
+    🔴 THE rc IS STILL 4 AND THAT IS THE POINT OF THE ROW BELOW: the shipped
+    pair refusal already covers this corpus, which is exactly why this change
+    adds a REPORT and not a second refusal.
+    """
+    rc, out, err = run_main(["900", "--round", "5"], comments=UNEARNED_ALL_FOUR)
+    assert rc == 4, (
+        f"the all-unearned corpus no longer returns the input-refusal 4 "
+        f"(got {rc}).\nstderr:\n{err}"
+    )
+    assert not out.strip()
+    assert "UNEARNED LEDGER" in err, (
+        f"nothing on stderr names the unearned ledger at all:\n{err}"
+    )
+    assert "4 of this ladder's 4 block(s)" in err, (
+        "the report does not print the count over its denominator, so nobody "
+        f"can tell one broken round from a wholly broken record:\n{err}"
+    )
+    assert "rounds 1, 2, 3 and 4" in err, (
+        f"the report does not name every offending round:\n{err}"
+    )
+    assert "EVERY block" in err, (
+        "a ladder with NO valid payload record at all reads the same as one "
+        f"with a single broken round:\n{err}"
+    )
+
+
+def test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF():
+    """🔴 REGRESSION. Red at `c4490f07`, where the brief said nothing.
+
+    The bystander warning has always gone to STDERR — which the auditor never
+    sees and the PR never carries. This is the mixed shape, and it is 8 of the
+    9 measured ladders: the gate's own pair is healthy, so the run succeeds and
+    a brief is assembled, and at the base that brief presented the ladder's
+    `payload=` record with no note that one of its rounds was measured over
+    nothing.
+    """
+    rc, out, err = run_main(["900", "--round", "5"], comments=UNEARNED_MIXED)
+    assert rc == 0 and "DELTA re-audit" in out, (
+        f"a bystander self-range refused a round-5 assembly (rc {rc}):\n{err}"
+    )
+    assert EXPECTED_UNEARNED_HEAD in out, (
+        "the brief carries no unearned-ledger section, so the auditor reading "
+        f"it is not told any round's `payload=` is unmeasured:\n{out[-2000:]}"
+    )
+    section = out[out.index(EXPECTED_UNEARNED_HEAD):]
+    assert "2 of this ladder's 4 block(s)" in section, (
+        f"the brief section does not print the count over its denominator:"
+        f"\n{section[:900]}"
+    )
+    assert "round 2" in section and "dddd4444..dddd4444" in section, (
+        f"the brief section names neither the round nor its range:\n"
+        f"{section[:900]}"
+    )
+    assert f"payload={PAYLOAD_NONZERO_B}" in section, (
+        "the brief section does not print the count that round POSTED, which "
+        f"is the number a reader would otherwise quote:\n{section[:900]}"
+    )
+    # 🔴 THE LEGACY BRANCH. A block with no `payload=` field must be described
+    # as having none — `payload=None` would read as a posted count of None, and
+    # that shape is most of the real corpus.
+    assert "round 1" in section and "with no `payload=` field" in section, (
+        "a LEGACY self-range block (no `payload=` field at all) is not "
+        f"described as one:\n{section[:900]}"
+    )
+    assert "payload=None" not in section, (
+        f"an absent `payload=` field was rendered as a posted value:\n"
+        f"{section[:900]}"
+    )
+    assert "EVERY block" not in section, (
+        "a ladder with ONE broken round is described as having no valid "
+        f"payload record at all:\n{section[:900]}"
+    )
+    # 🔴 IT MUST NOT READ AS A STOP. The whole failure direction in this
+    # subsystem is the false stop, and a section that says a round's payload is
+    # unmeasured is one sentence away from being read as "that round found
+    # nothing".
+    assert ad.ATTRIBUTION_REFUSAL_HEADER not in out, (
+        "the unearned-ledger report reached for the gate's own refusal header"
+    )
+
+
+def test_a_ladder_with_NO_self_range_reports_NOTHING_anywhere():
+    """🔴 THE SILENT CASE, AND IT IS THE CONTROL FOR BOTH TESTS ABOVE.
+
+    A report that fires on a healthy ladder is worse than none: it is a
+    permanently-red section the next reader learns to skip, which is the exact
+    failure `claude/RULES.md` names and which THE LEDGER's cross-repo branch
+    was rewritten for. So the healthy corpus must be byte-silent on this axis —
+    on stderr, in the brief, and in the block the operator pastes.
+
+    🔴 INVARIANT GUARD, not regression coverage: it is GREEN at `c4490f07`,
+    where none of this existed. Its evidence is the mutation battery.
+    """
+    healthy = [
+        payload_block(3, PAYLOAD_NONZERO_C, "aaaa1111", "bbbb2222"),
+        payload_block(4, PAYLOAD_NONZERO_A, "bbbb2222", "cccc3333"),
+    ]
+    rc, out, err = run_main(
+        ["900", "--round", "5", "--emit-claims", "--audited", "cccc3333"],
+        comments=healthy,
+    )
+    assert rc == 0, f"the healthy corpus did not assemble (rc {rc}):\n{err}"
+    # 🔴 SCOPED TO THIS REPORT'S OWN TOKENS, AND THE BARE WORD IS NOT ONE.
+    # `SELF-RANGE` alone is spelled by a DIFFERENT, pre-existing mechanism —
+    # `measure_executable_churn`'s unmeasured reason, reached whenever the
+    # round's range is degenerate for any cause. MEASURED by the battery:
+    # mutant `N1` (the range anchoring on `<to>` again) made `<anchor>..HEAD`
+    # degenerate and this control fired as an EXTRA-KILLER, i.e. it was
+    # asserting about a mechanism it does not guard. `claude/RULES.md`: a guard
+    # spelled over a WORD another feature can spell is not a guard. The three
+    # tokens below are emitted by the unearned-ledger report and by nothing
+    # else — `records a SELF-RANGE` is the bystander sentence's own phrase.
+    for where, text in (("stderr", err), ("stdout", out)):
+        assert "UNEARNED LEDGER" not in text, (
+            f"the unearned-ledger report fired on a ladder with no self-range "
+            f"at all, on {where}:\n{text[-1200:]}"
+        )
+        assert "records a SELF-RANGE" not in text, (
+            f"a healthy ladder was described as carrying a self-range on "
+            f"{where}:\n{text[-1200:]}"
+        )
+    assert EXPECTED_UNEARNED_HEAD not in out
+
+
+def test_the_block_the_operator_PASTES_carries_the_unearned_ledger_note():
+    """🔴 THE PR IS WHERE THE NEXT READER MEETS IT, AND STDERR IS NOT THE PR.
+
+    #687's record stayed broken for four rounds because the only artefact that
+    said so was a line on one operator's terminal. `--emit-claims` prints the
+    text that gets pasted into the PR comment, so the note goes there too —
+    the same two-readers argument the gate-override record makes.
+
+    🔴 AND IT IS OUTSIDE THE FENCE. A non-numbered line INSIDE the body is
+    folded into the claim above it by `_items_from_body`, which would corrupt
+    the pasted block; the round-trip guards below assert the header survives.
+
+    INVARIANT GUARD — green at `c4490f07` only in the sense that the string is
+    absent there, which this module's header says is not evidence. Its evidence
+    is mutant `UL5`.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "5", "--emit-claims", "--audited", "4444dddd"],
+        comments=UNEARNED_ALL_FOUR,
+    )
+    # The pair refusal still fires; `--emit-claims` still prints the block.
+    assert rc == 4, f"expected the input refusal 4, got {rc}:\n{err}"
+    assert "UNEARNED LEDGER" in out, (
+        "the text the operator pastes onto the PR says nothing about the "
+        f"broken record it is being pasted beside:\n{out}"
+    )
+    note = [ln for ln in out.splitlines() if "UNEARNED LEDGER" in ln]
+    assert len(note) == 1, f"expected exactly one note line, got {note}"
+    assert note[0].startswith("  "), (
+        f"the note is not indented outside the fence: {note[0]!r}"
+    )
+    assert "```audit-claims" not in note[0]
+    # It must sit BEFORE the fence opens, or it is inside the block body.
+    assert out.index(note[0]) < out.index("```audit-claims"), (
+        "the unearned-ledger note was emitted INSIDE the pasted block, where "
+        f"`_items_from_body` folds it into a claim:\n{out}"
+    )
+
+
+def test_an_ALL_self_range_ladder_is_ALREADY_refused_by_the_shipped_pair_check():
+    """🔴 THE ARGUMENT FOR ADDING NO NEW REFUSAL, AS A TEST RATHER THAN PROSE.
+
+    The obvious next step from #687 is "refuse when EVERY block is a
+    self-range". It is unreachable, and this pins why: if every ranged block is
+    a self-range then the NEWEST one is, and `gate_relevant_self_ranges` always
+    includes the newest block — so REFUSAL 3b already returns 4 for that corpus
+    at every round >= 2. A second refusal could only ever fire where the first
+    already did.
+
+    Below round 2 it would be WRONG rather than redundant: rounds 0 and 1
+    consume no previous block at all, so refusing them over a prior ladder's
+    broken record is a stop the operator cannot act on — the false stop this
+    skill says costs the most. Both halves are asserted.
+
+    🔴 INVARIANT GUARD. Every assertion here is GREEN at `c4490f07`: that is
+    the claim — the shipped check already covers it.
+    """
+    for round_no in ("2", "3", "5", "9"):
+        rc, out, err = run_main(
+            ["900", "--round", round_no], comments=UNEARNED_ALL_FOUR
+        )
+        assert rc == 4, (
+            f"an all-self-range ladder assembled at --round {round_no} with "
+            f"rc {rc} instead of the input refusal 4, so a separate "
+            f"all-unearned refusal would NOT be redundant after all:\n{err}"
+        )
+        assert not out.strip()
+    # 🔴 THE OTHER HALF, and it must stay rc 0. A round-1 run reads no previous
+    # block, so the same corpus must produce a brief — with the report, and
+    # without a refusal.
+    rc1, out1, err1 = run_main(["900", "--round", "1"],
+                               comments=UNEARNED_ALL_FOUR)
+    assert rc1 == 0, (
+        f"a round-1 assembly was refused over a PREVIOUS ladder's broken "
+        f"record (rc {rc1}), which is a stop the operator cannot act on:\n"
+        f"{err1}"
+    )
+    assert "FIRST, FULL adversarial audit" in out1, (
+        f"round 1 returned 0 and emitted no brief:\n{out1[:400]}"
+    )
+    # 🔴 DELIBERATELY NO ASSERTION ABOUT THE REPORT HERE. Every claim in this
+    # test is GREEN at `c4490f07` — that IS the claim, that the shipped check
+    # already covers the corpus a new refusal would be for. Adding a report
+    # assertion would make it red at the base for a reason that has nothing to
+    # do with what it asserts, and this module's header is explicit that a
+    # mixed red is how a guard gets mistaken for regression coverage. The
+    # reporting is covered by the three tests above.
+
+
+def test_the_unearned_reading_counts_RANGES_and_not_blocks():
+    """🔴 THE DENOMINATOR. A bare `audited=<sha>` names NO range.
+
+    It can be neither earned nor unearned by this reading, and folding it into
+    the denominator is the flattering answer: a ladder whose every ranged block
+    is degenerate would report as PARTIAL the moment it also posted one bare
+    block. That is a different defect with a different fix, and both
+    `parse_claims_blocks` and `ladder-range-coverage.py` already report it.
+
+    INVARIANT GUARD — `unearned_ledger` does not exist at `c4490f07`, so a red
+    there is an `AttributeError` and this module's header says that is not
+    evidence of anything. Evidence: mutant `UL1`.
+    """
+    bare = ad.ClaimsBlock(1, "", "9999eeee", ["x"], 0)
+    selfr = ad.ClaimsBlock(2, "2222bbbb", "2222bbbb", ["x"], 0)
+    un = ad.unearned_ledger([bare, selfr])
+    assert un.ranged == 1, (
+        f"a bare `audited=<sha>` was counted in the range denominator "
+        f"({un.ranged})"
+    )
+    assert un.every_ranged_block is True, (
+        "a ladder whose only RANGED block is degenerate did not report as "
+        "wholly unearned, because a rangeless block diluted it"
+    )
+    assert un.rounds == [2], f"the bare block's round leaked in: {un.rounds}"
+    # 🔴 AND AN EMPTY CORPUS IS NOT "every block unearned". `all([])` is True;
+    # a claim about no blocks is a claim about nothing.
+    empty = ad.unearned_ledger([])
+    assert empty.every_ranged_block is False, (
+        "a ladder with no blocks at all reported that every one of them is "
+        "unearned — `all([])` read as a measurement"
+    )
+    assert ad.unearned_ledger_summary(empty) == ""
+
+
+def test_the_unearned_ledger_strings_are_the_scripts_own():
+    """🔴 THE TWO-WAY CHECK ON THE LITERALS ABOVE.
+
+    The regression tests spell the heading and the tag as literals so their red
+    at `c4490f07` is an answer and not an `AttributeError`. That buys evidence
+    and costs a pin: a reword of the script's constant would leave those tests
+    asserting a string nothing emits, and they would go red for the right
+    reason with the wrong diagnosis. This is the half that names the cause.
+
+    INVARIANT GUARD — it names a symbol absent at the base, so a red there is
+    an AttributeError. Evidence: mutant `UL6`.
+    """
+    assert ad.UNEARNED_LEDGER_HEAD == EXPECTED_UNEARNED_HEAD, (
+        "the script's unearned-ledger heading and this module's literal have "
+        f"diverged:\n  script: {ad.UNEARNED_LEDGER_HEAD!r}\n  here:   "
+        f"{EXPECTED_UNEARNED_HEAD!r}"
+    )
+    # The tag is what stderr and the pasted block are grepped for, and it is
+    # produced by `unearned_ledger_summary`'s CALLERS rather than by the
+    # summary itself — so it is pinned against a real run, not against a
+    # constant that could stop being used.
+    _rc, _out, err = run_main(["900", "--round", "5"],
+                              comments=UNEARNED_ALL_FOUR)
+    assert EXPECTED_UNEARNED_TAG in err, (
+        f"no run emits the tag {EXPECTED_UNEARNED_TAG!r} that every other "
+        f"assertion in this section greps for:\n{err}"
     )
 
 

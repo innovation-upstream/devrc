@@ -454,6 +454,19 @@ fired the gate on two zeros nobody measured. Exit 4 means *your record is broken
 exit 5 means *the ladder has left the PR, stop auditing*. Only the pair the gate reads is refused; a
 self-range further back is reported and the run continues.
 
+🔴 **"Reported" now means THREE places, and it used to mean one — stderr, which is neither the brief
+nor the PR.** `ZacxDev/homelab-infra` #687 posted **four** blocks and every one was `audited=X..X`:
+its whole payload record was unearned, across four rounds, on a PR shipping ~1,147 lines, and
+nothing any auditor or reader saw said so. Measured 2026-09-23 over 241 ladders / 25 repos / 3,758
+comments: **9 ladders carry at least one self-range**, 8 of them mixed and #687 wholly unearned. So
+every run now prints `N of this ladder's M block(s) … are NOT evidence` on stderr, in a brief
+section beside THE LEDGER, and above the emitted block so it lands on the PR. **It stays a report:
+no refusal beyond the shipped exit 4.** A wholly-unearned ladder is *already* refused by that check
+at every round ≥ 2 (the newest block is a self-range, and the gate's pair always contains it), and
+below round 2 there is no prior block to refuse over. **If a round's `payload=` is named there, do
+not quote it — say it is unmeasured**, and if a stop is being attributed to one, that stop is
+arithmetic over zero commits.
+
 ⚠ **It was prose here until 2026-09-17, and prose lost.** MEASURED on `civitai/talos-infra` #1531:
 the condition was met **and stated in writing at the end of round 3** — round 2's ledger reads "zero
 payload lines changed" verbatim and rounds 3–11 each repeat it — and the ladder ran **nine more

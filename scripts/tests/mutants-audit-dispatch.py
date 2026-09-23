@@ -206,7 +206,19 @@ SKILL_RELS = (
 # counted m, NOT 164 + 17. That distinction is the one the three paragraphs
 # above record going wrong, and the arithmetic happens to differ here: 164 + 17
 # is 181, which would have been one too high and refused every run.
-MIN_TESTS = 180
+# 🔴 RAISED AGAIN 2026-09-23, 180 -> 187, at m = 196 — COUNTED the same way,
+# from a green run of the module (`196 passed`) put through the same formula,
+# `196 - min(50, max(1, 196 // 20))` = 196 - 9 = 187. Seven node ids were added
+# by `feat/unearned-ledger-detection`; the number is still the formula's output
+# on a counted m, NOT 180 + 7 (which is 187 only by coincidence — the floor is
+# a function of the CURRENT measurement, and the two agreeing here is not a
+# method). 🔴 AND IT WAS CI THAT CAUGHT IT, NOT THE AUTHOR: the gate lives in
+# `test_mutation_battery_anchors.py`, which is in NEITHER the five modules that
+# change touched NOR `scoped-tests.sh`'s selection for it — the mapper selects
+# files that NAME what changed, and that module names the HARNESS rather than
+# the target. Assume a change adding tests to `test_audit_dispatch.py` needs
+# this literal moved, and run that module by hand.
+MIN_TESTS = 187
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -2944,6 +2956,106 @@ def a_negative_payload_count_is_accepted(t):
     )
 
 
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE UNEARNED LEDGER (UL-series) — the WHOLE ladder's payload record.
+#
+# `ZacxDev/homelab-infra` #687 carried four rounds, every one of them recording
+# `audited=X..X`, and nothing said so anywhere the operator or the next auditor
+# would look. These rows mutate the reading and each of its three surfaces —
+# stderr, the brief, and the block that gets pasted onto the PR — so "the report
+# is guarded" can be re-derived rather than believed.
+#
+# 🔴 EACH TARGETS THE NARROWEST EXPRESSION THAT CAN BE WRONG. `claude/RULES.md`
+# is explicit that removing a guard TOGETHER WITH ITS ENCLOSING CONDITION proves
+# nothing about the guard: it dies for the wrong reason. So UL1 moves one
+# predicate inside a comprehension, UL4 moves one comparison, and neither
+# deletes the branch it lives in.
+
+
+def the_denominator_counts_blocks_not_ranges(t):
+    """UL1 — a bare `audited=<sha>` is folded into the range denominator.
+
+    The flattering direction: a wholly unearned ladder that also posted one
+    rangeless block then reports as PARTIAL, and `every_ranged_block` goes
+    False on exactly the corpus the report exists for.
+    """
+    return _swap(
+        t,
+        "    ranged = [b for b in blocks if b.audited_from and b.audited_to]",
+        "    ranged = list(blocks)",
+    )
+
+
+def the_brief_never_reports_an_unearned_ledger(t):
+    """UL2 — the brief section is suppressed, which is the #687 state exactly.
+
+    Not a deletion of the renderer: the function stays, is still called, and
+    still returns a string. Only the section's CONTENT goes.
+    """
+    return _swap(
+        t,
+        '    if un is None or not un.self_ranges:\n        return ""\n',
+        '    if True:\n        return ""\n',
+    )
+
+
+def stderr_never_reports_an_unearned_ledger(t):
+    """UL3 — the operator's terminal loses the corpus summary.
+
+    The per-block bystander sentence survives, so this isolates the WHOLE-LADDER
+    reading from the pair-scoped one the previous round shipped.
+    """
+    return _swap(
+        t,
+        '    if unearned.self_ranges:\n        print("⚠ UNEARNED LEDGER — "',
+        '    if False:\n        print("⚠ UNEARNED LEDGER — "',
+    )
+
+
+def a_partial_ladder_reads_as_wholly_unearned(t):
+    """UL4 — `== len(ranged)` becomes `>= 1`.
+
+    One comparison, inside the branch that already ran. A ladder with ONE broken
+    round then reports as having no valid payload record at all — the direction
+    that would make the loudest sentence in the report unreliable.
+    """
+    return _swap(
+        t,
+        "        every_ranged_block=bool(ranged) and len(selves) == len(ranged),",
+        "        every_ranged_block=bool(ranged) and len(selves) >= 1,",
+    )
+
+
+def the_pasted_block_drops_the_unearned_note(t):
+    """UL5 — the note is emitted for the brief and NOT for the PR.
+
+    #687's whole failure is that the only artefact saying so was one terminal.
+    """
+    return _swap(
+        t,
+        "    if facts.unearned is not None and facts.unearned.self_ranges:\n"
+        '        lines.append("  🔴 UNEARNED LEDGER — " + unearned_ledger_summary(',
+        "    if False:\n"
+        '        lines.append("  🔴 UNEARNED LEDGER — " + unearned_ledger_summary(',
+    )
+
+
+def the_unearned_heading_is_reworded(t):
+    """UL6 — the shipped heading drifts from the literal the suite pins.
+
+    The reachability control for that pin: a reworded heading must be caught by
+    the two-way check and not only by the tests that grep for it, or the three
+    regression rows would go red with the wrong diagnosis.
+    """
+    return _swap(
+        t,
+        '    "## 🔴 PART OF THIS LADDER\'S PAYLOAD RECORD WAS MEASURED OVER '
+        'ZERO COMMITS"\n',
+        '    "## 🔴 SOME ROUNDS OF THIS LADDER LOOK UNUSUAL"\n',
+    )
+
+
 # (label, expected killer set, mutation)
 ROWS = [
     ("D1  delete clause read-only",
@@ -4304,6 +4416,27 @@ ROWS = [
       "test_a_measured_NON_zero_never_overrules_a_STATED_zero",
       "test_a_SELF_RANGE_in_a_block_the_gate_reads_is_an_INPUT_refusal"},
      gate_never_fires),
+    # 🔴 THE UNEARNED-LEDGER ROWS. See the UL-series banner above the mutation
+    # functions for why each targets the narrowest expression rather than the
+    # branch it lives in.
+    ("UL1 the range denominator counts rangeless blocks",
+     {"test_the_unearned_reading_counts_RANGES_and_not_blocks"},
+     the_denominator_counts_blocks_not_ranges),
+    ("UL2 the BRIEF never reports an unearned ledger",
+     {"test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF"},
+     the_brief_never_reports_an_unearned_ledger),
+    ("UL3 stderr never reports the whole-ladder reading",
+     {"test_a_ladder_whose_EVERY_block_is_a_self_range_says_so_on_stderr", "test_the_unearned_ledger_strings_are_the_scripts_own"},
+     stderr_never_reports_an_unearned_ledger),
+    ("UL4 a PARTIAL ladder reads as wholly unearned",
+     {"test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF"},
+     a_partial_ladder_reads_as_wholly_unearned),
+    ("UL5 the PASTED block drops the unearned note",
+     {"test_the_block_the_operator_PASTES_carries_the_unearned_ledger_note"},
+     the_pasted_block_drops_the_unearned_note),
+    ("UL6 the shipped heading drifts from the pinned literal",
+     {"test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF", "test_the_unearned_ledger_strings_are_the_scripts_own"},
+     the_unearned_heading_is_reworded),
     ("G2  ONE zero round ends the ladder (`and` -> `or`)",
      {"test_the_gate_needs_two_CONSECUTIVE_zero_rounds_and_nothing_less"},
      gate_fires_on_one_zero_round),
@@ -4313,11 +4446,18 @@ ROWS = [
     # (the refusal says `payload=0` where it should say the field is absent
     # and the diff earned the zero), and a legacy pair over an UNCLASSIFIABLE
     # diff fires the gate on two unknowns.
+    # 🔴 A THIRD WIDENING IN ROUND 25, AND IT IS A REAL ONE. The
+    # unearned-ledger report has a distinct row for a LEGACY block — "with no
+    # `payload=` field", never "beside `payload=None`" — and this mutation
+    # makes the absent field parse as 0, so that row renders a count the
+    # comment never carried. A *report* now detects the fail-closed read, not
+    # only the gate: that is coverage this row did not have.
     ("G3  an ABSENT payload field reads as a measured zero",
      {"test_the_gate_FAILS_OPEN_on_a_block_that_carries_no_payload_field",
       "test_the_payload_field_the_emitter_writes_is_the_one_its_parser_reads",
       "test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field",
-      "test_an_UNRECOGNISED_file_type_is_UNMEASURED_and_fails_OPEN"},
+      "test_an_UNRECOGNISED_file_type_is_UNMEASURED_and_fails_OPEN",
+      "test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF"},
      absent_payload_field_reads_as_zero),
     ("G4  a no-count emit writes a ZERO instead of the placeholder",
      {"test_the_payload_field_the_emitter_writes_is_the_one_its_parser_reads"},
@@ -4398,8 +4538,18 @@ ROWS = [
     # `test_every_command_a_refusal_prescribes_actually_runs` now carries a
     # REFUSAL 3b case, so a self-range that is accepted returns 5 where that
     # case expects 4.
+    # 🔴 ROUND 25 ADDED THREE KILLERS, AND ONE OF THEM IS THE WHOLE ARGUMENT
+    # FOR NOT SHIPPING A SECOND REFUSAL.
+    # `…ALL_self_range_ladder_is_ALREADY_refused_by_the_shipped_pair_check`
+    # asserts that an all-unearned ladder returns 4 at every round >= 2 BECAUSE
+    # this check fires — so disabling the check is exactly the state in which
+    # that argument would be false, and it must go red there. The other two are
+    # the #687-shape rows, which assert rc 4 for the same reason.
     ("U8  a self-range in the gate's own pair is accepted",
      {"test_a_SELF_RANGE_in_a_block_the_gate_reads_is_an_INPUT_refusal",
+      "test_a_ladder_whose_EVERY_block_is_a_self_range_says_so_on_stderr",
+      "test_an_ALL_self_range_ladder_is_ALREADY_refused_by_the_shipped_pair_check",
+      "test_the_block_the_operator_PASTES_carries_the_unearned_ledger_note",
       "test_every_command_a_refusal_prescribes_actually_runs"},
      a_self_range_in_the_gates_own_pair_is_accepted),
     ("U9  the file header is matched BEFORE the hunk",
@@ -4414,8 +4564,15 @@ ROWS = [
     ("U12 a COMBINED merge diff is counted anyway",
      {"test_a_COMBINED_merge_diff_is_UNMEASURED_rather_than_miscounted"},
      a_combined_merge_diff_is_counted_anyway),
+    # 🔴 ROUND 25 GAVE THIS ROW A SECOND KILLER, AND THE SCOPE IT GUARDS IS NOW
+    # LOAD-BEARING TWICE OVER. Widening the refusal to the whole corpus does not
+    # merely refuse a run nothing consults — it DELETES the unearned-ledger
+    # report's entire reason to exist, because every ladder the report is for
+    # would be refused instead of reported. The mixed-shape row asserts rc 0 and
+    # a rendered brief, so it goes red there.
     ("U13 the self-range refusal covers the WHOLE corpus",
-     {"test_a_SELF_RANGE_the_gate_does_NOT_read_is_reported_and_not_refused"},
+     {"test_a_SELF_RANGE_the_gate_does_NOT_read_is_reported_and_not_refused",
+      "test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF"},
      the_self_range_refusal_covers_the_WHOLE_corpus),
     ("U14 `*` becomes a comment prefix",
      {"test_the_classifier_reads_a_changed_line_the_way_git_wrote_it"},
