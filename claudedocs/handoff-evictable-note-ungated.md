@@ -110,12 +110,19 @@ because `--release` is called exactly when the item completes. This arc's own pr
   forbidding the bare words `playbook` and `ladder`, which cannot be said there at all. This
   is `claude/RULES.md`'s "a guard can be SPELLED rather than STRUCTURAL" in a new shape: the
   guard was spelled against four spellings of the hazard and the hazard had a fifth.
-- 🔴 **TWO NUMBERS, BOTH CORRECT, ABOUT DIFFERENT THINGS — do not copy either forward.** The
+- 🔴 ~~**TWO NUMBERS, BOTH CORRECT, ABOUT DIFFERENT THINGS — do not copy either forward.** The
   deciding handoff quoted **370,563 B** for homelab-talos; measuring through this code gives
-  **289,805 B across 31 of 70 docs**. 370,563 is `handoff-audit.py`'s gross over ALL FOUR
-  buckets; `evictable_note` reports step 1 (`resolved` + `done`) only. The code comment
-  records the one this code can actually print, and says so. **Re-derive; the discrepancy is
-  a definition, not a drift.**
+  **289,805 B across 31 of 70 docs**.~~ 🔴 **RETRACTED — THE SECOND NUMBER IS NOT "CORRECT
+  ABOUT A DIFFERENT THING", IT IS WRONG FOR THE ONLY THING IT WAS USED FOR, AND THIS BULLET'S
+  "both correct" FRAMING IS WHAT MADE IT LOOK SETTLED.** `289,805 B / 31 docs` was measured by
+  looping `evictable_note()` directly; the quantity that matters is what `budget_warning`
+  newly PRINTS, which is **13 of homelab-talos's 70 docs**. The other 18 are under budget, so
+  `budget_warning` returns `""` for them whether gated or not. Refuted by #1826 round 0. The
+  rest of the bullet stands: 370,563 is `handoff-audit.py`'s gross over ALL FOUR buckets while
+  `evictable_note` reports step 1 (`resolved` + `done`) only, and no byte total belongs in the
+  source because the corpus moves. **Re-derive — and re-derive THROUGH THE CALLER, not through
+  the function you happen to be reading.** Kept struck rather than deleted: a wrong reading a
+  session acted on is the record, and this one reached the operator.
 - **Deleting the two ladder-pointers was a DELETION, not a rewrite, and it is why the note
   can travel.** In an ungated repo they named a test the repo does not ship — the
   `civitai/cli#618` failure in miniature, an authoritative-sounding step nobody's gate
