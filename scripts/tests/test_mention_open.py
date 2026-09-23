@@ -25,6 +25,7 @@ import errno
 import importlib.util
 import inspect
 import json
+import math
 import os
 import re
 import select
@@ -5282,10 +5283,10 @@ def test_the_universe_file_is_NOT_read_on_a_click_that_resolves(monkeypatch):
 
 def test_the_staleness_note_names_the_UNIT_not_only_the_generator(tmp_path):
     """🔴 THE TEXT IS A CLAIM AND THE CLAIM CHANGED. It used to say "nothing
-    regenerates it", which was true and is now false: a daily user unit does.
-    Left alone, it would send the operator to re-run a generator by hand while
+    regenerates it", which was true and is now false: a user unit does. Left
+    alone, it would send the operator to re-run a generator by hand while
     the actual fault — a failing unit, an expired token, a host that was off —
-    stayed invisible. A stale mapping past seven days now means SEVERAL runs did
+    stayed invisible. A stale mapping past seven days now means many runs did
     not land, which is a different diagnosis and needs a different sentence."""
     p = tmp_path / "known_repos.json"
     p.write_text(json.dumps(FAKE_UNIVERSE))
@@ -5297,6 +5298,44 @@ def test_the_staleness_note_names_the_UNIT_not_only_the_generator(tmp_path):
     assert "nothing regenerates it" not in note, note
     # And it still says nothing about a ROW — the disclosure rule is unchanged.
     _no_universe_token_anywhere(note, "STALENESS NOTE DISCLOSURE")
+
+
+def test_the_STALENESS_NOTE_text_is_pinned_WHOLE_and_names_no_cadence(tmp_path):
+    """🔴 THE ARTEFACT UNDER TEST IS PROSE, SO THE GUARD PINS THE WHOLE
+    NORMALISED STRING. A guard on the word "daily" would be walkable by
+    rewording — "the nightly refresh", "the once-a-day unit" — and that is
+    exactly the failure this test exists because of: the string said "the daily
+    refresh has not landed" for days after `nix/home.nix` made the unit
+    four-hourly, and NOTHING went red, because no test named the sentence.
+
+    ⚠ A COSMETIC REWORD NOW FAILS THIS TEST. That is the price of a
+    machine-readable claim, and it is deliberately paid: the alternative is an
+    operator-facing sentence that can go false without anyone finding out.
+
+    ⚠ IT ALSO PINS THE ABSENCE OF A CADENCE. The sentence must not spell the
+    period at all — that would be a second copy of `nix/home.nix` with nothing
+    to pin it against, and the operator does not need the number: the unit name
+    and the day count are what they act on."""
+    p = tmp_path / "known_repos.json"
+    p.write_text(json.dumps(FAKE_UNIVERSE))
+    old = time.time() - 9 * 86400
+    os.utime(p, (old, old))
+    note = MO.staleness_note(p)
+    assert note == (
+        "the repo mapping is 9 days old — the refresh has not landed, so a "
+        "repository created since then cannot resolve; check `systemctl --user "
+        "status mention-known-repos-refresh` or run scripts/regen-known-repos.py"
+    ), repr(note)
+    # ...and no cadence word is in it, in any of the spellings a reword reaches
+    # for. This is the claim the whole-string pin makes checkable at a glance.
+    for cadence in ("daily", "nightly", "hourly", "four-hourly", "4-hourly",
+                    "every day", "once a day"):
+        assert cadence not in note.lower(), (
+            f"the operator-facing note spells the refresh cadence ({cadence!r}) "
+            f"— that is a copy of `nix/home.nix` nothing can pin: {note}")
+    # POSITIVE CONTROL: the assertions above are about a note that was really
+    # produced, not about an empty string.
+    assert MO.staleness_note(tmp_path / "absent.json") == ""
 
 
 def test_the_universe_reaches_NO_sink_but_the_PICKER(monkeypatch, capsys):
@@ -5991,10 +6030,28 @@ def test_a_NON_NUMERIC_subject_is_UNKNOWN_rather_than_guessed():
 #
 #   * the wrong-repo side is MEASURED — of 100 distinct `(repo, n)` picks
 #     checked against the GitHub API, 6 name a number no such repository has,
-#     and their gaps (`n - max_ref`) are the ledger below. The smallest is 74.
+#     and their gaps (`n - max_ref`) are the ledger below. The smallest is 37.
 #   * the stale side needs to cover roughly one refresh interval of the fastest
 #     repository's growth. That was measured at 34.1/day over 14 days and
-#     39.0/day over 31; the timer is daily.
+#     39.0/day over 31; the timer fires every four hours (+900s of jitter), so
+#     one interval of the fastest repository is ~6.9 references.
+#
+# 🔴 AND THE BELOW MASS DECOMPOSES WITH ZERO RESIDUAL, WHICH IS WHY THE TIMER
+# DOES NOT SUBSUME THIS CHANGE. 65 click-time `below` rows = 59 stale-table + 6
+# wrong-repo. All 59 exist on GitHub, `created_at` resolved for 59 of 59, and
+# the reference was younger than 24 h at click time in EVERY case (median 22
+# minutes, max 9.2 h). 54 of the 59 name a reference created LESS THAN FOUR
+# HOURS before the click — i.e. inside ONE interval of the new cadence — so
+# #1831 alone would have fixed at most 5 of 59 and the margin covers the other
+# 54. The sharpest single case: gap 3, reference created 94 SECONDS before the
+# click, against a 3.6 h-old table. No cadence reaches that; a margin does.
+#
+# 🔴 EVERY NUMBER BELOW IS DERIVED FROM `MO.REFRESH_INTERVAL_DAYS`, NEVER
+# HARD-CODED — because the whole point of item 1 is that the cap is observable
+# operational state. An earlier revision of this block was computed against a
+# DAILY timer and every constant in it (a cap of 40, a stale-side gap of 30, a
+# 19-reference reproduction) went silently wrong the day `nix/home.nix` changed.
+# The derivations are spelled out so the next cadence change moves them too.
 #
 # These numbers are from a real click log on a private host. The NUMBERS travel
 # (they are the whole argument); the repository names do NOT, and every fixture
@@ -6002,70 +6059,377 @@ def test_a_NON_NUMERIC_subject_is_UNKNOWN_rather_than_guessed():
 # --------------------------------------------------------------------------- #
 
 # The six wrong-repo gaps, smallest first. A LEDGER, not a sample: the margin's
-# ceiling is chosen to sit under `min(...)` of it, so an entry added here must
-# be re-checked against `PLAUSIBLE_MARGIN_MAX`.
-_WRONG_REPO_GAPS = (74, 79, 135, 171, 183, 1810)
+# cap has to sit under `min(...)` of it, so an entry added here must be
+# re-checked against the cap `plausible_margin` actually produces.
+#
+# 🔴 IT IS A DECAYING MEASUREMENT, NOT A FIXED FACT, AND THAT IS STRUCTURAL.
+# `gap = n - max_ref` and `max_ref` only ever GROWS, so every refresh shrinks
+# the very separation the old ceiling was sized against. Re-measured after
+# #1831 landed, the same six picks give (37, 60, 98, 134, 146, 1810) against
+# LIVE `max_ref` — the smallest went 74 -> 37, halving in days, because a faster
+# refresh raised `max_ref`. 🔴 THE PREVIOUS VALUES (74, 79, 135, 171, 183, 1810)
+# ARE RETIRED; carrying them forward would have sized a cap against a window
+# that no longer exists.
+#
+# ⚠ THE LIVE COLUMN IS USED, NOT THE TABLE COLUMN. Measured against the range
+# table on disk the gaps are (43, 60, 104, 140, 152, 1810); the table converges
+# toward live as it refreshes, so LIVE is the conservative bound and the one
+# that stays true between refreshes.
+#
+# 🔴 THIS IS THE ARGUMENT FOR DELETING `PLAUSIBLE_MARGIN_MAX` RATHER THAN
+# RE-TUNING IT. A cap sized against a ledger that erodes by construction is
+# wrong on a timer nobody is watching: at the retired ceiling of 60, TWO of
+# these six now leak into PLAUSIBLE (the predicate is `max_ref + margin >= n`,
+# so `margin >= gap` leaks, and 60 >= 37 and 60 >= 60). At the margin a
+# four-hourly table actually produces, ZERO of six leak. Round 0's "0 of 6 leak
+# at the ceiling margin" was true of its corpus and is FALSE today — recorded
+# here rather than quietly corrected. Deriving the cap from the refresh interval
+# is what makes it immune to this ledger moving.
+_WRONG_REPO_GAPS = (37, 60, 98, 134, 146, 1810)
 
-# The largest stale-side gap the margin must still ADMIT. Derived, not measured:
-# one refresh interval (1 day) of the fastest measured growth (39.0/day), taken
-# up to the round 30 the separation argument uses. The click-time gap
-# distribution is NOT recoverable — `picks.jsonl` records `(t, repo, n)` and no
-# `max_ref` — so this end of the separation is an upper-bounding argument rather
-# than an observation, and it is labelled as one.
-_STALE_GAP_TO_ADMIT = 30
+# The fastest reference velocity MEASURED on the live universe, in refs/day.
+# 34.1 over a 14-day window, 39.0 over 31 days; the larger is the bound.
+_FASTEST_MEASURED_PER_DAY = 39.0
+
+
+# 🔴 THESE TWO ARE FUNCTIONS, NOT MODULE-LEVEL CONSTANTS, AND THAT IS NOT A
+# STYLE CHOICE. Computing them at import means one `MO.` attribute that does not
+# exist makes THE WHOLE FILE uncollectable — 560 tests reduced to a single
+# collection error, which hides every unrelated regression behind it and makes a
+# RED-at-base matrix impossible to read. Deferred, only the tests that actually
+# depend on the margin fail against a pre-margin handler, which is the shape a
+# regression matrix needs.
+def _derived_margin_cap() -> int:
+    """The largest margin the ordering can ever apply, READ OUT OF THE FUNCTION
+    rather than restated. `plausible_margin` is flat past one refresh interval,
+    so any age at or beyond it gives the cap; taken as a `max` over the whole
+    reachable domain (`ordering_state` stops ordering at `STALE_MAPPING_DAYS`)
+    so this stays right if the shape of the function ever changes."""
+    return max(MO.plausible_margin(a)
+               for a in (0.0, 0.01, 0.1, MO.REFRESH_INTERVAL_DAYS, 1.0,
+                         MO.STALE_MAPPING_DAYS - 0.001))
+
+
+def _stale_gap_to_admit() -> int:
+    """The largest stale-side gap the margin must still ADMIT. Derived, not
+    measured: one refresh interval of the fastest measured growth, rounded up —
+    39.0/day x 0.177083 d = 6.91 -> 7.
+
+    The click-time gap distribution is NOT recoverable — `picks.jsonl` records
+    `(t, repo, n)` and no `max_ref` — so this end of the separation is an
+    UPPER-BOUNDING ARGUMENT rather than an observation, and it is labelled as
+    one. ⚠ It is also an argument about the AVERAGE worst case: a repository can
+    allocate more than 7 references in some four-hour windows, and such a click
+    still lands BELOW. Tightening the cadence is the lever for that; widening
+    the cap is not, because the wrong-repo ledger is where the cap must stay."""
+    return math.ceil(_FASTEST_MEASURED_PER_DAY * MO.REFRESH_INTERVAL_DAYS)
+
+
+_REFRESH_UNIT = "mention-known-repos-refresh"
+
+# `*-*-* HH:MM:SS` (daily) or `*-*-* HH/N:MM:SS` (every N hours). Deliberately
+# NARROW: systemd's calendar grammar is large, and a parser that accepted more
+# of it than it understood would answer a number for a spelling nobody checked.
+# Anything else RAISES — see the negative-control tests.
+_ONCALENDAR_RE = re.compile(
+    r"^\*-\*-\* (?P<h>\d{1,2})(?:/(?P<step>\d+))?:(?P<m>\d{2}):(?P<s>\d{2})$")
+
+
+def _synthetic_timer_block(timer_lines: str, unit: str = _REFRESH_UNIT) -> str:
+    """A nix timer block shaped like the real one, for the controls. Indented
+    the way `nix/home.nix` indents it, so the parser is exercised on the same
+    shape it meets in the file rather than on a flattened fixture."""
+    return (f"  systemd.user.timers.{unit} = {{\n"
+            f"    Unit = {{\n"
+            f'      Description = "a timer";\n'
+            f"    }};\n"
+            f"    Timer = {{\n"
+            f"      {timer_lines}\n"
+            f"      Persistent = true;\n"
+            f"    }};\n"
+            f"  }};\n")
+
+
+def _refresh_interval_days_from_nix(text: str,
+                                    unit: str = _REFRESH_UNIT) -> float:
+    """The refresh unit's worst-case ON-SCHEDULE interval, in days, read out of
+    nix SOURCE — `OnCalendar`'s period plus `RandomizedDelaySec`.
+
+    🔴 IT RAISES ON EVERYTHING IT CANNOT READ, AND NEVER RETURNS A DEFAULT. This
+    is the instrument the two-way pin is read off; a fallback would make it
+    agree with `MO.REFRESH_INTERVAL_DAYS` for a file that no longer contains the
+    unit at all, which is precisely the drift the pin exists to catch.
+
+    ⚠ ONE DEFAULT IS DELIBERATE AND IS NOT A FALLBACK: an ABSENT
+    `RandomizedDelaySec` is 0 jitter, which is what systemd does and therefore a
+    MEASUREMENT rather than a guess. Deleting the line still fails the pin,
+    because the computed interval then no longer matches the constant."""
+    head = f"systemd.user.timers.{unit} = {{"
+    start = text.find(head)
+    assert start != -1, (
+        f"no `systemd.user.timers.{unit}` block in the nix source — the unit "
+        f"the margin's cap is derived from is gone, renamed, or spelled "
+        f"differently. `REFRESH_INTERVAL_DAYS` cannot be left standing over a "
+        f"unit that does not exist")
+    # Brace-balanced scan from the block's opening `{`, so a nested attrset
+    # (`Unit`, `Timer`, `Install`) cannot end the block early and a `}` inside a
+    # string is the only thing that could fool it — there are none here.
+    depth, i = 0, start + len(head) - 1
+    end = None
+    while i < len(text):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+        i += 1
+    assert end is not None, f"unbalanced braces in the `{unit}` timer block"
+    body = text[start:end]
+
+    m = re.search(r'OnCalendar\s*=\s*"([^"]*)"\s*;', body)
+    assert m is not None, (
+        f"the `{unit}` timer block has no `OnCalendar` — there is no period to "
+        f"derive the margin's cap from:\n{body}")
+    spec = m.group(1)
+    cal = _ONCALENDAR_RE.match(spec)
+    assert cal is not None, (
+        f"`OnCalendar = \"{spec}\"` is a systemd calendar spelling this parser "
+        f"does not implement. GUESSING a period here would put an unmeasured "
+        f"number into the pin — widen the parser deliberately instead")
+    step = cal.group("step")
+    # No `/N` means once a day at that time; `HH/N` means every N hours.
+    period = 86400 if step is None else int(step) * 3600
+    assert period > 0, f"a zero-length period from {spec!r}"
+
+    j = re.search(r"RandomizedDelaySec\s*=\s*(\d+)\s*;", body)
+    jitter = int(j.group(1)) if j else 0
+    return (period + jitter) / 86400.0
 
 
 def test_the_margin_CEILING_sits_inside_the_measured_SEPARATION():
     """🔴 THE ONE STRUCTURAL FACT THE WHOLE DESIGN RESTS ON, PINNED TWO-WAY.
 
-    The ceiling has to be BELOW the smallest wrong-repo gap (or a wrong-repo
-    click gets promoted into `PLAUSIBLE`, which is the failure mode the ceiling
-    exists to prevent) and AT OR ABOVE the stale-side gap it must admit (or the
-    margin does not fix the defect it was built for). There is room for both
-    only because the two sides are 44 apart; if a future measurement closes that
-    gap, this test is what says so rather than the picker quietly getting worse.
+    The cap has to be BELOW the smallest wrong-repo gap (or a wrong-repo click
+    gets promoted into `PLAUSIBLE`, which is the failure mode the cap exists to
+    prevent) and AT OR ABOVE the stale-side gap it must admit (or the margin
+    does not fix the defect it was built for). If a future cadence change or a
+    new measurement closes that window, this test is what says so rather than
+    the picker quietly getting worse.
 
-    ⚠ IT PINS A RELATIONSHIP, NOT A CONSTANT. Asserting `PLAUSIBLE_MARGIN_MAX
-    == 60` would pass while the ledger it is supposed to clear moved underneath
-    it."""
-    assert MO.PLAUSIBLE_MARGIN_MAX < min(_WRONG_REPO_GAPS), (
-        f"the ceiling {MO.PLAUSIBLE_MARGIN_MAX} reaches the smallest measured "
+    ⚠ IT PINS A RELATIONSHIP, NOT A CONSTANT — and that is what carried it
+    through the cadence change intact. There is no `PLAUSIBLE_MARGIN_MAX` any
+    more; the cap is `REFRESH_INTERVAL_DAYS x RANGE_GROWTH_PER_DAY`, read back
+    out of `plausible_margin` itself, so this test moved with the timer while a
+    `== 60` would have passed against a window that had shifted underneath it.
+    """
+    cap, admit = _derived_margin_cap(), _stale_gap_to_admit()
+    assert cap < min(_WRONG_REPO_GAPS), (
+        f"the cap {cap} reaches the smallest measured "
         f"wrong-repo gap {min(_WRONG_REPO_GAPS)} — a click naming a number that "
         f"repository has never had would be ranked PLAUSIBLE")
-    assert MO.PLAUSIBLE_MARGIN_MAX >= _STALE_GAP_TO_ADMIT, (
-        f"the ceiling {MO.PLAUSIBLE_MARGIN_MAX} is under the stale-side gap "
-        f"{_STALE_GAP_TO_ADMIT} it exists to admit — the margin cannot fix the "
+    assert cap >= admit, (
+        f"the cap {cap} is under the stale-side gap "
+        f"{admit} it exists to admit — the margin cannot fix the "
         f"defect it was built for")
+    # The headroom, stated so a future reading can see it MOVE rather than
+    # having to recompute it: 8 under a smallest measured gap of 37 leaves 29.
+    # ⚠ THE MESSAGE IS WORDED RATHER THAN A BARE INT BECAUSE A MUTANT IS SCORED
+    # ON IT. The mutation battery greps pytest's `E ` lines for a token naming
+    # the row; `assert x == 29, x` puts only a number there, and K94 was scored
+    # KILLED-WRONG-REASON on its first run for exactly that.
+    assert min(_WRONG_REPO_GAPS) - cap == 29, (
+        f"the HEADROOM under the smallest measured wrong-repo gap is now "
+        f"{min(_WRONG_REPO_GAPS) - cap} (cap {cap} under gap "
+        f"{min(_WRONG_REPO_GAPS)}), not the 29 this design was re-scoped "
+        f"against — the cap, the growth rate or the ledger moved")
     # The growth rate must cover the fastest repository measured, or `age x rate`
     # stops being an upper bound on what could have happened and becomes a knob.
-    assert MO.RANGE_GROWTH_PER_DAY >= 39.0, MO.RANGE_GROWTH_PER_DAY
+    assert MO.RANGE_GROWTH_PER_DAY >= _FASTEST_MEASURED_PER_DAY, (
+        MO.RANGE_GROWTH_PER_DAY)
+    # 🔴 THE RETIRED CONSTANT MUST STAY RETIRED. `PLAUSIBLE_MARGIN_MAX` was the
+    # one admittedly-unprincipled number in this design; re-introducing it —
+    # even as an alias — would put a tunable back beside the derived cap, and
+    # the two could then disagree with nothing to say which won.
+    assert not hasattr(MO, "PLAUSIBLE_MARGIN_MAX"), (
+        "PLAUSIBLE_MARGIN_MAX is back — the cap is the refresh interval now")
+    # 🔴 AND THE RETIRED VALUE IS DEMONSTRABLY WRONG TODAY, WHICH IS WHY THIS IS
+    # A DELETION AND NOT A RE-TUNE. The ledger erodes (see its comment); at a
+    # margin of 60 two of these six wrong-repo picks are now PROMOTED, which is
+    # the exact failure the ceiling existed to prevent. Asserted rather than
+    # narrated, so the argument for the deletion cannot go stale silently.
+    leaks_at_60 = [g for g in _WRONG_REPO_GAPS if 60 >= g]
+    assert len(leaks_at_60) == 2, leaks_at_60
+    # ...and none leaks at the cap the refresh interval produces.
+    assert [g for g in _WRONG_REPO_GAPS if cap >= g] == [], (
+        f"the derived cap {cap} now reaches a measured "
+        f"wrong-repo gap — the separation this design rests on is gone")
+
+
+def test_the_REFRESH_INTERVAL_matches_the_units_own_period():
+    """🔴 THE CONSTANT IS A COPY OF `nix/home.nix`, AND A COPY IS A CLAIM. The
+    margin's cap is only "observable operational state" if it actually tracks
+    the unit that writes the table; left unpinned it is a tunable wearing a
+    comment's clothes, and it would have gone stale the first time the cadence
+    moved — which has already happened once, mid-PR.
+
+    Two-way: the interval is recomputed from the timer block and compared, and
+    the parse FAILS if the unit is gone, so deleting the timer cannot quietly
+    leave the constant standing.
+
+    ⚠ THE PARSER IS VALIDATED BEFORE ITS VERDICT IS READ — see the two control
+    tests below. A parser that silently returned a default would agree with this
+    constant forever, whatever `nix/home.nix` said."""
+    nix = (ROOT / "nix" / "home.nix").read_text(encoding="utf-8")
+    got = _refresh_interval_days_from_nix(nix)
+    assert got == MO.REFRESH_INTERVAL_DAYS, (
+        f"`nix/home.nix` says the refresh unit runs every {got * 86400:.0f}s "
+        f"(period + RandomizedDelaySec) = {got} days, but "
+        f"`REFRESH_INTERVAL_DAYS` is {MO.REFRESH_INTERVAL_DAYS}. The margin's "
+        f"cap is supposed to BE the unit's period — move the constant, and "
+        f"re-derive every number in this block from it")
+    # ...and the two halves really are both in there, so the equality above is
+    # not being satisfied by a period that happens to include the jitter.
+    assert MO._REFRESH_PERIOD_SECONDS == 4 * 3600
+    assert MO._REFRESH_JITTER_SECONDS == 900
+
+
+def test_the_nix_TIMER_PARSER_can_see_a_DIFFERENT_period_POSITIVE_CONTROL():
+    """🔴 POSITIVE CONTROL. The test above is only evidence if the parser can
+    produce a number OTHER than the one it is compared against — a parser that
+    returned `MO.REFRESH_INTERVAL_DAYS`, or a hardcoded default, would agree
+    with the constant forever and the pin would be wired to nothing.
+
+    So: feed it synthetic blocks whose periods and jitters differ from the live
+    one and from each other, and watch the answer MOVE to the derived value.
+
+    Every fixture number here is distinct from 4h/900s and from the others, so
+    no row can be satisfied by another's value."""
+    # The DAILY shape this unit had before 2026-09-21, with no jitter at all.
+    daily = _synthetic_timer_block('OnCalendar = "*-*-* 07:00:00";')
+    assert _refresh_interval_days_from_nix(daily) == 1.0
+    # A six-hourly one, jitter included.
+    six = _synthetic_timer_block('OnCalendar = "*-*-* 00/6:00:00";\n'
+                                 '      RandomizedDelaySec = 1200;')
+    assert _refresh_interval_days_from_nix(six) == (6 * 3600 + 1200) / 86400.0
+    # The JITTER alone moves it — same period, different delay. Without this the
+    # parser could ignore `RandomizedDelaySec` entirely and still pass above.
+    three_a = _synthetic_timer_block('OnCalendar = "*-*-* 00/3:00:00";\n'
+                                     '      RandomizedDelaySec = 60;')
+    three_b = _synthetic_timer_block('OnCalendar = "*-*-* 00/3:00:00";\n'
+                                     '      RandomizedDelaySec = 1500;')
+    assert (_refresh_interval_days_from_nix(three_a)
+            != _refresh_interval_days_from_nix(three_b))
+    assert _refresh_interval_days_from_nix(three_b) == (3 * 3600 + 1500) / 86400.0
+    # ...and none of those is the live value, or "it moved" would be untestable.
+    assert MO.REFRESH_INTERVAL_DAYS not in {
+        1.0, (6 * 3600 + 1200) / 86400.0, (3 * 3600 + 1500) / 86400.0}
+
+
+@pytest.mark.parametrize("body,why", [
+    ("", "the unit is not in the file at all"),
+    ('systemd.user.timers.some-other-unit = {\n'
+     '    Timer = {\n      OnCalendar = "*-*-* 00/4:00:00";\n    };\n  };\n',
+     "a DIFFERENT unit carries the period"),
+    ('systemd.user.timers.mention-known-repos-refresh = {\n'
+     '    Timer = {\n      Persistent = true;\n    };\n  };\n',
+     "the block has no OnCalendar"),
+])
+def test_an_UNPARSEABLE_timer_block_FAILS_LOUDLY_rather_than_defaulting(body,
+                                                                        why):
+    """🔴 NEGATIVE CONTROL. The hazard this closes is not a wrong number, it is
+    a SILENT one: a parser that fell back to a default on anything it could not
+    read would report agreement with `REFRESH_INTERVAL_DAYS` for a file where
+    the unit had been renamed, deleted, or rewritten in a spelling it does not
+    understand — and the pin would keep passing while the constant described
+    nothing that runs.
+
+    Each row is a way the file can stop saying what the constant claims; every
+    one of them must RAISE."""
+    with pytest.raises(AssertionError):
+        _refresh_interval_days_from_nix(body)
+
+
+def test_an_UNREADABLE_ONCALENDAR_SPELLING_also_FAILS_LOUDLY():
+    """The second half of the negative control, one layer in: the block is
+    found and `OnCalendar` is present, but its VALUE is a systemd spelling this
+    parser does not implement (`weekly`, `Mon *-*-* 00:00:00`, a list). Guessing
+    would put a number in the pin that nothing measured."""
+    for spec in ("weekly", "Mon *-*-* 00:00:00", "*-*-* *:0/15",
+                 "hourly", ""):
+        blob = _synthetic_timer_block(f'OnCalendar = "{spec}";')
+        with pytest.raises(AssertionError):
+            _refresh_interval_days_from_nix(blob)
 
 
 @pytest.mark.parametrize("age_days,expected", [
     (None, 0),                 # `ranges_age_days` could not stat the file
     (0.0, 0),                  # written this instant — no tolerance earned
     (-3.0, 0),                 # a clock that went backwards
-    (0.25, 10),                # ceil(10.0)
-    (0.7, 28),                 # ceil(28.0) — the live reproduction's age
-    (0.9, 36),                 # ceil(36.0)
-    (0.90001, 37),             # ceil rounds UP: a hair more age buys a whole ref
-    (1.0, 40),                 # one refresh interval of the fastest repo
-    (1.49, 60),                # ceil(59.6) -> 60, the ceiling reached from below
-    (1.5, 60),                 # exactly at the ceiling
-    (3.3, 60),                 # past it
-    (6.9, 60),                 # the oldest age `ordering_state` still accepts
-    (900.0, 60),               # absurd, still bounded
+    (0.0749, 3),               # ceil(2.996) — TRUNCATION would say 2
+    (0.0751, 4),               # ceil(3.004): a hair more age buys a whole ref
+    (0.13, 6),                 # ceil(5.2) — mid-slope
+    (0.16, 7),                 # ceil(6.4) — still climbing, just under 4h
+    (0.177, 8),                # ceil(7.08) — the last point before the cap
+    (0.25, 8),                 # past one interval: the cap, reached from above
+    (0.7, 8),                  # the live reproduction's table age
+    (1.0, 8),                  # a full day: WITHOUT the min() this would be 40
+    (3.3, 8),                  # several missed runs, still capped
+    (6.9, 8),                  # the oldest age `ordering_state` still accepts
+    (900.0, 8),                # absurd, still bounded
 ])
 def test_the_margin_GROWS_with_table_age_and_STOPS_at_the_ceiling(age_days,
                                                                   expected):
     """Pinned at both ends and in the middle, because this is a two-part
     function and a single point cannot see either part.
 
-    ⚠ THE `ceil` IS DELIBERATE AND IS PINNED BY THE 0.90001 ROW. A reference
-    number is an integer, so half a reference of growth is a whole reference the
-    table has not seen; truncating would leave the margin one short at exactly
-    the moment it matters."""
+    ⚠ THE `ceil` IS DELIBERATE AND IS PINNED BY THE 0.0749/0.0751 PAIR, which is
+    where it lives at the 4-hourly cadence — the old pair (0.9/0.90001) sits far
+    past the cap now and would pin nothing. A reference number is an integer, so
+    half a reference of growth is a whole reference the table has not seen;
+    truncating would leave the margin one short at exactly the moment it
+    matters. 2.996 -> 3 is the row truncation fails.
+
+    ⚠ NO FIXTURE AGE PRODUCTS AN EXACT INTEGER, deliberately: `age x 40` landing
+    ON a whole number makes `ceil` and truncation agree, and the row then pins
+    neither. Every expected value is also distinct from `RANGE_GROWTH_PER_DAY`
+    and from the cap except where the cap is the thing under test.
+
+    ⚠ THE 1.0 ROW IS THE ONE THAT SEES THE `min(age, INTERVAL)`. At 40/day a
+    one-day-old table earned 40 before the cap moved onto the refresh interval;
+    it now earns 8, and a mutant that dropped the `min` — or capped the PRODUCT
+    at some literal — has to move this row."""
     assert MO.plausible_margin(age_days) == expected
+
+
+def test_the_margin_STOPS_GROWING_at_EXACTLY_one_refresh_interval():
+    """🔴 WHERE THE CAP IS, PINNED AS A BOUNDARY RATHER THAN AS A VALUE. The
+    table above pins points either side; this pins that the knee is at
+    `REFRESH_INTERVAL_DAYS` and not at some nearby number that happens to give
+    the same integers.
+
+    The claim is: strictly inside one interval the margin is strictly smaller
+    than the cap, and from the interval onward it never moves again — which is
+    the whole semantic content of "past one interval the table is not stale, it
+    is unmaintained, so tolerance stops growing rather than being
+    extrapolated"."""
+    interval = MO.REFRESH_INTERVAL_DAYS
+    cap = MO.plausible_margin(interval)
+    # Strictly inside: still climbing, and still under the cap. 0.6 and 0.9 of
+    # an interval are not multiples of the 1/40-day step, so neither can land on
+    # the cap by accident.
+    assert MO.plausible_margin(interval * 0.6) < cap
+    assert MO.plausible_margin(interval * 0.6) < MO.plausible_margin(
+        interval * 0.9) < cap
+    # From the knee onward it is FLAT, over a spread of ages that covers the
+    # whole remaining reachable domain.
+    for beyond in (interval, interval * 1.0001, interval * 2, 1.0, 3.7,
+                   MO.STALE_MAPPING_DAYS - 0.001, 1e6):
+        assert MO.plausible_margin(beyond) == cap, beyond
+    # ...and the cap really is the product of the two constants, so this is a
+    # claim about the implementation and not about an arbitrary plateau.
+    assert cap == math.ceil(interval * MO.RANGE_GROWTH_PER_DAY) == 8
 
 
 @pytest.mark.parametrize("junk", ["", "1.0", "nan", None, object(), True,
@@ -6090,31 +6454,41 @@ def test_an_UNUSABLE_age_DEGRADES_to_the_old_class_and_NEVER_RAISES(junk):
     assert MO.plausible_margin(junk) == 0
 
 
-@pytest.mark.parametrize("max_ref,margin,expected", [
-    # The regression, at the unit: a head 19 short of the clicked number, with
-    # the tolerance a 0.7-day-old table earns.
-    (1809, 28, MO.CLASS_PLAUSIBLE),
-    # The boundary, from both sides and ON it. 36 is the margin at age 0.9.
-    (1291 - 35, 36, MO.CLASS_PLAUSIBLE),   # just inside
-    (1291 - 36, 36, MO.CLASS_PLAUSIBLE),   # exactly on — INCLUDED
-    (1291 - 37, 36, MO.CLASS_BELOW),       # just outside
+@pytest.mark.parametrize("num,max_ref,margin,expected", [
+    # The regression, at the unit: a head 3 short of the clicked number, inside
+    # the tolerance a table part-way through one refresh interval earns. ⚠ THE
+    # ORIGINAL ROW HERE WAS THE LIVE 19-REFERENCE GAP, AND IT IS GONE ON PURPOSE
+    # — 19 is outside every margin this function can now produce. That incident
+    # is fixed by the 4-hourly timer, not by the margin; see the block above
+    # `RANGE_GROWTH_PER_DAY`.
+    ("1828", 1825, 6, MO.CLASS_PLAUSIBLE),
+    # The boundary, from both sides and ON it, at a margin of 6 — which is the
+    # margin of a table 0.13 d old, and is NOT the cap (8), NOT the growth rate
+    # (40) and NOT a power-of-two multiple of the one-reference step. A mutant
+    # that hardcoded any constant this file names therefore has to move a row.
+    ("1291", 1291 - 5, 6, MO.CLASS_PLAUSIBLE),    # just inside
+    ("1291", 1291 - 6, 6, MO.CLASS_PLAUSIBLE),    # exactly on — INCLUDED
+    ("1291", 1291 - 7, 6, MO.CLASS_BELOW),        # just outside
+    # ...and the same boundary one margin along, so "the boundary MOVES with the
+    # margin" is pinned rather than inferred from a single margin's behaviour.
+    ("1291", 1291 - 7, 7, MO.CLASS_PLAUSIBLE),
     # A head PAST the number is plausible at every margin, unchanged.
-    (1300, 0, MO.CLASS_PLAUSIBLE),
-    (1300, 60, MO.CLASS_PLAUSIBLE),
+    ("1291", 1300, 0, MO.CLASS_PLAUSIBLE),
+    ("1291", 1300, 8, MO.CLASS_PLAUSIBLE),
     # A margin may never NARROW: a negative one is clamped, not applied.
-    (1300, -50, MO.CLASS_PLAUSIBLE),
-    (1290, -50, MO.CLASS_BELOW),
+    ("1291", 1300, -50, MO.CLASS_PLAUSIBLE),
+    ("1291", 1290, -50, MO.CLASS_BELOW),
 ])
 def test_the_margin_MOVES_the_BELOW_boundary_and_only_that_boundary(
-        max_ref, margin, expected):
-    """The clicked number is 1828 for the first row and 1291 for the rest.
-
-    ⚠ THE FIXTURE VALUES OVERSHOOT THE BOUNDARY RATHER THAN LANDING ON A
-    MULTIPLE OF THE STEP. 36 is not a round multiple of anything in the
-    implementation, and 19 sits well inside 28 — so a mutant that scaled the
-    margin, or that swapped `>=` for `>`, is caught by the ON-the-boundary row
-    rather than surviving on an accident of the numbers."""
-    num = "1828" if max_ref == 1809 else "1291"
+        num, max_ref, margin, expected):
+    """⚠ THE FIXTURE VALUES OVERSHOOT THE BOUNDARY RATHER THAN LANDING ON A
+    MULTIPLE OF THE STEP, and holding that line matters MORE at the 4-hourly
+    cadence than it did at the daily one: the margins are now single digits, so
+    an accidental coincidence between a fixture and a constant is far likelier.
+    Every `num`/`max_ref`/`margin` triple here is pairwise distinct, the gaps
+    (3, 5, 6, 7, 9, 10) are distinct from the margins (6, 7, 8, 0, -50), and no
+    gap equals the cap — so a mutant that returned the cap, the rate, or zero
+    has a row that fails."""
     assert MO.plausibility_class(num, max_ref, margin) == expected
 
 
@@ -6130,27 +6504,42 @@ def test_a_WRONG_REPO_gap_stays_BELOW_at_EVERY_reachable_margin(gap):
     because the margin is a function of age: `ordering_state` throws the table
     away at `STALE_MAPPING_DAYS`, so `[0, 7)` is the whole reachable domain, and
     the bound has to hold across all of it. The gap is MONOTONE in age — an
-    older table can only make `max_ref` smaller — so a ceiling that clears the
-    gap at the oldest reachable age clears it everywhere."""
+    older table can only make `max_ref` smaller — so a cap that clears the gap
+    at the oldest reachable age clears it everywhere.
+
+    ⚠ THE SWEEP NOW STRADDLES THE KNEE, which it did not need to before: the
+    cap used to bind at ~1.5 d and now binds at ~0.18 d, so the ages below
+    include several points on BOTH sides of one refresh interval.
+
+    ⚠ THE AGES ARE LITERALS AND NOT `MO.REFRESH_INTERVAL_DAYS`, DELIBERATELY.
+    Naming the constant would make this test die of an `AttributeError` against
+    any handler that predates it — a KILL FOR THE WRONG REASON, and one that
+    hides what this test is actually for. With literals it fails where it should:
+    run against the retired 60-reference ceiling, the gaps 37 and 60 are
+    PROMOTED at ages 1.0 and 1.5, which is the measured reason that ceiling had
+    to go rather than be re-tuned."""
     num = 5000
     max_ref = num - gap
-    for age in (0.0, 0.1, 0.5, 0.99, 1.0, 1.5, 2.0, 3.7, 6.999):
+    for age in (0.0, 0.03, 0.11, 0.15, 0.177, 0.2, 0.5, 0.99, 1.0, 1.5, 2.0,
+                3.7, 6.999):
         margin = MO.plausible_margin(age)
         assert MO.plausibility_class(str(num), max_ref, margin) == MO.CLASS_BELOW, (
             f"a wrong-repo click with gap {gap} was promoted to PLAUSIBLE at "
-            f"table age {age}d (margin {margin}) — the ceiling "
-            f"{MO.PLAUSIBLE_MARGIN_MAX} no longer clears the ledger")
+            f"table age {age}d (margin {margin}) — the margin at that age no "
+            f"longer clears the wrong-repo ledger")
     # POSITIVE CONTROL, in the same run: the sweep above is only evidence if the
     # same machinery CAN say PLAUSIBLE. A gap the margin is built to admit must
     # move, or every assertion above is a fact about a function wired to nothing.
-    admitted = MO.plausibility_class(str(num), num - _STALE_GAP_TO_ADMIT,
-                                     MO.plausible_margin(1.0))
+    admit = _stale_gap_to_admit()
+    admitted = MO.plausibility_class(str(num), num - admit,
+                                     MO.plausible_margin(0.2))
     assert admitted == MO.CLASS_PLAUSIBLE, (
-        f"POSITIVE CONTROL FAILED — a {_STALE_GAP_TO_ADMIT}-gap at a one-day-old "
-        f"table is still {admitted}, so the BELOW assertions above prove nothing")
+        f"POSITIVE CONTROL FAILED — a {admit}-gap at a table past one refresh "
+        f"interval is still {admitted}, so the BELOW assertions above prove "
+        f"nothing")
 
 
-@pytest.mark.parametrize("margin", [0, 1, 60, 1000, 10 ** 9])
+@pytest.mark.parametrize("margin", [0, 1, 8, 61, 1000, 10 ** 9])
 def test_a_repo_with_NO_references_stays_IMPOSSIBLE_at_EVERY_margin(margin):
     """🔴 45% OF THE REAL UNIVERSE, AND THE MARGIN MUST NOT REACH IT. `0` is the
     one value in the table no amount of growth can be hiding, because growth is
@@ -6174,22 +6563,36 @@ def test_a_margin_promoted_row_NEVER_OUTRANKS_an_EXACT_fit():
     `measured_rank_key`'s distance was `max_ref - N`, and before the margin that
     could not be negative — `PLAUSIBLE` implied `max_ref >= N`. A margin admits
     rows with `max_ref < N`, and on those the raw subtraction goes NEGATIVE,
-    which sorts ASCENDING to the FRONT: a repository whose stale head is 19
+    which sorts ASCENDING to the FRONT: a repository whose stale head is a few
     short of the clicked number would outrank one whose head is exactly it.
     That is a tolerance outranking a measurement.
 
     `abs()` is the fix, and it is a no-op on every case that could arise before
     the margin — which is why no pre-existing test can see it and this one
-    exists."""
+    exists.
+
+    ⚠ THE THREE DISTANCES ARE 0, 3 AND 6 — pairwise distinct, none equal to the
+    margin (8) or to either constant, and the STALE row's distance (6) is larger
+    than the PAST row's (3) so the expected order is not the order the rows are
+    written in, nor alphabetical, nor the order a dropped `abs()` produces."""
     universe = ["acme/stale", "acme/exact", "acme/past"]
-    ranges = {"acme/stale": 1809, "acme/exact": 1828, "acme/past": 1840}
-    got = MO.order_universe(universe, "1828", ranges, None,
-                            MO.plausible_margin(0.7))
+    # #1828: stale is 6 BELOW (admitted by the margin), past is 3 ABOVE, exact
+    # is an exact fit.
+    ranges = {"acme/stale": 1822, "acme/exact": 1828, "acme/past": 1831}
+    margin = MO.plausible_margin(0.7)
+    got = MO.order_universe(universe, "1828", ranges, None, margin)
     assert got == ["acme/exact", "acme/past", "acme/stale"], got
+    # Without `abs()` the stale row scores -6 and sorts FIRST — state the
+    # counterfactual so the row this test defends is named rather than implied.
+    assert MO.measured_rank_key("acme/stale", "1828", ranges, margin) == (
+        MO.CLASS_PLAUSIBLE, 6)
     # All three really are in one class, or this is measuring the class term
     # rather than the distance term.
-    assert {MO.plausibility_class("1828", v, MO.plausible_margin(0.7))
+    assert {MO.plausibility_class("1828", v, margin)
             for v in ranges.values()} == {MO.CLASS_PLAUSIBLE}
+    # ...and the stale row really is margin-dependent: at margin 0 it is BELOW,
+    # so this fixture cannot pass with the margin deleted.
+    assert MO.plausibility_class("1828", 1822) == MO.CLASS_BELOW
 
 
 def test_a_STALE_table_no_longer_ranks_a_REAL_reference_behind_EVERYTHING(
@@ -6198,11 +6601,19 @@ def test_a_STALE_table_no_longer_ranks_a_REAL_reference_behind_EVERYTHING(
     file, because the age is read from `st_mtime` and a stubbed loader cannot
     reach the arm under test.
 
-    THE LIVE SHAPE IT REPRODUCES, measured on the operator's host: the range
-    table's entry for the busiest repository read 1809 while its live head was
-    1828, off a table 0.71 days old. Every click on one of those nineteen
-    references was filed `BELOW` — behind EVERY plausible row, including
-    repositories that had passed 1828 thousands of references ago.
+    🔴 THE SHAPE, AND WHAT IT IS NO LONGER. The live incident this PR was first
+    written against was a head of 1809 against `#1828` off a 0.71-day-old table
+    — a gap of 19, which the margin DOES NOT COVER at the four-hourly cadence
+    (the cap is 8) and is not supposed to: that table could only reach 0.71 days
+    old under the DAILY timer, and #1831 is what fixed it.
+
+    🔴 WHAT IT REPRODUCES INSTEAD IS THE MEASURED CASE THE TIMER CANNOT REACH,
+    and it is a better anchor because it is the aggregate rather than one
+    incident: of 59 stale-table `below` clicks, 54 name a reference created LESS
+    THAN FOUR HOURS before the click — inside one legitimately-elapsed refresh
+    interval. The sharpest of them is a gap of 3 against a table 3.6 h old, the
+    reference having been created 94 SECONDS earlier. That is this fixture: a
+    head 3 short, off a table 0.15 d (~3.6 h) old.
 
     RED at base / GREEN at HEAD. Before the margin this ordering is
     `[acme/other, acme/stale]`: `acme/stale` is `BELOW` and the sort's first
@@ -6210,7 +6621,7 @@ def test_a_STALE_table_no_longer_ranks_a_REAL_reference_behind_EVERYTHING(
     which is not what the operator wanted at all."""
     universe = ["acme/stale", "acme/other"]
     _ranges_on_disk(monkeypatch, tmp_path,
-                    {"acme/stale": 1809, "acme/other": 5000}, age_days=0.7)
+                    {"acme/stale": 1825, "acme/other": 5000}, age_days=0.15)
     # HERMETIC: Tier B must not be able to reorder these two rows, and the
     # operator's real log must not be read by a test at all.
     monkeypatch.setattr(MO, "PICKS_PATH", tmp_path / "no-picks-here.jsonl")
@@ -6225,6 +6636,10 @@ def test_a_STALE_table_no_longer_ranks_a_REAL_reference_behind_EVERYTHING(
     assert repos == ["acme/stale", "acme/other"], (
         f"the stale-but-real row is still ranked behind a repository that "
         f"passed #1828 thousands of references ago: {repos}")
+    # The row is margin-dependent — at margin 0 it is BELOW — so this assertion
+    # cannot be satisfied by an ordering that ignored the tolerance entirely.
+    assert MO.plausibility_class("1828", 1825) == MO.CLASS_BELOW
+    assert MO.plausible_margin(0.15) >= 3
     # 🔴 THE ARM WAS REALLY ENTERED. An absent or stale table short-circuits
     # `_ordered_universe` before anything is sorted, and this test would then be
     # asserting on the INPUT order — which for this two-row universe is the same
@@ -6250,7 +6665,7 @@ def test_the_CLICK_TELEMETRY_reports_the_class_the_operator_was_LOOKING_AT(
     naming no symbol this change introduced."""
     universe = ["acme/stale", "acme/other"]
     _ranges_on_disk(monkeypatch, tmp_path,
-                    {"acme/stale": 1809, "acme/other": 5000}, age_days=0.7)
+                    {"acme/stale": 1823, "acme/other": 5000}, age_days=0.16)
     monkeypatch.setattr(MO, "PICKS_PATH", tmp_path / "no-picks-here.jsonl")
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
     monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: universe)
@@ -6273,6 +6688,119 @@ def test_the_CLICK_TELEMETRY_reports_the_class_the_operator_was_LOOKING_AT(
     assert payload.get("ordered") is True, payload
 
 
+def test_the_CLICK_ROW_KEEPS_the_PRE_MARGIN_class_AS_A_SEPARATE_FIELD(
+        monkeypatch, tmp_path, spool):
+    """🔴 THE INSTRUMENT IS PRESERVED, NOT JUST MOVED — AND THIS IS A DELIBERATE
+    DEVIATION FROM THE BRIEF, WHICH SAID ONE KEY WOULD DO IT.
+
+    The test above is the fix that BREAKS the measurement: `plausibility` now
+    answers a different question under the same name, so "below 54 vs plausible
+    17" can never be re-run. A `margin` dim alone does not repair that — a row
+    reading `plausibility=plausible, margin=8` is still ambiguous between "this
+    was plausible anyway" and "the tolerance promoted it", and resolving it
+    needs `max_ref` and `N`, neither of which is emitted and one of which CANNOT
+    be (the universe names private repositories).
+
+    So the pre-margin class ships beside it, computed with margin 0 from the
+    SAME `order_ranges`. `plausibility_premargin != plausibility` is then a
+    mechanical test for "promoted by the staleness tolerance", with nothing left
+    to infer.
+
+    THIS ROW IS THE PROMOTED CASE — the two fields DISAGREE, which is the whole
+    point; `test_a_row_that_was_plausible_ANYWAY_reports_the_SAME_class_TWICE`
+    is the other half, and without it "they differ" could be an artefact of one
+    of them being constant."""
+    universe = ["acme/stale", "acme/other"]
+    _ranges_on_disk(monkeypatch, tmp_path,
+                    {"acme/stale": 1823, "acme/other": 5000}, age_days=0.16)
+    monkeypatch.setattr(MO, "PICKS_PATH", tmp_path / "no-picks-here.jsonl")
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: universe)
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "open_url", lambda url: 0)
+    monkeypatch.setattr(
+        MO, "pick",
+        lambda c, mesg="": next(r["url"] for r in c
+                                if MO.repo_of_github_url(r["url"])
+                                == "acme/stale"))
+    assert MO.main(["#1828"]) == 0
+    payload = _click_events(spool)[0]["payload"]
+    assert payload.get("plausibility") == "plausible", payload
+    assert payload.get("plausibility_premargin") == "below", (
+        f"the pre-margin class is missing or wrong — without it nobody can tell "
+        f"'the ranking improved' from 'the classifier was widened': {payload}")
+    # 🔴 THE SEPARATION IS THE CLAIM, so assert the RELATIONSHIP and not only the
+    # two values: this row was PROMOTED by the tolerance.
+    assert payload["plausibility"] != payload["plausibility_premargin"]
+    # ...and `margin` says by how much, on the SORT's side of the row.
+    assert payload.get("margin") == MO.plausible_margin(0.16), payload
+    assert payload["margin"] >= 5
+
+
+def test_a_row_that_was_plausible_ANYWAY_reports_the_SAME_class_TWICE(
+        monkeypatch, tmp_path, spool):
+    """🔴 THE NEGATIVE CONTROL FOR THE FIELD ABOVE. If `plausibility_premargin`
+    were wired to a constant — or if it were computed with the same margin as
+    `plausibility` — one of the two tests would still pass. This one pins that
+    the fields AGREE when no promotion happened, so "they differ" upstairs is a
+    fact about the row and not about the field.
+
+    Same fixture shape, one number changed: the picked row's head is PAST the
+    clicked number, so it is `plausible` at every margin including 0."""
+    universe = ["acme/ahead", "acme/other"]
+    _ranges_on_disk(monkeypatch, tmp_path,
+                    {"acme/ahead": 1833, "acme/other": 5000}, age_days=0.16)
+    monkeypatch.setattr(MO, "PICKS_PATH", tmp_path / "no-picks-here.jsonl")
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    monkeypatch.setattr(MO, "load_known_universe", lambda *a, **k: universe)
+    monkeypatch.setattr(MO, "tmux_pane_repo", lambda: "")
+    monkeypatch.setattr(MO, "open_url", lambda url: 0)
+    monkeypatch.setattr(
+        MO, "pick",
+        lambda c, mesg="": next(r["url"] for r in c
+                                if MO.repo_of_github_url(r["url"])
+                                == "acme/ahead"))
+    assert MO.main(["#1828"]) == 0
+    payload = _click_events(spool)[0]["payload"]
+    assert payload.get("plausibility") == "plausible", payload
+    assert payload.get("plausibility_premargin") == "plausible", (
+        f"the pre-margin class disagrees with the post-margin one on a row the "
+        f"margin had nothing to do with — the field is not reading the same "
+        f"table: {payload}")
+    # The margin was non-zero, so agreement here is not "no margin was applied".
+    assert payload.get("margin", 0) > 0, payload
+
+
+def test_the_MARGIN_dim_is_OMITTED_when_no_ordering_ran(monkeypatch, tmp_path,
+                                                        spool):
+    """🔴 ABSENT, NEVER ZERO — the same rule `tier_a`/`tier_b`/`ordering` follow,
+    and the reason `margin` rides in `order_dims` rather than beside
+    `plausibility`. A `margin=0` on a click that never reached the sort would
+    read as "the table was fresh", which is the reassuring direction: a consumer
+    filtering for stale-table clicks would silently count them as fresh ones.
+
+    The auto-open path shows no list at all, so no ordering runs and all four
+    ordering dims must be missing together.
+
+    ⚠ THIS IS AN INVARIANT GUARD, NOT REGRESSION COVERAGE, AND IT IS LABELLED AS
+    ONE. It is GREEN at both baselines — at `origin/main` and at the pre-rescope
+    PR head the `margin` key does not exist, so "it is absent here" was never
+    violated. What it pins is the rule going FORWARD: the obvious next edit is to
+    emit `margin` beside `plausibility` on the click row, which would ship a 0 on
+    every auto-open. Counting it as a regression test would be a false claim."""
+    monkeypatch.setattr(MO, "open_url", lambda url: 0)
+    monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
+    assert MO.main(["--no-discovery", "acme/widget#1291"]) == 0
+    payload = _click_events(spool)[0]["payload"]
+    for dim in ("margin", "ordering", "tier_a", "tier_b"):
+        assert dim not in payload, (
+            f"`{dim}` was emitted for a click that never reached the "
+            f"ordering: {payload}")
+    # POSITIVE CONTROL: the spool really was written and really can carry dims,
+    # or "the key is absent" is a fact about an empty payload.
+    assert payload.get("repo") == "acme/widget", payload
+
+
 def test_the_PROMOTION_GATE_reads_the_SAME_margin_the_SORT_used(monkeypatch,
                                                                 tmp_path):
     """🔴 FOUND BY THE MUTATION SWEEP, NOT BY REVIEW. Dropping `order_margin`
@@ -6287,13 +6815,14 @@ def test_the_PROMOTION_GATE_reads_the_SAME_margin_the_SORT_used(monkeypatch,
     a pane guess the module already refuses to auto-open.
 
     The fixture makes the top row PLAUSIBLE ONLY BECAUSE OF THE MARGIN — head
-    1260 against `#1291` is a gap of 31, inside the 40 a one-day-old table
-    earns and outside a margin of 0 — while every other row is far enough below
-    to be `BELOW` at any margin. So the promotion fires only if BOTH halves
-    agree."""
+    1285 against `#1291` is a gap of 6, inside the 8 a table one refresh
+    interval old earns and outside a margin of 0 — while every other row is far
+    enough below to be `BELOW` at any margin. So the promotion fires only if
+    BOTH halves agree. (`_ranges_on_disk` defaults to a 1-day-old table, which
+    is past the knee and so earns the full cap.)"""
     table = {ALPHA_FIRST: 5, "gardenersguild/trowelcast": 5,
              "hobbyist/plotwidget": 5, "wrongorg/wrongrepo": 5,
-             RANKED_FIRST: 1260}
+             RANKED_FIRST: 1285}
     seen = _guessed_picker(monkeypatch, text="#1291",
                            universe=[UNIVERSE_ONLY, ALPHA_FIRST],
                            ranges=table, tmp_path=tmp_path)
@@ -6305,8 +6834,8 @@ def test_the_PROMOTION_GATE_reads_the_SAME_margin_the_SORT_used(monkeypatch,
     assert "best-ranked repository" in seen["mesg"], seen["mesg"]
     # The row really is margin-dependent, or this test would fire with the
     # margin deleted entirely and prove nothing about the gate.
-    assert MO.plausibility_class("1291", 1260) == MO.CLASS_BELOW
-    assert (MO.plausibility_class("1291", 1260, MO.plausible_margin(1.0))
+    assert MO.plausibility_class("1291", 1285) == MO.CLASS_BELOW
+    assert (MO.plausibility_class("1291", 1285, MO.plausible_margin(1.0))
             == MO.CLASS_PLAUSIBLE)
 
 
@@ -6326,8 +6855,8 @@ def test_the_gates_TIE_CHECK_reads_the_margin_too_not_only_its_TOP_ROW(
     runner-up scores `(BELOW, 0)`, the tie disappears, and the promotion fires.
     """
     tied = {v: 5 for v in FAKE_UNIVERSE.values()}
-    tied[ALPHA_FIRST] = 1260          # margin-plausible for #1291
-    tied[RANKED_FIRST] = 1260         # ...and so is this one, IDENTICALLY
+    tied[ALPHA_FIRST] = 1285          # margin-plausible for #1291
+    tied[RANKED_FIRST] = 1285         # ...and so is this one, IDENTICALLY
     tied["wrongorg/wrongrepo"] = 5    # the pane guess
     seen = _guessed_picker(monkeypatch, text="#1291",
                            universe=[UNIVERSE_ONLY, ALPHA_FIRST],
@@ -6344,7 +6873,7 @@ def test_the_gates_TIE_CHECK_reads_the_margin_too_not_only_its_TOP_ROW(
     m = MO.plausible_margin(1.0)
     assert (MO.measured_rank_key(ALPHA_FIRST, "1291", tied, m)
             == MO.measured_rank_key(RANKED_FIRST, "1291", tied, m)
-            == (MO.CLASS_PLAUSIBLE, 31))
+            == (MO.CLASS_PLAUSIBLE, 6))
     assert (MO.measured_rank_key(ALPHA_FIRST, "1291", tied)
             == (MO.CLASS_BELOW, 0)), "the rows are plausible without the margin"
 
@@ -6359,13 +6888,13 @@ def test_the_PICKER_HEADER_counts_the_SAME_classes_the_rows_were_ranked_by(
 
     Found by the mutation sweep: withholding it there left the suite green.
 
-    One row is plausible ONLY because of the margin (head 1260 against `#1291`),
-    one is `BELOW` at any margin, one has no references at all — so all three
-    numbers in the header are distinct and none can be satisfied by another's
-    value."""
+    One row is plausible ONLY because of the margin (head 1285 against `#1291`,
+    a gap of 6 inside the cap of 8), one is `BELOW` at any margin, one has no
+    references at all — so all three numbers in the header are distinct and none
+    can be satisfied by another's value."""
     universe = ["acme/near", "acme/far", "acme/zero"]
     _ranges_on_disk(monkeypatch, tmp_path,
-                    {"acme/near": 1260, "acme/far": 5, "acme/zero": 0},
+                    {"acme/near": 1285, "acme/far": 5, "acme/zero": 0},
                     age_days=1.0)
     monkeypatch.setattr(MO, "PICKS_PATH", tmp_path / "no-picks-here.jsonl")
     monkeypatch.setattr(MO, "discover_repos", lambda *a, **k: {})
@@ -6390,12 +6919,16 @@ def test_the_margin_does_NOT_COLLAPSE_Tier_A_at_the_REAL_universe_SIZE():
     MEASURED against the operator's live 395-row table and a uniform sweep of
     clicked numbers over 86..4895 (the range the proposal reports for the real
     clicks): median plausible-class size 1 -> 1, mean 3.52 -> 3.99, max 29 -> 48
-    going from margin 0 to the ceiling. The reproduction here is on the
-    SYNTHETIC corpus, which is what a public repo can carry.
+    going from margin 0 to a ceiling of 60. ⚠ THAT MEASUREMENT WAS TAKEN AT THE
+    OLD 60-REFERENCE CEILING and is kept as the WORST case it now bounds — the
+    cap is 8, so the real widening is a fraction of those numbers. It is not
+    re-stated as a fresh measurement, because it was not re-taken. The
+    reproduction here is on the SYNTHETIC corpus, which is what a public repo
+    can carry.
 
     ⚠ THIS IS A RATIO GUARD, NOT A CONSTANT. The corpus is random-seeded and its
-    absolute counts are not the point; what must hold is that the ceiling does
-    not multiply the plausible class."""
+    absolute counts are not the point; what must hold is that the cap does not
+    multiply the plausible class."""
     repos, table = _measured_shape_corpus()
     nums = [str(n) for n in range(120, 3000, 37)]
 
@@ -6405,7 +6938,7 @@ def test_the_margin_does_NOT_COLLAPSE_Tier_A_at_the_REAL_universe_SIZE():
                     == MO.CLASS_PLAUSIBLE)
                 for n in nums]
 
-    before, after = sizes(0), sizes(MO.PLAUSIBLE_MARGIN_MAX)
+    before, after = sizes(0), sizes(_derived_margin_cap())
     b_mean = sum(before) / len(before)
     a_mean = sum(after) / len(after)
     # POSITIVE CONTROL: the sweep really discriminates, or "it did not collapse"
@@ -6416,7 +6949,7 @@ def test_the_margin_does_NOT_COLLAPSE_Tier_A_at_the_REAL_universe_SIZE():
         f"collapse either way")
     assert a_mean >= b_mean, "the margin made the class SMALLER — impossible"
     assert a_mean <= b_mean * 2.0, (
-        f"the ceiling more than DOUBLED the plausible class "
+        f"the cap more than DOUBLED the plausible class "
         f"({b_mean:.2f} -> {a_mean:.2f} rows of {len(repos)}) — Tier A's "
         f"sharpness is the thing this margin must not spend")
     assert max(after) < len(repos) // 2, (
@@ -7144,8 +7677,8 @@ def test_repo_of_github_url(url, expected):
 # ordering_state / ordering_note — the DEADMAN, and what the operator sees
 # --------------------------------------------------------------------------- #
 def test_a_STALE_range_table_is_IGNORED_rather_than_TRUSTED():
-    """🔴 THE DEADMAN. Past `STALE_MAPPING_DAYS` the daily refresh has missed
-    SEVERAL runs, and the two misclassifications that follow point in OPPOSITE
+    """🔴 THE DEADMAN. Past `STALE_MAPPING_DAYS` the four-hourly refresh has
+    missed dozens of runs, and the two misclassifications that follow point in OPPOSITE
     directions — a repo that has advanced past `N` is filed BELOW, and a repo
     that gained its first reference is filed IMPOSSIBLE. Ordering on that is
     confidently wrong; ordering on nothing is merely what shipped before.
@@ -8851,10 +9384,12 @@ def test_the_click_telemetry_DIM_ledger_is_pinned_two_way():
     argument supplied — so the ledger describes what can actually appear."""
     widest = MO.click_dims(repo="acme/widget", platform="github",
                            picker_shown=True, offered_total=7, rank=3,
-                           plausibility=MO.CLASS_BELOW, reason="selected",
+                           plausibility=MO.CLASS_BELOW,
+                           plausibility_premargin=MO.CLASS_IMPOSSIBLE,
+                           reason="selected",
                            ordered=True, pinned_above=2, surface="tui",
-                           ordering=MO.ORDER_APPLIED, tier_a=5, tier_b=1,
-                           queried=True)
+                           ordering=MO.ORDER_APPLIED, margin=9, tier_a=5,
+                           tier_b=1, queried=True)
     assert set(widest) == set(MO.CLICK_DIM_FIELDS), (
         f"`click_dims` produces {sorted(widest)} but the ledger names "
         f"{sorted(MO.CLICK_DIM_FIELDS)} — update CLICK_DIM_FIELDS in the SAME "
@@ -8868,10 +9403,15 @@ def test_the_click_telemetry_DIM_ledger_is_pinned_two_way():
     # every other, so no field can be satisfied by a neighbour's.
     assert widest == {"repo": "acme/widget", "platform": "github",
                       "picker_shown": True, "offered_total": 7, "rank": 3,
-                      "plausibility": "below", "reason": "selected",
+                      "plausibility": "below",
+                      "plausibility_premargin": "impossible",
+                      "reason": "selected",
                       "ordered": True, "pinned_above": 2, "surface": "tui",
-                      "ordering": "applied", "tier_a": 5, "tier_b": 1,
-                      "queried": True}
+                      "ordering": "applied", "margin": 9, "tier_a": 5,
+                      "tier_b": 1, "queried": True}
+    # ⚠ `plausibility_premargin` is deliberately a DIFFERENT class from
+    # `plausibility` here, and `margin` a number matching no other value in the
+    # call: a field wired to its neighbour, or to a constant, has to fail.
     # 🔴 THE LEDGER IS PINNED AGAINST THE FUNCTION'S OWN SIGNATURE TOO, so a
     # parameter added without a ledger row fails here rather than on the day a
     # consumer notices a column it was never told about.
