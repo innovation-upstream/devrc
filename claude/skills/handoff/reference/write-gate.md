@@ -920,7 +920,7 @@ Every line below is VERBATIM from `/handoff` step 5.
 
    🔴 **`This replace DROPS N line(s) that look DURABLE` — a WARNING, never a refusal.** Durable content under a REPLACE heading (usually `State now`) is deleted on the next update, and in a long diff a stale-status `-` line looks exactly like a measured-finding one. It classifies the deletions **above** the diff with base line numbers. Move that line under an APPEND heading, or carry it forward. 🔴 **A FLOOR: a silent run is NOT evidence that nothing durable was dropped** — read the diff anyway.
 
-   🔴 **Six refusals. All write NOTHING, each prints its own fix, and re-running after fixing your scratch file is safe.** `status=undefined-done` (11) — rule (m): a NEW doc whose `## Goal` carries no `closing-condition:`, or an update that DELETES the one the doc had; the refusal names which of six causes (wrong section, empty, unknown kind, fenced, unparsed, absent) and prints that cause's own fix. `status=rank-growth` (12) — rule (n): this update carries MORE `forcing: none` ranks than the doc does. Batch it under `## Defects (batched)`, or tag it with an external kind, or close one — `--rank-growth-approved` is the operator opt-in. `status=dated-topic` (7) — dated slug ⇒ per-session doc; **no flag bypasses it**, re-run without the date. `status=new-doc` (7) — no doc for this topic, others exist (listed), and none on the mainline (else ⇒ `stale-base`); if one IS this effort re-run with ITS topic — 🔴 `--new-effort` asserts genuine newness, **not a way past the list**. `status=unforced` (8) — a ranked item names no forcing function or an unrecognised kind. `status=unevidenced` (10) — a `Ruled out:` bullet names no `via: <kind>`. Rows read `[no via: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell as `via: <kind>` · `[fenced]` unfence YOURS, never promote a quote. 📖 write-gate §D. 🔴 **Read each row's marker — only one means "add a field"**: `[no forcing: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell it as `forcing: <kind>` · `[fenced]` **yours ⇒ unfence it; a QUOTE ⇒ tag the item, do NOT promote it** 📖 write-gate §C. ⚠ `forcing: none` and `via: assumed` are ACCEPTED, print an **advisory** above the diff; the write proceeds.
+   🔴 **Seven refusals. All write NOTHING, each prints its own fix, and re-running after fixing your scratch file is safe.** `status=leak-refused` (13) — rule (o): the TARGET repo's own leak scanner would not vouch for the delta, or could not be run at all. **ANY non-zero exit refuses**; it names the scanner and its exit code and reproduces the scanner's OWN lines; the doc is rolled back. 🔴 **Nothing attributed the refusal to your delta** — fix the SCRATCH file, or, if the tree was ALREADY red for something this handoff did not cause, read those lines and re-run with `--leak-pre-existing-approved`, which is recorded on the run and does NOT cover a scanner that could not be RUN. 📖 write-gate §H. `status=undefined-done` (11) — rule (m): a NEW doc whose `## Goal` carries no `closing-condition:`, or an update that DELETES the one the doc had; the refusal names which of six causes (wrong section, empty, unknown kind, fenced, unparsed, absent) and prints that cause's own fix. `status=rank-growth` (12) — rule (n): this update carries MORE `forcing: none` ranks than the doc does. Batch it under `## Defects (batched)`, or tag it with an external kind, or close one — `--rank-growth-approved` is the operator opt-in. `status=dated-topic` (7) — dated slug ⇒ per-session doc; **no flag bypasses it**, re-run without the date. `status=new-doc` (7) — no doc for this topic, others exist (listed), and none on the mainline (else ⇒ `stale-base`); if one IS this effort re-run with ITS topic — 🔴 `--new-effort` asserts genuine newness, **not a way past the list**. `status=unforced` (8) — a ranked item names no forcing function or an unrecognised kind. `status=unevidenced` (10) — a `Ruled out:` bullet names no `via: <kind>`. Rows read `[no via: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell as `via: <kind>` · `[fenced]` unfence YOURS, never promote a quote. 📖 write-gate §D. 🔴 **Read each row's marker — only one means "add a field"**: `[no forcing: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell it as `forcing: <kind>` · `[fenced]` **yours ⇒ unfence it; a QUOTE ⇒ tag the item, do NOT promote it** 📖 write-gate §C. ⚠ `forcing: none` and `via: assumed` are ACCEPTED, print an **advisory** above the diff; the write proceeds.
 
    🔴 **Exit 3 usually means nothing was written — but READ THE MESSAGE, because one arm of it committed.** Usually the rollback unlinks a NEW doc, so the handoff exists only in your scratch file. **The exception announces itself**: when the commit landed and a later step failed, the run says so and tells you not to re-run — re-running appends your findings twice. 🔴 **So `status=failed` is not by itself "nothing happened", and exit 3 is not a reliable tell** — a bad `--repo` or an unreadable `--update` exits 3 with no `status=` line at all, and `push-failed` uses exit 3 too. **Keep the scratch file until you have seen a commit sha**, name its path if step 5 never lands, and delete it once the commit exists.
 
@@ -931,3 +931,128 @@ Every line below is VERBATIM from `/handoff` step 5.
    - **`status=push-failed`** — the pre-check passed and the push still failed (the remote can move in between; that race cannot be designed away). 🔴 **The COMMIT EXISTS** — true of this and of the one `failed` arm above, and of nothing else here. The message names it and hands over preserve→verify→`reset --keep` **in that order**. Do not leave it — an un-pushed commit on a shared branch is invisible until `ship.sh` skips that host.
 
    🔴 **`--confirm` WITHOUT `--push` leaves a real commit in this checkout only — and it says so.** `status=written commit=<sha> branch=<b>` is followed by `NOT PUSHED` plus the exact command: a `git push` on a feature branch, or the preserve-on-a-topic-branch route on a shared one (several repos forbid committing to theirs). A **SUCCESS, not a refusal** — exit 0 — but push it or open a PR **in this session**: an un-pushed handoff is one only you can read. 🔴 **Do NOT retry by re-running with `--push`**: the doc already carries the update, so a second run exits 5 `no-change` or **appends your findings twice**.
+
+## §H — rule (o): the TARGET repo's own leak scanner reads the delta (2026-09-22)
+
+### Why this is code and not a sentence
+
+`handoff_doc.py` **commits AND pushes in one call** under `--confirm --push`, so
+there is no window in which a human can scan between the two. Four
+`denied-identifier` leak events have landed on handoff deltas and **one reached
+`main` of a PUBLIC repository**. The standing remedy had been written as a
+SENTENCE in the handoff document three times, in three wordings, and **no code
+ran it**: `grep -c leakscan` over `scripts/lib/handoff_doc.py` was `0`, and `0`
+across all seven files of this skill, against a positive control (`handoff`)
+matching 7/7.
+
+### The scanner is the TARGET repo's, and a repo with none PASSES
+
+What counts as sensitive is a property of the repository, not of this tool: one
+repo's denied-identifier set is another's ordinary vocabulary. So the gate
+resolves a scanner out of `--repo`, from a **closed set of ONE declared relative
+path** — `<target-repo>/tests/leakscan.py` — a lookup, never a glob, because a
+glob finds a fixture or a README and then runs it as your repo's gate.
+
+🔴 **THE SET DECLARED THREE AND NOW DECLARES ONE, AND THAT IS A MEASUREMENT.**
+Across 175 checkouts, a `scripts/`-level scanner and a ROOT-level one existed in
+**zero** of them: they bought no repository any coverage. The root entry also
+carried a smaller version of the hazard the no-glob rule is about — a
+root-level scanner file is exactly where a *fixture* or an *example* sits, and
+this tool EXECUTES whatever it resolves, in someone else's repo, and attributes
+the exit code to your delta. Adding a candidate is adding a program this tool
+will run; measure that it exists first.
+
+⚠ THE `<target-repo>/` PREFIX IS LOAD-BEARING PROSE, NOT DECORATION, and a gate
+in this repository is what taught it — **the reason outlives the list that
+provoked it**, which is why this paragraph survives the deletion of the two
+candidates it was originally about. Written bare, a `<dir>/leakscan.py` token
+reads as a path *here*; this repo has no such file, so `test_no_new_dead_paths`
+failed with `a doc claims a file that does not exist`. It was right twice over:
+it caught a real ambiguity, and the sentence it caught is the one whose entire
+point is that the scanner belongs to the OTHER repo. `doc-path-ignore.list`
+offers a silent exemption and says to prefer fixing the doc; this is why.
+
+🔴 AND THE FIRST DRAFT OF THIS VERY PARAGRAPH FAILED THE SAME GATE, by spelling
+the bare token in order to explain it. Describe the shape, never instantiate it
+— an example that IS the thing it forbids is the thing it forbids.
+
+A repo with no scanner **passes**, and says so: `NO SCANNER FOUND … PASS BY
+ABSENCE, not a clean result`. Refusing there would make the tool unusable in
+most repos and would be the permanently-red gate everyone learns to click
+through.
+
+### 🔴 Zero is the only pass — and exit 2 is the half a reader will re-narrow
+
+**Any non-zero exit refuses.** There is no `== 1` comparison in the gate and
+there must not be one. cairn's `tests/leakscan.py` exits **2** for "could not
+vouch": one of its OWN controls misbehaved, and its docstring says in as many
+words that 2 is not a clean result. Under a flat refuse that falls out by
+construction and there is nothing left to test — which is exactly why the claim
+is written here instead. A reader who has not been told it is the reader who
+narrows the check to the code a scanner "normally" uses.
+
+A scanner that cannot be **RUN** at all (a hang, a launch failure) is also a
+refusal: `run_leak_scanner` raises, and a gate that cannot read is not a pass.
+The operator opt-in below does **not** reach that arm — there is no verdict for
+anyone to have read and approved, and approving an absence is the reassuring
+zero this whole gate exists to refuse to print.
+
+### The gate does NOT attribute the refusal to your delta, and that is the decision
+
+A whole-tree scanner cannot be asked about one file — `tests/leakscan.py` takes
+**no paths**, it enumerates the repo from its own location. So any "was it THIS
+delta?" answer can only be a comparison between two scans, one with the delta
+and one without. **That comparison is a guess**, and three things make it the
+wrong guess: a concurrent writer in a shared checkout, a scanner whose rule set
+grew between the runs, and a new finding whose line is byte-identical to one the
+scan was already printing.
+
+🔴 **An earlier shape took that guess and, when it could not decide, printed
+`LEAK GATE COULD NOT ATTRIBUTE — and this write was NOT blocked` and then
+committed AND pushed anyway.** That arm existed only because an earlier
+requirement forbade any bypass flag: with no escape hatch, the gate had to guess
+or become unclearable on an already-red tree. The requirement is gone; the guess
+went with it. **The gate never ships a delta while the scanner is refusing.**
+
+### The already-red tree is an OPERATOR decision: `--leak-pre-existing-approved`
+
+A target tree can be red for something your call did not cause. With no way
+past, this would be the permanently-red gate `claude/RULES.md` says trains
+everyone to route around — so there is one, and it is a **decision, not a
+guess**: read the scanner's lines in the refusal, and if the finding is
+pre-existing, re-run with `--leak-pre-existing-approved`.
+
+It is rule (n)'s `--rank-growth-approved` shape reused rather than a second
+spelling of the same idea: a deliberately long `--…-approved` flag, `store_true`,
+held in a module constant and named by the refusal it overrides.
+
+🔴 **The flag is RECORDED on the run.** An approved-through run prints `LEAK GATE
+APPROVED THROUGH by --leak-pre-existing-approved`, the scanner's exit code and
+its own output, above the same `status=written` a clean run ends with. The two
+are therefore distinguishable afterwards by anyone reading the transcript, which
+is the point: this is an operator decision, not a silent pass. ⚠ And the note
+says in its own words that **nothing checked the "pre-existing" claim** — what
+was approved is everything the scanner printed, whatever produced it.
+
+### 🔴 What this gate structurally CANNOT see
+
+- **Anything sensitive already in the target tree that the delta did not
+  change** — now a REFUSAL rather than a blind spot, but the gate still cannot
+  tell you it was pre-existing. Only you can, and the flag is how you say so.
+- **The DIFF THE TOOL ALREADY PRINTED.** The gate stops the COMMIT; by the time
+  it runs, the unified diff — including whatever the scanner is about to refuse
+  — is already in the transcript. Moving the scan earlier would mean writing the
+  doc on the proposal run, whose whole contract is that it writes nothing. So
+  the gate bounds what gets *published*, not what gets *displayed*.
+- **A concurrent writer.** In a shared checkout another session's edit landing
+  before the scan is refused alongside yours — a LOUD false refusal with the
+  scanner's own lines on screen, which is the safe direction and the case the
+  flag exists for.
+
+### The timeout is 300 s, and that number is unattributed
+
+Nobody derived it. The only measurement beside it is the ~2.0 s the real scanner
+takes on the tree this was built against. It is kept because a generous ceiling
+fails in the safe, loud direction — on a hang rather than on a slow machine —
+which is a reason to keep the number, not a reason it is the right one. Said
+here rather than dressed up as a derivation.
