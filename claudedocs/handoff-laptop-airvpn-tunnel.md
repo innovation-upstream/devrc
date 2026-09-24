@@ -21,13 +21,11 @@ unaffected while the tunnel is up.
   — no MTU/routing churn.
 
 ## State now
-- Branch / PR: `devrc` `main` at `de2e1087` — `scripts/ship.sh` run rc=0 this session: BOTH hosts converged + switched at `de2e1087`, cross-host sha agreement verified. (Handoff's "workbench 3 behind at `a2f45567`" was STALE — git was already converged; only the stable-path helper lagged.)
-- Workbench helper refresh BLOCKED on sudo: `ssh zach@10.42.0.30 'sudo -n install ...'` → `sudo: a password is required`. Its `/etc/nixos/i3blocks-scripts/airvpn-updown` is still the Jul 21 copy (11,306 B, 0 `uidrange` lines) vs laptop's synced 16,099 B (3 uidrange lines). Laptop helper verified IN SYNC. Operator deferred the sudo step.
+- Branch / PR: `devrc` `main` at `5273d71b` (was `de2e1087` when this line was written) — `scripts/ship.sh` run rc=0 this session: BOTH hosts converged + switched at `de2e1087`, cross-host sha agreement verified. (Handoff's "workbench 3 behind at `a2f45567`" was STALE — git was already converged; only the stable-path helper lagged.)
+- Workbench helper refresh BLOCKED on sudo: `ssh zach@10.42.0.30 'sudo -n install ...'` → `sudo: a password is required`. Its `/etc/nixos/i3blocks-scripts/airvpn-updown` is still the Jul 21 copy (11,306 B, 0 `uidrange` lines) vs laptop's synced 16,099 B (3 uidrange lines). Laptop helper verified IN SYNC. Operator deferred the sudo step. ⚠ **Not urgent**, measured 2026-09-23: no user timer, no system timer and no enabled unit can bring the workbench tunnel up — it takes a deliberate pill click, and the tunnel is down. Do it on the LAN, with the killswitch re-test (next-step 2).
 - Laptop tunnel DOWN right now (`ip link show airvpn` → absent); killswitch helpers converged.
-- 🔴 **`main`'s `test_no_public_ips` leg is RED and PR #1861 is OPEN, not merged.** The leak recurred on 2026-09-23 with three literals, one of them the value #1853 scrubbed 24 h earlier. #1861 scrubs them, restores the gutted `How to verify`, and remaps the doc to `scoped-tests.sh`. Audit ladder: rounds 0, 1 and 2 all returned findings; round 3's fixes are in this commit.
-- **Nebula flap arc — the `ip rule` pin IS APPLIED (2026-09-23 ~20:35 CDT) and evaluated.** It fixed the identity-roaming and did NOT close the flap; the residual is measured to be outside nebula and outside this host. See the investigation block. ⚠ **The pin is not persistent — a reboot reverts it.** Making it permanent is an open decision, and it costs `kubectl` against homelab while active.
-- Workbench helper refresh is still not done and is **not urgent**: verified 2026-09-23 that no user timer, no system timer and no enabled unit can bring the workbench tunnel up — it takes a deliberate pill click, and the tunnel is down. Stale copy carries 0 `uidrange` lines vs the repo's 3. Do it on the same trip as the killswitch re-test, on the LAN.
-- `mosh` is NOT installed on either host and is not declared anywhere in `nix/` — checked 2026-09-23. It is the practical mitigation for the residual blackouts.
+- ✅ The 2026-09-23 leak recurrence is CLOSED: #1861 squash-merged as `5834b4c5`, and `test_no_public_ips` is green on `origin/main` (15 passed, measured at `5273d71b`). Details in the leak investigation below.
+- **Nebula flap arc — the `ip rule` pin IS APPLIED (2026-09-23 ~20:35 CDT) and evaluated.** It fixed the identity-roaming and did NOT close the flap; the residual is measured to be outside nebula and outside this host. See the investigation block. ⚠ **Not persistent — a reboot reverts it**; the cost of making it permanent is stated once, with the measurement, in that block.
 - Untracked in laptop tree: `nix/system/apply-networkmanager-openvpn.sh` (unrelated, not nix-read).
 
 ## Open investigations — live diagnosis state
@@ -98,15 +96,28 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
   **the roaming stopped while the flap did not**, so the symptom had TWO causes and this
   block described one. Do not resume by re-chasing nebula: three measurement rounds below,
   each with a control, put the residual flap outside nebula, outside this laptop and
-  outside devrc entirely.
+  outside devrc entirely. ⚠ **ONE NEBULA SYMPTOM IS EXPLICITLY NOT COVERED BY THAT
+  SENTENCE, AND IS STILL LIVE:** both lighthouses (`10.42.0.1`, `10.42.0.2`) remain
+  **100% loss from BOTH hosts**, re-measured 2026-09-23 after the pin. The two-cause split
+  does not account for it, and an older `homelab-talos` handoff recorded lighthouse ICMP
+  flapping independently of any of this. Keep it on the queue.
 - **FIXED — nebula identity-roaming (the mechanism this block originally described).**
   `sudo ip rule add to 192.168.50.94 priority 5150 lookup main` moved the homelab node off
   the tailscale subnet route (`ip route get 192.168.50.94` → `via 192.168.1.1 dev
-  wlp170s0`, was `dev tailscale0 table 52`). After: `Host roamed|header is too short` =
-  **1 event in 40 min** (was a storm); the gateway handshake completes cleanly via relay;
-  and the ssh burst that used to be five consecutive `rc=255` is **5/5 `rc=0`**. The only
-  nebula error left is the IPv6-remote noise tracked in its own block above. `via:
-  measurement` ⚠ **The pin is live kernel state and is NOT persistent — a reboot reverts
+  wlp170s0`, was `dev tailscale0 table 52`), and the ssh burst that used to be five
+  consecutive `rc=255` is **5/5 `rc=0`** — re-run and re-confirmed. `via: measurement`
+  🔴 **BUT "THE ROAMING STOPPED" IS UNPROVEN, AND AN EARLIER WORDING OF THIS BULLET
+  COMPARED TWO DIFFERENT INSTRUMENTS.** It read "`Host roamed|header is too short` =
+  1 event in 40 min (was a storm)". The **1** was counted in the LAPTOP's
+  `journalctl -u nebula@mesh`; **"a storm" described the GATEWAY POD's log**, read via
+  `kubectl`. Those are different sources, so the pair was never a before/after.
+  Re-measured on the laptop journal for 2026-09-23: 11:00→1, 12:00→1, 14:00→2, 20:00→1,
+  21:00→1 — the pin went in ~20:35, so **post-pin is indistinguishable from pre-pin**,
+  14 events in 7 days; the workbench's journal shows 9 in 17 days and never storms.
+  And the pod-log side **cannot now be re-read, because the pin itself breaks `kubectl`
+  against homelab** (rc 124, measured) — so this doc can no longer reach its own
+  before-number. Treat the roaming as UNMEASURED either way; the ssh burst is the only
+  re-derivable half. ⚠ **The pin is live kernel state and is NOT persistent — a reboot reverts
   it, and the roaming comes back.** It also breaks `kubectl` against homelab while in place
   (`$KC_HOMELAB` targets that node); `sudo ip rule del priority 5150` restores it.
 - 🔴 **NOT FIXED, AND NOT NEBULA'S — periodic ~6.5 s blackouts of the path TO HOME.**
@@ -119,8 +130,13 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
   | nearby anycast resolver | 1/140 | NONE |
   | local wifi gateway | 0/140 | NONE |
   Tailscale knows nothing about nebula's hostmap, so no nebula mechanism can blank both in
-  the same second. Loss is **clustered, never scattered**: contiguous ~13-packet runs, zero
-  isolated drops — blackout-shaped, not lossy-path-shaped. `via: measurement`
+  the same second. Loss is **dominated by one contiguous ~13-packet (6.5 s) run** —
+  blackout-shaped, not lossy-path-shaped. ⚠ An earlier wording said "clustered, **never**
+  scattered: zero isolated drops", and the table's own arithmetic refutes it: 15 lost
+  against a 13-packet run leaves 2 isolated. An independent re-probe an hour later gave
+  14/140 = one run of 13 plus one isolated drop. The run is the signal; the absolute was
+  overstated. ⚠ **Window: ONE ~70 s sample per transport** (140 packets at 0.5 s), so
+  "only traffic to HOME dies" rests on that single window. `via: measurement`
 - **Ruled out — the laptop's uplink, its ISP, and the local router's NAT.** The local wifi
   gateway is 0 % loss at 1–2 ms, signal −43 dBm, 650/866 Mbit. A local-router conntrack
   flush would blank both overlays at once while sparing ICMP — **the far non-home endpoint
@@ -149,34 +165,39 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
   renegotiating. If the onset is recent, a firmware update or a reboot is the cheap first
   move. 🔴 **Nothing in devrc, nothing in nebula's config and nothing on this laptop can
   cure this** — the levers here only shorten each stall: nebula already has
-  `use_relays: true` and the relay is provably healthy (the 0/140 row above IS that relay's
-  endpoint), so its tunnel-check timers decide how fast it abandons a dead direct path.
-  For a human working across it, `mosh` rides a 6.5 s blackout invisibly where `ssh` hangs.
+  `use_relays: true`. 🔴 **Do NOT read the 0/140 row as "the relay works" — an earlier
+  wording of this bullet did, and it conflated two addresses.** That row probed the relay
+  host's UNDERLAY endpoint, which shows only that the host is reachable. The relay's MESH
+  address — `10.42.0.2`, the one `relays:` actually names — is **100% loss from both
+  hosts**, measured again 2026-09-23 beside the underlay at 0% / 109 ms. So relaying is
+  NOT known to work and any lever resting on it is unproven.
+  For a human working across it, `mosh` should ride a 6.5 s blackout where `ssh` hangs —
+  ⚠ `via: inference`, NOT measurement: it is a long-lived-UDP tool proposed against a
+  hypothesised long-lived-UDP-state fault, and it is installed on neither host, so nothing
+  here has demonstrated it. `devrc#1865` stages it.
 - **Symptom + exact repro:** laptop↔workbench over nebula drops for ~30–60 s windows, then recovers. Repro: `ping -c 4 -i 0.3 10.42.0.30` loops — measured at 17:15:34–17:15:52 CDT a 100%-loss window of ~7 samples between clean stretches; `ssh zach@10.42.0.30` times out during banner exchange for minutes at a time (17:58–18:03, five consecutive rc=255) then succeeds.
 - **Observed (with values):** failing set is exactly the LIGHTHOUSES: `ping 10.42.0.1` (homelab lighthouse) and `10.42.0.2` (Hetzner lighthouse) 100% loss from BOTH laptop and workbench; `10.42.0.30` (workbench) and `10.42.0.20` (prod-gw) reachable with 0% loss (~137 ms / ~109 ms). Gateway pod (`nebula-gateway-5fpfv`, kubectl `-n nebula`, node `talos-jkj-deb` 192.168.50.94) log: `Tunnel status certName=zach-laptop tunnelCheck="map[method:active state:dead]"` (19:03:22Z) and `Host roamed ... newAddr="10.244.0.220:50519"` (19:05:09Z). Workbench log: my handshakes arrive `from="100.71.230.83:41232"` (my TAILSCALE addr) and lighthouse parsed garbage `from 10.244.0.220:54949: header is too short` (22:15:25Z) — `10.244.0.220` = `tailscale-subnet-router-5f4658c69f-2g99j` pod (kubectl field-selector lookup, 15d old, 0 restarts). Laptop routing: `ip route get 192.168.50.94` → `dev tailscale0 table 52`; `ip route show table 52` → `192.168.50.0/24 dev tailscale0` (rule 5270).
 - **Ruled out:** lighthouse pods down — kubectl `-n nebula` shows both `nebula-lighthouse-xl58z` and `nebula-gateway-5fpfv` Running 0 restarts; via: measurement. Gateway node dead — workbench pings `192.168.50.94` at 0.1 ms and `<home-public-ip>` at 1.0 ms; via: measurement. Tailscale broken — `tailscale status` shows subnet-router `active; direct`; via: measurement. talosctl route to node internals — `talosctl -n 192.168.50.94 netstat` fails `tls: expired certificate` (client cert expiry, separate defect); via: command.
 - **Leading hypothesis (high confidence, measured)** — ⚠ **SUPERSEDED, kept for the record.**
   Correct about the roaming, which the pin fixed; it does not explain the residual blackouts,
   and "high confidence" was asserted over a symptom that turned out to have two causes: laptop's tailscale subnet route `192.168.50.0/24 → tailscale0` intercepts nebula's UDP to `192.168.50.94:4242`, so stage-1s ride the subnet-router POD and arrive at nebula pods sourced from bogus addrs (`100.71.230.83`, `10.244.0.220`). Peers "roam" my identity onto those paths; when the tailscale path churns the roamed paths die → hang; a fresh handshake over a live path (this host's WAN address, `<laptop-wan-ip>`, seen in lighthouse log at 19:02:55Z) → recover. Lighthouse ICMP failing is likely the same arrival-path corruption, and every node's hostmap resolution degrades with the lighthouse tunnels.
-- **Next probe** — ⚠ **DONE 2026-09-23, verdict above.** The pin was applied and evaluated; it fixed the roaming and did not close the flap. Original text: `sudo ip rule add to 192.168.50.94 priority 5150 lookup main` (needs operator sudo; reversible with `ip rule del priority 5150`), then 10-min `ping -c 60 -i 1 10.42.0.30` loss check + one ssh burst. NOTE: `ip route show table main` has NO 192.168.50.0/24 route, so lookup main sends it via the default gw (WAN/hairpin) — if hairpin UDP fails, the alternative is a tailscale route exclusion for UDP:4242 or pinning the laptop's tunnel remotes out of table 52.
+- **Next probe** — ⚠ **DONE 2026-09-23; the verdict is the two-mechanism split above.** The recipe it carried is deleted rather than preserved: `claude/skills/handoff/SKILL.md` protects a superseded *reading* verbatim but says to delete a now-wrong **instruction** in the same delta, and re-running that `ip rule add` is exactly the wrong instruction — the pin is already applied. Its one still-live idea (a tailscale route exclusion for UDP:4242, rather than a `to <node>` pin) is carried in next-step 1, where it can be acted on.
 
 ## Next steps (ranked)
-1. Merge PR #1861 and confirm `main`'s `test_no_public_ips` leg goes green on `origin/main` (not on the branch). `main` is red until this lands, and a permanently-red gate trains everyone to click through.
-   `forcing: regression`
-2. Decide the PERMANENT form of the `ip rule` pin, in whichever repo owns the laptop's nebula unit. It is applied but lives in kernel state only, so a reboot silently reverts it and the roaming returns with nothing to announce it. Two known costs to weigh: it breaks `kubectl` against homelab while active, and a tailscale route exclusion for UDP:4242 may be the better shape than a `to <node>` pin. **Do not treat this as the flap fix — it is not** (see the investigation).
+1. Decide the PERMANENT form of the `ip rule` pin, in whichever repo owns the laptop's nebula unit — it is kernel-state-only today, so a reboot silently reverts it. Costs and shape options are stated once, with the measurement, in the investigation's FIXED bullet; a tailscale route exclusion for UDP:4242 may be the better shape than a `to <node>` pin. **Do not treat this as the flap fix — it is not** (see the investigation).
    `forcing: incident`
-3. Operator, ON THE LAN: refresh the workbench stable-path helper — `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown`. Verify: `cmp -s /etc/nixos/i3blocks-scripts/airvpn-updown ~/workspace/devrc/scripts/airvpn-updown && echo SYNC`. ⚠ Not urgent — nothing automatic can fire it (verified: no timer, no enabled unit) — but pair it with the killswitch re-test, because toggling that tunnel with the stale copy while off-LAN is a plausible lockout.
+2. Operator, ON THE LAN: refresh the workbench stable-path helper — `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown`. Verify: `cmp -s /etc/nixos/i3blocks-scripts/airvpn-updown ~/workspace/devrc/scripts/airvpn-updown && echo SYNC`. ⚠ Not urgent — nothing automatic can fire it (verified: no timer, no enabled unit) — but pair it with the killswitch re-test, because toggling that tunnel with the stale copy while off-LAN is a plausible lockout.
    `forcing: regression`
-4. Silence the gateway v6-remote noise — nebula config in `homelab-talos` (advertise v4 only from the gateway, or v6-listen on the laptop).
+3. Silence the gateway v6-remote noise — nebula config in `homelab-talos` (advertise v4 only from the gateway, or v6-listen on the laptop).
    `forcing: none`
-5. Re-run `scripts/data/refresh-airvpn-servers` from a host with qBit-pod access and bake country_code the supported way (its `_from_github` fallback is DEAD).
+4. Re-run `scripts/data/refresh-airvpn-servers` from a host with qBit-pod access and bake country_code the supported way (its `_from_github` fallback is DEAD).
    `forcing: none`
-6. `i3status-airvpn`'s no-country-code fallback abbreviates the full country NAME (`"United States"[:2]` → `UN`). One-line fix if it ever shows again; with cc baked it should be unreachable.
+5. `i3status-airvpn`'s no-country-code fallback abbreviates the full country NAME (`"United States"[:2]` → `UN`). One-line fix if it ever shows again; with cc baked it should be unreachable.
    `forcing: none`
 
 ## Defects (batched)
 - talosctl client cert EXPIRED (`tls: expired certificate` against 192.168.50.94) — blocks all node-level debugging from this host.
-- Workbench's stable-path `airvpn-updown` is stale (no roaming mode, no nebula pin) — closed by next-step 3's one command. General hazard: `/etc/nixos/i3blocks-scripts/` copies are NOT ship-managed nor covered by `drift-check.sh` rc 17 — stable-path helpers can rot silently on any host.
+- Workbench's stable-path `airvpn-updown` is stale (no roaming mode, no nebula pin) — closed by next-step 2's one command. General hazard: `/etc/nixos/i3blocks-scripts/` copies are NOT ship-managed nor covered by `drift-check.sh` rc 17 — stable-path helpers can rot silently on any host.
 - `refresh-airvpn-servers --from-github` fallback rotted (gluetun moved to `servers.go`); the kube source still works from the workbench.
 - The mockbin `ip` stub accepts any arg shape — any future `ip rule`/`nft` change needs a live unprivileged syntax probe before merge.
 
@@ -261,8 +282,11 @@ scripts/ship.sh
 🔴 **THE BLOCK BELOW IS THE ARC'S OWN CLOSING CONDITION and was DELETED WHOLESALE by the
 mesh-flap rewrite** — **seven** command lines plus the killswitch escape hatch. This is that
 block restored from `1c7ad1b9`, **plus two additions** (the `HOME_PUB` assignment, and the
-`journalctl` line that makes closing-condition item 4 runnable) — a restoration, not a
-transcription. One address literal is replaced by a runtime lookup; `<home-public-ip>` was
+`journalctl` line that makes closing-condition item 4 runnable, and the `HOME_PUB`
+placeholder guard) — a restoration, not a transcription. ⚠ An earlier wording said "plus
+two additions" and undercounted by one: the guard is executable and was not in the
+original, so a reader auditing this fence against `1c7ad1b9` would find a line the
+manifest did not account for. One address literal is replaced by a runtime lookup; `<home-public-ip>` was
 ALREADY a placeholder at `1c7ad1b9`, which is what #1853 did.
 🔴 **RUN IT ALL WITH THE TUNNEL UP, and substitute `HOME_PUB` first.** With the tunnel down
 *several* lines go vacuously green — but not all: `ip link show airvpn` fails outright, the
@@ -272,8 +296,13 @@ read returns `up`=false. Those three are the ones that catch you.
 # tunnel + split-tunnel, with the tunnel UP:
 ip link show airvpn && ip rule | rg 500          # pin present: uidrange 991-991 lookup main
 HOME_PUB='<home-public-ip>'                      # set at run time; NEVER inline the value
-: "${HOME_PUB:?substitute this first — an empty value makes the next line print the same
-     'any valid prefix is expected' error that means 'you passed a hostname'}"
+# Guard the mistake you will ACTUALLY make -- pasting this fence WITHOUT substituting.
+# 🔴 An earlier version of this guard was `: "${HOME_PUB:?...}"`, which fires only when the
+# variable is EMPTY. The block above never produces empty, so that guard was UNREACHABLE:
+# the unsubstituted paste walked straight past it into `ip route get '<home-public-ip>'`,
+# whose error is the SAME "any valid prefix is expected" the doc teaches means "you passed
+# a hostname". Match the placeholder, not the empty string.
+case "$HOME_PUB" in *'<'*) echo "substitute HOME_PUB first" >&2; return 2>/dev/null || exit 2;; esac
 ip route get "$HOME_PUB" uid 991                 # → via <gw> dev wlp170s0 (NOT airvpn)
 # the other half of the SPLIT: a non-LAN target must leave via the tunnel. `ip route get`
 # needs an ADDRESS, so resolve the resolver's NAME at run time rather than pinning a literal:
