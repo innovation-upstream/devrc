@@ -87,8 +87,8 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - as-of: 2026-09-23
 - **Symptom + exact repro:** laptop↔workbench over nebula drops for ~30–60 s windows, then recovers. Repro: `ping -c 4 -i 0.3 10.42.0.30` loops — measured at 17:15:34–17:15:52 CDT a 100%-loss window of ~7 samples between clean stretches; `ssh zach@10.42.0.30` times out during banner exchange for minutes at a time (17:58–18:03, five consecutive rc=255) then succeeds.
 - **Observed (with values):** failing set is exactly the LIGHTHOUSES: `ping 10.42.0.1` (homelab lighthouse) and `10.42.0.2` (Hetzner lighthouse) 100% loss from BOTH laptop and workbench; `10.42.0.30` (workbench) and `10.42.0.20` (prod-gw) reachable with 0% loss (~137 ms / ~109 ms). Gateway pod (`nebula-gateway-5fpfv`, kubectl `-n nebula`, node `talos-jkj-deb` 192.168.50.94) log: `Tunnel status certName=zach-laptop tunnelCheck="map[method:active state:dead]"` (19:03:22Z) and `Host roamed ... newAddr="10.244.0.220:50519"` (19:05:09Z). Workbench log: my handshakes arrive `from="100.71.230.83:41232"` (my TAILSCALE addr) and lighthouse parsed garbage `from 10.244.0.220:54949: header is too short` (22:15:25Z) — `10.244.0.220` = `tailscale-subnet-router-5f4658c69f-2g99j` pod (kubectl field-selector lookup, 15d old, 0 restarts). Laptop routing: `ip route get 192.168.50.94` → `dev tailscale0 table 52`; `ip route show table 52` → `192.168.50.0/24 dev tailscale0` (rule 5270).
-- **Ruled out:** lighthouse pods down — kubectl `-n nebula` shows both `nebula-lighthouse-xl58z` and `nebula-gateway-5fpfv` Running 0 restarts; via: measurement. Gateway node dead — workbench pings `192.168.50.94` at 0.1 ms and `24.79.61.66` at 1.0 ms; via: measurement. Tailscale broken — `tailscale status` shows subnet-router `active; direct`; via: measurement. talosctl route to node internals — `talosctl -n 192.168.50.94 netstat` fails `tls: expired certificate` (client cert expiry, separate defect); via: command.
-- **Leading hypothesis (high confidence, measured):** laptop's tailscale subnet route `192.168.50.0/24 → tailscale0` intercepts nebula's UDP to `192.168.50.94:4242`, so stage-1s ride the subnet-router POD and arrive at nebula pods sourced from bogus addrs (`100.71.230.83`, `10.244.0.220`). Peers "roam" my identity onto those paths; when the tailscale path churns the roamed paths die → hang; a fresh handshake over a live path (WAN `38.187.27.246`, seen in lighthouse log at 19:02:55Z) → recover. Lighthouse ICMP failing is likely the same arrival-path corruption, and every node's hostmap resolution degrades with the lighthouse tunnels.
+- **Ruled out:** lighthouse pods down — kubectl `-n nebula` shows both `nebula-lighthouse-xl58z` and `nebula-gateway-5fpfv` Running 0 restarts; via: measurement. Gateway node dead — workbench pings `192.168.50.94` at 0.1 ms and `<home-public-ip>` at 1.0 ms; via: measurement. Tailscale broken — `tailscale status` shows subnet-router `active; direct`; via: measurement. talosctl route to node internals — `talosctl -n 192.168.50.94 netstat` fails `tls: expired certificate` (client cert expiry, separate defect); via: command.
+- **Leading hypothesis (high confidence, measured):** laptop's tailscale subnet route `192.168.50.0/24 → tailscale0` intercepts nebula's UDP to `192.168.50.94:4242`, so stage-1s ride the subnet-router POD and arrive at nebula pods sourced from bogus addrs (`100.71.230.83`, `10.244.0.220`). Peers "roam" my identity onto those paths; when the tailscale path churns the roamed paths die → hang; a fresh handshake over a live path (this host's WAN address, `<laptop-wan-ip>`, seen in lighthouse log at 19:02:55Z) → recover. Lighthouse ICMP failing is likely the same arrival-path corruption, and every node's hostmap resolution degrades with the lighthouse tunnels.
 - **Next probe:** `sudo ip rule add to 192.168.50.94 priority 5150 lookup main` (needs operator sudo; reversible with `ip rule del priority 5150`), then 10-min `ping -c 60 -i 1 10.42.0.30` loss check + one ssh burst. NOTE: `ip route show table main` has NO 192.168.50.0/24 route, so lookup main sends it via the default gw (WAN/hairpin) — if hairpin UDP fails, the alternative is a tailscale route exclusion for UDP:4242 or pinning the laptop's tunnel remotes out of table 52.
 
 ## Next steps (ranked)
@@ -117,13 +117,24 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - The pill's `?` on `US?` is the UNVERIFIED marker (exit IP ≠ entry IP and no server cc), NOT the stale marker — two different `?`s in one block's grammar.
 - `--block` mirror machinery from #1839 was REMOVED, not left dead; `i3status-airvpn` stays in RELAY_BLOCKS so the `wb` rollup still carries the workbench tunnel's alarms on the laptop.
 
-- 🔴 **DO NOT PUT THE REAL ADDRESS BACK IN THIS DOC.** The split-tunnel verification needs
-  two probe targets and they are NOT the same kind of thing, which is why the fix is
-  asymmetric: the HOME public IP is a real endpoint and is now `<home-public-ip>` (the
-  gate's own remedy: *"if you are tempted to pin a real endpoint, the answer is an env
-  var, not a pin"*), while the Cloudflare resolver is not an endpoint of ours, is not a
-  disclosure, and carries a path-scoped ALLOWLIST entry instead. If you need the commands
-  to be copy-pasteable, put the address in a shell variable at run time — do not inline it.
+- 🔴 **NO ROUTABLE ADDRESS OF OURS GOES IN THIS DOC — AND "THE REAL ADDRESS" WAS TOO NARROW
+  A WORDING, MEASURED.** The first version of this bullet named the HOME public IP, so it
+  read as a rule about ONE value; two days later the mesh-flap investigation appended
+  **three** fresh literals — the home WAN, this laptop's WAN as the lighthouse saw it, and
+  the Hetzner lighthouse — and `main`'s `test_no_public_ips` leg went red again. The rule
+  is: **any endpoint of ours, in any section, however it arrives** (a journal quote, a
+  `static_host_map` excerpt, a ping result). Write `<home-public-ip>` / `<laptop-wan-ip>` /
+  `<hetzner-lighthouse-ip>` and put the value in a shell variable at run time if a command
+  must be copy-pasteable. The gate's own remedy: *"if you are tempted to pin a real
+  endpoint, the answer is an env var, not a pin"* — a pin is for values that are not a
+  disclosure at all. 🔴 **A GOTCHA IS NOT A GATE.** This bullet was already here, in this
+  file, and was read past; what actually caught the recurrence was the test. Widening the
+  sentence does not make it enforcement.
+- ⚠ **The Cloudflare resolver's ALLOWLIST pin for this doc is DELETED** (it was the
+  `this SHOULD leave via the tunnel` split-tunnel probe target). The literal left the file
+  when `How to verify` was rewritten around the mesh flap, and the gate's second leg fails
+  a pin that matches nothing rather than leaving a rubber stamp. The split-tunnel probe is
+  restored in `How to verify` in **hostname** form, which needs no pin at all.
 - 🔴 **THE EXPLANATION OF A LEAK IS ONE OF THE PLACES THE LEAK SPREADS TO.** The first PR
   body for #1853 quoted the address and was REFUSED by the `bash-guard` PreToolUse hook;
   the first commit message had the same defect and had already been PUSHED, and was
@@ -147,11 +158,11 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - `kubectl get pods -A` on `$KC_HOMELAB` TIMES OUT (rc 124, >90 s) — use `kubectl get pods -n <ns>` or a `--field-selector` instead; `kubectl get ds/deploy/cm -A` works fine.
 - `env KUBECONFIG=... kubectl ...` — bare `KUBECONFIG=... kubectl` in a compound command parses as a command name (timeout: 'failed to run command'); must use `env`.
 - The gateway/lighthouse nebula pods are distroless — `kubectl exec ... -- ping/ls/nebula` all fail (`executable file not found`); logs are the only window.
-- The two pods share one node (`talos-jkj-deb` / 192.168.50.94) and the lighthouse config's static_host_map only carries `10.42.0.2 → 5.161.118.55:4242`; the gateway config's comment says LAN IP is used deliberately ("NAT hairpinning won't work") — consistent with the hairpin half of the flap.
+- The two pods share one node (`talos-jkj-deb` / 192.168.50.94) and the lighthouse config's static_host_map only carries `10.42.0.2 → <hetzner-lighthouse-ip>:4242`; the gateway config's comment says LAN IP is used deliberately ("NAT hairpinning won't work") — consistent with the hairpin half of the flap.
 - `sudo -n` over ssh to the workbench fails (password required) — sudo-touching steps are operator-run, hand over the exact command.
 - (carried) Laptop has NO systemd-resolved — do NOT re-add `DNS` to the laptop wg conf.
 - (carried) The pill's `?` on `US?` is the UNVERIFIED marker, not the stale marker.
-- (carried) DO NOT put the real home public IP back in this doc; use `<home-public-ip>` / a runtime shell variable.
+- (carried, WIDENED) DO NOT put ANY routable address of ours back in this doc — not just the home public IP. Use `<home-public-ip>` / `<laptop-wan-ip>` / `<hetzner-lighthouse-ip>` or a runtime shell variable. It recurred with three new values on 2026-09-23.
 
 ## How to verify
 ```bash
@@ -161,6 +172,12 @@ ping -c 60 -i 1 10.42.0.30 | tail -1
 for i in 1 2 3 4 5; do ssh -o ConnectTimeout=10 zach@10.42.0.30 'true'; echo rc=$?; sleep 2; done
 # lighthouse tunnels (want 0% loss — currently 100% from BOTH hosts):
 ping -c 5 -i 0.3 10.42.0.1; ping -c 5 -i 0.3 10.42.0.2
+# split tunnel, with the tunnel UP — the exit is the AirVPN one, and a non-LAN
+# target still leaves via the tunnel. HOSTNAME form on purpose: an IP literal here
+# is what the public-IP gate blocks, and a public resolver's name needs no pin.
+curl -s https://ipinfo.io/json; ping -c 2 one.one.one.one
+# the killswitch's LAN carve-out still resolves (want rc=0 to the local gateway):
+ping -c 2 "$(ip route show default | awk '{print $3; exit}')"
 # ship state (want both hosts at one sha):
 scripts/ship.sh
 ```
