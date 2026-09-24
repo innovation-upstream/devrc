@@ -40,10 +40,9 @@ WHAT EACH TEST IS FOR — the audit findings the script was reworked for:
   F9         the exposure claim names the nebula group set, not just the laptop.
   D1         the insert uses `programs.mosh` (for the utempter wrapper and
              mosh-server on the system PATH) with `openFirewall = false`.
-  CITATION   the blackout measurement is restated inline and the handoff-doc
-             citation names PR #1866 — the OPEN PR carrying the corrected text.
-             #1861 merged WITHOUT the correction, so `main`'s copy of that doc
-             still contradicts this change's justification.
+  CITATION   the blackout measurement is restated inline, and the handoff-doc
+             citation names PR #1866 AND its merge commit — never a PR state.
+             See R3-2 below for why that distinction is the whole guard.
 
 ROUND-2 AUDIT FINDINGS closed here:
   R2-1       MOSH_FW_SWITCH=1 over an ALREADY APPLIED config converges with a
@@ -51,10 +50,26 @@ ROUND-2 AUDIT FINDINGS closed here:
              produced duplicate attributes and could never succeed).
   R2-2       the half-configured guard's mosh half accepts the dotted
              `programs.mosh.enable` spelling its own die message recommends.
-  R2-3       the citation names #1866, not the merged #1861.
+  R2-3       the citation names #1866, not the merged #1861. SUPERSEDED by R3-2
+             — the citation it installed was itself false within the hour.
   R2-7       a config with no trailing newline is patched, not blamed.
   CLAIM-9    the rc-127 claim is pinned to the guard that actually delivers it
              (the preflight `command -v` loop), not to the parse gate.
+
+ROUND-3 AUDIT FINDINGS closed here:
+  R3-1       ALREADY APPLIED requires `programs.mosh.openFirewall = false`, not
+             merely the presence of the two attribute paths. openFirewall
+             DEFAULTS TO TRUE, so the old check accepted — and under
+             MOSH_FW_SWITCH=1 ACTIVATED — a config opening 60000-61000 on every
+             interface, WAN included. Closed for the whole class (dotted and
+             braced, absent and explicitly true), scoped to mosh's own block so
+             another module's `openFirewall = false` cannot satisfy it.
+  R3-2       the citation states MERGED facts (#1866 + its merge commit
+             b7a30bc3) and may not assert a PR state, which expires.
+  R3-3       the converge path's printed counts are asserted, with fixture
+             values distinct from every constant the script or this module
+             names — the round-2 rig's defaults WERE 444/1420, so a hardcode
+             mutant was invisible to it.
 """
 from __future__ import annotations
 
@@ -579,6 +594,193 @@ def test_the_dotted_spelling_of_programs_mosh_counts_as_applied(tmp_path):
     assert r.log("rebuild") == []
 
 
+# --------------------------------------------------- R3-1: the openFirewall gate
+# Helpers for the round-3 fixtures. `mosh_text` is dropped in above the firewall
+# block at top level; `extra_fw` goes INSIDE it. The range is added by default
+# because every fixture below is about a config that already carries it.
+def _cfg_with(mosh_text: str, *, range_present: bool = True,
+              extra_top: str = "") -> str:
+    cfg = CONFIG_NIX.replace(
+        "  networking.firewall = {\n",
+        extra_top + mosh_text + "\n  networking.firewall = {\n", 1)
+    assert cfg != CONFIG_NIX
+    if range_present:
+        cfg = cfg.replace(
+            "    allowedTCPPorts = [ 7844 80 443 ];\n",
+            "    allowedTCPPorts = [ 7844 80 443 ];\n"
+            '    interfaces."nebula.mesh".allowedUDPPortRanges = '
+            "[ { from = 60000; to = 61000; } ];\n", 1)
+    return cfg
+
+
+def _assert_refused_for_wan_exposure(res, rig_obj, why: str | None = None):
+    """Every R3-1 refusal must be the SAME refusal: non-zero, naming the WAN
+    exposure and the safe form, writing nothing, evaluating nothing — and NOT
+    claiming ALREADY APPLIED."""
+    assert res.returncode != 0, res.stdout + res.stderr
+    assert "ALREADY APPLIED" not in res.stdout, res.stdout
+    assert "openFirewall" in res.stderr, res.stdout + res.stderr
+    assert "WAN" in res.stderr, res.stderr
+    assert "openFirewall = false;" in res.stderr, (
+        "the refusal must SPELL the safe form, not just name the problem")
+    if why is not None:
+        # "you wrote it true" and "you never wrote it" are DIFFERENT mistakes
+        # with different fixes in the reader's head, and the script distinguishes
+        # them. Nothing asserted that, and a mutation battery found the `true`
+        # arm SURVIVED every test: both spellings refuse, so only the wording
+        # tells them apart.
+        assert why in res.stderr, (
+            f"the refusal must diagnose WHICH mistake this is; expected "
+            f"{why!r}\n{res.stderr}")
+    assert rig_obj.cfg.read_text() == rig_obj.original_cfg_text, "nothing may be written"
+    assert rig_obj.backups() == []
+    assert rig_obj.log("rebuild") == [], "nothing may be evaluated or switched"
+
+
+_ABSENT = "ABSENT, and the option DEFAULTS TO TRUE"
+_TRUE = "explicitly set to `true`"
+
+
+@pytest.mark.parametrize("label,mosh_text,why", [
+    # The single most likely hand-written spelling: the dotted `enable` line the
+    # script's own die message recommends, with no `openFirewall` at all.
+    ("dotted, openFirewall absent", "  programs.mosh.enable = true;", _ABSENT),
+    # The braced form. This shape was ALREADY APPLIED at 9dd99f25 too, so the
+    # class predates R2-2's widening — R2-2 made it bigger, it did not create it.
+    ("braced, openFirewall absent",
+     "  programs.mosh = {\n    enable = true;\n  };", _ABSENT),
+    # Explicitly wrong rather than merely missing. The verdict is the same
+    # refusal; only the DIAGNOSIS differs, which is why `why` is asserted.
+    ("dotted, openFirewall true",
+     "  programs.mosh.enable = true;\n  programs.mosh.openFirewall = true;",
+     _TRUE),
+    ("braced, openFirewall true",
+     "  programs.mosh = {\n    enable = true;\n    openFirewall = true;\n  };",
+     _TRUE),
+])
+def test_programs_mosh_without_openFirewall_false_is_refused_not_ALREADY_APPLIED(
+        tmp_path, label, mosh_text, why):
+    """🟡 ROUND-3 FINDING 1 — REGRESSION COVERAGE. `programs.mosh.openFirewall`
+    DEFAULTS TO TRUE, and turning it off is this script's whole reason to write
+    the module explicitly: left on it adds 60000-61000 to
+    `networking.firewall.allowedUDPPortRanges`, i.e. 1001 UDP ports on EVERY
+    interface, WAN included.
+
+    The idempotence check tested only that the two attribute PATHS were present.
+    So a config carrying `programs.mosh.enable = true;` plus the range — with no
+    `openFirewall` line anywhere — read as `state : ALREADY APPLIED`, exit 0, and
+    under MOSH_FW_SWITCH=1 went down the converge path and SWITCHED, activating
+    the WAN-wide opening the script exists to avoid.
+
+    Measured at ee6b0ce9: all four rows here exit 0 with ALREADY APPLIED. (The
+    braced rows were ALREADY APPLIED at 9dd99f25 as well; R2-2's widening of the
+    mosh regex added the dotted rows, which had been refused as HALF configured
+    with advice that spells the safe form. So this closes a hole that got bigger,
+    not one that was created — and it closes the whole class, not the spelling
+    the audit happened to name.)"""
+    r = Rig(tmp_path, config_text=_cfg_with(mosh_text))
+    _assert_refused_for_wan_exposure(r.run(), r, why=why)
+
+
+def test_a_config_reading_both_true_and_false_is_refused_not_accepted(tmp_path):
+    """R3-1 regression coverage for the gate's FAIL-SAFE TIE-BREAK. RED at
+    ee6b0ce9 — but ⚠ read that red honestly: at ee6b0ce9 openFirewall was not
+    looked at AT ALL, so this fixture was ALREADY APPLIED for the same reason
+    every other R3-1 row was, not because the tie-break was inverted. The base
+    red therefore proves the CLASS, not this test's specific subject. What
+    proves the subject is mutation M4d — flipping the awk END block so
+    `saw_false` wins over `saw_true` fails THIS test and no other.
+
+    It exists because the scanner is crude (it does not understand Nix strings,
+    `mkIf`, or a second module file), so it CAN read both `true` and `false` for
+    one host. Every such ambiguity must resolve to REFUSE — the direction where
+    being wrong costs a re-run, not 1001 WAN-facing UDP ports. `saw_true` winning
+    over `saw_false` in the awk END block is the line that delivers that, and a
+    mutation battery found it otherwise uncovered: with the `true` arm dead both
+    spellings still refused, so only the diagnosis wording and this tie-break
+    could see it."""
+    r = Rig(tmp_path, config_text=_cfg_with(
+        "  programs.mosh = {\n    enable = true;\n    openFirewall = false;\n  };",
+        extra_top="  programs.mosh.openFirewall = true;\n"))
+    _assert_refused_for_wan_exposure(r.run(), r, why=_TRUE)
+
+
+def test_the_converge_path_refuses_a_config_that_would_open_the_WAN(tmp_path):
+    """🟡 ROUND-3 FINDING 1 — the half that actually reaches the machine. The
+    refusal above is only worth something if MOSH_FW_SWITCH=1 cannot walk past
+    it: at ee6b0ce9 this exact config printed ALREADY APPLIED and then ran
+    `nixos-rebuild switch`."""
+    r = Rig(tmp_path, config_text=_cfg_with("  programs.mosh.enable = true;"))
+    res = r.run(extra_env={"MOSH_FW_SWITCH": "1"})
+    _assert_refused_for_wan_exposure(res, r)
+    assert "switch" not in r.log("rebuild")
+    assert "SWITCHED" not in res.stdout, res.stdout
+
+
+def test_another_modules_openFirewall_false_does_not_satisfy_the_mosh_gate(tmp_path):
+    """🟡 ROUND-3 FINDING 1 — the NARROWING boundary, and the reason this guard
+    is not a bare `grep openFirewall = false`. `openFirewall` is a common NixOS
+    option name; a config that turns some OTHER service's copy off says nothing
+    about mosh's. The distractor sits ABOVE the mosh block so a whole-file grep
+    would find it first."""
+    r = Rig(tmp_path, config_text=_cfg_with(
+        "  programs.mosh.enable = true;",
+        extra_top="  services.jellyfin.openFirewall = false;\n"))
+    _assert_refused_for_wan_exposure(r.run(), r)
+
+
+def test_openFirewall_false_inside_the_braced_mosh_block_is_ALREADY_APPLIED(tmp_path):
+    """⚠ INVARIANT GUARD for the R3-1 gate's permitted direction, not regression
+    coverage: GREEN at ee6b0ce9 too (the pre-fix check ignored `openFirewall`
+    entirely, so of course it accepted this). It is here because R3-1 NARROWS the
+    ALREADY-APPLIED verdict, and a narrowing needs a pin saying how far — the
+    correctly-applied braced form, which is exactly what this script writes, must
+    still be accepted with nothing written."""
+    r = Rig(tmp_path, config_text=_cfg_with(MOSH_BLOCK.rstrip("\n")))
+    res = r.run()
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "ALREADY APPLIED" in res.stdout, res.stdout + res.stderr
+    assert r.cfg.read_text() == r.original_cfg_text
+    assert r.backups() == []
+    assert r.log("rebuild") == []
+
+
+def test_the_converge_path_prints_the_measured_current_counts(tmp_path):
+    """🟢 ROUND-3 FINDING 3 — COVERAGE GAP, not a defect: this is GREEN at
+    ee6b0ce9 by construction, because the script already printed the right
+    numbers. Nothing ASSERTED them, so a mutant replacing
+    `$(count_of before built)/$(count_of before fetched)` with the literals
+    `444`/`1420` survived the whole module — invisible because the rig's own
+    defaults ARE 444 and 1420, and a fixture that can only ever produce a
+    constant's own value cannot see a mutant that hardcodes it.
+
+    So the fixture values here are chosen to be distinct from every constant the
+    script or this module names: not 444/1420 (the rig defaults and the header's
+    example), not 447/1423 or 451/1429 (the other tests' `after` values), not
+    60000/61000/17/0/1. They are also distinct from each other, so a mutant
+    printing one column twice cannot pass.
+
+    These counts are what the operator reads to decide whether to let a switch
+    run on a host they cannot physically reach, so a wrong one misleads at the
+    exact moment the decision is irreversible."""
+    r = Rig(tmp_path)
+    first = r.run()
+    assert first.returncode == 0, first.stdout + first.stderr
+    (r.state / "rebuild.log").write_text("")
+    r.set("before_built", "39")
+    r.set("before_fetch", "2601")
+
+    res = r.run(extra_env={"MOSH_FW_SWITCH": "1"})
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "CONVERGING" in res.stdout, res.stdout
+    assert "current   : 39 to build, 2601 to fetch" in res.stdout, res.stdout
+    # The converge path prints no candidate/delta columns -- there is no
+    # candidate. A mutant that resurrects them would be a different bug.
+    assert "delta     :" not in res.stdout, res.stdout
+    assert "candidate :" not in res.stdout, res.stdout
+    assert r.log("rebuild") == ["dry-build before", "switch"], res.stdout
+
+
 def test_a_similar_but_different_attribute_is_not_mistaken_for_programs_mosh(tmp_path):
     """⚠ INVARIANT GUARD, not regression coverage: measured GREEN at 9dd99f25
     too — the pre-fix regex was NARROWER, so of course it rejected these. It is
@@ -839,36 +1041,80 @@ def test_the_exposure_claim_names_the_nebula_group_set_in_both_files():
             "alone.")
 
 
-def test_the_blackout_citation_names_the_open_correction_not_the_merged_pr():
-    """🟡 ROUND-2 FINDING 3. Both files cited PR #1861 as carrying the corrected
-    text of `claudedocs/handoff-laptop-airvpn-tunnel.md`, and that citation was
-    false in BOTH halves — with this test pinning the falsehood.
+# A citation may not assert a PR's *state*: every one of these has a shelf life
+# measured in minutes, and each has already been WRONG in this comment.
+# Enumerated, not a pattern — an unlisted spelling is not covered, and the
+# docstring says so.
+_EXPIRING_STATE_PHRASES = (
+    "open and unmerged",
+    "unmerged",
+    "not yet merged",
+    "still open",
+    "which is open",
+    "is open,",
+    "until #1866 lands",
+    "nothing merged corrects",
+    "contradicts the paragraph above",
+    "copy on `main` contradicts",
+)
 
-    Re-verified 2026-09-23: **#1861 is MERGED** (`5834b4c5`) and it never
-    carried the correction — its diff kept "Leading hypothesis (high
-    confidence, measured): laptop's tailscale subnet route …" verbatim, and
-    `origin/main` still reads that way. The correction — the flap had TWO
-    mechanisms and the one this change mitigates is not nebula's and not on
-    either host — is on **PR #1866** (`fix/flap-two-mechanisms-round3`), which
-    is OPEN. So nothing merged corrects the doc, and a citation naming a merged
-    PR reads as "already fixed, go read it" over text that says the opposite.
+# The merge commit of PR #1866, verified against `origin/main` 2026-09-24:
+#   gh pr view 1866 --json state,mergedAt,mergeCommit
+#     -> MERGED, 2026-09-24T03:41:52Z, b7a30bc3ae2d62ef0963e1311f33f4bef699534d
+# and `git show origin/main:claudedocs/handoff-laptop-airvpn-tunnel.md` carries
+# "**Leading hypothesis (high confidence, measured)** — ⚠ **SUPERSEDED, kept for
+# the record.**".
+_CORRECTION_MERGE_SHA = "b7a30bc3"
 
-    ⚠ WHAT THIS DOES NOT DO, and why. A draft asserted `"#1861" not in src` as
-    a second half, on the reasoning that no part of either file still has a
-    reason to name it. That is wrong: both files now name #1861 precisely to
-    record that it merged WITHOUT the correction, which is the provenance that
-    stops the wrong citation being re-derived. An absence pin would have deleted
-    the correction's own evidence, so the pin is the PRESENCE of #1866 only.
-    Like every word-level guard on prose it is walkable by rewording; it pins
-    the thing that was factually wrong, which is the number."""
+
+def test_the_blackout_citation_states_merged_facts_not_an_expiring_pr_state():
+    """🟡 ROUND-3 FINDING 2 — REGRESSION COVERAGE for the citation, and a
+    WIDENING of what it pins.
+
+    History: both files first cited PR #1861 as carrying the corrected text of
+    `claudedocs/handoff-laptop-airvpn-tunnel.md`. #1861 merged as `5834b4c5`
+    WITHOUT it. Round 2 replaced that with #1866 and asserted it was "OPEN and
+    unmerged, so nothing merged corrects it today" — and told the reader `main`
+    CONTRADICTS the paragraph. That expired almost immediately: #1866 merged as
+    `b7a30bc3` at 2026-09-24T03:41:52Z, and `origin/main`'s copy of the doc now
+    carries the correction with the old single-cause line marked "SUPERSEDED,
+    kept for the record". Re-verified here before this test was written.
+
+    The round-2 test pinned only `"#1866" in src`, and stayed GREEN across the
+    entire life of that falsehood — the number was right while everything said
+    about it was wrong. So the pin moves from the NUMBER to the CLASS: a
+    citation may name a PR and its MERGE COMMIT (immutable facts), and may not
+    assert a PR *state* (a fact with a shelf life).
+
+    ⚠ WHAT THIS DOES NOT DO. It is a word-level guard on prose, so it is walkable
+    by rewording — `_EXPIRING_STATE_PHRASES` is an enumeration and cannot see a
+    spelling nobody listed. It is not a pin on the whole normalised paragraph,
+    because these two comments are edited on every round and that would make
+    each copy-edit a failure for a claim that is really about meaning. What it
+    CAN do is fail the exact shape that has now been wrong twice, and require
+    the merge sha — which no draft written before 2026-09-24T03:41Z could have
+    contained."""
     for path in (APPLY, PKGS):
         src = path.read_text()
-        if "handoff-laptop-airvpn-tunnel" in src:
-            assert "#1866" in src, (
-                f"{path} cites the handoff doc without naming PR #1866, the OPEN "
-                "PR that carries the corrected text; `main`'s copy still "
-                "contradicts this change's justification")
         assert "6.5" in src, f"{path} must restate the measured blackout inline"
+        if "handoff-laptop-airvpn-tunnel" not in src:
+            continue
+        assert "#1866" in src, (
+            f"{path} cites the handoff doc without naming PR #1866, which "
+            "carries the correction that makes the doc readable as this "
+            "change's justification")
+        assert _CORRECTION_MERGE_SHA in src, (
+            f"{path} names PR #1866 without its merge commit "
+            f"{_CORRECTION_MERGE_SHA}. A bare PR number leaves the reader to "
+            "look up a state; the merge commit is the immutable fact and is "
+            "what stops the citation expiring again.")
+        low = src.lower()
+        stale = [p for p in _EXPIRING_STATE_PHRASES if p in low]
+        assert not stale, (
+            f"{path} asserts an expiring PR/doc STATE: {stale}. #1866 is "
+            f"MERGED ({_CORRECTION_MERGE_SHA}) and `main` now AGREES with this "
+            "change's justification. Cite merged facts — a number and a sha — "
+            "never a state.")
 
 
 # --------------------------------------------------------------- housekeeping

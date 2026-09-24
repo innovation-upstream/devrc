@@ -58,6 +58,12 @@
 #   interface including the WAN-facing one. The interface-scoped range is the
 #   narrow replacement, and is the reason this script exists at all.
 #
+#   🔴 WHICH IS WHY "ALREADY APPLIED" REQUIRES `openFirewall = false`, NOT
+#   merely the presence of `programs.mosh`. A hand-written
+#   `programs.mosh.enable = true;` with no openFirewall line IS the WAN-wide
+#   opening, not this change applied; the run refuses it, names the exposure
+#   and spells the safe form rather than converging onto it.
+#
 #   The mosh entry in nix/pkgs/default.nix stays: that is the user-level CLIENT
 #   on both hosts, installed by home-manager with no sudo. This module is the
 #   SERVER side and only on the host you connect into.
@@ -83,18 +89,22 @@
 #   distance -- so the fault is upstream of both hosts and nothing in this repo
 #   causes or cures it. ssh experiences the gap as a frozen terminal and often a
 #   banner-exchange timeout; mosh carries session state over UDP and rides it.
-#   ⚠ The write-up lives in `claudedocs/handoff-laptop-airvpn-tunnel.md`, and
-#   THE COPY ON `main` CONTRADICTS THE PARAGRAPH ABOVE. It still says "Leading
-#   hypothesis (high confidence, measured): laptop's tailscale subnet route
-#   ... intercepts nebula's UDP" -- i.e. it blames one of our own hosts. The
-#   correction (the flap had TWO mechanisms; the one this script mitigates is
-#   NOT nebula's and not on either host) is on PR #1866
-#   (`fix/flap-two-mechanisms-round3`), which is OPEN and unmerged, so nothing
-#   merged corrects it today. Verified 2026-09-23: #1861 merged as `5834b4c5`
-#   and did NOT carry the correction -- an earlier version of this comment cited
-#   it and was wrong in both halves. Do not read the doc as the justification
-#   for this change until #1866 lands -- the measurement above is the
-#   justification, which is why it is restated here rather than cited.
+#   The write-up lives in `claudedocs/handoff-laptop-airvpn-tunnel.md`, and
+#   `main`'s copy now AGREES with the paragraph above: PR #1866
+#   (`fix/flap-two-mechanisms-round3`) MERGED as `b7a30bc3`, so that doc carries
+#   the two-mechanism correction and its old single-cause line is marked
+#   "SUPERSEDED, kept for the record". Verified against `origin/main`
+#   2026-09-24. So the doc may be read as the justification for this change --
+#   it is the longer version of what is restated above.
+#
+#   ⚠ THE MEASUREMENT IS STILL RESTATED HERE RATHER THAN CITED, DELIBERATELY.
+#   The restatement is what makes this file's justification legible without a
+#   second read, and it is what survived two WRONG citations of this very
+#   paragraph: one naming #1861 (merged as `5834b4c5`, which did not carry the
+#   correction), then one describing #1866's review status as pending -- a
+#   claim that expired within the hour of being written. A citation that
+#   asserts a PR's STATE has a shelf life; one that names a merge commit does
+#   not. Do not reintroduce a state claim here; a test pins this.
 #
 # SAFETY. Nothing is written until every precondition passes AND both
 # dry-builds have run: the file is patched in a temp sibling, parse-checked,
@@ -168,6 +178,75 @@ MOSH_KEY="programs.mosh"
 # string. Neither key can contain one, and erring toward "not yet applied"
 # fails safe: a duplicate attribute is rejected by `nix-instantiate --parse`.)
 code_only() { sed 's/#.*$//' "$CFG"; }
+
+# 🔴 R3-1: "THE ATTRIBUTE PATH IS PRESENT" IS NOT "THE CHANGE IS APPLIED".
+# `programs.mosh.openFirewall` DEFAULTS TO TRUE, and writing it `false` is this
+# script's entire reason to write the module explicitly (see WHAT IT INSERTS
+# above): left on, the module adds 60000-61000 to
+# `networking.firewall.allowedUDPPortRanges` -- 1001 UDP ports on EVERY
+# interface, the WAN-facing one included.
+#
+# So the idempotence check needed a THIRD fact, not a second. Before the fix a
+# config carrying `programs.mosh.enable = true;` plus the range -- with no
+# `openFirewall` line anywhere, which is the single most likely hand-written
+# spelling -- reported `ALREADY APPLIED`, exit 0, and under MOSH_FW_SWITCH=1
+# went down the converge path and SWITCHED. Measured at ee6b0ce9.
+#
+# 🔴 AND IT MUST BE SCOPED TO MOSH, NOT A WHOLE-FILE GREP. `openFirewall` is a
+# common NixOS option name; some other service's `openFirewall = false;` says
+# nothing about mosh's, and accepting it would re-open this hole through a
+# different door -- wider on one axis while narrowing another.
+#
+# Answers `false` / `true` / `absent` for `programs.mosh`'s own openFirewall,
+# reading COMMENT-STRIPPED text. `true` wins over `false` when both are seen:
+# an ambiguous config is refused, never accepted.
+#
+# ⚠ The brace tracker is deliberately crude, in the same way `code_only` is: it
+# counts `{`/`}` without understanding Nix strings or antiquotation. Neither
+# key can contain a brace, and every direction it can be wrong in errs toward
+# REFUSING, which is the safe verdict for a gate whose failure mode is opening
+# the WAN.
+mosh_openfirewall_state() {
+  code_only | awk '
+    function brace_delta(s,   i, c, d) {
+      d = 0
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "{") d++
+        else if (c == "}") d--
+      }
+      return d
+    }
+    {
+      line = $0
+
+      # --- the dotted spelling: programs.mosh.openFirewall = <bool>;
+      if (line ~ /(^|[^.[:alnum:]_])programs\.mosh\.openFirewall[[:space:]]*=[[:space:]]*true[[:space:]]*;/)
+        saw_true = 1
+      else if (line ~ /(^|[^.[:alnum:]_])programs\.mosh\.openFirewall[[:space:]]*=[[:space:]]*false[[:space:]]*;/)
+        saw_false = 1
+
+      # --- the braced spelling: programs.mosh = { ... openFirewall = X; ... }
+      scan = ""
+      if (!inblock && match(line, /(^|[^.[:alnum:]_])programs\.mosh[[:space:]]*=[[:space:]]*\{/)) {
+        inblock = 1; depth = 0
+        scan = substr(line, RSTART)
+      } else if (inblock) {
+        scan = line
+      }
+      if (inblock) {
+        if (scan ~ /openFirewall[[:space:]]*=[[:space:]]*true[[:space:]]*;/) saw_true = 1
+        else if (scan ~ /openFirewall[[:space:]]*=[[:space:]]*false[[:space:]]*;/) saw_false = 1
+        depth += brace_delta(scan)
+        if (depth <= 0) inblock = 0
+      }
+    }
+    END {
+      if (saw_true) print "true"
+      else if (saw_false) print "false"
+      else print "absent"
+    }'
+}
 
 # ------------------------------------------------------------------- helpers
 # Defined up here rather than beside their first use because the ALREADY
@@ -289,8 +368,32 @@ code_only | grep -qF "$RANGE_KEY"  && have_range=1
 code_only | grep -qE "(^|[^.[:alnum:]_])programs\.mosh([^[:alnum:]_]|$)" && have_mosh=1
 
 if [ "$have_range" = "1" ] && [ "$have_mosh" = "1" ]; then
+  # 🔴 R3-1. Both paths present is NOT enough -- see mosh_openfirewall_state
+  # above. Refuse rather than "converge" onto a config that opens the WAN.
+  openfw="$(mosh_openfirewall_state)"
+  if [ "$openfw" != "false" ]; then
+    if [ "$openfw" = "true" ]; then
+      why="explicitly set to \`true\`"
+    else
+      why="ABSENT, and the option DEFAULTS TO TRUE"
+    fi
+    die "$CFG carries \`$MOSH_KEY\` and \`$RANGE_KEY\`, but
+  \`$MOSH_KEY.openFirewall\` is $why.
+  That is NOT this change applied -- it is the WAN exposure this script exists
+  to avoid. With openFirewall on, the module adds $PORT_FROM-$PORT_TO to
+  \`networking.firewall.allowedUDPPortRanges\`: $(( PORT_TO - PORT_FROM + 1 )) UDP ports on EVERY
+  interface, the WAN-facing one included, which the interface-scoped range in
+  this file does NOT undo. Nothing was written and nothing was switched.
+  Fix it by hand -- write the flag explicitly, in whichever spelling the file
+  already uses:
+    $MOSH_KEY = { enable = true; openFirewall = false; };
+  or, beside a dotted \`$MOSH_KEY.enable = true;\`:
+    $MOSH_KEY.openFirewall = false;
+  then re-run this script."
+  fi
   echo "  state     : ALREADY APPLIED -- both \`$MOSH_KEY\` and"
-  echo "              \`$RANGE_KEY\` are already in $CFG."
+  echo "              \`$RANGE_KEY\` are already in $CFG,"
+  echo "              and \`$MOSH_KEY.openFirewall\` is set false."
   if [ "$DO_SWITCH" != "1" ]; then
     echo
     echo "Nothing to write. If you have not switched since the edit landed, run:"
