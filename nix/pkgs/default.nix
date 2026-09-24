@@ -25,41 +25,34 @@ with pkgs; [
   git
   lefthook
 
-  # mosh — ssh over a link that BLACKS OUT rather than one that is merely slow.
-  # Measured 2026-09-23 from off-LAN: the path to home dropped for ~6.5-20 s at a
-  # time, which ssh experiences as a frozen terminal and a banner-exchange
-  # timeout. mosh's UDP datagram protocol carries session state across the gap.
-  # ⚠ `via: inference`, NOT measurement — mosh was never installed while the
-  # fault was live, so nothing here demonstrates it rides that specific outage.
+  # mosh — keeps a long-lived SSH-style session ALIVE across a link that goes
+  # dark, once ssh has managed to connect. 🔴 It does NOT help you *initiate* a
+  # session over a link that is failing during connect: mosh bootstraps by
+  # running `ssh <host> mosh-server new`, parses the key and port out of THAT
+  # ssh session, and only then switches to UDP — so the TCP/SSH handshake is
+  # unchanged. An earlier wording of this comment claimed the opposite.
+  # ⚠ `via: inference` — mosh was never installed while a blackout was live, so
+  # nothing here demonstrates it against that fault.
   #
-  # 🔴 THIS IS THE CLIENT ONLY, AND THAT IS THE WHOLE CHANGE ON PURPOSE.
-  # home-manager installs it on both hosts with no sudo, which is what a laptop
-  # needs to *initiate* a session. The SERVER side is NOT shipped here: a
-  # devrc#1865 branch carried a ~600-line staged /etc/nixos editor for it, and
-  # that was CLOSED UNMERGED once the diagnosis changed — the fault turned out
-  # to be an episodic, location-specific path problem (an external host reached
-  # the same machine at 0/300 while this laptop lost 45%), so the script was
-  # hardening a sudo rewrite of a remote host's config to mitigate something
-  # that had already stopped. What it automated is two lines, hand-edited once,
-  # at the console of the host you want to mosh INTO:
+  # This entry is the CLIENT ONLY. The server side is a system-level change,
+  # hand-edited once at the console of the host you want to mosh INTO:
   #
   #     programs.mosh = { enable = true; openFirewall = false; };
   #     networking.firewall.interfaces."nebula.mesh".allowedUDPPortRanges =
   #       [ { from = 60000; to = 61000; } ];
   #
-  # 🔴 `openFirewall` DEFAULTS TO TRUE and must be turned off: it opens 1001 UDP
-  # ports on EVERY interface, WAN included. The interface-scoped range is the
-  # narrow replacement — but "scoped to the mesh" is not "reachable only from
-  # the admin laptop": inside the mesh the gate is nebula's own
-  # firewall.inbound, which allows any/any from every listed GROUP (measured
-  # 2026-09-23 on the laptop: three — lighthouse, admin, workbench — plus icmp
-  # from any). Read the target host's own inbound rules before assuming the
-  # exposure is smaller. Without the server half, `mosh <host>` hangs at
-  # "Connecting..." with no diagnostic naming the firewall.
+  # 🔴 `openFirewall` DEFAULTS TO TRUE and must be turned off — it opens 1001
+  # UDP ports (60000-61000) on EVERY interface, WAN included. The
+  # interface-scoped range is the narrow replacement, but "scoped to the mesh"
+  # is not "reachable only from this laptop": inside the mesh the gate is
+  # nebula's own `firewall.inbound`, whose group list is PER-HOST and differs
+  # between hosts. Read the TARGET host's own inbound rules; do not carry a
+  # count from somewhere else.
+  # Without the server half, `mosh <host>` hangs at "Connecting..." with no
+  # diagnostic naming the firewall.
   #
-  # The long version, including why the staged script was dropped, is the
-  # `devrc/nix` entry in the subsystem index and
-  # claudedocs/handoff-laptop-airvpn-tunnel.md.
+  # Why there is no script for that edit, and the two audit lessons behind this
+  # entry: the `devrc/nix` subsystem-index entry (`cairn recall --repo .`).
   mosh
 
   # age — file encryption for the /analyze-service index off-machine backup
