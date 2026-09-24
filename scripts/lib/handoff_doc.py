@@ -4033,6 +4033,39 @@ LEAK_PRE_EXISTING_FLAG = "--leak-pre-existing-approved"
 LEAK_TRAILER_KEY = "Leak-Gate-Approved"
 
 
+#: 🔴 THE COMMIT MESSAGE WAS SCANNED BY NOTHING, AND IT IS THE CHANNEL A DENIED
+#: IDENTIFIER ACTUALLY TRAVELLED ON — one is on a PUBLIC repository's `main` in a
+#: commit message today. Rule (o) runs the target repo's own scanner over the
+#: WORKING TREE, and `--advanced` never lands in the tree: it becomes the commit
+#: SUBJECT (and a line on stdout) and nothing else. So the gate vouched for the
+#: doc while the message went past it unread. MEASURED on 5273d71b against
+#: cairn's real `tests/leakscan.py`: `--advanced` carrying `DENY_CANARY` with a
+#: clean doc delta → `leakscan: … exited 0 … the repo's OWN gate vouches for it`,
+#: rc 0, commit created, identifier in `git log -1`.
+#:
+#: 🔴 THE FIX IS A FILE, NOT A SECOND SCAN, AND THAT IS WHY THE BLACK BOX
+#: SURVIVES. The scanner takes no path and no text argument — it enumerates the
+#: repo from its own location and reads bytes off disk — so the only way to put
+#: text in front of it is to put the text in the tree. Materialising the message
+#: as an UNTRACKED file at the same moment as the doc write means the ONE
+#: existing scan covers doc and message in one verdict: no second invocation to
+#: attribute between (the shape `leak_gate`'s docstring rejects at length), no
+#: output parsing, no scanner internals imported.
+#:
+#: The name is root-relative and carries the PID so two concurrent handoff runs
+#: in one shared clone cannot delete each other's probe. ⚠ They can still READ
+#: each other's — a scan sees the whole tree — which is the same pre-existing
+#: exposure `leak_gate` already names a concurrent writer for, not a new one.
+MESSAGE_PROBE_PREFIX = ".handoff-commit-message-"
+
+#: `.md` on purpose: the probe must land in whatever set the target repo's
+#: scanner considers source. cairn's reads every enumerated non-binary file, so
+#: the suffix buys nothing there — but a scanner with a suffix list is the
+#: realistic other shape, and `.md` is the extension a handoff tool's text
+#: plausibly appears under.
+MESSAGE_PROBE_SUFFIX = ".md"
+
+
 class ScanRun(typing.NamedTuple):
     """One scanner invocation: its exit code and each stream it printed.
 
@@ -4257,9 +4290,11 @@ def leak_refusal_report(
     operator can act on — and it stops the COMMIT, which is the public one.
 
     🔴 IT CLAIMS THE SCANNER REFUSED, NOT THAT THIS DELTA CAUSED IT. The gate
-    makes no attribution, so the message offers BOTH remedies and does not
-    pretend to know which one applies: fix the scratch file, or — if the tree
-    was already red — say so explicitly with the flag.
+    makes no attribution, so the message offers every remedy and does not
+    pretend to know which one applies: fix the scratch file, fix the `--advanced`
+    text (which `MESSAGE_PROBE_PREFIX` puts in front of the scanner too, so this
+    arm is now reachable from either input), or — if the tree was already red —
+    say so explicitly with the flag.
     """
     shown, elided = _scanner_tail(run)
     return (
@@ -4283,9 +4318,9 @@ def leak_refusal_report(
             if elided
             else ""
         )
-        + f"  Fix the SCRATCH FILE (--update), not {relpath}, and re-run: the "
-        f"doc was rolled back to the bytes this run found, so nothing has to be "
-        f"undone first.\n"
+        + f"  Fix the SCRATCH FILE (--update) or the --advanced TEXT, not "
+        f"{relpath}, and re-run: the doc was rolled back to the bytes this run "
+        f"found, so nothing has to be undone first.\n"
         f"  🔴 IF THIS TREE WAS ALREADY RED for something this handoff did not "
         f"cause, that is an OPERATOR DECISION and not a guess this tool may "
         f"make for you: read the lines above, then re-run with "
@@ -4362,6 +4397,154 @@ def leak_unscannable_report(
         f"this repo's CI runs — then re-run:\n"
         f"      {_rerun_hint(rel, repo)}"
     )
+
+
+def message_probe_relpath(pid: int | None = None) -> str:
+    """The root-relative path the commit-message probe is written to.
+
+    ROOT-relative rather than beside the doc, and that is the one dimension of
+    the name that is load-bearing: cairn's scanner skips every file under
+    `.git/`, `__pycache__/`, `.pytest_cache/` and `node_modules/`, and a skip
+    list is the ordinary shape. The repo root is the only directory a whole-tree
+    scanner cannot be skipping, because skipping it would skip the repo.
+
+    ⚠ A COLLISION AT THIS PATH IS OVERWRITTEN AND THEN DELETED, AND THAT IS SAID
+    RATHER THAN GUARDED. The realistic occupant is a leftover probe from a run
+    that was killed before its cleanup, and overwriting that is the right
+    behaviour. A file someone genuinely NAMED this would have to be TRACKED, and
+    MEASURED: `message_probe_is_enumerated` returns False for a tracked path
+    (`--others` lists untracked files only), so that run REFUSES rather than
+    passing silently — the loss is a working-tree copy of a tracked file, which
+    `git restore` recovers. A pre-write arm would buy one `git ls-files` worth of
+    precision over that, and the arm is the more expensive thing.
+    """
+    return (f"{MESSAGE_PROBE_PREFIX}{os.getpid() if pid is None else pid}"
+            f"{MESSAGE_PROBE_SUFFIX}")
+
+
+def message_probe_text(subject: str, advanced: str) -> str:
+    """The OPERATOR FREE TEXT this run is about to put somewhere durable.
+
+    🔴 THE SCOPE IS OPERATOR TEXT, AND THE MACHINE-GENERATED TRAILERS ARE
+    DELIBERATELY OUT OF IT. `Claude-Session-Id` is a UUID this tool resolved, not
+    something a human typed, and `LEAK_TRAILER_KEY`'s value is *the gate's own
+    verdict* — scanning it would need the verdict that this scan produces, which
+    is a cycle, and it is the reason the fully-assembled message cannot be what
+    is scanned. `commit_message` composes those two after the gate has ruled.
+
+    🔴 BOTH SPELLINGS OF THE OPERATOR TEXT, BECAUSE THE GATE IS A BLACK BOX.
+    Line 1 is byte-for-byte the subject that lands in the commit — the truncated,
+    prefixed thing the closing condition names. Line 2 onward is the WHOLE
+    `--advanced` value, which `main` also prints to stdout and therefore re-stages
+    in any transcript `transcript-push.sh` ships.
+
+    Scanning only the subject would have been defensible and is NOT what this
+    does, for two reasons. (1) The whole value reaches a captured channel even
+    when `[:100]` and `splitlines()[0]` drop it from the commit, so a hostname in
+    line 3 of a multi-line `--advanced` would have been missed. (2) For a general
+    scanner the truncation can cut the other way too: `[:100]` can leave a
+    fragment that matches a rule the untruncated text does not. cairn's
+    `denied_identifiers` walks segment PREFIXES, so there it cannot — but this
+    gate does not know which scanner it is talking to, and assuming a matcher's
+    shape is exactly what "black box" forbids. Feeding both strings needs no
+    assumption about either.
+
+    ⚠ IT IS A SUPERSET OF THE COMMIT MESSAGE, SO IT CAN REFUSE TEXT THAT WOULD
+    NEVER HAVE BEEN COMMITTED. That is the intended direction: the stdout channel
+    is real, and the remedy is the same either way — reword `--advanced`.
+    """
+    return f"{subject}\n{advanced.strip()}\n"
+
+
+def message_probe_is_enumerated(repo: Path, rel: str) -> bool:
+    """Does the target repo's own `git` list `rel` as an untracked, unignored file?
+
+    🔴 THE POSITIVE CONTROL FOR THE WHOLE MECHANISM, AND WITHOUT IT THE FAILURE
+    IS A SILENT, PERMANENT PASS. A whole-tree scanner finds untracked files with
+    `git ls-files --others --exclude-standard`, which OBEYS `.gitignore` — so a
+    repo whose ignore rules happen to cover this path would make every
+    commit-message scan from then on read a file the scanner never opens, and
+    report `exited 0` for a message carrying anything at all.
+
+    MEASURED, both directions, on a throwaway repo carrying cairn's real
+    `tests/leakscan.py` and a probe spelling `DENY_CANARY`:
+      - not ignored → `ls-files` lists the path; scanner `2 file(s) scanned`,
+        `1 finding(s) — REFUSING`, exit 1.
+      - `.gitignore` carrying `.handoff-commit-message-*` → `ls-files` prints
+        NOTHING; scanner `1 file(s) scanned`, `0 findings`, exit 0, and the probe
+        appears in its output zero times.
+    The second run is the silent pass, and it is indistinguishable from a clean
+    message in every observable this gate has.
+
+    ⚠ IT IS THE SAME QUESTION *cairn's* SCANNER ASKS, NOT EVERY SCANNER'S. A gate
+    that enumerated `--cached` only would not see an untracked probe however this
+    answers; there is no black-box way to ask a scanner what it read. So this
+    proves the path is REACHABLE by the standard enumeration, which is the
+    strongest claim available without parsing output.
+
+    Raises `GitError` like every other `git` call here, which `main`'s
+    `except (GitError, OSError)` turns into `status=failed` with the doc rolled
+    back — the same treatment as any other git step that cannot answer.
+    """
+    out = git(repo, "ls-files", "--others", "--exclude-standard", "-z", "--", rel)
+    return rel in [x for x in out.split("\0") if x]
+
+
+def leak_message_unscannable_report(rel: str, repo: Path, probe_rel: str) -> str:
+    """The probe was written and the repo's own `git` will not enumerate it.
+
+    Same family as `leak_unscannable_report` and the same ruling for the same
+    reason: this arm produced NO VERDICT about the commit message, so
+    `LEAK_PRE_EXISTING_FLAG` does not reach it either — there is nothing for an
+    operator to have read and approved. What is different is the remedy, which is
+    in the caller's own repository rather than in its scanner.
+    """
+    return (
+        f"status=leak-refused scanner={rel}\n"
+        f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+        f"  The COMMIT MESSAGE is scanned by writing it to `{probe_rel}` so that "
+        f"{rel} reads it off the tree with everything else — and this repo's own "
+        f"`git ls-files --others --exclude-standard` does NOT list that path, so "
+        f"the scanner would never have opened it.\n"
+        f"  🔴 THAT IS A SILENT PASS, NOT A CLEAN RESULT. Every message from now "
+        f"on would be reported `exited 0` whatever it carried, which is the "
+        f"failure this gate exists to stop: `--advanced` becomes the commit "
+        f"subject, and a commit message reaches a public mainline without any "
+        f"scanner having read it.\n"
+        f"  Almost always an ignore rule. Find it and narrow it:\n"
+        f"      git -C {repo} check-ignore -v -- {probe_rel}\n"
+        f"  `{LEAK_PRE_EXISTING_FLAG}` does not reach this arm: no verdict about "
+        f"the message was produced, so there is nothing to approve."
+    )
+
+
+def remove_message_probe(probe: Path) -> str:
+    """Delete the probe. Returns text naming what is LEFT BEHIND, or empty.
+
+    🔴 EVERY EXIT PATH, WHICH IS WHY THE CALLER USES `finally` RATHER THAN
+    THREADING THIS THROUGH `_undo_write`. The probe is an untracked file in a
+    possibly-shared checkout — invisible to `git status -s` habits that scan for
+    ` M`, and swept in by anyone's `git add -A` — so it must not survive a clean
+    run, a refusal, a `GitError`, or an exception nobody predicted. `_undo_write`
+    runs on two of those four; `finally` runs on all of them, and on the ones a
+    future edit adds without reading this.
+
+    Non-raising for `_undo_write`'s reason — it runs on error paths, where a
+    cleanup that threw would replace the caller's diagnosis with its own — and
+    it RETURNS the failure as text rather than swallowing it, because silence
+    about a file left in someone else's checkout is the same defect one level
+    down.
+    """
+    try:
+        probe.unlink(missing_ok=True)
+    except OSError as exc:
+        return (
+            f"\n🔴 LEFT BEHIND: {probe} could not be removed ({exc}). It is an "
+            f"UNTRACKED file in this checkout and it holds this run's "
+            f"`--advanced` text. Delete it by hand — `git add -A` elsewhere "
+            f"would commit it."
+        )
+    return ""
 
 
 def leak_gate(
@@ -5343,6 +5526,24 @@ def main(argv: list[str] | None = None) -> int:
     # `Path.is_file()`, and so the refusal below cannot be a surprise about where
     # the scanner was expected to be.
     lookup = find_leak_scanner(repo)
+    # 🔴 HOISTED ABOVE THE GATE SO THE GATE CAN SCAN IT, and it costs nothing:
+    # the subject depends only on `--advanced`, never on the verdict. It used to
+    # be computed after the gate, which is the whole reason the commit message
+    # was scanned by nothing — `message = commit_message(subject, leak_trailer=…)`
+    # genuinely cannot exist before the verdict, and the SUBJECT was assumed to
+    # share that constraint. It does not.
+    subject = f"docs(handoff): {args.advanced.strip().splitlines()[0]}"[:100]
+    # 🔴 THE TRUNCATION IS ON THE SUBJECT, AND THE TRAILERS ARE ADDED AFTER IT.
+    # `[:100]` bounds the summary line; applying it to the whole message would
+    # have cut a trailer off exactly when the summary was longest, i.e. silently
+    # and on the busiest commits.
+    #
+    # 🔴 ONLY WHEN A SCANNER WILL ACTUALLY RUN. With no scanner the gate passes
+    # by absence and says so, so a probe would buy nothing while adding a new
+    # refusal arm to every repo that has none — which is most of them, devrc
+    # included. `lookup.path is not None` already implies `not lookup.unusable`.
+    probe_rel = message_probe_relpath() if lookup.path is not None else ""
+    probe = repo / probe_rel if probe_rel else None
     try:
         doc.parent.mkdir(parents=True, exist_ok=True)
         doc.write_text(merged_text, encoding="utf-8")
@@ -5353,6 +5554,22 @@ def main(argv: list[str] | None = None) -> int:
         # once it is written. Staging first would add nothing and would leave a
         # staged path behind on the refusal, which is the shape
         # `TestBlockedCommitLeavesNoTrace` exists for.
+        #
+        # 🔴 …AND THE COMMIT MESSAGE IS PUT IN THE TREE AT THE SAME MOMENT, for
+        # the same reason and read by the same single scan. `--advanced` never
+        # reaches a tracked file, so before this the message was the one channel
+        # rule (o) could not see — and the one a denied identifier took onto a
+        # public mainline. See `MESSAGE_PROBE_PREFIX`.
+        if probe is not None:
+            probe.write_text(
+                message_probe_text(subject, args.advanced), encoding="utf-8")
+            if not message_probe_is_enumerated(repo, probe_rel):
+                print(
+                    f"{leak_message_unscannable_report(lookup.rel, repo, probe_rel)}"
+                    f"{_undo_write(repo, doc, relpath, original, staged)}",
+                    file=sys.stderr,
+                )
+                return EXIT_LEAK_REFUSED
         verdict = leak_gate(
             repo, relpath, lookup, args.leak_pre_existing_approved
         )
@@ -5364,13 +5581,19 @@ def main(argv: list[str] | None = None) -> int:
             )
             return EXIT_LEAK_REFUSED
         print(verdict.notes)
+        if probe_rel:
+            # 🔴 SAID BY THE CALLER, BECAUSE THE CALLER IS WHAT OWNS THE PROBE —
+            # `leak_gate` is handed a tree and knows nothing about it, the same
+            # separation that leaves the write and the rollback here. And it is
+            # SAID AT ALL because `leak_clean_note` names only the doc: without
+            # this line a scanned message and an unscanned one print identically,
+            # which is the reassuring zero `claude/RULES.md` forbids quoting.
+            print(
+                f"leakscan: …and the commit SUBJECT plus the whole --advanced "
+                f"text were in that same scan, via the untracked {probe_rel}."
+            )
         git(repo, "add", "--", relpath)
         staged = True
-        subject = f"docs(handoff): {args.advanced.strip().splitlines()[0]}"[:100]
-        # 🔴 THE TRUNCATION IS ON THE SUBJECT, AND THE TRAILERS ARE ADDED AFTER
-        # IT. `[:100]` bounds the summary line; applying it to the whole message
-        # would have cut a trailer off exactly when the summary was longest,
-        # i.e. silently and on the busiest commits.
         message = commit_message(subject, leak_trailer=verdict.trailer)
         # Path-limited on purpose: exactly one commit, carrying exactly the
         # diff that was shown, even if the caller had other work staged.
@@ -5387,6 +5610,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"status=failed\n{exc}{note}", file=sys.stderr)
         return EXIT_FAIL
+    finally:
+        # 🔴 EVERY EXIT PATH OF THIS BLOCK, WHICH IS WHAT `finally` BUYS OVER
+        # THREE CALL SITES: the clean run, rule (o)'s two refusals, the
+        # `except` arm, AND an exception nobody predicted — `run_leak_scanner`'s
+        # docstring records a `ValueError` that escaped this very block once and
+        # left the unvouched doc written. It also covers the return a future edit
+        # adds without reading this. `remove_message_probe` is idempotent
+        # (`missing_ok=True`), so a second call would be harmless; there is no
+        # second call, which is the point.
+        if probe is not None:
+            left = remove_message_probe(probe)
+            if left:
+                print(left.lstrip("\n"), file=sys.stderr)
 
     if args.push:
         # No `branch=` here: the line that follows on either push outcome already
