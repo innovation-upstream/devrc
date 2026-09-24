@@ -44,7 +44,10 @@
 #   enough -- this is the other half.
 #
 # WHAT IT INSERTS, AND WHY BOTH HALVES
-#   programs.mosh = { enable = true; openFirewall = false; };
+#   programs.mosh = {          # multi-line on purpose: the one-line spelling
+#     enable = true;           # is NOT one of the two forms the idempotence
+#     openFirewall = false;    # check can read (see mosh_openfirewall_state)
+#   };
 #   networking.firewall.interfaces."nebula.mesh".allowedUDPPortRanges =
 #     [ { from = 60000; to = 61000; } ];
 #
@@ -197,52 +200,114 @@ code_only() { sed 's/#.*$//' "$CFG"; }
 # nothing about mosh's, and accepting it would re-open this hole through a
 # different door -- wider on one axis while narrowing another.
 #
-# Answers `false` / `true` / `absent` for `programs.mosh`'s own openFirewall,
-# reading COMMENT-STRIPPED text. `true` wins over `false` when both are seen:
-# an ambiguous config is refused, never accepted.
+# Answers `false` / `true` / `unknown` / `absent` for `programs.mosh`'s own
+# openFirewall, reading COMMENT-STRIPPED text. Only `false` lets the run
+# proceed; the other three all REFUSE, and they are kept apart because they are
+# three different mistakes with three different fixes in the reader's head.
 #
-# ⚠ The brace tracker is deliberately crude, in the same way `code_only` is: it
-# counts `{`/`}` without understanding Nix strings or antiquotation. Neither
-# key can contain a brace, and every direction it can be wrong in errs toward
-# REFUSING, which is the safe verdict for a gate whose failure mode is opening
-# the WAN.
+# 🔴 R4-F1: THE SCANNER USED TO HAVE CONFIDENT-WRONG-`false` MODES, AND THE
+# COMMENT HERE CLAIMED IT HAD NONE. The previous version tracked `{`/`}` depth
+# across a block and credited ANY `openFirewall = false;` seen while the depth
+# was still positive. Five shapes made that read `false` over a config whose
+# mosh openFirewall is ABSENT -- i.e. defaulting to TRUE, 1001 UDP ports on
+# every interface -- and the run then printed the affirmative
+# "and `programs.mosh.openFirewall` is set false" and, under MOSH_FW_SWITCH=1,
+# switched. Reproduced end to end at 8e389f18:
+#   1. `x = "a#b";` inside the block with the closing `};` after the `#` on the
+#      same line: `code_only` ate the brace, depth never returned to 0, and a
+#      foreign `services.jellyfin.openFirewall = false;` BELOW the block was
+#      credited to mosh;
+#   2. a `{` inside a Nix string, same mechanism;
+#   3. `environment.etc."n".text = "programs.mosh.openFirewall = false;";` --
+#      the dotted regex matched INSIDE a string literal;
+#   4. `}; services.jellyfin.openFirewall = false;` on ONE line -- the
+#      openFirewall test ran before the depth was decremented;
+#   5. `x = let openFirewall = false; in 1;` inside the block.
+#
+# So the scan no longer tries to be clever. It credits a `false` from exactly
+# TWO shapes, both of which must be UNAMBIGUOUS on their own line:
+#
+#   (a) the dotted form, alone on its line apart from indentation:
+#         programs.mosh.openFirewall = false;
+#       Anchored at the start of the line, which is what rules out a match
+#       inside a string literal and rules out `services.programs.mosh...`.
+#
+#   (b) the bare form inside a WELL-FORMED braced block:
+#         programs.mosh = {
+#           ...
+#           openFirewall = false;
+#         };
+#       The opener must END at the `{`; the closer must be `};` alone on its
+#       line; no other line in the block may contain a brace at all; and the
+#       crediting line must be `openFirewall = <bool>;` alone. This is the
+#       block this script itself writes.
+#
+# Everything else about mosh that this cannot read cleanly is `unknown`, which
+# refuses: a `programs.mosh =` assignment that is not the exact opener (a
+# one-liner, `lib.mkIf`, a brace on the next line), a brace or a stray
+# `openFirewall` mention inside the block, a block that never closes, and a
+# `programs.mosh.openFirewall` that is not the anchored dotted form.
+#
+# ⚠ WHAT IS STILL TRUE, AND WHAT IS NOT. This is NOT a Nix parser and the
+# comment above used to claim more than that bought: it said "every direction it
+# can be wrong in errs toward REFUSING", which was false. The honest claim is
+# narrower and has named limits:
+#   * a `false` is credited only from one of the two anchored shapes above, so a
+#     foreign `openFirewall = false` -- above the block, below it, or on the same
+#     line as the closer -- cannot satisfy the gate;
+#   * `code_only` still cannot see a `#` inside a Nix string, so a line can be
+#     truncated. A truncated line can only LOSE a credit or gain an `unknown`
+#     (both refuse); it cannot manufacture one of the two anchored shapes,
+#     because both must end in `;` and the truncation deletes the tail;
+#   * it reads ONE file. A `programs.mosh.openFirewall` set in an imported module
+#     -- or computed, `lib.mkForce`d, or `mkIf`d -- is invisible here, and this
+#     file cannot make a claim about it. That is a limit, not a safe direction:
+#     it is safe only because an unreadable mosh config lands on `absent` or
+#     `unknown`, which REFUSE, and because the affirmative banner is printed
+#     from `false` alone.
 mosh_openfirewall_state() {
   code_only | awk '
-    function brace_delta(s,   i, c, d) {
-      d = 0
-      for (i = 1; i <= length(s); i++) {
-        c = substr(s, i, 1)
-        if (c == "{") d++
-        else if (c == "}") d--
-      }
-      return d
-    }
+    function rtrim(s) { sub(/[[:space:]]+$/, "", s); return s }
+    function ltrim(s) { sub(/^[[:space:]]+/, "", s); return s }
     {
-      line = $0
+      t = rtrim($0)     # comment-stripped, trailing space removed
+      s = ltrim(t)      # ... and leading indentation removed
 
-      # --- the dotted spelling: programs.mosh.openFirewall = <bool>;
-      if (line ~ /(^|[^.[:alnum:]_])programs\.mosh\.openFirewall[[:space:]]*=[[:space:]]*true[[:space:]]*;/)
-        saw_true = 1
-      else if (line ~ /(^|[^.[:alnum:]_])programs\.mosh\.openFirewall[[:space:]]*=[[:space:]]*false[[:space:]]*;/)
-        saw_false = 1
-
-      # --- the braced spelling: programs.mosh = { ... openFirewall = X; ... }
-      scan = ""
-      if (!inblock && match(line, /(^|[^.[:alnum:]_])programs\.mosh[[:space:]]*=[[:space:]]*\{/)) {
-        inblock = 1; depth = 0
-        scan = substr(line, RSTART)
-      } else if (inblock) {
-        scan = line
-      }
       if (inblock) {
-        if (scan ~ /openFirewall[[:space:]]*=[[:space:]]*true[[:space:]]*;/) saw_true = 1
-        else if (scan ~ /openFirewall[[:space:]]*=[[:space:]]*false[[:space:]]*;/) saw_false = 1
-        depth += brace_delta(scan)
-        if (depth <= 0) inblock = 0
+        # The ONLY accepted closer. Anything else carrying a brace is a shape
+        # this scanner does not model -- refuse rather than guess at the depth.
+        if (s == "};") { inblock = 0; next }
+        if (t ~ /[{}]/) { ambiguous = 1; inblock = 0; next }
+        if (s ~ /^openFirewall[[:space:]]*=[[:space:]]*true[[:space:]]*;$/) { saw_true = 1; next }
+        if (s ~ /^openFirewall[[:space:]]*=[[:space:]]*false[[:space:]]*;$/) { saw_false = 1; next }
+        # A mention that is not the anchored form -- `let openFirewall = ...`,
+        # a foreign dotted path, a multi-line `openFirewall =` -- is unreadable.
+        if (t ~ /openFirewall/) { ambiguous = 1 }
+        next
       }
+
+      # A `programs.mosh = ...` assignment. Exactly one spelling opens a block;
+      # every other one (one-liner, `lib.mkIf`, brace on the next line) is a
+      # shape this scanner will not read.
+      if (t ~ /(^|[^.[:alnum:]_])programs\.mosh[[:space:]]*=/) {
+        if (s ~ /^programs\.mosh[[:space:]]*=[[:space:]]*\{$/) inblock = 1
+        else ambiguous = 1
+        next
+      }
+
+      # The dotted spelling, ANCHORED: nothing may precede it on the line but
+      # indentation, and nothing may follow the `;`. That is what keeps a match
+      # inside a string literal, and `services.programs.mosh.openFirewall`, out.
+      if (s ~ /^programs\.mosh\.openFirewall[[:space:]]*=[[:space:]]*true[[:space:]]*;$/) { saw_true = 1; next }
+      if (s ~ /^programs\.mosh\.openFirewall[[:space:]]*=[[:space:]]*false[[:space:]]*;$/) { saw_false = 1; next }
+      if (t ~ /programs\.mosh\.openFirewall/) { ambiguous = 1 }
     }
     END {
+      if (inblock) ambiguous = 1     # a block that never closed
+      # Precedence is the fail-closed order: an explicit `true` first, then
+      # anything unreadable, and only then a credited `false`.
       if (saw_true) print "true"
+      else if (ambiguous) print "unknown"
       else if (saw_false) print "false"
       else print "absent"
     }'
@@ -374,6 +439,15 @@ if [ "$have_range" = "1" ] && [ "$have_mosh" = "1" ]; then
   if [ "$openfw" != "false" ]; then
     if [ "$openfw" = "true" ]; then
       why="explicitly set to \`true\`"
+    elif [ "$openfw" = "unknown" ]; then
+      # 🔴 R4-F1. NOT the same mistake as ABSENT, and saying so matters: the
+      # flag may well be written false in a spelling this script cannot read,
+      # in which case the fix is to rewrite it in one of the two forms below
+      # rather than to add it. Refusing is still the only safe verdict -- the
+      # gate's failure mode is opening the WAN, so an unreadable config is
+      # treated exactly like a missing one.
+      why="written in a spelling this script CANNOT READ with confidence, so it
+  is treated as ON. Find it with \`grep -n 'programs\.mosh\|openFirewall' $CFG\`"
     else
       why="ABSENT, and the option DEFAULTS TO TRUE"
     fi
@@ -384,13 +458,24 @@ if [ "$have_range" = "1" ] && [ "$have_mosh" = "1" ]; then
   \`networking.firewall.allowedUDPPortRanges\`: $(( PORT_TO - PORT_FROM + 1 )) UDP ports on EVERY
   interface, the WAN-facing one included, which the interface-scoped range in
   this file does NOT undo. Nothing was written and nothing was switched.
-  Fix it by hand -- write the flag explicitly, in whichever spelling the file
-  already uses:
-    $MOSH_KEY = { enable = true; openFirewall = false; };
-  or, beside a dotted \`$MOSH_KEY.enable = true;\`:
+  Fix it by hand. 🔴 THESE TWO SPELLINGS ARE THE ONLY ONES THIS CHECK READS --
+  a one-line \`$MOSH_KEY = { ... };\`, a \`lib.mkIf\`, a \`lib.mkForce\` or a
+  brace on the next line all land on \`unknown\` and are refused again:
+    $MOSH_KEY = {
+      enable = true;
+      openFirewall = false;
+    };
+  or, beside a dotted \`$MOSH_KEY.enable = true;\`, alone on its own line:
     $MOSH_KEY.openFirewall = false;
   then re-run this script."
   fi
+  # 🔴 R4-F1: THIS AFFIRMATIVE IS A SECURITY CLAIM AND IS PRINTED FROM
+  # `false` ALONE. It is reachable only past the `die` above, i.e. only when
+  # `mosh_openfirewall_state` credited one of its two anchored shapes. `absent`
+  # and `unknown` both refuse, so this line can never be an assurance made about
+  # a config the scanner could not read -- which is exactly what it was at
+  # 8e389f18, where five shapes printed it over an openFirewall defaulting to
+  # TRUE. A wrong affirmative here is worse than silence.
   echo "  state     : ALREADY APPLIED -- both \`$MOSH_KEY\` and"
   echo "              \`$RANGE_KEY\` are already in $CFG,"
   echo "              and \`$MOSH_KEY.openFirewall\` is set false."
@@ -460,7 +545,10 @@ elif [ "$have_range" != "$have_mosh" ]; then
   die "$CFG is HALF configured: \`$present\` is present but \`$missing\` is not.
   This script only knows how to insert both at once, and will not merge into a
   partial edit. Add the missing half by hand:
-    $MOSH_KEY = { enable = true; openFirewall = false; };
+    $MOSH_KEY = {
+      enable = true;
+      openFirewall = false;   # the one-line form is NOT read by the
+    };                        # idempotence check -- keep it multi-line
     networking.firewall.$RANGE_KEY = [ { from = $PORT_FROM; to = $PORT_TO; } ];"
 fi
 
@@ -509,7 +597,10 @@ if [ "$anchor_count" != "1" ]; then
   all REFUSED rather than guessed at -- inserting after any of them puts the
   keys at the wrong option scope, which still parses and then fails evaluation.
   Add both by hand instead:
-    $MOSH_KEY = { enable = true; openFirewall = false; };
+    $MOSH_KEY = {
+      enable = true;
+      openFirewall = false;   # the one-line form is NOT read by the
+    };                        # idempotence check -- keep it multi-line
     networking.firewall.$RANGE_KEY = [ { from = $PORT_FROM; to = $PORT_TO; } ];"
 fi
 ANCHOR_LINE="$anchor_lines"

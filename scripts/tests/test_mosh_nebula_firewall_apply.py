@@ -621,8 +621,23 @@ def _assert_refused_for_wan_exposure(res, rig_obj, why: str | None = None):
     assert "ALREADY APPLIED" not in res.stdout, res.stdout
     assert "openFirewall" in res.stderr, res.stdout + res.stderr
     assert "WAN" in res.stderr, res.stderr
+    # 🟢 ROUND-4, "also worth closing": the docstring above says "the safe
+    # form", and claim 1 names TWO spellings — the braced block and the dotted
+    # line. This pinned only the substring both happen to share, so a refusal
+    # that dropped the dotted half, or that spelled the braced half as the
+    # ONE-LINE `programs.mosh = { enable = true; openFirewall = false; };`,
+    # still passed. The one-line spelling matters because the round-4 scanner
+    # does not read it: handing it to the operator is advice whose result is a
+    # second refusal. The guard is now as wide as the sentence.
     assert "openFirewall = false;" in res.stderr, (
         "the refusal must SPELL the safe form, not just name the problem")
+    assert "programs.mosh.openFirewall = false;" in res.stderr, (
+        "the refusal must spell the DOTTED safe form")
+    assert re.search(
+        r"programs\.mosh = \{\n\s+enable = true;\n\s+openFirewall = false;",
+        res.stderr), (
+        "the refusal must spell the braced safe form MULTI-LINE — the one-line "
+        f"spelling is not one the idempotence check reads\n{res.stderr}")
     if why is not None:
         # "you wrote it true" and "you never wrote it" are DIFFERENT mistakes
         # with different fixes in the reader's head, and the script distinguishes
@@ -639,6 +654,10 @@ def _assert_refused_for_wan_exposure(res, rig_obj, why: str | None = None):
 
 _ABSENT = "ABSENT, and the option DEFAULTS TO TRUE"
 _TRUE = "explicitly set to `true`"
+# R4-F1's third refusal: the scan could not read the flag with confidence, so
+# it is treated as ON. A DIFFERENT mistake from ABSENT — the flag may already
+# say false, in a spelling this script declines to certify.
+_UNKNOWN = "CANNOT READ with confidence"
 
 
 @pytest.mark.parametrize("label,mosh_text,why", [
@@ -743,6 +762,285 @@ def test_openFirewall_false_inside_the_braced_mosh_block_is_ALREADY_APPLIED(tmp_
     assert r.cfg.read_text() == r.original_cfg_text
     assert r.backups() == []
     assert r.log("rebuild") == []
+
+
+# ------------------------------------------- R4-F1: the scanner's wrong-`false`
+# 🔴 ROUND-4 FINDING 1 — REGRESSION COVERAGE, five shapes, each reproduced
+# end to end against the UNMUTATED script at 8e389f18.
+#
+# `mosh_openfirewall_state` at 8e389f18 tracked `{`/`}` depth and credited ANY
+# `openFirewall = false;` seen while the depth was positive. Each fixture below
+# made it print `false` for a config whose mosh openFirewall is ABSENT — i.e.
+# defaulting to TRUE, 1001 UDP ports on EVERY interface, WAN included. The run
+# then printed `state : ALREADY APPLIED`, printed the affirmative "and
+# `programs.mosh.openFirewall` is set false", exited 0, and under
+# MOSH_FW_SWITCH=1 ran `nixos-rebuild switch`.
+#
+# MEASURED at 8e389f18: all five rows exit 0 with ALREADY APPLIED. They are the
+# reason the 🔴 comment claiming "every direction it can be wrong in errs toward
+# REFUSING" was deleted rather than reworded — it was false, and a wrong
+# affirmative security claim is worse than silence.
+_FOREIGN_FALSE = "  services.jellyfin.openFirewall = false;\n"
+
+_WRONG_FALSE_SHAPES = [
+    # 1. `#` inside a Nix string eats the closing `};`: `code_only` truncates
+    #    the line, depth never returns to 0, and a FOREIGN `openFirewall =
+    #    false;` BELOW the block is credited to mosh.
+    ("hash inside a string swallows the closer",
+     "  programs.mosh = {\n"
+     "    enable = true;\n"
+     '    motd = "a#b"; };\n'
+     + _FOREIGN_FALSE.rstrip("\n")),
+    # 2. Same mechanism, different truncation: a `{` inside a string inflates
+    #    the depth, so the real `};` leaves it at 1 and the block stays open.
+    ("brace inside a string inflates the depth",
+     "  programs.mosh = {\n"
+     "    enable = true;\n"
+     '    motd = "{";\n'
+     "  };\n"
+     + _FOREIGN_FALSE.rstrip("\n")),
+    # 3. The DOTTED regex matching inside a string literal. Nothing to do with
+    #    braces: `"` satisfied the old left boundary `[^.[:alnum:]_]`.
+    ("the dotted form matched inside a string literal",
+     "  programs.mosh.enable = true;\n"
+     '  environment.etc."n".text = "programs.mosh.openFirewall = false;";'),
+    # 4. The closer and a foreign key on ONE line. The old code ran the
+    #    openFirewall test BEFORE decrementing the depth, so the foreign
+    #    `false` on the far side of the `};` was still read as in-block.
+    ("the closer shares a line with a foreign openFirewall",
+     "  programs.mosh = {\n"
+     "    enable = true;\n"
+     "  }; services.jellyfin.openFirewall = false;"),
+    # 5. A `let` binding that merely SPELLS the option name. In scope it is a
+    #    local variable, not `programs.mosh.openFirewall` at all.
+    ("a let-bound local named openFirewall",
+     "  programs.mosh = {\n"
+     "    enable = true;\n"
+     "    withUtempter = let openFirewall = false; in true;\n"
+     "  };"),
+]
+
+
+@pytest.mark.parametrize("label,mosh_text",
+                         _WRONG_FALSE_SHAPES,
+                         ids=[s[0] for s in _WRONG_FALSE_SHAPES])
+def test_a_false_the_scanner_cannot_read_confidently_is_refused(
+        tmp_path, label, mosh_text):
+    """🔴 R4-F1 REGRESSION COVERAGE. RED at 8e389f18 (exit 0, ALREADY APPLIED,
+    the affirmative banner printed) — green here. The gate's failure mode is
+    opening the operator's WAN, so it must fail CLOSED on uncertainty: a `false`
+    is credited only from a dotted line anchored at the start of its own line,
+    or from a bare `openFirewall = <bool>;` inside a well-formed braced block
+    whose closer is `};` alone. A foreign `openFirewall = false` — above the
+    block, below it, or on the closer's own line — can never satisfy it."""
+    r = Rig(tmp_path, config_text=_cfg_with(mosh_text))
+    _assert_refused_for_wan_exposure(r.run(), r, why=_UNKNOWN)
+
+
+def test_the_converge_path_refuses_an_unreadable_false_under_the_switch_opt_in(
+        tmp_path):
+    """🔴 R4-F1 — the half that reaches the machine, and the shape I reproduced
+    end to end. At 8e389f18 this exact config exited 0, printed the affirmative
+    "`programs.mosh.openFirewall` is set false" over an openFirewall that is
+    ABSENT, and ran `nixos-rebuild switch`."""
+    r = Rig(tmp_path, config_text=_cfg_with(_WRONG_FALSE_SHAPES[0][1]))
+    res = r.run(extra_env={"MOSH_FW_SWITCH": "1"})
+    _assert_refused_for_wan_exposure(res, r, why=_UNKNOWN)
+    assert "switch" not in r.log("rebuild")
+    assert "is set false" not in res.stdout, (
+        "🔴 the affirmative security claim must not be printed for a state the "
+        f"scanner could not read\n{res.stdout}")
+
+
+def test_the_unreadable_diagnosis_is_distinct_from_absent_and_from_true(tmp_path):
+    """🟡 R4-F1. Three refusals, three different fixes in the reader's head:
+    ABSENT means "add the line", `true` means "change the value", and
+    UNREADABLE means "the line may already say false — rewrite it in a spelling
+    this check reads". Collapsing them would still refuse, so only the wording
+    can see it; that is exactly the arm a round-3 mutation battery found
+    uncovered for `true`."""
+    unreadable = Rig(tmp_path / "u", config_text=_cfg_with(
+        "  programs.mosh = { enable = true; openFirewall = false; };"))
+    res = unreadable.run()
+    assert res.returncode != 0
+    assert _UNKNOWN in res.stderr, res.stderr
+    assert _ABSENT not in res.stderr, res.stderr
+    assert _TRUE not in res.stderr, res.stderr
+    # ... and the message must hand over a way to FIND the line it cannot read.
+    assert "grep -n" in res.stderr, res.stderr
+
+    absent = Rig(tmp_path / "a",
+                 config_text=_cfg_with("  programs.mosh.enable = true;"))
+    res_a = absent.run()
+    assert _ABSENT in res_a.stderr, res_a.stderr
+    assert _UNKNOWN not in res_a.stderr, res_a.stderr
+
+
+# --------------------------------------------- R4-F2: the scanner's own shapes
+# 🟡 ROUND-4 FINDING 2. At 8e389f18 the brace tracker and the block-open regex
+# were entirely uncovered: the only scoping test put its distractor ABOVE the
+# block, the one position from which the tracker cannot leak, and five mutants
+# of those lines SURVIVED the whole module 42/42. Each test below is written to
+# be the one that dies for a specific loosening — see the commit message for the
+# mutant-to-test map.
+def test_a_foreign_openFirewall_BELOW_the_mosh_block_does_not_satisfy_the_gate(
+        tmp_path):
+    """🔴 R4-F2 REGRESSION COVERAGE — the position the round-3 distractor test
+    could not reach. RED at 8e389f18 *as a class*: with the block left open by
+    any of the five R4-F1 shapes, a `false` below it was credited. Here the
+    block is WELL FORMED and closes cleanly, so the foreign line below is simply
+    out of scope — which is what pins that the scan stops at the closer.
+
+    ⚠ Honest about the base: with a well-formed block this exact fixture was
+    ALSO refused at 8e389f18 (the depth returned to 0). It is a REACHABILITY
+    guard for the closer, not regression coverage — what makes it earn its place
+    is that deleting the `if (s == "};") { inblock = 0 }` arm cannot be seen by
+    any other test in this module from the refusing side."""
+    r = Rig(tmp_path, config_text=_cfg_with(
+        "  programs.mosh = {\n    enable = true;\n  };\n"
+        + _FOREIGN_FALSE.rstrip("\n")))
+    _assert_refused_for_wan_exposure(r.run(), r, why=_ABSENT)
+
+
+def test_a_block_opener_must_be_programs_mosh_itself_not_merely_mosh_shaped(
+        tmp_path):
+    """🔴 R4-F2. The block-open regex is the most carefully written line in the
+    scanner and NOTHING distinguished it from a bare `/mosh/` at 8e389f18. Here
+    a DIFFERENT attribute whose path ends in `programs.mosh` — `services.
+    programs.mosh`, the same key the half-configured guard's left boundary
+    excludes — opens a block containing `openFirewall = false;`. Only mosh's own
+    `programs.mosh = {` may open the scan, so the verdict is ABSENT and the run
+    refuses.
+
+    Kills: dropping the `^` anchor from the opener's regex (the foreign path
+    then opens the block and its `false` is credited)."""
+    r = Rig(tmp_path, config_text=_cfg_with(
+        "  programs.mosh.enable = true;\n"
+        "  services.programs.mosh = {\n"
+        "    openFirewall = false;\n"
+        "  };"))
+    _assert_refused_for_wan_exposure(r.run(), r, why=_ABSENT)
+
+
+def test_a_dotted_false_on_a_FOREIGN_path_does_not_satisfy_the_gate(tmp_path):
+    """⚠ R4-F2 MUTATION COVERAGE, labelled rather than counted as regression
+    coverage. `services.programs.mosh.openFirewall = false;` is a different key
+    and was ALSO refused at 8e389f18 (the old regex's left boundary excluded a
+    preceding `.`), so the verdict does not move — only the diagnosis does,
+    from ABSENT to UNREADABLE, which is the honest one for a line that names
+    the option in a path this script does not own.
+
+    What it earns its place for: the round-3 battery's fifth surviving mutant
+    was exactly "drop the left boundary on the dotted `false` regex", and
+    NOTHING in the module could see it. Its round-4 equivalent — dropping the
+    `^` anchor from the dotted credit — makes this fixture credit a foreign
+    key's `false` and report ALREADY APPLIED, and this test is the one that
+    dies for it."""
+    r = Rig(tmp_path, config_text=_cfg_with(
+        "  programs.mosh.enable = true;\n"
+        "  services.programs.mosh.openFirewall = false;"))
+    _assert_refused_for_wan_exposure(r.run(), r, why=_UNKNOWN)
+
+
+def test_a_credited_false_does_NOT_outrank_a_second_unreadable_definition(
+        tmp_path):
+    """🔴 R4-F2 — the fail-closed PRECEDENCE, which nothing else can see. This
+    config carries BOTH a correctly-credited `openFirewall = false;` inside a
+    well-formed block AND a second `programs.mosh.openFirewall` the scanner
+    cannot read. The second one may be a `mkForce true` that wins at
+    evaluation, so the only safe verdict is the unreadable one: `unknown`
+    outranks a credited `false`, exactly as an explicit `true` outranks both.
+
+    Kills: swapping the two `else if` arms in the awk END block. That mutant
+    SURVIVED the first round-4 battery — every other fixture sets at most one
+    of the two flags, so the order between them was never exercised."""
+    r = Rig(tmp_path, config_text=_cfg_with(
+        "  programs.mosh = {\n"
+        "    enable = true;\n"
+        "    openFirewall = false;\n"
+        "  };\n"
+        "  programs.mosh.openFirewall = lib.mkForce true;"))
+    _assert_refused_for_wan_exposure(r.run(), r, why=_UNKNOWN)
+
+
+def test_a_mosh_block_that_never_closes_is_unreadable_even_if_it_credits_false(
+        tmp_path):
+    """🔴 R4-F2 — REACHABILITY for the END block's never-closed escalation, and
+    it took work to reach: in any file whose mosh block is followed by more Nix,
+    the very next brace trips the in-block guard instead, so the END arm looks
+    like defence-in-depth. The one shape that reaches it is a file TRUNCATED
+    inside the block — an interrupted write, a half-finished hand edit — where
+    the credited `false` is the last thing the scanner sees and nothing after it
+    can set the flag.
+
+    Kills: deleting `if (inblock) ambiguous = 1` from END. That mutant SURVIVED
+    the first round-4 battery."""
+    truncated = CONFIG_NIX.replace(
+        "    allowedTCPPorts = [ 7844 80 443 ];\n",
+        "    allowedTCPPorts = [ 7844 80 443 ];\n"
+        '    interfaces."nebula.mesh".allowedUDPPortRanges = '
+        "[ { from = 60000; to = 61000; } ];\n", 1)
+    truncated = truncated.split('  system.stateVersion')[0] + (
+        "  programs.mosh = {\n"
+        "    enable = true;\n"
+        "    openFirewall = false;\n")
+    assert truncated.count("programs.mosh") == 1
+    r = Rig(tmp_path, config_text=truncated)
+    _assert_refused_for_wan_exposure(r.run(), r, why=_UNKNOWN)
+
+
+# ------------------------------------------------- R4: the narrowing, measured
+# 🟡 What the round-4 scanner REFUSES that a Nix evaluator would accept. Every
+# row here is a correct config that this script now declines to certify. That is
+# the right side of the trade — refusing costs a re-run, a wrong `false` costs
+# 1001 WAN-facing UDP ports — but it is a cost, so it is enumerated rather than
+# left to be discovered.
+#
+# 🔴 ONLY ONE ROW IS A BEHAVIOUR CHANGE. Measured row by row at 8e389f18: the
+# one-line braced form was ACCEPTED there and is refused here. The other four
+# were refused at 8e389f18 too (as ABSENT, because the old regexes did not match
+# them either); what changed for those is only the DIAGNOSIS, from "you never
+# wrote it" to "I cannot read what you wrote", which is the more accurate of the
+# two and points at the right fix.
+_NARROWED = [
+    ("one-line braced block — the ONLY row whose verdict changed in round 4",
+     "  programs.mosh = { enable = true; openFirewall = false; };"),
+    ("lib.mkIf wrapping the block",
+     "  programs.mosh = lib.mkIf true {\n"
+     "    enable = true;\n"
+     "    openFirewall = false;\n"
+     "  };"),
+    ("the opening brace on the next line",
+     "  programs.mosh =\n"
+     "    {\n"
+     "      enable = true;\n"
+     "      openFirewall = false;\n"
+     "    };"),
+    ("openFirewall's value on the next line",
+     "  programs.mosh = {\n"
+     "    enable = true;\n"
+     "    openFirewall =\n"
+     "      false;\n"
+     "  };"),
+    ("lib.mkForce false",
+     "  programs.mosh = {\n"
+     "    enable = true;\n"
+     "    openFirewall = lib.mkForce false;\n"
+     "  };"),
+]
+
+
+@pytest.mark.parametrize("label,mosh_text", _NARROWED,
+                         ids=[s[0].split(" —")[0] for s in _NARROWED])
+def test_a_correct_config_in_an_unreadable_spelling_fails_CLOSED(
+        tmp_path, label, mosh_text):
+    """⚠ COST LEDGER, not regression coverage. Each row is a config whose
+    openFirewall really IS false and which this script refuses anyway, because
+    it will not certify a spelling it cannot read. The refusal must be the
+    UNREADABLE one — not ABSENT, which would tell the operator to add a line
+    that is already there — and it must name the two spellings that work."""
+    r = Rig(tmp_path, config_text=_cfg_with(mosh_text))
+    _assert_refused_for_wan_exposure(r.run(), r, why=_UNKNOWN)
 
 
 def test_the_converge_path_prints_the_measured_current_counts(tmp_path):
@@ -1046,7 +1344,10 @@ def test_the_exposure_claim_names_the_nebula_group_set_in_both_files():
 # Enumerated, not a pattern — an unlisted spelling is not covered, and the
 # docstring says so.
 _EXPIRING_STATE_PHRASES = (
-    "open and unmerged",
+    # ⚠ "open and unmerged" used to be listed here beside "unmerged". The check
+    # is a substring test, so the longer spelling could never fire on its own —
+    # every string containing it contains "unmerged" too. Removed in round 4 as
+    # redundant, not as a narrowing: the set this ledger matches is unchanged.
     "unmerged",
     "not yet merged",
     "still open",
