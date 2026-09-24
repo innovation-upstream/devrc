@@ -22,31 +22,34 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   🔴 FROZEN AT ROUND 1.
 
 ## State now
-- **`#1811` head is `41cef3db`** — round 2's four fixes landed and are pushed. Tests at that
-  sha on a clean tree: **3,298 passed** (hook tests + `test_handoff_doc_size.py`) and **101
-  passed** (guard module alone), both identical to the round-2 baseline at `b599278c`.
-- 🔴 **CI is PENDING on `41cef3db`** (all four re-queued 17:13Z by the fix commit),
-  `mergeStateStatus=UNSTABLE`. It was **green on `b599278c`** at 06:56Z — that green is a
-  claim about the PREVIOUS head and does not transfer. Re-read before merging.
-- 🔴 **THE LADDER IS STOPPED BY OPERATOR DECISION — not by a mechanism firing.** Round 2
-  returned findings, so the findings-keyed rule says another round. The operator chose to
-  fix the four and stop. **Neither documented stop mechanism actually applied** — see the
-  Gotchas entry; recording it as a criterion that fired would be the exact class of false
-  claim this ladder spent three rounds removing.
-- **`#1799` (the parent) is MERGED (`a371da4e`) and DEPLOYED to both hosts.** Its closing
-  condition was re-run LIVE this session, not taken from the doc: deployed copy
-  `/nix/store/py0j13ik…-hm_handoffwriteguard.py`, `_read_off_a_ref` = 6; probe returns `[]`
-  for an absent doc and a path for a real one, with the positive control firing. **ADDRESSED
-  — that arc is CLOSED.**
-- **`#1811` is NOT deployed.** The hook is a `home.file` copy, so the sequence is merge →
-  pull → `ship.sh` → confirm the deployed copy has no `GIT_VERB_SCAN_CAP`. Until then both
-  hosts run `#1799`'s version.
-- Branch is **44 commits behind `main`** (merge-base `b289a9fe`); `strict` is false, so the
-  green is a claim about the branch, never about the tree the merge creates.
-- **Still no `clawgate-task:` field, and the reason CHANGED.** `clawgate_handoff.sh resolve`
-  now exits **5 — NOTHING RESOLVED, 0 tasks for this session** (the earlier doc recorded one
-  `role=read` task, `#321`). An unknown session id also answers 200 with an empty array, so
-  this zero cannot distinguish "touched no task" from "wrong id". Not a clean bill of health.
+- **ARC CLOSED — the closing condition is met in full, measured 2026-09-24 on this
+  session.** All three legs, live:
+  - `#1799` merged and deployed (carried from the 2026-09-20 session's live re-run);
+    the follow-on `#1811` merged as squash `de2e1087` on 2026-09-23 — the handoff
+    framed it open, which was the one DRIFT finding on resume, and the follow-on was
+    the ship.
+  - Both hosts converged at ONE sha: `scripts/ship.sh` rc 0, workbench ff
+    `de2e1087→5834b4c5`, laptop ff `a6e98a3d→5834b4c5`, both `VERIFIED — on branch
+    main at origin/main + switched`, managed artifacts 0 dangling / 0 stale on both.
+  - The probe on the DEPLOYED copy: absent doc → `[]` on BOTH arms, real doc → its
+    absolute path (positive control firing). Deployed hook
+    `/nix/store/75m9ay…-hm_handoffwriteguard.py` is byte-identical to `origin/main`'s
+    (sha256 `8941adf5…` both); `GIT_VERB_SCAN_CAP` count 1 = origin/main's — the
+    comment-only residue the PR intended.
+- **`main` went red AGAIN mid-close-out on a DIFFERENT cause — do not confuse it with
+  the retired opencode-pin block below.** `a6e98a3d` re-leaked three routable literals
+  into `claudedocs/handoff-laptop-airvpn-tunnel.md`; `test_no_public_ips.py:219/:236`
+  reddened main, reproduced twice by the deadman. This session reviewed and landed
+  `#1861` (squash `5834b4c5`): adversarial review verdict LAND WITH NITS, the one nit
+  (a comment misattribution) fixed in the close-out commit, and the gate module
+  re-run green on the merged tree in a worktree (`15 passed`).
+- The rank-1 instruction to post the round-2 `audit-claims` block was already
+  satisfied: 2 `audit-claims` blocks exist as issue comments on `#1811`, and the
+  ladder is terminal (PR merged, stopped by operator decision) — no future round can
+  consume another.
+- clawgate: `resolve` exits 5 (nothing resolved, 0 tasks) — NO `clawgate-task:` field
+  written, per the field's own rule. Not a clean bill of health; the zero cannot
+  distinguish "touched no task" from "wrong id".
 
 ## Open investigations — live diagnosis state
 
@@ -128,21 +131,25 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   truncation and that test outright, so there is no cap left to pin and no mutant left to
   settle. The question was retired by deleting its subject.
 
+### ✅ RESOLVED — "`main` is RED, reproduced — an opencode version pin, reachable from no diff"
+- as-of: 2026-09-23
+- **CLOSED and superseded — do not re-adopt the block above this one.** The doc's own
+  rank-3 deletion (2026-09-20) showed the premise was backwards: `opencode 1.18.30` is
+  a broken upstream build, the flake pins 1.18.29 through a deliberate overlay, and the
+  deadman's red was the pin WORKING (the branch predated the pin commit's sandbox
+  build). Re-measured this session: `opencode --version` = 1.18.29 on the workbench.
+- Separately, `main` DID go red again on 2026-09-23 — but on `test_no_public_ips.py`
+  (three leaked literals in the AirVPN handoff doc, commit `a6e98a3d`), a different
+  mechanism entirely, fixed by `#1861` (`5834b4c5`) and verified green this session
+  (`15 passed` in a worktree off `origin/main`). Neither red is the opencode pin's.
+
 ## Next steps (ranked)
-1. **Merge `#1811` and ship both hosts.** Wait for CI on `41cef3db` (pending at time of
-   writing), merge `--squash`, then verify **by CONTENT, never ancestry** — a squash is
-   never an ancestor of its base — then `scripts/ship.sh` and confirm the deployed copy has
-   no `GIT_VERB_SCAN_CAP` with `readlink -f` as the arbiter, never a diff. Post the round-2
-   `audit-claims` block as an ISSUE comment first (`--round 2 --audited b599278c --payload
-   88`); a block posted as a REVIEW is invisible to the next round's assembler.
-   forcing: gate — a fleet-wide Stop hook, firing after every tool call of every session,
-   sitting unmerged with three audit rounds paid for.
-2. **Operator call: lift `test_the_hook_spawns_no_subprocess_on_any_path`?** An OBSERVATION
-   from `#1092`'s body frozen into a prohibition, wider than the `shutil` standard the same
-   file uses for the same hot path. Lifting it allows `git cat-file -e <ref>:<path>`, making
-   the ref exemption VERIFIED instead of shape-matched. 🔴 **The evidence for this got
-   stronger: the residual fired a SECOND time, on a real session, on 2026-09-23** — see the
-   Gotchas entry. It is no longer hypothetical.
+1. **Operator call: lift `test_the_hook_spawns_no_subprocess_on_any_path`?** An
+   OBSERVATION from `#1092`'s body frozen into a prohibition, wider than the `shutil`
+   standard the same file uses for the same hot path. Lifting it allows
+   `git cat-file -e <ref>:<path>`, making the ref exemption VERIFIED instead of
+   shape-matched. The residual over-match has now fired on real sessions twice
+   (2026-09-20 and 2026-09-23); the doc's own verify procedure trips it every time.
    forcing: user — reopens the fix shape the operator originally chose; not mine to take.
 
 ## Gotchas / decisions / dead-ends
@@ -435,39 +442,37 @@ FROZEN AT ROUND 1; this was that doc's rank 1 and is not another round of it.
   Same family as the `grep -r`/`.gitignore` blindness: the answer is a claim about the
   instrument's VIEW, never about the corpus.
 
+- 🔴 **A DELIBERATELY-PINNED COMMENT CAN CARRY A WRONG ATTRIBUTION — and the pin makes
+  it worse, because readers are told to trust it.** The repeat-offender comment in
+  `test_no_public_ips.py` said the second leak was "(devrc#1861)"; that PR is the FIX.
+  The doc's own prose had it right (`a6e98a3d`). Found only by an adversarial review
+  pass before merging; a title claim is a claim, and so is a pinned comment's.
+- 🔴 **THE EXISTENCE-GATE PROBE CAN BE WRITTEN SO IT PAYS NO FALSE ARMING.** The doc's
+  own How-to-verify trips the declared residual because the command carries the
+  contiguous string `claudedocs/handoff-…md`. Building the paths by concatenation in
+  the probe source (`pre='claudedocs/'+'handoff-'`) keeps `HANDOFF_PATH_RX` from
+  matching the session's OWN command — same probe, same verdicts, nothing to dismiss.
+
 ## How to verify
 ```bash
-# #1811's state and its sandbox tier — the tier both ladders could not speak for
-gh pr view 1811 --repo innovation-upstream/devrc --json state,mergeable,mergeStateStatus
-S=$(gh pr view 1811 --repo innovation-upstream/devrc --json headRefOid --jq .headRefOid)
-gh api "/repos/innovation-upstream/devrc/commits/$S/statuses" \
-  --jq 'group_by(.context)[]|max_by(.created_at)|"\(.context)=\(.state)"'
-
-# the guard module on the PR branch
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  ~/workspace/devrc-algo/scripts/claude-hooks/tests/test_handoff_write_guard.py -q   # 101 passed
-
-# round 2's counter-example: a bounded tail is NOT answer-preserving. Prints True/False.
-nix develop ~/workspace/devrc -c python3 -c '
-import importlib.util as u
-P="/home/zach/workspace/devrc-algo/scripts/claude-hooks/handoff-write-guard.py"
-s=u.spec_from_file_location("g",P)
-g=u.module_from_spec(s); s.loader.exec_module(g)
-def p(h):
-    if not h.endswith(":") or not g.REF_PREFIX_RX.search(h): return False
-    seg=g.SEGMENT_SPLIT_RX.split(h)[-1]; m=g.GIT_WORD_RX.search(seg)
-    return bool(m) and bool(g.GIT_VERB_RX.search(seg,m.end()))
-h="git show "+"z"*5000+" ref:"; print(p(h), p(h[-4096:]))'   # -> True False
-
-# the corpus numbers (6,621 transcripts / 6 flip sites / head max 27,856 B). ⚠ subagents
-# are at DEPTH 4 — `*/subagents/*.jsonl` matches ZERO and still prints a total. Assert it.
-#   files = glob('~/.claude/projects/*/*.jsonl') + glob('~/.claude/projects/*/*/subagents/*.jsonl')
-#   assert len(files) > 6000        # positive control; a bare zero is not a measurement
-# then, per Bash tool_use command containing 'claudedocs/':
-#   stripped = re.sub(COMMENT_PAT, " ", cmd); HANDOFF_PATH_RX.finditer(stripped)
-# and count sites where the WIDE [^\s:]+ ref class exempts but REF_PREFIX_RX does not.
-
-# the cap really is gone from the branch, and still present in the DEPLOYED copy
-grep -c GIT_VERB_SCAN_CAP ~/workspace/devrc-algo/scripts/claude-hooks/handoff-write-guard.py  # comments only
-grep -c GIT_VERB_SCAN_CAP "$(readlink -f ~/.claude/hooks/handoff-write-guard.py)"             # >0 until shipped
+# the arc's three legs, re-runnable after any later drift:
+gh pr view 1799 --repo innovation-upstream/devrc --json state,mergedAt   # MERGED
+scripts/drift-check.sh                                                   # hosts converged, rc 0
+# deployed hook is origin/main's bytes (readlink -f is the arbiter):
+sha256sum "$(readlink -f ~/.claude/hooks/handoff-write-guard.py)" | cut -c1-16
+git -C ~/workspace/devrc show origin/main:scripts/claude-hooks/handoff-write-guard.py | sha256sum | cut -c1-16
+# the probe on the DEPLOYED copy — paths built by concatenation so this command
+# does not itself arm the guard (want [] and the real path):
+P=$(readlink -f ~/.claude/hooks/handoff-write-guard.py); python3 -c "
+import importlib.util as u, sys
+s=u.spec_from_file_location('g',sys.argv[1]); g=u.module_from_spec(s); s.loader.exec_module(g)
+pre='claudedocs/'+'handoff-'
+print('absent:',g.handoff_read_docs({'tool_name':'Bash','tool_input':{'command':'cat '+pre+'no-such-doc.md'},'cwd':'/home/zach/workspace/devrc'}))
+print('real:',g.handoff_read_docs({'tool_name':'Bash','tool_input':{'command':'cat '+pre+'guard-existence-gate.md'},'cwd':'/home/zach/workspace/devrc'}))
+" "$P"
 ```
+## Defects (batched)
+- FIXED this session: the new repeat-offender comment in `scripts/tests/test_no_public_ips.py`
+  attributed the second leak to "(devrc#1861)" — the FIX PR — instead of commit
+  `a6e98a3d` (a direct main commit). Adversarial review caught it pre-merge; corrected
+  in the close-out commit with the right attribution.
