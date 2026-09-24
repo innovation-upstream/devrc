@@ -920,7 +920,7 @@ Every line below is VERBATIM from `/handoff` step 5.
 
    🔴 **`This replace DROPS N line(s) that look DURABLE` — a WARNING, never a refusal.** Durable content under a REPLACE heading (usually `State now`) is deleted on the next update, and in a long diff a stale-status `-` line looks exactly like a measured-finding one. It classifies the deletions **above** the diff with base line numbers. Move that line under an APPEND heading, or carry it forward. 🔴 **A FLOOR: a silent run is NOT evidence that nothing durable was dropped** — read the diff anyway.
 
-   🔴 **Seven refusals. All write NOTHING, each prints its own fix, and re-running after fixing your scratch file is safe.** `status=leak-refused` (13) — rule (o): the TARGET repo's own leak scanner would not vouch for the delta, or could not be run at all. **ANY non-zero exit refuses**; it names the scanner and its exit code and reproduces the scanner's OWN lines (the last 20 of EACH stream); the doc is rolled back, and the index is not touched because this run staged nothing. 🔴 **Nothing attributed the refusal to your delta** — fix the SCRATCH file, or, if the tree was ALREADY red for something this handoff did not cause, read those lines and re-run with `--leak-pre-existing-approved`. 🔴 **That flag is the OPERATOR's call, not the agent's**; it is recorded on the run AND stamped `Leak-Gate-Approved: <scanner> exit=<n>` on the commit, it CLEARS an in-process scanner failure (a bad import exits non-zero too — read the output, not the number), and it does NOT reach a hang, a launch failure, or a declared scanner path that is not a runnable file. 📖 write-gate §H. `status=undefined-done` (11) — rule (m): a NEW doc whose `## Goal` carries no `closing-condition:`, or an update that DELETES the one the doc had; the refusal names which of six causes (wrong section, empty, unknown kind, fenced, unparsed, absent) and prints that cause's own fix. `status=rank-growth` (12) — rule (n): this update carries MORE `forcing: none` ranks than the doc does. Batch it under `## Defects (batched)`, or tag it with an external kind, or close one — `--rank-growth-approved` is the operator opt-in. `status=dated-topic` (7) — dated slug ⇒ per-session doc; **no flag bypasses it**, re-run without the date. `status=new-doc` (7) — no doc for this topic, others exist (listed), and none on the mainline (else ⇒ `stale-base`); if one IS this effort re-run with ITS topic — 🔴 `--new-effort` asserts genuine newness, **not a way past the list**. `status=unforced` (8) — a ranked item names no forcing function or an unrecognised kind. `status=unevidenced` (10) — a `Ruled out:` bullet names no `via: <kind>`. Rows read `[no via: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell as `via: <kind>` · `[fenced]` unfence YOURS, never promote a quote. 📖 write-gate §D. 🔴 **Read each row's marker — only one means "add a field"**: `[no forcing: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell it as `forcing: <kind>` · `[fenced]` **yours ⇒ unfence it; a QUOTE ⇒ tag the item, do NOT promote it** 📖 write-gate §C. ⚠ `forcing: none` and `via: assumed` are ACCEPTED, print an **advisory** above the diff; the write proceeds.
+   🔴 **Seven refusals. All write NOTHING, each prints its own fix, and re-running after fixing your scratch file is safe.** `status=leak-refused` (13) — rule (o): the TARGET repo's own leak scanner would not vouch for the delta OR the commit MESSAGE, or could not be run at all, or could not READ the message because git does not enumerate the path it is written to. **ANY non-zero exit refuses**; it names the scanner and its exit code and reproduces the scanner's OWN lines (the last 20 of EACH stream); the doc is rolled back, and the index is not touched because this run staged nothing. 🔴 **Nothing attributed the refusal to your delta** — fix the SCRATCH file or the `--advanced` text, or, if the tree was ALREADY red for something this handoff did not cause, read those lines and re-run with `--leak-pre-existing-approved`. 🔴 **That flag is the OPERATOR's call, not the agent's**; it is recorded on the run AND stamped `Leak-Gate-Approved: <scanner> exit=<n>` on the commit, it CLEARS an in-process scanner failure (a bad import exits non-zero too — read the output, not the number), and it does NOT reach a hang, a launch failure, or a declared scanner path that is not a runnable file. 📖 write-gate §H. `status=undefined-done` (11) — rule (m): a NEW doc whose `## Goal` carries no `closing-condition:`, or an update that DELETES the one the doc had; the refusal names which of six causes (wrong section, empty, unknown kind, fenced, unparsed, absent) and prints that cause's own fix. `status=rank-growth` (12) — rule (n): this update carries MORE `forcing: none` ranks than the doc does. Batch it under `## Defects (batched)`, or tag it with an external kind, or close one — `--rank-growth-approved` is the operator opt-in. `status=dated-topic` (7) — dated slug ⇒ per-session doc; **no flag bypasses it**, re-run without the date. `status=new-doc` (7) — no doc for this topic, others exist (listed), and none on the mainline (else ⇒ `stale-base`); if one IS this effort re-run with ITS topic — 🔴 `--new-effort` asserts genuine newness, **not a way past the list**. `status=unforced` (8) — a ranked item names no forcing function or an unrecognised kind. `status=unevidenced` (10) — a `Ruled out:` bullet names no `via: <kind>`. Rows read `[no via: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell as `via: <kind>` · `[fenced]` unfence YOURS, never promote a quote. 📖 write-gate §D. 🔴 **Read each row's marker — only one means "add a field"**: `[no forcing: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell it as `forcing: <kind>` · `[fenced]` **yours ⇒ unfence it; a QUOTE ⇒ tag the item, do NOT promote it** 📖 write-gate §C. ⚠ `forcing: none` and `via: assumed` are ACCEPTED, print an **advisory** above the diff; the write proceeds.
 
    🔴 **Exit 3 usually means nothing was written — but READ THE MESSAGE, because one arm of it committed.** Usually the rollback unlinks a NEW doc, so the handoff exists only in your scratch file. **The exception announces itself**: when the commit landed and a later step failed, the run says so and tells you not to re-run — re-running appends your findings twice. 🔴 **So `status=failed` is not by itself "nothing happened", and exit 3 is not a reliable tell** — a bad `--repo` or an unreadable `--update` exits 3 with no `status=` line at all, and `push-failed` uses exit 3 too. **Keep the scratch file until you have seen a commit sha**, name its path if step 5 never lands, and delete it once the commit exists.
 
@@ -932,7 +932,7 @@ Every line below is VERBATIM from `/handoff` step 5.
 
    🔴 **`--confirm` WITHOUT `--push` leaves a real commit in this checkout only — and it says so.** `status=written commit=<sha> branch=<b>` is followed by `NOT PUSHED` plus the exact command: a `git push` on a feature branch, or the preserve-on-a-topic-branch route on a shared one (several repos forbid committing to theirs). A **SUCCESS, not a refusal** — exit 0 — but push it or open a PR **in this session**: an un-pushed handoff is one only you can read. 🔴 **Do NOT retry by re-running with `--push`**: the doc already carries the update, so a second run exits 5 `no-change` or **appends your findings twice**.
 
-## §H — rule (o): the TARGET repo's own leak scanner reads the delta (2026-09-22)
+## §H — rule (o): the TARGET repo's own leak scanner reads the delta AND the commit message (2026-09-22)
 
 ### Why this is code and not a sentence
 
@@ -1156,8 +1156,87 @@ found in the wild that does this, and cairn's own reads with `errors="replace"`.
 The claim that holds is the narrow one — this gate does not choose the bytes it
 decodes, and a mangled line the operator can act on beats a traceback.
 
+### 🔴 The COMMIT MESSAGE is in the scan too, and it was the channel that leaked
+
+⚠ **THE LIST BELOW ONCE READ AS COMPLETE AND OMITTED THE ONE THAT MATTERED.**
+Rule (o) scans the **working tree**, and `--advanced` never lands in the tree: it
+becomes the commit **subject**, plus one line on stdout, and nothing else. So the
+gate vouched for the doc while the message went past it unread — and a commit
+message carrying a `denied-identifier` is on a PUBLIC repository's `main` today.
+MEASURED on the pre-change tree against cairn's real scanner, with a **clean**
+doc delta and `--advanced` carrying that repo's own synthetic canary: `exited 0 …
+the repo's OWN gate vouches for it`, rc 0, commit created, identifier in
+`git log -1`.
+
+🔴 **THE FIX IS A FILE, NOT A SECOND SCAN, AND THAT IS WHAT KEEPS THE BLACK BOX.**
+The scanner takes no path and no text argument — the same fact the
+no-attribution decision rests on — so the only way to put text in front of it is
+to put the text in the tree. The tool therefore materialises the message as an
+**untracked file in the target repo's root**, written at the same moment as the
+doc, so the **one existing scan** covers doc and message in a single verdict. No
+second invocation to attribute between, no output parsed, no scanner internals
+imported. The name is a module constant (`MESSAGE_PROBE_PREFIX`) carrying the
+PID, so two concurrent handoff runs in one clone cannot delete each other's.
+
+- **It is REMOVED on every exit path**, from a `finally` rather than from the
+  three or four returns — the clean run, both rule (o) refusals, the
+  failed-commit arm, and an exception nobody predicted (the `errors="replace"`
+  story above is one that really escaped this block). A leftover would be an
+  untracked file in a shared checkout: invisible to `git status -s` habits that
+  scan for ` M`, and swept in by anyone's `git add -A`.
+- **The commit cannot pick it up**: the commit is path-limited to the doc. Not
+  assumed — a `pre-commit` hook recording the tree proves the file was present at
+  commit time and the commit still carried exactly one path.
+- **Only when a scanner will actually run.** With none, the gate passes by
+  absence and says so, so a probe would buy nothing and would add a refusal arm
+  to every repo that has no scanner — most of them, this one included.
+
+🔴 **WHAT IS SCANNED IS THE OPERATOR FREE TEXT: THE SUBJECT *AND* THE WHOLE
+`--advanced` VALUE, NOT THE ASSEMBLED MESSAGE.** The trailers are deliberately
+out of scope — `Claude-Session-Id` is a UUID the tool resolved, and
+`Leak-Gate-Approved`'s value **is the gate's own verdict**, so scanning the
+assembled message would need the verdict the scan produces. That cycle is why the
+subject is hoisted above the gate and the message is composed after it.
+
+Feeding the whole value as well as the subject is a decision, and it catches two
+things a subject-only scan misses: the subject is `splitlines()[0]` truncated to
+100 characters, so text on a **later line** or **past the truncation** reaches the
+commit nowhere — but it does reach **stdout**, which `transcript-push.sh` exports.
+It is therefore a **superset** of the commit message and can refuse text that
+would never have been committed; that is the intended direction, and the remedy
+is the same either way: reword `--advanced`.
+
+🔴 **AND THE PROBE'S VISIBILITY IS CHECKED, BECAUSE THE FAILURE IS A SILENT,
+PERMANENT PASS.** A whole-tree scanner finds untracked files with
+`git ls-files --others --exclude-standard`, which **obeys `.gitignore`** — so a
+repo whose ignore rules happened to cover this path would report `exited 0` for
+every message from then on, whatever it carried, indistinguishable from clean.
+MEASURED both ways on a throwaway repo carrying cairn's real scanner and a probe
+spelling its canary: not ignored → `2 file(s) scanned`, `1 finding(s) — REFUSING`,
+exit 1; ignored → `ls-files` prints nothing, `1 file(s) scanned`, `0 findings`,
+exit 0, probe named zero times. So the tool asks git whether it enumerates the
+path and **refuses** (`status=leak-refused`, with the `check-ignore` command to
+find the rule) when it does not. `--leak-pre-existing-approved` does not reach
+that arm — same ruling as a hang, same reason: no verdict about the message was
+produced, so there is nothing to approve.
+
+⚠ **IT IS THE SAME QUESTION *cairn's* SCANNER ASKS, NOT EVERY SCANNER'S.** A gate
+that enumerated only tracked files would not read the probe however that check
+answers, and there is no black-box way to ask a scanner what it read. The claim
+is the available one: the path is reachable by the standard enumeration.
+
 ### 🔴 What this gate structurally CANNOT see
 
+- **Text that reaches the TRANSCRIPT but neither the tree nor `--advanced`.** The
+  probe covers the operator text this tool is about to make durable; it does not
+  and cannot cover everything a session says.
+- **A target repo with NO scanner** — `find_leak_scanner` PASSES BY ABSENCE, and
+  it says so, but nothing about that repo's doc *or* message was examined. The
+  pass-by-absence line is the whole of the evidence.
+- **A scanner that does not read untracked files.** The probe is untracked by
+  construction (staging it is the residue this module refuses to leave), so a
+  target gate enumerating `--cached` only would scan the doc and not the message,
+  and would report `exited 0` for both.
 - **Anything sensitive already in the target tree that the delta did not
   change** — now a REFUSAL rather than a blind spot, but the gate still cannot
   tell you it was pre-existing. Only you can, and the flag is how you say so.

@@ -8903,3 +8903,532 @@ class TestTheRefusingExitCodesAreASPANNotALiteral:
                        update=clean_update(tmp_path))
         assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
         assert f"exited {code}" in res.stdout, res.stdout
+
+
+# --------------------------------------------------------------------------
+# rule (o), second channel: THE COMMIT MESSAGE
+#
+# 🔴 THE MEASURED GAP. Rule (o) runs the target repo's scanner over the WORKING
+# TREE, and `--advanced` never lands in the tree: it becomes the commit SUBJECT
+# and a line on stdout, and nothing else. So the gate vouched for the doc while
+# the message went past it unread — and a commit message is exactly the channel a
+# denied identifier travelled on onto a PUBLIC repository's `main`.
+#
+# MEASURED on `origin/main` 5273d71b, against cairn's REAL `tests/leakscan.py` in
+# a throwaway repo with a CLEAN doc delta and `--advanced` carrying
+# `DENY_CANARY`: `leakscan: tests/leakscan.py exited 0 … the repo's OWN gate
+# vouches for it`, rc 0, commit created, the identifier in `git log -1`.
+#
+# 🔴 WHAT THESE TESTS ARE AND ARE NOT — the same split as the section above, and
+# the same reason. They are the WIRING half, over a fake scanner whose verdict the
+# harness controls. The end-to-end run against cairn's real scanner is recorded in
+# the PR that added them, because vendoring that scanner here would be a 700-line
+# copy of another repo's gate that goes stale silently. What makes the stub a fair
+# stand-in for the closing condition is that `DENIED_TOKEN` above is
+# byte-identical to cairn's own synthetic `DENY_CANARY` sentinel.
+# --------------------------------------------------------------------------
+
+#: A scanner that copies every probe file it can see to `dest` and then passes.
+#:
+#: Not a verdict fixture — an OBSERVATION one. Nothing else can read the probe:
+#: it exists only between the doc write and the end of the run, and `main`
+#: deletes it in a `finally`. Asserting on the file's CONTENT rather than only on
+#: the refusal is what pins WHICH text is scanned, which is the decision this
+#: section is about.
+_PROBE_CAPTURE_SRC = '''\
+import shutil
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parent.parent
+dest = Path({dest!r})
+dest.mkdir(parents=True, exist_ok=True)
+found = sorted(root.glob({prefix!r} + "*"))
+for p in found:
+    shutil.copy(p, dest / p.name)
+print("capture: %d probe file(s)" % len(found))
+sys.exit(0)
+'''
+
+
+def probe_capture_scanner(repo: Path, dest: Path) -> Path:
+    return install_scanner(
+        repo,
+        _PROBE_CAPTURE_SRC.format(dest=str(dest), prefix=hd.MESSAGE_PROBE_PREFIX),
+    )
+
+
+def probe_leftovers(repo: Path) -> list[str]:
+    """Every probe file still in `repo` — by PREFIX, not by exact name.
+
+    The name carries the PID so two concurrent runs in one shared clone cannot
+    delete each other's, which means no test can predict it. A prefix glob is
+    also the wider assertion: it fails on a probe from any run, including one a
+    future edit spells differently.
+    """
+    return sorted(p.name for p in repo.glob(hd.MESSAGE_PROBE_PREFIX + "*"))
+
+
+def untracked_paths(repo: Path) -> list[str]:
+    """Untracked paths, as git sees them.
+
+    🔴 THE EXPECTED SET IS NAMED RATHER THAN ASSERTED EMPTY, because every
+    fixture here writes its fake scanner UNTRACKED — `tests/leakscan.py` is
+    legitimately in this list. An `== ""` assertion would fail on the fixture
+    instead of on residue, and the obvious repair (drop the assertion) would stop
+    looking for residue at all. Naming the one expected entry keeps the check as
+    wide as it was: a probe, a lock file or anything else still fails.
+    """
+    return sorted(
+        line[3:] for line in _sh(
+            "git", "status", "--porcelain", "--untracked-files=all", cwd=repo
+        ).splitlines() if line.startswith("?? ")
+    )
+
+
+def status_at_commit_time(repo: Path) -> Path:
+    """Arm a `pre-commit` hook that records the untracked tree, and say where.
+
+    🔴 THE ONLY WAY TO ASK WHETHER THE PROBE EXISTED *DURING* THE COMMIT, which
+    two tests below need in opposite directions: one asserts it was there and
+    still not committed (so the path-limit is what excluded it, not its absence),
+    the other asserts it was never written at all because the repo has no
+    scanner. Without this, both would be reading the same empty tree after the
+    fact and neither could tell those two worlds apart.
+    """
+    out = repo / ".git" / "precommit-status.txt"
+    # write_exec owns the shebang — see `_block_commits`.
+    write_exec(repo / ".git" / "hooks" / "pre-commit",
+               f'git status --porcelain --untracked-files=all > "{out}"\nexit 0\n')
+    return out
+
+
+#: An `--advanced` whose FIRST line is clean and whose THIRD line is not.
+#:
+#: 🔴 THE DECISION-SPECIFIC FIXTURE. The commit subject is
+#: `f"docs(handoff): {advanced.strip().splitlines()[0]}"[:100]`, so a token on
+#: line 3 reaches the commit message NOWHERE — scanning only the subject would
+#: pass this. It still reaches stdout, which `transcript-push.sh` ships, which is
+#: why `message_probe_text` feeds the WHOLE value.
+_ADVANCED_TOKEN_ON_A_LATER_LINE = (
+    "the drain loop is fixed and the reading was corrected\n"
+    "and the deploy was verified against the real click path\n"
+    f"and the store is reached at scope {DENIED_TOKEN}\n"
+)
+
+#: An `--advanced` that is ONE line, clean for its first 100 characters, and
+#: carrying the token after them. The other mechanism by which a subject-only
+#: scan misses text the operator typed: `[:100]`.
+_ADVANCED_TOKEN_PAST_THE_TRUNCATION = (
+    "the drain loop is fixed, the at-max reading was corrected, the deploy is "
+    "verified against the real click path, and the store is reached at scope "
+    f"{DENIED_TOKEN}"
+)
+
+
+class TestTheProbeFixtureIsAnInstrument:
+    """🔴 VALIDATE THE INSTRUMENT FIRST. Every assertion below about WHICH text
+    is scanned is really an assertion about `_PROBE_CAPTURE_SRC`, until that stub
+    is shown to actually find and copy a probe."""
+
+    def test_the_capture_scanner_sees_a_probe_and_copies_it(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        dest = tmp_path / "captured"
+        scanner = probe_capture_scanner(repo, dest)
+        planted = repo / f"{hd.MESSAGE_PROBE_PREFIX}0{hd.MESSAGE_PROBE_SUFFIX}"
+        planted.write_text("planted\n", encoding="utf-8")
+        out = subprocess.run([sys.executable, str(scanner)], cwd=repo,
+                             capture_output=True, text=True)
+        assert out.returncode == 0, (out.returncode, out.stdout, out.stderr)
+        assert "capture: 1 probe file(s)" in out.stdout, out.stdout
+        assert (dest / planted.name).read_text(encoding="utf-8") == "planted\n"
+
+    def test_negative_control_it_reports_zero_with_no_probe_present(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """A stub that reported a find either way would make the `no scanner ⇒
+        no probe` test below green for the wrong reason."""
+        scanner = probe_capture_scanner(repo, tmp_path / "captured")
+        out = subprocess.run([sys.executable, str(scanner)], cwd=repo,
+                             capture_output=True, text=True)
+        assert "capture: 0 probe file(s)" in out.stdout, out.stdout
+
+    def test_the_pre_commit_capture_hook_actually_records_something(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """POSITIVE CONTROL for `status_at_commit_time`. A hook that silently
+        failed to install, or a `git status` that printed nothing, would make
+        both of its consumers pass without observing anything."""
+        out = status_at_commit_time(repo)
+        (repo / "sentinel-untracked.txt").write_text("x\n", encoding="utf-8")
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert out.exists(), "the pre-commit hook never ran — fixture is inert"
+        assert "sentinel-untracked.txt" in out.read_text(encoding="utf-8"), (
+            "the hook ran but recorded no untracked files, so a probe's absence "
+            "from this capture would prove nothing"
+        )
+
+
+class TestADeniedIdentifierInTheCOMMITMESSAGEIsRefused:
+    """The regression half. RED on pre-change code, where the message was read by
+    nothing at all.
+
+    🔴 EVERY FIXTURE HERE USES A CLEAN DOC DELTA (`clean_update`), because that
+    is what makes the refusal attributable to the MESSAGE. With a leaky delta the
+    tests would pass identically on `origin/main`.
+    """
+
+    def test_a_denied_identifier_in_advanced_is_refused(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        token_scanner(repo)
+        before = doc_of(repo)
+        shas_before = commit_shas(repo)
+
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path),
+                       advanced=f"the store is reached at scope {DENIED_TOKEN}")
+
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stdout, res.stderr)
+        assert "status=leak-refused" in res.stderr, res.stderr
+        # The scanner's own line, naming the probe — so a reader can see it was
+        # the MESSAGE that was flagged and not the doc.
+        assert DENIED_TOKEN in res.stderr, res.stderr
+        # …and this module's standing property: nothing written, nothing staged,
+        # no commit, and no residue — the probe included, which is why the
+        # untracked set is asserted rather than merely the doc.
+        assert doc_of(repo) == before, "the doc was left written after the refusal"
+        assert commit_shas(repo) == shas_before, "a commit was made despite the refusal"
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == [], f"paths left STAGED after the refusal: {staged}"
+        assert untracked_paths(repo) == ["tests/leakscan.py"], (
+            "residue beyond the fixture's own scanner: "
+            f"{untracked_paths(repo)}")
+
+    def test_the_refusal_NAMES_the_probe_so_the_doc_is_not_blamed(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 SPLIT OUT OF THE TEST ABOVE ON PURPOSE, AND THE REASON IS THE RED
+        MATRIX. This assertion mentions `MESSAGE_PROBE_PREFIX`, which does not
+        exist on pre-change code — so on `origin/main` it dies with an
+        `AttributeError` about a missing symbol rather than with the refusal it is
+        about, and a mutant that dies for the wrong reason proves nothing. The
+        test above carries the regression claim and names no new symbol, so it is
+        red at `origin/main` for the right reason: rc 0 and a commit.
+
+        What this one adds is that the operator can tell WHICH channel was
+        flagged. Rule (o)'s refusal prints the scanner's own lines, and without
+        the probe's name in them a message finding reads as a doc finding — and
+        the printed remedy would send the operator to edit `--update`."""
+        token_scanner(repo)
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path),
+                       advanced=f"the store is reached at scope {DENIED_TOKEN}")
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stderr)
+        assert hd.MESSAGE_PROBE_PREFIX in res.stderr, res.stderr
+        assert "--advanced" in res.stderr, (
+            "the remedy never mentions the input that actually has to change:\n"
+            + res.stderr)
+        assert probe_leftovers(repo) == []
+
+    def test_the_refusal_is_the_MESSAGE_and_the_SAME_DELTA_lands_clean(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 REACHABILITY, or the test above passes for the wrong reason.
+
+        The byte-identical doc delta with a CLEAN `--advanced` must reach
+        `status=written` and commit — so the refusal above is the message being
+        scanned, not the delta, not a neighbouring rule refusing the fixture, and
+        not the token scanner disliking the doc."""
+        token_scanner(repo)
+        update = clean_update(tmp_path)
+
+        clean = run_tool(repo, "--confirm", update=update,
+                         advanced="the drain loop is fixed and verified")
+
+        assert clean.returncode == hd.EXIT_OK, (clean.returncode, clean.stderr)
+        assert "status=written" in clean.stdout, clean.stdout
+        assert DENIED_TOKEN not in _sh("git", "log", "-1", "--format=%B", cwd=repo)
+
+    def test_a_token_only_on_a_LATER_line_of_advanced_is_refused(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE DECISION THIS SECTION EXISTS TO PIN: the WHOLE `--advanced`
+        value is scanned, not only the subject line that lands in the commit.
+
+        The subject is `splitlines()[0]`, so this token reaches the commit
+        message nowhere — a subject-only scan passes it. It DOES reach stdout,
+        which `transcript-push.sh` exports, so it is a real channel."""
+        token_scanner(repo)
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path),
+                       advanced=_ADVANCED_TOKEN_ON_A_LATER_LINE)
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stdout, res.stderr)
+        assert DENIED_TOKEN in res.stderr, res.stderr
+
+    def test_a_token_PAST_the_100_char_truncation_is_refused(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """The second mechanism by which a subject-only scan misses operator
+        text: `[:100]`. Distinct from the multi-line case — one line, and the
+        token is dropped by the SLICE rather than by `splitlines()`."""
+        subject = f"docs(handoff): {_ADVANCED_TOKEN_PAST_THE_TRUNCATION}"[:100]
+        assert DENIED_TOKEN not in subject, (
+            "fixture inert: the token survives the truncation, so this test is "
+            f"the same claim as the one above: {subject!r}"
+        )
+        token_scanner(repo)
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path),
+                       advanced=_ADVANCED_TOKEN_PAST_THE_TRUNCATION)
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stdout, res.stderr)
+        assert DENIED_TOKEN in res.stderr, res.stderr
+
+
+class TestWhatTheProbeActuallyCARRIES:
+    """Pinning the TEXT, not just the refusal. A gate that refuses on the right
+    inputs can still be scanning the wrong string."""
+
+    def _captured(self, repo: Path, tmp_path: Path, advanced: str) -> str:
+        dest = tmp_path / "captured"
+        probe_capture_scanner(repo, dest)
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path),
+                       advanced=advanced)
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        files = sorted(dest.iterdir())
+        assert len(files) == 1, f"expected exactly one probe, got {files}"
+        return files[0].read_text(encoding="utf-8")
+
+    def test_line_one_is_BYTE_FOR_BYTE_the_subject_that_lands_in_the_commit(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 DERIVED FROM THE COMMIT, NOT FROM THE IMPLEMENTATION. The expected
+        value is read out of `git log` — the artifact — so this cannot go green
+        against a probe that scans some other rendering of the same idea."""
+        advanced = _ADVANCED_TOKEN_PAST_THE_TRUNCATION.replace(DENIED_TOKEN,
+                                                              "alpha-notes")
+        body = self._captured(repo, tmp_path, advanced)
+        committed_subject = _sh(
+            "git", "log", "-1", "--format=%s", cwd=repo).rstrip("\n")
+        assert body.splitlines()[0] == committed_subject, (
+            f"probe line 1 {body.splitlines()[0]!r} is not the committed subject "
+            f"{committed_subject!r}"
+        )
+        # …and the truncation really happened, or the assertion above is about a
+        # string the slice never touched.
+        assert len(committed_subject) == 100, (
+            f"fixture inert: the subject was not truncated ({len(committed_subject)})"
+        )
+
+    def test_the_WHOLE_advanced_value_is_there_too(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        advanced = _ADVANCED_TOKEN_ON_A_LATER_LINE.replace(DENIED_TOKEN,
+                                                           "alpha-notes")
+        body = self._captured(repo, tmp_path, advanced)
+        for line in advanced.strip().splitlines():
+            assert line in body, f"missing from the probe: {line!r}\n{body}"
+
+    def test_the_MACHINE_GENERATED_trailers_are_NOT_in_it(
+        self, repo: Path, tmp_path: Path, monkeypatch
+    ) -> None:
+        """🔴 THE SCOPE, STATED AS A TEST. `Claude-Session-Id` is a UUID this
+        tool resolved rather than anything a human typed, and
+        `LEAK_TRAILER_KEY`'s value IS the gate's own verdict — scanning it would
+        need the verdict this scan produces. That cycle is the reason the
+        assembled message cannot be what is scanned, and this is the assertion
+        that keeps a future edit from "fixing" it into one."""
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID",
+                           "11111111-2222-3333-4444-555555555555")
+        body = self._captured(repo, tmp_path, "the drain loop is fixed")
+        assert "Claude-Session-Id" not in body, body
+        assert hd.LEAK_TRAILER_KEY not in body, body
+        # The session id really was resolvable, or the assertion is vacuous.
+        assert "Claude-Session-Id" in _sh("git", "log", "-1", "--format=%B",
+                                          cwd=repo), "fixture inert: no trailer"
+
+
+class TestTheProbeLeavesNoTrace:
+    """The probe is an UNTRACKED file in a possibly-shared checkout — invisible
+    to `git status -s` habits that scan for ` M`, and swept in by anyone's
+    `git add -A`. It must not survive any exit path."""
+
+    def test_it_is_gone_on_the_CLEAN_path(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        token_scanner(repo)
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert probe_leftovers(repo) == []
+        assert untracked_paths(repo) == ["tests/leakscan.py"], (
+            "residue beyond the fixture's own scanner: "
+            f"{untracked_paths(repo)}")
+
+    def test_it_is_gone_after_an_APPROVED_THROUGH_run(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """The arm that writes despite a refusing scanner — a third exit path,
+        and the one a `verdict.refusal`-only cleanup would have missed."""
+        install_scanner(repo, _ALWAYS_SRC.format(code=1))
+        res = run_tool(repo, "--confirm", hd.LEAK_PRE_EXISTING_FLAG,
+                       update=clean_update(tmp_path))
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert probe_leftovers(repo) == []
+
+    def test_it_is_gone_when_the_COMMIT_is_refused(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """The `except (GitError, OSError)` path, reached the way
+        `TestBlockedCommitLeavesNoTrace` reaches it — a refusing `pre-commit`
+        hook, which is the measured real shape."""
+        token_scanner(repo)
+        write_exec(repo / ".git" / "hooks" / "pre-commit",
+                   "echo 'blocked by guard' >&2\nexit 1\n")
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
+        assert res.returncode == hd.EXIT_FAIL, (res.returncode, res.stderr)
+        assert "status=failed" in res.stderr, res.stderr
+        assert probe_leftovers(repo) == [], (
+            "a blocked commit left the probe behind — the same defect class as "
+            "the staged doc this module's no-trace class exists for"
+        )
+        assert untracked_paths(repo) == ["tests/leakscan.py"], (
+            "residue beyond the fixture's own scanner: "
+            f"{untracked_paths(repo)}")
+
+    def test_the_probe_EXISTS_at_commit_time_and_is_still_not_committed(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 CONFIRMED, NOT ASSUMED. `git commit -m … -- <relpath>` is
+        path-limited, which is what keeps an untracked probe out of the commit —
+        but "not in the commit" is also what you get from a probe that was never
+        there. The hook capture is what separates those: it proves the probe was
+        present in the tree at the moment of the commit AND that the commit
+        carried exactly one path."""
+        token_scanner(repo)
+        captured = status_at_commit_time(repo)
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        seen = captured.read_text(encoding="utf-8")
+        assert hd.MESSAGE_PROBE_PREFIX in seen, (
+            f"the probe was NOT in the tree at commit time, so this test proves "
+            f"nothing about the path limit:\n{seen}"
+        )
+        names = _sh("git", "show", "--name-only", "--format=", "HEAD",
+                    cwd=repo).split()
+        assert names == ["claudedocs/handoff-sample-topic.md"], (
+            f"the commit carried more than the doc: {names}")
+
+    def test_NO_probe_is_written_when_the_repo_has_no_scanner(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """With no scanner the gate passes by absence and says so, so a probe
+        would buy nothing while adding a refusal arm to every repo that has none
+        — which is most of them, devrc itself included."""
+        captured = status_at_commit_time(repo)
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        seen = captured.read_text(encoding="utf-8")
+        assert hd.MESSAGE_PROBE_PREFIX not in seen, (
+            f"a probe was written into a repo with no scanner:\n{seen}")
+
+
+class TestAnIGNOREDProbePathIsRefusedRatherThanSilentlyPassed:
+    """🔴 THE SILENT, PERMANENT PASS — and the reason the enumerability check is
+    not decoration.
+
+    A whole-tree scanner finds untracked files with
+    `git ls-files --others --exclude-standard`, which OBEYS `.gitignore`. MEASURED
+    on a throwaway repo carrying cairn's real `tests/leakscan.py` and a probe
+    spelling its `DENY_CANARY`: not ignored → `2 file(s) scanned`,
+    `1 finding(s) — REFUSING`, exit 1; with `.gitignore` carrying
+    `.handoff-commit-message-*` → `ls-files` prints NOTHING, the scanner reports
+    `1 file(s) scanned`, `0 findings`, exit 0, and names the probe zero times.
+    The second run is indistinguishable from a clean message in every observable
+    this gate has, forever.
+
+    ⚠ IT IS THE SAME QUESTION *cairn's* SCANNER ASKS, NOT EVERY SCANNER'S. There
+    is no black-box way to ask a scanner what it read; this proves the path is
+    reachable by the standard enumeration, which is the strongest claim available
+    without parsing output.
+    """
+
+    def _ignore_the_probe(self, repo: Path) -> None:
+        (repo / ".gitignore").write_text(
+            f"{hd.MESSAGE_PROBE_PREFIX}*\n", encoding="utf-8")
+
+    def test_the_fixture_really_hides_the_probe_from_git(self, repo: Path) -> None:
+        """POSITIVE CONTROL for the fixture. An ignore rule that did not match
+        would make the refusal below unreachable and the test vacuous."""
+        self._ignore_the_probe(repo)
+        rel = hd.message_probe_relpath(pid=4242)
+        (repo / rel).write_text("x\n", encoding="utf-8")
+        assert not hd.message_probe_is_enumerated(repo, rel), (
+            "git still enumerates the probe, so the ignore fixture is inert")
+        # …and the predicate can say yes, or it is a function that only refuses.
+        (repo / ".gitignore").unlink()
+        assert hd.message_probe_is_enumerated(repo, rel), (
+            "the predicate never returns True — every refusal below would be "
+            "green for the wrong reason"
+        )
+
+    def test_a_TRACKED_file_at_the_probe_path_is_not_a_silent_pass_either(
+        self, repo: Path
+    ) -> None:
+        """The other way the probe can be unreadable, and it is not a `.gitignore`.
+
+        `--others` lists UNTRACKED files only, so a path someone genuinely
+        committed under this name is invisible to the enumeration in exactly the
+        same way an ignored one is — and the run must refuse for that too.
+        MEASURED here rather than reasoned: this is also what bounds the damage of
+        the collision `message_probe_relpath` documents, since a refusing run says
+        so instead of reporting a clean message."""
+        rel = hd.message_probe_relpath(pid=777)
+        (repo / rel).write_text("someone's real file\n", encoding="utf-8")
+        assert hd.message_probe_is_enumerated(repo, rel), (
+            "untracked: the predicate must say YES, or the pair below is one claim")
+        _sh("git", "add", "--", rel, cwd=repo)
+        _sh("git", "commit", "-q", "-m", "a file that happens to be named this",
+            cwd=repo)
+        assert not hd.message_probe_is_enumerated(repo, rel), (
+            "a TRACKED path reads as enumerable, so a run colliding with one "
+            "would report a clean message it never scanned"
+        )
+
+    def test_the_run_REFUSES_rather_than_reporting_a_clean_message(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        token_scanner(repo)
+        self._ignore_the_probe(repo)
+        before = doc_of(repo)
+        shas_before = commit_shas(repo)
+
+        res = run_tool(repo, "--confirm", update=clean_update(tmp_path))
+
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stdout, res.stderr)
+        assert "status=leak-refused" in res.stderr, res.stderr
+        assert "check-ignore" in res.stderr, (
+            "the refusal does not hand over the one command that finds the rule:\n"
+            + res.stderr)
+        assert doc_of(repo) == before, "the doc was left written"
+        assert commit_shas(repo) == shas_before, "a commit was made"
+        assert probe_leftovers(repo) == []
+
+    def test_the_OPERATOR_OPT_IN_does_not_reach_this_arm(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """Same ruling as `leak_unscannable_report`, same reason: this arm
+        produced NO verdict about the message, so there is nothing for an
+        operator to have read and approved."""
+        token_scanner(repo)
+        self._ignore_the_probe(repo)
+        shas_before = commit_shas(repo)
+        res = run_tool(repo, "--confirm", hd.LEAK_PRE_EXISTING_FLAG,
+                       update=clean_update(tmp_path))
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, (
+            res.returncode, res.stdout, res.stderr)
+        assert commit_shas(repo) == shas_before, "the flag wrote through anyway"
+        assert hd.LEAK_PRE_EXISTING_FLAG in res.stderr, (
+            "the refusal does not say the flag is inapplicable here:\n" + res.stderr)
