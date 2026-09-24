@@ -30,13 +30,33 @@ with pkgs; [
   # for ~6.5 s at a time, which ssh experiences as a frozen terminal and a
   # banner-exchange timeout. mosh's UDP datagram protocol carries session state
   # across the gap, so the same outage is invisible. It is a MITIGATION, not a
-  # fix — the blackout is upstream of both hosts (see
-  # claudedocs/handoff-laptop-airvpn-tunnel.md).
-  # 🔴 Installing this is NOT sufficient by itself: mosh-server binds a UDP port
-  # in 60000-61000 on the machine you connect TO, and neither host's
-  # networking.firewall opens that range. That half is a /etc/nixos change and
-  # is staged as nix/system/apply-mosh-nebula-firewall.sh — both halves, or mosh
-  # hangs at "Connecting..." with no diagnostic.
+  # fix — nebula and tailscale black out in the SAME second for the same
+  # duration while a far endpoint of ours that is not at home stays 0/140 over
+  # the same wifi, router, ISP and distance, so the fault is upstream of both
+  # hosts. ⚠ The write-up is claudedocs/handoff-laptop-airvpn-tunnel.md, but its
+  # CORRECTED text is on PR #1861 and is NOT merged: as `main` stands that doc
+  # still blames the laptop's own tailscale subnet route "with high
+  # confidence". The measurement restated here is the justification, not the doc.
+  #
+  # 🔴 THIS ENTRY IS THE CLIENT, AND IT IS DELIBERATELY USER-LEVEL. home-manager
+  # installs it on both hosts with no sudo, which is what the laptop needs to
+  # *initiate* a session. The SERVER side is a system-level change — the
+  # `programs.mosh` NixOS module (for the utempter setgid wrapper, without which
+  # mosh cannot write utmp and `who` misses the session, and for mosh-server on
+  # the system PATH) plus a UDP range on the mesh interface, because
+  # mosh-server binds one ephemeral port in 60000-61000 on the machine you
+  # connect TO and neither host's networking.firewall opens that range. That
+  # half is staged as nix/system/apply-mosh-nebula-firewall.sh — both halves, or
+  # mosh hangs at "Connecting..." with no diagnostic.
+  #
+  # 🔴 The module's `openFirewall` defaults to TRUE and the staged script turns
+  # it OFF: it would open 1001 UDP ports on EVERY interface, WAN included. The
+  # interface-scoped range is the narrow replacement — but "scoped to the mesh"
+  # is not "reachable only from the admin laptop": inside the mesh the gate is
+  # nebula's own firewall.inbound, which allows any/any from every listed GROUP
+  # (measured 2026-09-23 on the laptop: three — lighthouse, admin, workbench —
+  # plus icmp from any). Read the target host's own inbound rules before
+  # assuming the exposure is smaller.
   mosh
 
   # age — file encryption for the /analyze-service index off-machine backup
