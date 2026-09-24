@@ -41,8 +41,20 @@ WHAT EACH TEST IS FOR — the audit findings the script was reworked for:
   D1         the insert uses `programs.mosh` (for the utempter wrapper and
              mosh-server on the system PATH) with `openFirewall = false`.
   CITATION   the blackout measurement is restated inline and the handoff-doc
-             citation names PR #1861, because the corrected text of that doc is
-             not on `main`.
+             citation names PR #1866 — the OPEN PR carrying the corrected text.
+             #1861 merged WITHOUT the correction, so `main`'s copy of that doc
+             still contradicts this change's justification.
+
+ROUND-2 AUDIT FINDINGS closed here:
+  R2-1       MOSH_FW_SWITCH=1 over an ALREADY APPLIED config converges with a
+             switch instead of falling through into a second patch pass (which
+             produced duplicate attributes and could never succeed).
+  R2-2       the half-configured guard's mosh half accepts the dotted
+             `programs.mosh.enable` spelling its own die message recommends.
+  R2-3       the citation names #1866, not the merged #1861.
+  R2-7       a config with no trailing newline is patched, not blamed.
+  CLAIM-9    the rc-127 claim is pinned to the guard that actually delivers it
+             (the preflight `command -v` loop), not to the parse gate.
 """
 from __future__ import annotations
 
@@ -61,8 +73,24 @@ from testlib.mockbin import write_exec  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # TEST SEAM, same convention as test_nebula_relay_apply.py: a mutation battery
-# (or a red-baseline measurement against an older revision) copies nix/system/
-# into a `mktemp -d` and points this at the copy.
+# copies nix/system/ into a `mktemp -d`, edits the copy, and points this at it.
+#
+# 🔴 A RED-BASELINE MEASUREMENT AGAINST 5f968207 DOES NOT WORK THAT WAY, AND
+# RUNNING IT PRIVILEGED WOULD EDIT THE REAL SYSTEM FILE. The pre-fix script has
+# NO `MOSH_FW_CFG` seam at all — it hardcodes `CFG="/etc/nixos/configuration.nix"`
+# — so pointing DEVRC_TEST_MOSH_FW_DIR at a copy of it makes every test operate
+# on the live /etc/nixos. Measured unprivileged: 25 red / 1 green, and 22 of the
+# reds are `Permission denied` writing the REAL
+# `/etc/nixos/configuration.nix.bak-mosh`, i.e. reds that say nothing about the
+# change. As root the same run would have PATCHED THE LIVE CONFIG. Never run a
+# baseline under sudo.
+#
+# To measure a real baseline: copy nix/system/ to a temp dir, hand-add the seam
+# to the copy (`CFG="${MOSH_FW_CFG:-/etc/nixos/configuration.nix}"`, plus the
+# root/tool/iface seams a given test needs), and say in the report that the reds
+# were taken against a HAND-SEAMED copy — not against 5f968207 as committed.
+# Where a test can only go red through a seam the old script lacks, that is the
+# honest claim, and it is not the same as a clean red.
 _SYSDIR = Path(os.environ.get("DEVRC_TEST_MOSH_FW_DIR",
                               str(REPO_ROOT / "nix" / "system"))).resolve()
 APPLY = _SYSDIR / "apply-mosh-nebula-firewall.sh"
@@ -192,11 +220,32 @@ for a in "$@"; do iface="$a"; done
 echo "3: $iface    inet $mesh/24 scope global $iface\\\\       valid_lft forever preferred_lft forever"
 ''')
 
+        # 🔴 THIS SHIM MUST BE ABLE TO SAY NO FOR A REASON THE TEST DID NOT ASK
+        # FOR. An unconditional `exit 0` made it blind to the exact defect the
+        # converge path had: re-running the patch pass over an already-applied
+        # config inserts a SECOND `programs.mosh` block and a SECOND
+        # `allowedUDPPortRanges`, which the real `nix-instantiate --parse`
+        # rejects with `attribute … already defined`. With a rubber-stamp shim a
+        # test asserting "the converge run succeeds" passes over a config the
+        # real parser would refuse — green for the wrong reason. So the shim
+        # models that one rule. `instantiate_rc` still forces a syntax error on
+        # demand; the duplicate check is independent of it and always armed.
         write_exec(self.bin / "nix-instantiate", f'''
 rc=$(cat {S}/instantiate_rc)
 if [ "$rc" != "0" ]; then
   echo "error: syntax error, unexpected ID, at $2:12:3" >&2
   exit "$rc"
+fi
+code=$(grep -v '^[[:space:]]*#' "$2")
+n_mosh=$(printf '%s\\n' "$code" | grep -cE 'programs\\.mosh[[:space:]]*=[[:space:]]*\\{{' || true)
+n_range=$(printf '%s\\n' "$code" | grep -cE 'allowedUDPPortRanges[[:space:]]*=' || true)
+if [ "${{n_mosh:-0}}" -gt 1 ]; then
+  echo "error: attribute 'programs.mosh.enable' at $2:20:5 already defined at $2:11:5" >&2
+  exit 1
+fi
+if [ "${{n_range:-0}}" -gt 1 ]; then
+  echo "error: attribute 'allowedUDPPortRanges' at $2:30:5 already defined at $2:21:5" >&2
+  exit 1
 fi
 exit 0
 ''')
@@ -338,6 +387,14 @@ def test_a_failed_switch_rolls_the_config_back_and_names_the_state(rig):
     assert str(rig.backups()[0]) in r.stderr
     # The three states are mutually exclusive: a started-but-unreported switch
     # is NOT "never started" and NOT "already switched".
+    #
+    # ⚠ THE TWO NEGATIVE ASSERTIONS ARE WEAKER THAN THEY LOOK, and the script's
+    # header now says so too. "ALREADY SWITCHED" needs PERSISTED=1 with OK=0 —
+    # set on adjacent lines with nothing between them — and "NEVER STARTED"
+    # needs a failure between the `mv` and the switch, where only `echo`s live.
+    # Neither is reachable from realistic input, so these lines cannot fail on a
+    # BEHAVIOUR change; what they still catch is a MESSAGE change that makes the
+    # trap print more than one state at once.
     assert "STARTED, OUTCOME UNKNOWN" in r.stderr
     assert "NEVER STARTED" not in r.stderr
     assert "ALREADY SWITCHED" not in r.stderr
@@ -428,6 +485,151 @@ def test_a_second_run_is_idempotent_on_the_structure(rig):
     assert len(rig.backups()) == 1, "a no-op run must not take a second backup"
 
 
+def test_the_converge_run_switches_instead_of_re_patching(rig):
+    """🟡 ROUND-2 FINDING 1. `MOSH_FW_SWITCH=1` over an ALREADY APPLIED config is
+    the second half of the two-step workflow this script exists to create: edit
+    now on a host you cannot reach, converge later when you are at its keyboard.
+
+    It used to print "converging with a switch anyway" and then FALL THROUGH
+    into the anchor check and the awk patch pass, inserting a second
+    `programs.mosh` block and a second `allowedUDPPortRanges`. Measured at
+    9dd99f25: two of each, TWO backups — and the real parser then rejects the
+    result with `attribute 'programs.mosh.enable' already defined`, so the
+    advertised converge could never succeed. It failed closed, which is why
+    nothing louder happened; it was still a regression against 5f968207.
+
+    The pins here are the ones that separate "converged" from "re-patched": the
+    file is byte-identical to what the first run left, there is still exactly
+    ONE backup (the converge writes nothing, so it takes none), each attribute
+    appears once, and the rebuild log shows a switch with NO second
+    `dry-build after` — an `after` label can only come from evaluating a
+    candidate, i.e. from a patch pass that should not have run."""
+    first = rig.run()
+    assert first.returncode == 0, first.stdout + first.stderr
+    applied = rig.cfg.read_text()
+    assert len(rig.backups()) == 1
+    (rig.state / "rebuild.log").write_text("")
+
+    r = rig.run(extra_env={"MOSH_FW_SWITCH": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "ALREADY APPLIED" in r.stdout
+    assert "CONVERGING" in r.stdout, r.stdout
+    assert rig.cfg.read_text() == applied, "the converge run must write nothing"
+    assert applied.count("programs.mosh = {") == 1
+    assert applied.count("allowedUDPPortRanges") == 1
+    assert len(rig.backups()) == 1, "a converge run must not take a second backup"
+    assert not list(rig.etc.glob("configuration.nix.new.*"))
+    assert rig.log("rebuild") == ["dry-build before", "switch"], r.stdout
+    assert "=== SWITCHED" in r.stdout
+
+
+def test_a_failed_converge_switch_does_not_claim_a_rollback_it_did_not_do(rig):
+    """The converge path arms no rollback trap, and must not pretend otherwise:
+    it never touched $CFG, so there is nothing of ours to restore — while the
+    SYSTEM may still have moved, which is the separate claim worth making."""
+    first = rig.run()
+    assert first.returncode == 0, first.stdout + first.stderr
+    applied = rig.cfg.read_text()
+    rig.set("switch_rc", "1")
+
+    r = rig.run(extra_env={"MOSH_FW_SWITCH": "1"})
+    assert r.returncode != 0
+    assert "switch` FAILED" in r.stderr, r.stdout + r.stderr
+    assert "is UNTOUCHED" in r.stderr
+    assert "ROLLED BACK" not in r.stderr, "nothing was patched, so nothing rolled back"
+    assert "ROLLBACK FAILED" not in r.stderr
+    assert "list-generations" in r.stderr, "the system-side claim must be made"
+    assert rig.cfg.read_text() == applied
+    assert len(rig.backups()) == 1
+
+
+def test_the_dotted_spelling_of_programs_mosh_counts_as_applied(tmp_path):
+    """🟡 ROUND-2 FINDING 2. The two halves of the half-configured guard
+    disagreed about spelling. The range half is `grep -qF` (a substring, so the
+    dotted form matches fine); the mosh half was a regex whose RIGHT boundary
+    `[^.[:alnum:]_]` EXCLUDED a following dot — so `programs.mosh.enable =
+    true;`, the most idiomatic NixOS spelling and close to what this script's
+    own die message hands the operator, never matched.
+
+    Measured at 9dd99f25: a fully and correctly hand-applied dotted config was
+    refused as "HALF configured", with remediation advice that produces
+    `already defined`. This fixture is exactly that config — both halves
+    present, both in dotted form — and the only correct verdict is ALREADY
+    APPLIED with nothing written."""
+    cfg = CONFIG_NIX.replace(
+        "  networking.firewall = {\n",
+        "  programs.mosh.enable = true;\n"
+        "  programs.mosh.openFirewall = false;\n"
+        "\n"
+        "  networking.firewall = {\n", 1)
+    cfg = cfg.replace(
+        "    allowedTCPPorts = [ 7844 80 443 ];\n",
+        "    allowedTCPPorts = [ 7844 80 443 ];\n"
+        '    interfaces."nebula.mesh".allowedUDPPortRanges = '
+        "[ { from = 60000; to = 61000; } ];\n", 1)
+    assert cfg != CONFIG_NIX
+
+    r = Rig(tmp_path, config_text=cfg)
+    res = r.run()
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "ALREADY APPLIED" in res.stdout, res.stdout + res.stderr
+    assert "HALF configured" not in res.stderr, res.stderr
+    assert r.cfg.read_text() == r.original_cfg_text, "nothing may be written"
+    assert r.backups() == []
+    assert r.log("rebuild") == []
+
+
+def test_a_similar_but_different_attribute_is_not_mistaken_for_programs_mosh(tmp_path):
+    """⚠ INVARIANT GUARD, not regression coverage: measured GREEN at 9dd99f25
+    too — the pre-fix regex was NARROWER, so of course it rejected these. It is
+    here because R2-2 widens a boundary, and a widening needs a pin saying how
+    far: `programs.moshpit` and `services.programs.mosh` are different keys and
+    must still NOT satisfy the mosh half, so with the range present a file
+    carrying only those is HALF configured."""
+    cfg = CONFIG_NIX.replace(
+        "  networking.firewall = {\n",
+        "  programs.moshpit.enable = true;\n"
+        "  services.programs.mosh = true;\n"
+        "\n"
+        "  networking.firewall = {\n", 1)
+    cfg = cfg.replace(
+        "    allowedTCPPorts = [ 7844 80 443 ];\n",
+        "    allowedTCPPorts = [ 7844 80 443 ];\n"
+        '    interfaces."nebula.mesh".allowedUDPPortRanges = '
+        "[ { from = 60000; to = 61000; } ];\n", 1)
+    r = Rig(tmp_path, config_text=cfg)
+    res = r.run()
+    assert res.returncode == 1, res.stdout + res.stderr
+    assert "HALF configured" in res.stderr, res.stdout + res.stderr
+    assert "`programs.mosh` is not" in res.stderr, res.stderr
+    assert r.cfg.read_text() == r.original_cfg_text
+
+
+def test_the_nix_instantiate_shim_can_reject_a_duplicated_attribute(rig):
+    """🔴 NEGATIVE CONTROL FOR THE INSTRUMENT, not for the script. The converge
+    test above is only worth anything if the parse shim can say no to the shape
+    the old fall-through produced. This drives the shim directly with a config
+    carrying two `programs.mosh = {` blocks and watches it refuse; a shim that
+    rubber-stamps everything fails here, and every test that trusts its 0 is
+    then known to be trusting nothing."""
+    dup = rig.etc / "dup.nix"
+    dup.write_text(CONFIG_NIX.replace(
+        "  networking.firewall = {\n",
+        MOSH_BLOCK + "\n" + MOSH_BLOCK + "\n  networking.firewall = {\n", 1))
+    env = dict(os.environ)
+    env["PATH"] = f"{rig.bin}:{env.get('PATH', '')}"
+    res = subprocess.run(["nix-instantiate", "--parse", str(dup)],
+                         env=env, capture_output=True, text=True, timeout=60)
+    assert res.returncode != 0, res.stdout + res.stderr
+    assert "already defined" in res.stderr, res.stderr
+
+    ok = rig.etc / "ok.nix"
+    ok.write_text(CONFIG_NIX)
+    res2 = subprocess.run(["nix-instantiate", "--parse", str(ok)],
+                          env=env, capture_output=True, text=True, timeout=60)
+    assert res2.returncode == 0, res2.stdout + res2.stderr
+
+
 def test_a_half_configured_file_is_refused_rather_than_merged(rig):
     """Only one of the two attribute paths present: refuse and say which."""
     rig.cfg.write_text(rig.original_cfg_text.replace(
@@ -503,6 +705,67 @@ def test_a_parse_failure_prints_the_parsers_own_output(rig):
     assert rig.log("rebuild") == [], "no dry-build after a parse failure"
 
 
+def test_a_missing_nix_instantiate_aborts_in_the_PREFLIGHT_tool_check(rig):
+    """CLAIM-9 RESIDUE. The parse gate's comment used to say a missing
+    `nix-instantiate` (rc 127) was distinguished there from a genuinely broken
+    file. It is not — and cannot be: the preflight `command -v` loop lists
+    `nix-instantiate` and aborts long before anything is patched, so the parse
+    gate is unreachable for that case. This proves WHICH guard delivers the
+    claim, by running with a PATH that has every other tool the loop checks and
+    not that one.
+
+    ⚠ REACHABILITY GUARD, not regression coverage: measured GREEN at 9dd99f25
+    — the preflight loop already listed the tool there. What was wrong at that
+    revision was the parse gate's COMMENT, which claimed a guarantee this guard
+    provides and that gate does not. A comment is not testable, so this pins the
+    guard the corrected comment now names.
+
+    Mutation: drop `nix-instantiate` from the preflight list and this goes red
+    on its own assertion — the run gets as far as the parse gate and dies
+    claiming the candidate "does not parse as Nix", which is exactly the false
+    claim about the file that the comment now says is impossible."""
+    import shutil
+    minbin = rig.root / "minbin"
+    minbin.mkdir()
+    # Everything the preflight loop checks, EXCEPT nix-instantiate, plus what
+    # the script runs before it (mktemp for $SCRATCH) and just after it.
+    for tool in ("bash", "awk", "sed", "grep", "cp", "mv", "rm", "mktemp",
+                 "date", "head", "cut", "wc", "diff", "readlink", "cat",
+                 "tail", "chmod", "printf"):
+        src = shutil.which(tool)
+        if src:
+            (minbin / tool).symlink_to(src)
+    for shim in ("id", "ip", "nixos-rebuild"):
+        (minbin / shim).symlink_to(rig.bin / shim)
+    assert not (minbin / "nix-instantiate").exists()
+
+    r = rig.run(extra_env={"PATH": str(minbin)})
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "`nix-instantiate` is not on PATH" in r.stderr, r.stdout + r.stderr
+    assert "does not parse as Nix" not in r.stderr, (
+        "rc 127 must not be reported as a claim about the file")
+    assert rig.cfg.read_text() == rig.original_cfg_text
+    assert rig.backups() == []
+    assert rig.log("rebuild") == []
+
+
+def test_a_config_with_no_trailing_newline_is_patched_not_blamed(tmp_path):
+    """🟢 ROUND-2 FINDING 7. The +17 check measured both sides with `wc -l`,
+    which counts NEWLINES. A config whose last line is unterminated counts one
+    short, while awk's output always ends with a newline — so the run died with
+    "expected the patch to add exactly 17 lines, it added 18", a message
+    blaming the patch for the shape of the input. Fail-safe but misleading, and
+    latent only because both hosts' real files end with a newline."""
+    r = Rig(tmp_path, config_text=CONFIG_NIX.rstrip("\n"))
+    res = r.run()
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "it added 18" not in res.stderr, res.stderr
+    assert "candidate : +17 lines" in res.stdout, res.stdout
+    text = r.cfg.read_text()
+    assert MOSH_BLOCK in text
+    assert RANGE_BLOCK in text
+
+
 # ------------------------------------------------------------------------- D1
 def test_the_insert_uses_the_module_with_openFirewall_off(rig):
     """D1. `programs.mosh` brings the utempter setgid wrapper (its
@@ -576,18 +839,35 @@ def test_the_exposure_claim_names_the_nebula_group_set_in_both_files():
             "alone.")
 
 
-def test_the_blackout_citation_does_not_depend_on_an_unmerged_branch():
-    """The corrected text of `claudedocs/handoff-laptop-airvpn-tunnel.md` is on
-    PR #1861 and is NOT merged; as `main` stands that doc blames the laptop's
-    own tailscale subnet route "with high confidence", i.e. the opposite. So
-    wherever the doc is cited, the citation must name #1861 — and the
-    measurement itself is restated inline so the justification stands alone."""
+def test_the_blackout_citation_names_the_open_correction_not_the_merged_pr():
+    """🟡 ROUND-2 FINDING 3. Both files cited PR #1861 as carrying the corrected
+    text of `claudedocs/handoff-laptop-airvpn-tunnel.md`, and that citation was
+    false in BOTH halves — with this test pinning the falsehood.
+
+    Re-verified 2026-09-23: **#1861 is MERGED** (`5834b4c5`) and it never
+    carried the correction — its diff kept "Leading hypothesis (high
+    confidence, measured): laptop's tailscale subnet route …" verbatim, and
+    `origin/main` still reads that way. The correction — the flap had TWO
+    mechanisms and the one this change mitigates is not nebula's and not on
+    either host — is on **PR #1866** (`fix/flap-two-mechanisms-round3`), which
+    is OPEN. So nothing merged corrects the doc, and a citation naming a merged
+    PR reads as "already fixed, go read it" over text that says the opposite.
+
+    ⚠ WHAT THIS DOES NOT DO, and why. A draft asserted `"#1861" not in src` as
+    a second half, on the reasoning that no part of either file still has a
+    reason to name it. That is wrong: both files now name #1861 precisely to
+    record that it merged WITHOUT the correction, which is the provenance that
+    stops the wrong citation being re-derived. An absence pin would have deleted
+    the correction's own evidence, so the pin is the PRESENCE of #1866 only.
+    Like every word-level guard on prose it is walkable by rewording; it pins
+    the thing that was factually wrong, which is the number."""
     for path in (APPLY, PKGS):
         src = path.read_text()
         if "handoff-laptop-airvpn-tunnel" in src:
-            assert "#1861" in src, (
-                f"{path} cites the handoff doc without naming PR #1861, whose "
-                "unmerged branch carries the corrected text")
+            assert "#1866" in src, (
+                f"{path} cites the handoff doc without naming PR #1866, the OPEN "
+                "PR that carries the corrected text; `main`'s copy still "
+                "contradicts this change's justification")
         assert "6.5" in src, f"{path} must restate the measured blackout inline"
 
 
@@ -603,9 +883,15 @@ def test_the_script_is_executable_and_passes_bash_n():
 
 
 def test_no_predictable_tmp_literal_survives_in_the_source():
-    """Structural companion to the mktemp scratch: the hazardous shape is a
-    literal `/tmp/<name>.$$`, which as root is an arbitrary-file-overwrite
-    primitive for any local user who pre-creates the symlink."""
+    """⚠ HALF INVARIANT GUARD, half regression coverage — measured, and labelled
+    because the two halves are not worth the same. The `> /tmp/` assertion was
+    already GREEN at 5f968207: that shape never existed in the pre-fix script,
+    so it pins an invariant rather than catching a bug. Only the `mktemp -d`
+    half goes red there (the old script used no scratch dir at all).
+
+    The invariant half still earns its place: the hazardous shape is a literal
+    `/tmp/<name>.$$`, which as root is an arbitrary-file-overwrite primitive for
+    any local user who pre-creates the symlink — worth keeping out."""
     src = APPLY.read_text()
     assert not re.search(r">\s*/tmp/", src), src
     assert "mktemp -d" in src

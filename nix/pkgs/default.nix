@@ -33,10 +33,14 @@ with pkgs; [
   # fix — nebula and tailscale black out in the SAME second for the same
   # duration while a far endpoint of ours that is not at home stays 0/140 over
   # the same wifi, router, ISP and distance, so the fault is upstream of both
-  # hosts. ⚠ The write-up is claudedocs/handoff-laptop-airvpn-tunnel.md, but its
-  # CORRECTED text is on PR #1861 and is NOT merged: as `main` stands that doc
-  # still blames the laptop's own tailscale subnet route "with high
-  # confidence". The measurement restated here is the justification, not the doc.
+  # hosts. ⚠ The write-up is claudedocs/handoff-laptop-airvpn-tunnel.md, and the
+  # copy on `main` CONTRADICTS the paragraph above: it still blames the laptop's
+  # own tailscale subnet route "with high confidence". The correction — the flap
+  # had TWO mechanisms and this one is not nebula's — is on PR #1866
+  # (`fix/flap-two-mechanisms-round3`), OPEN and unmerged, so nothing merged
+  # corrects it. Verified 2026-09-23: #1861 merged as 5834b4c5 WITHOUT the
+  # correction; an earlier version of this comment cited it and was wrong. The
+  # measurement restated here is the justification, not the doc.
   #
   # 🔴 THIS ENTRY IS THE CLIENT, AND IT IS DELIBERATELY USER-LEVEL. home-manager
   # installs it on both hosts with no sudo, which is what the laptop needs to

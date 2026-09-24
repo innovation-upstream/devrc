@@ -83,11 +83,18 @@
 #   distance -- so the fault is upstream of both hosts and nothing in this repo
 #   causes or cures it. ssh experiences the gap as a frozen terminal and often a
 #   banner-exchange timeout; mosh carries session state over UDP and rides it.
-#   ⚠ The write-up lives in `claudedocs/handoff-laptop-airvpn-tunnel.md`, but
-#   the CORRECTED text is on PR #1861 and is NOT merged: as `main` stands that
-#   doc still blames the laptop's own tailscale subnet route "with high
-#   confidence". Do not read it as the justification for this change until
-#   #1861 lands -- the measurement above is the justification.
+#   ⚠ The write-up lives in `claudedocs/handoff-laptop-airvpn-tunnel.md`, and
+#   THE COPY ON `main` CONTRADICTS THE PARAGRAPH ABOVE. It still says "Leading
+#   hypothesis (high confidence, measured): laptop's tailscale subnet route
+#   ... intercepts nebula's UDP" -- i.e. it blames one of our own hosts. The
+#   correction (the flap had TWO mechanisms; the one this script mitigates is
+#   NOT nebula's and not on either host) is on PR #1866
+#   (`fix/flap-two-mechanisms-round3`), which is OPEN and unmerged, so nothing
+#   merged corrects it today. Verified 2026-09-23: #1861 merged as `5834b4c5`
+#   and did NOT carry the correction -- an earlier version of this comment cited
+#   it and was wrong in both halves. Do not read the doc as the justification
+#   for this change until #1866 lands -- the measurement above is the
+#   justification, which is why it is restated here rather than cited.
 #
 # SAFETY. Nothing is written until every precondition passes AND both
 # dry-builds have run: the file is patched in a temp sibling, parse-checked,
@@ -95,7 +102,18 @@
 # real eval gate -- `nix-instantiate --parse` is only a syntax gate and will
 # happily accept keys written at the wrong OPTION SCOPE), backed up, and only
 # then moved into place. From that moment a trap restores the backup on ANY
-# failure and reports which of three states the run actually reached.
+# failure and says what the run had reached when it failed.
+#
+# ⚠ BE PRECISE ABOUT WHAT THAT LAST CLAIM IS WORTH. The trap carries three
+# post-write branches, and only ONE of them -- "STARTED, OUTCOME UNKNOWN" -- is
+# reachable from a realistic failure (a `nixos-rebuild switch` that does not
+# return 0). "ALREADY SWITCHED" needs PERSISTED=1 with OK=0, and those are set
+# on adjacent lines with nothing between them; "NEVER STARTED" needs a failure
+# between the `mv` and the switch, where the only commands are `echo`s. They are
+# kept as DEFENCE -- if a future edit puts work between those statements the
+# branch starts telling the truth instead of having to be invented then -- but
+# an earlier version of this header said the trap "reports which of three states
+# the run actually reached", which claimed more coverage than is delivered.
 #
 # Overrides (all optional; the first three are test seams):
 #   MOSH_FW_CFG=/etc/nixos/configuration.nix
@@ -150,6 +168,59 @@ MOSH_KEY="programs.mosh"
 # string. Neither key can contain one, and erring toward "not yet applied"
 # fails safe: a duplicate attribute is rejected by `nix-instantiate --parse`.)
 code_only() { sed 's/#.*$//' "$CFG"; }
+
+# ------------------------------------------------------------------- helpers
+# Defined up here rather than beside their first use because the ALREADY
+# APPLIED + MOSH_FW_SWITCH=1 converge path (below) needs all three before the
+# patch section exists, and bash resolves a function at CALL time -- a
+# definition further down the file would simply not be there yet.
+
+dry_build() {   # $1 = config to evaluate, $2 = label
+  local rc=0
+  nixos-rebuild dry-build -I "nixos-config=$1" >"$SCRATCH/$2.out" 2>&1 || rc=$?
+  return $rc
+}
+
+# `nix` prints these to stderr, which dry_build folds into the same file:
+#   these 444 derivations will be built:      / this derivation will be built:
+#   these 1420 paths will be fetched (...)    / this path will be fetched (...)
+# Absent means zero. `tail -1` because a run can print the pair more than once.
+count_of() {    # $1 = label, $2 = built|fetched
+  local f="$SCRATCH/$1.out" n
+  if [ "$2" = "built" ]; then
+    n="$(sed -n 's/^ *these \([0-9]*\) derivations will be built.*/\1/p' "$f" | tail -1)"
+    [ -n "$n" ] || { grep -q '^ *this derivation will be built' "$f" && n=1 || n=0; }
+  else
+    n="$(sed -n 's/^ *these \([0-9]*\) paths will be fetched.*/\1/p' "$f" | tail -1)"
+    [ -n "$n" ] || { grep -q '^ *this path will be fetched' "$f" && n=1 || n=0; }
+  fi
+  printf '%s' "$n"
+}
+
+# 🔴 F7-adjacent: `wc -l` COUNTS NEWLINES, NOT LINES. A config whose last line
+# has no terminating newline is one short by that count, while awk's output
+# always ends with one -- so the +17 check saw +18 and the run died claiming
+# "the patch added 18 lines", blaming the patch for the input's shape. awk's NR
+# counts the final unterminated record, so both sides are measured the same way.
+# (Both hosts' real files do end with a newline, so this was latent.)
+lines_of() { awk 'END { print NR + 0 }' "$1"; }
+
+verify_text() {
+  # No apostrophe in the fallback: bash treats a `'` inside `${x:-…}` as an
+  # opening quote even within double quotes, and the whole file then fails
+  # `bash -n` with "unexpected EOF while looking for matching `''".
+  local target="${MESH_IP:-<THIS HOST-S $IFACE ADDRESS: nebula was down, look it up>}"
+  echo "VERIFY FROM THE OTHER HOST (this proves the path, not just the config):"
+  echo
+  echo "    mosh --ssh=\"ssh -o ConnectTimeout=10\" zach@${target} -- true && echo MOSH-OK"
+  echo
+  echo "🔴 A successful \`mosh\` is the only verification. \`nixos-rebuild switch\`"
+  echo "reporting success is a claim about the REBUILD, not about reachability."
+  echo
+  echo "If it hangs at \"Connecting...\", check in this order:"
+  echo "    ss -lunp 'sport >= :$PORT_FROM and sport <= :$PORT_TO'  # here, while connecting"
+  echo "    command -v mosh-server                                  # must be on the ssh session's PATH"
+}
 
 # ---------------------------------------------------------------- preflight (no writes)
 echo "== preflight =="
@@ -206,19 +277,78 @@ fi
 # ------------------------------------------------------------------ idempotence
 have_range=0; have_mosh=0
 code_only | grep -qF "$RANGE_KEY"  && have_range=1
-code_only | grep -qE "(^|[^.[:alnum:]_])programs\.mosh([^.[:alnum:]_]|$)" && have_mosh=1
+# 🔴 THE RIGHT BOUNDARY MUST ALLOW `.`, OR THE MOST IDIOMATIC SPELLING NEVER
+# MATCHES. This read `([^.[:alnum:]_]|$)`, which excludes a following dot -- so
+# `programs.mosh.enable = true;`, the dotted form this script's OWN die message
+# tells the operator to consider, did not count as present. Measured: a fully
+# and correctly hand-applied dotted config was refused as "HALF configured",
+# with remediation advice whose result is `already defined`. Only alnum and `_`
+# may follow, so `programs.moshfoo` still does not match while
+# `programs.mosh.enable` and `programs.mosh = {` both do. The LEFT boundary
+# still excludes `.` on purpose: `services.programs.mosh` is a different key.
+code_only | grep -qE "(^|[^.[:alnum:]_])programs\.mosh([^[:alnum:]_]|$)" && have_mosh=1
 
 if [ "$have_range" = "1" ] && [ "$have_mosh" = "1" ]; then
   echo "  state     : ALREADY APPLIED -- both \`$MOSH_KEY\` and"
   echo "              \`$RANGE_KEY\` are already in $CFG."
-  if [ "$DO_SWITCH" = "1" ]; then
-    echo "              MOSH_FW_SWITCH=1, so converging with a switch anyway."
-  else
+  if [ "$DO_SWITCH" != "1" ]; then
     echo
     echo "Nothing to write. If you have not switched since the edit landed, run:"
     echo "    sudo nixos-rebuild switch"
     exit 0
   fi
+
+  # 🔴 THIS BRANCH USED TO FALL THROUGH INTO THE PATCH PASS, AND THAT KILLED
+  # THE SECOND HALF OF THE ADVERTISED TWO-STEP WORKFLOW. It printed "converging
+  # with a switch anyway" and then ran the anchor check and the awk insert
+  # again, producing a SECOND `programs.mosh` block and a SECOND
+  # `allowedUDPPortRanges` -- measured: two of each, two backups. The real
+  # parser then rejects the result with `attribute 'programs.mosh.enable'
+  # already defined`, so it failed closed, but "edit now, converge later" could
+  # never succeed. Nothing needs writing here, so the converge path SKIPS the
+  # whole patch section: no anchor check, no awk, no temp file, no backup.
+  echo "              MOSH_FW_SWITCH=1: CONVERGING. Nothing is written -- the"
+  echo "              file already carries the change; this run only switches."
+  echo
+
+  echo "== dry-build (nothing is activated) =="
+  if ! dry_build "$CFG" before; then
+    sed 's/^/    | /' "$SCRATCH/before.out" >&2 || true
+    die "your config does not dry-build (see above). $CFG is UNTOUCHED and
+  nothing was switched. Fix that first -- switching on top of it would be
+  strictly worse."
+  fi
+  echo "  current   : $(count_of before built) to build, $(count_of before fetched) to fetch"
+  echo "  🔴 There is no delta column: the change is ALREADY in the file, so that"
+  echo "     count is the whole switch, this change included. /etc/nixos has no"
+  echo "     flake, so most of it is root-channel drift, not mosh."
+  echo
+
+  echo "== nixos-rebuild switch =="
+  # No rollback trap is armed on this path and none is wanted: this run never
+  # touched $CFG, so there is nothing of ours to restore -- and the PATCHED /
+  # SWITCH_ATTEMPTED / PERSISTED flags are deliberately NOT set here, because
+  # nothing reads them yet (`finish` is installed further down) and setting them
+  # would read as "the trap will report this" when it will not. The failure
+  # branch below does the reporting instead. What CAN have moved is the system,
+  # and that is a separate claim -- say it rather than implying the failure was
+  # harmless.
+  if ! nixos-rebuild switch; then
+    echo >&2
+    echo "🔴 \`nixos-rebuild switch\` FAILED." >&2
+    echo "   $CFG is UNTOUCHED -- this run wrote nothing, so there is no backup" >&2
+    echo "   and nothing to roll back. The SYSTEM is the open question: switch" >&2
+    echo "   registers the profile generation and installs the bootloader BEFORE" >&2
+    echo "   it activates, so a failure part-way can still have moved both." >&2
+    echo "   Check:  readlink /nix/var/nix/profiles/system" >&2
+    echo "           nixos-rebuild list-generations | tail -5" >&2
+    exit 1
+  fi
+  echo
+  echo "=== SWITCHED (config was already applied; nothing was edited) ==="
+  echo
+  verify_text
+  exit 0
 elif [ "$have_range" != "$have_mosh" ]; then
   # Refuse rather than guess: half of the change is present, and which half it
   # is changes what the fix should be.
@@ -313,7 +443,7 @@ NR == n {
 END { if (inserted + 0 != 1) exit 3 }
 ' "$CFG" > "$CAND" || die "the patch pass did not make exactly one insertion"
 
-added=$(( $(wc -l < "$CAND") - $(wc -l < "$CFG") ))
+added=$(( $(lines_of "$CAND") - $(lines_of "$CFG") ))
 [ "$added" = "17" ] || die "expected the patch to add exactly 17 lines, it added $added"
 echo "  candidate : +17 lines"
 
@@ -330,10 +460,17 @@ TMP="$(mktemp "${CFG}.new.XXXXXXXX")" || die "cannot create a temp file next to 
 cp -p "$CFG" "$TMP"
 cat "$CAND" > "$TMP"
 
-# 🔴 F8: THE PARSE ERROR IS SHOWN, NOT SWALLOWED. `>/dev/null 2>&1` made a
-# MISSING `nix-instantiate` (rc 127) indistinguishable from a genuinely broken
-# file, and both printed "the edited file does not parse as Nix" -- a claim
-# about the file that is false in the first case.
+# 🔴 F8: THE PARSE ERROR IS SHOWN, NOT SWALLOWED. `>/dev/null 2>&1` swallowed
+# the parser's own diagnosis, so every rejection printed the same opaque "the
+# edited file does not parse as Nix". Capturing stderr and echoing it is what
+# makes the message name the actual syntax error.
+#
+# ⚠ THE rc-127 CASE IS NOT CLOSED HERE, AND AN EARLIER VERSION OF THIS COMMENT
+# SAID IT WAS. A MISSING `nix-instantiate` cannot reach this line at all: the
+# preflight `command -v` loop near the top of the file lists it and aborts with
+# the "sudo inherits the CALLER's PATH" message long before any patching. That
+# loop is the guard delivering the claim; this block only ever sees a real
+# parser verdict.
 #
 # ⚠ AND IT IS ONLY A SYNTAX GATE. It rejects a duplicated attribute (that much
 # was checked, and the duplicate-attribute worry is refuted), but it knows
@@ -342,8 +479,9 @@ cat "$CAND" > "$TMP"
 if ! nix-instantiate --parse "$TMP" >/dev/null 2>"$SCRATCH/parse.err"; then
   sed 's/^/    | /' "$SCRATCH/parse.err" >&2 || true
   die "the candidate does not parse as Nix (see the parser's own output above).
-  $CFG is UNTOUCHED. If that output says nix-instantiate is missing rather than
-  naming a syntax error, the file is fine and your PATH is not."
+  $CFG is UNTOUCHED. A missing \`nix-instantiate\` cannot produce this message --
+  the preflight tool check aborts on that before anything is patched -- so the
+  output above is a real parser verdict on the candidate file."
 fi
 echo "  nix parse : OK"
 
@@ -358,28 +496,6 @@ echo
 # eval gate (option scope, F2) and the honest answer to "what will a switch
 # actually do to this machine".
 echo "== dry-build (nothing is activated) =="
-
-dry_build() {   # $1 = config to evaluate, $2 = label
-  local rc=0
-  nixos-rebuild dry-build -I "nixos-config=$1" >"$SCRATCH/$2.out" 2>&1 || rc=$?
-  return $rc
-}
-
-# `nix` prints these to stderr, which dry_build folds into the same file:
-#   these 444 derivations will be built:      / this derivation will be built:
-#   these 1420 paths will be fetched (...)    / this path will be fetched (...)
-# Absent means zero. `tail -1` because a run can print the pair more than once.
-count_of() {    # $1 = label, $2 = built|fetched
-  local f="$SCRATCH/$1.out" n
-  if [ "$2" = "built" ]; then
-    n="$(sed -n 's/^ *these \([0-9]*\) derivations will be built.*/\1/p' "$f" | tail -1)"
-    [ -n "$n" ] || { grep -q '^ *this derivation will be built' "$f" && n=1 || n=0; }
-  else
-    n="$(sed -n 's/^ *these \([0-9]*\) paths will be fetched.*/\1/p' "$f" | tail -1)"
-    [ -n "$n" ] || { grep -q '^ *this path will be fetched' "$f" && n=1 || n=0; }
-  fi
-  printf '%s' "$n"
-}
 
 if ! dry_build "$CFG" before; then
   sed 's/^/    | /' "$SCRATCH/before.out" >&2 || true
@@ -467,23 +583,6 @@ TMP=""            # moved, not leaked -- keep the cleanup honest
 PATCHED=1
 echo "  applied   : $CFG"
 echo
-
-verify_text() {
-  # No apostrophe in the fallback: bash treats a `'` inside `${x:-…}` as an
-  # opening quote even within double quotes, and the whole file then fails
-  # `bash -n` with "unexpected EOF while looking for matching `''".
-  local target="${MESH_IP:-<THIS HOST-S $IFACE ADDRESS: nebula was down, look it up>}"
-  echo "VERIFY FROM THE OTHER HOST (this proves the path, not just the config):"
-  echo
-  echo "    mosh --ssh=\"ssh -o ConnectTimeout=10\" zach@${target} -- true && echo MOSH-OK"
-  echo
-  echo "🔴 A successful \`mosh\` is the only verification. \`nixos-rebuild switch\`"
-  echo "reporting success is a claim about the REBUILD, not about reachability."
-  echo
-  echo "If it hangs at \"Connecting...\", check in this order:"
-  echo "    ss -lunp 'sport >= :$PORT_FROM and sport <= :$PORT_TO'  # here, while connecting"
-  echo "    command -v mosh-server                                  # must be on the ssh session's PATH"
-}
 
 if [ "$DO_SWITCH" != "1" ]; then
   OK=1
