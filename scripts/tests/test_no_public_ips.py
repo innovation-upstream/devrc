@@ -93,6 +93,19 @@ MENU_TEST_MIRRORED_ENDPOINTS = 2
 # audit's M7 mutant survived. If the same value is legitimately used in five
 # files, it gets five entries — the noise IS the point: each one is a place a
 # reviewer agreed the value is harmless.
+# 🔴 REPEAT-OFFENDER SITE, NAMED HERE ON PURPOSE — do NOT delete this comment as dead
+# text. `claudedocs/handoff-laptop-airvpn-tunnel.md` has leaked routable addresses of ours
+# TWICE: devrc#1853 scrubbed one, and the next commit to that file put the SAME value back
+# plus two more (devrc#1861), reddening `main` both times.
+#
+# The line exists because `scripts/scoped-tests.sh` maps a changed file to its tests by
+# grepping the test universe for the CHANGED PATH AS A STRING. That doc used to appear in
+# this module as an ALLOWLIST key; deleting the key — which the second leg of this gate
+# REQUIRES once the literal leaves the doc — also silently unmapped the doc, so an author
+# appending to it would get `UNMAPPED — no test file names these` and never run this gate
+# locally. Naming the path in a comment restores the mapping without pre-approving any
+# value, which an ALLOWLIST entry would. Applies to any repeat-offender path whose only
+# tie to this module was a pin that has since been correctly deleted.
 ALLOWLIST = {
     # Cloudflare / Google / Quad9 public resolvers — global services, not endpoints
     # of ours. `8.8.8.8` is additionally the UDP-connect trick that picks the
@@ -110,11 +123,6 @@ ALLOWLIST = {
         "refs file, which moved the literal with it. The pin follows the TEXT, not the path "
         "it used to live at — deleting it instead would have left the demoted copy unpinned",
     ("scripts/tests/test_airvpn_menu.py", "1.1.1.1"): "public resolver as a 'some public IP' fixture",
-    ("claudedocs/handoff-laptop-airvpn-tunnel.md", "1.1.1.1"):
-        "public resolver as the 'this SHOULD leave via the tunnel' probe target in "
-        "the split-tunnel verification. Its counterpart in that doc was the home "
-        "public IP — a real endpoint — which was SCRUBBED rather than pinned here; "
-        "the pair is the worked example of this file's two kinds",
     ("nix/system/apply-dns-travel.sh", "8.8.8.8"): "public resolver written into a travel DNS config",
     ("nix/system/apply-travel-prep.sh", "8.8.8.8"): "public resolver written into a travel DNS config",
     ("scripts/browser-bridge/server.py", "8.8.8.8"): "UDP-connect egress-iface probe (no packet is sent)",

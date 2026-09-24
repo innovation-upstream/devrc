@@ -76,19 +76,23 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - **Leading hypothesis:** rotating the address is the only action that actually revokes
   it. Whether that is worth doing is a judgement about the operator's ISP and threat
   model, not a measurement.
-- **Next probe:** none for the diagnosis — it is closed. The ACTION is `devrc#1853`
-  (branch `fix/scrub-public-ip-airvpn-handoff`), OPEN and MERGEABLE at the time of
-  writing. Merge it, then re-run the gate on `origin/main` (not on the branch) and expect
-  green. 🔴 It is the only PR from that session where `/audit-pr` round 0 is still
-  actionable.
+- **Next probe:** 🔴 **REOPENED 2026-09-23 — this block said "it is closed" and that was
+  wrong within 24 hours.** #1853 merged as `1c7ad1b9` and the gate went green; the very
+  next commit to this file, `a6e98a3d`, put the SAME value back plus two more, and `main`
+  went red again on the same test. Hash-compared across all three revisions of this file.
+  The ACTION is now `devrc#1861`. 🔴 **The diagnosis is not "someone was careless": it is
+  that the prohibition lives in PROSE inside the very document people append to, and prose
+  does not gate.** The open question is whether anything cheaper than the test can make the
+  rule reachable at APPEND time — the gate catches it only after a push, on CI. Until that
+  is answered, treat this block as OPEN, not as history.
 
 <!-- as-of: 2026-09-23 -->
 ### Nebula mesh flaps: "connection keeps hanging and recovering" — ROOT CAUSE MEASURED, fix not applied
 - as-of: 2026-09-23
 - **Symptom + exact repro:** laptop↔workbench over nebula drops for ~30–60 s windows, then recovers. Repro: `ping -c 4 -i 0.3 10.42.0.30` loops — measured at 17:15:34–17:15:52 CDT a 100%-loss window of ~7 samples between clean stretches; `ssh zach@10.42.0.30` times out during banner exchange for minutes at a time (17:58–18:03, five consecutive rc=255) then succeeds.
 - **Observed (with values):** failing set is exactly the LIGHTHOUSES: `ping 10.42.0.1` (homelab lighthouse) and `10.42.0.2` (Hetzner lighthouse) 100% loss from BOTH laptop and workbench; `10.42.0.30` (workbench) and `10.42.0.20` (prod-gw) reachable with 0% loss (~137 ms / ~109 ms). Gateway pod (`nebula-gateway-5fpfv`, kubectl `-n nebula`, node `talos-jkj-deb` 192.168.50.94) log: `Tunnel status certName=zach-laptop tunnelCheck="map[method:active state:dead]"` (19:03:22Z) and `Host roamed ... newAddr="10.244.0.220:50519"` (19:05:09Z). Workbench log: my handshakes arrive `from="100.71.230.83:41232"` (my TAILSCALE addr) and lighthouse parsed garbage `from 10.244.0.220:54949: header is too short` (22:15:25Z) — `10.244.0.220` = `tailscale-subnet-router-5f4658c69f-2g99j` pod (kubectl field-selector lookup, 15d old, 0 restarts). Laptop routing: `ip route get 192.168.50.94` → `dev tailscale0 table 52`; `ip route show table 52` → `192.168.50.0/24 dev tailscale0` (rule 5270).
-- **Ruled out:** lighthouse pods down — kubectl `-n nebula` shows both `nebula-lighthouse-xl58z` and `nebula-gateway-5fpfv` Running 0 restarts; via: measurement. Gateway node dead — workbench pings `192.168.50.94` at 0.1 ms and `24.79.61.66` at 1.0 ms; via: measurement. Tailscale broken — `tailscale status` shows subnet-router `active; direct`; via: measurement. talosctl route to node internals — `talosctl -n 192.168.50.94 netstat` fails `tls: expired certificate` (client cert expiry, separate defect); via: command.
-- **Leading hypothesis (high confidence, measured):** laptop's tailscale subnet route `192.168.50.0/24 → tailscale0` intercepts nebula's UDP to `192.168.50.94:4242`, so stage-1s ride the subnet-router POD and arrive at nebula pods sourced from bogus addrs (`100.71.230.83`, `10.244.0.220`). Peers "roam" my identity onto those paths; when the tailscale path churns the roamed paths die → hang; a fresh handshake over a live path (WAN `38.187.27.246`, seen in lighthouse log at 19:02:55Z) → recover. Lighthouse ICMP failing is likely the same arrival-path corruption, and every node's hostmap resolution degrades with the lighthouse tunnels.
+- **Ruled out:** lighthouse pods down — kubectl `-n nebula` shows both `nebula-lighthouse-xl58z` and `nebula-gateway-5fpfv` Running 0 restarts; via: measurement. Gateway node dead — workbench pings `192.168.50.94` at 0.1 ms and `<home-public-ip>` at 1.0 ms; via: measurement. Tailscale broken — `tailscale status` shows subnet-router `active; direct`; via: measurement. talosctl route to node internals — `talosctl -n 192.168.50.94 netstat` fails `tls: expired certificate` (client cert expiry, separate defect); via: command.
+- **Leading hypothesis (high confidence, measured):** laptop's tailscale subnet route `192.168.50.0/24 → tailscale0` intercepts nebula's UDP to `192.168.50.94:4242`, so stage-1s ride the subnet-router POD and arrive at nebula pods sourced from bogus addrs (`100.71.230.83`, `10.244.0.220`). Peers "roam" my identity onto those paths; when the tailscale path churns the roamed paths die → hang; a fresh handshake over a live path (this host's WAN address, `<laptop-wan-ip>`, seen in lighthouse log at 19:02:55Z) → recover. Lighthouse ICMP failing is likely the same arrival-path corruption, and every node's hostmap resolution degrades with the lighthouse tunnels.
 - **Next probe:** `sudo ip rule add to 192.168.50.94 priority 5150 lookup main` (needs operator sudo; reversible with `ip rule del priority 5150`), then 10-min `ping -c 60 -i 1 10.42.0.30` loss check + one ssh burst. NOTE: `ip route show table main` has NO 192.168.50.0/24 route, so lookup main sends it via the default gw (WAN/hairpin) — if hairpin UDP fails, the alternative is a tailscale route exclusion for UDP:4242 or pinning the laptop's tunnel remotes out of table 52.
 
 ## Next steps (ranked)
@@ -117,13 +121,36 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - The pill's `?` on `US?` is the UNVERIFIED marker (exit IP ≠ entry IP and no server cc), NOT the stale marker — two different `?`s in one block's grammar.
 - `--block` mirror machinery from #1839 was REMOVED, not left dead; `i3status-airvpn` stays in RELAY_BLOCKS so the `wb` rollup still carries the workbench tunnel's alarms on the laptop.
 
-- 🔴 **DO NOT PUT THE REAL ADDRESS BACK IN THIS DOC.** The split-tunnel verification needs
-  two probe targets and they are NOT the same kind of thing, which is why the fix is
-  asymmetric: the HOME public IP is a real endpoint and is now `<home-public-ip>` (the
-  gate's own remedy: *"if you are tempted to pin a real endpoint, the answer is an env
-  var, not a pin"*), while the Cloudflare resolver is not an endpoint of ours, is not a
-  disclosure, and carries a path-scoped ALLOWLIST entry instead. If you need the commands
-  to be copy-pasteable, put the address in a shell variable at run time — do not inline it.
+- 🔴 **NO ROUTABLE ADDRESS OF OURS GOES IN THIS DOC — AND ONE OF THEM CAME BACK 24 HOURS
+  AFTER IT WAS SCRUBBED.** Measured by hash-compare across the three revisions of this
+  file: #1853 removed the home public IP at `1c7ad1b9` (2026-09-22 17:27), and at
+  `a6e98a3d` (2026-09-23 17:43) the mesh-flap investigation put **that same value** back,
+  alongside two genuinely new ones — this laptop's WAN as the lighthouse saw it, and the
+  Hetzner lighthouse. So the shape is not "three new literals": it is **one returning value
+  plus two new**, one day apart, with the prohibition already written in this file. The
+  rule is **any endpoint of ours, in any section, however it arrives** (a journal quote, a
+  `static_host_map` excerpt, a ping result): write `<home-public-ip>` / `<laptop-wan-ip>` /
+  `<hetzner-lighthouse-ip>`, and put the value in a shell variable at run time if a command
+  must be copy-pasteable. 🔴 **A GOTCHA IS NOT A GATE, AND THE RETURNING VALUE IS THE
+  PROOF.** This bullet was already here, in this file, naming that exact value, and it was
+  read past inside a day; `scripts/tests/test_no_public_ips.py` is what caught it, both
+  times. Widening the sentence does not make it enforcement — the only reason the recurrence
+  was visible at all is that the gate is red until someone fixes it.
+- ⚠ **A PLACEHOLDER IN THIS DOC IS GATE COMPLIANCE, NOT REVOCATION — and for one of the
+  three it is not even a removal from HEAD.** The value written `<hetzner-lighthouse-ip>`
+  is still committed at HEAD in `scripts/airvpn-updown` and
+  `scripts/claude-hooks/tests/test_guard_core.py`, deliberately, as tracked `PENDING_SCRUB`
+  debt — the killswitch one is split into its own PR because moving it is a runtime change.
+  The other two are genuinely gone from HEAD. None of the three is revoked: the gate reads
+  `git ls-files` and is blind to history.
+- ⚠ **The Cloudflare resolver's ALLOWLIST pin for this doc is DELETED** — the literal left
+  the file when the mesh-flap rewrite replaced `How to verify` wholesale, and the gate's
+  second leg fails a pin that matches nothing rather than leaving a rubber stamp. Note what
+  that rewrite cost: **eight command lines and the killswitch escape hatch**, not just one
+  probe. `How to verify` below is the pre-rewrite block restored, with the resolver reached
+  through `getent` at run time so no literal is needed — 🔴 `ip route get one.one.one.one`
+  does NOT work (`Error: any valid prefix is expected`); that argument must be an address,
+  which is exactly why the runtime-variable remedy exists.
 - 🔴 **THE EXPLANATION OF A LEAK IS ONE OF THE PLACES THE LEAK SPREADS TO.** The first PR
   body for #1853 quoted the address and was REFUSED by the `bash-guard` PreToolUse hook;
   the first commit message had the same defect and had already been PUSHED, and was
@@ -147,11 +174,11 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - `kubectl get pods -A` on `$KC_HOMELAB` TIMES OUT (rc 124, >90 s) — use `kubectl get pods -n <ns>` or a `--field-selector` instead; `kubectl get ds/deploy/cm -A` works fine.
 - `env KUBECONFIG=... kubectl ...` — bare `KUBECONFIG=... kubectl` in a compound command parses as a command name (timeout: 'failed to run command'); must use `env`.
 - The gateway/lighthouse nebula pods are distroless — `kubectl exec ... -- ping/ls/nebula` all fail (`executable file not found`); logs are the only window.
-- The two pods share one node (`talos-jkj-deb` / 192.168.50.94) and the lighthouse config's static_host_map only carries `10.42.0.2 → 5.161.118.55:4242`; the gateway config's comment says LAN IP is used deliberately ("NAT hairpinning won't work") — consistent with the hairpin half of the flap.
+- The two pods share one node (`talos-jkj-deb` / 192.168.50.94) and the lighthouse config's static_host_map only carries `10.42.0.2 → <hetzner-lighthouse-ip>:4242`; the gateway config's comment says LAN IP is used deliberately ("NAT hairpinning won't work") — consistent with the hairpin half of the flap.
 - `sudo -n` over ssh to the workbench fails (password required) — sudo-touching steps are operator-run, hand over the exact command.
 - (carried) Laptop has NO systemd-resolved — do NOT re-add `DNS` to the laptop wg conf.
 - (carried) The pill's `?` on `US?` is the UNVERIFIED marker, not the stale marker.
-- (carried) DO NOT put the real home public IP back in this doc; use `<home-public-ip>` / a runtime shell variable.
+- (carried, WIDENED) DO NOT put ANY routable address of ours back in this doc — not just the home public IP. Use `<home-public-ip>` / `<laptop-wan-ip>` / `<hetzner-lighthouse-ip>` or a runtime shell variable. On 2026-09-23 it recurred with three literals, one of them the value scrubbed 24 h earlier.
 
 ## How to verify
 ```bash
@@ -164,3 +191,33 @@ ping -c 5 -i 0.3 10.42.0.1; ping -c 5 -i 0.3 10.42.0.2
 # ship state (want both hosts at one sha):
 scripts/ship.sh
 ```
+🔴 **THE BLOCK BELOW IS THE ARC'S OWN CLOSING CONDITION and was DELETED WHOLESALE by the
+mesh-flap rewrite** — eight command lines plus the killswitch escape hatch. Restored here
+from `1c7ad1b9`, with the two address literals replaced by a placeholder and a runtime
+lookup. Run it ALL WITH THE TUNNEL UP; with the tunnel down every line below is vacuously
+green and proves nothing.
+```bash
+# tunnel + split-tunnel, with the tunnel UP:
+ip link show airvpn && ip rule | rg 500          # pin present: uidrange 991-991 lookup main
+HOME_PUB=<home-public-ip>                        # set at run time; NEVER inline it here
+ip route get "$HOME_PUB" uid 991                 # → via <gw> dev wlp170s0 (NOT airvpn)
+# the other half of the SPLIT: a non-LAN target must leave via the tunnel. `ip route get`
+# needs an ADDRESS, so resolve the resolver's NAME at run time rather than pinning a literal:
+ip route get "$(getent ahostsv4 one.one.one.one | awk '{print $1; exit}')" | head -1
+                                                 # → dev airvpn table 51820
+curl -s https://ipinfo.io/json | jq -r .country   # → US
+ssh zach@10.42.0.30 'echo nebula-ok'              # nebula path alive with tunnel up
+# pill (after ~60s post-connect) — this is closing-condition item 3:
+python3 -c "import json,os; d=json.load(open(os.path.expanduser('~/.cache/bar-status/airvpn.json'))); print(d['up'], d['verdict'], d['server'], d['country_code'])"
+# writer + timer:
+systemctl --user list-timers airvpn-status-poll.timer --no-pager | head -3
+# closing-condition item 4 — ONLY the IPv6-remote noise, no MTU/routing churn:
+journalctl -u 'nebula@mesh' --since <up-time> | rg -c 'Failed to write outgoing packet|Failed to send handshake'
+```
+🔴 **Killswitch re-test protocol: `claude/skills/bar/reference/airvpn.md` (laptop section).**
+It is FAIL-CLOSED on this laptop's ONLY uplink. Instant bail that KEEPS the tunnel:
+`sudo nft delete table inet airvpn_ks`; full teardown:
+`sudo /etc/nixos/i3blocks-scripts/airvpn-sudo down`. ⚠ The original block's `python3 -c`
+passed a literal `~` to `open()`, which does not expand it — that line always raised
+`FileNotFoundError`. Fixed above with `os.path.expanduser`; it is a repair, not a
+transcription.
