@@ -76,11 +76,15 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - **Leading hypothesis:** rotating the address is the only action that actually revokes
   it. Whether that is worth doing is a judgement about the operator's ISP and threat
   model, not a measurement.
-- **Next probe:** none for the diagnosis — it is closed. The ACTION is `devrc#1853`
-  (branch `fix/scrub-public-ip-airvpn-handoff`), OPEN and MERGEABLE at the time of
-  writing. Merge it, then re-run the gate on `origin/main` (not on the branch) and expect
-  green. 🔴 It is the only PR from that session where `/audit-pr` round 0 is still
-  actionable.
+- **Next probe:** 🔴 **REOPENED 2026-09-23 — this block said "it is closed" and that was
+  wrong within 24 hours.** #1853 merged as `1c7ad1b9` and the gate went green; the very
+  next commit to this file, `a6e98a3d`, put the SAME value back plus two more, and `main`
+  went red again on the same test. Hash-compared across all three revisions of this file.
+  The ACTION is now `devrc#1861`. 🔴 **The diagnosis is not "someone was careless": it is
+  that the prohibition lives in PROSE inside the very document people append to, and prose
+  does not gate.** The open question is whether anything cheaper than the test can make the
+  rule reachable at APPEND time — the gate catches it only after a push, on CI. Until that
+  is answered, treat this block as OPEN, not as history.
 
 <!-- as-of: 2026-09-23 -->
 ### Nebula mesh flaps: "connection keeps hanging and recovering" — ROOT CAUSE MEASURED, fix not applied
@@ -117,24 +121,36 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - The pill's `?` on `US?` is the UNVERIFIED marker (exit IP ≠ entry IP and no server cc), NOT the stale marker — two different `?`s in one block's grammar.
 - `--block` mirror machinery from #1839 was REMOVED, not left dead; `i3status-airvpn` stays in RELAY_BLOCKS so the `wb` rollup still carries the workbench tunnel's alarms on the laptop.
 
-- 🔴 **NO ROUTABLE ADDRESS OF OURS GOES IN THIS DOC — AND "THE REAL ADDRESS" WAS TOO NARROW
-  A WORDING, MEASURED.** The first version of this bullet named the HOME public IP, so it
-  read as a rule about ONE value; two days later the mesh-flap investigation appended
-  **three** fresh literals — the home WAN, this laptop's WAN as the lighthouse saw it, and
-  the Hetzner lighthouse — and `main`'s `test_no_public_ips` leg went red again. The rule
-  is: **any endpoint of ours, in any section, however it arrives** (a journal quote, a
-  `static_host_map` excerpt, a ping result). Write `<home-public-ip>` / `<laptop-wan-ip>` /
-  `<hetzner-lighthouse-ip>` and put the value in a shell variable at run time if a command
-  must be copy-pasteable. The gate's own remedy: *"if you are tempted to pin a real
-  endpoint, the answer is an env var, not a pin"* — a pin is for values that are not a
-  disclosure at all. 🔴 **A GOTCHA IS NOT A GATE.** This bullet was already here, in this
-  file, and was read past; what actually caught the recurrence was the test. Widening the
-  sentence does not make it enforcement.
-- ⚠ **The Cloudflare resolver's ALLOWLIST pin for this doc is DELETED** (it was the
-  `this SHOULD leave via the tunnel` split-tunnel probe target). The literal left the file
-  when `How to verify` was rewritten around the mesh flap, and the gate's second leg fails
-  a pin that matches nothing rather than leaving a rubber stamp. The split-tunnel probe is
-  restored in `How to verify` in **hostname** form, which needs no pin at all.
+- 🔴 **NO ROUTABLE ADDRESS OF OURS GOES IN THIS DOC — AND ONE OF THEM CAME BACK 24 HOURS
+  AFTER IT WAS SCRUBBED.** Measured by hash-compare across the three revisions of this
+  file: #1853 removed the home public IP at `1c7ad1b9` (2026-09-22 17:27), and at
+  `a6e98a3d` (2026-09-23 17:43) the mesh-flap investigation put **that same value** back,
+  alongside two genuinely new ones — this laptop's WAN as the lighthouse saw it, and the
+  Hetzner lighthouse. So the shape is not "three new literals": it is **one returning value
+  plus two new**, one day apart, with the prohibition already written in this file. The
+  rule is **any endpoint of ours, in any section, however it arrives** (a journal quote, a
+  `static_host_map` excerpt, a ping result): write `<home-public-ip>` / `<laptop-wan-ip>` /
+  `<hetzner-lighthouse-ip>`, and put the value in a shell variable at run time if a command
+  must be copy-pasteable. 🔴 **A GOTCHA IS NOT A GATE, AND THE RETURNING VALUE IS THE
+  PROOF.** This bullet was already here, in this file, naming that exact value, and it was
+  read past inside a day; `scripts/tests/test_no_public_ips.py` is what caught it, both
+  times. Widening the sentence does not make it enforcement — the only reason the recurrence
+  was visible at all is that the gate is red until someone fixes it.
+- ⚠ **A PLACEHOLDER IN THIS DOC IS GATE COMPLIANCE, NOT REVOCATION — and for one of the
+  three it is not even a removal from HEAD.** The value written `<hetzner-lighthouse-ip>`
+  is still committed at HEAD in `scripts/airvpn-updown` and
+  `scripts/claude-hooks/tests/test_guard_core.py`, deliberately, as tracked `PENDING_SCRUB`
+  debt — the killswitch one is split into its own PR because moving it is a runtime change.
+  The other two are genuinely gone from HEAD. None of the three is revoked: the gate reads
+  `git ls-files` and is blind to history.
+- ⚠ **The Cloudflare resolver's ALLOWLIST pin for this doc is DELETED** — the literal left
+  the file when the mesh-flap rewrite replaced `How to verify` wholesale, and the gate's
+  second leg fails a pin that matches nothing rather than leaving a rubber stamp. Note what
+  that rewrite cost: **eight command lines and the killswitch escape hatch**, not just one
+  probe. `How to verify` below is the pre-rewrite block restored, with the resolver reached
+  through `getent` at run time so no literal is needed — 🔴 `ip route get one.one.one.one`
+  does NOT work (`Error: any valid prefix is expected`); that argument must be an address,
+  which is exactly why the runtime-variable remedy exists.
 - 🔴 **THE EXPLANATION OF A LEAK IS ONE OF THE PLACES THE LEAK SPREADS TO.** The first PR
   body for #1853 quoted the address and was REFUSED by the `bash-guard` PreToolUse hook;
   the first commit message had the same defect and had already been PUSHED, and was
@@ -162,7 +178,7 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - `sudo -n` over ssh to the workbench fails (password required) — sudo-touching steps are operator-run, hand over the exact command.
 - (carried) Laptop has NO systemd-resolved — do NOT re-add `DNS` to the laptop wg conf.
 - (carried) The pill's `?` on `US?` is the UNVERIFIED marker, not the stale marker.
-- (carried, WIDENED) DO NOT put ANY routable address of ours back in this doc — not just the home public IP. Use `<home-public-ip>` / `<laptop-wan-ip>` / `<hetzner-lighthouse-ip>` or a runtime shell variable. It recurred with three new values on 2026-09-23.
+- (carried, WIDENED) DO NOT put ANY routable address of ours back in this doc — not just the home public IP. Use `<home-public-ip>` / `<laptop-wan-ip>` / `<hetzner-lighthouse-ip>` or a runtime shell variable. On 2026-09-23 it recurred with three literals, one of them the value scrubbed 24 h earlier.
 
 ## How to verify
 ```bash
@@ -172,12 +188,36 @@ ping -c 60 -i 1 10.42.0.30 | tail -1
 for i in 1 2 3 4 5; do ssh -o ConnectTimeout=10 zach@10.42.0.30 'true'; echo rc=$?; sleep 2; done
 # lighthouse tunnels (want 0% loss — currently 100% from BOTH hosts):
 ping -c 5 -i 0.3 10.42.0.1; ping -c 5 -i 0.3 10.42.0.2
-# split tunnel, with the tunnel UP — the exit is the AirVPN one, and a non-LAN
-# target still leaves via the tunnel. HOSTNAME form on purpose: an IP literal here
-# is what the public-IP gate blocks, and a public resolver's name needs no pin.
-curl -s https://ipinfo.io/json; ping -c 2 one.one.one.one
-# the killswitch's LAN carve-out still resolves (want rc=0 to the local gateway):
-ping -c 2 "$(ip route show default | awk '{print $3; exit}')"
 # ship state (want both hosts at one sha):
 scripts/ship.sh
 ```
+🔴 **THE BLOCK BELOW IS THE ARC'S OWN CLOSING CONDITION and was DELETED WHOLESALE by the
+mesh-flap rewrite** — eight command lines plus the killswitch escape hatch. Restored here
+from `1c7ad1b9`, with the two address literals replaced by a placeholder and a runtime
+lookup. Run it ALL WITH THE TUNNEL UP; with the tunnel down every line below is vacuously
+green and proves nothing.
+```bash
+# tunnel + split-tunnel, with the tunnel UP:
+ip link show airvpn && ip rule | rg 500          # pin present: uidrange 991-991 lookup main
+HOME_PUB=<home-public-ip>                        # set at run time; NEVER inline it here
+ip route get "$HOME_PUB" uid 991                 # → via <gw> dev wlp170s0 (NOT airvpn)
+# the other half of the SPLIT: a non-LAN target must leave via the tunnel. `ip route get`
+# needs an ADDRESS, so resolve the resolver's NAME at run time rather than pinning a literal:
+ip route get "$(getent ahostsv4 one.one.one.one | awk '{print $1; exit}')" | head -1
+                                                 # → dev airvpn table 51820
+curl -s https://ipinfo.io/json | jq -r .country   # → US
+ssh zach@10.42.0.30 'echo nebula-ok'              # nebula path alive with tunnel up
+# pill (after ~60s post-connect) — this is closing-condition item 3:
+python3 -c "import json,os; d=json.load(open(os.path.expanduser('~/.cache/bar-status/airvpn.json'))); print(d['up'], d['verdict'], d['server'], d['country_code'])"
+# writer + timer:
+systemctl --user list-timers airvpn-status-poll.timer --no-pager | head -3
+# closing-condition item 4 — ONLY the IPv6-remote noise, no MTU/routing churn:
+journalctl -u 'nebula@mesh' --since <up-time> | rg -c 'Failed to write outgoing packet|Failed to send handshake'
+```
+🔴 **Killswitch re-test protocol: `claude/skills/bar/reference/airvpn.md` (laptop section).**
+It is FAIL-CLOSED on this laptop's ONLY uplink. Instant bail that KEEPS the tunnel:
+`sudo nft delete table inet airvpn_ks`; full teardown:
+`sudo /etc/nixos/i3blocks-scripts/airvpn-sudo down`. ⚠ The original block's `python3 -c`
+passed a literal `~` to `open()`, which does not expand it — that line always raised
+`FileNotFoundError`. Fixed above with `os.path.expanduser`; it is a repair, not a
+transcription.
