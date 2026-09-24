@@ -21,12 +21,14 @@ unaffected while the tunnel is up.
   — no MTU/routing churn.
 
 ## State now
-- Branch / PR: `devrc` `main` at `5273d71b` (was `de2e1087` when this line was written) — `scripts/ship.sh` run rc=0 this session: BOTH hosts converged + switched at `de2e1087`, cross-host sha agreement verified. (Handoff's "workbench 3 behind at `a2f45567`" was STALE — git was already converged; only the stable-path helper lagged.)
-- Workbench helper refresh BLOCKED on sudo: `ssh zach@10.42.0.30 'sudo -n install ...'` → `sudo: a password is required`. Its `/etc/nixos/i3blocks-scripts/airvpn-updown` is still the Jul 21 copy (11,306 B, 0 `uidrange` lines) vs laptop's synced 16,099 B (3 uidrange lines). Laptop helper verified IN SYNC. Operator deferred the sudo step. ⚠ **Not urgent**, measured 2026-09-23: no user timer, no system timer and no enabled unit can bring the workbench tunnel up — it takes a deliberate pill click, and the tunnel is down. Do it on the LAN, with the killswitch re-test (next-step 2).
-- Laptop tunnel DOWN right now (`ip link show airvpn` → absent); killswitch helpers converged.
-- ✅ The 2026-09-23 leak recurrence is CLOSED: #1861 squash-merged as `5834b4c5`, and `test_no_public_ips` is green on `origin/main` (15 passed, measured at `5273d71b`). Details in the leak investigation below.
-- **Nebula flap arc — the `ip rule` pin IS APPLIED (2026-09-23 ~20:35 CDT) and evaluated.** It fixed the identity-roaming and did NOT close the flap; the residual is measured to be outside nebula and outside this host. See the investigation block. ⚠ **Not persistent — a reboot reverts it**; the cost of making it permanent is stated once, with the measurement, in that block.
-- Untracked in laptop tree: `nix/system/apply-networkmanager-openvpn.sh` (unrelated, not nix-read).
+- Branch / PR: `devrc` `main` at `811fa910`. This session landed **#1866** (squash `b7a30bc3`) — the flap investigation's two-mechanism rewrite plus three corrections to measurements a previous session had made.
+- 🔴 **PR #1865 (mosh) is OPEN at `abcbec38`, FIVE audit rounds deep, and has ONE actionable blocker: it is 2 commits behind `main` and carries an INHERITED CI red.** `tekton/devrc-pytests` fails on `TestMutationKillMatrix.test_kills_the_readme_exclusion` — the same test that was red on `main` until **#1868** (`811fa910`) fixed it. `main` is now green on all four legs. The PR branch does not contain `811fa910`. Merge `origin/main` into the branch and the red should clear; do NOT debug that test against the mosh diff, which touches three files none of which it imports.
+- **The mesh-flap arc is CLOSED on measurement, and NOT by anything we did.** Loss to home climbed 16% → 30% → 45% between ~22:45 and ~00:03 local, then stopped dead. A watcher has since polled **1827 times over 12h39m with ZERO triggers** and the link is 0% loss. No config changed between 45% and 0%.
+- **The `ip rule` pin (applied 2026-09-23 ~20:35 CDT) is STILL APPLIED and STILL NOT PERSISTENT** — `ip rule show | rg 5150` confirms it live at 22h45m uptime. A reboot reverts it silently. Next-step 2 is the only thing that fixes that.
+- ✅ **The 2026-09-23 leak recurrence is CLOSED** — #1861 squash-merged as `5834b4c5`; `test_no_public_ips` is green on `origin/main` (15 passed). #1866 (`b7a30bc3`) then landed the corrections that had been stranded on #1861's branch.
+- **Workbench helper: still BLOCKED on sudo, by design.** `ssh zach@10.42.0.30 'sudo -n install ...'` → `sudo: a password is required`, so it is operator-run. Its `/etc/nixos/i3blocks-scripts/airvpn-updown` is still the Jul 21 copy (11,306 B, **0** `uidrange` lines) vs the laptop's synced 16,099 B (**3**). Laptop helper verified IN SYNC.
+- `mosh` is installed on NEITHER host and the firewall half is staged-not-applied. Nothing about mosh has been demonstrated end to end.
+- Untracked in the laptop tree: `nix/system/apply-networkmanager-openvpn.sh` (unrelated, pre-existing).
 
 ## Open investigations — live diagnosis state
 <!-- as-of: 2026-09-21 -->
@@ -183,23 +185,37 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
   and "high confidence" was asserted over a symptom that turned out to have two causes: laptop's tailscale subnet route `192.168.50.0/24 → tailscale0` intercepts nebula's UDP to `192.168.50.94:4242`, so stage-1s ride the subnet-router POD and arrive at nebula pods sourced from bogus addrs (`100.71.230.83`, `10.244.0.220`). Peers "roam" my identity onto those paths; when the tailscale path churns the roamed paths die → hang; a fresh handshake over a live path (this host's WAN address, `<laptop-wan-ip>`, seen in lighthouse log at 19:02:55Z) → recover. Lighthouse ICMP failing is likely the same arrival-path corruption, and every node's hostmap resolution degrades with the lighthouse tunnels.
 - **Next probe** — ⚠ **DONE 2026-09-23; the verdict is the two-mechanism split above.** The recipe it carried is deleted rather than preserved: `claude/skills/handoff/SKILL.md` protects a superseded *reading* verbatim but says to delete a now-wrong **instruction** in the same delta, and re-running that `ip rule add` is exactly the wrong instruction — the pin is already applied. Its one still-live idea (a tailscale route exclusion for UDP:4242, rather than a `to <node>` pin) is carried in next-step 1, where it can be acted on.
 
+### 🔴 SUPERSEDES the "home router NAT/conntrack" hypothesis above — THREE vantages put the fault on the PATH, not at either end
+- as-of: 2026-09-24
+- 🔴 **The block above leads with "the home router is periodically losing NAT/conntrack state". That is REFUTED.** It rested on "home's outbound internet is clean during the blackouts", and that measurement **cannot test home's INBOUND path** — outbound ICMP builds its own state per packet. Do not resume by rebooting or reconfiguring the home router; it was measured innocent.
+- **Symptom + exact repro:** laptop↔home over nebula AND tailscale loses 16–45% in contiguous 6.5–20 s blackouts. Repro: `ping -c 160 -i 0.5 -D 10.42.0.30` beside `ping -c 160 -i 0.5 -D <tailscale peer>`, concurrently.
+- **Observed (with values):** the two overlays are not merely similar, they are **identical** — 160-packet concurrent run: nebula `49/160 (30.6%)`, tailscale `49/160 (30.6%)`, same gap count (4), same longest run (26), **same blackout start epochs to the second** (`1790225305`, `1790225319`). RTT 144.0 vs 143.3 ms.
+- **Ruled out — the home end (router, NAT, conntrack, home ISP link).** A THIRD vantage outside both — the far box, probing the SAME destination `10.42.0.30` over the mesh — measured **0/300 loss** across window `1790225893..1790226042`, which **fully contains** the laptop's window `1790225901..1790226023` in which the laptop lost **127/280 (45%)** with blackouts at `…914`, `…989`, `…009`, `…023`. An external host reached the same machine flawlessly while the laptop could not. `via: measurement`
+- **Ruled out — the laptop's own link and its ISP generally.** Local gateway `0/120` at 1–2 ms, signal −43 dBm; far non-home endpoint `0/140`. Only traffic to *home* dies. `via: measurement`
+- **Ruled out — a broken forward or return path at the IP layer.** `mtr` laptop→home, 120 probes: last responding hop (16) **0.0%**. Reverse `mtr` from home→laptop's WAN, 60 probes: last responder (17) **1.7%**. Intermediate hops showing 15–75% are ICMP rate-limiting — later hops are clean, so that loss is not real. `via: measurement`
+- **Leading hypothesis (UNTESTED — say so):** the overlay pings ride **UDP on the wire**; `mtr`'s probes do not. UDP dying while ICMP survives would point at per-flow state being evicted on the path. **This host sits behind carrier-grade NAT at its current location** — the forward `mtr` shows hops 2–6 all RFC1918 (`10.35.x`, `10.10.x`, `10.100.x`) — and CGNAT is a classic source of exactly this shape. It also explains why home↔far-box UDP is clean: different path, different CGNAT.
+- **Next probe:** the discriminator is already built and RUNNING — `bash <scratchpad>/flap-watch.sh <log>`, pid recorded in `flap-watch.pid`. It polls 20 packets every 20 s and, on ≥15% loss, fires a 5-way 60 s concurrent probe (nebula, tailscale, ICMP-to-last-hop-before-home, ICMP-to-far-box, ICMP-to-local-gw) DURING the episode. **Its trigger and parser were positive-controlled** (a black-hole target returns 100% → TRIGGER; a synthetic gap parses to the right run length), so its zero is a real zero. ⚠ It is a plain background process, not a unit — a suspend or reboot ends it, and the fault has not recurred in 12.5 h, so it may need re-launching.
+
 ## Next steps (ranked)
-1. Decide the PERMANENT form of the `ip rule` pin, in whichever repo owns the laptop's nebula unit — it is kernel-state-only today, so a reboot silently reverts it. Costs and shape options are stated once, with the measurement, in the investigation's FIXED bullet; a tailscale route exclusion for UDP:4242 may be the better shape than a `to <node>` pin. **Do not treat this as the flap fix — it is not** (see the investigation).
+1. **PR #1865 — take `origin/main` into the branch to clear the inherited CI red, then run audit round 5.** `git merge origin/main` (the branch is 2 behind; `811fa910` fixes the failing test). Round 4 returned findings, so the ladder is not finished. IN FLIGHT: `devrc#1865`.
+   `forcing: gate`
+2. **Decide the PERMANENT form of the `ip rule` pin**, in whichever repo owns the laptop's nebula unit. It is kernel-state-only, so a reboot silently reverts it. 🔴 **Justify it on the ssh evidence (5/5 `rc=0` vs five consecutive `rc=255`), NOT on "it stopped the roaming"** — that claim did not survive re-measurement, and the instrument that could settle it is the one the pin disables. Costs: breaks `kubectl` against homelab while active; a tailscale route exclusion for UDP:4242 may be the better shape.
    `forcing: incident`
-2. Operator, ON THE LAN: refresh the workbench stable-path helper — `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown`. Verify: `cmp -s /etc/nixos/i3blocks-scripts/airvpn-updown ~/workspace/devrc/scripts/airvpn-updown && echo SYNC`. ⚠ Not urgent — nothing automatic can fire it (verified: no timer, no enabled unit) — but pair it with the killswitch re-test, because toggling that tunnel with the stale copy while off-LAN is a plausible lockout.
+3. **Operator, ON THE LAN: refresh the workbench stable-path helper** — `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown`. Verify: `cmp -s /etc/nixos/i3blocks-scripts/airvpn-updown ~/workspace/devrc/scripts/airvpn-updown && echo SYNC`. ⚠ Not urgent — measured 2026-09-23 that no timer and no enabled unit can fire it — but pair it with the killswitch re-test, because toggling that tunnel with the stale copy while off-LAN is a plausible lockout.
    `forcing: regression`
-3. Silence the gateway v6-remote noise — nebula config in `homelab-talos` (advertise v4 only from the gateway, or v6-listen on the laptop).
+4. Silence the gateway v6-remote noise — nebula config in `homelab-talos` (advertise v4 only from the gateway, or v6-listen on the laptop).
    `forcing: none`
-4. Re-run `scripts/data/refresh-airvpn-servers` from a host with qBit-pod access and bake country_code the supported way (its `_from_github` fallback is DEAD).
+5. Re-run `scripts/data/refresh-airvpn-servers` from a host with qBit-pod access and bake country_code the supported way (its `_from_github` fallback is DEAD).
    `forcing: none`
-5. `i3status-airvpn`'s no-country-code fallback abbreviates the full country NAME (`"United States"[:2]` → `UN`). One-line fix if it ever shows again; with cc baked it should be unreachable.
+6. `i3status-airvpn`'s no-country-code fallback abbreviates the full country NAME (`"United States"[:2]` → `UN`). One-line fix if it ever shows again; with cc baked it should be unreachable.
    `forcing: none`
 
 ## Defects (batched)
-- talosctl client cert EXPIRED (`tls: expired certificate` against 192.168.50.94) — blocks all node-level debugging from this host.
-- Workbench's stable-path `airvpn-updown` is stale (no roaming mode, no nebula pin) — closed by next-step 2's one command. General hazard: `/etc/nixos/i3blocks-scripts/` copies are NOT ship-managed nor covered by `drift-check.sh` rc 17 — stable-path helpers can rot silently on any host.
+- talosctl client cert EXPIRED (`tls: expired certificate` against 192.168.50.94) — blocks node-level debugging from this host.
+- Workbench's stable-path `airvpn-updown` is stale (0 `uidrange` lines vs the repo's 3) — closed by next-step 3. General hazard: `/etc/nixos/i3blocks-scripts/` copies are NOT ship-managed nor covered by `drift-check.sh` rc 17.
 - `refresh-airvpn-servers --from-github` fallback rotted (gluetun moved to `servers.go`); the kube source still works from the workbench.
-- The mockbin `ip` stub accepts any arg shape — any future `ip rule`/`nft` change needs a live unprivileged syntax probe before merge.
+- #1865's `mosh_openfirewall_state()` is a deliberately crude scanner, not a Nix parser: it cannot see `mkIf`, a second module file, or a `{` inside a string. Every direction it errs in REFUSES, which is the right side for a gate whose failure mode is opening the WAN — but a legitimate `openFirewall = false` behind `mkIf` is refused and needs hand-applying.
+- #1865's branch pins its handoff citation as prose (`#1866` + merge sha) rather than reading the doc, because the branch is behind `main` and the structural guard would be red there. Worth converting to a real read after it merges.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 The laptop has NO systemd-resolved: NetworkManager `dns=none` + local dnsmasq (`127.0.0.1` → public resolver). wg-quick ABORTS on the conf's `DNS =` line (`resolvconf` fails, interface torn down in the same invocation — measured on first connect). The apply script now strips that line when resolved is absent. Do NOT re-add DNS to the laptop conf.
@@ -268,7 +284,31 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - (carried) The pill's `?` on `US?` is the UNVERIFIED marker, not the stale marker.
 - (carried, WIDENED) DO NOT put ANY routable address of ours back in this doc — not just the home public IP. Use `<home-public-ip>` / `<laptop-wan-ip>` / `<hetzner-lighthouse-ip>` or a runtime shell variable. On 2026-09-23 it recurred with three literals, one of them the value scrubbed 24 h earlier.
 
+- 🔴 **A commit pushed to a branch AFTER its PR squash-merged is stranded and invisible to every gate.** Measured this session: `7511cbb8` landed on #1861's branch six minutes after #1861 merged as `5834b4c5`, so it was never in `main` and never in the merged PR. It was recovered as #1866 only because someone looked. **Verify a squash landed by CONTENT, never by ancestry** — `git merge-base --is-ancestor` is false after every squash, forever.
+- 🔴 **A line-based grep over a wrapped sentence returns a confident zero.** Verifying #1866's merge, one sentinel read ABSENT because the sentence wraps; normalising whitespace found it. Control the two forms against each other before believing an absence.
+- 🔴 **`gh pr view --json headRefOid` reporting an old sha is not always API lag — the PR may have MERGED at that sha.** This session diagnosed lag, was wrong, and nearly re-merged a merged PR. Read `state` before theorising about staleness.
+- 🔴 **A 20-second ping sample cannot size an episodic fault.** A 40-packet run read 65% loss; a concurrent 120-packet run minutes later read 16%, same mechanism. The first reading nearly got reported as a degradation.
+- 🔴 **Widening a guard's regex to admit one spelling admitted a WAN hole.** #1865 round 2 widened an idempotence check so `programs.mosh.enable` would match; round 4 found it then accepted a config with `openFirewall` ABSENT — which defaults TRUE and opens 1001 UDP ports on every interface — reported `ALREADY APPLIED`, printed an affirmative "openFirewall is set false" banner, and ran the switch. Fix the CLASS, not the spelling the audit named.
+- ⚠ **`nixos-rebuild switch` on a host whose `/etc/nixos` has no flake pulls the ROOT CHANNEL.** Measured on the workbench: `dry-build` reported **444 to build / 1420 to fetch** against a system last built 5 days earlier on `nixpkgs-unstable`. A staged script that ends in a bare `switch` is a full system update, not its own delta — which is why #1865's script now stops before switching by default.
+- ⚠ The `bash-guard` hook cannot resolve `git -C $VAR`; it judges the caller's cwd instead. Pass an absolute path, or assign the variable in the same command.
+
 ## How to verify
+🔴 **The arc's own closing-condition block is preserved verbatim below — do NOT replace it
+with the watcher checks; those answer a different question.** New this session, first:
+```bash
+# the flap watcher — still running, and did it catch an episode?
+ps -o pid=,etime= -p "$(cat <scratchpad>/flap-watch.pid)"
+rg -c 'quiet|TRIGGER' <scratchpad>/flap-watch.log
+rg -A8 'EPISODE' <scratchpad>/flap-watch.log      # empty = the fault has not recurred
+# loss to home, WITH the controls that make it interpretable (a bare number is not a reading):
+ping -c 120 -i 0.5 10.42.0.30   | tail -2         # home over nebula — UDP on the wire
+ping -c 120 -i 0.5 192.168.1.1  | tail -2         # own link — must be 0%
+# the pin (kernel state only; reverts on reboot):
+ip rule show | rg 5150
+# PR #1865 after taking main in (the red is INHERITED, fixed on main by 811fa910):
+gh pr checks 1865 --repo innovation-upstream/devrc
+```
+
 ```bash
 # mesh stability after the fix (want 0% loss over 60 samples):
 ping -c 60 -i 1 10.42.0.30 | tail -1
