@@ -95,8 +95,9 @@ MENU_TEST_MIRRORED_ENDPOINTS = 2
 # reviewer agreed the value is harmless.
 # 🔴 REPEAT-OFFENDER SITE, NAMED HERE ON PURPOSE — do NOT delete this comment as dead
 # text. `claudedocs/handoff-laptop-airvpn-tunnel.md` has leaked routable addresses of ours
-# TWICE: devrc#1853 scrubbed one, and the next commit to that file put the SAME value back
-# plus two more (devrc#1861), reddening `main` both times.
+# TWICE: devrc#1853 scrubbed one, and the next commit to that file (a6e98a3d, a direct
+# main commit) put the SAME value back plus two more; fixed by devrc#1861. Both leaks
+# reddened `main` on this gate.
 #
 # The line exists because `scripts/scoped-tests.sh` maps a changed file to its tests by
 # grepping the test universe for the CHANGED PATH AS A STRING. That doc used to appear in
