@@ -2234,7 +2234,24 @@ TARGET_FLOORS=(
   # with the gate still green. 525 is copied verbatim from the gate's own
   # message — this run's count through the documented rule, never
   # arithmetic done by hand here.
-  "scripts/session-analysis/tests|525"
+  #
+  # 2026-09-25, the arc-scoped extractor (#1870): 525 -> 752 collected, +227 in
+  # scripts/session-analysis/tests/test_extract_user_msgs.py. That is past the
+  # DRIFT CEILING, not below the floor — `drift = max(floor/4, 60)` = 131, so
+  # the ceiling was 525+131 = 656 and 752 cleared it. The gate's own function on
+  # this run's own count: `_suggested_floor 752` = 752 - min(50, max(1, 37)) = 715.
+  #
+  # 🔴 THIS IS THE SECOND HALF OF WHAT `tekton/devrc-pytests` WAS RED ON, and the
+  # first half hid it. The check reported `FAILED … passed=24177 skipped=5
+  # failed=0` — identical BEFORE and AFTER the skip-ledger fix, because the
+  # description carries only the test counts and a GUARD failure moves none of
+  # them. TWO guards were red at once; fixing one changed the output not at all,
+  # which reads exactly like "the fix did nothing" and invites reverting it. It
+  # did not do nothing: the skip pin was necessary too (CI runs `-n 8`, so the
+  # xdist pin is inapplicable there and the third battery's skip left observed=5
+  # against 4 applicable pins). When a red's description is byte-identical
+  # across a fix, suspect a SECOND guard rather than a failed fix.
+  "scripts/session-analysis/tests|715"
   "scripts/session-analysis/session_insight/tests|55"
   # 129 -> 116 on 2026-09-07: the initiative TAGGER was removed with the
   # initiatives board, taking test_routing_tag.py (7), the routing half of
