@@ -15,6 +15,28 @@ the card's DISPLAY title is `directory`. So the human-readable label goes in
 🔴 THIS MODULE CANNOT SEND A SIGNAL MESSAGE. It notifies a human that a draft is
 waiting. Transmission happens only in `consumer.transmit_approved()`, which
 demands a capability minted from an APPROVED draft row.
+
+🔴 THE BASE URL IS CONFIGURATION, NOT A LITERAL (fixed 2026-09-25). This module
+used to hold `ENDPOINT = "http://<host>:<port>/api/tasks"`, so it could not
+follow the task service's split out of the permission router — whichever host
+the literal named was the host it kept posting to.
+
+🔴 AND THE PRECEDENCE BELOW IS A DELIBERATE SECOND COPY. Say so loudly, because
+a silent one is how this class of bug regenerates: the shared definition lives
+in the repo's lib directory (loaded by explicit path by the board pollers and by
+the mail-actions twin of this module), and THIS module cannot reach it. It runs
+from an image whose Dockerfile COPYs the five files of this directory BY NAME —
+`COPY . .` is refused on purpose, devrc is public — and whose dockerignore
+denies `**` and re-admits only those names. Two build-time controls assert the
+image's file set EXACTLY, in both directions, and a gate test pins the COPY list
+against this directory's contents. So there is no import that works here without
+widening a deliberately narrow, security-motivated allowlist to carry a
+six-hundred-line module for three lines of it.
+
+The copy is therefore pinned MECHANICALLY rather than by good intentions:
+scripts/tests/test_clawgate_task_base_url_single_source.py asserts this module's
+ledger, its default and its resolution BEHAVIOUR against the shared module's,
+and fails the moment the two disagree.
 """
 from __future__ import annotations
 
@@ -22,7 +44,44 @@ import os
 
 import _mentions
 
-ENDPOINT = "http://192.168.50.250:30302/api/tasks"
+# --------------------------------------------------------------------------- #
+# 🔴 A COPY OF THE SHARED TASK-URL PRECEDENCE. See the module docstring for why
+# it cannot be an import, and for the guard that keeps it honest. Change nothing
+# here without changing the shared definition; the guard fails either way round.
+# --------------------------------------------------------------------------- #
+#: Specific key first, general key as the FALLBACK. Order is the contract: swap
+#: these and a host that only knows `CLAWGATE_API_URL` keeps working while one
+#: told about the split silently un-splits the two services again.
+TASK_API_URL_VARS = ("CLAWGATE_TASK_API_URL", "CLAWGATE_API_URL")
+
+#: What both keys being unset resolves to — the LAN NodePort this pod reached
+#: when the URL was a literal, so introducing the lookup moves no request.
+DEFAULT_API_URL = "http://192.168.50.250:30302"
+
+#: The POST path for creating a Task card (NOT the board read's `?summary=1`).
+TASKS_PATH = "/api/tasks"
+
+
+def task_base_url(env=None) -> str:
+    """First non-empty value among `TASK_API_URL_VARS`, else the default.
+
+    An EMPTY value counts as unset (matching the shell's `${A:-$B}`), so a
+    half-written `CLAWGATE_TASK_API_URL=` falls through to the router key rather
+    than resolving to a bare path. Trailing slashes are stripped so the caller
+    can concatenate a path without doubling the separator.
+    """
+    src = os.environ if env is None else env
+    for name in TASK_API_URL_VARS:
+        value = src.get(name)
+        if value:
+            return value.rstrip("/")
+    return DEFAULT_API_URL.rstrip("/")
+
+
+def task_endpoint(env=None) -> str:
+    """The `POST /api/tasks` URL for the TASK service, resolved at CALL TIME."""
+    return task_base_url(env) + TASKS_PATH
+
 
 # clawgate renders `directory` as the card title; trim to a sane label length.
 TITLE_MAX = 120
@@ -86,18 +145,20 @@ def emit_draft_task(*, draft_id: int, recipient: str, body: str,
     """Post one clawgate Task card for a pending draft. True if posted.
 
     Graceful no-op (returns False, posts nothing) when `CLAWGATE_HOOK_TOKEN` is
-    unset — mirroring `mail-actions/clawgate.py`.
+    unset — mirroring `mail-actions/clawgate.py`. The endpoint is resolved AFTER
+    the token check, so that no-op reads nothing at all.
     """
     token = os.environ.get("CLAWGATE_HOOK_TOKEN")
     if not token:
         return False
     import requests
 
+    url = task_endpoint()
     payload = build_draft_payload(draft_id=draft_id, recipient=recipient,
                                   body=body, mentions=mentions,
                                   author_names=author_names)
     resp = requests.post(
-        ENDPOINT,
+        url,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         json=payload,
         timeout=timeout,

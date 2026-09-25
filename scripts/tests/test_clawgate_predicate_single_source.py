@@ -90,6 +90,17 @@ ALLOWLIST = {
 EXPECTED_IMPORTERS = {
     "scripts/bar-status-poll",      # the 45s bar poller, writes the cache
     "scripts/session-manager",      # the cross-host JSON report
+    # 🔴 A PRODUCER, not a renderer — added 2026-09-25 and the reason the ledger
+    # is worth reading rather than rubber-stamping. It does not touch the
+    # pending predicate at all; it loads the module for `task_base_url`, the
+    # ONE definition of which base URL the task service lives on now that it is
+    # a separate process from the permission router. It held
+    # `ENDPOINT = "http://<host>:<port>/api/tasks"` and could not follow that
+    # split. Its Signal twin (scripts/signal/clawgate.py) cannot import the
+    # module — it ships in an image that COPYs its own directory by name — and
+    # carries a deliberate copy pinned by
+    # scripts/tests/test_clawgate_task_base_url_single_source.py.
+    "scripts/mail-actions/clawgate.py",
 }
 # `scripts/agent-ops` — the mission-control TUI — was the third importer until it
 # was RETIRED. It is not "one fewer surface to keep in sync": it read this

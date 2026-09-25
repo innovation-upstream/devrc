@@ -629,6 +629,27 @@ def read_clawgate_task_env(path=None):
     return base, _token(env)
 
 
+def task_base_url(env=None) -> str:
+    """The task-side base URL resolved from a MAPPING — `os.environ` by default.
+
+    🔴 SAME LEDGER, DIFFERENT CONFIGURATION CHANNEL. `read_clawgate_task_env`
+    answers the same question for a consumer whose configuration lives in
+    ~/.claude/clawgate.env, and it also returns the hook token, so it can only
+    serve a caller that has that file. The two task-CARD producers
+    (`scripts/mail-actions/clawgate.py`, `scripts/signal/clawgate.py`) take their
+    token from the PROCESS ENVIRONMENT instead — a systemd unit's `Environment=`
+    and a Kubernetes Deployment's `env:` respectively — and neither has the file
+    at all. Without this entry point they would have to open-code the
+    precedence, which is exactly the N-sites regrowth `_base_from`'s docstring
+    warns about.
+
+    So: one ledger (`TASK_API_URL_VARS`), one precedence (`_base_from`), one
+    default (`DEFAULT_API_URL`), reachable from either channel. `env` is any
+    mapping, so a test can drive it without touching the process environment.
+    """
+    return _base_from(os.environ if env is None else env, TASK_API_URL_VARS)
+
+
 def tasks_url(base: str) -> str:
     """The board URL for a base. No credential is ever put in it."""
     return base.rstrip("/") + TASKS_PATH
