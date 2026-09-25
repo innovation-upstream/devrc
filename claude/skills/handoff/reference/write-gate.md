@@ -1200,13 +1200,35 @@ nothing. Over the line, the delta must be `<= 0`.
 The warning has printed on every over-budget write since #1648 and the mechanism it
 names went on regardless. MEASURED on one arc:
 
-| | at the prune | seven days later | |
+| | at the prune (`3c4a1c6`) | at the next peak (`219d58e`) | |
 |---|---:|---:|---|
-| whole doc | 63,433 B | 134,563 B | x2.1 |
+| whole doc | 64,097 B | 139,371 B | x2.17 |
 | `Gotchas` | 45,984 B / 89 bullets | 83,618 B / 147 bullets | +58 |
 
-The prune **worked** — it landed the doc under the 65,536 B ceiling. Seven days later
-it had doubled, at roughly 10 KB and 8 `Gotchas` bullets per day, with `Gotchas` at
+🔴 **THIS TABLE IS THE SINGLE SOURCE OF TRUTH FOR THE WHOLE-DOCUMENT ROW.**
+`scripts/lib/handoff_doc.py` and `scripts/tests/test_handoff_doc.py` point here
+instead of restating the literals — the same ruling `scripts/tests/test_handoff_doc_size.py`
+makes about the ceiling it owns, applied one arc down, and applied because restating
+them is exactly how they went wrong. **Re-measure rather than believe them.** Two
+commands, run inside the measured repo (`<cairn>`, whose doc this was):
+
+```bash
+git cat-file -s 3c4a1c6:claudedocs/handoff-cairn-control-plane.md   # 64097
+git cat-file -s 219d58e:claudedocs/handoff-cairn-control-plane.md   # 139371
+```
+
+⚠ **THE FIRST PAIR WRITTEN HERE WAS WRONG, AND ONLY THE WHOLE-DOCUMENT ROW HAS BEEN
+RE-MEASURED.** It read 63,433 B → 134,563 B, x2.1. Neither figure reproduces at **any**
+revision of that file: all 107 of them were sized, and the corrected 64,097 hits two of
+them while 63,433 and 134,563 hit none — so the scan is an instrument with a positive
+control, not a guess. The `Gotchas` row above was **not** re-derived by that scan and is
+neither confirmed nor retracted here; do not quote it as measured alongside the row that
+was.
+
+🔴 **The conclusion is unchanged, which is why this is a correction and not a
+retraction.** The prune **worked** — 64,097 B is under the 65,536 B ceiling — and the
+document then more than DOUBLED: 75,274 B of growth over the 6.1 days between those
+two commits (2026-09-18 → 2026-09-25), roughly **12 KB a day**, with `Gotchas` at
 62% of the file; every other section combined would have fitted under the ceiling on
 its own.
 

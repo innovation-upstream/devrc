@@ -422,15 +422,19 @@ freely and may not rise.
 
 🔴 WHY A REFUSAL WHERE `budget_warning` DELIBERATELY REFUSES NOTHING. That
 warning has been printed on every over-budget write since #1648 and the
-mechanism it names went on regardless: MEASURED on one arc, 63,433 B the day a
-prune landed it UNDER the ceiling, 134,563 B seven days later — x2.1, roughly
-10 KB a day, with `Gotchas` alone going 45,984 -> 83,618 B. The growth is
-STRUCTURAL rather than careless: the bucket rules forbid durable content in a
-REPLACE section, so the correct remedy for a finding is "move it to `Gotchas`",
-which APPENDS. That section has an entry rule and no exit rule; it is monotonic
-by construction, and a warning is not a counterweight to a construction. A prose
-prune discipline was tried IN the document and the section regrew within seven
-days of being read.
+mechanism it names went on regardless: MEASURED on one arc, a document a prune
+had landed UNDER the ceiling more than DOUBLED inside a week, `Gotchas` reaching
+62% of it. 🔴 THE BYTES, THE RATIO AND THE `git cat-file -s` COMMANDS THAT
+RE-MEASURE THEM LIVE IN ONE PLACE — `claude/skills/handoff/reference/write-gate.md`
+§I — and are NOT restated here, because the restated copies are what went wrong:
+the first pair written down reproduced at no revision of the measured file.
+
+The growth is STRUCTURAL rather than careless: the bucket rules forbid durable
+content in a REPLACE section, so the correct remedy for a finding is "move it to
+`Gotchas`", which APPENDS. That section has an entry rule and no exit rule; it is
+monotonic by construction, and a warning is not a counterweight to a
+construction. A prose prune discipline was tried IN the document and the section
+regrew within seven days of being read.
 
 🔴 THE OVERRIDE IS NOT A CONVENIENCE, IT IS WHAT MAKES THE REFUSAL SAFE.
 `/handoff`'s write path is the ONLY step that records a session — see
@@ -3287,8 +3291,10 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
 # EXIT RULE. `Gotchas` and `Open investigations` APPEND by design, the bucket
 # rules forbid durable content anywhere else, so "move it to `Gotchas`" is the
 # CORRECT remedy for every finding and the section is monotonic by construction.
-# MEASURED on one arc: 63,433 B the day a prune landed it under the ceiling,
-# 134,563 B seven days later, `Gotchas` 45,984 -> 83,618 B and 62% of the file.
+# MEASURED on one arc: a prune landed the doc under the ceiling and it more than
+# DOUBLED inside a week, `Gotchas` reaching 62% of the file. The figures, and the
+# two commands that re-measure them, are owned by
+# `claude/skills/handoff/reference/write-gate.md` §I — one place, never restated.
 #
 # 🔴 SO THE RATCHET IS ON GROWTH, NOT ON SIZE. A doc under its allowance is not
 # this rule's population at all — `budget_warning` keeps that one, and keeps
@@ -3414,17 +3420,33 @@ def size_ratchet_override_note(
     makes it readable off the artefact afterwards. Neither is the other's
     backup.
 
-    🔴 SILENT WHEN THE RATCHET WOULD NOT HAVE FIRED. A flag that prints a block
-    on every run it is passed on is a flag people learn to pass by reflex and a
-    block nobody reads — `declared_forcing_none_report`'s stated reason. The
-    caller decides this too, by only calling when the refusal is non-empty; the
-    guard below is the same predicate said twice on purpose, so a direct caller
-    cannot announce an override of a rule that never fired.
+    🔴 SILENT WHEN THE RATCHET WOULD NOT HAVE FIRED, AND `main()` IS THE ONE
+    PLACE THAT DECIDES IT. A flag that prints a block on every run it is passed
+    on is a flag people learn to pass by reflex and a block nobody reads —
+    `declared_forcing_none_report`'s stated reason. `main()` calls this only when
+    `size_ratchet_report` returned non-empty, and that non-emptiness IS the
+    predicate; there is deliberately no copy of it here.
+
+    🔴 THERE USED TO BE, AND IT WAS DELETED RATHER THAN KEPT AS A BELT-AND-BRACES
+    CHECK. The line that stood here restated `size_ratchet_report`'s three-way
+    guard verbatim — `claude/RULES.md`'s duplicated predicate, one rule at two
+    sites. Its stated justification was "so a DIRECT caller cannot announce an
+    override of a rule that never fired", and the caller it protected against
+    does not exist: `main()` is the only production call; the one direct call in
+    the suite monkeypatches `budget_position` to raise, so it lands in the
+    handler below without ever reaching the predicate; and no test can bind a
+    branch nothing takes. A guard no caller reaches reads as coverage and
+    provides none.
+
+    🔴 IT IS DESCRIBED ABOVE RATHER THAN QUOTED, AND THAT IS LOAD-BEARING. The
+    mutation rows for `size_ratchet_report`'s copy are UNRANGED `sed`
+    expressions now that this one is gone, so a verbatim restatement anywhere in
+    this file — a docstring included — gives each of them a SECOND match and
+    makes the mutation wider than the expression it claims to isolate.
+    `scripts/tests/mutants-handoff-cap.sh`, rule (p) block.
     """
     try:
         pos = budget_position(relpath, merged_text, base_text)
-        if not pos.is_handoff_doc or pos.over_by <= 0 or pos.delta <= 0:
-            return ""
         return "\n".join([
             f"🔴 SIZE RATCHET OVERRIDDEN by {SIZE_RATCHET_FLAG} — this document "
             f"is {pos.after:,} B against an allowance of {pos.allowance:,} B, "

@@ -1013,26 +1013,43 @@ run 'rule-p-override-ignored' \
 # delta, which is the one route out that is not the override. That is the
 # permanently-red gate `claude/RULES.md` forbids, and this row is what makes the
 # escape's own test bind (it PASSES at the pre-rule base, by construction).
-# Ranged to `size_ratchet_report`: the identical predicate is deliberately said
-# again in `size_ratchet_override_note`, and mutating both at once would be
-# wider than the expression that can be wrong.
+#
+# 🔴 THE FOUR PREDICATE ROWS BELOW ARE UNRANGED, AND THAT IS A CHANGE WITH TWO
+# REASONS. They used to carry `/^def size_ratchet_report/,/^def
+# size_ratchet_override_note/` because `size_ratchet_override_note` re-derived
+# the identical predicate and a bare `s|…|` would have mutated both copies at
+# once — wider than the expression that can be wrong. That duplicate is DELETED
+# (`claude/RULES.md`, one rule one place), so each expression now occurs EXACTLY
+# ONCE in the module. Second reason, and the one that makes the un-ranging worth
+# doing rather than merely possible: `test_mutants_handoff_cap.py`'s scraper only
+# captures an expression STARTING `s|` or `s@`, and 🔴 a ranged row does not
+# simply drop out of it — MEASURED, and the flattering reading is the wrong one.
+# The scraper skips FORWARD to the next such line, so a ranged row is recorded
+# carrying a LATER row's expression and the rows in between disappear. At the
+# commit before this one that was 5 rule-(p) rows: `rule-p-ignores-the-DELTA`
+# paired with the ALLOWANCE expression, four more absent entirely, and the rot
+# guard green over all of it. Un-ranging is what makes each row answer for its own
+# expression (98 -> 102 rows scraped, all four names now present).
+# 🔴 Before re-ranging any of them, or before restating the predicate anywhere in
+# `handoff_doc.py` — a docstring counts — check the pattern still occurs once:
+# two matches is a mutation that no longer isolates what its name claims.
 run 'rule-p-ignores-the-DELTA' \
   test_the_same_delta_LANDS_when_it_EVICTS_at_least_as_much \
-  '/^def size_ratchet_report/,/^def size_ratchet_override_note/ s|or pos.delta <= 0:|or False:|'
+  's|or pos.delta <= 0:|or False:|'
 # The BOUNDARY of that arm, one byte over: `delta == 0` must LAND — an
 # over-budget doc may be rewritten in place.
 run 'rule-p-delta-boundary-excludes-a-flat-update' \
   test_the_boundary_is_a_POSITIVE_delta_not_a_NON_NEGATIVE_one \
-  '/^def size_ratchet_report/,/^def size_ratchet_override_note/ s|or pos.delta <= 0:|or pos.delta < 0:|'
+  's|or pos.delta <= 0:|or pos.delta < 0:|'
 # 🔴 THE CEILING ARM. Dropping it ratchets EVERY handoff doc, which is a
 # different rule wearing this one's name — and the corpus median is 13,730 B.
 run 'rule-p-ignores-the-CEILING' \
   test_a_doc_UNDER_its_ceiling_GROWS_exactly_as_before \
-  '/^def size_ratchet_report/,/^def size_ratchet_override_note/ s|or pos.over_by <= 0 |or False |'
+  's|or pos.over_by <= 0 |or False |'
 # Its boundary: a doc sitting exactly ON its allowance is not over it.
 run 'rule-p-ceiling-boundary-fires-AT-the-line' \
   test_the_ceiling_boundary_is_STRICTLY_over_not_at \
-  '/^def size_ratchet_report/,/^def size_ratchet_override_note/ s|or pos.over_by <= 0 |or pos.over_by < 0 |'
+  's|or pos.over_by <= 0 |or pos.over_by < 0 |'
 # 🔴 THE NUMBER'S OWNER. A literal here is the same VALUE and therefore invisible
 # to every other row in this block — they all use documents far over both
 # spellings. Only the guard that MOVES the ceiling can see it.
@@ -1071,6 +1088,25 @@ run 'rule-p-stamps-a-run-it-never-refused' \
 # 🔴 THE HAZARD THIS RULE IS NOT ALLOWED TO CREATE. The write path is the only
 # step that records a session, so a bug in the ratchet must cost the ratchet and
 # never the record.
+#
+# 🔴 THIS ONE STAYS RANGED, AND IT IS THE EXCEPTION TO THE NOTE ABOVE. Deleting
+# the duplicated predicate did not make this pattern unique: the handler idiom
+# `except (Exception, SystemExit):` occurs THREE times in `handoff_doc.py` —
+# `evictable_note`, `size_ratchet_report` and `size_ratchet_override_note`, whose
+# own handler is what the direct call in
+# `test_it_degrades_to_NO_RATCHET_when_its_own_code_explodes` exercises. Unranged,
+# this row would mutate all three at once and die for the wrong reason.
+#
+# 🔴 AND THE COST IS NOT "INVISIBLE TO THE ROT GUARD", IT IS WORSE THAN THAT —
+# MEASURED, because the obvious reading is wrong. `test_mutants_handoff_cap.py`'s
+# scraper skips forward from a `run` line to the next expression STARTING `s|`, so
+# a ranged row does not drop out: it is captured carrying the expression of some
+# LATER row, and the rows in between vanish. Measured on this file: at the commit
+# before this one, 5 rule-(p) rows were mis-paired or missing, and THIS row was
+# reported healthy off `rule-p-comment-reword-control`'s expression while its own
+# was never checked. Un-ranging the four predicate rows above closed four of the
+# five; this one is unfixable from here and is left stated. Do not read a green
+# `test_every_mutation_row_still_changes_its_target` as covering this row.
 run 'rule-p-crashes-instead-of-degrading' \
   test_it_degrades_to_NO_RATCHET_when_its_own_code_explodes \
   '/^def size_ratchet_report/,/^def size_ratchet_override_note/ s|    except (Exception, SystemExit):|    except SystemExit:|'

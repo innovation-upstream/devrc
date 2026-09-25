@@ -7979,9 +7979,13 @@ def test_a_heading_matching_BOTH_step1_detectors_is_not_double_counted():
 # write since #1648 and the growth went on regardless, because it is STRUCTURAL:
 # the bucket rules forbid durable content in a REPLACE section, so the correct
 # remedy for a finding is "move it to `Gotchas`", which APPENDS. That section has
-# an entry rule and no exit rule. On the arc this rule was measured against,
-# 63,433 B the day a prune landed it under the ceiling became 134,563 B seven
-# days later — x2.1, `Gotchas` 45,984 -> 83,618 B and 62% of the file.
+# an entry rule and no exit rule. On the arc this rule was measured against, a
+# prune landed the doc under the ceiling and it more than DOUBLED inside a week,
+# `Gotchas` reaching 62% of the file. 🔴 THE BYTES AND THE RATIO ARE NOT RESTATED
+# HERE: `claude/skills/handoff/reference/write-gate.md` §I owns them and carries
+# the `git cat-file -s` commands that re-measure them. The literals that used to
+# stand here reproduced at no revision of the measured document — a fourth copy
+# of a number is how that happens.
 #
 # 🔴 WHAT MAKES EACH TEST BELOW NON-VACUOUS, because two of them could pass for
 # the wrong reason and be indistinguishable from a pass for the right one:
