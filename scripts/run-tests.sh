@@ -3962,6 +3962,16 @@ EXPECTED_SKIPS=(
   # here — that accounting cost is the mechanism, not an oversight.
   "scripts/tests|mutation_battery_handoff_archive_and_cap[.]py has no multi-site row"
   "scripts/tests|mutation_battery_investigation_rename[.]py has no multi-site row"
+  # The THIRD single-site battery, added with `mutation_battery_extract_user_msgs.py`
+  # (#1870). Paying the accounting cost the comment above says is the mechanism.
+  # 🔴 THIS IS WHAT `tekton/devrc-pytests` WAS RED ON, and the shape is worth
+  # keeping: the check reported `FAILED … passed=24177 skipped=5 failed=0` — a
+  # verdict contradicting its own counts, because an UNPINNED SKIP is a GUARD 2
+  # failure and not a test failure. Two audit rounds read that red, could not
+  # attribute it, and correctly declined to blame the diff; it was the diff, via
+  # a guard that fails with zero failing tests. If you land a battery with no
+  # multi-site row and CI goes red with `failed=0`, look here first.
+  "scripts/tests|mutation_battery_extract_user_msgs[.]py has no multi-site row"
 )
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
 # carried two regression pins against the LIVE datapacket-talos skill corpus, a
