@@ -1178,3 +1178,110 @@ takes on the tree this was built against. It is kept because a generous ceiling
 fails in the safe, loud direction — on a hang rather than on a slow machine —
 which is a reason to keep the number, not a reason it is the right one. Said
 here rather than dressed up as a derivation.
+
+## §I — rule (p): a doc already over its ceiling may not GROW (2026-09-25)
+
+### What it refuses
+
+`status=size-ratchet`, exit **14**, nothing written. The predicate is two facts about
+the MERGED document, both read out of one `budget_position()` call:
+
+* the merge is **over its allowance** (`handoff_budget.MAX_BYTES`, or the doc's
+  `GRANDFATHERED` entry when it has one); **and**
+* the **net byte delta is positive** — the merge is bigger than the document it
+  replaces.
+
+A doc **under** its allowance is not this rule's population at all, however much the
+update adds: that one stays `budget_warning`'s, and that function still refuses
+nothing. Over the line, the delta must be `<= 0`.
+
+### Why a refusal, where the warning deliberately refuses nothing
+
+The warning has printed on every over-budget write since #1648 and the mechanism it
+names went on regardless. MEASURED on one arc:
+
+| | at the prune | seven days later | |
+|---|---:|---:|---|
+| whole doc | 63,433 B | 134,563 B | x2.1 |
+| `Gotchas` | 45,984 B / 89 bullets | 83,618 B / 147 bullets | +58 |
+
+The prune **worked** — it landed the doc under the 65,536 B ceiling. Seven days later
+it had doubled, at roughly 10 KB and 8 `Gotchas` bullets per day, with `Gotchas` at
+62% of the file; every other section combined would have fitted under the ceiling on
+its own.
+
+🔴 **The growth is STRUCTURAL, not careless.** The bucket rules forbid durable content
+in a REPLACE section, so the correct remedy for a finding is "move it to `Gotchas`" —
+which APPENDS. That section has an entry rule and **no exit rule**; it is monotonic by
+construction, and a warning is not a counterweight to a construction. One PR did
+exactly that twice in one day, correctly by the bucket rule and harmfully by the size
+rule, and two blind audit rounds missed the tension because each was scoped to one
+axis.
+
+### What was ruled out before building, so nobody re-derives it
+
+* **Detection was never the gap.** `evictable_note()` already reports what has closed
+  per-document. Corpus-wide: 468,110 B (14.1%) already evictable — 284,262 B of
+  resolved investigations alone — while 28 docs sat over the hard cap.
+* **The advice surface stays deleted.** #1821 removed it from `evictable_note()` after
+  7 of 10 audit findings across four rounds came from it. This rule reuses that
+  function's three-way branch exactly as it stands and widens nothing.
+* **A prose rule was tried and did not hold.** The motivating document already carried
+  a written prune discipline; it was read, and the section regrew within seven days.
+* **A TTL / staleness stamp was designed and rejected before building.** A check that
+  reddens because a stamp aged goes red on a day nobody changed anything, and
+  `claude/RULES.md` calls a permanently-red gate worse than none.
+
+### How you clear it
+
+Two ways, and the first is usually the right one:
+
+1. **Shrink a REPLACE section in the same delta.** `State now`, `Next steps` and
+   `How to verify` are rewritten wholesale, so what they no longer need to say costs
+   nothing to drop.
+2. **Move what has closed out of the document first**, in its own commit, to the arc's
+   archive file — then re-run the update unchanged. `Gotchas` and `Open investigations`
+   APPEND through this tool, so it cannot shrink them for you.
+
+🔴 **Eviction means MOVE, leaving a pointer.** Nothing in this rule can tell a deletion
+from an eviction — the arithmetic is identical — so the refusal says so in its own
+words. A ratchet whose cheapest escape is deleting a gotcha or a ruled-out theory has
+made things worse than it found them.
+
+### The override, and why it is not a convenience
+
+`--override-size-ratchet "<why>"`. The reason is **required**; an empty one is refused
+at argument-validation time with **exit 2**, not 14 — an empty flag is a complaint
+about an ARGUMENT, and returning the rule's own verdict code would tell a caller its
+document grew when the truth is that a flag was blank.
+
+🔴 **The escape is what makes the refusal safe.** `/handoff`'s write path is the only
+step that records a session, and `handoff-write-guard.py` blocks Stop until a handoff
+is written; a refusal with no escape could cost a session its record, which
+`handoff_budget.py`'s own header measures as the worse trade (22 of 253 sessions never
+recorded, ZERO of them because a gate correctly declined). For the same reason
+`size_ratchet_report()` **never raises** — any failure of its own code degrades to "no
+ratchet", never to a crash in the landing step.
+
+An overridden run is recorded **twice, in two channels, neither a backup for the
+other**: a block above the diff at the moment the decision is taken, and
+`Size-Ratchet-Override: <why>` on the commit, which is what survives a transcript
+shipped as a bounded tail. The reason is whitespace-collapsed and clipped for the
+trailer, because `session_trailer.valid_id()` rejects a value over 256 chars or
+carrying a newline and `append_trailer` then returns the message **unchanged** — a
+silent failure that would leave the run claiming a durable record that does not exist.
+
+### What it does NOT do
+
+* It is **not gated on `gate_enforces_budget()`**. Unlike the RED-gate claim in
+  `budget_warning`, this refusal asserts nothing about anyone's CI — it is this tool's
+  own verdict, true in any repo, and a repo shipping no `test_handoff_doc_size.py` is
+  exactly where nothing else would ever notice.
+* It **does not check where the bytes came from or went**. A net-zero delta that
+  deleted a gotcha to pay for a new one satisfies it.
+* It **reaches a doc's first write**, which is not the case it is named for. `before`
+  is 0 for a new doc, so a first write over the ceiling is refused. That is the stated
+  predicate rather than an oversight: rule (n) grandfathers round 1 because it compares
+  a COUNT across rounds and a new doc has no previous round to have grown since, while
+  this rule compares BYTES against a fixed ceiling a new doc can be over on day one.
+* It **prunes no document**. This is the mechanism only.

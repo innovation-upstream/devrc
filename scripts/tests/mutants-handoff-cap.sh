@@ -103,6 +103,23 @@ cp -a "$SRC/scripts/tests/conftest.py" "$ROOT/scripts/tests/" 2>/dev/null
 # sweep against a suite that was already failing for an unrelated reason.
 mkdir -p "$ROOT/scripts/tests/fixtures"
 cp -a "$SRC/scripts/tests/fixtures/." "$ROOT/scripts/tests/fixtures/"
+# 🔴 THE AUDITOR AND ITS OWN SIBLING, AND THE BATTERY WAS RED WITHOUT THEM.
+# `evictable_note` resolves `handoff-audit.py` RELATIVE TO THE MODULE
+# (`__file__/../../handoff-audit.py`), so in a copy that lacks it the function
+# returns "" — by design, it never raises — and twelve `evictable_note` /
+# budget-note tests fail at the BASELINE. `handoff-audit.py` in turn
+# `SystemExit`s at module level without `skill-audit.py`, so copying one without
+# the other swaps a silent "" for a caught SystemExit and leaves the same twelve
+# red.
+#
+# ⚠ THIS FILE'S COPY LIST DID NOT MOVE WHEN #1815 ADDED `evictable_note`, so the
+# battery has exited 1 at its own baseline control ever since — which is the good
+# outcome of the two available: the control refused to score a sweep against a
+# suite that was already failing, rather than printing a screen of `ok`. It is
+# still a permanently-red gate, which `claude/RULES.md` says is worse than none.
+# MEASURED at `4c9a3f58` (before rule (p)): the same twelve names, same order.
+cp -a "$SRC/scripts/handoff-audit.py" "$ROOT/scripts/"
+cp -a "$SRC/scripts/skill-audit.py" "$ROOT/scripts/"
 # The suite reads the skill body (TestSkillAndModuleAgree) and its reference dir.
 cp -a "$SRC/claude/skills/handoff/SKILL.md" "$ROOT/claude/skills/handoff/"
 cp -a "$SRC/claude/skills/handoff/reference/." \
@@ -966,6 +983,88 @@ run 'new-docs-are-ratcheted-too' \
   's|^    if is_new_doc:|    if False:|'
 run 'rule-n-comment-reword-control' SURVIVES \
   's|# --- rule (n): the rank queue does not GROW its unforced half|# --- rule n: rank ratchet (reworded comment)|'
+
+printf '\n== rule (p): an over-ceiling doc may not GROW (must be KILLED) ==\n'
+# 🔴 THE REFUSAL ITSELF. Everything else in this block is a boundary or a
+# recording; this row is the rule.
+run 'rule-p-refusal-never-fires' \
+  test_an_over_ceiling_doc_that_GROWS_is_REFUSED \
+  's|^    if ratchet and not args.size_ratchet_override:|    if False and not args.size_ratchet_override:|'
+# 🔴 THE TWO HALVES OF THE CONDITION GET SEPARATE ROWS — mutating both together
+# would delete the guard with its enclosing condition and prove nothing about
+# either half. This is the OPERATOR OPT-IN half: a flag the code ignores is a
+# refusal nobody can clear, on the one write path that records a session.
+run 'rule-p-override-ignored' \
+  test_the_override_LANDS_the_growth_and_SAYS_SO_above_the_diff \
+  's|^    if ratchet and not args.size_ratchet_override:|    if ratchet and True:|'
+# 🔴 THE DELTA ARM. Without it the rule stops being a ratchet on GROWTH and
+# becomes a flat refusal on every over-budget doc — including the EVICTING
+# delta, which is the one route out that is not the override. That is the
+# permanently-red gate `claude/RULES.md` forbids, and this row is what makes the
+# escape's own test bind (it PASSES at the pre-rule base, by construction).
+# Ranged to `size_ratchet_report`: the identical predicate is deliberately said
+# again in `size_ratchet_override_note`, and mutating both at once would be
+# wider than the expression that can be wrong.
+run 'rule-p-ignores-the-DELTA' \
+  test_the_same_delta_LANDS_when_it_EVICTS_at_least_as_much \
+  '/^def size_ratchet_report/,/^def size_ratchet_override_note/ s|or pos.delta <= 0:|or False:|'
+# The BOUNDARY of that arm, one byte over: `delta == 0` must LAND — an
+# over-budget doc may be rewritten in place.
+run 'rule-p-delta-boundary-excludes-a-flat-update' \
+  test_the_boundary_is_a_POSITIVE_delta_not_a_NON_NEGATIVE_one \
+  '/^def size_ratchet_report/,/^def size_ratchet_override_note/ s|or pos.delta <= 0:|or pos.delta < 0:|'
+# 🔴 THE CEILING ARM. Dropping it ratchets EVERY handoff doc, which is a
+# different rule wearing this one's name — and the corpus median is 13,730 B.
+run 'rule-p-ignores-the-CEILING' \
+  test_a_doc_UNDER_its_ceiling_GROWS_exactly_as_before \
+  '/^def size_ratchet_report/,/^def size_ratchet_override_note/ s|or pos.over_by <= 0 |or False |'
+# Its boundary: a doc sitting exactly ON its allowance is not over it.
+run 'rule-p-ceiling-boundary-fires-AT-the-line' \
+  test_the_ceiling_boundary_is_STRICTLY_over_not_at \
+  '/^def size_ratchet_report/,/^def size_ratchet_override_note/ s|or pos.over_by <= 0 |or pos.over_by < 0 |'
+# 🔴 THE NUMBER'S OWNER. A literal here is the same VALUE and therefore invisible
+# to every other row in this block — they all use documents far over both
+# spellings. Only the guard that MOVES the ceiling can see it.
+run 'rule-p-ceiling-is-a-second-literal' \
+  test_the_CEILING_is_read_from_handoff_budget_and_not_copied \
+  's|allowance=handoff_budget.GRANDFATHERED.get(relpath, handoff_budget.MAX_BYTES),|allowance=handoff_budget.GRANDFATHERED.get(relpath, 65_536),|'
+# The ledger half of the same claim.
+run 'rule-p-grandfathered-ledger-ignored' \
+  test_a_GRANDFATHERED_allowance_is_what_it_measures_against \
+  's|allowance=handoff_budget.GRANDFATHERED.get(relpath, handoff_budget.MAX_BYTES),|allowance=handoff_budget.MAX_BYTES,|'
+# 🔴 THE SEAM. Two sites read one `budget_position`; a refusal and a warning
+# quoting different numbers about one document is the failure this shape exists
+# to prevent, and each site is individually correct while it happens.
+run 'rule-p-quotes-a-different-overage-than-the-warning' \
+  test_the_refusal_and_the_WARNING_quote_the_SAME_two_numbers \
+  's|f"{pos.allowance:,} B, over by {pos.over_by:,} B "|f"{pos.allowance:,} B, over by {pos.after:,} B "|'
+# The reason is the whole point of the override; an empty one records nothing
+# while still suppressing the refusal.
+run 'rule-p-override-reason-not-required' \
+  test_the_override_REQUIRES_a_reason \
+  's|^    if args.size_ratchet_override is not None and not args.size_ratchet_override.strip():|    if False:|'
+# 🔴 THE DURABLE HALF of the record. stdout survives only in a transcript
+# shipped as a bounded TAIL; `git log` is what a later reader actually has.
+run 'rule-p-override-not-stamped-on-the-commit' \
+  test_the_override_is_STAMPED_on_the_commit \
+  's|                _ratchet_trailer_value(args.size_ratchet_override)|                ""|'
+# The IMMEDIATE half, which the trailer is not a backup for.
+run 'rule-p-override-note-suppressed' \
+  test_the_override_LANDS_the_growth_and_SAYS_SO_above_the_diff \
+  's|^    if ratchet_override:|    if False:|'
+# 🔴 THE FALSE-RECORD DIRECTION. Keying the stamp on the FLAG rather than on
+# whether the rule fired puts an override of nothing on an ordinary commit.
+run 'rule-p-stamps-a-run-it-never-refused' \
+  test_the_override_is_SILENT_on_a_run_the_ratchet_would_not_refuse \
+  's|                if ratchet_override else ""|                if args.size_ratchet_override else ""|'
+# 🔴 THE HAZARD THIS RULE IS NOT ALLOWED TO CREATE. The write path is the only
+# step that records a session, so a bug in the ratchet must cost the ratchet and
+# never the record.
+run 'rule-p-crashes-instead-of-degrading' \
+  test_it_degrades_to_NO_RATCHET_when_its_own_code_explodes \
+  '/^def size_ratchet_report/,/^def size_ratchet_override_note/ s|    except (Exception, SystemExit):|    except SystemExit:|'
+run 'rule-p-comment-reword-control' SURVIVES \
+  's|# --- rule (p): a doc already over its ceiling may not GROW|# --- rule p: size ratchet (reworded comment)|'
 
 
 printf '\n== controls ==\n'

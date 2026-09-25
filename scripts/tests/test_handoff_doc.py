@@ -1499,7 +1499,10 @@ class TestRuleFDidNotMoveTheExitCodes:
         # reading as the two entries above — the injectivity loop ran FIRST and
         # passed, so this is a genuinely new code rather than a collision
         # wearing a count failure.
-        assert len(codes) == 13, f"the EXIT_* constant set changed: {codes}"
+        # 13 -> 14, 2026-09-25: rule (p) adds `EXIT_SIZE_RATCHET = 14`. Same
+        # reading again — the injectivity loop ran FIRST and passed, so this is
+        # a genuinely new code rather than a collision wearing a count failure.
+        assert len(codes) == 14, f"the EXIT_* constant set changed: {codes}"
 
     def test_the_exit_code_constants_did_not_move(self) -> None:
         """Their VALUES, not just their names — a caller reads the number."""
@@ -1522,6 +1525,10 @@ class TestRuleFDidNotMoveTheExitCodes:
         # legend quotes the literal 13, and an unpinned value moves while the
         # prose that quotes it stays behind.
         assert hd.EXIT_LEAK_REFUSED == 13
+        # Rule (p)'s code, pinned for the identical reason: `SKILL.md`'s step-5
+        # legend quotes the literal 14, and an unpinned value moves while the
+        # prose that quotes it stays behind.
+        assert hd.EXIT_SIZE_RATCHET == 14
 
     def test_the_prose_quotes_the_CONSTANT_not_a_stale_literal(self) -> None:
         """🔴 PROSE AGAINST THE CONSTANT, not prose against prose.
@@ -6758,10 +6765,18 @@ class TestTheRankQueueDoesNotGrowItsUnforcedHalf:
 # UNRELATED PR goes red. MEASURED 2026-09-13, the evening that gate landed: three
 # different documents went over in one session, discovered exactly that way.
 #
-# 🔴 EVERY TEST HERE ASSERTS IT WARNS AND NEVER REFUSES. A blocking check
-# deadlocks against the write-back guard, which blocks Stop until a handoff is
-# written — a session on a doc already grandfathered OVER the ceiling could then
-# neither record its work nor end its turn.
+# 🔴 EVERY TEST HERE ASSERTS IT WARNS AND NEVER REFUSES. An UNCLEARABLE blocking
+# check deadlocks against the write-back guard, which blocks Stop until a handoff
+# is written — a session on a doc already grandfathered OVER the ceiling could
+# then neither record its work nor end its turn.
+#
+# ⚠ "A blocking check" IS NOW NARROWER THAN IT READS, and the word that was
+# missing is UNCLEARABLE. Rule (p) (`TestADocOverItsCeilingMayNotGrow`) IS a
+# blocking check on these same numbers — an over-budget doc may not GROW — and it
+# escapes the deadlock by being clearable two ways that do not require the doc to
+# come back under the ceiling: a net-<=-0 delta, or `--override-size-ratchet
+# "<why>"`, which always lands. `budget_warning` itself still refuses nothing,
+# which is what every assertion below is about.
 
 DOC = "claudedocs/handoff-example-topic.md"
 
@@ -7423,7 +7438,15 @@ class TestTheBudgetWarningDoesNotDescribeAWriteThatIsRefused:
         """🔴 POSITIVE CONTROL, AND IT RUNS FIRST. The assertion below is of the
         form "this string is absent", which is also what a warning wired to
         nothing produces. Watch the warning APPEAR on a run that reaches the
-        diff, so its absence on the refused run is a fact about the ordering."""
+        diff, so its absence on the refused run is a fact about the ordering.
+
+        ⚠ THE DELTA BELOW IS LOAD-BEARING AND NOT OBVIOUSLY SO. `Next steps`
+        REPLACES, and this one-item section is SHORTER than the base's two, so
+        the net byte delta is negative and rule (p) lets the run through to the
+        warning. Lengthen this fixture past the base's section and the run exits
+        14 instead, with the warning correctly suppressed — and this positive
+        control would then be measuring rule (p) rather than the ordering it is
+        named for."""
         over = self._over_budget_repo(repo)
         upd = write_delta(
             tmp_path,
@@ -7466,6 +7489,31 @@ class TestTheBudgetWarningDoesNotDescribeAWriteThatIsRefused:
         printed = src.index("print(budget_note)", call)
         diff = src.index("print(diff,", printed)
         assert call < printed < diff, "the budget note must still print before the diff"
+
+    def test_a_run_RULE_P_refuses_does_not_also_warn_about_the_size_budget(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE SAME F4 CLASS, ONE RULE LATER, and the reason rule (p) sits
+        ABOVE `budget_warning` rather than beside it. That warning says in as
+        many words "this is a WARNING, not a refusal" — which is false on a run
+        whose stderr reads NOTHING WRITTEN, and rule (p) is the refusal that
+        reads the SAME two numbers the warning would have printed.
+
+        The positive control for this absence is the sibling
+        `test_the_fixture_DOES_trigger_the_warning_on_a_run_that_proceeds`: the
+        same fixture, a delta that does NOT grow, and the warning present."""
+        over = self._over_budget_repo(repo)
+        upd = write_delta(
+            tmp_path,
+            "over-and-growing.md",
+            "## Gotchas / decisions / dead-ends\n- one more durable gotcha.\n",
+        )
+        res = run_tool(over, update=upd)
+        assert res.returncode == hd.EXIT_SIZE_RATCHET, res.stdout + res.stderr
+        assert "OVER ITS SIZE BUDGET" not in res.stdout, (
+            "the size-budget warning described the consequences of a write rule "
+            "(p) refused to make\n" + res.stdout
+        )
 
 
 # --- evictable_note: the per-doc eviction backlog, printed where the decision is --
@@ -7922,6 +7970,425 @@ def test_a_heading_matching_BOTH_step1_detectors_is_not_double_counted():
     assert "does NOT clear" in note, (
         "a document smaller than the overage was reported as clearing it:\n" + note
     )
+
+
+# --------------------------------------------------------------------------
+# rule (p): a doc already OVER its ceiling may not GROW
+#
+# 🔴 THE MECHANISM, MEASURED. `budget_warning` has printed on every over-budget
+# write since #1648 and the growth went on regardless, because it is STRUCTURAL:
+# the bucket rules forbid durable content in a REPLACE section, so the correct
+# remedy for a finding is "move it to `Gotchas`", which APPENDS. That section has
+# an entry rule and no exit rule. On the arc this rule was measured against,
+# 63,433 B the day a prune landed it under the ceiling became 134,563 B seven
+# days later — x2.1, `Gotchas` 45,984 -> 83,618 B and 62% of the file.
+#
+# 🔴 WHAT MAKES EACH TEST BELOW NON-VACUOUS, because two of them could pass for
+# the wrong reason and be indistinguishable from a pass for the right one:
+#   * the EVICTING case (criterion 2) asserts the merged doc is STILL OVER the
+#     ceiling. Without that it would be a second copy of criterion 3's test —
+#     "under the ceiling, so not this rule's population" — wearing criterion 2's
+#     name, and a ratchet that only ever let through deltas that cleared the
+#     ceiling would sail past it.
+#   * the UNDER-ceiling case (criterion 3) asserts the delta was POSITIVE. A
+#     no-op or shrinking delta would pass whether or not the rule reads the
+#     ceiling at all.
+# --------------------------------------------------------------------------
+
+
+def _ratchet_filler(nbytes: int, tag: str) -> str:
+    """About `nbytes` of bullets carrying NO marker any rule in this module
+    reads — no date, no `as-of:`, no `forcing:`, no `Ruled out:`, no
+    `clawgate-task:`. Bytes and nothing else, so a size fixture cannot trip a
+    DIFFERENT rule and be scored as this one's refusal."""
+    line = f"- {tag}: synthetic filler, carrying no field any rule reads.\n"
+    return line * max(1, nbytes // len(line.encode("utf-8")))
+
+
+#: A document already well past `MAX_BYTES`, with its bulk split across ONE
+#: REPLACE section and ONE APPEND section on purpose: `State now` is what an
+#: eviction can shrink through this tool, `Gotchas` is what cannot, and
+#: criterion 2's remedy only exists because the two behave differently.
+#:
+#: `BASE_GOAL_SECTION` is REUSED rather than re-typed — the drift that constant
+#: exists for (see its own comment) would otherwise turn a size fixture into a
+#: rule (m) refusal the moment the Goal template moves.
+OVERSIZE_DOC = f"""# Handoff: sample-topic — 2026-08-01
+
+{BASE_GOAL_SECTION}
+## State now
+- Branch / PR: `feat/sample` / none
+{_ratchet_filler(20_000, "state")}
+## Next steps (ranked)
+1. Instrument the drain loop.
+2. Re-read the retry wrapper.
+
+## Gotchas / decisions / dead-ends
+{_ratchet_filler(60_000, "gotcha")}
+## How to verify
+`python3 tools/queue_probe.py --for 240`
+"""
+
+#: An APPEND-only delta: it adds a gotcha bullet and takes nothing away.
+RATCHET_GROW_UPDATE = (
+    "## Gotchas / decisions / dead-ends\n"
+    "- The pool-size knob is a dead end; the ceiling is not connections.\n"
+)
+
+#: The SAME gotcha bullet, paid for out of the REPLACE section — the intended
+#: work, and the reason criterion 2 says this refusal is escapable without the
+#: override.
+RATCHET_EVICTING_UPDATE = (
+    "## State now\n"
+    "- Branch / PR: `feat/sample` / #99\n"
+    + _ratchet_filler(9_000, "state")
+    + "\n"
+    + RATCHET_GROW_UPDATE
+)
+
+RATCHET_REASON = "the incident writeup lands tonight; the prune is ranked first"
+
+
+@pytest.fixture()
+def oversize_repo(repo: Path) -> Path:
+    """`repo`, with its handoff doc already OVER the ceiling and committed."""
+    assert len(OVERSIZE_DOC.encode("utf-8")) > hd.handoff_budget.MAX_BYTES, (
+        "the fixture document is not over MAX_BYTES, so every refusal below "
+        "would be measuring nothing"
+    )
+    (repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+        OVERSIZE_DOC, encoding="utf-8")
+    _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=repo)
+    _sh("git", "commit", "-q", "-m", "seed an over-budget handoff doc", cwd=repo)
+    _sh("git", "push", "-q", "origin", "main", cwd=repo)
+    return repo
+
+
+def _ratchet_update(tmp_path: Path, text: str, name: str) -> Path:
+    p = tmp_path / name
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def _doc_bytes(repo: Path) -> int:
+    return len(doc_of(repo).encode("utf-8"))
+
+
+class TestADocOverItsCeilingMayNotGrow:
+    """Rule (p). 📖 `claude/skills/handoff/reference/write-gate.md` §I."""
+
+    # ---- criterion 1: over the ceiling + positive delta => REFUSED ----------
+
+    @pytest.mark.parametrize("extra", [(), ("--confirm",)],
+                             ids=["proposal", "confirm"])
+    def test_an_over_ceiling_doc_that_GROWS_is_REFUSED(
+        self, oversize_repo: Path, tmp_path: Path, extra: tuple
+    ) -> None:
+        """🔴 BOTH RUNS, because only one of them can write. The proposal run
+        must refuse so the author sees it BEFORE typing `--confirm`; the confirm
+        run must refuse so nothing lands. A rule wired only into the second
+        would let the diff read as approvable."""
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        before_tree, before_shas = tree_hash(oversize_repo), commit_shas(oversize_repo)
+        res = run_tool(oversize_repo, *extra, update=upd)
+        assert res.returncode == hd.EXIT_SIZE_RATCHET, res.stdout + res.stderr
+        assert "status=size-ratchet" in res.stderr
+        assert "NOTHING WRITTEN" in res.stderr
+        assert tree_hash(oversize_repo) == before_tree
+        assert commit_shas(oversize_repo) == before_shas
+
+    def test_the_refusal_names_the_bytes_and_BOTH_ways_out(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        """A refusal nobody can comply with is the permanently-red gate this
+        repo forbids. Two routes to a net-<=-0 delta, and the prohibition that
+        stops the third — deleting a gotcha — from being the cheapest one."""
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        err = run_tool(oversize_repo, update=upd).stderr
+        assert "over by" in err and "this update)" in err
+        assert "net delta of 0 or less" in err
+        assert "shrink a REPLACE section" in err
+        assert "arc's archive file" in err
+        assert "Do NOT satisfy this by DELETING" in err
+        assert hd.SIZE_RATCHET_FLAG in err
+
+    # ---- criterion 2: a net-<=-0 delta LANDS, still over the ceiling --------
+
+    def test_the_same_delta_LANDS_when_it_EVICTS_at_least_as_much(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE ESCAPE THAT IS NOT THE OVERRIDE, and the assertion that keeps
+        it from being criterion 3's test under another name: the document is
+        STILL over its ceiling after this update. What cleared the refusal is
+        the net delta, not the ceiling.
+
+        ⚠ LABELLED AN INVARIANT GUARD, not regression coverage — `claude/
+        RULES.md` asks for the distinction. It PASSES at `4c9a3f58`, the commit
+        before rule (p), because a tree with no ratchet refuses nothing. What
+        makes it bind is MUTATION: the battery's `rule-p-ignores-the-DELTA` row
+        drops the `delta <= 0` arm — every over-budget update then refuses,
+        eviction included — and this is the test that goes red."""
+        upd = _ratchet_update(tmp_path, RATCHET_EVICTING_UPDATE, "evict.md")
+        before = _doc_bytes(oversize_repo)
+        res = run_tool(oversize_repo, "--confirm", update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "status=size-ratchet" not in res.stdout + res.stderr
+        after = _doc_bytes(oversize_repo)
+        assert after < before, f"the delta did not shrink the doc: {before} -> {after}"
+        assert after > hd.handoff_budget.MAX_BYTES, (
+            f"the doc came back UNDER the ceiling ({after:,} B), so this case no "
+            f"longer distinguishes 'the delta was <= 0' from 'the doc is not over "
+            f"the line' — it has become a duplicate of the criterion-3 test"
+        )
+
+    # ---- criterion 3: a doc UNDER its ceiling is unaffected -----------------
+
+    def test_a_doc_UNDER_its_ceiling_GROWS_exactly_as_before(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The negative control, and the boundary. `repo`'s doc is a few hundred
+        bytes; this update ADDS to it and must land untouched by rule (p).
+
+        ⚠ ALSO AN INVARIANT GUARD — criterion 3 is "unchanged from today", so it
+        PASSES at `4c9a3f58` by construction. Its binding force is the battery's
+        `rule-p-ignores-the-CEILING` row, which drops the `over_by <= 0` arm and
+        turns rule (p) into a flat no-growth rule over every handoff doc."""
+        before = _doc_bytes(repo)
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "status=size-ratchet" not in res.stdout + res.stderr
+        after = _doc_bytes(repo)
+        assert after > before, (
+            f"this delta did not GROW the doc ({before} -> {after}), so it says "
+            f"nothing about whether a positive delta under the ceiling lands"
+        )
+        assert after <= hd.handoff_budget.MAX_BYTES
+
+    # ---- criterion 4: gated or not, the ratchet binds ------------------------
+
+    def test_it_binds_a_repo_that_ships_NO_size_gate(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE MOTIVATING DOCUMENT LIVES IN AN UNGATED REPO, so a rule that
+        borrowed `gate_enforces_budget` would be inert exactly where nothing
+        else notices. Asserted, not assumed: the fixture ships no gate."""
+        assert hd.gate_enforces_budget(oversize_repo) is False
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        res = run_tool(oversize_repo, update=upd)
+        assert res.returncode == hd.EXIT_SIZE_RATCHET, res.stdout + res.stderr
+        assert "will go RED" not in res.stderr, (
+            "the refusal claims a gate in a repo that ships none — the "
+            "civitai/cli#618 shape `gate_enforces_budget` exists to stop"
+        )
+
+    def test_it_binds_a_GATED_repo_TOO(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        """The SECOND measured point. `claude/RULES.md`: one measurement is not
+        a general claim — gatedness is a dimension this rule deliberately does
+        not read, so it is measured at both of its values."""
+        gate = oversize_repo / hd.BUDGET_GATE_RELPATH
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.write_text("# a stand-in for the real ceiling gate\n", encoding="utf-8")
+        assert hd.gate_enforces_budget(oversize_repo) is True
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        res = run_tool(oversize_repo, update=upd)
+        assert res.returncode == hd.EXIT_SIZE_RATCHET, res.stdout + res.stderr
+
+    # ---- criterion 5: an override that REQUIRES a reason and RECORDS it -----
+
+    def test_the_override_REQUIRES_a_reason(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 AN EMPTY REASON RECORDS NOTHING WHILE STILL SUPPRESSING THE
+        REFUSAL, and it is refused with EXIT_USAGE rather than the rule's own
+        code — this is a complaint about an ARGUMENT, and returning 14 would
+        tell a caller its document grew when a flag was blank."""
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        before = tree_hash(oversize_repo)
+        res = run_tool(oversize_repo, hd.SIZE_RATCHET_FLAG, "",
+                       "--confirm", update=upd)
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert res.returncode != hd.EXIT_SIZE_RATCHET
+        assert "EMPTY reason" in res.stderr
+        assert tree_hash(oversize_repo) == before
+
+    def test_the_override_LANDS_the_growth_and_SAYS_SO_above_the_diff(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        """Criterion 5's first half. The run proceeds, and the reason is where
+        the reader of THIS run sees it — above the diff, with the bytes."""
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        before = _doc_bytes(oversize_repo)
+        res = run_tool(oversize_repo, hd.SIZE_RATCHET_FLAG, RATCHET_REASON,
+                       "--confirm", update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert _doc_bytes(oversize_repo) > before
+        assert "SIZE RATCHET OVERRIDDEN" in res.stdout
+        assert RATCHET_REASON in res.stdout
+        head = res.stdout.index("SIZE RATCHET OVERRIDDEN")
+        assert head < res.stdout.index("@@"), (
+            "the override block landed BELOW the diff, where it is hundreds of "
+            "lines away from the decision it describes"
+        )
+
+    def test_the_override_is_STAMPED_on_the_commit(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE DURABLE HALF, and the one stdout cannot be. A transcript is
+        shipped as a bounded TAIL, so an override early in a long session is
+        unrecoverable from it; `git log` is not."""
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        res = run_tool(oversize_repo, hd.SIZE_RATCHET_FLAG, RATCHET_REASON,
+                       "--confirm", update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        msg = _sh("git", "log", "-1", "--format=%B", cwd=oversize_repo)
+        assert f"{hd.SIZE_RATCHET_TRAILER_KEY}: {RATCHET_REASON}" in msg, msg
+
+    def test_the_override_is_SILENT_on_a_run_the_ratchet_would_not_refuse(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 A FLAG THAT PRINTS ON EVERY RUN IT IS PASSED ON IS A BLOCK NOBODY
+        READS, and a commit stamped with an override of a rule that never fired
+        is a false record. Both halves keyed on ONE predicate — whether the
+        refusal was non-empty — so they cannot drift apart."""
+        res = run_tool(repo, hd.SIZE_RATCHET_FLAG, RATCHET_REASON,
+                       "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "SIZE RATCHET OVERRIDDEN" not in res.stdout
+        msg = _sh("git", "log", "-1", "--format=%B", cwd=repo)
+        assert hd.SIZE_RATCHET_TRAILER_KEY not in msg, msg
+
+    # ---- criterion 6: a clean status, never an exception ---------------------
+
+    def test_the_refusal_is_a_STATUS_and_not_a_TRACEBACK(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        res = run_tool(oversize_repo, update=upd)
+        assert res.returncode == hd.EXIT_SIZE_RATCHET
+        assert "Traceback" not in res.stderr
+
+    def test_it_degrades_to_NO_RATCHET_when_its_own_code_explodes(
+        self, monkeypatch
+    ) -> None:
+        """🔴 THE HAZARD THIS RULE IS NOT ALLOWED TO CREATE. `/handoff`'s write
+        path is the only step that records a session — `evictable_note` may not
+        even raise there, "to decorate a warning" — so a bug in the ratchet has
+        to cost the ratchet, never the record."""
+        def boom(*_a, **_k):
+            raise RuntimeError("the ratchet's own code is broken")
+
+        monkeypatch.setattr(hd, "budget_position", boom)
+        assert hd.size_ratchet_report("claudedocs/handoff-x.md", "a" * 99_999, "") == ""
+        assert hd.size_ratchet_override_note(
+            "claudedocs/handoff-x.md", "a" * 99_999, "", "why") == ""
+
+    def test_it_survives_a_SystemExit_from_the_auditors_own_import(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """🔴 `SystemExit` IS NOT AN `Exception`. `handoff-audit.py` raises
+        exactly that at MODULE level when one of its own siblings is missing, and
+        this refusal reaches it through `evictable_note`. A bare
+        `except Exception` would leave the likeliest failure uncaught, on the
+        write path — round 1 of #1815, F3, one rule over."""
+        bad = tmp_path / "handoff-audit.py"
+        bad.write_text("import sys\nsys.exit('sibling missing')\n", encoding="utf-8")
+        monkeypatch.setattr(hd, "_AUDITOR", bad)
+        out = hd.size_ratchet_report("claudedocs/handoff-x.md", "a" * 99_999, "")
+        assert "status=size-ratchet" in out, (
+            "the refusal itself vanished when the auditor died — the note is "
+            "optional, the refusal is not"
+        )
+
+    # ---- the seam: one computation, two consumers ---------------------------
+
+    def test_the_refusal_and_the_WARNING_quote_the_SAME_two_numbers(self) -> None:
+        """🔴 A SEAM GUARD, not a component guard. Each site is individually
+        correct with its own derivation, and that is exactly the state in which
+        a warning and a refusal can disagree about one document while both read
+        as right. Pinned as the whole matched substring, so a reworded sentence
+        cannot walk past it."""
+        rel = "claudedocs/handoff-seam.md"
+        base = "# doc\n\n## State now\n" + _ratchet_filler(80_000, "base")
+        merged = base + _ratchet_filler(3_000, "added")
+        refusal = hd.size_ratchet_report(rel, merged, base)
+        warning = hd.budget_warning(rel, merged, base, gated=True)
+        pat = re.compile(r"over by ([\d,]+) B \(\+([\d,]+) B this update\)")
+        got_r, got_w = pat.search(refusal), pat.search(warning)
+        assert got_r and got_w, (refusal, warning)
+        assert got_r.group(0) == got_w.group(0), (
+            f"rule (p) says {got_r.group(0)!r} and budget_warning says "
+            f"{got_w.group(0)!r} about the SAME document"
+        )
+
+    def test_the_CEILING_is_read_from_handoff_budget_and_not_copied(
+        self, monkeypatch
+    ) -> None:
+        """🔴 A SECOND COPY OF THE NUMBER IS THE DEFECT THIS REPO'S COMMENTS
+        WARN ABOUT REPEATEDLY, and a literal would be invisible to every
+        assertion above — they all use documents far over BOTH numbers. So move
+        the ceiling and watch the verdict move with it."""
+        rel = "claudedocs/handoff-x.md"
+        base, merged = "a" * 70_000, "a" * 71_000
+        assert "status=size-ratchet" in hd.size_ratchet_report(rel, merged, base)
+        monkeypatch.setattr(hd.handoff_budget, "MAX_BYTES", 200_000)
+        assert hd.size_ratchet_report(rel, merged, base) == "", (
+            "the ceiling moved and the refusal did not — rule (p) is measuring "
+            "against a number of its own"
+        )
+
+    def test_a_GRANDFATHERED_allowance_is_what_it_measures_against(
+        self, monkeypatch
+    ) -> None:
+        """The ledger is the other half of `handoff_budget`, and a doc with an
+        entry is judged against ITS allowance — the same reading
+        `budget_warning` already gives the same path."""
+        rel = "claudedocs/handoff-x.md"
+        base, merged = "a" * 70_000, "a" * 71_000
+        monkeypatch.setitem(hd.handoff_budget.GRANDFATHERED, rel, 98_304)
+        assert hd.size_ratchet_report(rel, merged, base) == ""
+        monkeypatch.setitem(hd.handoff_budget.GRANDFATHERED, rel, 65_536)
+        out = hd.size_ratchet_report(rel, merged, base)
+        assert "its grandfathered allowance" in out, out
+
+    def test_a_path_that_is_not_a_handoff_doc_is_not_ratcheted(self) -> None:
+        """The same population `budget_warning` governs, from the same
+        predicate — `budget_position.is_handoff_doc` — rather than a second
+        spelling of it here."""
+        assert hd.size_ratchet_report("README.md", "a" * 99_999, "") == ""
+        assert hd.size_ratchet_report(
+            "claudedocs/notes.md", "a" * 99_999, "") == ""
+
+    def test_the_boundary_is_a_POSITIVE_delta_not_a_NON_NEGATIVE_one(self) -> None:
+        """🔴 THE OFF-BY-ONE THE CRITERIA SPELL OUT. `delta == 0` LANDS: an
+        over-budget doc may be rewritten in place. Only `delta > 0` refuses, and
+        the two cases are one byte apart."""
+        rel = "claudedocs/handoff-x.md"
+        base = "a" * 70_000
+        assert hd.size_ratchet_report(rel, "b" * 70_000, base) == ""
+        assert "status=size-ratchet" in hd.size_ratchet_report(rel, "a" * 70_001, base)
+        assert hd.size_ratchet_report(rel, "a" * 69_999, base) == ""
+
+    def test_the_ceiling_boundary_is_STRICTLY_over_not_at(self) -> None:
+        """The other boundary, measured at the byte. A doc sitting exactly ON
+        its allowance is not over it, so a growing delta there still lands —
+        `budget_warning`'s own `after > allowance` reading."""
+        rel = "claudedocs/handoff-x.md"
+        cap = hd.handoff_budget.MAX_BYTES
+        assert hd.size_ratchet_report(rel, "a" * cap, "a" * (cap - 1)) == ""
+        assert "status=size-ratchet" in hd.size_ratchet_report(
+            rel, "a" * (cap + 1), "a" * cap)
+
+
+def test_the_status_token_rule_p_prints_is_the_one_the_legend_lists() -> None:
+    """🔴 PROSE AGAINST THE CONSTANT, the shape
+    `test_the_prose_quotes_the_CONSTANT_not_a_stale_literal` already uses: the
+    module's own EXIT CODES legend must carry rule (p)'s number beside its
+    status word, so renumbering one without the other goes red."""
+    legend = (hd.__doc__ or "").partition("EXIT CODES")[2]
+    assert re.search(
+        rf"^\s*{hd.EXIT_SIZE_RATCHET}\s+size-ratchet\b", legend, re.M), legend
 
 
 # --------------------------------------------------------------------------

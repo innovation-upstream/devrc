@@ -14,12 +14,23 @@ test → lib is the direction that file already uses for `handoff_index`.
 one session, and each author found out when an UNRELATED PR went red. `/handoff`
 appends by design and nothing in that loop says you are approaching a ceiling.
 
-🔴 AND THE WARNING NEVER REFUSES. A blocking check DEADLOCKS against
-`~/.claude/hooks/handoff-write-guard.py`, which blocks Stop until a handoff is
-written: a session working on one of the documents already grandfathered OVER the
-base ceiling could then neither record its work nor end its turn. The write
-guard's own measurement — 22 of 253 sessions never recorded, ZERO because a gate
-correctly declined — says an unrecorded session costs more than an oversized doc.
+🔴 AND THE WARNING NEVER REFUSES. An UNCLEARABLE blocking check DEADLOCKS
+against `~/.claude/hooks/handoff-write-guard.py`, which blocks Stop until a
+handoff is written: a session working on one of the documents already
+grandfathered OVER the base ceiling could then neither record its work nor end
+its turn. The write guard's own measurement — 22 of 253 sessions never recorded,
+ZERO because a gate correctly declined — says an unrecorded session costs more
+than an oversized doc.
+
+⚠ THAT SENTENCE ONCE READ "a blocking check", FULL STOP, AND IT IS NOW NARROWER
+THAN IT LOOKS. `handoff_doc.py`'s rule (p) IS a blocking check on these numbers:
+a doc already over its allowance may not GROW (`status=size-ratchet`, exit 14).
+What makes it not the deadlock above is that it is CLEARABLE two ways that do
+not require the doc to come back under the ceiling — a net-<=-0 delta, or
+`--override-size-ratchet "<why>"`, which always lands and records the reason on
+the commit. The word that was missing is UNCLEARABLE; the measurement behind it
+is unchanged and still decides the direction every such gate must fail in.
+`budget_warning` itself still refuses nothing.
 """
 from __future__ import annotations
 
