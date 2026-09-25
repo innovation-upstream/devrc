@@ -68,6 +68,23 @@ and the writer it runs is devrc-only and deliberately absent from that repo.
 ⚠ Exit codes differ too: the writer exits **3** on a malformed entry, the packaged
 client **5** (`EXIT_CORRUPT`; `3` is `EXIT_UNREACHABLE_NO_CACHE` for the client).
 
+🔴 **`cairn append` REFUSES a `--text` over 2,000 characters AND EXITS 0 — so the
+refusal is invisible to every caller that checks a status or greps for success.**
+Measured 2026-09-25: `cairn: refusing to send — `--text` is 2386 characters, max
+2000 — 386 over. Nothing was written, and the store was not contacted.`, `rc=0`. A
+run piped through `grep -E 'appended|duplicate|error'` printed **nothing at all**
+and read as a clean append; the bullet simply never existed. This is the same shape
+as the `cairn-validate`-without-`sync` trap above — a check whose healthy answer and
+whose failed answer are both silence — and it bites hardest exactly when the bullet
+is worth writing, because a dense, well-evidenced bullet is the one that runs long.
+**So the post-write check is not optional and `cairn sync && cairn-validate` does
+NOT cover this** (validate is about whether the entry PARSES, not whether your text
+arrived): **confirm the bullet COUNT moved** —
+`cairn recall --repo <path> --list` and read the `N nuance` on that row, or
+`cairn recall --repo <path> --ref <entry> | grep -c '<a distinctive phrase>'`.
+Trim to ≤2,000 and re-append; the server dedupes by content hash, so a retry after
+a genuine timeout is still safe.
+
 🔴 **`cairn-who` is a separate command, not a `cairn` subcommand.** It is about a
 **task**, not a store entry: it touches no store and never syncs, takes none of
 the `--scope`/`--repo`/`--no-sync` flags, and has its own longer `--timeout`
