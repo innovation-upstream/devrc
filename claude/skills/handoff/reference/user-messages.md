@@ -19,7 +19,7 @@ walked the whole corpus, and wrote records of `{project, kind, text}`:
 | transcripts read | 974 | 2 |
 | records | 13,768 | 27 |
 | output | **54.1 MiB** | **172 KiB** (≈322× smaller) |
-| wall time | 12 s | 23 s (21 s of it is the arc resolver's corpus walk) |
+| wall time | 12 s | 23 s (21 s of it is the arc resolver — see the ⚠ below; it is NOT all local) |
 
 ⚠ These counts and the dedup counts further down come from runs minutes apart on
 a **live** corpus, so they differ by a few records. Neither is wrong; the corpus
@@ -36,7 +36,8 @@ did I ask for across this arc" was 54 MiB of everything, hand-read.
 ⚠ `--arc` is not faster in wall time; it is 322× smaller in what you have to
 read. Once you already hold the ids, `--session` extraction is **~0 s**.
 
-⚠ **The 21 s is not all local.** `arc_report` → `archive_search` →
+⚠ **The 21 s is not all local, and the table row above says so rather than
+repeating the retracted attribution.** `arc_report` → `archive_search` →
 `transcript_search.search_peers` **SSHes every configured peer host**
 (`ConnectTimeout=5`, `timeout=180`) and its `find-session: peer …` warnings land
 on this tool's stderr. So `--arc` has a network leg, it can be slower when a peer
@@ -84,10 +85,12 @@ then append the note naming the corpus that walk did **not** search.
 Each of those is a claim about coverage. A second spelling in the extractor
 would publish a chain that looks complete and is not, and the two tools would
 answer *"which sessions worked this doc"* with different sets while neither said
-so. Under `--arc` every coverage note the resolver produced is reproduced in the
-output header, including the `N of M commit(s) … carry no session id` line
-**when N is zero** — an absent coverage line is indistinguishable from "nothing
-missing".
+so. Under `--arc` every coverage note the resolver produced is reproduced — in
+the markdown header, and on **stderr in every format** (there is no header under
+`--jsonl`) — including the `N of M commit(s) … carry no session id` line **when
+N is zero**, because an absent coverage line is indistinguishable from "nothing
+missing". They are emitted on the empty paths too (exits 4, 5 and 6), which is
+where a coverage line matters most: exit 6 under `--arc` IS the measured zero.
 
 ## Exit codes
 
@@ -98,10 +101,10 @@ its reason on stderr.
 | code | meaning |
 |---|---|
 | 0 | messages were extracted |
-| 2 | bad invocation — an `--ids-file` that could not be read or held no ids, or an `-o` path that could not be opened. **Nothing was written.** |
+| 2 | bad invocation — an `--ids-file` that could not be read or held no ids, or an `-o` path that could not be opened, **written or closed**. **Nothing was written**, and the walk may already have run — this is not a claim that nothing was searched. |
 | 3 | `--arc` only: the seed named no handoff doc, or no `$DEVRC`/`$HOMELAB`/`$DATAPACKET`/`$CIVITAI` checkout holds it. 🔴 **NOTHING WAS MEASURED** — a typo in the name lands here, not on 4. |
 | 4 | `--arc` only: the doc resolved and the arc **was** measured, and it has zero member sessions. A **measured** empty arc — a real finding about the doc. |
-| 5 | session ids were selected and **none** resolved to a transcript on this host. Every unresolved id is named on stderr. Check the peer host before concluding the sessions are gone. |
+| 5 | **NOTHING WAS READ.** Two ways in, and the stderr line says which: session ids were selected and **none** resolved (each is named — check the peer host before concluding they are gone), **or** no transcript could be opened at all, which includes an absent or empty `~/.claude/projects` (a fresh host, a container, the nix sandbox). |
 | 6 | transcripts **were** read and held zero user-typed messages after filtering — the sessions exist and are empty of typed input. |
 
 The pair that matters most is **3 vs 4**: 3 means the instrument never ran, 4
@@ -139,7 +142,9 @@ nothing was opened, so nothing was measured.
 
 ### 1. 2026-09-18 21:02:05 · typed
 
-<the operator's message>
+~~~
+<the operator's message — always fenced>
+~~~
 ```
 
 The `>` lines are the coverage notes — **read them**; they are what says whether

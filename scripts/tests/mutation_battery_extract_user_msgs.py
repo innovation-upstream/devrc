@@ -31,12 +31,13 @@ two of the three are defects in the BATTERY, not in the code:
     mutated `SKILL.md` in the tree. Restore covers every target, in a `finally`.
 
 🔴 AND ONE FINDING ABOUT MUTATION RESULTS THEMSELVES — READ THIS BEFORE
-MEASURING `P2` AGAIN. Deleting `os.dup2` was scored, in order: SURVIVED (1 draw),
-20/20 red (20 draws), an independent audit's 22/40, then 10/40. Same mutant, same
-test, controls clean every time. It is LOAD-DEPENDENT — whether the shutdown
+MEASURING `P2` AGAIN. Deleting `os.dup2` was scored, in order: SURVIVED — 0 red
+of 1 draw, and that GREEN draw is the whole reason this history exists; then
+20/20 red; then an independent audit's 22/40; then 10/40. Four measurements, no
+two agreeing. Same mutant, same test, controls clean every time. It is LOAD-DEPENDENT — whether the shutdown
 flush still holds data depends on TextIOWrapper buffer state when the pipe
 closes, which depends on how far `head` got. **There is no rate to find. If you
-are about to write a fourth number, that is the mistake**; two of the three
+are about to write a FIFTH number, that is the mistake**; two of the three
 already shipped into source comments as properties of the guard, one of them
 telling maintainers a load-bearing line was uncovered.
 
@@ -194,7 +195,15 @@ MUTANTS = [
      "test_a_REAL_shaped_subagent_transcript_is_excluded"),
 
     # --- the broken-pipe guard ------------------------------------------------
-    ("P1", "replacement", "the except arm no longer catches BrokenPipeError",
+    # 🔴 THIS ROW CAUGHT A MASKED REGRESSION, which is the argument for naming
+    # a test per row. When the write-failure guard (`except OSError` -> exit 2)
+    # landed beside the pipe guard, this mutant stopped producing a traceback —
+    # BrokenPipeError SUBCLASSES OSError, so it fell through to the sibling and
+    # exited 2 quietly. The named test's assertions (no traceback, head got a
+    # row) all still held, so the row scored KILLED-WRONG-REASON instead of
+    # silently passing. The test now asserts the EXIT CODE.
+    ("P1", "replacement", "the except arm no longer catches BrokenPipeError, so "
+     "the pipe falls through to the write-failure guard and `| head` exits 2",
      "    except BrokenPipeError:", "    except KeyboardInterrupt:",
      "test_a_closed_stdout_exits_quietly"),
     # 🔴 NAMES THE DETERMINISTIC GUARD, NOT THE FLAKY ONE. Pointed at
@@ -210,8 +219,8 @@ MUTANTS = [
      "  4  --arc: the arc was MEASURED and has zero member sessions\n", "",
      "test_every_exit_code_is_listed_in_the_help"),
     ("H2", "addition", "--help gains a code the tool never returns",
-     "  6  transcripts were read",
-     "  7  a code the tool never returns\n  6  transcripts were read",
+     "  6  transcripts WERE read",
+     "  7  a code the tool never returns\n  6  transcripts WERE read",
      "test_the_help_lists_no_code_the_contract_does_not_define"),
     # 🔴 REMOVES BOTH EXAMPLES, and the first spelling removed one of two and
     # SURVIVED. That was the BATTERY being wrong, not a coverage gap: the test

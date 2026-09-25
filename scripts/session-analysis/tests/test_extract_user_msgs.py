@@ -509,9 +509,13 @@ class TestPipingToHead:
     #:
     #: 🔴 THIS CLASS PINS THE `except` ARM ONLY. It does NOT reliably pin the
     #: `dup2`, and that is stated rather than implied because getting it wrong
-    #: has now cost three false claims. Deleting the `dup2` and running this
-    #: class went red 1/1, then 20/20, then an independent audit's 22/40, then
-    #: 10/40 — same mutant, same test, controls clean every time. Whether the
+    #: has now cost false claims twice. Deleting the `dup2` and running this
+    #: class scored, in order: SURVIVED — 0 red of 1 draw, and THAT GREEN DRAW
+    #: IS WHY THIS HISTORY EXISTS; then 20/20 red; then an independent audit's
+    #: 22/40; then 10/40. Same mutant, same test, controls clean every time.
+    #: (An earlier version of this comment recorded the first draw as "red
+    #: 1/1", converting the founding error out of the history in the one file
+    #: a maintainer of this test reads.) Whether the
     #: shutdown flush still holds data depends on TextIOWrapper buffer state
     #: when the pipe closes, which varies with how far `head` got, which varies
     #: with machine load. **There is no rate to find; do not measure a fourth.**
@@ -532,19 +536,38 @@ class TestPipingToHead:
         head_out = p2.communicate()[0]
         err = p1.stderr.read().decode()
         p1.stderr.close()
-        p1.wait()
-        return head_out, err
+        rc = p1.wait()
+        return rc, head_out, err
 
     @pytest.mark.parametrize("n", CUT_POINTS)
     def test_a_closed_stdout_exits_quietly(self, tmp_path, n):
+        """🔴 ASSERTS THE EXIT CODE, NOT ONLY THE ABSENCE OF A TRACEBACK — and
+        the version this replaces asserted only the latter, which stopped
+        detecting the defect the moment a sibling handler was added.
+
+        `BrokenPipeError` SUBCLASSES `OSError`. When the write-failure guard
+        (`except OSError` → exit 2) landed beside this one, deleting the
+        dedicated `except BrokenPipeError` arm no longer produced a traceback:
+        the broken pipe fell through to the sibling and exited **2**, quietly.
+        The old assertions all still held, so the mutant scored
+        KILLED-WRONG-REASON — a masked regression, not a caught one. And the
+        masked behaviour is itself wrong: `… | head` exiting 2 breaks the Unix
+        contract for the pipeline this tool's own --help documents.
+
+        The ordering of the two `except` arms is therefore load-bearing, and
+        this is what pins it."""
         _write_session(tmp_path, "proj-a", "sess-1",
                        [_user(f"{LEAK_TYPED}-{i}" + "x" * 4000,
                               ts=f"2026-09-01T00:00:{i:02d}Z")
                         for i in range(40)])
-        head_out, err = self._pipe_to_head(tmp_path, n)
+        rc, head_out, err = self._pipe_to_head(tmp_path, n)
         assert head_out.strip(), (
             "head got no row — the positive control failed, so a silent stderr "
             "would prove nothing")
+        assert rc == X.EXIT_OK, (
+            f"a closed pipe exited {rc}; `… | head` must exit 0. Exit "
+            f"{X.EXIT_USAGE} here means the broken pipe was caught by the "
+            "write-failure guard instead of its own arm")
         assert "BrokenPipeError" not in err, err
         assert "Exception ignored" not in err, err
         assert "Traceback" not in err, err
@@ -589,9 +612,14 @@ class TestPipingToHead:
         os.close(devnull_fd)
 
     def test_the_dup2_pin_can_report_absence(self, tmp_path, monkeypatch):
-        """Negative control on the test above: with the handler's redirect
-        removed, `calls` must be empty. Without this, a test asserting on a
-        list nothing ever appends to would pass for the wrong reason."""
+        """Negative control on the test above: on a run where the handler never
+        RUNS (no broken pipe), `calls` must be empty. Without this, a test
+        asserting on a list nothing ever appends to would pass for the wrong
+        reason.
+
+        ⚠ This said "with the handler's redirect removed", which describes a
+        setup the body does not build — the control is real but narrower than
+        that sentence."""
         _write_session(tmp_path, "proj-a", "sess-1", [_user(LEAK_TYPED)])
         calls = []
         monkeypatch.setattr(X.os, "dup2", lambda a, b: calls.append((a, b)))
@@ -633,6 +661,50 @@ class TestCoverageNotesReachEveryFormat:
             assert rc == X.EXIT_OK, argv
             assert "UNSCOPED" in err, f"{argv}: the banner is absent from stderr"
 
+    def test_notes_reach_the_EXIT_6_path(self, tmp_path):
+        """🔴 REGRESSION FROM THE ROUND-1 FIX. The notes loop was placed AFTER
+        the `if not rows: return`, so on exit 6 the UNSCOPED banner, the arc
+        coverage line and `unmeasured_notes` were emitted NOWHERE — and under
+        `--arc`, exit 6 IS the measured zero whose coverage line decides
+        whether the zero is real. Fixing --jsonl for rc 0 moved the gap
+        instead of closing it."""
+        _write_session(tmp_path, "proj-a", "s1",
+                       [_user("[Request interrupted by user]")])
+        rc, _, err = _run([], tmp_path)
+        assert rc == X.EXIT_NO_MESSAGES
+        assert "UNSCOPED" in err, (
+            "the banner is absent on the exit-6 path — a measured zero with no "
+            "statement of what it covered")
+
+    def test_notes_reach_the_EXIT_5_path(self, tmp_path):
+        rc, _, err = _run(["--session", "ghost"], tmp_path)
+        assert rc == X.EXIT_NO_TRANSCRIPTS
+        assert "ghost" in err, "the unresolved id is named nowhere"
+
+    def test_arc_coverage_notes_reach_the_EXIT_6_path(self, tmp_path,
+                                                      monkeypatch):
+        """The case that matters most: an arc that resolved, whose sessions
+        hold nothing typed. Without the coverage line the zero cannot be told
+        from an incomplete chain."""
+        _write_session(tmp_path, "proj-a", "s1",
+                       [_user("[Request interrupted by user]")])
+        fake = _fake_find_session(members=[_FakeMember("s1", "wrote")])
+        monkeypatch.setattr(X, "_load_find_session", lambda: fake)
+        rc, _, err = _run(["--arc", "handoff-fake"], tmp_path)
+        assert rc == X.EXIT_NO_MESSAGES
+        assert "carry no session id" in err, err
+
+    def test_every_note_is_printed_EXACTLY_ONCE(self, tmp_path):
+        """Notes used to be printed inline where they were appended AND again
+        by the loop, so every one reached stderr twice and a consumer counting
+        `!` lines double-counted the gap."""
+        _write_session(tmp_path, "proj-a", "s1", [_user(LEAK_TYPED)])
+        rc, _, err = _run(["--session", "s1", "--session", "ghost"], tmp_path)
+        assert rc == X.EXIT_OK
+        bang = [ln for ln in err.splitlines() if ln.startswith("! ")]
+        assert len(bang) == len(set(bang)), f"a note printed twice: {bang}"
+        assert sum("ghost" in ln for ln in bang) == 1, bang
+
     def test_jsonl_stdout_stays_one_record_per_line(self, tmp_path):
         """The notes go to stderr rather than a header record precisely so
         `| jq` needs no preamble skip. Pin that."""
@@ -666,7 +738,12 @@ class TestExitSixIsAboutWhatWasREAD:
         assert rc == X.EXIT_NO_TRANSCRIPTS, (
             f"opened 0 transcripts and returned {rc}; exit "
             f"{X.EXIT_NO_MESSAGES} would claim they were read")
-        assert "could not be opened" in err or "could not be read" in err
+        low = err.lower()
+        assert "0 were read" in low, err
+        assert "nothing was measured" in low, err
+        assert "permission denied" in low, (
+            "the per-file reason must survive — 'could not be opened' without "
+            "the errno sends the reader looking in the wrong place")
 
     def test_a_readable_but_EMPTY_transcript_IS_a_measured_emptiness(
             self, tmp_path):
@@ -722,10 +799,17 @@ class TestUnwritableOutputIsRefusedNotCrashed:
             "the extraction had already run; a traceback discards the result")
         assert "no-such-dir" in err
 
-    def test_non_utf8_on_stdin_does_not_crash_the_ids_file_reader(self, tmp_path,
-                                                                  monkeypatch):
-        """`read_ids_file`'s docstring promises OSError -> exit 2. A
-        UnicodeDecodeError is a ValueError and escaped as a traceback."""
+    def test_non_utf8_on_stdin_is_REPORTED_not_crashed_and_NOT_exit_2(
+            self, tmp_path, monkeypatch):
+        """🔴 PINS THE EXIT CODE, because the claim about it was wrong. The
+        round-1 commit and PR comment both said "an unwritable -o and non-UTF-8
+        on --ids-file - BOTH now exit 2". MEASURED: the -o case does; this one
+        exits 0 — the replaced byte yields an id that resolves to nothing and
+        is REPORTED as unresolved, which is the file branch's behaviour and is
+        right. The code was fine and the sentence was false, and the test that
+        shipped with it called `read_ids_file` directly so it pinned no exit
+        code at all. A caller branching on 2 for this input branches on a code
+        that never arrives."""
         _write_session(tmp_path, "proj-a", "s1", [_user(LEAK_TYPED)])
 
         class _Bin:
@@ -735,8 +819,12 @@ class TestUnwritableOutputIsRefusedNotCrashed:
         monkeypatch.setattr(sys, "stdin",
                             type("S", (), {"buffer": _Bin,
                                            "read": staticmethod(lambda: "")})())
-        ids = X.read_ids_file("-")
-        assert "s1" in ids, ids
+        rc, out, err = _run(["--ids-file", "-"], tmp_path)
+        assert rc == X.EXIT_OK, (
+            f"got {rc}; the readable id still extracts, so this is not a usage "
+            "error — and it is emphatically not a traceback at rc 1")
+        assert LEAK_TYPED in out
+        assert "1 of 2" in err, "the undecodable id must be reported unresolved"
 
 
 class TestUnscopedWalk:
@@ -926,6 +1014,26 @@ class TestTheReferenceDocIsRoutedAndDeployed:
         assert "a sentence deliberately absent from the user-messages reference" \
             not in REFERENCE.read_text(encoding="utf-8")
 
+    #: 🔴 THE MEANING-BEARING WORDS OF EACH CODE, not its number. The integer
+    #: check below is necessary and was NOT sufficient: findings 1 and 2 of
+    #: round 2 were both a code whose MEANING had become false while its number
+    #: was still present, and they shipped past a green suite because every
+    #: guard on this table compared `{int}` sets. The test's name said "with its
+    #: meaning" and its docstring said "a row for a code the tool no longer
+    #: returns is a false promise" — reading as coverage while providing none,
+    #: which is worse than no guard because it stops anyone looking.
+    #:
+    #: Keep these to words that must be TRUE of the code, never to a phrasing:
+    #: a reword should pass, a changed meaning should not.
+    EXIT_MEANING_TOKENS = {
+        0: ("extracted",),
+        2: ("invocation", "written"),
+        3: ("measured",),
+        4: ("measured", "zero"),
+        5: ("read",),
+        6: ("read", "zero"),
+    }
+
     def test_the_reference_documents_EVERY_exit_code_with_its_meaning(self):
         """Two-way against `EXIT_CONTRACT`: a code added to the tool with no
         row here leaves the reference reading as coverage while providing none,
@@ -936,6 +1044,51 @@ class TestTheReferenceDocIsRoutedAndDeployed:
         assert rows == {c for c, _ in X.EXIT_CONTRACT}, (
             f"the reference's exit table lists {sorted(rows)}; the tool "
             f"defines {sorted(c for c, _ in X.EXIT_CONTRACT)}")
+
+    def test_the_reference_table_rows_still_MEAN_what_the_tool_returns(self):
+        """The half the integer check cannot do — see EXIT_MEANING_TOKENS."""
+        import re
+        text = REFERENCE.read_text(encoding="utf-8")
+        for code, tokens in self.EXIT_MEANING_TOKENS.items():
+            (row,) = re.findall(rf"^\| {code} \| (.*)$", text, re.M)
+            low = row.lower()
+            missing = [tok for tok in tokens if tok not in low]
+            assert not missing, (
+                f"the reference's row for exit {code} no longer means what the "
+                f"tool returns — missing {missing}. Row: {row!r}")
+
+    def test_the_help_epilog_rows_still_MEAN_what_the_tool_returns(self):
+        """🔴 THE THIRD SITE. `EXIT_CONTRACT` and the reference table were both
+        corrected for the `-o` case while the epilog kept saying "nothing was
+        searched" — a sweep applied to two of three sites, which is the shape
+        the audit skill calls out by name. This is what makes the third one
+        fail rather than be noticed by a reader."""
+        import re
+        for code, tokens in self.EXIT_MEANING_TOKENS.items():
+            block = re.search(rf"^  {code}  (.*?)(?=^  \d  |\Z)",
+                              X.EPILOG, re.M | re.S)
+            assert block, f"--help lists no row for exit {code}"
+            low = " ".join(block.group(1).split()).lower()
+            missing = [tok for tok in tokens if tok not in low]
+            assert not missing, (
+                f"--help's row for exit {code} no longer means what the tool "
+                f"returns — missing {missing}. Row: {low!r}")
+
+    def test_the_meaning_token_ledger_covers_every_code(self):
+        """Two-way, so a new exit code cannot be added with no meaning pinned."""
+        assert set(self.EXIT_MEANING_TOKENS) == {c for c, _ in X.EXIT_CONTRACT}
+
+    def test_the_meaning_check_can_go_RED(self):
+        """Negative control: a table whose row means the opposite must fail.
+        Without this the three tests above are a fact about a regex that
+        happens to match."""
+        import re
+        text = REFERENCE.read_text(encoding="utf-8")
+        (row,) = re.findall(r"^\| 5 \| (.*)$", text, re.M)
+        mutated = row.lower().replace("read", "xxxx")
+        missing = [t for t in self.EXIT_MEANING_TOKENS[5] if t not in mutated]
+        assert missing == ["read"], (
+            "the meaning check cannot detect a row that lost its meaning")
 
     def test_the_reference_carries_a_MEASURED_cost_not_a_vague_one(self):
         """🔴 PINS THE SHAPE, NOT THE DIGITS — and the version this replaces

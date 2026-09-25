@@ -31,9 +31,10 @@ would say so.
 
 🔴 A ZERO IS NEVER REPORTED AS A ZERO. `--arc typo-in-the-name` and an arc that
 genuinely has no sessions both produce "nothing extracted"; so do "the ids
-resolved to no transcript" and "the transcripts held no typed message". Those
-are four different facts with four different fixes, so they get four different
-exit codes and a reason on stderr. See `EXIT_CONTRACT`.
+resolved to no transcript", "no transcript could be opened at all" and "the
+transcripts held no typed message". Different facts with different fixes, so
+each gets its own exit code and a reason on stderr — and where one code covers
+two ways in (exit 5 does), the stderr line says which. See `EXIT_CONTRACT`.
 
 HOW THE CORPUS IS REACHED — ONE RULE, ONE PLACE
 -----------------------------------------------
@@ -76,8 +77,15 @@ EXIT_ARC_UNMEASURED = 3
 #: `--arc` resolved a real doc and the arc WAS measured — and it has no member
 #: sessions. A measured emptiness, which is a finding rather than a failure.
 EXIT_ARC_EMPTY = 4
-#: Session ids were selected and NONE of them resolved to a transcript in this
-#: host's corpus. The ids may be from the other host, or pruned.
+#: NOTHING WAS READ. Two ways in, and the message on stderr says which:
+#:   (a) session ids were selected and none resolved to a transcript here — the
+#:       ids may be from the other host, or pruned; every one is named.
+#:   (b) the transcripts that WERE selected could not be opened, or the corpus
+#:       itself is absent/empty (a fresh host, a different $HOME, a container,
+#:       the nix sandbox). No id is named, because none was the problem.
+#: 🔴 (b) arrived when exit 6 was fixed to stop claiming files were read that
+#: were not, and every contract sentence here still said "ids were selected …
+#: check the peer host" — which sends a reader of case (b) to the wrong fix.
 EXIT_NO_TRANSCRIPTS = 5
 #: Transcripts were read and yielded zero user-typed messages after filtering.
 EXIT_NO_MESSAGES = 6
@@ -94,8 +102,9 @@ EXIT_NO_MESSAGES = 6
 EXIT_CONTRACT = (
     (EXIT_OK, "messages were extracted"),
     (EXIT_USAGE, "bad invocation — an --ids-file that could not be read or held "
-                 "no ids, or an -o path that could not be opened. Nothing was "
-                 "written."),
+                 "no ids, or an -o path that could not be opened, WRITTEN or "
+                 "CLOSED. Nothing was written, and the walk may already have "
+                 "run: this is not a claim that nothing was searched."),
     (EXIT_ARC_UNMEASURED,
      "`--arc` ONLY: the seed named no handoff doc, or no $DEVRC/$HOMELAB/"
      "$DATAPACKET/$CIVITAI checkout holds it. 🔴 NOTHING WAS MEASURED — this "
@@ -105,9 +114,10 @@ EXIT_CONTRACT = (
      "member sessions. A MEASURED empty arc — a real finding about the doc, "
      "not a typo in your argument."),
     (EXIT_NO_TRANSCRIPTS,
-     "session ids were selected but NONE resolved to a transcript in "
-     "~/.claude/projects on this host. Every unresolved id is named on stderr. "
-     "Check the peer host before concluding the sessions are gone."),
+     "NOTHING WAS READ — the stderr line says which of the two: session ids "
+     "were selected and none resolved (each is named; check the peer host "
+     "before concluding they are gone), OR no transcript could be opened at "
+     "all, which includes an absent or empty ~/.claude/projects."),
     (EXIT_NO_MESSAGES,
      "transcripts WERE read and held zero user-typed messages after filtering "
      "— the sessions exist and are empty of typed input (agent-driven, or "
@@ -443,11 +453,13 @@ exit codes — a zero cannot distinguish a wrong name from an empty arc, so
 each reason has its own code and prints on stderr:
 
   0  messages were extracted
-  2  bad invocation; nothing was searched
+  2  bad invocation, or an output path that could not be written; NOTHING
+     WAS WRITTEN (the walk may already have run)
   3  --arc: NOTHING MEASURED (seed names no doc / no checkout holds it)
   4  --arc: the arc was MEASURED and has zero member sessions
-  5  ids were selected and none resolved to a transcript on this host
-  6  transcripts were read and held zero user-typed messages
+  5  NOTHING WAS READ — ids resolved to no transcript, or none could be
+     opened at all (an absent or empty corpus lands here)
+  6  transcripts WERE read and held zero user-typed messages
 """
 
 
@@ -487,6 +499,25 @@ def main(argv=None):
     ids, roles, notes = [], {}, []
     scoped = bool(a.arc or a.session or a.ids_file)
 
+    # 🔴 ONE EMITTER, CALLED BEFORE EVERY RETURN THAT HAS NOTES. Two defects
+    # made this necessary and it fixes both. (a) The notes loop used to sit
+    # AFTER the `if not rows: return`, so on exit 5 and exit 6 the UNSCOPED
+    # banner, the arc coverage line and `unmeasured_notes` were emitted
+    # NOWHERE — and under `--arc`, exit 6 is precisely the measured-zero whose
+    # coverage line decides whether the zero is real. (b) Notes were ALSO
+    # printed inline where they were appended, so every one reached stderr
+    # twice on the success path and a consumer counting `!` lines double-counted
+    # the gap. Appending is now the only way to raise a note; this is the only
+    # way one is printed; `_emitted` makes a second call a no-op.
+    _emitted = []
+
+    def flush_notes():
+        if _emitted:
+            return
+        _emitted.append(True)
+        for note in notes:
+            print(f"! {note}", file=err)
+
     if a.arc:
         try:
             members, arc_notes = arc_sessions(a.arc, root=root)
@@ -495,8 +526,7 @@ def main(argv=None):
             return EXIT_ARC_UNMEASURED
         notes.extend(arc_notes)
         if not members:
-            for note in arc_notes:
-                print(f"! {note}", file=err)
+            flush_notes()
             print(f"--arc {a.arc!r}: the doc resolved and its arc WAS measured "
                   "— it has zero member sessions. 🔴 This is a MEASURED empty "
                   "arc, not a typo in your argument (that is exit "
@@ -521,14 +551,15 @@ def main(argv=None):
     if scoped:
         resolved, missing = resolve_sessions(ids, root=root)
         if missing:
-            # Printed on SUCCESS too — a partial extraction that does not say
+            # Raised as a NOTE, not printed here — see `flush_notes`. It still
+            # reaches the success path; a partial extraction that does not say
             # so reads as a whole one.
-            print(f"! {len(missing)} of {len(ids)} selected session(s) have no "
-                  "transcript on this host (peer host? pruned?): "
-                  + " ".join(missing), file=err)
-            notes.append(f"{len(missing)} of {len(ids)} selected session(s) "
-                         "were NOT readable on this host: " + " ".join(missing))
+            notes.append(
+                f"{len(missing)} of {len(ids)} selected session(s) have NO "
+                "transcript on this host (peer host? pruned?): "
+                + " ".join(missing))
         if not resolved:
+            flush_notes()
             print(f"none of the {len(ids)} selected session id(s) resolved to a "
                   "transcript in ~/.claude/projects on this host. 🔴 Nothing "
                   "was read — this is not 'the sessions are empty' (that is "
@@ -591,8 +622,6 @@ def main(argv=None):
 
     suppressed = sum(suppressed_by.values())
     if unreadable:
-        print(f"! {len(unreadable)} transcript(s) could not be read: "
-              + "; ".join(unreadable), file=err)
         notes.append(f"{len(unreadable)} of {len(sources)} transcript(s) could "
                      "NOT be read: " + "; ".join(unreadable))
 
@@ -606,14 +635,16 @@ def main(argv=None):
     emptied = sorted(sid for sid, n in suppressed_by.items()
                      if not any(r["session_id"] == sid for r in rows))
     if emptied:
-        note = (f"{len(emptied)} session(s) are ABSENT from this report because "
-                "dedup suppressed every one of their messages as a repeat of "
-                "another session's — they are not empty: " + " ".join(emptied)
-                + ". Pass --no-dedup to see them.")
-        print(f"! {note}", file=err)
-        notes.append(note)
+        notes.append(
+            f"{len(emptied)} session(s) are ABSENT from this report because "
+            "dedup suppressed every one of their messages as a repeat of "
+            "another session's — they are not empty: " + " ".join(emptied)
+            + ". Pass --no-dedup to see them.")
 
     if not rows:
+        # 🔴 BEFORE THE RETURN, NOT AFTER IT. Under `--arc`, exit 6 IS the
+        # measured zero whose coverage line decides whether the zero is real.
+        flush_notes()
         if not opened:
             # NOT exit 6: nothing was read, so nothing was measured.
             print(f"none of the {len(sources)} selected transcript(s) could be "
@@ -628,18 +659,7 @@ def main(argv=None):
     # Oldest first across sessions; rows sharing a timestamp keep file order.
     rows.sort(key=lambda r: (r["ts"] == "", r["ts"]))
 
-    # 🔴 EVERY NOTE GOES TO STDERR, IN EVERY FORMAT. They used to reach
-    # `render_markdown` ONLY, so `--jsonl` — the CANONICAL machine form, and the
-    # one the documented pipeline produces — emitted no coverage line, no
-    # `unmeasured_notes` and no UNSCOPED banner. That contradicted four shipped
-    # sentences at once, including this module's own "ALWAYS, INCLUDING WHEN IT
-    # IS ZERO" and the reference's "carries strictly more": it carried strictly
-    # LESS, and a chain rendered without its gaps reads as complete.
-    #
-    # stderr rather than a header RECORD, deliberately: `--jsonl` promises one
-    # canonical record per line and `| jq` must not have to skip a preamble.
-    for note in notes:
-        print(f"! {note}", file=err)
+    flush_notes()
 
     try:
         out = open(a.out, "w") if a.out else sys.stdout
@@ -666,11 +686,11 @@ def main(argv=None):
         # CPython retrying the flush AT SHUTDOWN, which prints
         # "Exception ignored … BrokenPipeError" to stderr.
         #
-        # 🔴 DO NOT WRITE A KILL RATE FOR THE `dup2` HERE. THREE HAVE BEEN
-        # WRITTEN AND ALL THREE WERE WRONG; IF YOU ARE ABOUT TO ADD A FOURTH,
-        # THAT IS THE MISTAKE. The three, in order: "NOT pinned — a mutant
-        # deleting it SURVIVES green" (one draw); "20/20 red" (20 draws); an
-        # independent audit's "22/40 red"; then 10/40 here. Same mutant, same
+        # 🔴 DO NOT WRITE A KILL RATE FOR THE `dup2` HERE. FOUR HAVE BEEN
+        # MEASURED, NO TWO AGREE, AND TWO SHIPPED AS FACTS; IF YOU ARE ABOUT TO
+        # ADD A FIFTH, THAT IS THE MISTAKE. The four, in order: SURVIVED — 0 red
+        # of 1 draw, and that GREEN draw is why this history exists; then 20/20
+        # red; then an independent audit's 22/40; then 10/40. Same mutant, same
         # test, controls clean every time (0/40). It is LOAD-DEPENDENT: whether
         # the shutdown flush still holds data depends on TextIOWrapper buffer
         # state at the moment the pipe closes, which varies with how far `head`
@@ -685,12 +705,40 @@ def main(argv=None):
         # the stronger one — the observable consequence is real (seen at
         # `--jsonl | head -5`) but cannot be asserted reliably.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        return EXIT_OK
-    finally:
         if a.out:
             out.close()
+        return EXIT_OK
+    except OSError as exc:
+        # 🔴 THE WRITE, NOT JUST THE OPEN. The first version of this guard
+        # wrapped `open()` only, and writes are BUFFERED — so for a path you
+        # can create but cannot fill (a full disk, a quota, an I/O error) the
+        # failure surfaced at `close()`, outside the handler, as exactly the
+        # "traceback at rc 1 discarding the whole result" the guard was added
+        # to remove. MEASURED: `--jsonl -o /dev/full` → rc 1, `OSError: [Errno
+        # 28] No space left on device` from `out.close()`.
+        if a.out:
+            try:
+                out.close()
+            except OSError:
+                pass            # the original failure is the one to report
+        print(f"writing {a.out or 'stdout'!r}: {exc}", file=err)
+        return EXIT_USAGE
 
-    print(f"sessions={len(sources)} msgs={len(rows)} "
+    # 🔴 CLOSED EXPLICITLY, INSIDE A GUARD — not in a `finally`. A buffered
+    # write is only durable once close() succeeds, so a close that raises must
+    # reach the same handler as a failed write rather than escaping it.
+    if a.out:
+        try:
+            out.close()
+        except OSError as exc:
+            print(f"writing {a.out!r}: {exc} — the output is INCOMPLETE",
+                  file=err)
+            return EXIT_USAGE
+
+    # `sessions=` counts what was READ, not what was selected — the same basis
+    # exit 6 uses, and for the same reason: a file that could not be opened is
+    # named in a note, and counting it here would contradict that note.
+    print(f"sessions={opened} msgs={len(rows)} "
           f"deduped={suppressed} out={a.out or '-'}", file=err)
     return EXIT_OK
 
