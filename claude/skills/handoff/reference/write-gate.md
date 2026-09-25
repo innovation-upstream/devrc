@@ -1274,12 +1274,39 @@ Two ways, and the first is usually the right one:
    archive file — then re-run the update unchanged. `Gotchas` and `Open investigations`
    APPEND through this tool, so it cannot shrink them for you.
 
+🔴 **REMEDY 2's DESTINATION IS ITSELF A GOVERNED DOCUMENT, AND BOTH HALVES OF THAT
+MATTER.** A `claudedocs/handoff-<arc>-archive.md` sink matches `is_handoff_doc` like any
+other doc — MEASURED on `<cairn>/claudedocs/handoff-cairn-control-plane-archive.md`,
+which returns `True` and is 138,791 B, i.e. **73,255 B over the 65,536 B ceiling** and now
+carries a `GRANDFATHERED` entry of its own. So the remedy points at a file that is in
+rule (p)'s population.
+
+⚠ **IT IS STILL NOT REFUSED IN PRACTICE, AND THAT IS THE PRECISE CLAIM.** Remedy 2's
+write is **out of band**: `handoff_doc.py` writes exactly one path per run,
+`claudedocs/handoff-<topic>.md` for the `--topic` it was given, so an archive move made
+with `git mv` / an editor / a plain commit never reaches this rule at all. What WOULD
+reach it is routing the archive write through this tool — `--topic <arc>-archive` names
+that same file — and on an over-ceiling sink that run needs
+`--override-size-ratchet "<why>"` like any other growth. 🔴 **Do NOT close the gap by
+narrowing `is_handoff_doc` to exempt archives**: `test_handoff_doc_size.py` says in its
+own words that exempting the archive would make "move it to the archive" the way to dodge
+the cap. The ruling taken instead was to grandfather the sink, which ratchets it from
+where it is.
+
 🔴 **Eviction means MOVE, leaving a pointer.** Nothing in this rule can tell a deletion
 from an eviction — the arithmetic is identical — so the refusal says so in its own
 words. A ratchet whose cheapest escape is deleting a gotcha or a ruled-out theory has
 made things worse than it found them.
 
 ### The override, and why it is not a convenience
+
+🔴 **WHO MAY PULL IT: the AGENT may pull it; the reason MUST say whether an operator
+approved it.** That is an operator ruling and it is deliberately **not**
+`--leak-pre-existing-approved`'s rule, which is the operator's call and where the skill
+tells the executor to stop. The sentence is one string —
+`handoff_doc.SIZE_RATCHET_WHO_MAY` — carried verbatim by the refusal, by `--help`, by
+`SKILL.md` step 5 and by this line, and pinned in all four as a whole normalised string
+so a reword in one place cannot quietly disagree with the others.
 
 `--override-size-ratchet "<why>"`. The reason is **required**; an empty one is refused
 at argument-validation time with **exit 2**, not 14 — an empty flag is a complaint

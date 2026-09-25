@@ -447,7 +447,9 @@ A refusal with no escape could therefore cost a session its record, which is
 strictly worse than an oversized doc (`handoff_budget`'s own header measures
 that trade: 22 of 253 sessions never recorded, ZERO of them because a gate
 correctly declined). `--override-size-ratchet "<why>"` always clears it, the
-reason is REQUIRED, and it is recorded on the run AND on the commit.
+reason is REQUIRED, and it is recorded on the run AND on the commit. 🔴 AND IT IS
+NOT OPERATOR-ONLY, UNLIKE `--leak-pre-existing-approved`: `SIZE_RATCHET_WHO_MAY`
+is the one place that says who may pull it and what the reason then owes.
 
 ⚠ AND IT REACHES A DOC'S FIRST WRITE, WHICH IS NOT THE CASE THE RULE IS NAMED
 FOR. `before` is 0 for a new doc, so a first write larger than the ceiling is a
@@ -3333,6 +3335,34 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
 # `test_handoff_doc_size.py` is exactly where nothing else would ever notice.
 SIZE_RATCHET_FLAG = "--override-size-ratchet"
 
+#: 🔴 WHO MAY PULL RULE (p)'S OVERRIDE, AS ONE STRING — the refusal, `--help`,
+#: `claude/skills/handoff/SKILL.md` and `reference/write-gate.md` §I all carry
+#: THIS text, and
+#: `test_the_SKILL_and_the_TOOL_agree_on_WHO_may_pull_the_ratchet_override`
+#: pins the whole normalised sentence in every one of them.
+#:
+#: 🔴 IT IS DELIBERATELY NOT THE LEAK GATE'S RULE, AND THE DIFFERENCE IS THE
+#: POINT. `--leak-pre-existing-approved` is the OPERATOR's call and the skill
+#: tells the executor to stop; this flag is not. Operator decision: the agent may
+#: pull it, and what is required instead is that the reason SAY so, because an
+#: overridden round that reads afterwards like an approved one is the failure
+#: this flag's reason exists to prevent. A guard on words is walkable by
+#: rewording, which is why the four sites share one string rather than four
+#: paraphrases that "agree".
+#:
+#: ⚠ AND THE CODE USED TO CLASSIFY IT THE OTHER WAY — the refusal announced it as
+#: an operator opt-in, `size_ratchet_override_note`'s docstring and its printed
+#: block both said OPERATOR, and the `--help` said nothing about who at all. That
+#: was wrong in the direction that matters: an agent reading it would either not
+#: pull a flag it is allowed to pull, or pull it and record nothing about
+#: approval. ⚠ The old wording is DESCRIBED rather than QUOTED, for the reason
+#: `size_ratchet_override_note`'s docstring gives about restating a string in this
+#: file: rule (n)'s refusal still carries it, and a second verbatim copy here
+#: would widen any `sed` that isolates that one.
+SIZE_RATCHET_WHO_MAY = (
+    "the AGENT may pull it; the reason MUST say whether an operator approved it"
+)
+
 #: The commit trailer that makes an overridden run readable off the ARTEFACT.
 #: Same argument as `LEAK_TRAILER_KEY`, which it deliberately mirrors: stdout
 #: survives only as long as a transcript `scripts/transcript-push.sh` ships as a
@@ -3445,10 +3475,10 @@ def size_ratchet_report(relpath: str, merged_text: str, base_text: str) -> str:
             "pointer: those sections exist so a future session does not repeat "
             "work already done, and nothing in this rule can tell a deletion "
             "from an eviction — the arithmetic is identical.",
-            f'  Operator opt-in overrides: {SIZE_RATCHET_FLAG} "<why>". The '
-            f"reason is REQUIRED and is recorded on the run AND stamped "
-            f"`{SIZE_RATCHET_TRAILER_KEY}:` on the commit, so an overridden "
-            f"round does not read afterwards as a clean one.",
+            f'  Overrides: {SIZE_RATCHET_FLAG} "<why>" — '
+            f"{SIZE_RATCHET_WHO_MAY}. The reason is REQUIRED and is recorded on "
+            f"the run AND stamped `{SIZE_RATCHET_TRAILER_KEY}:` on the commit, "
+            f"so an overridden round does not read afterwards as a clean one.",
         ])
     except (Exception, SystemExit):
         # 🔴 `SystemExit` IS NOT AN `Exception` — `evictable_note` above execs a
@@ -3464,7 +3494,7 @@ def size_ratchet_report(relpath: str, merged_text: str, base_text: str) -> str:
 def size_ratchet_override_note(
     relpath: str, merged_text: str, base_text: str, reason: str
 ) -> str:
-    """Rule (p) fired and the OPERATOR cleared it. WRITTEN. Never raises.
+    """Rule (p) fired and the CALLER cleared it. WRITTEN. Never raises.
 
     🔴 AN OVERRIDDEN RUN MUST NOT READ LIKE A RUN THAT WAS NEVER OVER THE LINE,
     which is the whole reason the flag takes a reason at all. Same shape as
@@ -3472,6 +3502,11 @@ def size_ratchet_override_note(
     decision readable AT THE MOMENT it is taken, the commit trailer is what
     makes it readable off the artefact afterwards. Neither is the other's
     backup.
+
+    ⚠ NOT "THE OPERATOR" — that word stood here and in the block below, and it
+    was a claim about WHO, not about the mechanism. `SIZE_RATCHET_WHO_MAY` owns
+    that claim now, and `leak_approved_note`, which this is shaped after, is the
+    one that really is operator-only. The two flags differ on exactly this point.
 
     🔴 SILENT WHEN THE RATCHET WOULD NOT HAVE FIRED, AND `main()` IS THE ONE
     PLACE THAT DECIDES IT. A flag that prints a block on every run it is passed
@@ -3506,9 +3541,10 @@ def size_ratchet_override_note(
             f"over by {pos.over_by:,} B, and this update adds "
             f"{pos.delta:,} B more.",
             f"  Reason given: {_clip(reason, 240)}",
-            f"  This is an OPERATOR DECISION, not a clean result, and it is "
-            f"stamped `{SIZE_RATCHET_TRAILER_KEY}:` on the commit. Nothing here "
-            f"checked the reason; what was approved is the delta below.",
+            f"  This is a DELIBERATE OVERRIDE, not a clean result, and it is "
+            f"stamped `{SIZE_RATCHET_TRAILER_KEY}:` on the commit — "
+            f"{SIZE_RATCHET_WHO_MAY}. Nothing here checked the reason; what was "
+            f"cleared is the delta below.",
         ])
     except (Exception, SystemExit):
         return ""
@@ -4976,7 +5012,8 @@ def build_parser() -> argparse.ArgumentParser:
         dest="size_ratchet_override",
         help="override the status=size-ratchet refusal: land this update even "
         "though the doc is already over its byte ceiling and this delta makes "
-        "it bigger. REASON is REQUIRED — it is printed above the diff and "
+        f"it bigger. Unlike {LEAK_PRE_EXISTING_FLAG}, {SIZE_RATCHET_WHO_MAY}. "
+        "REASON is REQUIRED — it is printed above the diff and "
         f"stamped `{SIZE_RATCHET_TRAILER_KEY}: <why>` on the commit, so the "
         "round does not read afterwards as one that was never over the line. "
         "The ordinary fix is a net delta of 0 or less; the refusal spells out "

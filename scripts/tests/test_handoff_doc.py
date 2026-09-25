@@ -8529,6 +8529,122 @@ def test_the_status_token_rule_p_prints_is_the_one_the_legend_lists() -> None:
         rf"^\s*{hd.EXIT_SIZE_RATCHET}\s+size-ratchet\b", legend, re.M), legend
 
 
+#: 🔴 WHO MAY PULL RULE (p)'S OVERRIDE, AS A WHOLE NORMALISED STRING.
+#:
+#: A LITERAL COPY, not `hd.SIZE_RATCHET_WHO_MAY`, and that is the whole point:
+#: every site below interpolates the constant, so a test that read the constant
+#: too would pass on any reword — including one that flipped the flag back to
+#: operator-only — because all four sites would move together. The literal is
+#: what makes the reword go red and forces the decision to be taken again.
+#:
+#: 🔴 A WHOLE SENTENCE RATHER THAN A KEYWORD, because a guard on words is
+#: walkable by rewording: "AGENT" and "operator" both appear in
+#: `--leak-pre-existing-approved`'s own sentence, which says the OPPOSITE about
+#: the OPPOSITE flag, so any keyword test here passes on the wrong claim.
+RATCHET_WHO_MAY_PIN = (
+    "the AGENT may pull it; the reason MUST say whether an operator approved it"
+)
+
+#: The LEAK gate's rule, which is the one this flag is NOT. Used as the positive
+#: control for the reader below: it lives in the same SKILL.md sentence, so
+#: finding it proves a zero on the pin above is a fact about the pin and not
+#: about a reader wired to the wrong file.
+LEAK_OPERATOR_ONLY_PIN = (
+    "is the OPERATOR's call, never the agent's — report the refusal and STOP."
+)
+
+
+def _normalised(text: str) -> str:
+    """Whitespace-collapsed, so a pin survives re-wrapping but not re-wording.
+
+    Load-bearing rather than defensive: `write-gate.md` carries the sentence
+    wrapped across two lines and `--help` is re-wrapped by argparse, so a raw
+    substring test would fail on both while the claim was intact.
+    """
+    return " ".join(text.split())
+
+
+def test_the_SKILL_and_the_TOOL_agree_on_WHO_may_pull_the_ratchet_override() -> None:
+    """🔴 A SEAM LEDGER OVER FOUR SITES, one of which is the only file the
+    executing agent reads.
+
+    Operator ruling: rule (p)'s override is NOT operator-only — the agent may
+    pull it, and the requirement that replaces approval is that the reason SAY
+    whether an operator approved it. That ruling is only worth anything if the
+    refusal, `--help` and the skill body say the SAME thing, because they are
+    read at three different moments by two different readers:
+
+      * `size_ratchet_report` — read at the moment the refusal fires;
+      * `--help` / `size_ratchet_override_note` — read by whoever types the flag;
+      * `claude/skills/handoff/SKILL.md` step 5 — the ONLY file the executing
+        agent reads at step 5, and therefore the one that decides whether it
+        pulls the flag at all;
+      * `reference/write-gate.md` §I — where the ruling's reasoning lives.
+
+    🔴 THE HAZARD IS SPECIFICALLY DRIFT TOWARD THE LEAK GATE'S RULE. Three of
+    these sites said "OPERATOR" before #1871 while the decision was the opposite,
+    and the sentence sits INSIDE the same SKILL.md line as
+    `--leak-pre-existing-approved`, which really is operator-only and really does
+    end in STOP. Nothing structural keeps an editor from applying one flag's rule
+    to the other; this is that thing.
+    """
+    assert _normalised(hd.SIZE_RATCHET_WHO_MAY) == RATCHET_WHO_MAY_PIN, (
+        "handoff_doc.SIZE_RATCHET_WHO_MAY was reworded. That sentence is the "
+        "operator's ruling on who may pull "
+        f"{hd.SIZE_RATCHET_FLAG}; if the ruling really changed, change this pin "
+        "and all four sites in the same commit.\n"
+        f"  pinned: {RATCHET_WHO_MAY_PIN!r}\n"
+        f"  actual: {_normalised(hd.SIZE_RATCHET_WHO_MAY)!r}"
+    )
+
+    rel = "claudedocs/handoff-x.md"
+    cap = hd.handoff_budget.MAX_BYTES
+    refusal = hd.size_ratchet_report(rel, "a" * (cap + 2), "a" * (cap + 1))
+    assert "status=size-ratchet" in refusal, (
+        "the fixture did not trip rule (p), so every assertion below would be "
+        f"about an empty string: {refusal!r}")
+    note = hd.size_ratchet_override_note(
+        rel, "a" * (cap + 2), "a" * (cap + 1), "because the operator said so")
+
+    sites = {
+        "the rule (p) refusal": refusal,
+        "the override note above the diff": note,
+        f"{hd.SIZE_RATCHET_FLAG}'s --help": hd.build_parser().format_help(),
+        "claude/skills/handoff/SKILL.md": HANDOFF_SKILL.read_text(
+            encoding="utf-8"),
+        "claude/skills/handoff/reference/write-gate.md": (
+            HANDOFF_SKILL.parent / "reference" / "write-gate.md"
+        ).read_text(encoding="utf-8"),
+    }
+    missing = sorted(
+        name for name, text in sites.items()
+        if RATCHET_WHO_MAY_PIN not in _normalised(text)
+    )
+    assert not missing, (
+        f"these sites no longer state who may pull {hd.SIZE_RATCHET_FLAG}, so "
+        f"the tool, its help and the skill disagree about it — and the skill is "
+        f"the only one the executing agent reads at step 5: {missing}\n"
+        f"  required, normalised: {RATCHET_WHO_MAY_PIN!r}"
+    )
+
+    # 🔴 POSITIVE CONTROL for the SKILL.md read. Every assertion above is "the
+    # string is present", which a reader pointed at the wrong file, or one whose
+    # normalisation mangles the text, would fail — but a reader that found
+    # NOTHING and a reword are the same observable. The leak gate's own sentence
+    # lives in the SAME SKILL.md line and must NOT have this flag's rule, so
+    # finding it proves the reader works and that the two flags are still
+    # distinguished.
+    skill = _normalised(sites["claude/skills/handoff/SKILL.md"])
+    assert LEAK_OPERATOR_ONLY_PIN in skill, (
+        "the leak gate's operator-only sentence is gone from SKILL.md's step-5 "
+        "legend. It is this test's positive control — without it a zero above "
+        "cannot be told from a reader wired to nothing — and it is also the "
+        "claim that keeps the two flags' rules apart."
+    )
+    assert RATCHET_WHO_MAY_PIN not in LEAK_OPERATOR_ONLY_PIN, (
+        "the two pins overlap, so the control cannot distinguish them")
+
+
 # --------------------------------------------------------------------------
 # rule (o): the target repo's OWN leak scanner reads the delta
 #
