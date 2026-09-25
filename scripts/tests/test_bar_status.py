@@ -197,7 +197,7 @@ def test_fetch_clawgate_asks_for_the_summary_form_and_keeps_the_token_out_of_it(
         return []
 
     monkeypatch.setattr(poll, "_http_json", fake_http_json)
-    monkeypatch.setattr(poll.CG, "read_clawgate_env",
+    monkeypatch.setattr(poll.CG, "read_clawgate_task_env",
                         lambda *a, **k: ("http://cg.invalid:1",
                                          "sentinel-token-value"))
     poll.fetch_clawgate()
@@ -207,11 +207,76 @@ def test_fetch_clawgate_asks_for_the_summary_form_and_keeps_the_token_out_of_it(
     assert seen["headers"]["Authorization"] == "Bearer sentinel-token-value"
 
 
+# --------------------------------------------------------------------------- #
+# The router/task base-URL seam.
+#
+# 🔴 THESE DRIVE THE POLLER THROUGH A REAL ENV FILE INSTEAD OF STUBBING THE
+# READER. Stubbing `read_clawgate_*_env` is what made the original defect
+# invisible: the lib was correct in isolation, the poller was correct in
+# isolation, and the seam — which reader the poller calls — was owned by neither
+# test. Both hosts/ports are synthetic, pairwise distinct, and distinct from
+# `DEFAULT_API_URL`, so neither a wrong-key mutant nor a hardcoded-constant
+# mutant can land on the expected string by construction.
+# --------------------------------------------------------------------------- #
+SEAM_ROUTER_URL = "http://router.invalid:9201"
+SEAM_TASK_URL = "http://tasks.invalid:9202"
+
+
+def _seam_env(tmp_path, monkeypatch, *, router=SEAM_ROUTER_URL, task=SEAM_TASK_URL):
+    lines = []
+    if router is not None:
+        lines.append("CLAWGATE_API_URL=%s" % router)
+    if task is not None:
+        lines.append("CLAWGATE_TASK_API_URL=%s" % task)
+    lines.append("CLAWGATE_HOOK_TOKEN=sentinel-seam-token-b4c1d9")
+    f = tmp_path / "clawgate.env"
+    f.write_text("\n".join(lines) + "\n")
+    monkeypatch.setattr(poll.CG, "CLAWGATE_ENV_PATH", str(f))
+    seen = {}
+
+    def fake_http_json(url, headers=None, timeout=None):
+        seen["url"] = url
+        seen["headers"] = headers or {}
+        return []
+
+    monkeypatch.setattr(poll, "_http_json", fake_http_json)
+    return seen
+
+
+def test_the_poller_fetches_the_board_from_the_TASK_service_not_the_router(
+        tmp_path, monkeypatch):
+    """🔴 THE SHIPPED DEFECT. `/api/tasks` moved to the extracted task service;
+    the poller was building it on the router base, so every 45s tick asked the
+    permission router for a board it no longer serves."""
+    seen = _seam_env(tmp_path, monkeypatch)
+    poll.fetch_clawgate()
+    assert seen["url"].startswith(SEAM_TASK_URL), (
+        "the 45s board poll must go to the task service %s, got %r"
+        % (SEAM_TASK_URL, seen["url"]))
+    assert not seen["url"].startswith(SEAM_ROUTER_URL), (
+        "the board poll is still pointed at the permission router (%r)"
+        % seen["url"])
+    assert seen["url"] == poll.CG.tasks_url(SEAM_TASK_URL)
+    assert "sentinel-seam-token-b4c1d9" not in seen["url"]
+
+
+def test_the_poller_falls_back_to_the_router_when_the_task_url_is_unset(
+        tmp_path, monkeypatch):
+    """⚠ Every host that has not been told about the split must keep polling
+    exactly where it polled before — otherwise this is a breaking change, not a
+    fix."""
+    seen = _seam_env(tmp_path, monkeypatch, task=None)
+    poll.fetch_clawgate()
+    assert seen["url"] == poll.CG.tasks_url(SEAM_ROUTER_URL), (
+        "with CLAWGATE_TASK_API_URL unset the poll must fall back to %s, got %r"
+        % (SEAM_ROUTER_URL, seen["url"]))
+
+
 def test_a_failing_clawgate_fetch_never_leaks_the_token_into_the_cache(
         monkeypatch, tmp_path):
     """The `stale` marker formats the exception. Pin that the credential cannot
     reach it — this payload is written to disk and read by two other tools."""
-    monkeypatch.setattr(poll.CG, "read_clawgate_env",
+    monkeypatch.setattr(poll.CG, "read_clawgate_task_env",
                         lambda *a, **k: ("http://cg.invalid:1",
                                          "sentinel-token-value"))
 

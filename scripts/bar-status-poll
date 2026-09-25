@@ -1019,10 +1019,17 @@ def _http_json(url: str, headers=None, timeout: float = 3.0):
 # Fetch functions (network / cluster; wrapped by source() so failures -> stale)
 # ---------------------------------------------------------------------------
 def _clawgate_creds():
-    """(token, base_url), read from the env file at CALL time by the shared
+    """(token, task_base_url), read from the env file at CALL time by the shared
     module — one reader, so session-manager and this poller cannot disagree about
-    where the credential comes from or what the default base is."""
-    base, token = CG.read_clawgate_env()
+    where the credential comes from or what the default base is.
+
+    🔴 THE *TASK* READER, NOT THE ROUTER ONE. `/api/tasks` moved to the extracted
+    task service when it was carved out of the permission router; the router base
+    (`CLAWGATE_API_URL`) still serves /api/send and friends and answers 404 here.
+    `CG.TASK_API_URL_VARS` holds the precedence — unset `CLAWGATE_TASK_API_URL`
+    falls back to the router base, i.e. exactly the old destination.
+    """
+    base, token = CG.read_clawgate_task_env()
     return token, base
 
 
