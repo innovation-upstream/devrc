@@ -37,7 +37,7 @@ of 1 draw, and that GREEN draw is the whole reason this history exists; then
 two agreeing. Same mutant, same test, controls clean every time. It is LOAD-DEPENDENT — whether the shutdown
 flush still holds data depends on TextIOWrapper buffer state when the pipe
 closes, which depends on how far `head` got. **There is no rate to find. If you
-are about to write a FIFTH number, that is the mistake**; two of the three
+are about to write a FIFTH number, that is the mistake**; two of the four
 already shipped into source comments as properties of the guard, one of them
 telling maintainers a load-bearing line was uncovered.
 
@@ -78,6 +78,13 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+#: Sentinels for the deletion rows that must REMOVE an except arm without
+#: breaking the module: replacing the caught type with a class nothing raises
+#: disables the arm while keeping the file importable. Injected into the source
+#: by `_PRELUDE` so the mutant is a real deletion, not a NameError.
+_PRELUDE = ("class _NeverRaisedW1(Exception):\n    pass\n\n\n"
+            "class _NeverRaisedW2(Exception):\n    pass\n\n\n")
 
 REPO = Path(__file__).resolve().parents[2]
 SRC = REPO / "scripts" / "session-analysis" / "extract_user_msgs.py"
@@ -216,7 +223,7 @@ MUTANTS = [
 
     # --- the --help contract --------------------------------------------------
     ("H1", "deletion", "an exit code disappears from --help",
-     "  4  --arc: the arc was MEASURED and has zero member sessions\n", "",
+     "  4  --arc: the arc WAS measured and has zero member sessions\n", "",
      "test_every_exit_code_is_listed_in_the_help"),
     ("H2", "addition", "--help gains a code the tool never returns",
      "  6  transcripts WERE read",
@@ -231,6 +238,37 @@ MUTANTS = [
      "      extract_user_msgs.py --session 00000000-1111-4222-8333-444444444444\n"
      "      extract_user_msgs.py --session <id-a> --session <id-b>\n", "",
      "test_every_selector_has_at_least_one_example"),
+
+    # --- the WRITE path, added round 3 ---------------------------------------
+    # 🔴 THESE FOUR ROWS EXIST BECAUSE THE BATTERY GAINED NONE WHEN THE CODE
+    # THEY COVER LANDED. An independent round-3 sweep found three reachable
+    # mutants over that code surviving a fully green 93-test suite AND a 33/33
+    # battery — the battery was evidence about the 33 rows it held, and the new
+    # guards were not among them. W2 is the one that matters: without the close
+    # guard a TOTAL write failure reported `rc 0 … out=<path>`.
+    ("W1", "deletion", "the mid-write OSError arm is gone, so a failed write "
+     "tracebacks at rc 1 again — the defect round 2 says it fixed",
+     "    except OSError as exc:\n"
+     "        # 🔴 THE WRITE, NOT JUST THE OPEN.",
+     "    except _NeverRaisedW1 as exc:\n"
+     "        # 🔴 THE WRITE, NOT JUST THE OPEN.",
+     "test_the_mid_write_arm_reports_rather_than_tracebacks"),
+    ("W2", "deletion", "the success-path close guard is gone, so a write that "
+     "wrote NOTHING reports success",
+     "    if a.out:\n        try:\n            out.close()\n"
+     "        except OSError as exc:",
+     "    if a.out:\n        try:\n            out.close()\n"
+     "        except _NeverRaisedW2 as exc:",
+     "test_a_write_that_fails_ENTIRELY_does_not_report_success"),
+    ("W3", "replacement", "sessions= reports the SELECTION size again, not what "
+     "was read",
+     'print(f"sessions={opened} msgs={len(rows)} "',
+     'print(f"sessions={len(sources)} msgs={len(rows)} "',
+     "test_sessions_counts_what_was_READ"),
+    ("W4", "deletion", "the arc-empty path stops flushing its coverage notes",
+     "        if not members:\n            flush_notes()",
+     "        if not members:\n            pass",
+     "test_notes_reach_the_ARC_EMPTY_path"),
 
     # --- the routing prose (payload for this PR, not scaffolding) -------------
     ("R1", "deletion", "an exit row vanishes from the reference's table",
@@ -333,7 +371,11 @@ def main() -> int:
                 rows.append((mid, "NOT-APPLIED",
                              f"pattern occurs {n}x in {target.name}, want 1"))
                 continue
-            target.write_text(text.replace(old, new, 1))
+            mutated = text.replace(old, new, 1)
+            if "_NeverRaisedW" in new:
+                mutated = mutated.replace("import argparse",
+                                          _PRELUDE + "import argparse", 1)
+            target.write_text(mutated)
             assert _digest(target) != pristine[target], f"{mid}: no-op write"
 
             failed, errors, collected, out = _run_suite(tmp)

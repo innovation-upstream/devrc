@@ -101,10 +101,13 @@ EXIT_NO_MESSAGES = 6
 #: rather than hidden, here and in the reference's exit table.
 EXIT_CONTRACT = (
     (EXIT_OK, "messages were extracted"),
-    (EXIT_USAGE, "bad invocation — an --ids-file that could not be read or held "
-                 "no ids, or an -o path that could not be opened, WRITTEN or "
-                 "CLOSED. Nothing was written, and the walk may already have "
-                 "run: this is not a claim that nothing was searched."),
+    (EXIT_USAGE,
+     "bad invocation, OR the output could not be opened, written or closed. "
+     "🔴 IT IS NOT A CLAIM THAT NOTHING HAPPENED. On an --ids-file error "
+     "nothing was searched; but on an OUTPUT error the walk has already run "
+     "and, for -o PATH, that file has been TRUNCATED AT OPEN and may hold a "
+     "PARTIAL result — whatever was there before is GONE. Delete it or "
+     "re-run; do not treat it as the previous content."),
     (EXIT_ARC_UNMEASURED,
      "`--arc` ONLY: the seed named no handoff doc, or no $DEVRC/$HOMELAB/"
      "$DATAPACKET/$CIVITAI checkout holds it. 🔴 NOTHING WAS MEASURED — this "
@@ -453,10 +456,13 @@ exit codes — a zero cannot distinguish a wrong name from an empty arc, so
 each reason has its own code and prints on stderr:
 
   0  messages were extracted
-  2  bad invocation, or an output path that could not be written; NOTHING
-     WAS WRITTEN (the walk may already have run)
-  3  --arc: NOTHING MEASURED (seed names no doc / no checkout holds it)
-  4  --arc: the arc was MEASURED and has zero member sessions
+  2  bad invocation, or the output could not be opened/written/closed.
+     NOT a claim that nothing happened: on an output error the walk has
+     already run and `-o PATH` holds a PARTIAL file — it was TRUNCATED
+     at open, so its previous content is gone
+  3  --arc: NOTHING WAS MEASURED (the seed names no doc, or no checkout
+     holds it) — a typo lands here, not on 4
+  4  --arc: the arc WAS measured and has zero member sessions
   5  NOTHING WAS READ — ids resolved to no transcript, or none could be
      opened at all (an absent or empty corpus lands here)
   6  transcripts WERE read and held zero user-typed messages
@@ -541,9 +547,11 @@ def main(argv=None):
         try:
             ids.extend(read_ids_file(a.ids_file))
         except OSError as exc:
+            flush_notes()
             print(f"--ids-file {a.ids_file!r}: {exc}", file=err)
             return EXIT_USAGE
         if not ids:
+            flush_notes()
             print(f"--ids-file {a.ids_file!r} held no session ids. Nothing was "
                   "searched.", file=err)
             return EXIT_USAGE
@@ -647,9 +655,15 @@ def main(argv=None):
         flush_notes()
         if not opened:
             # NOT exit 6: nothing was read, so nothing was measured.
-            print(f"none of the {len(sources)} selected transcript(s) could be "
-                  "opened — 0 were read. 🔴 This is NOT 'the sessions are "
-                  "empty'; nothing was measured.", file=err)
+            if not sources:
+                print("the corpus holds NO session transcripts at all "
+                      f"(looked under {root or ROOT!r}) — 0 were read. 🔴 This "
+                      "is NOT 'the sessions are empty': check $HOME and that "
+                      "this host has a ~/.claude/projects.", file=err)
+            else:
+                print(f"none of the {len(sources)} selected transcript(s) could "
+                      "be opened — 0 were read. 🔴 This is NOT 'the sessions "
+                      "are empty'; nothing was measured.", file=err)
             return EXIT_NO_TRANSCRIPTS
         print(f"read {opened} transcript(s) and found zero user-typed "
               "messages after filtering. 🔴 The transcripts WERE read — this "
@@ -721,7 +735,10 @@ def main(argv=None):
                 out.close()
             except OSError:
                 pass            # the original failure is the one to report
-        print(f"writing {a.out or 'stdout'!r}: {exc}", file=err)
+        where = repr(a.out) if a.out else "stdout"
+        print(f"writing {where}: {exc} — the output is INCOMPLETE"
+              + (f"; {a.out!r} was truncated at open, so its previous content "
+                 "is GONE" if a.out else ""), file=err)
         return EXIT_USAGE
 
     # 🔴 CLOSED EXPLICITLY, INSIDE A GUARD — not in a `finally`. A buffered
@@ -731,7 +748,8 @@ def main(argv=None):
         try:
             out.close()
         except OSError as exc:
-            print(f"writing {a.out!r}: {exc} — the output is INCOMPLETE",
+            print(f"writing {a.out!r}: {exc} — the output is INCOMPLETE; "
+                  "its previous content was truncated at open and is GONE",
                   file=err)
             return EXIT_USAGE
 

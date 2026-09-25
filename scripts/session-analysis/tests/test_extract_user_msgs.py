@@ -5,12 +5,13 @@ own prompts and a client's infrastructure, and devrc is PUBLIC. Every transcript
 here is synthesised under `tmp_path` from `LEAKCANARY-*` strings, chosen to be
 unmistakable if one ever escaped into a fixture.
 
-🔴 THE LOAD-BEARING TESTS IN THIS MODULE ARE THE FOUR IN
+🔴 THE LOAD-BEARING TESTS IN THIS MODULE ARE THOSE IN
 `TestAZeroIsNeverJustAZero`. They are not unit tests of an `if` — they are the
-control proving the tool can tell four different "nothing came back" facts
-apart. A wrong `--arc` name, a measured-empty arc, ids that resolve to no
-transcript, and transcripts holding no typed message all produce the same empty
-output; before this CLI they all produced the same exit 0 as well. Each test
+control proving the tool can tell the "nothing came back" facts apart. A wrong
+`--arc` name, a measured-empty arc, ids that resolve to no transcript, no
+transcript openable at all, and transcripts holding no typed message all
+produce the same empty output; before this CLI they all produced the same exit
+0 as well. (Exit 5 covers two of those, and its stderr line says which.) Each test
 asserts the code AND that the reason names the right mechanism, because a
 correct code with a misleading sentence sends the reader to the wrong fix.
 """
@@ -518,7 +519,7 @@ class TestPipingToHead:
     #: a maintainer of this test reads.) Whether the
     #: shutdown flush still holds data depends on TextIOWrapper buffer state
     #: when the pipe closes, which varies with how far `head` got, which varies
-    #: with machine load. **There is no rate to find; do not measure a fourth.**
+    #: with machine load. **There is no rate to find; do not measure a fifth.**
     #: The `dup2` is pinned deterministically by
     #: `test_the_shutdown_flush_is_silenced_by_redirecting_fd_1` below instead.
     CUT_POINTS = (1, 5)
@@ -790,6 +791,114 @@ class TestDedupErasureIsAnnounced:
         assert "ABSENT from this report" not in out
 
 
+class TestTheWriteGuardsArePinned:
+    """🔴 EVERY GUARD THIS PR ADDED TO THE WRITE PATH, PINNED. Round 3 built an
+    ad-hoc sweep over the code round 2 shipped and found THREE reachable
+    mutants surviving a fully green suite and a 33/33 battery — because the
+    battery gained no rows for the new code. The worst turned a TOTAL write
+    failure into `rc 0 … out=<path>`, which is the exact class this PR exists
+    to remove. A battery is only evidence about the rows it holds."""
+
+    def _big(self, tmp_path, n=200):
+        _write_session(tmp_path, "proj-a", "s1",
+                       [_user("Y" * 400 + str(i),
+                              ts=f"2026-09-01T00:00:{i % 60:02d}Z")
+                        for i in range(n)])
+
+    def test_a_write_that_fails_ENTIRELY_does_not_report_success(self, tmp_path):
+        """X6 — the CLOSE guard, and the fixture size is the whole test.
+
+        🔴 A SMALL corpus on purpose. `/dev/full` accepts the open and fails
+        every write, but for a large output the failure surfaces mid-render and
+        the WRITE arm catches it — so a big fixture here exercises the wrong
+        guard entirely. When the whole output fits in the buffer, nothing fails
+        until `close()`, and with the close guard deleted this returned
+        **`rc 0 … sessions=1 msgs=2 out=/dev/full`**: a write that put not one
+        byte on the device, reported as a completed extraction.
+
+        MEASURED while building this: aimed at the big fixture, the mutant
+        survived this assertion and was caught only by a sibling — the test
+        named the right defect and could not see it."""
+        _write_session(tmp_path, "proj-a", "s1",
+                       [_user(LEAK_TYPED, ts="2026-09-01T00:00:00Z"),
+                        _user(LEAK_OTHER, ts="2026-09-01T00:00:01Z")])
+        rc, _, err = _run(["--session", "s1", "--jsonl", "--no-dedup",
+                           "-o", "/dev/full"], tmp_path)
+        assert rc == X.EXIT_USAGE, (
+            f"a write that wrote nothing returned {rc} — success")
+        assert "INCOMPLETE" in err, err
+        assert "sessions=" not in err, (
+            "the success summary printed for a write that wrote nothing")
+
+    def test_the_mid_write_arm_reports_rather_than_tracebacks(self, tmp_path):
+        """X7. Deleting the write arm restores the 'traceback at rc 1
+        discarding the whole result' this PR says it fixed. Reached with a
+        corpus big enough to fail during render rather than at close."""
+        self._big(tmp_path, n=400)
+        rc, _, err = _run(["--session", "s1", "--jsonl", "--no-dedup",
+                           "-o", "/dev/full"], tmp_path)
+        assert rc == X.EXIT_USAGE
+        assert "Traceback" not in err
+
+    def test_BOTH_failure_arms_say_the_output_is_INCOMPLETE(self, tmp_path):
+        """Which arm fires depends on buffer size, so the same failure must not
+        report two different things — round 3 measured exactly that."""
+        for n in (10, 400):
+            _write_session(tmp_path, "proj-a", "s1",
+                           [_user("Y" * 400 + str(i),
+                                  ts=f"2026-09-01T00:00:{i % 60:02d}Z")
+                            for i in range(n)])
+            _, _, err = _run(["--session", "s1", "--jsonl", "--no-dedup",
+                              "-o", "/dev/full"], tmp_path)
+            assert "INCOMPLETE" in err, f"n={n}: {err!r}"
+
+    def test_a_failed_o_write_SAYS_the_previous_content_is_gone(self, tmp_path):
+        """🔴 THE DATA CLAIM. `open(path,"w")` truncates BEFORE the first write,
+        so an output error leaves a partial file where the previous content
+        was. The contract said 'Nothing was written'; MEASURED, 26 bytes of
+        prior content became 2,048 bytes of partial output. A caller trusting
+        that sentence leaves destroyed data in place."""
+        self._big(tmp_path)
+        _, _, err = _run(["--session", "s1", "--jsonl", "--no-dedup",
+                          "-o", "/dev/full"], tmp_path)
+        assert "GONE" in err or "gone" in err, (
+            f"the caller is not told the previous content was destroyed: {err!r}")
+
+    def test_sessions_counts_what_was_READ(self, tmp_path):
+        """X5. Reverting this to `len(sources)` moved the output and survived."""
+        _write_session(tmp_path, "proj-a", "s1", [_user(LEAK_TYPED)])
+        p = _write_session(tmp_path, "proj-a", "s2", [_user(LEAK_OTHER)])
+        p.chmod(0o000)
+        try:
+            rc, _, err = _run(["--session", "s1", "--session", "s2"], tmp_path)
+        finally:
+            p.chmod(0o644)
+        assert rc == X.EXIT_OK
+        assert "sessions=1 " in err, (
+            f"sessions= must count the 1 transcript READ, not the 2 selected: "
+            f"{err!r}")
+
+    def test_notes_reach_the_ARC_EMPTY_path(self, tmp_path, monkeypatch):
+        """X3. Claim 1 named exit 4 explicitly and nothing pinned it."""
+        fake = _fake_find_session(members=())
+        monkeypatch.setattr(X, "_load_find_session", lambda: fake)
+        rc, _, err = _run(["--arc", "handoff-fake"], tmp_path)
+        assert rc == X.EXIT_ARC_EMPTY
+        assert "carry no session id" in err, err
+
+    def test_notes_reach_the_IDS_FILE_usage_path(self, tmp_path, monkeypatch):
+        """The return that broke the flusher's own universal — `--arc` and
+        `--ids-file` are documented as combinable, and this path dropped all
+        three arc notes."""
+        fake = _fake_find_session(members=[_FakeMember("s1", "wrote")])
+        monkeypatch.setattr(X, "_load_find_session", lambda: fake)
+        rc, _, err = _run(["--arc", "handoff-fake",
+                           "--ids-file", str(tmp_path / "nope.txt")], tmp_path)
+        assert rc == X.EXIT_USAGE
+        assert "carry no session id" in err, (
+            f"the arc's coverage notes were dropped on this return: {err!r}")
+
+
 class TestUnwritableOutputIsRefusedNotCrashed:
     def test_a_bad_o_path_exits_2_rather_than_traceback(self, tmp_path):
         _write_session(tmp_path, "proj-a", "s1", [_user(LEAK_TYPED)])
@@ -1025,13 +1134,23 @@ class TestTheReferenceDocIsRoutedAndDeployed:
     #:
     #: Keep these to words that must be TRUE of the code, never to a phrasing:
     #: a reword should pass, a changed meaning should not.
+    #:
+    #: 🔴 AND EACH MUST DISCRIMINATE — a single shared word does not. The first
+    #: version used `("measured",)` for 3 and `("read",)` for 5, which every
+    #: neighbouring row also satisfies: an audit showed all six rows could be
+    #: rewritten to mean the OPPOSITE while the ledger stayed green, and codes
+    #: 3↔4 and 5↔6 could have their texts SWAPPED outright — the pair the
+    #: reference itself calls "the pair that matters most". A substring test
+    #: cannot see an inversion; it CAN be made to see a swap, and
+    #: `test_NO_TWO_CODES_SHARE_A_ROW…` enforces that by construction, so a
+    #: token weakened back to a shared word fails there rather than here.
     EXIT_MEANING_TOKENS = {
         0: ("extracted",),
-        2: ("invocation", "written"),
-        3: ("measured",),
-        4: ("measured", "zero"),
-        5: ("read",),
-        6: ("read", "zero"),
+        2: ("invocation", "truncated"),
+        3: ("nothing was measured",),
+        4: ("zero member sessions",),
+        5: ("nothing was read",),
+        6: ("zero user-typed",),
     }
 
     def test_the_reference_documents_EVERY_exit_code_with_its_meaning(self):
@@ -1078,17 +1197,44 @@ class TestTheReferenceDocIsRoutedAndDeployed:
         """Two-way, so a new exit code cannot be added with no meaning pinned."""
         assert set(self.EXIT_MEANING_TOKENS) == {c for c, _ in X.EXIT_CONTRACT}
 
-    def test_the_meaning_check_can_go_RED(self):
-        """Negative control: a table whose row means the opposite must fail.
-        Without this the three tests above are a fact about a regex that
-        happens to match."""
+    def test_the_meaning_check_detects_token_ERASURE(self):
+        """Negative control #1 — a row that LOST its token fails."""
         import re
         text = REFERENCE.read_text(encoding="utf-8")
         (row,) = re.findall(r"^\| 5 \| (.*)$", text, re.M)
         mutated = row.lower().replace("read", "xxxx")
         missing = [t for t in self.EXIT_MEANING_TOKENS[5] if t not in mutated]
-        assert missing == ["read"], (
+        assert missing == list(self.EXIT_MEANING_TOKENS[5]), (
             "the meaning check cannot detect a row that lost its meaning")
+
+    def test_NO_TWO_CODES_SHARE_A_ROW_ie_the_rows_are_not_SWAPPABLE(self):
+        """🔴 NEGATIVE CONTROL #2, AND THE ONE THE TOKEN CHECK CANNOT DO ALONE.
+
+        Round 3 showed the token ledger green over every row rewritten to mean
+        the OPPOSITE, and green when codes 3 and 4 had their texts SWAPPED —
+        the pair the reference itself calls "the pair that matters most". A
+        substring test cannot see an inversion; what it CAN see is that each
+        row satisfies only its OWN code's tokens.
+
+        So this asserts the rows are pairwise discriminating: give code N the
+        text of code M and the ledger must reject it. That is what makes a
+        swap, and most inversions, fail — and it is checked by construction
+        rather than by imagining a mutation."""
+        import re
+        text = REFERENCE.read_text(encoding="utf-8")
+        rows = {int(c): r.lower()
+                for c, r in re.findall(r"^\| (\d) \| (.*)$", text, re.M)}
+        confusable = []
+        for code, tokens in self.EXIT_MEANING_TOKENS.items():
+            for other, other_row in rows.items():
+                if other == code:
+                    continue
+                if all(tok in other_row for tok in tokens):
+                    confusable.append((code, other))
+        assert not confusable, (
+            "these rows satisfy another code's meaning tokens, so the two are "
+            f"swappable while the ledger stays green: {confusable}. Give each "
+            "code a token no other row can carry.")
 
     def test_the_reference_carries_a_MEASURED_cost_not_a_vague_one(self):
         """🔴 PINS THE SHAPE, NOT THE DIGITS — and the version this replaces
