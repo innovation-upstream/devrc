@@ -423,11 +423,14 @@ freely and may not rise.
 🔴 WHY A REFUSAL WHERE `budget_warning` DELIBERATELY REFUSES NOTHING. That
 warning has been printed on every over-budget write since #1648 and the
 mechanism it names went on regardless: MEASURED on one arc, a document a prune
-had landed UNDER the ceiling more than DOUBLED inside a week, `Gotchas` reaching
-62% of it. 🔴 THE BYTES, THE RATIO AND THE `git cat-file -s` COMMANDS THAT
-RE-MEASURE THEM LIVE IN ONE PLACE — `claude/skills/handoff/reference/write-gate.md`
-§I — and are NOT restated here, because the restated copies are what went wrong:
-the first pair written down reproduced at no revision of the measured file.
+had landed UNDER the ceiling more than DOUBLED inside a week, the growth landing
+in `Gotchas`. 🔴 THE BYTES AND THE `git cat-file -s` COMMANDS THAT RE-MEASURE
+THEM LIVE IN ONE PLACE — `claude/skills/handoff/reference/write-gate.md` §I — and
+are NOT restated here, because the restated copies are what went wrong: the first
+pair written down reproduced at no revision of the measured file. ⚠ AND NO
+`Gotchas` RATIO IS QUOTED, HERE OR THERE. This sentence carried "62% of it";
+round 1 of #1871's audit re-measured it and it reproduces on neither reading of
+the source row, so §I now declines to publish one rather than pick.
 
 The growth is STRUCTURAL rather than careless: the bucket rules forbid durable
 content in a REPLACE section, so the correct remedy for a finding is "move it to
@@ -3047,13 +3050,25 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         # number that does not actually clear the overage sends an author cutting
         # and leaves them still red — the one outcome worse than saying nothing.
         # 🔴 SCOPED TO THE `over_by > 0` CALLERS, which since #1826 means the
-        # GATED over-budget arm alone. The two `over_by=0` callers — the near
-        # arm, and the UNGATED over-budget arm — deliberately take the `else`
-        # branch and state no relation to any overage. For the near arm there
-        # is no overage to relate to. For the ungated arm it is a choice: no
-        # gate will go red there, so "still red" cannot happen, and the arm's
-        # own comment explains why it declines to assert a deficit against a
-        # ceiling nothing enforces. ⚠ The COST is real and is recorded there:
+        # GATED over-budget arm alone. EVERY OTHER caller passes `over_by=0`
+        # deliberately, takes the `else` branch, and states no relation to any
+        # overage.
+        # ⚠ NO COUNT HERE, AND THE MISSING NUMBER IS THE FIX. This said "the
+        # two `over_by=0` callers" and rule (p) made it THREE in the PR that
+        # added it — a bare count is wrong from the moment a caller lands, and
+        # wrong silently, because nothing reads a comment's arithmetic. The
+        # sites are enumerated instead, and `git grep -n
+        # 'evictable_note(merged_text'` is what re-derives the list:
+        #   * `budget_warning`'s UNGATED over-budget arm — a CHOICE: no gate
+        #     will go red there, so "still red" cannot happen, and that arm's
+        #     own comment explains why it declines to assert a deficit against
+        #     a ceiling nothing enforces;
+        #   * `budget_warning`'s NEAR arm — there is no overage to relate to;
+        #   * `size_ratchet_report`, rule (p) — the zero withholds the WRONG
+        #     threshold rather than an unenforced one, for the reason stated at
+        #     that call site: clearing the refusal needs a net delta of 0, not a
+        #     cleared overage.
+        # ⚠ The UNGATED arm's zero has a real COST, recorded at that arm:
         # 12 of the 13 docs that arm newly reaches have `net < over_by`, and
         # it is the reader who must subtract. Round 1 of #1826 found this
         # comment asserting, unscoped, a rule that its newest caller breaks.
@@ -3292,9 +3307,12 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
 # rules forbid durable content anywhere else, so "move it to `Gotchas`" is the
 # CORRECT remedy for every finding and the section is monotonic by construction.
 # MEASURED on one arc: a prune landed the doc under the ceiling and it more than
-# DOUBLED inside a week, `Gotchas` reaching 62% of the file. The figures, and the
-# two commands that re-measure them, are owned by
+# DOUBLED inside a week, the growth landing in `Gotchas`. The figures, and the two
+# commands that re-measure them, are owned by
 # `claude/skills/handoff/reference/write-gate.md` §I — one place, never restated.
+# ⚠ THE `Gotchas` RATIO IS NOT AMONG THEM. This line carried "62% of the file"
+# while claiming to restate nothing; #1871 round 1 re-measured it and §I now
+# publishes no ratio at all, so quoting one here would make this the only source.
 #
 # 🔴 SO THE RATCHET IS ON GROWTH, NOT ON SIZE. A doc under its allowance is not
 # this rule's population at all — `budget_warning` keeps that one, and keeps
@@ -3328,15 +3346,50 @@ SIZE_RATCHET_TRAILER_KEY = "Size-Ratchet-Override"
 #: `session_trailer.valid_id` rejects a value over 256 chars or carrying a
 #: newline, and `append_trailer` then returns the message UNCHANGED — so a long
 #: or multi-line reason would leave the run claiming a durable record that does
-#: not exist. Whitespace is collapsed and the value clipped here so the trailer
-#: always lands; the FULL reason is on stdout, which is the other channel and
-#: not this one's backup.
+#: not exist. The value is clipped here so the trailer always lands.
+#:
+#: ⚠ AND STDOUT IS NOT THE BACKUP THIS COMMENT USED TO CALL IT. It said "the
+#: FULL reason is on stdout", which is false past 240 characters:
+#: `size_ratchet_override_note` clips its own echo to 240, so a 631-char reason
+#: reaches NEITHER channel whole. Stdout carries strictly MORE (240 > 200) and
+#: that is the whole of the relation — pinned by
+#: `test_the_two_CHANNELS_clip_the_reason_at_DIFFERENT_widths`, because a
+#: comment is a claim too and this one was wrong twice.
+#:
+#: ⚠ THE CLIP IS ONLY TWO THIRDS OF THAT GUARANTEE, AND THE MISSING THIRD WAS
+#: MEASURED FALSE RATHER THAN SUSPECTED. `_clip` collapses PYTHON whitespace,
+#: which is a strict subset of what `valid_id` refuses: a reason carrying a
+#: non-whitespace C0 control — `\x1b` out of pasted coloured terminal output,
+#: `\x01` — passed the clip untouched, failed `valid_id`, and the commit got NO
+#: trailer while stdout and `write-gate.md` had both already promised one.
+#: MEASURED at `f4b98ce7`: `"urgent\x1bfix"` clipped to 10 chars, `valid_id`
+#: False, trailer absent, no diagnostic. The long and multi-line cases this
+#: comment was written about DID land, which is why the hole survived.
 SIZE_RATCHET_REASON_MAX = 200
 
 
 def _ratchet_trailer_value(reason: str) -> str:
-    """`reason`, flattened and clipped to something a trailer can carry."""
-    return _clip(reason, SIZE_RATCHET_REASON_MAX)
+    """`reason`, repaired and clipped to something a trailer can carry.
+
+    🔴 THE POST-CONDITION IS THE POINT, NOT THE TWO STEPS:
+    `session_trailer.valid_id` accepts the result for EVERY `str` input that is
+    not whitespace-only, and `_ratchet_trailer_value` is the only place that
+    promise is made. Pinned by
+    `test_every_ratchet_reason_reaches_a_value_the_APPENDER_ACCEPTS`, which
+    asserts the relationship rather than either step's spelling.
+
+    🔴 CLIP FIRST, REPAIR SECOND, AND THE OTHER ORDER WAS MEASURED WRONG WHILE
+    WRITING THIS FIX rather than reasoned about. `_clip` collapses whitespace,
+    and a tab or a newline is whitespace a reason may legitimately carry —
+    `"line one\\nline two"` has always reached the commit as `line one line
+    two`. Repairing first turns those into replacement marks BEFORE `_clip` can
+    see them as whitespace, so it fixes the control-character hole by breaking
+    the multi-line case the clip was originally written for. Repair is
+    length-preserving (one mark per refused character), so running it after the
+    clip cannot push the value back over `SIZE_RATCHET_REASON_MAX`.
+    """
+    return session_trailer.printable_for_trailer(
+        _clip(reason, SIZE_RATCHET_REASON_MAX))
 
 
 def size_ratchet_report(relpath: str, merged_text: str, base_text: str) -> str:

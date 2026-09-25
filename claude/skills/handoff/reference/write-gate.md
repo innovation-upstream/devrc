@@ -1228,9 +1228,18 @@ was.
 🔴 **The conclusion is unchanged, which is why this is a correction and not a
 retraction.** The prune **worked** — 64,097 B is under the 65,536 B ceiling — and the
 document then more than DOUBLED: 75,274 B of growth over the 6.1 days between those
-two commits (2026-09-18 → 2026-09-25), roughly **12 KB a day**, with `Gotchas` at
-62% of the file; every other section combined would have fitted under the ceiling on
-its own.
+two commits (2026-09-18 → 2026-09-25), roughly **12 KB a day**; every other section
+combined would have fitted under the ceiling on its own.
+
+⚠ **NO `Gotchas` RATIO IS QUOTED IN THAT SENTENCE, AND THE OMISSION IS THE POINT.** It
+used to end "with `Gotchas` at 62% of the file" — a figure out of the row the paragraph
+above declares NOT re-derived, offered inside the sentence that presents the conclusion
+as measured, which is the exact thing that paragraph tells you not to do. Re-measured,
+it reproduces neither the ratio implied by the table's own bytes nor the one an
+independent span extraction gives, and the two disagree with each other; no replacement
+figure is written here because a second unverified one is the same defect. Re-derive it
+in the measured repo if a ratio is what you need. The conclusion does not rest on one:
+a prune that worked, undone inside a week, is the whole of it.
 
 🔴 **The growth is STRUCTURAL, not careless.** The bucket rules forbid durable content
 in a REPLACE section, so the correct remedy for a finding is "move it to `Gotchas`" —

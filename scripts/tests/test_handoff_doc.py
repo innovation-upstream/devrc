@@ -7981,11 +7981,14 @@ def test_a_heading_matching_BOTH_step1_detectors_is_not_double_counted():
 # remedy for a finding is "move it to `Gotchas`", which APPENDS. That section has
 # an entry rule and no exit rule. On the arc this rule was measured against, a
 # prune landed the doc under the ceiling and it more than DOUBLED inside a week,
-# `Gotchas` reaching 62% of the file. 🔴 THE BYTES AND THE RATIO ARE NOT RESTATED
-# HERE: `claude/skills/handoff/reference/write-gate.md` §I owns them and carries
-# the `git cat-file -s` commands that re-measure them. The literals that used to
-# stand here reproduced at no revision of the measured document — a fourth copy
-# of a number is how that happens.
+# the growth landing in `Gotchas`. 🔴 THE BYTES ARE NOT RESTATED HERE:
+# `claude/skills/handoff/reference/write-gate.md` §I owns them and carries the
+# `git cat-file -s` commands that re-measure them. The literals that used to stand
+# here reproduced at no revision of the measured document — a fourth copy of a
+# number is how that happens. ⚠ AND THE SENTENCE ABOVE USED TO CARRY "`Gotchas`
+# reaching 62% of the file" IN THE SAME BREATH AS "NOT RESTATED HERE", which is
+# the fourth copy arriving inside the warning against it. #1871 round 1
+# re-measured that ratio; §I now publishes none, and neither does this.
 #
 # 🔴 WHAT MAKES EACH TEST BELOW NON-VACUOUS, because two of them could pass for
 # the wrong reason and be indistinguishable from a pass for the right one:
@@ -8248,6 +8251,137 @@ class TestADocOverItsCeilingMayNotGrow:
         assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
         msg = _sh("git", "log", "-1", "--format=%B", cwd=oversize_repo)
         assert f"{hd.SIZE_RATCHET_TRAILER_KEY}: {RATCHET_REASON}" in msg, msg
+
+    # ---- the trailer lands for EVERY reason, not only the short clean ones ---
+    #
+    # 🔴 THE COVERAGE GAP THESE THREE CLOSE, NAMED SO NOBODY RE-OPENS IT.
+    # `RATCHET_REASON` is 61 characters of plain ASCII, i.e. well inside
+    # `SIZE_RATCHET_REASON_MAX` and carrying nothing `valid_id` refuses — so
+    # `test_the_override_is_STAMPED_on_the_commit` above passes whether
+    # `_ratchet_trailer_value` clips, repairs, or does nothing at all, and no
+    # test called that function directly. Round 1 of #1871's audit found the
+    # control-character hole underneath exactly that shape.
+    #
+    # ⚠ AND THE TRAILER IS THE ONLY ASSERTION THAT CAN SEE IT. `append_trailer`
+    # returns the message UNCHANGED for a value `valid_id` refuses: no
+    # exception, no exit code, nothing on stderr, and stdout has already printed
+    # the full reason. Asserting the run succeeded is satisfied by the bug.
+
+    #: A reason carrying non-whitespace C0 controls — the shape that arrives by
+    #: pasting coloured terminal output into the flag. `_clip` collapses PYTHON
+    #: whitespace only, so these two survived it and then failed `valid_id`.
+    RATCHET_REASON_CONTROL = "pasted \x1bcolour and \x01a header: prune ranked first"
+    #: What must reach the commit: one mark per refused character, and NOT the
+    #: characters themselves.
+    RATCHET_REASON_CONTROL_STAMPED = (
+        "pasted �colour and �a header: prune ranked first")
+
+    #: 79 DISTINCT eight-byte tokens, 631 characters — over the 200-char clip,
+    #: and chosen so the cut POINT is readable in the value rather than only its
+    #: length. A `"x" * 500` fixture cannot tell a clip at 200 from one at 150.
+    RATCHET_REASON_LONG = " ".join(f"word{i:03d}" for i in range(1, 80))
+
+    def test_a_reason_carrying_a_CONTROL_character_still_STAMPS_the_commit(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        """MEASURED RED at `f4b98ce7`: no `Size-Ratchet-Override:` trailer at
+        all, while stdout and `write-gate.md` both promised one."""
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        res = run_tool(oversize_repo, hd.SIZE_RATCHET_FLAG,
+                       self.RATCHET_REASON_CONTROL, "--confirm", update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        msg = _sh("git", "log", "-1", "--format=%B", cwd=oversize_repo)
+        assert hd.SIZE_RATCHET_TRAILER_KEY in msg, (
+            "the run promised a durable record and the commit carries no "
+            f"trailer:\n{msg}")
+        assert (f"{hd.SIZE_RATCHET_TRAILER_KEY}: "
+                f"{self.RATCHET_REASON_CONTROL_STAMPED}") in msg, msg
+        # The controls themselves must not reach the file: that is the half
+        # `valid_id` exists for, and a repair that merely let them through
+        # would satisfy the assertion above.
+        assert "\x1b" not in msg and "\x01" not in msg, repr(msg)
+
+    def test_a_reason_LONGER_than_the_clip_still_STAMPS_the_commit(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        """The case `SIZE_RATCHET_REASON_MAX`'s comment is actually about, which
+        no test exercised. Literal expectations, and the cut point is pinned by
+        CONTENT (`word025` in, `word026` out) as well as by length — so a clip
+        that moved would be caught by something other than the constant."""
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        assert len(self.RATCHET_REASON_LONG) == 631, len(self.RATCHET_REASON_LONG)
+        res = run_tool(oversize_repo, hd.SIZE_RATCHET_FLAG,
+                       self.RATCHET_REASON_LONG, "--confirm", update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        msg = _sh("git", "log", "-1", "--format=%B", cwd=oversize_repo)
+        line = next((ln for ln in msg.splitlines()
+                     if ln.startswith(f"{hd.SIZE_RATCHET_TRAILER_KEY}: ")), None)
+        assert line is not None, (
+            f"no {hd.SIZE_RATCHET_TRAILER_KEY} trailer on a 631-char "
+            f"reason:\n{msg}")
+        value = line.split(": ", 1)[1]
+        assert len(value) == 200, len(value)
+        assert value.startswith("word001 word002 "), value
+        assert value.endswith("word025…"), value
+        assert "word026" not in value, value
+
+    def test_the_two_CHANNELS_clip_the_reason_at_DIFFERENT_widths(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        """⚠ AN INVARIANT GUARD, AND IT CORRECTS A COMMENT RATHER THAN A DEFECT.
+        `SIZE_RATCHET_REASON_MAX` used to say "the FULL reason is on stdout",
+        offered as the reason clipping the trailer costs nothing. It is false:
+        `size_ratchet_override_note` clips its echo at 240, so a 631-char reason
+        reaches NEITHER channel whole. What is true — stdout carries strictly
+        more than the trailer, and both are bounded — is what the comment now
+        says and what this pins, with both widths as literals."""
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        res = run_tool(oversize_repo, hd.SIZE_RATCHET_FLAG,
+                       self.RATCHET_REASON_LONG, "--confirm", update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        echoed = next((ln.split("Reason given: ", 1)[1]
+                       for ln in res.stdout.splitlines()
+                       if "Reason given: " in ln), None)
+        assert echoed is not None, res.stdout
+        assert len(echoed) == 240, len(echoed)
+        assert echoed.endswith("word030…"), echoed
+        assert self.RATCHET_REASON_LONG not in res.stdout, (
+            "stdout now carries the reason in full, so the trailer's clip is no "
+            "longer the only bound and this comment's reasoning has changed"
+        )
+        msg = _sh("git", "log", "-1", "--format=%B", cwd=oversize_repo)
+        stamped = next(ln.split(": ", 1)[1] for ln in msg.splitlines()
+                       if ln.startswith(f"{hd.SIZE_RATCHET_TRAILER_KEY}: "))
+        assert len(stamped) == 200 < len(echoed) == 240
+
+    @pytest.mark.parametrize("reason,expected", [
+        pytest.param("plain and short", "plain and short", id="plain"),
+        pytest.param("line one\nline two", "line one line two", id="newline"),
+        pytest.param("a\tb", "a b", id="tab"),
+        pytest.param("urgent\x1bfix", "urgent�fix", id="esc"),
+        pytest.param("head\x01er", "head�er", id="soh"),
+        # Not whitespace, so it survives `.strip()` and every empty-reason check
+        # upstream: a DELETING repair would empty the value and `valid_id("")`
+        # is False, which is the same silent failure in a second shape.
+        pytest.param("\x1b\x01", "��", id="controls-only"),
+        pytest.param("x" * 500, "x" * 199 + "…", id="over-the-clip"),
+    ])
+    def test_every_ratchet_reason_reaches_a_value_the_APPENDER_ACCEPTS(
+        self, reason: str, expected: str
+    ) -> None:
+        """🔴 A RELATIONSHIP, NOT A SPELLING. The claim is that
+        `_ratchet_trailer_value`'s output is something `session_trailer.valid_id`
+        accepts and `append_trailer` therefore writes — so it asserts both ends
+        and the byte-level `expected` in between, and stays true if either
+        function is reworded. `newline` and `tab` are here because a repair that
+        replaced whitespace instead of collapsing it would fix the control case
+        and silently regress the multi-line one (measured while fixing this)."""
+        value = hd._ratchet_trailer_value(reason)
+        assert value == expected, repr(value)
+        assert hd.session_trailer.valid_id(value), repr(value)
+        msg = hd.commit_message(
+            "subject", session_id="", ratchet_trailer=value)
+        assert f"{hd.SIZE_RATCHET_TRAILER_KEY}: {expected}" in msg, msg
 
     def test_the_override_is_SILENT_on_a_run_the_ratchet_would_not_refuse(
         self, repo: Path, update_file: Path
