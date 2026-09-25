@@ -118,8 +118,19 @@ cp -a "$SRC/scripts/tests/fixtures/." "$ROOT/scripts/tests/fixtures/"
 # suite that was already failing, rather than printing a screen of `ok`. It is
 # still a permanently-red gate, which `claude/RULES.md` says is worse than none.
 # MEASURED at `4c9a3f58` (before rule (p)): the same twelve names, same order.
+#
+# 🔴 AND THE CHAIN IS THREE DEEP, NOT TWO — MEASURED by adding the first two and
+# watching ELEVEN of the twelve stay red. `skill-audit.py` reads its ceiling and
+# working-margin floor out of `scripts/browser-bridge/tests/test_skill_size.py`
+# at MODULE level, deliberately keeping no copy of the numbers, and `SystemExit`s
+# naming that path when it is absent. The tell is worth writing down: the
+# traceback names a BROWSER-BRIDGE size gate on a battery about handoff-doc
+# rules, which reads as an unrelated breakage rather than as a missing copy.
 cp -a "$SRC/scripts/handoff-audit.py" "$ROOT/scripts/"
 cp -a "$SRC/scripts/skill-audit.py" "$ROOT/scripts/"
+mkdir -p "$ROOT/scripts/browser-bridge/tests"
+cp -a "$SRC/scripts/browser-bridge/tests/test_skill_size.py" \
+      "$ROOT/scripts/browser-bridge/tests/"
 # The suite reads the skill body (TestSkillAndModuleAgree) and its reference dir.
 cp -a "$SRC/claude/skills/handoff/SKILL.md" "$ROOT/claude/skills/handoff/"
 cp -a "$SRC/claude/skills/handoff/reference/." \
