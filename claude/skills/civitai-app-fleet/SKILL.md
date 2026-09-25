@@ -1,28 +1,38 @@
 ---
 name: civitai-app-fleet
-description: "Bulk iteration across the Civitai App Block fleet (gen-matrix, sensei, model-benchmarking, playable-collections, custom-generators, app-requests, generate-from-model) — rolling one change through every app repo — plus release: civitai app submit, version bumps, a refused submit, deploy state. Platform-side ops is the `app-blocks` skill in talos-infra."
-argument-hint: "<action> — inventory | state <app> [version] | floor <app> | preflight <dir> [floor] | fan-out"
+description: "Bulk iteration across the Civitai App Block fleet (gen-matrix, sensei, model-benchmarking, playable-collections, custom-generators, app-requests, generate-from-model, panorama-360, oauth-probe) — rolling one change through every app repo — plus release: civitai app submit, version bumps, a refused submit, deploy state. Platform-side ops is the `app-blocks` skill in talos-infra."
+argument-hint: "<action> — inventory | state <app> [version] | floor <app> | preflight <dir> [floor] [--allow-downgrade] | fan-out"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob
 ---
 
 # Civitai App Block fleet
 
-Seven repos that ship one app each. Most work here is **the same change rolled
+**Nine** repos that ship one app each. Most work here is **the same change rolled
 through all of them**; releasing is the last mile of that, not the whole job.
 Platform operation — Tekton, Flipt, deploy diagnosis — is `app-blocks` in
 `civitai/talos-infra` (checked out here as `datapacket-talos`), and it only
 loads with that repo as cwd.
+
+🔴 **It was seven for weeks after it stopped being seven.** `panorama-360` and
+`oauth-probe` were live, released apps with their own repos while every doc here
+still said seven, so bulk passes silently skipped two. **Never state the count
+from memory — `fleet.py` prints one row per member**, and `fleet.py`'s `REPOS`
+comment carries the command that re-derives the list from the platform. Two of
+the nine break the naming pattern: `panorama-360` is `civitai/app-panorama-360`
+(the `civitai` org, no `civitai-` repo prefix), and `generate-from-model` is
+`civitai-block-…`, not `civitai-app-…`.
 
 ## Start every bulk pass with the inventory
 
 ```bash
 SKILL=~/.claude/skills/civitai-app-fleet
 python3 $SKILL/fleet.py            # --json drives a fan-out; --no-platform skips the CLI
-                                   # 🔴 it git-fetches SEVEN SHARED clones by
-                                   # default — --no-fetch to touch nothing
+                                   # 🔴 it git-fetches EVERY SHARED clone in REPOS
+                                   # by default — --no-fetch to touch nothing
 ```
 
-It reports, per repo: **default branch** (`sensei` is `trunk`, six are `main`),
+It reports, per repo: **default branch** (`sensei` is `trunk`; read the rest,
+do not assume),
 what the base clone currently has **checked out and how dirty it is**, both
 version fields, `buildCommand`, lockfile, **whether it declares multiple vitest
 projects** (`2+` vs `1` — a class, not a count: the check cannot tell two from
@@ -63,13 +73,36 @@ need **no** lockfile edit — `package-lock.json` recorded the root version,
 python3 $SKILL/app_state.py <app> <version>   # authoritative state; exit 0 iff live
 python3 $SKILL/app_state.py <app>             # the submit floor
 
-# Submit from a clean export, NEVER a worktree: a worktree's .git is a FILE,
-# and the CLI's exclusion list only drops .git DIRECTORIES.
-git -C <repo> archive origin/<default> | tar -x -C <dir>
+# Submit from a clean WORKTREE off origin/<default> — it is clean by
+# construction, and being inside a git repo is what arms the two submit-time
+# guards (see the 🔴 below).
+git -C <repo> fetch origin && git -C <repo> worktree add --detach <dir> origin/<default>
 python3 $SKILL/preflight.py <dir> "$(python3 $SKILL/app_state.py <app> | sed 's/.*floor=//')"
 civitai app validate <dir>
+civitai app submit <dir> --package-only   # ALWAYS dry-run first: writes the zip, never submits
 civitai app submit <dir> --yes            # --yes required non-interactively
+git -C <repo> worktree remove <dir>
 ```
+
+🔴 **This used to say "export with `git archive`, NEVER a worktree", and that is
+RETRACTED.** The CLI dropped `.git` only as a *directory* once; since issue #409
+it matches `.git`/`.hg`/`.svn` on the **exact name whatever the file type**, so a
+worktree's `.git` FILE is dropped too. Measured on 0.1.105 (2026-09-25):
+`--package-only` inside a linked worktree printed
+`Skipped 3 path(s): .env (.env*), .git, node_modules/` and produced a zip with no
+`.git` entry, while a sibling `.gitattributes` was packaged — the match is exact,
+not a prefix.
+
+**Submitting from a `git archive` export now costs two guards**, because both
+degrade silently outside a git work tree — which is precisely what an export dir
+is:
+
+- the **dirty-tree refusal** — "no repo, or no `git` on PATH: proceed SILENTLY";
+- the **build provenance stamp** — no repo ⇒ nothing sent, so that release's
+  `SOURCE` column in `civitai app status` is blank forever and nobody can ask
+  which commit is live. 11 of the fleet's 79 approved rows are blank there today;
+  that count does NOT attribute them, since a row predating the stamp is blank
+  for the same reason — the point is only that a blank `SOURCE` is unrecoverable.
 
 Then a **moderator must approve** before anything builds. A failed build leaves
 the previous version serving — it is not an outage. The `.env*` rule drops
@@ -86,19 +119,50 @@ offline.
 1. **`civitai app status <slug>` shows only the NEWEST submission.** A withdrawn
    duplicate of the same version masks a healthy `building` row underneath.
    `app_state.py` reads the list instead.
-2. **The submit floor is the highest version ON RECORD, not deployed** — a
-   withdrawn submission still occupies it.
+2. **There are TWO submit floors and they disagree.** `app_state.py` /
+   `preflight.py` use the highest version **ON RECORD** (a withdrawn submission
+   occupies it) — deliberately conservative, ours. The CLI's own refusal uses the
+   highest **APPROVED** version (`approvedPeak` in `internal/cmd/approved_version.go`),
+   so a withdrawn or rejected row does not raise its bar, and `--allow-downgrade`
+   escapes it. 🔴 **Neither is a platform rule**: `civitai app status` carries two
+   `oauth-probe 0.1.3` rows — `approved/failed` then `approved/live`, same source
+   commit `04e9c8e` — i.e. the server accepted a same-version re-submit, which is
+   the ordinary way to retry a failed build. `preflight.py --allow-downgrade`
+   waives its floor for exactly that; pass it to `civitai app submit` too.
 3. **The builder picks its install command from `buildCommand`'s first word.** A
    manifest and lockfile that disagree is a guaranteed build failure **CI cannot
    see**, because `.github/` is not in the bundle. `preflight.py` and
-   `civitai app validate` both catch it.
+   `civitai app validate` both catch it — re-measured 2026-09-25: a `pnpm run
+   build` manifest carrying only `package-lock.json` fails `validate` at rc=1
+   with the exact remedy in the message.
+
+## 🔴 What `civitai app validate` does NOT check
+
+It is a **manifest-shape** pre-check, not a submit gate. Measured 2026-09-25 on
+0.1.105, each against a clean fixture that validates at rc=0 and three negative
+controls that correctly fail (`iframe.src` set, `allow-same-origin` sandbox,
+`outputDir: "../out"`):
+
+| Passes at rc=0, **`--strict` too** | |
+|---|---|
+| `"auth": "nonsense"` — and `"auth": 12345` | the field is not validated at all |
+| any unknown top-level key | only *named* server-owned keys (`trustTier`, `iframe.src`) are rejected |
+| `"bootSkeleton": true` over an empty `#root` | no structural check against `index.html` |
+| `scopes` with no `scopeJustifications` | |
+
+So a green `validate` says the manifest is well-shaped; it says nothing about
+whether the app boots, whether `auth` means anything, or whether the host will
+accept it. What it **does** catch and is worth running for: the lockfile/builder
+mismatch above, the sandbox and server-owned-field rules, `outputDir` traversal,
+and the scope enum (`apps:storage:*` is not a scope — the members are
+`apps:storage:read`, `…:write`, `…:shared:read`, `…:shared:write`).
 
 ## Where a change belongs
 
 | The change is about | Repo |
 |---|---|
 | One app's own UI / logic | that app's repo |
-| Anything imported from `@civitai/*` | `civitai/civitai-app-starters` — **all five packages ship from there** |
+| Anything imported from `@civitai/*` | `civitai/civitai-app-starters` — **all SIX packages ship from there**: `@civitai/app-sdk`, `@civitai/sdk`, `@civitai/blocks-react`, `@civitai/theme`, `@civitai/components`, `@civitai/components-react` (counted on `origin/main`, where the deprecated `blocks-cli` is already gone) |
 | Host, scopes, money path, app storage, submit/approval | `civitai/civitai` |
 | The `civitai` CLI | `civitai/cli` (Go) |
 | The build pipeline | `civitai/talos-infra` → `clusters/production/apps/tekton-builds/app-blocks-pipeline.yaml` |

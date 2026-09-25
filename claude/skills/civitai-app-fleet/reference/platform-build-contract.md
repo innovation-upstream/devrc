@@ -16,6 +16,13 @@ either file.
 
 ## The install recipe
 
+🔴 **THIS FILE IS THE SINGLE OWNER OF THE RECIPE.** `preflight.py` used to carry
+a second copy of it, and the two drifted: this one passed `--ignore-scripts` on
+the pnpm branch, that one did not. Two statements of one rule means one of them
+is wrong and nothing tells you which — so the script now states only the
+lockfile mapping it actually asserts and points here for the rest. Do not
+re-paste the recipe anywhere.
+
 The builder selects its install command from `buildCommand`'s **first word**:
 
 ```sh
@@ -25,6 +32,13 @@ yarn)  corepack enable; yarn … ;;
 *)     [ -f package-lock.json ] || fail
        npm ci --ignore-scripts ;;
 ```
+
+⚠ **`--ignore-scripts` ON THE PNPM BRANCH IS THE ONE FLAG THIS FILE DOES NOT
+OWN.** Its value is whatever
+`clusters/production/apps/tekton-builds/app-blocks-pipeline.yaml` in
+`civitai/talos-infra` says, and it is being re-read there rather than settled
+from here. Read the yaml before relying on it; the npm branch's
+`--ignore-scripts` is not in doubt.
 
 Consequences worth knowing before you change a manifest:
 
@@ -79,5 +93,29 @@ Dropped at any depth: `node_modules`, `dist`, `build`, `out`, `.git`, `.next`,
 includes **`.envrc`**. Kept at the project root only: `.env.example`,
 `.env.production`, `.env.sample`.
 
-🔴 Export with `git archive`, not from a worktree: a worktree's `.git` is a
-**file**, and only `.git` *directories* are dropped.
+🔴 **RETRACTED (verified against CLI 0.1.105, 2026-09-25): "export with
+`git archive`, not from a worktree".** That rule was true of an older CLI, whose
+exclusion list matched `.git` only as a DIRECTORY, so a linked worktree's `.git`
+FILE was packaged and the platform rejected the bundle. The CLI fixed it
+(issue #409): `.git`/`.hg`/`.svn` are now matched on the **exact name**
+regardless of file type — `vcsMetadataNames` in `internal/pkgzip/pkgzip.go`, and
+`app submit --help` states it outright ("in a linked worktree or a submodule,
+`.git` is a file").
+
+Measured: `civitai app submit . --package-only` run inside a linked worktree
+printed `Skipped 3 path(s): .env (.env*), .git, node_modules/` and produced a zip
+with no `.git` entry, while a sibling `.gitattributes` **was** packaged (7 files
+vs 6) — so the match is on the exact name, not a prefix.
+
+**Following the retracted advice now costs two guards**, because both degrade
+silently on a directory that is not inside a git work tree, which is exactly what
+a `git archive` export is:
+
+- the **dirty-tree refusal** (`app_submit_dirty_guard.go`): "no repo, or no
+  `git` on PATH: proceed SILENTLY";
+- the **build provenance stamp** (#411): "no repo / no git / bare repo / inside
+  `.git` → `Provenance{}` (send nothing)", so `civitai app status` shows an empty
+  `SOURCE` column for that release and nobody can later ask which commit is live.
+
+So: submit from a clean checkout that IS a repo — a worktree created off
+`origin/<default>` is clean by construction and stamps the right sha.
