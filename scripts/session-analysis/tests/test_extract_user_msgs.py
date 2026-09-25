@@ -19,6 +19,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -504,19 +505,18 @@ class TestPipingToHead:
 
     #: Two cut points, because there are TWO failures behind one symptom: the
     #: failed WRITE (the `except BrokenPipeError` arm) and CPython's retry of
-    #: the flush AT SHUTDOWN (the `os.dup2` beside it). This class pins BOTH —
-    #: MEASURED over 20 runs each: dup2 deleted => 20/20 red, dup2 present =>
-    #: 0/20 red; mutating the exception type is likewise red.
+    #: the flush AT SHUTDOWN (the `os.dup2` beside it).
     #:
-    #: 🔴 THE 4 KB ROWS ARE LOAD-BEARING, NOT PADDING. With short rows the
-    #: failed write drains the buffer, nothing is left for the shutdown flush,
-    #: and the dup2 mutant SURVIVES. An earlier revision of this comment
-    #: recorded exactly that survival as a property of the guard — it was a
-    #: single draw against the WEAKER fixture that predated `CUT_POINTS`, and
-    #: the claim was written as if it applied to this one. It shipped a comment
-    #: telling maintainers a load-bearing line was uncovered. **Re-run the sweep
-    #: after touching this fixture; a mutation result is a fact about the test
-    #: as it stood, and does not survive a change to what it feeds.**
+    #: 🔴 THIS CLASS PINS THE `except` ARM ONLY. It does NOT reliably pin the
+    #: `dup2`, and that is stated rather than implied because getting it wrong
+    #: has now cost three false claims. Deleting the `dup2` and running this
+    #: class went red 1/1, then 20/20, then an independent audit's 22/40, then
+    #: 10/40 — same mutant, same test, controls clean every time. Whether the
+    #: shutdown flush still holds data depends on TextIOWrapper buffer state
+    #: when the pipe closes, which varies with how far `head` got, which varies
+    #: with machine load. **There is no rate to find; do not measure a fourth.**
+    #: The `dup2` is pinned deterministically by
+    #: `test_the_shutdown_flush_is_silenced_by_redirecting_fd_1` below instead.
     CUT_POINTS = (1, 5)
 
     def _pipe_to_head(self, tmp_path, n, *extra):
@@ -548,6 +548,195 @@ class TestPipingToHead:
         assert "BrokenPipeError" not in err, err
         assert "Exception ignored" not in err, err
         assert "Traceback" not in err, err
+
+
+    def test_the_shutdown_flush_is_silenced_by_redirecting_fd_1(
+            self, tmp_path, monkeypatch):
+        """🔴 THE DETERMINISTIC PIN ON `os.dup2`, replacing a rate that could
+        not be measured. It asserts the redirect HAPPENS — fd 1 is pointed at
+        `os.devnull` when the pipe breaks — rather than asserting the stderr
+        noise is absent, which is the flaky observable.
+
+        Weaker than the behavioural claim and deliberately not dressed up as
+        it: this proves the line runs, not that the user sees nothing. The
+        consequence is real (124 bytes at `--jsonl | head -5`) but is buffer-
+        timing dependent and cannot be asserted reliably."""
+        _write_session(tmp_path, "proj-a", "sess-1", [_user(LEAK_TYPED)])
+
+        calls = []
+        real_dup2 = X.os.dup2
+        monkeypatch.setattr(X.os, "dup2",
+                            lambda a, b: calls.append((a, b)))
+
+        class _BrokenStdout(io.StringIO):
+            def write(self, s):
+                raise BrokenPipeError(32, "Broken pipe")
+
+        broken = _BrokenStdout()
+        broken.fileno = lambda: 4242          # a sentinel, never dup2'd for real
+        monkeypatch.setattr(sys, "stdout", broken)
+        rc = X.main(["--session", "sess-1", "--jsonl", "--root", str(tmp_path)])
+
+        assert rc == X.EXIT_OK, "a closed pipe is not an error exit"
+        assert calls, "os.dup2 was never called — the shutdown flush is unguarded"
+        devnull_fd, target = calls[0]
+        assert target == 4242, (
+            f"dup2 redirected fd {target}, not stdout's own descriptor")
+        # The SOURCE fd must be /dev/null, not some other file. Compared by
+        # device id, which is what makes it /dev/null rather than merely "a fd".
+        assert os.fstat(devnull_fd).st_rdev == os.stat(os.devnull).st_rdev, (
+            "fd 1 was redirected somewhere that is not /dev/null")
+        os.close(devnull_fd)
+
+    def test_the_dup2_pin_can_report_absence(self, tmp_path, monkeypatch):
+        """Negative control on the test above: with the handler's redirect
+        removed, `calls` must be empty. Without this, a test asserting on a
+        list nothing ever appends to would pass for the wrong reason."""
+        _write_session(tmp_path, "proj-a", "sess-1", [_user(LEAK_TYPED)])
+        calls = []
+        monkeypatch.setattr(X.os, "dup2", lambda a, b: calls.append((a, b)))
+        # No BrokenPipeError raised ⇒ the handler never runs ⇒ no redirect.
+        rc = X.main(["--session", "sess-1", "--jsonl", "-o",
+                     str(tmp_path / "out.jsonl"), "--root", str(tmp_path)])
+        assert rc == X.EXIT_OK
+        assert calls == [], (
+            "dup2 ran on a path with no broken pipe — the pin would then pass "
+            "whatever the handler does")
+
+
+class TestCoverageNotesReachEveryFormat:
+    """🔴 `--jsonl` USED TO EMIT NO COVERAGE NOTE AT ALL — not the arc coverage
+    line, not `unmeasured_notes`, not the UNSCOPED banner. They reached
+    `render_markdown` only, so the CANONICAL machine form (and the one the
+    documented pipeline produces) carried strictly LESS than markdown while
+    three shipped sentences said the opposite. A chain rendered without its
+    gaps reads as complete."""
+
+    def test_the_arc_coverage_line_reaches_stderr_in_BOTH_formats(
+            self, tmp_path, monkeypatch):
+        _write_session(tmp_path, "proj-a", "s1", [_user(LEAK_TYPED)])
+        fake = _fake_find_session(members=[_FakeMember("s1", "wrote")])
+        monkeypatch.setattr(X, "_load_find_session", lambda: fake)
+        for argv in (["--arc", "handoff-fake"],
+                     ["--arc", "handoff-fake", "--jsonl"]):
+            rc, out, err = _run(argv, tmp_path)
+            assert rc == X.EXIT_OK, argv
+            assert "carry no session id" in err, (
+                f"{argv}: the coverage line is absent from stderr")
+            assert "LEAKCANARY-note-is-surfaced" in err, (
+                f"{argv}: an unmeasured_note the resolver produced was dropped")
+
+    def test_the_UNSCOPED_banner_reaches_stderr_in_BOTH_formats(self, tmp_path):
+        _write_session(tmp_path, "proj-a", "s1", [_user(LEAK_TYPED)])
+        for argv in ([], ["--jsonl"]):
+            rc, out, err = _run(argv, tmp_path)
+            assert rc == X.EXIT_OK, argv
+            assert "UNSCOPED" in err, f"{argv}: the banner is absent from stderr"
+
+    def test_jsonl_stdout_stays_one_record_per_line(self, tmp_path):
+        """The notes go to stderr rather than a header record precisely so
+        `| jq` needs no preamble skip. Pin that."""
+        _write_session(tmp_path, "proj-a", "s1", [_user(LEAK_TYPED)])
+        _, out, _ = _run(["--session", "s1", "--jsonl"], tmp_path)
+        for line in out.splitlines():
+            json.loads(line)        # every line, no exceptions
+
+
+class TestExitSixIsAboutWhatWasREAD:
+    """🔴 exit 6 asserts 'the transcripts WERE read'. It was derived from the
+    SELECTION size, so two reachable inputs made that assertion false."""
+
+    def test_an_absent_corpus_is_NOT_a_measured_emptiness(self, tmp_path):
+        """Reachable on any host where `~/.claude/projects` does not exist —
+        a fresh host, a different $HOME, a container, the nix sandbox."""
+        rc, _, err = _run([], tmp_path / "nothing-here")
+        assert rc != X.EXIT_NO_MESSAGES, (
+            "an empty corpus reported a MEASURED emptiness having opened "
+            "nothing — the opposite of the truth")
+        assert rc == X.EXIT_NO_TRANSCRIPTS
+
+    def test_a_selection_whose_files_are_all_unreadable_reads_NOTHING(
+            self, tmp_path):
+        p = _write_session(tmp_path, "proj-a", "s1", [_user(LEAK_TYPED)])
+        p.chmod(0o000)
+        try:
+            rc, _, err = _run(["--session", "s1"], tmp_path)
+        finally:
+            p.chmod(0o644)
+        assert rc == X.EXIT_NO_TRANSCRIPTS, (
+            f"opened 0 transcripts and returned {rc}; exit "
+            f"{X.EXIT_NO_MESSAGES} would claim they were read")
+        assert "could not be opened" in err or "could not be read" in err
+
+    def test_a_readable_but_EMPTY_transcript_IS_a_measured_emptiness(
+            self, tmp_path):
+        """The positive control: exit 6 must still be reachable, or the fix
+        above would have moved the bug rather than removed it."""
+        _write_session(tmp_path, "proj-a", "s1",
+                       [_user("[Request interrupted by user]")])
+        rc, _, err = _run(["--session", "s1"], tmp_path)
+        assert rc == X.EXIT_NO_MESSAGES
+        assert "read 1 transcript(s)" in err, err
+
+
+class TestDedupErasureIsAnnounced:
+    """🔴 A session dedup suppressed ENTIRELY vanishes from a per-session
+    report, and a reader concludes it typed nothing. Cross-session dedup is
+    intended; its erasure of a whole session is a gap and must be announced —
+    the same standard this module already holds for unresolved ids."""
+
+    def test_a_fully_suppressed_session_is_named_in_BOTH_channels(self, tmp_path):
+        _write_session(tmp_path, "proj-a", "s1",
+                       [_user(LEAK_TYPED, ts="2026-09-01T00:00:00Z")])
+        _write_session(tmp_path, "proj-a", "s3",
+                       [_user(LEAK_TYPED, ts="2026-09-01T00:00:01Z")])
+        rc, out, err = _run(["--session", "s1", "--session", "s3"], tmp_path)
+        assert rc == X.EXIT_OK
+        assert "s3" in err, "the erased session is not named on stderr"
+        assert "s3" in out, (
+            "the erased session is not named in the markdown header — stderr "
+            "is routinely discarded by a caller redirecting stdout")
+        assert "--no-dedup" in out, "the header must name the way to see them"
+
+    def test_a_PARTIALLY_suppressed_session_is_NOT_reported_as_erased(
+            self, tmp_path):
+        """Negative control — a session that still contributes a row is not a
+        gap, and reporting it as one would make the warning noise."""
+        _write_session(tmp_path, "proj-a", "s1",
+                       [_user(LEAK_TYPED, ts="2026-09-01T00:00:00Z")])
+        _write_session(tmp_path, "proj-a", "s2",
+                       [_user(LEAK_TYPED, ts="2026-09-01T00:00:01Z"),
+                        _user(LEAK_OTHER, ts="2026-09-01T00:00:02Z")])
+        rc, out, err = _run(["--session", "s1", "--session", "s2"], tmp_path)
+        assert rc == X.EXIT_OK
+        assert "ABSENT from this report" not in err
+        assert "ABSENT from this report" not in out
+
+
+class TestUnwritableOutputIsRefusedNotCrashed:
+    def test_a_bad_o_path_exits_2_rather_than_traceback(self, tmp_path):
+        _write_session(tmp_path, "proj-a", "s1", [_user(LEAK_TYPED)])
+        rc, _, err = _run(["--session", "s1", "-o",
+                           str(tmp_path / "no-such-dir" / "out.md")], tmp_path)
+        assert rc == X.EXIT_USAGE, (
+            "the extraction had already run; a traceback discards the result")
+        assert "no-such-dir" in err
+
+    def test_non_utf8_on_stdin_does_not_crash_the_ids_file_reader(self, tmp_path,
+                                                                  monkeypatch):
+        """`read_ids_file`'s docstring promises OSError -> exit 2. A
+        UnicodeDecodeError is a ValueError and escaped as a traceback."""
+        _write_session(tmp_path, "proj-a", "s1", [_user(LEAK_TYPED)])
+
+        class _Bin:
+            @staticmethod
+            def read():
+                return b"s1\n\xff\xfe-not-utf8\n"
+        monkeypatch.setattr(sys, "stdin",
+                            type("S", (), {"buffer": _Bin,
+                                           "read": staticmethod(lambda: "")})())
+        ids = X.read_ids_file("-")
+        assert "s1" in ids, ids
 
 
 class TestUnscopedWalk:

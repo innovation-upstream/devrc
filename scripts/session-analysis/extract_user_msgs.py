@@ -82,10 +82,20 @@ EXIT_NO_TRANSCRIPTS = 5
 #: Transcripts were read and yielded zero user-typed messages after filtering.
 EXIT_NO_MESSAGES = 6
 
+#: 🔴 EXIT 5 MEANS SOMETHING ELSE IN `find-session.py`, AND THIS TOOL IMPORTS
+#: THAT ONE. There, `EXIT_ARC_UNMEASURED = 5` — "the doc was named but NOT
+#: measured". Here that fact is exit 3, and 5 means "ids resolved to no
+#: transcript on this host". A script reading the number from the wrong tool
+#: gets a confident, wrong answer, and the coupling this PR introduced makes
+#: that MORE likely rather than less. Renumbering to match was rejected: 3/4
+#: must be adjacent to read as a pair, and moving `find-session`'s established
+#: 5 would break its own documented contract. So the divergence is DECLARED
+#: rather than hidden, here and in the reference's exit table.
 EXIT_CONTRACT = (
     (EXIT_OK, "messages were extracted"),
-    (EXIT_USAGE, "bad invocation — a flag conflict, or an --ids-file that "
-                 "could not be read. Nothing was searched."),
+    (EXIT_USAGE, "bad invocation — an --ids-file that could not be read or held "
+                 "no ids, or an -o path that could not be opened. Nothing was "
+                 "written."),
     (EXIT_ARC_UNMEASURED,
      "`--arc` ONLY: the seed named no handoff doc, or no $DEVRC/$HOMELAB/"
      "$DATAPACKET/$CIVITAI checkout holds it. 🔴 NOTHING WAS MEASURED — this "
@@ -266,9 +276,19 @@ def read_ids_file(path):
 
     Raises `OSError` — the caller turns that into exit 2, because an ids file
     that could not be read must never degrade into "no ids selected".
+
+    🔴 BOTH BRANCHES DECODE WITH `errors="replace"`. stdin used to decode
+    strictly, so non-UTF-8 on the pipe raised `UnicodeDecodeError` — a
+    `ValueError`, not an `OSError` — which escaped the caller's handler as a
+    traceback at rc 1 while this docstring promised exit 2. A session id is
+    ASCII in every runtime seen so far, so a replaced byte yields an id that
+    simply resolves to nothing and is REPORTED as unresolved, which is the
+    behaviour the file branch already had.
     """
     if path == "-":
-        text = sys.stdin.read()
+        data = sys.stdin.buffer.read() if hasattr(sys.stdin, "buffer") else None
+        text = (data.decode("utf-8", errors="replace") if data is not None
+                else sys.stdin.read())
     else:
         text = Path(path).read_text(errors="replace")
     out = []
@@ -330,17 +350,33 @@ def corpus_paths(root=None):
 # --------------------------------------------------------------------------- #
 # RENDERING
 # --------------------------------------------------------------------------- #
+def _longest_backtick_run(text):
+    """The longest run of backticks in `text`, so a fence can outgrow it."""
+    best = run = 0
+    for ch in text:
+        run = run + 1 if ch == "`" else 0
+        best = max(best, run)
+    return best
+
+
 def render_jsonl(rows, out):
     for r in rows:
         out.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
 def render_markdown(rows, out, title, notes=(), roles=None):
-    """Grouped by session, newest-typed-first WITHIN a session preserved.
+    """Grouped by session, oldest message first.
+
+    ⚠ This said "newest-typed-first WITHIN a session preserved" and the sort is
+    ASCENDING — oldest first — so it described the opposite order. Rows sharing
+    a timestamp keep file order; that is the only sense in which file order is
+    "preserved".
 
     Markdown is the DEFAULT because the answer is read by a human or pasted
     into a context window; `--jsonl` is the canonical machine form and carries
-    strictly more (every key, un-truncated).
+    every key un-truncated. ⚠ It does NOT carry more than markdown overall —
+    the coverage notes go to STDERR in both formats, which is what stops
+    `--jsonl` publishing a chain with its gaps missing.
     """
     roles = roles or {}
     by_session = {}
@@ -361,7 +397,15 @@ def render_markdown(rows, out, title, notes=(), roles=None):
         for i, r in enumerate(group, 1):
             stamp = (r.get("ts") or "")[:19].replace("T", " ") or "time UNMEASURED"
             out.write(f"### {i}. {stamp} · {r['kind']}\n\n")
-            out.write(r["text"].rstrip() + "\n\n")
+            # 🔴 FENCED, NOT RAW. The text is the operator's own prose and
+            # this is a structured document an AGENT reads: a message beginning
+            # `## `, `### ` or `> ` rendered raw becomes a session heading, a
+            # message heading or a coverage note. Fencing makes the boundary
+            # unambiguous in the one artifact whose whole job is to report what
+            # was said without editorialising it.
+            body = r["text"].rstrip()
+            fence = "`" * max(3, _longest_backtick_run(body) + 1)
+            out.write(f"{fence}\n{body}\n{fence}\n\n")
 
 
 # --------------------------------------------------------------------------- #
@@ -375,10 +419,10 @@ selectors (combinable; with NONE of them the WHOLE corpus is walked)
                         message names the doc.
       extract_user_msgs.py --arc handoff-cairn-phase3
       extract_user_msgs.py --arc claudedocs/handoff-cairn-phase3.md
-      extract_user_msgs.py --arc 8951d8f0-1064-4113-aae8-c9913f5ef5cb
+      extract_user_msgs.py --arc 00000000-1111-4222-8333-444444444444
 
   --session ID          one session. Repeatable.
-      extract_user_msgs.py --session 8951d8f0-1064-4113-aae8-c9913f5ef5cb
+      extract_user_msgs.py --session 00000000-1111-4222-8333-444444444444
       extract_user_msgs.py --session <id-a> --session <id-b>
 
   --ids-file PATH       one id per line; `#` comments and blanks skipped.
@@ -500,44 +544,112 @@ def main(argv=None):
                      "subagent transcripts are NOT included. Pass "
                      "--arc/--session/--ids-file to scope it.")
 
-    rows, seen, suppressed, unreadable = [], set(), 0, []
+    # 🔴 `opened` COUNTS TRANSCRIPTS ACTUALLY READ, NOT THE SELECTION SIZE. The
+    # exit-6 sentence asserts "the transcripts WERE read", and deriving it from
+    # `len(sources)` made that assertion false on two reachable inputs: an
+    # absent or empty `~/.claude/projects` (a fresh host, a different $HOME, a
+    # container, the nix sandbox) reported `read 0 transcript(s)` while
+    # affirming they were read, and a selection whose every file is unreadable
+    # reported `read 1` having opened none. A caller branching on 6 then
+    # concludes the exact opposite of the truth — which is the confusion the
+    # four-code contract exists to remove, on the one code with no other witness.
+    rows, seen, unreadable, opened = [], set(), [], 0
+    #: sid -> how many of its records dedup suppressed. A session whose EVERY
+    #: record is suppressed vanishes from the report entirely, and that must be
+    #: announced rather than inferred from a total.
+    suppressed_by = {}
     for sid, path in sources:
+        # 🔴 MATERIALISED INSIDE THE `try`, ON PURPOSE. `records_of` is a
+        # generator, so its `open()` runs on the first `next()`, not at the
+        # call — and an OSError from a MID-FILE read escapes at a different
+        # point from one at open. Consuming it here puts both inside one
+        # handler, and makes `opened` true of files that were read and held
+        # nothing, which is exactly the population exit 6 is about.
         try:
-            for rec in records_of(path, session_id=sid):
-                if not a.no_dedup:
-                    # 🔴 `kind` IS PART OF THE IDENTITY. A `/handoff` typed as
-                    # prose and a `/handoff` slash command are two different
-                    # events with the same text; a key that omits `kind` keeps
-                    # whichever the walk reached first and silently drops the
-                    # other. MEASURED over a frozen 974-transcript list: 7 rows
-                    # the previous implementation kept vanished this way.
-                    key = hashlib.md5(
-                        "\x1f".join((rec["project"], rec["kind"],
-                                     rec["text"])).encode()).hexdigest()
-                    if key in seen:
-                        suppressed += 1
-                        continue
-                    seen.add(key)
-                rec["arc_role"] = roles.get(sid)
-                rows.append(rec)
+            recs = list(records_of(path, session_id=sid))
         except OSError as exc:
             unreadable.append(f"{sid}: {exc}")
+            continue
+        opened += 1
+        for rec in recs:
+            if not a.no_dedup:
+                # 🔴 `kind` IS PART OF THE IDENTITY. A `/handoff` typed as
+                # prose and a `/handoff` slash command are two different
+                # events with the same text; a key that omits `kind` keeps
+                # whichever the walk reached first and silently drops the
+                # other. MEASURED over a frozen 974-transcript list: 7 rows
+                # the previous implementation kept vanished this way.
+                key = hashlib.md5(
+                    "\x1f".join((rec["project"], rec["kind"],
+                                 rec["text"])).encode()).hexdigest()
+                if key in seen:
+                    suppressed_by[sid] = suppressed_by.get(sid, 0) + 1
+                    continue
+                seen.add(key)
+            rec["arc_role"] = roles.get(sid)
+            rows.append(rec)
 
+    suppressed = sum(suppressed_by.values())
     if unreadable:
         print(f"! {len(unreadable)} transcript(s) could not be read: "
               + "; ".join(unreadable), file=err)
-        notes.append(f"{len(unreadable)} transcript(s) could not be read")
+        notes.append(f"{len(unreadable)} of {len(sources)} transcript(s) could "
+                     "NOT be read: " + "; ".join(unreadable))
+
+    # 🔴 A SESSION DEDUP ERASED COMPLETELY IS A GAP, NOT A TIDY-UP. Cross-session
+    # dedup is the point under `--arc` — the same kickoff pasted into every
+    # resumed session is noise — but a session whose every record was a repeat
+    # disappears from the report, and a reader then concludes it typed nothing.
+    # The module already holds itself to this standard for unresolved ids
+    # ("the markdown header MUST carry the gap too — stderr is routinely
+    # discarded by a caller redirecting stdout"); suppression is the same class.
+    emptied = sorted(sid for sid, n in suppressed_by.items()
+                     if not any(r["session_id"] == sid for r in rows))
+    if emptied:
+        note = (f"{len(emptied)} session(s) are ABSENT from this report because "
+                "dedup suppressed every one of their messages as a repeat of "
+                "another session's — they are not empty: " + " ".join(emptied)
+                + ". Pass --no-dedup to see them.")
+        print(f"! {note}", file=err)
+        notes.append(note)
 
     if not rows:
-        print(f"read {len(sources)} transcript(s) and found zero user-typed "
+        if not opened:
+            # NOT exit 6: nothing was read, so nothing was measured.
+            print(f"none of the {len(sources)} selected transcript(s) could be "
+                  "opened — 0 were read. 🔴 This is NOT 'the sessions are "
+                  "empty'; nothing was measured.", file=err)
+            return EXIT_NO_TRANSCRIPTS
+        print(f"read {opened} transcript(s) and found zero user-typed "
               "messages after filtering. 🔴 The transcripts WERE read — this "
               "is a measured emptiness, not an unresolved selector.", file=err)
         return EXIT_NO_MESSAGES
 
-    # Chronological across sessions, file order preserved within one.
+    # Oldest first across sessions; rows sharing a timestamp keep file order.
     rows.sort(key=lambda r: (r["ts"] == "", r["ts"]))
 
-    out = open(a.out, "w") if a.out else sys.stdout
+    # 🔴 EVERY NOTE GOES TO STDERR, IN EVERY FORMAT. They used to reach
+    # `render_markdown` ONLY, so `--jsonl` — the CANONICAL machine form, and the
+    # one the documented pipeline produces — emitted no coverage line, no
+    # `unmeasured_notes` and no UNSCOPED banner. That contradicted four shipped
+    # sentences at once, including this module's own "ALWAYS, INCLUDING WHEN IT
+    # IS ZERO" and the reference's "carries strictly more": it carried strictly
+    # LESS, and a chain rendered without its gaps reads as complete.
+    #
+    # stderr rather than a header RECORD, deliberately: `--jsonl` promises one
+    # canonical record per line and `| jq` must not have to skip a preamble.
+    for note in notes:
+        print(f"! {note}", file=err)
+
+    try:
+        out = open(a.out, "w") if a.out else sys.stdout
+    except OSError as exc:
+        # Guarded because the extraction has already RUN by this point — an
+        # unwritable path used to surface as a traceback at rc 1, discarding
+        # the whole result, from the `--jsonl -o <path>` shape this repo's own
+        # reproduce recipe uses.
+        print(f"-o {a.out!r}: {exc}", file=err)
+        return EXIT_USAGE
     try:
         if a.jsonl:
             render_jsonl(rows, out)
@@ -549,22 +661,29 @@ def main(argv=None):
         # reference doc BOTH show piped usage, so the traceback was reachable
         # from the documented invocation.
         #
-        # TWO failures, one symptom, and BOTH lines below are pinned by
-        # `TestPipingToHead`. This `except` handles the failed WRITE; the `dup2`
-        # handles CPython retrying the flush AT SHUTDOWN, which prints
-        # "Exception ignored … BrokenPipeError". Mutating either turns that
-        # class red — MEASURED over 20 runs: dup2 deleted => 20/20 red, dup2
-        # present => 0/20 red.
+        # TWO failures, one symptom. This `except` handles the failed WRITE and
+        # is pinned behaviourally by `TestPipingToHead`. The `dup2` handles
+        # CPython retrying the flush AT SHUTDOWN, which prints
+        # "Exception ignored … BrokenPipeError" to stderr.
         #
-        # ⚠ AN EARLIER REVISION OF THIS COMMENT SAID THE OPPOSITE — "NOT pinned,
-        # a mutant deleting this line SURVIVES the suite" — and that was wrong
-        # in the dangerous direction: it invited a maintainer to delete a
-        # load-bearing line, and told anyone who did to disregard the red. The
-        # error was not the measurement but its SCOPE: the single SURVIVED draw
-        # was taken against the WEAKER fixture this test had before it grew
-        # `CUT_POINTS` and 4 KB rows, and the claim was then written as if it
-        # applied to the strengthened one. A mutation result is a fact about the
-        # test AS IT STOOD; re-run the sweep after touching a fixture.
+        # 🔴 DO NOT WRITE A KILL RATE FOR THE `dup2` HERE. THREE HAVE BEEN
+        # WRITTEN AND ALL THREE WERE WRONG; IF YOU ARE ABOUT TO ADD A FOURTH,
+        # THAT IS THE MISTAKE. The three, in order: "NOT pinned — a mutant
+        # deleting it SURVIVES green" (one draw); "20/20 red" (20 draws); an
+        # independent audit's "22/40 red"; then 10/40 here. Same mutant, same
+        # test, controls clean every time (0/40). It is LOAD-DEPENDENT: whether
+        # the shutdown flush still holds data depends on TextIOWrapper buffer
+        # state at the moment the pipe closes, which varies with how far `head`
+        # got before exiting. There is no rate to find. Do not go looking for
+        # one — reaching for a better number is what regenerated this error
+        # twice.
+        #
+        # So the line is pinned STRUCTURALLY instead, by
+        # `test_the_shutdown_flush_is_silenced_by_redirecting_fd_1`: it asserts
+        # the redirect HAPPENS, which is deterministic. That is a weaker claim
+        # than "the stderr noise is gone" and is deliberately not dressed up as
+        # the stronger one — the observable consequence is real (seen at
+        # `--jsonl | head -5`) but cannot be asserted reliably.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return EXIT_OK
     finally:

@@ -30,14 +30,24 @@ two of the three are defects in the BATTERY, not in the code:
   * The first battery restored two of the three files it could touch and left a
     mutated `SKILL.md` in the tree. Restore covers every target, in a `finally`.
 
-🔴 AND ONE FINDING ABOUT MUTATION RESULTS THEMSELVES, which cost a wrong comment
-in the shipped source: row `P2` (delete `os.dup2`) was scored SURVIVED on a
-single draw taken against an EARLIER, weaker version of `TestPipingToHead` —
-before it grew `CUT_POINTS` and 4 KB rows — and the result was then written into
-the source as a property of the guard ("not pinned; a mutant deleting this line
-survives green"). Re-measured against the strengthened fixture: **20 of 20 red**.
-A mutation result is a fact about the test AS IT STOOD. Re-run this battery
-after touching a fixture; do not carry a verdict across that change.
+🔴 AND ONE FINDING ABOUT MUTATION RESULTS THEMSELVES — READ THIS BEFORE
+MEASURING `P2` AGAIN. Deleting `os.dup2` was scored, in order: SURVIVED (1 draw),
+20/20 red (20 draws), an independent audit's 22/40, then 10/40. Same mutant, same
+test, controls clean every time. It is LOAD-DEPENDENT — whether the shutdown
+flush still holds data depends on TextIOWrapper buffer state when the pipe
+closes, which depends on how far `head` got. **There is no rate to find. If you
+are about to write a fourth number, that is the mistake**; two of the three
+already shipped into source comments as properties of the guard, one of them
+telling maintainers a load-bearing line was uncovered.
+
+`P2` therefore no longer targets the flaky observable. It deletes the `dup2` and
+is killed by `test_the_shutdown_flush_is_silenced_by_redirecting_fd_1`, which
+asserts the redirect HAPPENS — deterministic. That is a weaker claim than "the
+stderr noise is gone" and is deliberately not dressed up as the stronger one.
+
+The general rule the episode is worth remembering for: a mutation result is a
+fact about the test AS IT STOOD. Re-run after touching a fixture; never carry a
+verdict across that change.
 
 READ BEFORE TRUSTING A VERDICT
 ------------------------------
@@ -79,7 +89,7 @@ SUITE = TESTS
 
 #: The dedup key, quoted once so the three key-component rows cannot drift apart.
 DEDUP_KEY = ('"\\x1f".join((rec["project"], rec["kind"],\n'
-             '                                     rec["text"])).encode()')
+             '                                 rec["text"])).encode()')
 
 #: `(id, kind, description, old, new, expected_test)`
 MUTANTS = [
@@ -102,8 +112,16 @@ MUTANTS = [
     ("E4", "replacement", "an unresolvable seed exits OK",
      "            return EXIT_ARC_UNMEASURED", "            return EXIT_OK",
      "test_3_a_seed_naming_no_doc_is_UNMEASURED"),
+    # 🔴 ANCHORED ON THE ENCLOSING GUARD. `return EXIT_NO_TRANSCRIPTS` occurs
+    # TWICE since the exit-6 fix added an opened-nothing branch, and a 2x anchor
+    # mutates a site this row does not name — caught by the anchors ledger.
     ("E5", "replacement", "ids resolving to no transcript exit OK",
-     "            return EXIT_NO_TRANSCRIPTS", "            return EXIT_OK",
+     '"was read — this is not \'the sessions are empty\' (that is "\n'
+     '                  f"exit {EXIT_NO_MESSAGES}).", file=err)\n'
+     "            return EXIT_NO_TRANSCRIPTS",
+     '"was read — this is not \'the sessions are empty\' (that is "\n'
+     '                  f"exit {EXIT_NO_MESSAGES}).", file=err)\n'
+     "            return EXIT_OK",
      "test_5_ids_that_resolve_to_nothing_read_NOTHING"),
     ("E6", "replacement", "transcripts holding nothing typed exit OK",
      "        return EXIT_NO_MESSAGES", "        return EXIT_OK",
@@ -121,7 +139,7 @@ MUTANTS = [
      'f"deduped={suppressed} out=', 'f"deduped=0 out=',
      "test_dedup_suppresses_a_repeat_and_REPORTS"),
     ("N4", "disable", "dedup never suppresses anything",
-     "                    if key in seen:", "                    if False:",
+     "                if key in seen:", "                if False:",
      "test_dedup_suppresses_a_repeat_and_REPORTS"),
     ("N5", "replacement", "the UNSCOPED banner stops saying it is unscoped",
      'notes.append(f"UNSCOPED: every session transcript',
@@ -179,11 +197,13 @@ MUTANTS = [
     ("P1", "replacement", "the except arm no longer catches BrokenPipeError",
      "    except BrokenPipeError:", "    except KeyboardInterrupt:",
      "test_a_closed_stdout_exits_quietly"),
+    # 🔴 NAMES THE DETERMINISTIC GUARD, NOT THE FLAKY ONE. Pointed at
+    # `test_a_closed_stdout_exits_quietly` this row was a coin flip across four
+    # measurements (see the header); the structural pin kills it every time.
     ("P2", "deletion", "the dup2 silencer removed — CPython then retries the "
-     "flush at shutdown. 🔴 SCORED SURVIVED ONCE, against the fixture that "
-     "predated CUT_POINTS; 20/20 red against the current one",
+     "flush at shutdown and prints 'Exception ignored … BrokenPipeError'",
      "        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())\n",
-     "", "test_a_closed_stdout_exits_quietly"),
+     "", "test_the_shutdown_flush_is_silenced_by_redirecting_fd_1"),
 
     # --- the --help contract --------------------------------------------------
     ("H1", "deletion", "an exit code disappears from --help",
@@ -199,7 +219,7 @@ MUTANTS = [
     # still satisfies. A mutant must violate the contract the named test states,
     # not merely edit near it.
     ("H3", "deletion", "--session loses EVERY example in --help",
-     "      extract_user_msgs.py --session 8951d8f0-1064-4113-aae8-c9913f5ef5cb\n"
+     "      extract_user_msgs.py --session 00000000-1111-4222-8333-444444444444\n"
      "      extract_user_msgs.py --session <id-a> --session <id-b>\n", "",
      "test_every_selector_has_at_least_one_example"),
 

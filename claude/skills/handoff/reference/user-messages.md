@@ -34,8 +34,19 @@ devrc corpus. So the third step had nothing to grep on, and the answer to "what
 did I ask for across this arc" was 54 MiB of everything, hand-read.
 
 ⚠ `--arc` is not faster in wall time; it is 322× smaller in what you have to
-read. Once you already hold the ids, `--session` extraction is **~0 s** — the
-whole 21 s is the arc resolver's own corpus walk for reader sessions.
+read. Once you already hold the ids, `--session` extraction is **~0 s**.
+
+⚠ **The 21 s is not all local.** `arc_report` → `archive_search` →
+`transcript_search.search_peers` **SSHes every configured peer host**
+(`ConnectTimeout=5`, `timeout=180`) and its `find-session: peer …` warnings land
+on this tool's stderr. So `--arc` has a network leg, it can be slower when a peer
+is unreachable, and an earlier version of this page attributed the whole 21 s to
+a local corpus walk. `--session` and `--ids-file` have no network leg at all.
+
+⚠ **Unscoped peak RSS is ~8.5× the pre-change tool** (24.8 MiB → 211.7 MiB on the
+same corpus): every record is buffered so rows can be sorted chronologically
+across sessions, where the old tool streamed straight to the file. Survivable
+today and it grows with the corpus; a selector avoids it entirely.
 
 ## Commands
 
@@ -45,7 +56,7 @@ E=~/workspace/devrc/scripts/session-analysis/extract_user_msgs.py
 # an arc — a slug, a basename, a path, or a SESSION ID that opened with the doc
 python3 $E --arc handoff-cairn-phase3
 python3 $E --arc claudedocs/handoff-cairn-phase3.md
-python3 $E --arc 8951d8f0-1064-4113-aae8-c9913f5ef5cb
+python3 $E --arc 00000000-1111-4222-8333-444444444444
 
 # named sessions; --session repeats
 python3 $E --session <id-a> --session <id-b> --jsonl -o ./msgs.jsonl
@@ -87,7 +98,7 @@ its reason on stderr.
 | code | meaning |
 |---|---|
 | 0 | messages were extracted |
-| 2 | bad invocation — a flag conflict, or an `--ids-file` that could not be read, or one holding no ids. **Nothing was searched.** |
+| 2 | bad invocation — an `--ids-file` that could not be read or held no ids, or an `-o` path that could not be opened. **Nothing was written.** |
 | 3 | `--arc` only: the seed named no handoff doc, or no `$DEVRC`/`$HOMELAB`/`$DATAPACKET`/`$CIVITAI` checkout holds it. 🔴 **NOTHING WAS MEASURED** — a typo in the name lands here, not on 4. |
 | 4 | `--arc` only: the doc resolved and the arc **was** measured, and it has zero member sessions. A **measured** empty arc — a real finding about the doc. |
 | 5 | session ids were selected and **none** resolved to a transcript on this host. Every unresolved id is named on stderr. Check the peer host before concluding the sessions are gone. |
@@ -96,6 +107,20 @@ its reason on stderr.
 The pair that matters most is **3 vs 4**: 3 means the instrument never ran, 4
 means it ran and the answer is zero. Treating them alike is the scoped-zero-as-
 absence mistake `handoff_arc` exists to refuse.
+
+🔴 **Exit 5 means something DIFFERENT in `find-session.py`, and this tool imports
+that one.** There `EXIT_ARC_UNMEASURED = 5` — *"the doc was named but not
+measured"*. Here that fact is **exit 3**, and 5 means *"ids resolved to no
+transcript on this host"*. A script reading the number off the wrong tool gets a
+confident wrong answer, and the coupling makes that more likely, not less.
+Renumbering was rejected — 3/4 must be adjacent to read as a pair, and moving
+`find-session`'s established 5 would break its own contract — so the divergence
+is declared rather than hidden. **Check which tool produced the number.**
+
+⚠ **Exit 6 is about what was READ, not what was selected.** An absent or empty
+`~/.claude/projects` (a fresh host, a different `$HOME`, a container, the nix
+sandbox) and a selection whose every file is unreadable both give **5**, not 6:
+nothing was opened, so nothing was measured.
 
 ## Output contract
 
@@ -122,6 +147,19 @@ the chain is complete. Under `--arc` the session heading carries the member's
 role (`originated` / `earliest-stamped` / `wrote` / `resumed`), which is
 `handoff_arc`'s vocabulary, not a second one.
 
+Each message body is **fenced**. The text is the operator's own prose and this is
+a structured document an agent reads: a message beginning `## ` or `> ` rendered
+raw would become a session heading or a coverage note.
+
+🔴 **Every coverage note also goes to STDERR, in BOTH formats** — prefixed `!`.
+It used to reach the markdown header only, so `--jsonl` (the canonical form, and
+the one the documented pipeline produces) emitted no coverage line, no
+`unmeasured_notes` and no `UNSCOPED` banner at all: it carried strictly *less*
+than markdown while three sentences here said the opposite. stderr rather than a
+header record, so `| jq` never has to skip a preamble. **If you redirect stderr
+to `/dev/null`, you are discarding the only statement of what the run could not
+see.**
+
 **`--jsonl`** is the canonical machine form — one record per line, every key
 always present:
 
@@ -146,6 +184,14 @@ noise, not five findings. `--no-dedup` keeps every repeat.
 The key is `(project, kind, text)`. **`kind` is load-bearing**: `/handoff` typed
 as prose and `/handoff` the slash command are two different events with the same
 text, and a key omitting `kind` keeps whichever the walk reached first.
+
+🔴 **The key has no `session_id`, so dedup reaches ACROSS sessions — and a session
+whose every message is a repeat of another's disappears from the report.** That
+is intended (a kickoff pasted into five resumed sessions is noise, not five
+findings) but it would let a reader conclude the session typed nothing. So an
+erased session is **named** — in the markdown header and on stderr — with a
+pointer to `--no-dedup`. A partially-suppressed session is not reported, because
+it still appears.
 
 ⚠ **This changed on 2026-09-25 and the unscoped total moved.** Commands used to
 dedup GLOBALLY while typed messages deduped per-project — an inconsistency that
