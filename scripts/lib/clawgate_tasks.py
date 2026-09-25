@@ -529,14 +529,37 @@ def _detail(count, open_rows, review_rows, stuck_rows):
 # --------------------------------------------------------------------------- #
 # Credentials (the only I/O in this module)
 # --------------------------------------------------------------------------- #
-def read_clawgate_env(path=None):
-    """`(base_url, token)` from ~/.claude/clawgate.env, read at CALL TIME.
+#: 🔴 THERE ARE TWO BASE URLS AND THEY ARE NOT SPARE SPELLINGS OF EACH OTHER.
+#: The task/board service was extracted out of the permission router, so the two
+#: run as two processes on two base URLs:
+#:
+#:   router side  — /api/attention, /api/tmux/*, /api/transcripts/*, /api/send
+#:   task side    — /api/tasks*,    /api/agents*, /agent/task*
+#:
+#: Repointing `CLAWGATE_API_URL` at the task service would be the obvious
+#: one-line "fix" and it would 404 the router group, which includes permission
+#: routing — the highest-traffic surface on the box. So the task service gets its
+#: OWN key in the SAME file, exactly as the CLI models it (clawgatectl's
+#: `envTaskAPIURL`/`baseURLFor`): the two names must not drift apart.
+#:
+#: ⚠ ORDER IS THE CONTRACT, not decoration. The specific key wins and
+#: `CLAWGATE_API_URL` is the FALLBACK, so a host that has not been told about the
+#: split resolves to exactly what it resolves to today — introducing this moves
+#: no request's destination. Swapping these two entries silently un-splits the
+#: services again; `test_the_task_url_ledger_is_ordered_specific_first` pins it.
+TASK_API_URL_VARS = ("CLAWGATE_TASK_API_URL", "CLAWGATE_API_URL")
 
-    🔴 The token is returned and nothing else. It is never logged, never put in
-    a URL or in argv, and never formatted into an exception here — a KeyError
-    names the missing VARIABLE, not its value. Callers keep their own failure
-    policy: the poller lets this raise (-> a `stale` marker), agent-ops swallows
-    it (-> no enrichment).
+#: The router side reads ONE key. Declared beside its twin so the two ledgers are
+#: read together and neither can quietly grow the other's name.
+ROUTER_API_URL_VARS = ("CLAWGATE_API_URL",)
+
+
+def _read_env_file(path=None):
+    """Parse `KEY=VALUE` out of the env file. The ONLY I/O in this module.
+
+    🔴 Private on purpose: the parsed mapping holds every credential in the file,
+    so it never leaves this module. Callers get the two derived strings they
+    asked for and nothing else.
     """
     path = os.path.expanduser(path or CLAWGATE_ENV_PATH)
     env = {}
@@ -547,10 +570,63 @@ def read_clawgate_env(path=None):
                 continue
             k, v = line.split("=", 1)
             env[k.strip()] = v.strip()
-    base = (env.get("CLAWGATE_API_URL") or DEFAULT_API_URL).rstrip("/")
+    return env
+
+
+def _base_from(env, names):
+    """First non-empty value among `names`, else the default. ONE implementation.
+
+    🔴 This is the whole precedence rule, spelled once. Open-coding it at a call
+    site is how this class of bug regenerates at N sites — and at N-1 of them in
+    the same direction. An empty value counts as unset (matching the shell's
+    `${A:-$B}`), so `CLAWGATE_TASK_API_URL=` falls through rather than resolving
+    to a bare path.
+    """
+    for name in names:
+        value = env.get(name)
+        if value:
+            return value.rstrip("/")
+    return DEFAULT_API_URL.rstrip("/")
+
+
+def _token(env):
+    """The hook token, or a KeyError naming the VARIABLE and not its value."""
     if "CLAWGATE_HOOK_TOKEN" not in env:
         raise KeyError("CLAWGATE_HOOK_TOKEN")
-    return base, env["CLAWGATE_HOOK_TOKEN"]
+    return env["CLAWGATE_HOOK_TOKEN"]
+
+
+def read_clawgate_env(path=None):
+    """`(router_base_url, token)` from ~/.claude/clawgate.env, read at CALL TIME.
+
+    🔴 ROUTER SIDE ONLY — /api/attention, /api/tmux/*, /api/transcripts/*,
+    /api/send. A task-side path built on this base reaches the wrong service.
+    Use `read_clawgate_task_env` for /api/tasks*, /api/agents* and /agent/task*.
+
+    🔴 The token is returned and nothing else. It is never logged, never put in
+    a URL or in argv, and never formatted into an exception here — a KeyError
+    names the missing VARIABLE, not its value. Callers keep their own failure
+    policy: the poller lets this raise (-> a `stale` marker), agent-ops swallows
+    it (-> no enrichment).
+    """
+    env = _read_env_file(path)
+    base = _base_from(env, ROUTER_API_URL_VARS)
+    return base, _token(env)
+
+
+def read_clawgate_task_env(path=None):
+    """`(task_base_url, token)` from ~/.claude/clawgate.env, read at CALL TIME.
+
+    🔴 TASK SIDE — /api/tasks*, /api/agents*, /agent/task*. Same file, same
+    token, same call-time read as `read_clawgate_env`; the ONLY difference is
+    which base URL comes back, and `TASK_API_URL_VARS` is the one place that
+    decides. `CLAWGATE_TASK_API_URL` unset resolves to whatever
+    `CLAWGATE_API_URL` resolves to, so this is safe on a host that never heard of
+    the split.
+    """
+    env = _read_env_file(path)
+    base = _base_from(env, TASK_API_URL_VARS)
+    return base, _token(env)
 
 
 def tasks_url(base: str) -> str:

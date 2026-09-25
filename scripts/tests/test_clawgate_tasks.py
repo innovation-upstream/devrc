@@ -896,6 +896,151 @@ def test_the_token_never_reaches_the_url(tmp_path):
     assert "sentinel-must-not-appear" not in url
 
 
+# --------------------------------------------------------------------------- #
+# §E2 — the router/task base-URL split
+#
+# 🔴 EVERY HOST AND PORT BELOW IS SYNTHETIC, PAIRWISE DISTINCT, AND DISTINCT FROM
+# `DEFAULT_API_URL`. That is load-bearing twice over. Distinct from each other,
+# so a mutant that reads the wrong KEY produces a different string instead of the
+# same one. Distinct from the default, so a mutant that ignores the env file and
+# hardcodes the constant cannot land on the expected value by construction — a
+# fixture that can only ever produce the constant's own value survives a fully
+# green suite. `.invalid` is reserved by RFC 6761 and can never resolve.
+# --------------------------------------------------------------------------- #
+ROUTER_URL = "http://router.invalid:9101"
+TASK_URL = "http://tasks.invalid:9102"
+ENV_TOKEN = "sentinel-split-token-3f7a91"
+
+
+def _split_env(tmp_path, *, router=ROUTER_URL, task=TASK_URL, name="clawgate.env"):
+    """An env file holding whichever of the two URLs the caller asked for."""
+    lines = []
+    if router is not None:
+        lines.append("CLAWGATE_API_URL=%s" % router)
+    if task is not None:
+        lines.append("CLAWGATE_TASK_API_URL=%s" % task)
+    lines.append("CLAWGATE_HOOK_TOKEN=%s" % ENV_TOKEN)
+    f = tmp_path / name
+    f.write_text("\n".join(lines) + "\n")
+    return str(f)
+
+
+def test_the_two_readers_resolve_to_the_two_DIFFERENT_services(tmp_path):
+    """🔴 THE DEFECT THIS FILE EXISTS TO PIN.
+
+    The task/board service was extracted out of the permission router, so
+    `/api/tasks` and `/api/send` live on two processes at two base URLs. Before
+    the split was modelled here, ONE reader served both and every task-side
+    caller built its URL on the ROUTER base.
+
+    ⚠ Measured when this landed: the router base still ANSWERED the task routes,
+    so the misrouting was latent — the right answer from the wrong service, which
+    turns into a hard failure when the carve finishes. That is precisely why this
+    is pinned by a test rather than left to a live probe: the live probe was
+    green while the code was wrong.
+
+    Both halves are asserted in one test on purpose: pinning only the
+    task side lets a "fix" that repoints BOTH readers at the task service pass,
+    and that breaks permission routing, which is the product.
+    """
+    f = _split_env(tmp_path)
+
+    task_base, task_token = cg.read_clawgate_task_env(f)
+    router_base, router_token = cg.read_clawgate_env(f)
+
+    assert task_base == TASK_URL, (
+        "read_clawgate_task_env must resolve CLAWGATE_TASK_API_URL (%s), got %r"
+        % (TASK_URL, task_base))
+    assert router_base == ROUTER_URL, (
+        "read_clawgate_env must stay on CLAWGATE_API_URL (%s), got %r"
+        % (ROUTER_URL, router_base))
+    assert task_base != router_base, \
+        "the two readers collapsed onto one base URL — the split is not modelled"
+    # The whole point is the URL a task-side caller ends up building.
+    assert cg.tasks_url(task_base) == TASK_URL + cg.TASKS_PATH
+    assert cg.tasks_url(task_base) != cg.tasks_url(router_base)
+    # One file, one credential: the split is about routing, not about secrets.
+    assert task_token == router_token == ENV_TOKEN
+
+
+def test_the_task_url_falls_back_to_the_router_url_when_unset(tmp_path):
+    """⚠ THE FALLBACK IS WHAT MAKES THIS SAFE TO LAND.
+
+    A host that has not been told about the split has only `CLAWGATE_API_URL`.
+    It must keep resolving to exactly that — introducing the second variable
+    moves no request's destination until someone sets it.
+    """
+    f = _split_env(tmp_path, task=None)
+    task_base, _ = cg.read_clawgate_task_env(f)
+    router_base, _ = cg.read_clawgate_env(f)
+    assert task_base == router_base == ROUTER_URL, (
+        "with CLAWGATE_TASK_API_URL unset the task base must fall back to the "
+        "router base %s, got %r" % (ROUTER_URL, task_base))
+    assert task_base != cg.DEFAULT_API_URL, \
+        "the fallback skipped CLAWGATE_API_URL and went straight to the default"
+
+
+def test_an_empty_task_url_falls_through_like_the_shell_does(tmp_path):
+    # `CLAWGATE_TASK_API_URL=` is how a half-written env file looks. Resolving it
+    # to "" would build `/api/tasks?summary=1` — a bare path urlopen rejects with
+    # an error naming neither variable. `${A:-$B}` treats empty as unset; so does
+    # this.
+    f = _split_env(tmp_path, task="")
+    task_base, _ = cg.read_clawgate_task_env(f)
+    assert task_base == ROUTER_URL
+
+
+def test_the_task_url_defaults_when_NEITHER_variable_is_set(tmp_path):
+    f = _split_env(tmp_path, router=None, task=None)
+    task_base, _ = cg.read_clawgate_task_env(f)
+    assert task_base == cg.DEFAULT_API_URL
+
+
+def test_the_task_url_is_stripped_of_a_trailing_slash(tmp_path):
+    # tasks_url() rstrips too, but only because it is handed a base. The reader
+    # is the one place a caller that never touches tasks_url also goes through.
+    f = _split_env(tmp_path, task=TASK_URL + "/")
+    task_base, _ = cg.read_clawgate_task_env(f)
+    assert task_base == TASK_URL
+
+
+def test_the_task_url_ledger_is_ordered_specific_first():
+    """🔴 ORDER IS THE CONTRACT. Swapping these two entries makes
+    `CLAWGATE_API_URL` win whenever it is set — which on the operator's box is
+    always — silently un-splitting the services while every URL still looks
+    well-formed. Pinned as a whole tuple, not as a membership check.
+    """
+    assert cg.TASK_API_URL_VARS == ("CLAWGATE_TASK_API_URL", "CLAWGATE_API_URL")
+    assert cg.ROUTER_API_URL_VARS == ("CLAWGATE_API_URL",)
+    # The router ledger must NOT grow the task name: that is the repoint the
+    # comment in the module forbids, and it would 404 /api/send.
+    assert "CLAWGATE_TASK_API_URL" not in cg.ROUTER_API_URL_VARS
+
+
+def test_the_task_reader_raises_naming_the_variable_not_a_value(tmp_path):
+    """Same two-sided leak claim as the router reader — the task reader parses
+    the SAME file, so it sees the same credentials and must be just as quiet."""
+    f = tmp_path / "clawgate.env"
+    f.write_text("CLAWGATE_TASK_API_URL=%s\n" % TASK_URL +
+                 "CLAWGATE_HOOK_TOKN=sentinel-task-typo-key-1e60bc\n"
+                 "UNRELATED_API_KEY=sentinel-task-unrelated-5a2d74\n")
+    with pytest.raises(KeyError) as ei:
+        cg.read_clawgate_task_env(str(f))
+    text = str(ei.value)
+    assert "CLAWGATE_HOOK_TOKEN" in text
+    for secret in ("sentinel-task-typo-key-1e60bc",
+                   "sentinel-task-unrelated-5a2d74"):
+        assert secret not in text, \
+            "read_clawgate_task_env leaked a value from the env file"
+
+
+def test_the_task_token_never_reaches_the_task_url(tmp_path):
+    f = _split_env(tmp_path)
+    base, token = cg.read_clawgate_task_env(f)
+    assert token == ENV_TOKEN
+    assert ENV_TOKEN not in cg.tasks_url(base)
+
+
 def test_tasks_url_uses_the_summary_form():
     # 🔴 Item 4: 190,385 bytes -> 7,058 on the live board (27x), measured
     # against 0.7.86. `?summary=1` swaps `body` for commentCount/attachmentCount
