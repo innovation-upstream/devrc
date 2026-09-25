@@ -75,6 +75,12 @@ BATTERIES = (
     # Spans THREE files (resume-state.sh, the ceiling test module, and the
     # shared handoff-name predicate it borrows), so it declares `TARGETS`.
     "mutation_battery_handoff_archive_and_cap.py",
+    # Spans FOUR files (the extractor, its suite's fixture-bearing
+    # prose, the handoff reference doc and /resume's routing row), so
+    # it declares `TARGETS`. Its routing rows mutate PROSE in two
+    # different skills — a section-level mapping would bucket them
+    # together and score one against the other's suite.
+    "mutation_battery_extract_user_msgs.py",
 )
 
 # 🔴 PYTHON MUTATION INSTRUMENTS THIS MODULE CANNOT PIN, each with its reason.

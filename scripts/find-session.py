@@ -1179,16 +1179,40 @@ def render_arc(report, unresolved_note=None):
     return "\n".join(out)
 
 
-def run_arc(a):
-    """Resolve and print one arc. Returns an exit code."""
-    basename = a.arc
+class ArcUnmeasured(RuntimeError):
+    """No repo handle holds the doc — NOT 'the arc is empty'.
+
+    Raised rather than returning an empty report for the reason
+    `handoff_arc.GitUnavailable` exists: an unmeasurable arc and an empty one
+    produce the same zero, and every caller has to be able to tell them apart.
+    The message is the operator-facing sentence; a caller may print it verbatim.
+    """
+
+
+def arc_report(basename, stderr=None):
+    """Resolve one arc to a fully-annotated `handoff_arc.ArcReport`.
+
+    🔴 THE ARC GLUE LIVES HERE AND NOWHERE ELSE. Resolving an arc is four steps
+    that must happen together — find the repo that owns the doc, walk the corpus
+    for readers, `resolve_arc`, then append the note naming the corpus the walk
+    did NOT search — and every one of them is a claim about coverage. A second
+    consumer that re-spelled any part of it would publish a chain that looks
+    complete and is not, which is the exact defect `ArcReport`'s gap fields exist
+    to refuse. `run_arc` below renders this; `scripts/session-analysis/
+    extract_user_msgs.py` imports it to scope an extraction to the same sessions.
+
+    Raises `ArcUnmeasured` when no repo handle holds the doc. Returns a report
+    whose `members` may legitimately be empty — that is a MEASURED empty arc, a
+    different fact, and the caller must distinguish the two.
+    """
+    err = stderr if stderr is not None else sys.stderr
     repo, rel = arc_repo_for(basename)
     if repo is None:
-        print(f"--arc: no repo handle holds claudedocs/{basename}. 🔴 This is "
-              "NOT 'the arc is empty' — it means every $DEVRC/$HOMELAB/"
-              "$DATAPACKET/$CIVITAI checkout this shell can see lacks the doc, "
-              "so nothing was measured at all.", file=sys.stderr)
-        return EXIT_ARC_UNMEASURED
+        raise ArcUnmeasured(
+            f"no repo handle holds claudedocs/{basename}. 🔴 This is NOT 'the "
+            "arc is empty' — it means every $DEVRC/$HOMELAB/$DATAPACKET/"
+            "$CIVITAI checkout this shell can see lacks the doc, so nothing "
+            "was measured at all.")
 
     # The reader half: walk the corpus for the doc name, then keep only the
     # sessions that OPENED with it. Terms are replaced deliberately — an arc
@@ -1200,7 +1224,7 @@ def run_arc(a):
         reader_rows = [render(r) for r in rows]
         readers_measured = True
     except Exception as exc:                      # noqa: BLE001
-        print(f"(the transcript walk failed: {exc})", file=sys.stderr)
+        print(f"(the transcript walk failed: {exc})", file=err)
 
     report = handoff_arc.resolve_arc(repo, rel, reader_rows=reader_rows,
                                      readers_measured=readers_measured)
@@ -1215,6 +1239,17 @@ def run_arc(a):
             "the opencode corpus was NOT searched for readers (the arc walk is "
             "--claude-only, because a resume command is runtime-specific), so an "
             "opencode session that resumed this doc is NOT in this chain")
+    return report
+
+
+def run_arc(a):
+    """Resolve and print one arc. Returns an exit code."""
+    basename = a.arc
+    try:
+        report = arc_report(basename)
+    except ArcUnmeasured as exc:
+        print(f"--arc: {exc}", file=sys.stderr)
+        return EXIT_ARC_UNMEASURED
     if a.json:
         print(json.dumps({
             "doc": report.doc,
