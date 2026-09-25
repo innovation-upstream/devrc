@@ -1023,9 +1023,17 @@ def _clawgate_creds():
     module — one reader, so session-manager and this poller cannot disagree about
     where the credential comes from or what the default base is.
 
-    🔴 THE *TASK* READER, NOT THE ROUTER ONE. `/api/tasks` moved to the extracted
-    task service when it was carved out of the permission router; the router base
-    (`CLAWGATE_API_URL`) still serves /api/send and friends and answers 404 here.
+    🔴 THE *TASK* READER, NOT THE ROUTER ONE. `/api/tasks` is a task-side route
+    and belongs on the extracted task service's base URL.
+
+    ⚠ Measured when this landed: the ROUTER base still answered `/api/tasks` 200,
+    so pointing the poll at the router was not yet a visible failure — it was the
+    right answer from the wrong service, and it becomes a hard one the moment the
+    carve finishes and the router drops the route. Do NOT read a green poll as
+    evidence the base is correct. What the same probe DID show is that the two
+    are genuinely different services: the task base answers `/api/attention` 404,
+    which is why repointing `CLAWGATE_API_URL` instead would break /api/send.
+
     `CG.TASK_API_URL_VARS` holds the precedence — unset `CLAWGATE_TASK_API_URL`
     falls back to the router base, i.e. exactly the old destination.
     """

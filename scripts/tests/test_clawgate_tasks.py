@@ -931,8 +931,15 @@ def test_the_two_readers_resolve_to_the_two_DIFFERENT_services(tmp_path):
     The task/board service was extracted out of the permission router, so
     `/api/tasks` and `/api/send` live on two processes at two base URLs. Before
     the split was modelled here, ONE reader served both and every task-side
-    caller built its URL on the ROUTER base — a 404 against a live-looking
-    config. Both halves are asserted in one test on purpose: pinning only the
+    caller built its URL on the ROUTER base.
+
+    ⚠ Measured when this landed: the router base still ANSWERED the task routes,
+    so the misrouting was latent — the right answer from the wrong service, which
+    turns into a hard failure when the carve finishes. That is precisely why this
+    is pinned by a test rather than left to a live probe: the live probe was
+    green while the code was wrong.
+
+    Both halves are asserted in one test on purpose: pinning only the
     task side lets a "fix" that repoints BOTH readers at the task service pass,
     and that breaks permission routing, which is the product.
     """

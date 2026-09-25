@@ -245,9 +245,13 @@ def _seam_env(tmp_path, monkeypatch, *, router=SEAM_ROUTER_URL, task=SEAM_TASK_U
 
 def test_the_poller_fetches_the_board_from_the_TASK_service_not_the_router(
         tmp_path, monkeypatch):
-    """🔴 THE SHIPPED DEFECT. `/api/tasks` moved to the extracted task service;
-    the poller was building it on the router base, so every 45s tick asked the
-    permission router for a board it no longer serves."""
+    """🔴 THE SHIPPED DEFECT. `/api/tasks` is a task-side route and the poller
+    was building it on the ROUTER base, so every 45s tick asked the permission
+    router for a board that belongs to the extracted task service.
+
+    ⚠ Measured when this landed: the router still answered, so the bar was green
+    the whole time. A live probe could not have caught this; only pinning WHICH
+    base the poller resolves can."""
     seen = _seam_env(tmp_path, monkeypatch)
     poll.fetch_clawgate()
     assert seen["url"].startswith(SEAM_TASK_URL), (
