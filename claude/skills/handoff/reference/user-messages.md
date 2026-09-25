@@ -162,15 +162,25 @@ change were neither. Over 975 transcripts and 19,406 pre-dedup records:
 superset** of the old — nothing that used to be kept is now dropped. That
 superset property is the claim worth carrying; the +19 is one corpus on one day.
 
-## Where it reaches the corpus, and why twice
+## Where it reaches the corpus — one rule, one place
 
-- **Selected** sessions resolve through `transcript_search.find_transcript` —
-  the one by-id lookup, which applies `is_corpus_member` and so refuses a
-  `subagents/` transcript. A subagent is not a session anybody typed into.
-- The **unscoped** walk keeps its own glob and still wants every `.jsonl`
-  including `subagents/`, which is why it stays registered as its own
-  `ENUMERATING` site in `scripts/tests/test_transcript_search.py`'s
-  `JSONL_GLOB_SITES` ledger.
+Both paths go through `scripts/lib/transcript_search.py`: selected sessions via
+`find_transcript`, the unscoped walk via `iter_transcripts`. Both apply
+`is_corpus_member`, so a `subagents/` transcript is excluded either way — a
+subagent is not a session anybody typed into.
+
+**So the unscoped walk is every SESSION transcript, not every `.jsonl`.** On this
+host that is ~975 of ~6,656 files; the other ~5,681 are subagent transcripts.
+If you need those, this is the wrong tool — `scripts/audit-rule-firing-sweep.py`
+is the one that deliberately wants both tiers.
+
+⚠ Retracted 2026-09-25, recorded so nobody re-derives it: the tool used to keep
+a private glob justified as *"the unscoped walk wants every `.jsonl` including
+`subagents/`"*. That was false in four places at once — two docstrings, the
+`JSONL_GLOB_SITES` ledger reason, and the line the tool **printed on every
+unscoped run** — and the private walk had never included one (measured: 0 of
+5,681). It was also the *narrower* copy, checking only the immediate parent dir
+where `is_corpus_member` checks every parent part.
 
 ## 🔴 The output is the operator's own words
 

@@ -35,14 +35,19 @@ resolved to no transcript" and "the transcripts held no typed message". Those
 are four different facts with four different fixes, so they get four different
 exit codes and a reason on stderr. See `EXIT_CONTRACT`.
 
-TWO WAYS THE CORPUS IS REACHED, DELIBERATELY
---------------------------------------------
-  * SELECTED sessions resolve through `transcript_search.find_transcript` — the
-    one by-id lookup, which applies `is_corpus_member` and so refuses a
-    `subagents/` transcript. A subagent is not a session anybody typed into.
-  * The UNSCOPED walk keeps its own glob and still wants EVERY jsonl including
-    `subagents/`, which is why it is registered as its own ENUMERATING site in
-    `scripts/tests/test_transcript_search.py`'s `JSONL_GLOB_SITES` ledger.
+HOW THE CORPUS IS REACHED — ONE RULE, ONE PLACE
+-----------------------------------------------
+Both paths go through `scripts/lib/transcript_search.py`: selected sessions via
+`find_transcript` (the by-id lookup), the unscoped walk via `iter_transcripts`.
+Both apply `is_corpus_member`, so a `subagents/` transcript is excluded either
+way — a subagent is not a session anybody typed into.
+
+⚠ RETRACTED 2026-09-25, DO NOT RE-DERIVE: this file used to keep a PRIVATE glob
+here "because the unscoped walk wants EVERY jsonl including `subagents/`". That
+sentence was false in four places at once — here, on `corpus_paths`, in the
+`JSONL_GLOB_SITES` ledger, and in the line the tool PRINTED on every unscoped
+run — and the private walk had never included a single subagent transcript
+(measured: 0 of 5,681). See `corpus_paths` for the mechanism.
 """
 import argparse
 import hashlib
@@ -56,7 +61,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS / "lib"))
 
-from transcript_search import find_transcript  # noqa: E402
+from transcript_search import find_transcript, iter_transcripts  # noqa: E402
 
 ROOT = os.path.expanduser("~/.claude/projects")
 
@@ -167,11 +172,15 @@ def message_of(raw):
     return ("typed", txt)
 
 
-def records_of(path, session_id=None, project=None):
-    """Yield `{session_id, project, ts, kind, text}` for one transcript file."""
+def records_of(path, session_id=None):
+    """Yield `{session_id, project, ts, kind, text}` for one transcript file.
+
+    `project` is always derived from the path — it had a parameter that no
+    caller and no test ever passed.
+    """
     path = Path(path)
     session_id = session_id if session_id is not None else path.stem
-    project = project if project is not None else path.parent.name
+    project = path.parent.name
     with open(path, errors="replace") as f:
         for line in f:
             line = line.strip()
@@ -292,22 +301,30 @@ def resolve_sessions(ids, root=None):
 
 
 def corpus_paths(root=None):
-    """Every transcript in the corpus, subagents INCLUDED — the unscoped walk.
+    """Every session transcript in the corpus — the unscoped walk.
 
-    Kept as its own glob rather than routed through `transcript_search`: the
-    shared walk excludes `subagents/` because a subagent is not a resumable
-    session, which is right for `/find-session` and wrong for a corpus-wide
-    dump that is trying to see everything. Registered with that reason in
-    `JSONL_GLOB_SITES`.
+    🔴 THE SHARED ENUMERATOR, NOT A GLOB OF OUR OWN, AND THE PRIVATE ONE THIS
+    REPLACED CARRIED A FALSE REASON FOR EXISTING. It open-coded exactly the two
+    rules `transcript_search.is_corpus_member` owns — skip a `subagents` dir,
+    skip a `wf_` prefix — while `JSONL_GLOB_SITES`, this function's docstring,
+    the module docstring and the line the tool PRINTS on every unscoped run all
+    said it kept its own walk because it "wants EVERY jsonl including
+    subagents". MEASURED 2026-09-25: of 5,681 transcripts whose parent dir IS
+    `subagents`, the private walk included **0**. It had never included one; a
+    real subagent transcript sits at `<project>/<id>/subagents/agent-*.jsonl`,
+    so its immediate parent is literally `subagents` and the very check that
+    was supposed to let them through is what dropped them.
+
+    Worse, the private copy was the NARROWER of the two: it tested only
+    `path.parent.name`, where `is_corpus_member` tests every parent part. A
+    transcript nested one level below a `subagents/` dir passed the private
+    check and fails the shared one — so routing here both deletes a duplicated
+    predicate and fixes the direction it was wrong in.
+
+    The two-way `JSONL_GLOB_SITES` ledger entry and the `scripts/README.md`
+    prose row went with it, which is what that ledger is for.
     """
-    base = Path(root if root is not None else ROOT)
-    out = []
-    for path in sorted(base.glob("**/*.jsonl")):
-        project = path.parent.name
-        if project == "subagents" or project.startswith("wf_"):
-            continue
-        out.append(path)
-    return out
+    return list(iter_transcripts(root=root if root is not None else ROOT))
 
 
 # --------------------------------------------------------------------------- #
@@ -479,7 +496,8 @@ def main(argv=None):
     else:
         sources = [(p.stem, p) for p in corpus_paths(root=root)]
         title = f"user messages — WHOLE corpus ({len(sources)} transcripts)"
-        notes.append("UNSCOPED: the whole corpus, subagents included. Pass "
+        notes.append(f"UNSCOPED: every session transcript ({len(sources)}) — "
+                     "subagent transcripts are NOT included. Pass "
                      "--arc/--session/--ids-file to scope it.")
 
     rows, seen, suppressed, unreadable = [], set(), 0, []
@@ -531,20 +549,22 @@ def main(argv=None):
         # reference doc BOTH show piped usage, so the traceback was reachable
         # from the documented invocation.
         #
-        # TWO failures, one symptom. This `except` handles the failed WRITE and
-        # is pinned by `test_a_closed_stdout_exits_quietly` (mutated: replacing
-        # the exception type turns it red). The `dup2` below handles the SECOND
-        # one — CPython retries the flush AT SHUTDOWN and prints "Exception
-        # ignored … BrokenPipeError". MEASURED on the live corpus: removing it
-        # emits 124 bytes on stderr at `--jsonl | head -5`, and 0 bytes at
-        # `head -1`.
+        # TWO failures, one symptom, and BOTH lines below are pinned by
+        # `TestPipingToHead`. This `except` handles the failed WRITE; the `dup2`
+        # handles CPython retrying the flush AT SHUTDOWN, which prints
+        # "Exception ignored … BrokenPipeError". Mutating either turns that
+        # class red — MEASURED over 20 runs: dup2 deleted => 20/20 red, dup2
+        # present => 0/20 red.
         #
-        # ⚠ AND IT IS NOT PINNED, SAID PLAINLY RATHER THAN IMPLIED. Whether the
-        # shutdown flush has anything left depends on TextIOWrapper buffer state
-        # at the moment the pipe closes, so a synthetic fixture does not
-        # reproduce it reliably: a mutant deleting this line SURVIVES the suite.
-        # It is kept on a live measurement, not on a test — do not read the test
-        # beside it as covering this line.
+        # ⚠ AN EARLIER REVISION OF THIS COMMENT SAID THE OPPOSITE — "NOT pinned,
+        # a mutant deleting this line SURVIVES the suite" — and that was wrong
+        # in the dangerous direction: it invited a maintainer to delete a
+        # load-bearing line, and told anyone who did to disregard the red. The
+        # error was not the measurement but its SCOPE: the single SURVIVED draw
+        # was taken against the WEAKER fixture this test had before it grew
+        # `CUT_POINTS` and 4 KB rows, and the claim was then written as if it
+        # applied to the strengthened one. A mutation result is a fact about the
+        # test AS IT STOOD; re-run the sweep after touching a fixture.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return EXIT_OK
     finally:

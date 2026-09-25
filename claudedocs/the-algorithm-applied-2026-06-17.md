@@ -108,7 +108,9 @@ We have a **low-error (1.7%), heavily-tooled, prod-ops-dominated** practice whos
 ### Appendix — reproduce
 ```bash
 # on each host:
-python3 ~/workspace/devrc/scripts/session-analysis/extract_user_msgs.py /tmp/msgs_<host>.jsonl
+# ⚠ the positional output path was REMOVED 2026-09-25 (devrc #1870); use -o --jsonl.
+python3 ~/workspace/devrc/scripts/session-analysis/extract_user_msgs.py \
+  --jsonl -o /tmp/msgs_<host>.jsonl
 python3 ~/workspace/devrc/scripts/session-analysis/extract_genesis.py   /tmp/genesis_<host>.jsonl
 # combine + analyze:
 python3 /tmp/algo_analyze.py   # (scp laptop files back first)

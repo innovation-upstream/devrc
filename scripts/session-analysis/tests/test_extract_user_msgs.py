@@ -503,17 +503,20 @@ class TestPipingToHead:
     its own documented pipeline teaches the reader the pipeline is wrong."""
 
     #: Two cut points, because there are TWO failures behind one symptom: the
-    #: failed WRITE, and CPython's retry of the flush AT SHUTDOWN.
+    #: failed WRITE (the `except BrokenPipeError` arm) and CPython's retry of
+    #: the flush AT SHUTDOWN (the `os.dup2` beside it). This class pins BOTH —
+    #: MEASURED over 20 runs each: dup2 deleted => 20/20 red, dup2 present =>
+    #: 0/20 red; mutating the exception type is likewise red.
     #:
-    #: 🔴 WHAT THIS CLASS DOES AND DOES NOT COVER. It pins the `except
-    #: BrokenPipeError` arm — mutating the exception type turns it red. It does
-    #: NOT pin the `dup2` beside it: whether the shutdown flush has anything
-    #: left depends on TextIOWrapper buffer state when the pipe closes, and a
-    #: synthetic fixture does not reproduce that. MEASURED — deleting the `dup2`
-    #: SURVIVES this suite green, while on the live corpus it emits 124 bytes of
-    #: "Exception ignored … BrokenPipeError" at `--jsonl | head -5` (and 0 at
-    #: `head -1`). Stated rather than implied: a reader must not take this class
-    #: as certifying that line. The source comment says the same.
+    #: 🔴 THE 4 KB ROWS ARE LOAD-BEARING, NOT PADDING. With short rows the
+    #: failed write drains the buffer, nothing is left for the shutdown flush,
+    #: and the dup2 mutant SURVIVES. An earlier revision of this comment
+    #: recorded exactly that survival as a property of the guard — it was a
+    #: single draw against the WEAKER fixture that predated `CUT_POINTS`, and
+    #: the claim was written as if it applied to this one. It shipped a comment
+    #: telling maintainers a load-bearing line was uncovered. **Re-run the sweep
+    #: after touching this fixture; a mutation result is a fact about the test
+    #: as it stood, and does not survive a change to what it feeds.**
     CUT_POINTS = (1, 5)
 
     def _pipe_to_head(self, tmp_path, n, *extra):
@@ -559,20 +562,41 @@ class TestUnscopedWalk:
             "a corpus-wide answer that does not announce itself is the 54 MiB "
             "run reading as a scoped one")
 
-    def test_the_unscoped_walk_still_sees_subagents(self, tmp_path):
-        """The reason it keeps its own glob rather than routing through
-        `transcript_search`, and the reason its `JSONL_GLOB_SITES` entry says
-        'wants EVERY jsonl including subagents'."""
-        _write_session(tmp_path, "proj-a/sess-1", "subagent-x",
+    def test_a_REAL_shaped_subagent_transcript_is_excluded(self, tmp_path):
+        """🔴 THE FIXTURE SHAPE IS THE WHOLE TEST, and the version this replaces
+        got it wrong. It wrote `<root>/proj-a/sess-1/subagent-x.jsonl` — parent
+        dir `sess-1` — and asserted the walk INCLUDED it, which it did, because
+        nothing there is named `subagents`. A real subagent transcript lives at
+        `<project>/<session-id>/subagents/agent-*.jsonl`, so its parent IS
+        `subagents` and it was always excluded. The old test therefore asserted
+        a shape the corpus does not have, and read as coverage for a claim
+        (`the unscoped walk sees subagents`) that was false: MEASURED on the
+        live corpus, 0 of 5,681 such transcripts were included."""
+        _write_session(tmp_path, "proj-a/sess-1/subagents", "agent-aa845366",
                        [_user(LEAK_TYPED)])
-        paths = X.corpus_paths(root=tmp_path)
-        assert any(p.stem == "subagent-x" for p in paths)
+        _write_session(tmp_path, "proj-a", "sess-1", [_user(LEAK_OTHER)])
+        assert [p.stem for p in X.corpus_paths(root=tmp_path)] == ["sess-1"]
 
-    def test_a_literal_subagents_dir_and_wf_dirs_are_still_skipped(self, tmp_path):
+    def test_a_literal_subagents_dir_and_wf_dirs_are_skipped(self, tmp_path):
         _write_session(tmp_path, "subagents", "agent-1", [_user(LEAK_TYPED)])
         _write_session(tmp_path, "wf_123", "run-1", [_user(LEAK_OTHER)])
         _write_session(tmp_path, "proj-a", "sess-1", [_user("kept")])
         assert [p.stem for p in X.corpus_paths(root=tmp_path)] == ["sess-1"]
+
+    def test_the_walk_IS_the_shared_enumerator_not_a_second_copy(self, tmp_path):
+        """One rule, one place — asserted behaviourally, over the shape that
+        separated the two: the private copy tested only the IMMEDIATE parent, so
+        a transcript nested BELOW a `subagents/` dir passed it and fails
+        `is_corpus_member`, which tests every parent part."""
+        import transcript_search
+        _write_session(tmp_path, "proj-a/sess-1/subagents/nested", "agent-9",
+                       [_user(LEAK_TYPED)])
+        _write_session(tmp_path, "proj-a", "sess-1", [_user(LEAK_OTHER)])
+        assert X.corpus_paths(root=tmp_path) == list(
+            transcript_search.iter_transcripts(root=tmp_path))
+        assert [p.stem for p in X.corpus_paths(root=tmp_path)] == ["sess-1"], (
+            "a transcript nested below a subagents/ dir must be excluded — the "
+            "private walk this replaced included it")
 
     def test_the_walk_is_SORTED_so_a_run_is_deterministic(self, tmp_path):
         for name in ("sess-c", "sess-a", "sess-b"):
@@ -724,20 +748,48 @@ class TestTheReferenceDocIsRoutedAndDeployed:
             f"the reference's exit table lists {sorted(rows)}; the tool "
             f"defines {sorted(c for c, _ in X.EXIT_CONTRACT)}")
 
-    def test_the_reference_names_the_three_vs_four_distinction(self):
-        """The one thing a reader must not miss: which zero they are holding."""
-        text = REFERENCE.read_text(encoding="utf-8")
-        assert "3 vs 4" in text or "3 vs. 4" in text
+    def test_the_reference_carries_a_MEASURED_cost_not_a_vague_one(self):
+        """🔴 PINS THE SHAPE, NOT THE DIGITS — and the version this replaces
+        pinned the digits. It required the literal `54.1 MiB`, `13,768` and
+        `974`, two of which are LIVE-CORPUS counts that drift by design (the
+        doc says so in its own caveat). So the only thing it could ever fire on
+        was somebody CORRECTLY re-measuring: it went red on the right action
+        and green on a stale number, which is backwards. It was already stale
+        when written — the corpus read 13,780 the same day.
 
-    def test_the_reference_carries_the_measured_cost_it_removes(self):
+        What must hold is that the claim is anchored: the word MEASURED, a
+        date, a byte figure and a transcript count, in a table. The values are
+        the author's to update."""
+        import re
         text = REFERENCE.read_text(encoding="utf-8")
-        for token in ("54.1 MiB", "13,768", "974", "MEASURED"):
-            assert token in text, f"the measurement lost its {token!r}"
+        assert "MEASURED" in text, "the cost claim lost its MEASURED anchor"
+        assert re.search(r"MEASURED\s+\d{4}-\d{2}-\d{2}", text), (
+            "a measurement with no date cannot be judged stale")
+        assert re.search(r"\d+(?:\.\d+)?\s*MiB", text), "no byte figure"
+        assert re.search(r"\|\s*transcripts read\s*\|", text), (
+            "the cost table lost its transcripts-read row")
+        assert re.search(r"\d+×|\d+x", text), "no ratio — the headline claim"
 
-    def test_the_reference_names_every_selector_flag(self):
+    def test_the_reference_gives_a_RUNNABLE_command_for_every_selector(self):
+        """🔴 PINS THE COMMAND BLOCK, NOT A MENTION. The version this replaces
+        asserted `flag in text`, which a flag satisfies by appearing anywhere —
+        including inside the exit-code table, where `--ids-file` is named only
+        to explain exit 2. So the reference could lose every runnable example
+        of a selector and still pass. Measured while building the mutation
+        battery: `--ids-file` occurs 3x in this doc, and deleting the one
+        example that teaches you to USE it killed nothing.
+
+        What a reader needs is a command they can copy, so that is what is
+        pinned: each selector must appear on a `python3 $E …` line."""
+        import re
         text = REFERENCE.read_text(encoding="utf-8")
+        commands = [ln for ln in text.splitlines()
+                    if re.search(r"^\s*\|?\s*python3 \$E ", ln)]
+        assert commands, "the reference has no runnable command block at all"
         for flag in ("--arc", "--session", "--ids-file", "--jsonl"):
-            assert flag in text, flag
+            assert any(flag in ln for ln in commands), (
+                f"{flag} appears in no `python3 $E …` command — a reader has "
+                f"nothing to copy. Lines found: {commands}")
 
 
 class TestNoCapturedTextEscapes:
