@@ -155,6 +155,37 @@ is the pre-cutover per-host mirror, frozen and refreshed by nothing.
 **The discriminator is the stamp, not the path** — a store that cannot date
 itself is refused rather than served.
 
+🔴 **"Two" counts KINDS, not directories — there is one read cache PER CONFIGURED
+INSTANCE, and every tool that defaults to a path defaults to the FIRST one.**
+Measured 2026-09-25 with two instances configured: `personal` →
+`~/.cache/subsystem-store` (`store.zacx.dev`, 298 entry-files) and `civitai` →
+`~/.cache/subsystem-store-civitai` (`cairn.civitai.com`, 132). `cairn sync` prints
+one `cairn[<instance>]:` line each; read them rather than assuming one store.
+
+Three consequences, each of which produced a confident wrong reading in one
+session:
+
+- 🔴 **`cairn-validate --scope <s>` reads `~/.cache/subsystem-store` and nothing
+  else, so validating an entry that lives on another instance CHECKS ZERO FILES.**
+  It is honest about it — `NOTHING WAS CHECKED — no entry files were found … A zero
+  here is NOT a clean bill of health` — but it exits **0**, so a run that branches on
+  the exit code records a pass over an empty directory. Pass
+  `--store ~/.cache/subsystem-store-<instance>` when the entry is not on the default,
+  and read the `checked: N entry file(s)` line before believing any verdict.
+- 🔴 **`subsystem_touch.py`'s `scope-absent` is per-INSTANCE as well as per-host.**
+  The probe reported `scope-absent scope=civitai-developer-docs` while that scope had
+  three entries on the `civitai` instance; `cairn create` then refused
+  `[already-exists]`, which is how the truth surfaced. So a `scope-absent` justifies
+  *trying* a create, never a claim that the scope is unrecorded — and the refusal
+  costs nothing, because create is `If-None-Match: *` and writes nothing on refusal.
+- ⚠ **Which instance a write lands on is NOT obvious from the scope, so read the
+  `instance=` field the verb echoes.** Same session, same run of `/handoff`:
+  `cairn append --scope civitai-developer-docs` answered `instance=civitai`, while
+  `cairn create --scope civitai-app-starters` answered `instance=personal` — and that
+  second scope exists on BOTH instances (4 entries on `civitai`, 6 on `personal`), so
+  the sibling entries a future reader expects to find alongside yours may be on the
+  other one. Do not infer the instance; quote what the command printed.
+
 ## Adding a consumer that reads the store
 
 Call `subsystem_read_store.resolve_read_store()`. Do **not** compute a path.
