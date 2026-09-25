@@ -79,6 +79,24 @@ GRANDFATHER_STEP = 16_384
 # current / allowance / over-by and the exact line to paste, and that is the
 # authority. An allowance only ever changes by a deliberate edit to its line
 # below.
+#
+# 🔴 THE KEY IS A BARE REPO-RELATIVE PATH, AND SINCE #1871 THIS LEDGER COVERS
+# DOCUMENTS IN OTHER REPOSITORIES TOO. `handoff_doc.py` runs against a `--repo`
+# the caller names, so rule (p) reads this dict for a doc in ANY checkout, and
+# the lookup carries no repo component. Two consequences the next person adding
+# an entry has to hold at once:
+#
+#   * 🔴 ONE ENTRY GOVERNS EVERY REPO THAT HAS A DOC OF THAT NAME. There is no
+#     collision today — measured across devrc, cairn and homelab-talos when the
+#     grandfathering block below was added: no filename appears in two of them,
+#     and none of the 17 new paths collided with the 11 that were already here.
+#     That is a measurement of one moment, not a property. Two repos that grow a
+#     `claudedocs/handoff-<same-topic>.md` share ONE allowance, and the larger
+#     document is the one that decides it.
+#   * 🔴 `test_handoff_doc_size.py` CAN ONLY SEE devrc's TREE, so its check (d)
+#     ("an entry naming a path that does not exist went stale") is FALSE for a
+#     foreign entry. `LIVES_ELSEWHERE` below is what declares those, and it is
+#     the only reason a foreign entry does not red that gate on day one.
 GRANDFATHERED: dict[str, int] = {
     "claudedocs/handoff-tmux-webapp.md": 180_224,
     "claudedocs/handoff-audit-pr-ladder.md": 196_608,
@@ -106,6 +124,75 @@ GRANDFATHERED: dict[str, int] = {
     # the entry be deleted rather than left standing.
     # That is the ratchet working — an entry is not a permanent exemption, and
     # leaving it here would have let the doc regrow 22 KB unobserved.
+
+    # --- #1871: the ALREADY-OVER population in the OTHER repos this tool runs
+    # --- against, grandfathered so rule (p) ratchets each doc from where it is
+    # --- rather than refusing the next update to all seventeen on day one.
+    #
+    # 🔴 EVERY PATH BELOW IS ALSO IN `LIVES_ELSEWHERE`. Measured 2026-09-25 with
+    # `handoff_index.handoff_paths_on_disk` over three repos: devrc 0 of 136
+    # docs over allowance, cairn 2 of 3, homelab-talos 15 of 75. devrc's own
+    # corpus contributes NOTHING here, which is why the ledger above did not
+    # need to grow for it.
+    #
+    # ⚠ ONE OF THEM IS AN `-archive.md` SINK, AND IT IS THE ENTRY THAT MAKES THE
+    # REFUSAL'S OWN REMEDY 2 WORTH READING TWICE — see `write-gate.md` §I, which
+    # owns that finding. It gets an entry like the rest: the operator's ruling
+    # was to grandfather, never to exempt archives from `is_handoff_doc`.
+    "claudedocs/handoff-cairn-control-plane.md": 98_304,
+    "claudedocs/handoff-cairn-control-plane-archive.md": 147_456,
+    "claudedocs/handoff-chief-cairn-client.md": 163_840,
+    "claudedocs/handoff-clawgate-task-detail-page.md": 81_920,
+    "claudedocs/handoff-clawgate-to-muster-extraction.md": 163_840,
+    "claudedocs/handoff-clawgate-ux-audit.md": 114_688,
+    "claudedocs/handoff-clickup-mirror.md": 294_912,
+    "claudedocs/handoff-clickup-mirror-check.md": 98_304,
+    "claudedocs/handoff-comic-flex.md": 360_448,
+    "claudedocs/handoff-homelab-ci-alerting-lock-leak.md": 98_304,
+    "claudedocs/handoff-media-autoremixer.md": 98_304,
+    "claudedocs/handoff-nebula-pre-departure-hardening.md": 98_304,
+    "claudedocs/handoff-promptver-teardown.md": 81_920,
+    "claudedocs/handoff-session-makework-audit.md": 147_456,
+    "claudedocs/handoff-tekton-ci-budget-sizing.md": 98_304,
+    "claudedocs/handoff-tekton-ci-speedup.md": 180_224,
+    "claudedocs/handoff-tekton-remote-dispatch.md": 327_680,
+}
+
+# 🔴 THE LEDGER PATHS WHOSE DOCUMENT IS NOT IN devrc, and the repo that holds
+# each. A SECOND STRUCTURE RATHER THAN A RICHER VALUE ON PURPOSE:
+# `GRANDFATHERED` stays `dict[str, int]` because `handoff_doc.budget_position`
+# reads it with a bare `.get(relpath, MAX_BYTES)` and three mutation rows in
+# `scripts/tests/mutation_battery_handoff_archive_and_cap.py` anchor on whole
+# ledger lines — widening the value would move all four for a field only one
+# reader wants.
+#
+# 🔴 WHAT IT BUYS, AND WHAT IT COSTS. It buys check (d): an entry named here is
+# EXPECTED to be absent from devrc's corpus, so it is not reported stale. It
+# costs check (d) for exactly those entries — devrc's gate cannot see a rename
+# in another repo, and nothing else will. That is not a hole this module can
+# close; a gate reads one tree. `test_handoff_doc_size.py` spends the mapping
+# the other way instead, asserting that every path here IS in `GRANDFATHERED`
+# and is NOT present in devrc — so the collision hazard the ledger's header
+# names fails LOUDLY the day devrc grows a doc of one of these names, rather
+# than silently handing two documents one allowance.
+LIVES_ELSEWHERE: dict[str, str] = {
+    "claudedocs/handoff-cairn-control-plane.md": "cairn",
+    "claudedocs/handoff-cairn-control-plane-archive.md": "cairn",
+    "claudedocs/handoff-chief-cairn-client.md": "homelab-talos",
+    "claudedocs/handoff-clawgate-task-detail-page.md": "homelab-talos",
+    "claudedocs/handoff-clawgate-to-muster-extraction.md": "homelab-talos",
+    "claudedocs/handoff-clawgate-ux-audit.md": "homelab-talos",
+    "claudedocs/handoff-clickup-mirror.md": "homelab-talos",
+    "claudedocs/handoff-clickup-mirror-check.md": "homelab-talos",
+    "claudedocs/handoff-comic-flex.md": "homelab-talos",
+    "claudedocs/handoff-homelab-ci-alerting-lock-leak.md": "homelab-talos",
+    "claudedocs/handoff-media-autoremixer.md": "homelab-talos",
+    "claudedocs/handoff-nebula-pre-departure-hardening.md": "homelab-talos",
+    "claudedocs/handoff-promptver-teardown.md": "homelab-talos",
+    "claudedocs/handoff-session-makework-audit.md": "homelab-talos",
+    "claudedocs/handoff-tekton-ci-budget-sizing.md": "homelab-talos",
+    "claudedocs/handoff-tekton-ci-speedup.md": "homelab-talos",
+    "claudedocs/handoff-tekton-remote-dispatch.md": "homelab-talos",
 }
 
 

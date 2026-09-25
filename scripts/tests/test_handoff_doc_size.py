@@ -53,11 +53,26 @@ pinned four ways, so every direction of drift comes back here:
   b. a doc over its own entry's allowance          -> FAIL (the ratchet)
   c. an entry whose doc now fits under MAX_BYTES   -> FAIL, delete the entry
   d. an entry naming a path that does not exist    -> FAIL, it went stale
+                                                      UNLESS `LIVES_ELSEWHERE`
+                                                      declares it foreign
   e. an allowance that is not the tightest step    -> FAIL, with the literal
                                                       to paste
 
 (c) is the one that keeps this from decaying into a permanent exemption list,
 and (d) is what catches a rename or a move into `claudedocs/archive/`.
+
+🔴 AND SINCE #1871 THE LEDGER COVERS DOCUMENTS IN OTHER REPOSITORIES, WHICH IS
+WHY (d) HAS AN EXCEPTION AT ALL. `handoff_doc.py` enforces rule (p) against a
+`--repo` the caller names and looks the allowance up by a BARE repo-relative
+path, so an over-ceiling doc in cairn or homelab-talos needs an entry HERE. This
+module reads only devrc's tree, so every such entry is a path (d) would call
+stale. `handoff_budget.LIVES_ELSEWHERE` declares them, and
+`test_every_FOREIGN_entry_is_declared_and_is_NOT_a_devrc_document` spends the
+declaration in the other direction: the day devrc grows a doc with one of those
+names, two documents share one allowance, and that test is what makes it loud.
+⚠ (d) IS GONE FOR THOSE ENTRIES, and nothing replaces it — a rename in another
+repo leaves a stale entry no gate can see. A gate reads one tree; that is the
+price of a cross-repo ledger, not an oversight.
 
 🔴 WHY THE ALLOWANCE IS QUANTISED RATHER THAN THE MEASURED SIZE. Pinning each
 doc at exactly the bytes it has today makes the gate red on the very NEXT byte
@@ -118,7 +133,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 import handoff_index  # noqa: E402
 from handoff_budget import (  # noqa: E402
-    GRANDFATHER_STEP, GRANDFATHERED, MAX_BYTES, tightest_allowance)
+    GRANDFATHER_STEP, GRANDFATHERED, LIVES_ELSEWHERE, MAX_BYTES,
+    tightest_allowance)
 
 # The hard per-document ceiling. See "WHERE THE NUMBER COMES FROM" above.
 #
@@ -220,13 +236,20 @@ def this_repos_corpus() -> dict[str, int]:
 
 
 def oversize_findings(
-    sizes: dict[str, int], ledger: dict[str, int]
+    sizes: dict[str, int],
+    ledger: dict[str, int],
+    elsewhere: "set[str] | frozenset[str] | dict[str, str]" = frozenset(),
 ) -> dict[str, list[str]]:
     """The five checks, as `{kind: [rendered finding, …]}`. PURE.
 
     Split from the tests so the failure branches can be driven from synthetic
     inputs — a ceiling test reads a tree it never writes, so on a compliant tree
     nothing exercises them and they would be asserted-but-never-watched.
+
+    `elsewhere` names ledger paths whose document is in ANOTHER repository, so
+    (d) must not read their absence from `sizes` as staleness. 🔴 IT DEFAULTS
+    EMPTY, which is what keeps the stale branch exercised: every existing control
+    calls this with two arguments and still watches (d) fire.
     """
     over_ceiling: list[str] = []
     over_allowance: list[str] = []
@@ -264,7 +287,7 @@ def oversize_findings(
             )
 
     for path in sorted(ledger):
-        if path not in sizes:
+        if path not in sizes and path not in elsewhere:
             stale.append(
                 f"{path}: named in GRANDFATHERED and not present in the corpus "
                 f"— it was renamed, moved or deleted. Repoint or remove the entry"
@@ -542,7 +565,7 @@ def test_no_handoff_doc_exceeds_its_budget():
     # `census_scan.py` can see, which is what puts THIS test in
     # `ledger-check.sh`'s pre-merge screen. See that function's docstring.
     sizes = this_repos_corpus()
-    findings = oversize_findings(sizes, GRANDFATHERED)
+    findings = oversize_findings(sizes, GRANDFATHERED, LIVES_ELSEWHERE)
     assert not any(findings.values()), (
         f"\n\nA handoff document is over budget, or the grandfather ledger has "
         f"drifted.\n"
@@ -554,6 +577,57 @@ def test_no_handoff_doc_exceeds_its_budget():
         f"{_render(findings)}\n"
         f"{_eviction_playbook()}"
     )
+
+
+def test_every_FOREIGN_entry_is_declared_and_is_NOT_a_devrc_document():
+    """🔴 THE COLLISION GUARD, AND THE PRICE OF A CROSS-REPO LEDGER PAID BACK.
+
+    `LIVES_ELSEWHERE` switches check (d) OFF for the entries it names, so it is
+    the one structure in this module that can make a real stale entry invisible.
+    Three claims, each a different way that goes wrong:
+
+      1. every declared path is actually IN the ledger — a declaration for a path
+         nobody grandfathered exempts nothing and reads as if it did;
+      2. no declared path is present in devrc's OWN corpus. The ledger key is a
+         bare repo-relative path, so a devrc doc of that name would share one
+         allowance with a foreign document, and whichever is smaller would be
+         silently governed by the other's number. This is the assertion that
+         makes the ledger header's collision hazard MECHANICAL rather than a
+         comment;
+      3. the exemption is not a blanket one — an UNDECLARED absent path must
+         still be reported stale, driven through the REAL checker.
+
+    ⚠ WHAT IT CANNOT DO: confirm a declared document still exists where it is
+    declared to live. This suite reads one tree. That is stated in the module
+    docstring and in `handoff_budget.LIVES_ELSEWHERE`'s own comment, and it is
+    not closable from here.
+    """
+    undeclared = sorted(set(LIVES_ELSEWHERE) - set(GRANDFATHERED))
+    assert not undeclared, (
+        "LIVES_ELSEWHERE names paths that are not in GRANDFATHERED, so the "
+        "declaration exempts nothing while reading as though it did: "
+        f"{undeclared}"
+    )
+
+    sizes = this_repos_corpus()
+    collisions = sorted(set(LIVES_ELSEWHERE) & set(sizes))
+    assert not collisions, (
+        "a path declared as living in ANOTHER repo is also a handoff doc in "
+        "THIS one, and the ledger key carries no repo — so one allowance now "
+        "governs two different documents. Rename one, or split the ledger by "
+        "repo; do NOT pick a value silently. Offenders (path -> declared "
+        "repo): " + repr({p: LIVES_ELSEWHERE[p] for p in collisions})
+    )
+
+    # 🔴 POSITIVE CONTROL for the exemption's narrowness, through the REAL
+    # checker: a declared path is silent, an undeclared one is still stale.
+    both = oversize_findings(
+        {},
+        {"declared.md": MAX_BYTES + GRANDFATHER_STEP,
+         "undeclared.md": MAX_BYTES + GRANDFATHER_STEP},
+        {"declared.md": "some-other-repo"},
+    )
+    assert [x.split(":")[0] for x in both["stale"]] == ["undeclared.md"], both
 
 
 def test_every_grandfathered_entry_is_a_correctly_stepped_allowance():

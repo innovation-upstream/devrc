@@ -181,6 +181,14 @@ MUTANTS = [
     # the ALLOWANCE moves, which is always a deliberate edit to that line.
     # 🔴 Re-check these three rows whenever the ledger is edited;
     # `handoff_budget.GRANDFATHERED` is the source.
+    #
+    # 🔴 AND SINCE #1871 THE LEDGER HOLDS ENTRIES FOR DOCUMENTS IN OTHER REPOS,
+    # WHICH MAKES THE CHOICE OF ANCHOR LOAD-BEARING IN A NEW WAY: C4 and C5 must
+    # anchor on an entry whose document is in devrc. Point either at a path in
+    # `LIVES_ELSEWHERE` and it SURVIVES while looking correct — `over_allowance`
+    # and `over_ceiling` both need the doc to be IN the scanned corpus, and a
+    # foreign one never is. C11 is immune (it is a pure ledger check) but is
+    # listed with them because the re-check is one habit, not three.
     ("C4", "deletion", "silently drop a document from the ledger",
      '    "claudedocs/handoff-nix-disk-cleanup.md": 114_688,\n',
      "",
@@ -229,6 +237,20 @@ MUTANTS = [
      r'_HANDOFF_NAME = re.compile(r"\Ahandoff-.+\.md\Z")',
      r'_HANDOFF_NAME = re.compile(r"\Ahandoff-.+\.mark?down?\Z|\Ahandoff-.+\.md\Z")',
      "test_the_size_predicate_is_the_INDEX_MODULES_and_not_a_second_spelling"),
+    # 🔴 THE CROSS-REPO LEDGER'S OWN HAZARD (#1871). `LIVES_ELSEWHERE` turns
+    # check (d) OFF for the entries it names, so the way it goes wrong is not a
+    # stale entry — C6 above still covers that, and still kills, because the path
+    # it plants is undeclared — but a COLLISION: the ledger key carries no repo,
+    # so declaring a path that ALSO exists in devrc hands two different documents
+    # one allowance and silences the only check that could see it.
+    # The planted path is in `GRANDFATHERED` and IS a devrc doc, which isolates
+    # the collision arm from the "declared but not grandfathered" arm beside it.
+    # MEASURED by hand at this tree: killed by that one test, nothing else.
+    ("C14", "insertion", "declare a path that is ALSO a devrc document",
+     "LIVES_ELSEWHERE: dict[str, str] = {\n",
+     "LIVES_ELSEWHERE: dict[str, str] = {\n"
+     '    "claudedocs/handoff-tmux-webapp.md": "some-other-repo",\n',
+     "test_every_FOREIGN_entry_is_declared_and_is_NOT_a_devrc_document"),
 ]
 
 #: 🔴 EVERY ROW, BECAUSE THIS BATTERY SPANS THREE FILES. The anchors module
@@ -261,6 +283,7 @@ TARGETS = {
     "C11": BUD,
     "C12": IDX,
     "C13": IDX,
+    "C14": BUD,
 }
 
 
