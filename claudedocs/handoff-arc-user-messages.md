@@ -36,12 +36,24 @@ the archaeology each time. Two halves: **scope** an extraction to one arc's sess
     any record** — so the obvious compose (enumerate via `--arc --json`, extract
     corpus-wide, grep the ids) could not be completed at all, there was nothing to grep on.
   - Measured after, on a 2-session arc: 27 records, 172 KiB — **322x smaller**.
-- ✅ **Route: SHIPPED, then MEASURED NOT TO FIRE, then replaced.** #1870's routing was a
-  "Load when" row in `/resume`'s SKILL.md pointing at
-  `claude/skills/handoff/reference/user-messages.md`. Both halves deploy correctly
-  (`readlink -f` → `/nix/store/…-devrc-claude-skills/`, switch ran 2026-09-25 21:41), so
-  this was never a merged-≠-deployed miss. It still went 1-for-3 — see the next section.
-  The deterministic replacement is the arc footer, below.
+- 🔶 **Route: the prose half shipped and was measured NOT to fire; the deterministic
+  replacement is OPEN as `#1883`, NOT merged.** #1870's routing was a "Load when" row in
+  `/resume`'s SKILL.md pointing at `claude/skills/handoff/reference/user-messages.md`. Both
+  halves deploy correctly (`readlink -f` → `/nix/store/…-devrc-claude-skills/`, switch ran
+  2026-09-25 21:41), so this was never a merged-≠-deployed miss. It still went 1-for-3 —
+  see the routing measurement below.
+  - **`#1883` (branch `feat/arc-names-the-extractor`, commits `a83ac29f` + `1eabd11b`):**
+    `find-session.render_arc` prints `extract_user_msgs.py --arc <doc>` under every resolved
+    arc; `--json` carries it as `next_command`. Deterministic rather than prose, per
+    `claude/RULES.md` → "Deterministic Over Prose" — the tool the agent already reached for
+    names the next one.
+  - 🔴 **`#1883` IS NOT MERGED AND NOT AUDITED.** `mergeStateStatus=UNSTABLE`,
+    `mergeable=MERGEABLE` (no conflicts) with four Tekton legs pending at the time of
+    writing — `devrc-pytests`, `devrc-nodetests`, `devrc-gotests`,
+    `devrc-cairn-client-runs`. Nothing blocks a merge in this repo (CI is advisory, ~42%
+    measured red-noise rate), so **read the failing test before acting on a red**. No
+    `/audit-pr` round has been run, Round 0 included; the operator was offered it and had
+    not answered when this was written.
 
 ## The routing measurement — why a second mechanism was needed
 🔴 **The prose route could only fire when `/resume` fired, and this question arrives at the
@@ -114,3 +126,30 @@ UNMEASURED): the question appears in **254 sessions**, of which only **3** came 
 - The `1 of 3` reference-read figure counts a transcript mentioning `user-messages.md`. A
   session that had the row in context and reasoned from it without opening the file would
   read as a miss here.
+## Verification of #1883 — what was and was NOT run
+- ✅ **Mutation battery `mutation_battery_arc_extractor_footer.py`: 8/8 KILLED, positive
+  control fired.** It paid for itself on its first run: C0 — dropping `"next_command"` from
+  `run_arc`'s JSON dict — scored **SURVIVED**, because
+  `test_the_JSON_carries_the_command_and_NULL_when_there_is_none` asserted against
+  `extractor_next_command(...)` directly and never touched the JSON path. Its NAME claimed a
+  relationship its BODY did not check (the `guards-narrower` shape). The test now goes
+  through `run_arc` and parses the output. Registered two-way in
+  `test_mutation_battery_anchors.py`.
+- ✅ **160 passed** across `test_find_session_arc.py`, `test_find_session_skill_contract.py`,
+  `test_find_session_skill_cli.py`; **38 passed / 4 skipped** on the anchor ledger.
+- ✅ **Live positive control:** `--arc handoff-clawgate-to-muster-extraction.md` renders the
+  footer, and the exact command it printed runs at **rc 0** — 7 sessions, 199 messages,
+  967,441 bytes. The claim that the printed line WORKS is measured, not inferred.
+- ⏳ **`scripts/scoped-tests.sh` — IN FLIGHT, NO VERDICT YET.** Its first run reported
+  `RESULT: FAIL (exit=3)` having run **nothing**: `logrotate`/`dash` missing from PATH,
+  because a fresh worktree copies `.envrc` (`use opencode`) which carries no gate toolchain.
+  🔴 **The background wrapper reported exit 0 over that failure** — the runner's own
+  `RESULT:` line is what said otherwise. Re-running under `nix develop`; it selected 6 of
+  368 files, a superset of the three modules already green plus `test_find_session_live.py`,
+  `test_transcript_search.py` and `check-clickup-addressed/tests/test_shared_walk.py`.
+  **Those three have NOT been observed green — do not report this change as fully gated.**
+- ❌ **Neither `nix build` sandbox tier was run locally.** The dev-host tier and the sandbox
+  tier are blind to different things; Tekton runs the sandbox one.
+- ⚠ **The handoff write gate reported `leakscan: NO SCANNER FOUND`** — a pass by absence,
+  not a clean result. Checked by hand instead: no IPs, URLs, tokens, real media paths or
+  client names in this doc.
