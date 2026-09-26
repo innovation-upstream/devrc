@@ -51,10 +51,20 @@ nothing — the interview gate allowing every criteria-less create, and the writ
 spellings therefore landed **before** the rename. Each hook derives every predicate from one
 `TASK_CLI_NAMES` tuple; add a third spelling there, not at the call sites.
 
-🔴 **`CLAWGATE_TASKS_API_URL` — the second base URL, in the SAME `~/.claude/clawgate.env`.**
+🔴 **`CLAWGATE_TASK_API_URL` — the second base URL, in the SAME `~/.claude/clawgate.env`.**
 Optional. When set, the writeback guard's live re-read targets it (passed to the CLI as
 `--api-url`, and used by the curl fallback) instead of `CLAWGATE_API_URL`. An optional
 `CLAWGATE_TASKS_HOOK_TOKEN` overrides `CLAWGATE_HOOK_TOKEN` for the same reads.
+
+⚠ **Singular `TASK`, and this line used to say `TASKS`.** The plural was the extraction
+plan's working name; the CLI shipped `envTaskAPIURL = "CLAWGATE_TASK_API_URL"`, the server
+writes the singular into every agent's env file, and so does the host env file. The guard
+spelled the plural, which nothing sets — and an unset first entry is not an error, it falls
+through to `CLAWGATE_API_URL`, so the live re-read went to the permission router, which
+answers `/api/tasks/<id>` with a right-looking 200. The hook no longer spells either name:
+it takes the ordered ledger from `devrc/scripts/lib/clawgate_tasks.py`
+(`TASK_API_URL_VARS`), the same module the bar poller and session-manager read, and its
+suite fails if the two ever disagree.
 
 ⚠ **Do NOT repoint `CLAWGATE_API_URL` at muster.** `clawgate-hook.sh` reads it for `/api/send` —
 permission routing, which stays in clawgate. Repointing it breaks the highest-traffic surface on

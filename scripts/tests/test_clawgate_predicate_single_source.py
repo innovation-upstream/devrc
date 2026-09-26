@@ -90,6 +90,16 @@ ALLOWLIST = {
 EXPECTED_IMPORTERS = {
     "scripts/bar-status-poll",      # the 45s bar poller, writes the cache
     "scripts/session-manager",      # the cross-host JSON report
+    # 🔴 The write-back guard takes only `TASK_API_URL_VARS` — the task-API base-URL
+    # ledger — NOT the pending/stuck predicate, so it renders none of this queue and
+    # the "its output was never reviewed here" reading does not apply to it. It is
+    # listed because it genuinely loads the module and because the ledger is
+    # two-way. It joined after open-coding that tuple with a PLURAL variable name
+    # nothing sets, which fell through to the permission router's base URL and read
+    # verdicts off the wrong service. Its load is DEFERRED to the Stop path (this
+    # hook runs after every tool call) and its deployed copy gets the module as a
+    # nix-store sibling; both are pinned by its own suite.
+    "scripts/claude-hooks/clawgate-writeback-guard.py",
 }
 # `scripts/agent-ops` — the mission-control TUI — was the third importer until it
 # was RETIRED. It is not "one fewer surface to keep in sync": it read this
@@ -502,11 +512,36 @@ def test_negative_control_prose_about_the_module_is_not_a_consumer(snippet,
     assert not _loads_shared_module(p), snippet
 
 
+def _is_test_file(rel: str) -> bool:
+    """Does this path live in a test directory?
+
+    🔴 ANY `tests/` SEGMENT, not just `scripts/tests/`. This ledger is about
+    PRODUCTION surfaces — a suite that loads the module to assert something about it
+    is not a consumer rendering the queue. The check used to be
+    `rel.startswith("scripts/tests/")`, written when that was the only suite
+    directory under `scripts/`; there are now several siblings
+    (`scripts/claude-hooks/tests/`, `scripts/opencode/tests/`, …), so a test that
+    touched the module in one of them joined the ledger as if it were a surface.
+    """
+    return "tests" in rel.split("/")[:-1]
+
+
+def test_the_test_directory_filter_covers_the_SIBLING_suites_too():
+    """The control for the exclusion above — it must fire on every suite directory
+    under `scripts/`, and must NOT fire on a production file whose name merely
+    contains the word."""
+    assert _is_test_file("scripts/tests/test_x.py")
+    assert _is_test_file("scripts/claude-hooks/tests/test_x.py")
+    assert _is_test_file("scripts/opencode/tests/test_x.py")
+    assert not _is_test_file("scripts/bar-status-poll")
+    assert not _is_test_file("scripts/lib/tests_helper.py")
+
+
 def test_exactly_the_expected_surfaces_import_the_shared_module():
     found = set()
     for p in python_files(REPO / "scripts"):
         rel = p.relative_to(REPO).as_posix()
-        if rel.startswith("scripts/tests/") or rel == LIB_REL:
+        if _is_test_file(rel) or rel == LIB_REL:
             continue
         if _loads_shared_module(p):
             found.add(rel)

@@ -68,7 +68,7 @@ trap 'rm -rf "$T"' EXIT
 ROOT="$T/tree"
 
 mkdir -p "$ROOT/scripts/claude-hooks/tests" "$ROOT/scripts/testlib" \
-         "$ROOT/nix" "$ROOT/claude/skills/clawgate"
+         "$ROOT/scripts/lib" "$ROOT/nix" "$ROOT/claude/skills/clawgate"
 # The hooks themselves plus every module they or their suites import
 # (`guard_core`, `hook_telemetry`, the registrar the suites read as a ledger).
 cp -a "$SRC"/scripts/claude-hooks/*.py "$ROOT/scripts/claude-hooks/"
@@ -81,6 +81,12 @@ cp -a "$SRC/scripts/claude-hooks/tests/conftest.py" \
 # imports `testlib.spool_plugin`, so without it the baseline aborts at
 # collection and every row goes unmeasured.
 cp -a "$SRC"/scripts/testlib/. "$ROOT/scripts/testlib/"
+# 🔴 The write-back guard takes its task-base variable ledger from this module
+# (`TASK_API_URL_VARS`) instead of spelling one, and its suite loads the same file
+# to pin the two together. Without it here the hook would silently resolve the
+# ledger out of the REAL checkout through its `$DEVRC_DIR` fallback — i.e. rows
+# W17/W18 would be measured against an unmutated copy of the wrong tree.
+cp -a "$SRC/scripts/lib/clawgate_tasks.py" "$ROOT/scripts/lib/"
 # Both suites read these as LEDGERS (`HOME_NIX`, `SKILL`, `FLOW`): the hook's
 # registration in home.nix and the skill/flow text it routes to.
 cp -a "$SRC/nix/home.nix" "$ROOT/nix/"
@@ -105,8 +111,10 @@ ROWS=0
 # ran yields zero FAILED lines — i.e. "clean" — so a harness wired to nothing
 # would score every mutant SURVIVED. `run-tests.sh`'s own formula is
 # `m - min(50, max(1, m/20))`; re-derive with `--collect-only`, never by memory.
-# Measured 2026-09-21: writeback 374, interview 361.
-WB_FLOOR=355
+# Measured 2026-09-25: writeback 383, interview 361 (re-derived with
+# `--collect-only`, not carried over — the writeback suite grew by the
+# shared-ledger cases W17-W19 exercise).
+WB_FLOOR=364
 IV_FLOOR=343
 
 failing() { # failing <suite> <floor>
@@ -217,8 +225,8 @@ run "W3 the arming regex fires on the bare word" \
 run "W4 curl reads the GENERIC url instead of the tasks one" \
     test_the_curl_fallback_prefers_the_TASKS_url_and_the_TASKS_token \
     "$WB" "$WB_SUITE" "$WB_FLOOR" \
-    '    url = _first_set(conf, TASK_API_URL_VARS)[0]' \
-    '    url = conf.get(TASK_API_URL_VARS[1])'
+    '    url = _first_set(conf, names)[0]' \
+    '    url = conf.get(names[1])'
 run "W5 curl reads the GENERIC token instead of the tasks one" \
     test_the_curl_fallback_prefers_the_TASKS_url_and_the_TASKS_token \
     "$WB" "$WB_SUITE" "$WB_FLOOR" \
@@ -236,8 +244,8 @@ run "W6 --api-url is never passed to the CLI" \
 # negative control is reachable.
 run "W7 --api-url is invented from the generic url" \
     test_WITHOUT_the_tasks_url_no_api_url_flag_is_invented "$WB" "$WB_SUITE" "$WB_FLOOR" \
-    '    api_url = _env_file(env_path).get(TASK_API_URL_VARS[0])' \
-    '    api_url = _first_set(_env_file(env_path), TASK_API_URL_VARS)[0]'
+    '    api_url = _env_file(env_path).get(task_api_url_vars()[0])' \
+    '    api_url = _first_set(_env_file(env_path), task_api_url_vars())[0]'
 # W8 the second client is never reached.
 run "W8 only the FIRST task CLI is ever tried" \
     test_live_task_falls_through_to_muster_when_clawgatectl_is_ABSENT \
@@ -324,6 +332,41 @@ run "W15 emit() goes SILENT on the notice rung" \
 run "W16 comment-only edit (control)" SURVIVES "$WB" "$WB_SUITE" "$WB_FLOOR" \
     '# The task API path, as a PATTERN.' \
     '# The task API path, as a PATTERN (see the extraction plan).'
+# --------------------------------------------------------------------------- #
+# W17-W19 🔴 THE SHARED-LEDGER INDIRECTION. This hook used to spell its own
+# task-base variable ledger, with a PLURAL name nothing anywhere sets — so the
+# first entry never resolved, the list fell through to `CLAWGATE_API_URL`, and the
+# live re-read went to the permission ROUTER. That service answers `/api/tasks/<id>`
+# with a right-looking 200, so there was no error to notice: the guard reported
+# verdicts read off the wrong board. The ledger now comes from
+# `scripts/lib/clawgate_tasks.TASK_API_URL_VARS` and these rows are what prove the
+# new tests can actually see that path break.
+# --------------------------------------------------------------------------- #
+# W17 THE PRECEDENCE ITSELF, at the narrowest expression that still parses. The
+# router key wins and the task board becomes unreachable again — which is the bug,
+# reconstructed. Its killer must be the BEHAVIOURAL case: the ledger pin beside it
+# also dies here, and a row scored only by that pin would prove nothing about what
+# the hook actually READS.
+run "W17 the shared ledger is consumed in REVERSE order" \
+    test_the_TASK_base_WINS_when_both_variables_are_set_to_distinct_values \
+    "$WB" "$WB_SUITE" "$WB_FLOOR" \
+    '    return tuple(_cg().TASK_API_URL_VARS)' \
+    '    return tuple(reversed(_cg().TASK_API_URL_VARS))'
+# W18 THE DEPLOY SEAM. The deployed hook is a lone nix-store copy whose only route
+# to the shared module is the sibling `nix/home.nix` lands beside it; drop that
+# candidate and the switch is still green while the store copy silently resolves
+# whatever `$DEVRC_DIR` happens to hold — or nothing at all.
+run "W18 the loader stops looking in its OWN directory" \
+    test_the_shared_ledger_module_is_deployed_BESIDE_the_hook \
+    "$WB" "$WB_SUITE" "$WB_FLOOR" \
+    '    for path in (os.path.join(here, "clawgate_tasks.py"),' \
+    '    for path in (os.path.join(here, "__absent__.py"),'
+# W19 SURVIVES: a second no-op control, inside the block W17/W18 mutate, so "these
+# two rows are red for any edit here" is excluded rather than assumed.
+run "W19 comment-only edit in the loader (control)" SURVIVES \
+    "$WB" "$WB_SUITE" "$WB_FLOOR" \
+    '    """The shared module, imported on first use — see `_load_clawgate_tasks`."""' \
+    '    """The shared module, imported on first use (see `_load_clawgate_tasks`)."""'
 
 echo
 echo "== clawgate-task-interview-guard.py =="
