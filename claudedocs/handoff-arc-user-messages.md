@@ -118,10 +118,22 @@ through the gate; this body is the retirement.
 - The reference-read count (3 of 6) counts a transcript mentioning `user-messages.md`. A
   session that had the row in context and reasoned from it without opening the file reads as
   a miss.
-- **Neither `nix build` sandbox tier was run locally** on `#1883`. A `gate.sh --tier all`
-  run was launched; if this doc does not record its verdict, it did not finish.
-- The `8/8 KILLED` battery result, the `160 passed` figure and the 967,441-byte probe were
-  verified for STRUCTURE by round 0, not re-run by it.
+- **Neither `nix build` sandbox tier was run locally** on `#1883`, at any head.
+- 🔴 **The local `gate.sh --tier all` DID finish and its pytest tier is UNMEASURED, not
+  failed** — killed at its own 3600s cap (`exit=124`, `RESULT: FAIL (exit=143)` = SIGTERM)
+  under three concurrent full suites from other checkouts. `GATE: RESULT=FAIL exit=1` is that
+  timeout. Its **node** and **go** tiers passed at `SCOPE: FULL`. ⚠ This bullet used to say
+  "if this doc does not record its verdict, it did not finish" — a conditional that was
+  already false when the verdict landed in the section below.
+- ⚠ **The battery and test counts that USED to sit in this bullet are gone on purpose.** It
+  read "the `8/8 KILLED` battery result, the `160 passed` figure … were verified for STRUCTURE
+  by round 0" — and both numbers were wrong (9 and 159), which the section below says
+  explicitly. Round 2 found the stale pair **still standing two lines above its own
+  correction**, inside that round's own diff hunk as unchanged context: the same
+  meets-the-false-one-first defect the correction claimed to close, at 39 lines instead of 80.
+  🔴 **So no count lives here any more.** Current figures live once, in
+  `## Verification of #1883`, and a number quoted in two places is a number that will disagree
+  with itself.
 ## Verification of #1883 — what was and was NOT run
 🔴 **REWRITTEN 2026-09-26 after round 1. The previous version of this section carried three
 wrong numbers and an account of `C0` that its own doc contradicted 80 lines earlier — read
