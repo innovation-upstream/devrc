@@ -207,6 +207,56 @@ class TestIdValidation:
         assert st._MAX_ID_LEN == 256
 
 
+class TestThePrintableRepairMirrorsTheRefusal:
+    """`printable_for_trailer` and `valid_id` are two halves of ONE rule.
+
+    🔴 THE SEAM IS THE DEFECT SITE, NOT EITHER HALF. Both functions are trivial
+    and neither is wrong on its own; what shipped broken (#1871, round 1) was a
+    CALLER that repaired a value by its own reading of what a trailer accepts,
+    got a strict subset — Python whitespace, where `valid_id` refuses everything
+    below 0x20 — and lost the trailer silently. These tests assert the
+    RELATIONSHIP over the whole character space, so widening one half without
+    the other goes red instead of quiet.
+    """
+
+    def test_every_codepoint_survives_the_repair_into_a_valid_value(self):
+        """🔴 THE WHOLE SPACE, NOT A LIST OF THE ONES SOMEONE THOUGHT OF. An
+        enumeration of `\\x1b` and `\\x01` is a guard on the two characters the
+        audit happened to name; this is a guard on the rule."""
+        rejected = [c for c in range(0x11000)
+                    if not st.valid_id(st.printable_for_trailer(f"a{chr(c)}b"))]
+        assert rejected == [], (
+            f"{len(rejected)} codepoint(s) survive the repair in a form "
+            f"`valid_id` still refuses, first few: {rejected[:8]}"
+        )
+
+    def test_the_repair_is_a_NO_OP_on_what_valid_id_already_accepts(self):
+        """A repair that rewrote acceptable characters would corrupt every
+        ordinary reason — the assertion above cannot see that, because a
+        function returning a constant acceptable string passes it."""
+        for value in ("d8c216f2-b51d-4c2c-a559-5a5ab4163848", "ses_01ABCdef",
+                      "a plain reason, with punctuation — and an em dash",
+                      "spaces   kept   verbatim", "x"):
+            assert st.printable_for_trailer(value) == value, value
+
+    def test_the_repair_REPLACES_rather_than_DELETES(self):
+        """🔴 POSITION AND LENGTH ARE THE POINT. Deleting is the other obvious
+        implementation and it is wrong twice: a value that is nothing but
+        controls becomes `""`, which `valid_id` REFUSES, so the silent failure
+        returns in a second shape; and the reader loses the fact that anything
+        was dropped."""
+        assert st.printable_for_trailer("\x1b") == st.UNPRINTABLE_MARK
+        assert st.valid_id(st.printable_for_trailer("\x1b")) is True
+        assert len(st.printable_for_trailer("a\x1b\x01b")) == 4
+        assert st.printable_for_trailer("a\x1bb") == f"a{st.UNPRINTABLE_MARK}b"
+
+    def test_the_mark_is_pinned_as_a_LITERAL(self):
+        """Pinned here so a change to it is a decision, not a diff nobody reads:
+        every assertion above is written in terms of `UNPRINTABLE_MARK`, so they
+        would all follow it silently."""
+        assert st.UNPRINTABLE_MARK == "�"
+
+
 class TestAppendTrailer:
     def test_it_appends_the_resumable_id(self):
         out = st.append_trailer("fix: a thing\n", "abc-123")
