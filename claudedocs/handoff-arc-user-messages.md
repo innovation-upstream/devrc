@@ -25,35 +25,27 @@ the archaeology each time. Two halves: **scope** an extraction to one arc's sess
   operator reads that count.
 
 ## State now
-- ✅ **Scope: SHIPPED.** `#1870` (`e48eebac`, merged 2026-09-25T22:48:19Z) gave
-  `scripts/session-analysis/extract_user_msgs.py` three selectors — `--arc SEED`,
-  repeatable `--session ID`, `--ids-file PATH` (`-` = stdin) — with markdown default and
-  `--jsonl` canonical. The arc resolver is **imported, never re-implemented**: the four
-  steps were extracted to `find-session.arc_report` and both consumers call it.
-  Loud-empty exit codes separate *"the seed named nothing"* from *"the arc resolved with
-  zero members"*, because a bare zero cannot tell those apart.
-  - Measured before: 974 transcripts, 13,768 records, 54.1 MiB, 12 s, **no session id on
-    any record** — so the obvious compose (enumerate via `--arc --json`, extract
-    corpus-wide, grep the ids) could not be completed at all, there was nothing to grep on.
-  - Measured after, on a 2-session arc: 27 records, 172 KiB — **322x smaller**.
-- 🔶 **Route: the prose half shipped and was measured NOT to fire; the deterministic
-  replacement is OPEN as `#1883`, NOT merged.** #1870's routing was a "Load when" row in
-  `/resume`'s SKILL.md pointing at `claude/skills/handoff/reference/user-messages.md`. Both
-  halves deploy correctly (`readlink -f` → `/nix/store/…-devrc-claude-skills/`, switch ran
-  2026-09-25 21:41), so this was never a merged-≠-deployed miss. It still went 1-for-3 —
-  see the routing measurement below.
-  - **`#1883` (branch `feat/arc-names-the-extractor`, commits `a83ac29f` + `1eabd11b`):**
-    `find-session.render_arc` prints `extract_user_msgs.py --arc <doc>` under every resolved
-    arc; `--json` carries it as `next_command`. Deterministic rather than prose, per
-    `claude/RULES.md` → "Deterministic Over Prose" — the tool the agent already reached for
-    names the next one.
-  - 🔴 **`#1883` IS NOT MERGED AND NOT AUDITED.** `mergeStateStatus=UNSTABLE`,
-    `mergeable=MERGEABLE` (no conflicts) with four Tekton legs pending at the time of
-    writing — `devrc-pytests`, `devrc-nodetests`, `devrc-gotests`,
-    `devrc-cairn-client-runs`. Nothing blocks a merge in this repo (CI is advisory, ~42%
-    measured red-noise rate), so **read the failing test before acting on a red**. No
-    `/audit-pr` round has been run, Round 0 included; the operator was offered it and had
-    not answered when this was written.
+- ✅ **Scope: SHIPPED** in `#1870` (`e48eebac`) — `--arc` / `--session` / `--ids-file`, the
+  resolver imported rather than re-spelled, loud-empty exit codes. 322x smaller on a
+  2-session arc (27 records, 172 KiB, against 13,768 records / 54.1 MiB corpus-wide).
+- 🔶 **Route: `#1883` OPEN, not merged.** `render_arc` prints the extractor command under
+  every resolved arc. Round 0 of the audit ladder ran before the merge decision and
+  questioned the requirement; its findings are applied:
+  - **`next_command` DROPPED from `--json`** — measured reach **0 of 6**. Five of the six
+    sessions called `--arc --json` and each parsed `members` and discarded the rest, so the
+    field never entered an agent's context. It shipped on a hypothesised caller that does
+    not exist. Re-add it when one is named.
+  - **The seed guard now crosses the seam it claimed.** It asserted
+    `arc_seed_to_doc(doc) == doc` without importing the extractor, so it was blind to the
+    only way that seam breaks. It now loads `extract_user_msgs` through the extractor's own
+    loader and asserts the resolver is SHARED. It was also **the one guard with no mutant**;
+    `F8` now covers it.
+  - **"Two seam guards" was wrong — there is ONE**, plus the path-existence check.
+  - Guards: **7** (was 8; the JSON test went with its field). Battery: **8 mutants**, C0
+    re-pointed because the field its old anchor named is gone.
+- ⚠ **Five routes now point at this one tool**, not two: the `/resume` row, the reference
+  doc, a cairn task board entry, this footer, and `find-session`'s own SKILL.md. `RULES.md`
+  "One rule, one place" points the other way; not resolved here, recorded.
 
 ## The routing measurement — why a second mechanism was needed
 🔴 **The prose route could only fire when `/resume` fired, and this question arrives at the
@@ -111,21 +103,25 @@ UNMEASURED): the question appears in **254 sessions**, of which only **3** came 
   shipped tool in anger; the source of the routing measurement above.
 
 ## NEXT — ranked
-1. **Let the routing measurement mature, then read it.** The footer is one PR old; the 3
-   post-merge sessions are a count, not a rate. Re-run the measurement once ~10 more
-   sessions have received the question. **Closing condition:** the operator reads the
-   count. 🔴 Do not re-tune the routing off n=3.
-2. **Decide the answering mode** (the open question above). Options seen so far: leave it
-   (subagent synthesis is working), or add a mode that emits ask-shaped rows rather than
-   raw messages. **Operator's call — do not build it unasked.**
+1. **Investigate the 352-of-617 gap** (its own section above). Do not fix it on a
+   mechanism — find a distinguishing signal first.
+2. **Re-read the reach comparison at n≥10.** Already reachable: 6 post-merge sessions
+   existed by 2026-09-26 04:42Z and the population grows ~1/h under active work, ~5/day at
+   baseline. **Closing condition:** the operator reads the count. 🔴 Do not re-tune off n=6.
+3. **Decide the answering mode.** One 7-session arc extracts to 967,441 bytes / 199
+   messages, so synthesis is still a subagent's job. Options: leave it, or emit ask-shaped
+   rows. **Operator's call — do not build it unasked.**
 
 ## UNMEASURED — do not report these as absences
-- **The peer host (laptop) was not walked** for the 254-session count or the 3-session
-  split. Both are local-Claude-corpus figures.
+- **The peer host (laptop) was never walked** for any figure in this doc.
 - **The opencode corpus is excluded** from arc reader resolution by design.
-- The `1 of 3` reference-read figure counts a transcript mentioning `user-messages.md`. A
-  session that had the row in context and reasoned from it without opening the file would
-  read as a miss here.
+- The reference-read count (3 of 6) counts a transcript mentioning `user-messages.md`. A
+  session that had the row in context and reasoned from it without opening the file reads as
+  a miss.
+- **Neither `nix build` sandbox tier was run locally** on `#1883`. A `gate.sh --tier all`
+  run was launched; if this doc does not record its verdict, it did not finish.
+- The `8/8 KILLED` battery result, the `160 passed` figure and the 967,441-byte probe were
+  verified for STRUCTURE by round 0, not re-run by it.
 ## Verification of #1883 — what was and was NOT run
 - ✅ **Mutation battery `mutation_battery_arc_extractor_footer.py`: 8/8 KILLED, positive
   control fired.** It paid for itself on its first run: C0 — dropping `"next_command"` from
@@ -153,3 +149,63 @@ UNMEASURED): the question appears in **254 sessions**, of which only **3** came 
 - ⚠ **The handoff write gate reported `leakscan: NO SCANNER FOUND`** — a pass by absence,
   not a clean result. Checked by hand instead: no IPs, URLs, tokens, real media paths or
   client names in this doc.
+## The routing measurement — RE-DERIVED, and the mechanism RETRACTED
+🔴 **Both the original justification and its first replacement were wrong. Read this section
+before quoting any number from this doc's history.** The surviving claim is about two
+surfaces' REACH and deliberately says nothing about *why* the narrower one misses.
+
+**Re-derived 2026-09-26 by round 0 of the audit ladder, then independently reproduced:**
+
+| claim as shipped | re-derived | verdict |
+|---|---|---|
+| question appears in **254** sessions | 259 with a user-typed occurrence; 285 with the phrase anywhere | ballpark, immaterial |
+| **3** post-merge sessions | **6** | ❌ doubled |
+| reference read **1 of 3** | **3 of 6** | ❌ |
+| extractor used **2 of 3** | **5 of 6** | ❌ |
+| `--arc` used **3 of 3** | **6 of 6** | ✅ |
+
+Two of those six landed **3 and 11 minutes after** this arc's first commit, and a sixth
+during the audit. `n=3` was honest when taken and stale before the branch was pushed.
+Arrival rate ≈ **1/h** under active work, ≈ 0.22/h at baseline — so `n=10` was **~4 hours**
+away, not the "~10 more sessions" horizon this doc's NEXT #1 used to imply. 🔴 **The PR body
+said "do not re-tune the routing off n=3" and then built off n=3.** Recorded because the
+disclaimer was doing decoration work, not decision work.
+
+**What survives as the justification:** `find-session --arc` reached **6 of 6** of those
+sessions; the `/resume` reference row reached **3 of 6**. The footer rides the wider surface.
+That is a reach comparison at n=6 — a COUNT, not a rate — and it needs no mechanism.
+
+### 🔴 RETRACTED MECHANISMS — three, do not derive a fourth
+1. ~~"The question arrives at the END of an arc, in sessions that never ran `/resume`."~~
+   Built on ONE session (`6ef53792`). That session's first message **is** an indented
+   `/resume` kickoff paste, so it *was* invoked.
+2. ~~"The kickoff paste does not expand — 0 of 617."~~ **True by construction.** The
+   population is "first user message starts with `/resume`"; a session where the command
+   actually fires opens with `<command-message>` instead, so the filter excludes every
+   expanded case. The zero is a selection effect, not evidence.
+3. ~~"Indentation prevents expansion."~~ **Refuted by its own control.** All **4**
+   flush-left pastes equally failed to expand, while several *indented* ones do carry a
+   resume `<command-name>`. De-indenting the kickoff block would fix nothing.
+
+🔴 **An absence is the observable the most causes share** (`claude/RULES.md`, "an EMPTY
+RESULT cannot distinguish two mechanisms"). Three mechanisms for this one absence have been
+asserted and withdrawn. If you are reaching for a fourth, you are the fourth — name the
+upstream signal that would distinguish it first, or write that there is none.
+
+## The 352-of-617 gap — SPLIT OUT, not fixed here
+🔴 **MEASURED and unexplained: of 617 sessions opening with a `/resume` kickoff paste, 352
+(57%) never load `/resume`'s SKILL.md body at all.** Independently reproduced twice with
+different markers (audit: ≥351; this session: 352).
+
+⚠ **The first probe for this was wired to nothing** and is worth recording: it searched for
+the resume skill's `description`, which ships in the always-on skill LISTING in *every*
+session, so it matched 100% of transcripts and "proved" there was no gap. A body-only marker
+is what produced 352. Any re-measurement must use a string absent from the frontmatter.
+
+- **This is NOT this arc's work and must not be fixed on a guess** — all three candidate
+  mechanisms above are retracted, so the cause is genuinely unknown.
+- **Closing condition:** a named upstream signal that distinguishes at least two candidate
+  mechanisms is identified and measured, OR the operator reads the measurement and closes it
+  as won't-fix. Mechanical half: `<0.57` on a re-run of the same probe after any change.
+- **Blast radius if real:** every route that rides `/resume`'s body, not just this one row —
+  which is why it is worth its own investigation rather than a patch here.
