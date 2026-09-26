@@ -81,11 +81,14 @@ BATTERIES = (
     # different skills — a section-level mapping would bucket them
     # together and score one against the other's suite.
     "mutation_battery_extract_user_msgs.py",
-    # Single-file (`find-session.py`), so no `TARGETS`. Guards the arc footer that
-    # names that same extractor — the DETERMINISTIC half of the routing whose
-    # prose half (a "Load when" row) reached 3 of 6 sessions where the tool itself
-    # reached 6 of 6. (This read "1 of 3" — a count stale within minutes of being
-    # taken; re-derived by round 0 of the audit ladder.)
+    # Spans TWO files (`find-session.py` and the extractor), so it declares
+    # `TARGETS`. It has to: round 1 measured that every mutant able to isolate the
+    # SEAM lives in `extract_user_msgs.py`, so a single-file battery scored
+    # `9/9 KILLED` while vouching for the seam guard's widening not at all.
+    # Guards the arc footer naming that extractor — the DETERMINISTIC half of the
+    # routing whose prose half (a "Load when" row) reached 3 of 6 sessions where
+    # the tool itself reached 6 of 6. (This read "1 of 3" — a count stale within
+    # minutes of being taken; re-derived by round 0 of the audit ladder.)
     "mutation_battery_arc_extractor_footer.py",
 )
 

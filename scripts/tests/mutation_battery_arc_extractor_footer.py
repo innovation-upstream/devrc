@@ -26,6 +26,7 @@ Usage: PYTHONDONTWRITEBYTECODE=1 python3 mutation_battery_arc_extractor_footer.p
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -35,6 +36,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 SRC = ROOT / "find-session.py"
+EUM = ROOT / "session-analysis" / "extract_user_msgs.py"
 TESTS = HERE / "test_find_session_arc.py"
 SCRIPT = SRC
 SELECT = "ArcNamesTheExtractor"
@@ -119,6 +121,23 @@ MUTANTS = [
      "        handoff_arc.doc_basename(seed))",
      "test_the_printed_SEED_is_one_the_EXTRACTOR_ACCEPTS"),
 
+    # 🔴 X1 IS THE ONLY MUTANT THAT ISOLATES THE SEAM, AND IT LIVES IN THE OTHER
+    # FILE. Round 1 measured that F8 kills the seam guard's OLD, extractor-blind
+    # form and its widened form identically — so `9/9 KILLED` vouched for the
+    # widening not at all, and the battery structurally could not, because it
+    # mutated one file while every discriminating mutant lives in the extractor.
+    # Hence `TARGETS` below. X1 keeps the resolver's NAME in a comment on purpose:
+    # that is exactly what the v2 spelled guard `in body` check accepted.
+    ("X1", "replacement",
+     "the extractor stops routing its seed through `arc_seed_to_doc` while still "
+     "NAMING it in a comment — the seam broken in the one shape a spelled guard "
+     "cannot see. After it, `--arc <session-uuid>` resolves in find-session and "
+     "exits 3 in the extractor, because the UUID branch lives only in the resolver.",
+     "    basename = fs.arc_seed_to_doc(seed, root=root)",
+     "    # X1: was fs.arc_seed_to_doc(seed, root=root)\n"
+     "    basename = fs.handoff_arc.doc_basename(seed)",
+     "test_the_printed_SEED_is_one_the_EXTRACTOR_ACCEPTS"),
+
     ("F7", "reorder",
      "the footer moves ABOVE the coverage line, so an agent that reads the "
      "command and stops has skipped every gap qualifying the chain",
@@ -128,6 +147,18 @@ MUTANTS = [
       "    out.append(handoff_arc.coverage_line(report))"),
      "test_the_command_sits_BELOW_the_coverage_line"),
 ]
+
+#: 🔴 A MULTI-FILE BATTERY, and it has to be. Every mutant that isolates the SEAM
+#: lives in the extractor, not in `find-session.py` — round 1 measured that a
+#: single-file battery scored `9/9 KILLED` while vouching for the seam guard's
+#: widening not at all. `test_mutation_battery_anchors.py` reads this map to check
+#: each anchor against the file it actually belongs to; without it every row falls
+#: back to `SCRIPT` and X1's anchor would be checked against the wrong file, where
+#: it occurs 0x — reported as a battery bug rather than the mapping bug it is.
+TARGETS = {
+    **{mid: SRC for mid, *_ in MUTANTS},
+    "X1": EUM,
+}
 
 
 def _run(node: str) -> tuple[int, str]:
@@ -140,7 +171,12 @@ def _run(node: str) -> tuple[int, str]:
 
 
 def main() -> int:
-    original = SRC.read_text(encoding="utf-8")
+    # 🔴 EVERY TARGET'S PRISTINE TEXT, KEYED BY PATH. A single `original` would
+    # restore the wrong file's contents onto a mutated sibling, and the next mutant
+    # would then land on leftover damage — a test dying to that is recorded as
+    # killing a mutant it never saw ("a sweep whose restore step can fail silently
+    # scores borrowed kills").
+    pristine = {p: p.read_text(encoding="utf-8") for p in set(TARGETS.values())}
 
     rc, out = _run(SELECT)
     if rc != 0:
@@ -158,13 +194,15 @@ def main() -> int:
     results, control = [], None
     try:
         for mid, _kind, _desc, old, new, node in MUTANTS:
-            n = original.count(old)
+            target = TARGETS[mid]
+            base = pristine[target]
+            n = base.count(old)
             if n != 1:
-                print(f"  {mid}: FATAL — anchor occurs {n}x, so the mutation is "
-                      "stale or ambiguous and measures nothing.")
+                print(f"  {mid}: FATAL — anchor occurs {n}x in {target.name}, so "
+                      "the mutation is stale or ambiguous and measures nothing.")
                 results.append((mid, "ANCHOR-NOT-UNIQUE", node))
                 continue
-            SRC.write_text(original.replace(old, new), encoding="utf-8")
+            target.write_text(base.replace(old, new), encoding="utf-8")
             rc, out = _run(node)
             # 🔴 THE VERDICT IS NOT `rc != 0`. A different guard's failure would
             # satisfy that with the guard under test deleted, so the NAMED test
@@ -177,7 +215,20 @@ def main() -> int:
             results.append((mid, verdict, node))
             print(f"  {mid}: {verdict}  (expected killer: {node})")
     finally:
-        SRC.write_text(original, encoding="utf-8")
+        for path, text in pristine.items():
+            path.write_text(text, encoding="utf-8")
+
+    # 🔴 ASSERT THE RESTORE BY DIGEST, not by a green re-run. A silently failed
+    # restore leaves the next mutant landing on leftover damage, and the test that
+    # dies to it is scored as killing a mutant it never saw — a BORROWED kill. The
+    # green re-check below is the tripwire; this is the actual proof.
+    dirty = [p.name for p, text in pristine.items()
+             if hashlib.sha256(p.read_bytes()).hexdigest()
+             != hashlib.sha256(text.encode()).hexdigest()]
+    if dirty:
+        print(f"🔴 RESTORE FAILED — not byte-identical: {dirty}. Every verdict "
+              "above is suspect: later mutants may have landed on leftover damage.")
+        return 2
 
     rc, _ = _run(SELECT)
     print(f"restored: {'GREEN' if rc == 0 else 'RED — RESTORE FAILED'}")
