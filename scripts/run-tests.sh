@@ -3989,6 +3989,14 @@ EXPECTED_SKIPS=(
   # a guard that fails with zero failing tests. If you land a battery with no
   # multi-site row and CI goes red with `failed=0`, look here first.
   "scripts/tests|mutation_battery_extract_user_msgs[.]py has no multi-site row"
+  # The FOURTH, added with `mutation_battery_arc_extractor_footer.py` — the arc
+  # footer that names that same extractor. 🔴 THE COMMENT ABOVE PAID OFF EXACTLY AS
+  # WRITTEN: a local `scoped-tests.sh` run went `RESULT: FAIL (exit=1)` over
+  # `passed=364 skipped=4 failed=0`, and its "look here first" is what attributed
+  # it in one read instead of another two rounds. The accounting cost is the
+  # mechanism — a battery added to `BATTERIES` without a line here is a silently
+  # collapsed skip group, so land both in the SAME commit.
+  "scripts/tests|mutation_battery_arc_extractor_footer[.]py has no multi-site row"
 )
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
 # carried two regression pins against the LIVE datapacket-talos skill corpus, a
