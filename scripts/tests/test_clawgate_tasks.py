@@ -1080,3 +1080,95 @@ def test_now_is_never_defaulted_to_wall_clock_inside_the_predicate():
     with pytest.raises(TypeError):
         cg.stuck_reasons(_task(1, cg.IN_PROGRESS, "x", None))
     assert time.time  # (the module under test must not need this at all)
+
+
+# =========================================================================== #
+# §G — `task_base_url`: the env FILE, with the process environment ON TOP
+#
+# 🔴 WHY A SECOND ENTRY POINT EXISTS AT ALL. `read_clawgate_task_env` also
+# returns the hook token and raises when the file has none, so it cannot serve a
+# caller that wants the base URL alone — or one running where the file is
+# absent. `task_base_url` composes the SAME ledger, the SAME precedence and the
+# SAME default over two layers instead of open-coding any of them.
+#
+# Values are pairwise distinct AND distinct from `DEFAULT_API_URL`, so a mutant
+# that collapses a layer or a key onto another cannot pass by coincidence.
+# =========================================================================== #
+PROC_TASK_URL = "http://proc-tasks.invalid:9103"
+PROC_ROUTER_URL = "http://proc-router.invalid:9104"
+
+
+def test_task_base_url_reads_the_env_FILE_when_the_process_has_nothing(tmp_path):
+    """🔴 THE DEFECT THIS CLOSES. An `os.environ`-only resolver answers
+    `DEFAULT_API_URL` here — on a host whose file names the task service."""
+    assert cg.task_base_url({}, _split_env(tmp_path)) == TASK_URL, (
+        "the env-file layer was not consulted; %s would mean only the process "
+        "environment was read" % cg.DEFAULT_API_URL)
+
+
+def test_the_process_environment_overrides_the_env_file(tmp_path):
+    assert cg.task_base_url({"CLAWGATE_TASK_API_URL": PROC_TASK_URL},
+                            _split_env(tmp_path)) == PROC_TASK_URL, (
+        "the process environment must OVERRIDE the file (%s would mean the "
+        "file won)" % TASK_URL)
+
+
+def test_the_files_TASK_key_outranks_the_processs_ROUTER_key(tmp_path):
+    """🔴 MERGED BEFORE THE LEDGER IS APPLIED, not after. A process layer that
+    won wholesale would let a bare `CLAWGATE_API_URL` in a shell beat the file's
+    `CLAWGATE_TASK_API_URL` and silently un-split the two services again."""
+    assert cg.task_base_url({"CLAWGATE_API_URL": PROC_ROUTER_URL},
+                            _split_env(tmp_path)) == TASK_URL, (
+        "a process CLAWGATE_API_URL (%s) beat the file's CLAWGATE_TASK_API_URL "
+        "(%s) — the specific key must outrank the general one across BOTH "
+        "layers" % (PROC_ROUTER_URL, TASK_URL))
+
+
+def test_the_process_ROUTER_key_still_beats_the_files_ROUTER_key(tmp_path):
+    """The override is per-KEY, not per-layer: with no task key anywhere, the
+    process environment's router value is the one that wins."""
+    assert cg.task_base_url({"CLAWGATE_API_URL": PROC_ROUTER_URL},
+                            _split_env(tmp_path, task=None)) == PROC_ROUTER_URL
+
+
+def test_an_empty_process_value_does_not_mask_the_file(tmp_path):
+    # Empty means UNSET everywhere (`${A:-$B}`), so `CLAWGATE_TASK_API_URL= cmd`
+    # falls through TO THE FILE rather than erasing it.
+    assert cg.task_base_url({"CLAWGATE_TASK_API_URL": ""},
+                            _split_env(tmp_path)) == TASK_URL
+
+
+def test_task_base_url_defaults_when_the_env_file_is_absent(tmp_path):
+    """A base URL has a defined answer without the file, so an absent one is a
+    STATE, not an error — unlike `read_clawgate_task_env`, which must also
+    produce a token."""
+    absent = str(tmp_path / "nope" / "clawgate.env")
+    assert cg.task_base_url({}, absent) == cg.DEFAULT_API_URL
+    with pytest.raises(OSError):
+        cg.read_clawgate_task_env(absent)
+
+
+def test_task_base_url_reads_os_environ_when_env_is_omitted(tmp_path,
+                                                            monkeypatch):
+    """The default `env=None` really is the process environment — asserted
+    rather than assumed, because every other test here injects a mapping and
+    would pass with that default wired to `{}`."""
+    monkeypatch.setenv("CLAWGATE_TASK_API_URL", PROC_TASK_URL)
+    assert cg.task_base_url(path=_split_env(tmp_path)) == PROC_TASK_URL
+
+
+def test_task_base_url_strips_a_trailing_slash_from_either_layer(tmp_path):
+    assert cg.task_base_url({}, _split_env(tmp_path, task=TASK_URL + "/")) == \
+        TASK_URL
+    assert cg.task_base_url({"CLAWGATE_TASK_API_URL": PROC_TASK_URL + "//"},
+                            _split_env(tmp_path)) == PROC_TASK_URL
+
+
+def test_task_base_url_never_returns_a_value_from_the_env_file_but_the_url(
+        tmp_path):
+    """🔴 The merged mapping holds every credential in the file. Only the
+    derived string leaves the function — pinned, because the merge made that a
+    thing a future edit could get wrong."""
+    f = _split_env(tmp_path)
+    assert ENV_TOKEN not in cg.task_base_url({}, f)
+    assert ENV_TOKEN not in cg.task_base_url({"CLAWGATE_API_URL": ""}, f)

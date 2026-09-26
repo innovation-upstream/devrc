@@ -48,7 +48,8 @@ link IS populated; they are tested, not observed in the wild. Nothing here shoul
 be tightened on the strength of a live zero.
 
 This module is PURE: no network, no clock of its own (`now` is injected), no
-filesystem beyond `read_clawgate_env`. Everything is unit-tested in
+filesystem beyond `_read_env_file` (reached by `read_clawgate_env`,
+`read_clawgate_task_env` and `task_base_url`). Everything is unit-tested in
 scripts/tests/test_clawgate_tasks.py, and the consolidation itself is pinned by
 scripts/tests/test_clawgate_predicate_single_source.py, which fails if a second
 copy of the state set reappears anywhere in the repo.
@@ -627,6 +628,78 @@ def read_clawgate_task_env(path=None):
     env = _read_env_file(path)
     base = _base_from(env, TASK_API_URL_VARS)
     return base, _token(env)
+
+
+def _read_env_file_or_empty(path=None):
+    """`_read_env_file`, but a missing/unreadable file is `{}` rather than a raise.
+
+    🔴 THE ONLY DIFFERENCE FROM `_read_env_file`, and it is deliberate.
+    `read_clawgate_env` / `read_clawgate_task_env` must also produce a TOKEN, and
+    "no file" genuinely defeats that — so they keep the raising read. A caller
+    that wants only a base URL has a defined answer without the file
+    (`DEFAULT_API_URL`), so for that caller an absent file is a STATE, not an
+    error.
+
+    `OSError` covers the whole family this can hit — the file is absent
+    (`FileNotFoundError`), the `.claude` directory is absent (`NotADirectory`/
+    `FileNotFoundError`), or it exists and is unreadable (`PermissionError`).
+    A MALFORMED file is deliberately NOT swallowed here: `_read_env_file` skips
+    lines without `=` rather than raising, so a garbled file yields the keys it
+    could parse and the precedence handles the rest.
+    """
+    try:
+        return _read_env_file(path)
+    except OSError:
+        return {}
+
+
+def task_base_url(env=None, path=None) -> str:
+    """The task-side base URL: the env FILE, with the PROCESS ENVIRONMENT on top.
+
+    🔴 SAME LEDGER, TWO LAYERS. `read_clawgate_task_env` answers the same
+    question, but it also returns the hook token and raises when the file has
+    none — so it cannot serve a caller that wants the base URL alone, or one
+    running where the file is absent. Rather than open-code the precedence at
+    such a call site (the N-sites regrowth `_base_from`'s docstring warns
+    about), this composes the SAME `TASK_API_URL_VARS` ledger, the SAME
+    `_base_from` precedence and the SAME `DEFAULT_API_URL` over a two-layer
+    mapping:
+
+        1. `CLAWGATE_TASK_API_URL` from the process environment
+        2. `CLAWGATE_TASK_API_URL` from ~/.claude/clawgate.env
+        3. `CLAWGATE_API_URL`      from the process environment
+        4. `CLAWGATE_API_URL`      from ~/.claude/clawgate.env
+        5. `DEFAULT_API_URL`
+
+    🔴 WHY THE FILE IS THE BASE LAYER AND NOT AN AFTERTHOUGHT. It is the layer
+    that actually carries the answer. The env file on the operator's host holds
+    both keys today; the surfaces this serves are started by hand or by a unit
+    that sets no `CLAWGATE_*` at all, so a resolver reading only `os.environ`
+    resolves to the default and silently posts at the permission router — the
+    exact defect this is here to close. `os.environ` stays an OVERRIDE because
+    a one-off `CLAWGATE_TASK_API_URL=… cmd` must still win over the file.
+
+    🔴 AND THE LAYERS ARE MERGED BEFORE THE LEDGER IS APPLIED, not after. A
+    process environment that wins WHOLESALE would let a bare `CLAWGATE_API_URL`
+    exported in a shell beat the file's `CLAWGATE_TASK_API_URL` and silently
+    un-split the two services again — the specific key must outrank the general
+    one across both layers, which is what one `_base_from` over the merged
+    mapping gives.
+
+    An EMPTY process value does not mask the file: empty means unset
+    everywhere (`_base_from`'s `${A:-$B}` rule), so `CLAWGATE_TASK_API_URL= cmd`
+    falls through to the file rather than erasing it.
+
+    `env` is any mapping and `path` any env-file path, so a test can drive both
+    layers without touching the process environment or the real file — and MUST
+    pass `path`, or it asserts against whatever the host happens to have.
+    """
+    merged = _read_env_file_or_empty(path)
+    # 🔴 `merged` holds every credential in the file (see `_read_env_file`). It
+    # is local and only the derived string leaves this function.
+    process = os.environ if env is None else env
+    merged.update({k: v for k, v in process.items() if v})
+    return _base_from(merged, TASK_API_URL_VARS)
 
 
 def tasks_url(base: str) -> str:
