@@ -10023,7 +10023,8 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     "test_the_real_reader_uses_the_BODY_scan_and_not_gits_trailer_parser",
     "test_a_nonzero_extractor_exit_becomes_a_REASON_not_an_absence_of_asks",
     "test_the_asks_are_scoped_to_THIS_PRs_commits_and_not_the_whole_CHECKOUT",
-    # Round 0 of this PR's own ladder produced these three.
+    # Round 0 of this PR's own ladder produced these two (a third,
+    # the PR-comment coverage test, was RENAMED rather than added).
     "test_a_non_owner_PR_comment_is_not_inlined_as_an_operator_ask",
     "test_the_extractor_is_invoked_with_include_answers",
     # 🔴 THE UNEARNED-LEDGER GUARDS (round 25), AND THEY ARE GUARDS FOR THREE
@@ -13275,7 +13276,7 @@ ASKS_FIXTURE = (
 )
 
 
-def fake_asks(_runner, _repo_dir, _data, extractor=None):
+def fake_asks(_runner, _data, extractor=None):
     return ASKS_FIXTURE
 
 
@@ -13303,7 +13304,7 @@ def test_no_other_round_pays_for_the_asks():
     exactly what round 0 itself exists to delete."""
     calls = []
 
-    def counting(_runner, _repo_dir, _data, extractor=None):
+    def counting(_runner, _data, extractor=None):
         calls.append(1)
         return ASKS_FIXTURE
 
@@ -13343,7 +13344,7 @@ def test_the_real_reader_never_returns_an_empty_block_when_everything_fails():
     def broken_runner(cmd, cwd=None):
         return 1, "", "fatal: not a git repository"
 
-    block = ad._read_operator_asks(broken_runner, "/nowhere", {})
+    block = ad._read_operator_asks(broken_runner, {})
     assert block, "the real reader returned an empty block on total failure"
     assert "UNATTRIBUTED-UNKNOWN" in block, block
     assert "not an absence of asks" in block.lower(), block
@@ -13355,7 +13356,7 @@ def test_the_real_reader_reports_a_missing_module_rather_than_raising(monkeypatc
     the audit."""
     monkeypatch.setattr(ad, "operator_asks", None)
     monkeypatch.setattr(ad, "_OPERATOR_ASKS_IMPORT_ERROR", "no module named x")
-    block = ad._read_operator_asks(lambda *a, **k: (0, "", ""), "/nowhere", {})
+    block = ad._read_operator_asks(lambda *a, **k: (0, "", ""), {})
     assert "COULD NOT LOAD" in block and "no module named x" in block
     assert "UNATTRIBUTED-UNKNOWN" in block
 
@@ -13373,10 +13374,10 @@ def test_the_real_reader_reads_the_operators_PR_COMMENTS_when_no_trailer_exists(
         raise AssertionError(f"the extractor was run with no session ids: {cmd}")
 
     block = ad._read_operator_asks(
-        runner, "/nowhere",
+        runner,
         {"body": "PROSE THE AGENT WROTE ABOUT ITS OWN CHANGE",
          "commits": [{"messageHeadline": "x", "messageBody": "no trailer here"}],
-         "comments": [{"authorAssociation": "OWNER",
+         "comments": [{"authorAssociation": "OWNER", "viewerDidAuthor": True,
                        "author": {"login": "ZacxDev"}, "body": "and log it"}]},
     )
     assert "> and log it" in block
@@ -13393,14 +13394,14 @@ def test_a_non_owner_PR_comment_is_not_inlined_as_an_operator_ask():
     def runner(cmd, cwd=None):
         raise AssertionError("should not reach the extractor")
 
-    block = ad._read_operator_asks(runner, "/nowhere", {
+    block = ad._read_operator_asks(runner, {
         "commits": [{"messageHeadline": "x", "messageBody": "no trailer"}],
-        "comments": [{"authorAssociation": "NONE",
+        "comments": [{"authorAssociation": "MEMBER", "viewerDidAuthor": False,
                       "author": {"login": "civitai-deploy"},
                       "body": "DEPLOY PREVIEW READY"}],
     })
     assert "DEPLOY PREVIEW READY" not in block
-    assert "non-owner author skipped" in block
+    assert "civitai-deploy" in block and "not the operator" in block
 
 
 def test_the_extractor_is_invoked_with_include_answers():
@@ -13415,7 +13416,7 @@ def test_the_extractor_is_invoked_with_include_answers():
         return 0, json.dumps(
             {"kind": "answer", "text": "the first option", "session_id": sid}), ""
 
-    block = ad._read_operator_asks(runner, "/nowhere", {
+    block = ad._read_operator_asks(runner, {
         "commits": [{"messageHeadline": "x",
                      "messageBody": f"Claude-Session-Id: {sid}"}],
     })
@@ -13448,7 +13449,7 @@ def test_the_real_reader_uses_the_BODY_scan_and_not_gits_trailer_parser():
         return 0, json.dumps(
             {"kind": "typed", "text": "do not add a retry", "session_id": sid}), ""
 
-    block = ad._read_operator_asks(runner, "/nowhere", {
+    block = ad._read_operator_asks(runner, {
         "commits": [{"messageHeadline": "feat: something (#1)",
                      "messageBody": squashed}],
     })
@@ -13465,7 +13466,7 @@ def test_a_nonzero_extractor_exit_becomes_a_REASON_not_an_absence_of_asks():
     def runner(cmd, cwd=None):
         return 5, "", "NOTHING WAS READ"
 
-    block = ad._read_operator_asks(runner, "/nowhere", {
+    block = ad._read_operator_asks(runner, {
         "commits": [{"messageHeadline": "x",
                      "messageBody": f"Claude-Session-Id: {sid}"}],
     })
@@ -13498,7 +13499,7 @@ def test_the_asks_are_scoped_to_THIS_PRs_commits_and_not_the_whole_CHECKOUT():
         return 0, json.dumps(
             {"kind": "typed", "text": "my own ask", "session_id": mine}), ""
 
-    block = ad._read_operator_asks(runner, "/nowhere", {
+    block = ad._read_operator_asks(runner, {
         "commits": [{"messageHeadline": "mine",
                      "messageBody": f"Claude-Session-Id: {mine}"}],
     })

@@ -248,7 +248,7 @@ def records_of(path, session_id=None, include_answers=False):
     answer is the OPERATOR, arriving in a `tool_result` block. MEASURED
     2026-09-26 over this host's corpus: **1,491 answer records across 594
     sessions, 837,635 B** — against 895,672 B for the entire `typed` operator
-    corpus, so it is 71% again on top of everything this tool could previously
+    corpus, so it is 92% again on top of everything this tool could previously
     report. Median 479 B, max 2,037 B. 24 carry a free-text `notes:` (the
     operator's own words); the rest record a decision.
 
@@ -261,25 +261,52 @@ def records_of(path, session_id=None, include_answers=False):
     path = Path(path)
     session_id = session_id if session_id is not None else path.stem
     project = path.parent.name
-    with open(path, errors="replace") as f:
-        parsed = []
-        for line in f:
+
+    def _parse(fh):
+        for line in fh:
             line = line.strip()
             if not line:
                 continue
             try:
-                parsed.append(json.loads(line))
+                yield json.loads(line)
             except ValueError:
                 continue
-    # Only materialised when the caller asked for answers — the default path
-    # still streams nothing extra into memory beyond the list above, and the
-    # id scan is skipped entirely.
-    ids = answer_ids(parsed) if include_answers else set()
-    for obj in parsed:
+
+    # 🔴 THE DEFAULT PATH STREAMS. `answer_ids` genuinely needs the whole file (a
+    # `tool_result` names a `tool_use` that appeared earlier), so the answers
+    # path materialises — but making that unconditional taxed every caller for a
+    # feature they did not ask for. MEASURED over 984 transcripts / 2.79 GB,
+    # `--jsonl -o`, 4 interleaved runs at load ~9: streaming 10.0-11.3 s and
+    # 222 MB peak RSS; materialising 17.3-26.3 s and 256 MB. So 1.6-2.4x wall for
+    # nothing. ⚠ An earlier revision claimed "the default path still streams
+    # nothing extra into memory beyond the list above" — self-contradictory, the
+    # list WAS the whole file on both paths. Round 1 of the devrc#1887 ladder
+    # measured it.
+    with open(path, errors="replace") as f:
+        if include_answers:
+            parsed = list(_parse(f))
+            ids = answer_ids(parsed)
+            source = parsed
+        else:
+            ids = set()
+            source = list(_parse(f))
+    for obj in source:
         if obj.get("type") != "user" or obj.get("isMeta"):
             continue
         # sidechain == a subagent's own transcript, not user-typed
         if obj.get("isSidechain"):
+            continue
+        # 🔴 A COMPACTION SUMMARY IS THE MODEL'S PROSE, NOT THE OPERATOR'S. It
+        # arrives as a `user` record with `isCompactSummary: true` and opens
+        # "This session is being continued from a previous conversation…".
+        # MEASURED 2026-09-26: 16 such records on this host, ALL 16 previously
+        # emitted as user-typed, carrying 211,362 B — **23.8% of the entire
+        # operator corpus**, and 212x the largest harness class any downstream
+        # filter removes. Round 1 of the devrc#1887 ladder found it. It also
+        # matters for a PUBLIC repo: `CLAUDE.md` names "a model's summaries of
+        # them" as captured text that must never be committed, and this tool's
+        # output gets quoted into handoff docs.
+        if obj.get("isCompactSummary"):
             continue
         msg = obj.get("message") or {}
         if msg.get("role") != "user":
@@ -531,8 +558,8 @@ output
                         AskUserQuestion prompt, which arrive in a tool_result
                         block this tool otherwise ignores. MEASURED 1,491
                         records / 837,635 B on this host, against 895,672 B
-                        for the whole typed corpus, so it is 71% again on top
-                        of everything the default can report. OFF by default:
+                        for the whole typed corpus, so it nearly DOUBLES what the
+                        default can report. OFF by default:
                         it changes WHAT IS EMITTED, not which sessions are
                         selected, and no shipped consumer's output may move.
 
@@ -581,7 +608,8 @@ def build_parser():
                         "prompts, as kind=answer. They arrive in a tool_result "
                         "block, which this tool otherwise ignores — MEASURED "
                         "1,491 records / 837,635 B on this host, against "
-                        "895,672 B for the whole typed corpus. OFF by default "
+                        "895,672 B for the whole typed corpus — it nearly doubles it. "
+                        "OFF by default "
                         "so no existing consumer's output moves.")
     p.add_argument("--root", default=None,
                    help=argparse.SUPPRESS)   # tests point this at a fixture
@@ -691,10 +719,14 @@ def main(argv=None):
     for sid, path in sources:
         # 🔴 MATERIALISED INSIDE THE `try`, ON PURPOSE. `records_of` is a
         # generator, so its `open()` runs on the first `next()`, not at the
-        # call — and an OSError from a MID-FILE read escapes at a different
-        # point from one at open. Consuming it here puts both inside one
-        # handler, and makes `opened` true of files that were read and held
-        # nothing, which is exactly the population exit 6 is about.
+        # call. Consuming it here puts every read inside one handler, and makes
+        # `opened` true of files that were read and held nothing, which is
+        # exactly the population exit 6 is about. ⚠ This comment used to add
+        # "an OSError from a MID-FILE read escapes at a different point from
+        # one at open"; that stopped being true when `records_of` began reading
+        # the file to completion before its first yield, so both now surface at
+        # the same `next()`. The conclusion is unaffected — round 1 of the
+        # devrc#1887 ladder caught the sentence, not a defect.
         try:
             recs = list(records_of(path, session_id=sid,
                                   include_answers=a.include_answers))

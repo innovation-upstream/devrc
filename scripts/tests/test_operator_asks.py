@@ -95,35 +95,46 @@ def test_a_control_character_in_a_trailer_is_dropped_by_the_writers_predicate():
 # comment authorship — ownership, not a bot denylist
 # --------------------------------------------------------------------------
 
-def test_a_non_owner_comment_is_skipped_and_counted():
-    """🔴 The direction round 0 found wrong. The old bot DENYLIST filtered 0 of
-    115 devrc comments and MISSED `civitai-deploy`, which posts 74% of comments
-    on `civitai/civitai` and would have been inlined AS the operator's asks."""
-    asks, skipped = oa.asks_from_comments([
-        {"authorAssociation": "NONE", "author": {"login": "civitai-deploy"},
-         "body": "deploy preview ready"},
-        {"authorAssociation": "OWNER", "author": {"login": "ZacxDev"},
-         "body": "do it the other way"},
+def test_the_operator_is_viewerDidAuthor_and_NOT_repo_membership():
+    """🔴 THIS PREDICATE WAS WRONG TWICE. A bot denylist filtered 0 of 115 devrc
+    comments; then `authorAssociation in {OWNER,MEMBER,COLLABORATOR}` re-admitted
+    the very bot the denylist missed — `civitai-deploy` is `MEMBER` — and newly
+    admitted devrc's ten OTHER human collaborators, all org members. Both
+    measured. The fixture carries that exact shape."""
+    asks, skips, examined = oa.asks_from_comments([
+        # the bot BOTH earlier predicates let through
+        {"authorAssociation": "MEMBER", "viewerDidAuthor": False,
+         "author": {"login": "civitai-deploy"}, "body": "deploy preview ready"},
+        # a teammate: a repo MEMBER who is not the operator
+        {"authorAssociation": "MEMBER", "viewerDidAuthor": False,
+         "author": {"login": "a-teammate"}, "body": "looks good to me"},
+        {"authorAssociation": "MEMBER", "viewerDidAuthor": True,
+         "author": {"login": "ZacxDev"}, "body": "do it the other way"},
     ])
     assert [a.text for a in asks] == ["do it the other way"]
-    assert skipped == 1
+    assert examined == 3
+    assert sum(skips.values()) == 2
+    assert any("civitai-deploy" in k for k in skips), skips
+    assert any("a-teammate" in k for k in skips), skips
 
 
-def test_an_UNRECOGNISED_association_is_NOT_treated_as_the_operator():
-    """The opposite direction from the old bot list, on purpose: including a
-    bot's words MANUFACTURES an author of record, which is worse than missing a
-    comment the operator can restate."""
-    asks, skipped = oa.asks_from_comments([
-        {"authorAssociation": "SOMETHING_NEW", "body": "automated notice"},
-        {"authorAssociation": None, "body": "no association at all"},
+def test_a_MISSING_viewerDidAuthor_is_UNKNOWN_not_a_silent_no():
+    """The field's absence must not be guessed from a proxy — that is how this
+    predicate went wrong twice."""
+    asks, skips, examined = oa.asks_from_comments([
+        {"authorAssociation": "OWNER", "body": "no authorship field at all"},
     ])
     assert asks == []
-    assert skipped == 2
+    assert examined == 1
+    assert any("could not be established" in k for k in skips), skips
+    assert any("NOT a claim" in k for k in skips), skips
 
 
-def test_owner_association_matching_is_case_folded():
-    assert oa.is_owner("owner") and oa.is_owner("Member")
-    assert not oa.is_owner("CONTRIBUTOR")
+def test_no_membership_or_denylist_predicate_survives():
+    """Both wrong answers are gone, and neither may come back as a proxy."""
+    for gone in ("OWNER_ASSOCIATIONS", "is_owner", "KNOWN_BOT_LOGINS", "is_bot"):
+        assert not hasattr(oa, gone), f"{gone} came back"
+    assert oa.VIEWER_FIELD == "viewerDidAuthor"
 
 
 # --------------------------------------------------------------------------
@@ -219,8 +230,20 @@ def test_a_REAL_ask_survives_the_classifier_including_a_long_one():
 def test_an_ask_that_MENTIONS_a_harness_note_is_still_an_ask():
     """The markers are looked for in a BOUNDED window at the head, so an ask
     that quotes one further down survives. The operator discusses these systems
-    constantly — including in the ask that created this module."""
-    tail = "y" * oa._MARKER_WINDOW
+    constantly — including in the ask that created this module.
+
+    🔴 THE FIXTURE LENGTH IS A LITERAL, NOT `_MARKER_WINDOW`. An earlier version
+    wrote `"y" * oa._MARKER_WINDOW`, which puts the marker just past the window
+    FOR EVERY VALUE OF IT — so `_MARKER_WINDOW = 10**9` SURVIVED a mutation
+    sweep. Narrowing was guarded and WIDENING was not, and widening is the
+    direction this module calls "strictly worse than no filter". Round 1 found
+    it. 900 is chosen to exceed the shipped 400 while staying a fixed number.
+    """
+    assert oa._MARKER_WINDOW < 900, (
+        "the window grew past this fixture — raise the literal deliberately, "
+        "and say why the wider window cannot eat an ask"
+    )
+    tail = "y" * 900
     assert oa.non_operator_reason(
         f"why did the agent stop\n{tail}\nit was stopped by the user.") == ""
 
@@ -444,8 +467,8 @@ def test_asks_are_rendered_VERBATIM_and_never_summarised_or_clipped():
     out = oa.render([oa.Ask(source=oa.SOURCE_SESSION, text=ask, session_id=SID_A)],
                     session_ids=(SID_A,), projects_root="/nonexistent")
     assert ask.splitlines()[0] in out
+    assert ask[-40:] in out, "the tail was dropped — something is still clipping"
     assert "clipped" not in out
-    assert str(len(ask)) not in out.split("**Ledger:**")[0] or True
 
 
 def test_a_multiline_ask_keeps_every_line_quoted():
@@ -544,3 +567,145 @@ def test_a_glob_metacharacter_in_an_id_cannot_widen_the_transcript_match(tmp_pat
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# --------------------------------------------------------------------------
+# 🔴 ROUND 1's FINDINGS — each guard names the defect it pins
+# --------------------------------------------------------------------------
+
+def test_a_rc0_coverage_note_becomes_an_UNKNOWN():
+    """🔴 THE BIGGEST ROUND-1 FINDING. The extractor exits **0** having read only
+    SOME of the ids it was given, and says so on stderr with a `!` prefix.
+    Discarding that made a HALF-resolved session set render as a complete read
+    with no UNKNOWN and no directive — handing round 0 exactly the licence to
+    delete that this module exists to remove. The operator runs two hosts, so a
+    missing transcript is the ORDINARY case.
+
+    The wording is the extractor's to change; the `!` prefix is the contract
+    (`print(f"! {note}", file=err)`), so that is what this reads.
+    """
+    err = ("! 1 of 2 selected session(s) have NO transcript on this host "
+           "(peer host? pruned?): dddddddd-1111-4222-8333-444444444444\n"
+           "sessions=1 msgs=7 deduped=1 out=-\n")
+    notes = oa.coverage_notes(err)
+    assert len(notes) == 1, notes
+    assert "NO transcript on this host" in notes[0]
+    assert "sessions=1" not in " ".join(notes), (
+        "the ordinary summary line was read as a coverage gap"
+    )
+
+
+def test_a_FULL_rc0_run_produces_no_coverage_note():
+    """The negative control: a note on every run is a note nobody reads, and it
+    would put a permanent UNKNOWN in every brief."""
+    assert oa.coverage_notes("sessions=2 msgs=9 deduped=0 out=-\n") == []
+    assert oa.coverage_notes("") == []
+
+
+def test_the_sources_line_says_NAMED_BY_not_resolved():
+    """An id read from a trailer is not an id resolved to a transcript — and
+    conflating them is what made the partial read look complete."""
+    out = oa.render([], session_ids=(SID_A,), projects_root="/nonexistent")
+    assert "NAMED BY" in out
+    assert "session(s) resolved from" not in out
+
+
+def test_a_comment_source_with_ZERO_comments_still_prints_a_line():
+    """`consulted and empty` must be distinguishable from `not consulted`."""
+    out = oa.render([], comments_examined=0, projects_root="/nonexistent")
+    assert "0 comment(s) examined" in out
+
+
+def test_the_comment_source_declares_that_REVIEW_comments_are_invisible():
+    """`gh pr view --json comments` returns ISSUE comments only. An ask left in a
+    review is absent, and its absence is UNKNOWN rather than zero — the same
+    blind spot the claims reader already pins for itself."""
+    out = oa.render([], comments_examined=3, projects_root="/nonexistent")
+    assert "ISSUE comments ONLY" in out
+    assert "REVIEW comment" in out
+
+
+def test_the_block_warns_against_committing_a_quoted_ask():
+    """This repo is PUBLIC and findings land in tracked `.md`, which no content
+    gate covers."""
+    out = oa.render([oa.Ask(source=oa.SOURCE_SESSION, text="x", session_id=SID_A)],
+                    session_ids=(SID_A,), projects_root="/nonexistent")
+    assert "DO NOT COMMIT ONE" in out
+
+
+def test_the_agents_own_preview_block_is_stripped_from_an_answer():
+    """🔴 Same class as the PR description this module dropped: a `selected
+    preview:` block is the AGENT'S OWN PLAN, and an auditor quoting it would
+    attribute the agent's plan to the operator. Measured on devrc#1887: two
+    answer rows of 1,124 B carried ~440 B of the operator's actual notes."""
+    raw = ('The user answered: "Which?"="Option B (Recommended)" selected preview:\n'
+           'AFTER:\n  module ~603 -> ~330 lines\n  tests 49 -> ~30')
+    got = oa.strip_answer_framing(raw)
+    assert "module ~603" not in got, "the agent's plan survived as the operator's ask"
+    assert "Option B" in got, "the operator's actual choice was stripped too"
+    assert "The user answered: " not in got
+
+
+def test_an_answer_that_is_ONLY_framing_is_dropped_with_a_reason():
+    out = jl({"kind": "answer", "session_id": SID_A,
+              "text": "The user answered: selected preview:\nAFTER: nothing"})
+    asks, dropped = oa.parse_rows(out)
+    assert asks == []
+    assert any("harness framing" in k for k in dropped), dropped
+
+
+def test_every_framing_fragment_is_actually_stripped():
+    """A fragment in the tuple that the function never removes is dead weight
+    that reads as coverage — the shape of round 0's eight dead guards."""
+    for frag in oa.ANSWER_FRAMING:
+        assert frag not in oa.strip_answer_framing(f"keep this {frag} and this")
+
+
+class TestRoundOneSeamFindings(TestTheSeamWithTheRealProducer):
+    """Round 1's producer-side findings, driven through the real extractor."""
+
+    def test_a_model_authored_compaction_summary_is_NOT_the_operator(self, tmp_path):
+        """🔴 THE LARGEST MISCLASSIFICATION LEFT. Measured over this host: 16
+        records carrying **211,362 B = 23.8% of the entire operator corpus** —
+        212x the one harness family kept — all of them a MODEL's summary of a
+        conversation, emitted as the operator's verbatim ask. `CLAUDE.md` also
+        names "a model's summaries of them" as captured text a public repo must
+        not commit."""
+        rows = self._rows(tmp_path, [
+            self._user(
+                "This session is being continued from a previous conversation "
+                "that ran out of context. The summary below covers the earlier "
+                "portion of the conversation in detail.",
+                isCompactSummary=True, isVisibleInTranscriptOnly=True),
+            self._user("the real ask"),
+        ])
+        assert [r["text"] for r in rows] == ["the real ask"], (
+            f"a compaction summary reached this module: {rows}"
+        )
+
+    def test_the_opt_in_DEFAULT_is_pinned_not_just_the_parameter(self, tmp_path):
+        """🔴 THE PR'S WHOLE COMPATIBILITY GUARANTEE, asserted in five places and
+        previously enforced in NONE. Round 1's sweep set the parameter default to
+        True and set the argparse default to True — both SURVIVED, because the
+        one test that looked like the guard passed `include_answers=False`
+        EXPLICITLY. This calls `records_of` with NO keyword at all, so the
+        DEFAULT is what is under test.
+        """
+        eum = _extractor()
+        proj = tmp_path / "-home-zach-workspace-devrc"
+        proj.mkdir(exist_ok=True)
+        p = proj / f"{SID_A}.jsonl"
+        p.write_text("\n".join(json.dumps(r) for r in [
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tu_1", "name": "AskUserQuestion",
+                 "input": {}}]}},
+            self._user([{"type": "tool_result", "tool_use_id": "tu_1",
+                         "content": "my answer"}]),
+        ]) + "\n")
+        assert list(eum.records_of(p)) == [], (
+            "records_of emits answers BY DEFAULT — every existing consumer's "
+            "output just moved"
+        )
+        assert eum.build_parser().parse_args([]).include_answers is False, (
+            "the CLI default flipped — the shipped footer's output moves"
+        )

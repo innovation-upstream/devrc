@@ -5468,7 +5468,7 @@ def _read_round_zero(repo_dir):
 EXTRACTOR = Path(__file__).resolve().parent / "session-analysis" / "extract_user_msgs.py"
 
 
-def _read_operator_asks(runner, repo_dir, data, extractor=None):
+def _read_operator_asks(runner, data, extractor=None):
     """ROUND 0's attribution input. -> a rendered block, always a string.
 
     🔴 EVERY FAILURE PATH RETURNS A BLOCK, NEVER None OR "". The block's whole
@@ -5507,10 +5507,11 @@ def _read_operator_asks(runner, repo_dir, data, extractor=None):
     # measured 115 comments across the 120 newest devrc PRs.
     raw_comments = data.get("comments")
     if isinstance(raw_comments, list):
-        got, non_owner = operator_asks.asks_from_comments(raw_comments)
+        got, comment_skips, comments_examined = \
+            operator_asks.asks_from_comments(raw_comments)
         asks += got
     else:
-        non_owner = 0
+        comment_skips, comments_examined = {}, None
         unmeasured.append(operator_asks.Unmeasured(
             operator_asks.SOURCE_PR_COMMENT,
             "`gh` returned no comments array for this PR"))
@@ -5571,6 +5572,19 @@ def _read_operator_asks(runner, repo_dir, data, extractor=None):
                 operator_asks.SOURCE_SESSION,
                 operator_asks.extractor_reason(rc, err)))
         else:
+            # 🔴 rc 0 IS NOT FULL COVERAGE, AND THE PROOF IS ON STDERR. The
+            # extractor exits 0 having read only SOME of the ids it was given,
+            # and says so there: "N of M selected session(s) have NO transcript
+            # on this host (peer host? pruned?)", plus unreadable transcripts and
+            # dedup-emptied sessions. An earlier revision read `out` and threw
+            # `err` away, so a HALF-resolved set rendered as a complete read with
+            # no UNKNOWN and no directive — handing round 0 exactly the licence
+            # to delete that this whole module exists to remove. The operator
+            # runs TWO HOSTS, so a missing transcript is the ORDINARY case, not a
+            # corner. Round 1 of the devrc#1887 ladder found it.
+            for note in operator_asks.coverage_notes(err):
+                unmeasured.append(operator_asks.Unmeasured(
+                    operator_asks.SOURCE_SESSION, note))
             got, dropped = operator_asks.parse_rows(out)
             if not got:
                 # 🔴 THE REASON MATTERS AND IT IS NOT ALWAYS THE SAME. With
@@ -5592,7 +5606,8 @@ def _read_operator_asks(runner, repo_dir, data, extractor=None):
 
     return operator_asks.render(
         asks, unmeasured=unmeasured, session_ids=ids,
-        non_owner_skipped=non_owner, dropped=dropped)
+        comment_skips=comment_skips, comments_examined=comments_examined,
+        dropped=dropped)
 
 
 def build_parser():
@@ -6487,7 +6502,7 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         # Read ONLY at round 0, for the same reason as `round_zero` — and this
         # one also SHELLS OUT (git + the extractor), so reading it on a round
         # that never prints it would be paid work with no consumer.
-        operator_asks=(operator_asks_reader(runner, repo_dir, data)
+        operator_asks=(operator_asks_reader(runner, data)
                        if args.round_no == 0 else None),
         payload=args.payload,
         # 🔴 CARRIED ONLY WHEN THE GATE ACTUALLY FIRED. `args.gate_override` is

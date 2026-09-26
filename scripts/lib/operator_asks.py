@@ -119,16 +119,34 @@ UNKNOWN_DIRECTIVE = (
     "for it. Say the source was unreadable instead."
 )
 
-#: 🔴 OWNERSHIP, NOT A BOT DENYLIST. An earlier version enumerated nine bot
-#: logins. Measured: it filtered **0** of the 115 comments across the 120 newest
-#: devrc PRs (all from the operator), and MISSED the one real bot population in a
-#: repo `/audit-pr` runs against — `civitai-deploy` posts 130 of 177 comments
-#: (74%) on the 60 newest `civitai/civitai` PRs and would have been inlined AS
-#: the operator's asks. Nine declarations, zero instances, and wrong in
-#: direction. `authorAssociation` is on every comment row `gh` already returns,
-#: so this is one predicate over data in hand instead of a list that only grows
-#: when somebody remembers. `claude/RULES.md` → "declarations-vs-instances".
-OWNER_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+#: 🔴 THE OPERATOR IS `viewerDidAuthor`, AND NOTHING ELSE WILL DO. This predicate
+#: has now been wrong TWICE in the same place, both times because it answered a
+#: NEARBY question instead of the one the heading asks.
+#:
+#:  1. A nine-login BOT DENYLIST. Measured: filtered **0** of 115 comments across
+#:     the 120 newest devrc PRs, and missed `civitai-deploy` — 130 of 177
+#:     comments (74%) on the 60 newest `civitai/civitai` PRs. Nine declarations,
+#:     zero instances (`claude/RULES.md` → "declarations-vs-instances").
+#:  2. `authorAssociation in {OWNER, MEMBER, COLLABORATOR}`. That is REPO
+#:     MEMBERSHIP, which is not operator identity. Measured: `devrc` has **11
+#:     collaborators, 10 of them other people**, all org members ⇒ `MEMBER`; and
+#:     `civitai-deploy` — the very bot fix 1 missed — is ALSO `MEMBER`. So the
+#:     replacement re-admitted the exact comment it was written to exclude, AND
+#:     newly admitted ten teammates, under a heading reading "THE OPERATOR'S OWN
+#:     ASKS". Round 1 of the devrc#1887 ladder found it.
+#:
+#: `viewerDidAuthor` is on every comment row `gh` already returns and means "the
+#: authenticated user wrote this" — `gh` runs AS the operator, so it is the
+#: identity question itself rather than a proxy for it. Verified live: the
+#: operator's own comment on #1887 is `viewerDidAuthor: true`, and
+#: `civitai-deploy`'s are `false`.
+#:
+#: ⚠ THE LESSON, because two wrong answers in one spot is the pattern: when a
+#: predicate's docstring asks a different question from the heading its result is
+#: printed under, the heading is what readers believe. Do not replace this with
+#: another proxy — a login table, an association set, an owner comparison — and
+#: if `viewerDidAuthor` is ever absent, report UNKNOWN rather than guessing.
+VIEWER_FIELD = "viewerDidAuthor"
 
 
 @dataclass(frozen=True)
@@ -184,34 +202,63 @@ def safe_label(sid: str, width: int = 8) -> str:
     return sid[:width]
 
 
-def is_owner(association: str) -> bool:
-    """Is this comment author the repo's own side rather than a bot or drive-by?
+def is_the_operator(comment: object) -> tuple[bool, str]:
+    """-> (is the operator, reason-if-not). The identity question, asked directly.
 
-    Case-folded because the API's spelling is not something to depend on. An
-    UNRECOGNISED value is NOT an owner — the opposite direction from the old bot
-    list, and deliberately: here the failure is *including a bot's words as the
-    operator's ask*, which manufactures an author of record, and that is worse
-    than missing one comment the operator can restate.
+    `viewerDidAuthor` is authoritative: `gh` authenticates AS the operator, so
+    the field means "the person this tool is running for wrote this". A MISSING
+    field is NOT a yes and NOT a silent no — it returns a reason, so the caller
+    can report UNKNOWN instead of guessing from a proxy. See `VIEWER_FIELD`'s
+    comment for the two proxies that were wrong here before.
     """
-    return (association or "").strip().upper() in OWNER_ASSOCIATIONS
+    # 🔴 THE ONLY isinstance CHECK FOR A COMMENT ROW LIVES HERE. `asks_from_comments`
+    # used to repeat it and then call this, which made this branch unreachable from
+    # the only caller — a guard that reads as coverage and provides none, which is
+    # exactly the eight-dead-guards defect round 0 found in this same module.
+    # Pyright flagged it; the annotation is `object` so the check is real to the
+    # type checker too.
+    if not isinstance(comment, dict):
+        return False, "a malformed comment row"
+    v = comment.get(VIEWER_FIELD)
+    if v is True:
+        return True, ""
+    if v is False:
+        login = ((comment.get("author") or {}) or {}).get("login") or "someone else"
+        return False, f"written by {login}, not the operator"
+    return False, (
+        f"`{VIEWER_FIELD}` was absent, so authorship could not be established — "
+        "NOT a claim that the operator did not write it"
+    )
 
 
-def asks_from_comments(comments: Sequence[dict]) -> tuple[list[Ask], int]:
-    """-> (operator asks, non_owner_skipped). `comments` is `gh pr view --json comments`."""
+def asks_from_comments(comments: Sequence[dict]) -> tuple[list[Ask], dict, int]:
+    """-> (operator asks, {reason: count} for the rest, comments examined).
+
+    🔴 RETURNS THE EXAMINED COUNT, so *consulted and empty* is distinguishable
+    from *not consulted*. An earlier revision returned only a skip tally, so a PR
+    with zero comments produced no "Sources read" line at all and the two states
+    read identically — round 1 of the devrc#1887 ladder found that too.
+    """
     out: list[Ask] = []
-    skipped = 0
+    skipped: dict[str, int] = {}
+    examined = 0
     for c in comments or []:
+        ok, why = is_the_operator(c)
         if not isinstance(c, dict):
+            # A malformed row is not a comment anybody wrote; it is not counted
+            # as examined, and it is reported rather than swallowed.
+            skipped[why] = skipped.get(why, 0) + 1
             continue
         body = (c.get("body") or "").strip()
         if not body:
             continue
-        if not is_owner(c.get("authorAssociation")):
-            skipped += 1
+        examined += 1
+        if not ok:
+            skipped[why] = skipped.get(why, 0) + 1
             continue
         login = ((c.get("author") or {}) or {}).get("login") or ""
         out.append(Ask(source=SOURCE_PR_COMMENT, text=body, who=login))
-    return out, skipped
+    return out, skipped, examined
 
 
 #: The two `kind`s of `extract_user_msgs.py` row that are the operator speaking.
@@ -232,6 +279,49 @@ HARNESS_NOTE_PATTERNS = ("was stopped by the user.",)
 
 #: How far in the note markers are looked for, so an ask ABOUT one survives.
 _MARKER_WINDOW = 400
+
+#: 🔴 AN `answer` ROW ARRIVES WRAPPED IN AGENT TEXT, AND THAT IS THE SAME CLASS
+#: THIS MODULE DELETED THE PR DESCRIPTION FOR. Measured on devrc#1887: two answer
+#: rows totalling 1,124 B carried ~440 B of the operator's free-text notes; the
+#: rest was the harness's framing sentences, the agent's own question text, its
+#: option labels, and — worst — its `selected preview:` block, which is the
+#: AGENT'S OWN PLAN. An auditor quoting that attributes the agent's plan to the
+#: operator, the exact inversion round 0 exists to catch. Round 1 found it.
+#:
+#: These are the harness's fixed sentences, stripped so what remains is the
+#: question and the answer. The question STAYS — an answer without it is
+#: unreadable — and it is labelled in the render as a question the session asked.
+ANSWER_FRAMING = (
+    "The user answered: ",
+    "Your questions have been answered: ",
+    "Read the answers carefully — they may request clarification, changes, or "
+    "that you not proceed — and follow what they actually say.",
+    "You can now continue with these answers in mind.",
+)
+
+#: Everything from here on in an answer row is the AGENT's rendering of its own
+#: option, not the operator's words.
+ANSWER_PREVIEW_MARKER = "selected preview:"
+
+
+def strip_answer_framing(text: str) -> str:
+    """Remove the harness's fixed sentences and the agent's own preview block.
+
+    🔴 ORDER IS LOAD-BEARING: framing FIRST, then the preview cut. The fragments
+    end in a space, and cutting the preview first `rstrip`s that space away — so
+    a row that was ONLY framing came back as the bare `"The user answered:"`
+    instead of empty, and was emitted as an operator ask. Caught by
+    `test_an_answer_that_is_ONLY_framing_is_dropped_with_a_reason` on its first
+    run, which is the whole reason that test asserts the empty case rather than
+    just the happy one.
+    """
+    out = text or ""
+    for frag in ANSWER_FRAMING:
+        out = out.replace(frag, "")
+    cut = out.find(ANSWER_PREVIEW_MARKER)
+    if cut != -1:
+        out = out[:cut]
+    return out.strip()
 
 
 def non_operator_reason(text: str) -> str:
@@ -279,12 +369,19 @@ def parse_rows(jsonl_text: str) -> tuple[list[Ask], dict]:
             if reason != "empty":
                 dropped[reason] = dropped.get(reason, 0) + 1
             continue
+        kind = row.get("kind") or ""
+        if kind == "answer":
+            text = strip_answer_framing(text)
+            if not text:
+                dropped["an answer row that was entirely harness framing"] = (
+                    dropped.get("an answer row that was entirely harness framing", 0) + 1)
+                continue
         out.append(Ask(
             source=SOURCE_SESSION,
             text=text,
             session_id=row.get("session_id") or "",
             role=row.get("arc_role") or "",
-            kind=row.get("kind") or "",
+            kind=kind,
         ))
     return out, dropped
 
@@ -300,6 +397,30 @@ EXTRACTOR_REASONS = {
     5: "those session ids resolved to no readable transcript on this host",
     6: "the transcripts were read and held no operator-typed message",
 }
+
+
+#: Lines the extractor writes to stderr while STILL EXITING 0 — each one says a
+#: part of the selection was not read. They are prefixed `!` by that tool
+#: (`extract_user_msgs.py`'s own coverage notes), which is the marker this reads.
+#: 🔴 A rc-0 RUN WITH ONE OF THESE IS A PARTIAL READ, and treating it as complete
+#: is what suppressed the UNKNOWN directive on a half-resolved session set.
+_COVERAGE_NOTE_PREFIX = "!"
+
+
+def coverage_notes(stderr: str) -> list[str]:
+    """The extractor's rc-0 partial-coverage notes, as reasons for `Unmeasured`.
+
+    Reads the `!`-prefixed lines that tool emits rather than matching their
+    wording: the sentences are its to change, the prefix is the contract. An
+    empty result means it reported full coverage — which is a READING, not an
+    assumption, because a rc-0 run with no notes read everything it selected.
+    """
+    out: list[str] = []
+    for line in (stderr or "").splitlines():
+        t = line.strip()
+        if t.startswith(_COVERAGE_NOTE_PREFIX) and len(t) > 1:
+            out.append(t.lstrip("! ").strip())
+    return out
 
 
 def extractor_reason(rc: int, stderr: str = "") -> str:
@@ -366,6 +487,12 @@ def agent_side_reference(ids: Sequence[str], projects_root=None) -> list[str]:
     return lines
 
 
+def asks_by_source(asks: Sequence[Ask], source: str) -> list[Ask]:
+    """The asks from one source. Public so the ledger can count without
+    re-deriving the grouping `_render_asks` already does."""
+    return [a for a in asks if a.source == source]
+
+
 def _render_asks(asks: Sequence[Ask]) -> tuple[list[str], dict]:
     """The verbatim ask bodies, grouped by source then session."""
     lines: list[str] = []
@@ -402,7 +529,8 @@ def _render_asks(asks: Sequence[Ask]) -> tuple[list[str], dict]:
 
 
 def render(asks: Sequence[Ask], unmeasured: Sequence[Unmeasured] = (),
-           session_ids: Sequence[str] = (), non_owner_skipped: int = 0,
+           session_ids: Sequence[str] = (), comment_skips: dict | None = None,
+           comments_examined: int | None = None,
            dropped: dict | None = None, projects_root=None) -> str:
     """The round-0 asks block. NEVER returns a quiet empty block.
 
@@ -434,8 +562,12 @@ def render(asks: Sequence[Ask], unmeasured: Sequence[Unmeasured] = (),
 
     lines += ["", "**Sources read:**"]
     if session_ids:
+        # 🔴 "NAMED BY", NOT "RESOLVED". An earlier revision said "resolved",
+        # which reads as "resolved to a transcript" — they were only read out of
+        # trailers, and whether each has a readable transcript on THIS host is a
+        # separate fact the `!` lines below carry. Round 1 found the wording.
         lines.append(
-            f"  {SOURCE_SESSION}: {len(session_ids)} session(s) resolved from "
+            f"  {SOURCE_SESSION}: {len(session_ids)} session(s) NAMED BY "
             f"`Claude-Session-Id:` trailers in the PR's commit BODIES — "
             + ", ".join(safe_label(s) for s in session_ids)
         )
@@ -444,12 +576,21 @@ def render(asks: Sequence[Ask], unmeasured: Sequence[Unmeasured] = (),
         # so a reader must be able to see whether what it dropped SHOULD have
         # been dropped.
         lines.append(f"  {SOURCE_SESSION}: dropped {n} record(s) — {reason}")
-    if non_owner_skipped:
+    if comments_examined is not None:
+        # Printed even at ZERO, so "consulted and empty" is distinguishable from
+        # "not consulted" — they read identically without this line.
         lines.append(
-            f"  {SOURCE_PR_COMMENT}: {non_owner_skipped} comment(s) from a "
-            "non-owner author skipped (bots and drive-by comments are not the "
-            "operator; an UNRECOGNISED association is treated as non-owner)"
+            f"  {SOURCE_PR_COMMENT}: {comments_examined} comment(s) examined, "
+            f"{len(asks_by_source(asks, SOURCE_PR_COMMENT))} from the operator"
         )
+        lines.append(
+            f"  ! {SOURCE_PR_COMMENT}: `gh pr view --json comments` returns "
+            "ISSUE comments ONLY — an ask left as a REVIEW comment, inside a "
+            "review thread, or in a review body is NOT visible here and its "
+            "absence is UNKNOWN, not zero."
+        )
+    for why, n in sorted((comment_skips or {}).items(), key=lambda kv: -kv[1]):
+        lines.append(f"  {SOURCE_PR_COMMENT}: {n} skipped — {why}")
     for u in unmeasured:
         lines.append(f"  ! {u.source}: UNKNOWN — {u.reason}")
     if not session_ids and not unmeasured and not asks:
@@ -481,5 +622,14 @@ def render(asks: Sequence[Ask], unmeasured: Sequence[Unmeasured] = (),
     if unmeasured or not asks:
         lines += ["", UNKNOWN_DIRECTIVE]
 
+    lines += [
+        "",
+        "🔴 **QUOTE AN ASK IN YOUR REPORT, BUT DO NOT COMMIT ONE.** This repo is "
+        "PUBLIC and `CLAUDE.md` forbids committing captured text — message "
+        "bodies, prompts, transcript content — however it arrives. Findings land "
+        "in tracked `claudedocs/**.md` and in public PR comments, and the `.md` "
+        "surface is gated by nothing, so this is yours to hold: paraphrase or "
+        "elide when a finding goes into a file.",
+    ]
     lines += [""] + agent_side_reference(session_ids, projects_root=projects_root)
     return "\n".join(lines)

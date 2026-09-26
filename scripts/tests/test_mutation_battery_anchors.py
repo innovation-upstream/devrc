@@ -90,6 +90,16 @@ BATTERIES = (
     # the tool itself reached 6 of 6. (This read "1 of 3" — a count stale within
     # minutes of being taken; re-derived by round 0 of the audit ladder.)
     "mutation_battery_arc_extractor_footer.py",
+    # Single-target (`scripts/lib/operator_asks.py`), so no `TARGETS`. Committed
+    # because round 1 of devrc#1887 found that the `17 mutants, 17 KILLED` in
+    # that PR's body came from a SCRATCHPAD script — a claim `claude/RULES.md`'s
+    # "re-verify a self-reported mutation result" cannot check from the tree.
+    # 🔴 Its own header carries the warning that matters: eight rows of its
+    # PREDECESSOR were all KILLED while the branches they mutated fired ZERO
+    # times in production, because the upstream producer already removed those
+    # inputs. A kill proves a test watches a branch, never that the branch is
+    # REACHABLE — reachability is the suite's seam class, not this file's.
+    "mutation_battery_operator_asks.py",
 )
 
 # 🔴 PYTHON MUTATION INSTRUMENTS THIS MODULE CANNOT PIN, each with its reason.
