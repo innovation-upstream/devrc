@@ -43,12 +43,27 @@ SELECT = "ArcNamesTheExtractor"
 #: `test_mutation_battery_anchors.py` reads, with `old` as the 4th field.
 MUTANTS = [
     # 🔴 POSITIVE CONTROL, first so a wired-to-nothing batch is obvious at once.
+    #
+    # ⚠ C0 USED TO MUTATE `run_arc`'s `"next_command"` JSON FIELD, and that field
+    # was DELETED (measured reach 0 of 6, no caller). Its anchor would now occur 0x,
+    # which this battery scores ANCHOR-NOT-UNIQUE and the anchor ledger fails on —
+    # so the control was re-pointed rather than dropped. Its first incarnation
+    # SURVIVED, which is how the guards-narrower defect in the JSON test was found;
+    # that history is worth keeping even though both the field and the test are gone.
     ("C0", "control",
-     "the JSON drops `next_command` entirely — the POSITIVE CONTROL; if this "
-     "does not go red the battery is wired to nothing. It SURVIVED on the first "
-     "run and the test, not the code, was what was wrong.",
-     '            "next_command": extractor_next_command(report),\n', "",
-     "test_the_JSON_carries_the_command_and_NULL_when_there_is_none"),
+     "`extractor_next_command` returns None unconditionally — the POSITIVE "
+     "CONTROL. Every footer assertion must die; if this does not go red the "
+     "battery is wired to nothing and every SURVIVED below is uninterpretable.",
+     # 🔴 THE ANCHOR SPANS TO `n = …` ON PURPOSE. A first draft replaced only the
+     # opening line of the multi-line `return (…)`, which orphaned its continuation
+     # lines into a SyntaxError — the module then failed to import and the batch
+     # scored KILLED-WRONG-TEST, dying for a reason that says nothing about the
+     # guard. Mutate to something that still PARSES, or the control is theatre.
+     # (`claude/RULES.md`: "ISOLATE THE MUTATION … dies for the wrong reason".)
+     "    if not report.members:\n        return None\n"
+     "    n = len(report.members)\n",
+     "    return None  # C0 — control\n    n = len(report.members)\n",
+     "test_a_resolved_arc_NAMES_the_extractor_command"),
 
     ("F1", "replacement",
      "the footer is computed and never appended — the whole feature inert while "
@@ -89,6 +104,20 @@ MUTANTS = [
      'EXTRACTOR_REL = "scripts/session-analysis/extract_user_msgs.py"',
      'EXTRACTOR_REL = "scripts/session-analysis/extract_user_messages.py"',
      "test_the_NAMED_PATH_EXISTS_in_this_repo"),
+
+    # 🔴 F8 EXISTS BECAUSE ROUND 0 FOUND THE SEED GUARD WAS THE ONE GUARD WITH NO
+    # MUTANT — so its ability to go red was never verified, while the PR called it
+    # one of "two seam guards, the load-bearing ones". Breaking the resolver the
+    # EXTRACTOR shares is the failure mode the old, extractor-blind version of that
+    # guard could not see; this mutant is what proves the widened one can.
+    ("F8", "replacement",
+     "`arc_seed_to_doc` stops accepting a bare basename, so every footer names a "
+     "seed the extractor's own resolver rejects — the seam breaking with both "
+     "components individually fine",
+     "    return handoff_arc.doc_basename(seed)",
+     '    return "" if seed and not seed.startswith("/") else (\n'
+     "        handoff_arc.doc_basename(seed))",
+     "test_the_printed_SEED_is_one_the_EXTRACTOR_ACCEPTS"),
 
     ("F7", "reorder",
      "the footer moves ABOVE the coverage line, so an agent that reads the "

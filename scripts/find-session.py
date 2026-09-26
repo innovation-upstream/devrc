@@ -1164,19 +1164,38 @@ EXTRACTOR_REL = "scripts/session-analysis/extract_user_msgs.py"
 def extractor_next_command(report):
     """The `extract_user_msgs.py --arc …` line printed under a resolved arc.
 
-    🔴 THIS EXISTS BECAUSE PROSE ROUTING WAS MEASURED NOT TO FIRE. #1870 shipped
-    the arc-scoped extractor and routed it from a "Load when" row in `/resume`'s
-    SKILL.md. Measured over the three sessions that asked the operator's standing
-    question — *"anything left outstanding from this arc?"* — after that landed:
-    `find-session --arc` ran in **3 of 3**, the reference file was read in **1 of
-    3**, and one session re-found the extractor with
-    `find $DEVRC/scripts -name 'extract_user_msgs*'` while the row sat unread in
-    its own context. A row in one skill's body can only fire when that skill
-    loads, and this question arrives at the END of an arc, in sessions that never
-    ran `/resume` — one of the three never invoked it at all. So the routing now
-    rides the surface that fired every time: the tool the agent already reached
-    for names the next one. Deterministic, per RULES.md "Deterministic Over
-    Prose".
+    🔴 THIS RIDES THE SURFACE WITH THE WIDER MEASURED REACH. It is a claim about
+    two surfaces' REACH, deliberately NOT about why the narrower one misses —
+    see the retraction below. #1870 shipped the arc-scoped extractor and routed it
+    from a "Load when" row in `/resume`'s SKILL.md, which can only be read in a
+    session where that skill's body loads. Measured over the **6** sessions that
+    asked the operator's standing question — *"anything left outstanding from this
+    arc?"* — after #1870 merged: `find-session --arc` ran in **6 of 6**, the
+    reference file was read in **3 of 6**, and two sessions re-found the extractor
+    with `find $DEVRC/scripts -name 'extract_user_msgs*'`. So this line goes where
+    every one of them already looked: the tool the agent reached for names the next
+    one. Deterministic, per RULES.md "Deterministic Over Prose".
+
+    ⚠ **n=6, and it was n=3 when this was written** — two more sessions landed
+    within 11 minutes of the first commit and a sixth during the audit that caught
+    it. The population grows ~1/h under active work. It is a COUNT, not a rate;
+    do not re-tune routing off it.
+
+    🔴 RETRACTED — DO NOT RE-DERIVE: *"a row in one skill's body only fires when
+    that skill loads, and this question arrives at the END of an arc, in sessions
+    that never ran `/resume`."* That named a mechanism from ONE session, and the
+    mechanism is unestablished. Two later candidates were also refuted: the
+    kickoff-paste population shows **0 of 617** pastes expanding as a command, but
+    that zero is true BY CONSTRUCTION (a session where the command fires opens with
+    `<command-message>`, so the "starts with /resume" filter excludes it), and
+    INDENTATION is not the cause either — all 4 flush-left pastes equally failed to
+    expand while several indented ones did. What IS measured: **352 of 617** such
+    sessions never load `/resume`'s body at all, cause UNKNOWN. That gap is real,
+    it is tracked separately, and nothing here depends on explaining it. Three
+    successive mechanisms for this absence have now been wrong; if you are
+    reaching for a fourth, you are the fourth — an absence is the observable the
+    most causes share (RULES.md, "an EMPTY RESULT cannot distinguish two
+    mechanisms").
 
     🔴 RETURNS None FOR A MEASURED-EMPTY ARC, DELIBERATELY. The extractor exits
     non-zero when an arc resolves with no members, so printing the command there
@@ -1315,10 +1334,13 @@ def run_arc(a):
             "coverage": handoff_arc.coverage_line(report),
             "readers_measured": report.readers_measured,
             "unmeasured": report.unmeasured_notes,
-            # 🔴 null, not an empty string, for a measured-empty arc — see
-            # `extractor_next_command`. A machine caller must be able to branch
-            # on "there is no next step" without string-matching for one.
-            "next_command": extractor_next_command(report),
+            # ⚠ NO `next_command` HERE, DELETED 2026-09-26 AND NOT AN OVERSIGHT.
+            # It shipped for one round, justified as "a machine caller must be able
+            # to branch on it" — a hypothesis, not a consumer. Measured reach: 0 of
+            # 6. Five of those six sessions DID call `--arc --json`, and each parsed
+            # `members` and discarded the rest, so the field never entered an
+            # agent's context. The human footer covers every reader that sees the
+            # rendering. Re-add it when a caller exists and is named here.
         }, indent=2))
         return EXIT_OK
     print(render_arc(report))

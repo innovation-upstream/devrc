@@ -731,20 +731,30 @@ class TestTrailerValuesAreValidatedOnREAD:
 
 
 class TestTheArcNamesTheExtractor:
-    """🔴 THE ROUTING GUARD FOR A PROSE ROUTE THAT WAS MEASURED NOT TO FIRE.
+    """🔴 THE ROUTING GUARDS FOR THE SURFACE WITH THE WIDER MEASURED REACH.
 
-    #1870 shipped `extract_user_msgs.py --arc` and routed it from a "Load when"
-    row in `/resume`'s SKILL.md. Measured over the three sessions that asked the
-    operator's standing end-of-arc question after that landed: `--arc` ran in 3 of
-    3, the reference file was read in 1 of 3, and one session re-found the script
-    with `find $DEVRC/scripts -name 'extract_user_msgs*'` while the row sat unread
-    in its context. These guards pin the deterministic replacement — the tool that
-    DID fire every time names the next one.
+    #1870 shipped `extract_user_msgs.py --arc` and routed it from a "Load when" row
+    in `/resume`'s SKILL.md, readable only where that skill's body loads. Measured
+    over the **6** sessions that asked the operator's standing end-of-arc question
+    after #1870 merged: `--arc` ran in **6 of 6**, the reference file was read in
+    **3 of 6**, and two sessions re-found the script with
+    `find $DEVRC/scripts -name 'extract_user_msgs*'`. These guards pin the footer
+    that goes where all six already looked. ⚠ n=6, a COUNT and not a rate.
 
-    🔴 The two seam guards are the load-bearing ones. A footer that renders
-    perfectly while naming a path that does not exist, or a seed the extractor
-    rejects, is inert in exactly the way a rendering test cannot see — the
-    "verified in isolation" hazard, two components each fine and the seam broken.
+    ⚠ This docstring said "3 of 3 / 1 of 3" and named an end-of-arc MECHANISM. The
+    counts were stale within minutes and the mechanism was refuted; the retraction
+    lives once, in `find_session.extractor_next_command`, and is deliberately not
+    restated here.
+
+    🔴 THE SEAM GUARD IS THE LOAD-BEARING ONE. A footer that renders perfectly
+    while naming a path that does not exist, or a seed the extractor rejects, is
+    inert in exactly the way a rendering test cannot see — the "verified in
+    isolation" hazard, two components each fine and the seam broken. ⚠ There is
+    **ONE** such guard, and this docstring claimed TWO: the seed test asserted
+    `arc_seed_to_doc(doc) == doc` without importing the extractor at all, so it
+    could not see the extractor stopping to call it. That was a description wider
+    than its implementation — the `guards-narrower` shape — found by round 0 of the
+    audit ladder. It now imports `extract_user_msgs` and crosses the seam for real.
     """
 
     @staticmethod
@@ -807,42 +817,39 @@ class TestTheArcNamesTheExtractor:
             f"the arc footer names {fs.EXTRACTOR_REL}, which does not exist")
 
     def test_the_printed_SEED_is_one_the_EXTRACTOR_ACCEPTS(self):
-        """🔴 SEAM GUARD, and the one a render test structurally cannot make. The
-        footer promises `--arc <report.doc>` works. The extractor resolves its seed
-        through `find_session.arc_seed_to_doc`, so that function — not a second
-        spelling of it — is what must accept a bare basename. If it ever stopped,
-        every footer this module prints would be a command that exits non-zero.
+        """🔴 SEAM GUARD, and the one a render test structurally cannot make.
+
+        The footer promises `--arc <report.doc>` works. ⚠ An earlier version of this
+        guard asserted `fs.arc_seed_to_doc(doc) == doc` and NEVER IMPORTED the
+        extractor, so it was blind to the only way this seam actually breaks — the
+        extractor ceasing to route its seed through that function. It read as a seam
+        guard and was a unit test of `find-session` alone. It now loads
+        `extract_user_msgs` the way the extractor's own `--arc` path does and
+        asserts the function object is SHARED, not merely that two spellings agree.
         """
+        import importlib.util as _ilu
+        src = Path(__file__).resolve().parents[1] / fs.EXTRACTOR_REL.split(
+            "scripts/", 1)[1]
+        spec = _ilu.spec_from_file_location("eum_seam", str(src))
+        eum = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(eum)
+
+        # The extractor loads find-session through its OWN loader; that module
+        # object is what its `--arc` path calls. Assert the seam by IDENTITY.
+        their_fs = eum._load_find_session()
+        assert hasattr(their_fs, "arc_seed_to_doc"), (
+            "the extractor's find-session handle has no `arc_seed_to_doc` — the "
+            "footer's `--arc <doc>` promise has no resolver behind it")
         doc = "handoff-arc-fixture.md"
-        assert fs.arc_seed_to_doc(doc) == doc
-
-    def test_the_JSON_carries_the_command_and_NULL_when_there_is_none(
-            self, monkeypatch, capsys):
-        """A machine caller must branch on "no next step" without string-matching
-        for one, which is why the empty case is `None` and not `""`.
-
-        🔴 THIS TEST GOES THROUGH `run_arc` AND PARSES THE JSON, and an earlier
-        version did neither — it asserted `extractor_next_command(...)` directly
-        while its NAME claimed the JSON was covered. The mutation battery's
-        positive control (dropping the `"next_command"` key from `run_arc`'s dict)
-        SURVIVED against it, which is what exposed the gap: a docstring claiming a
-        relationship while the body inspected one side. Reading as coverage while
-        providing none is worse than none, because it stops anyone looking.
-        """
-        for n, expected in ((2, True), (0, False)):
-            report = (self._report(n) if n else
-                      ha.ArcReport(doc="handoff-arc-fixture.md", repo="devrc"))
-            monkeypatch.setattr(fs, "arc_report", lambda _b, report=report: report)
-            rc = fs.run_arc(fs.parse_args(["--arc", "handoff-arc-fixture.md",
-                                           "--json"]))
-            assert rc == fs.EXIT_OK
-            payload = json.loads(capsys.readouterr().out)
-            assert "next_command" in payload, (
-                "the JSON dropped the key entirely — a caller branching on it "
-                "cannot tell 'no next step' from 'this tool has no such field'")
-            assert (payload["next_command"] is not None) is expected
-            if expected:
-                assert fs.EXTRACTOR_REL in payload["next_command"]
+        assert their_fs.arc_seed_to_doc(doc) == doc, (
+            f"the extractor's own resolver rejects {doc!r}, which is exactly what "
+            "every footer this module prints hands to it")
+        # ...and that the extractor really does depend on it, so a future rewrite
+        # that stops calling it fails HERE rather than silently at runtime.
+        body = src.read_text(encoding="utf-8")
+        assert "arc_seed_to_doc" in body, (
+            "the extractor no longer names `arc_seed_to_doc`; the footer's seed "
+            "contract is now unenforced — re-point this guard at the new resolver")
 
 
 class TestEverySessionOnTheOldestCommitIsOriginated:
