@@ -464,9 +464,15 @@ are **TWO** registrations on that host with **separate extension ids and therefo
 separate stores**: `Default` → `onglbmc…` from the repo path, and `Profile 1` →
 `doiabid…` from `.local`. The 0 bytes was `Profile 1`. Re-measured 2026-09-21: Default
 `3,268,444 B` / `12,456` `resetsAt`; Profile 1 `811 B` / `0`. So no report had ever
-finished **in that profile** — which is true and uninteresting — while the registration
-that matters had been recording all along. The kept values below are the original
-Profile-1 reading.
+finished **in that profile** — while the registration that matters had been recording all
+along. The kept values below are the original Profile-1 reading.
+🔴 **AND THE CONCLUSION DRAWN FROM THAT — "true and uninteresting" — IS ITSELF NOW
+SUPERSEDED, 2026-09-26.** Profile 1's store is **4,861,557 B**. Both registrations are
+recording, so the split is live and neither popup can show all 16 accounts: the reason
+`Profile 1` is worth deleting is no longer hygiene, it is data loss. The `811 B` / `0`
+figures above are a correct 2026-09-21 reading and nothing more — **do not read them as
+evidence that `Profile 1` is dormant.** See the `Profile 1's .local store went from
+811 B to 4.9 MB` block at the end of this section, and ranked item 2.
 - as-of: 2026-09-20
 - **Symptom + exact repro:** on the laptop (10.42.0.100), the only host where
   the extension was found registered, its LevelDB is empty.
