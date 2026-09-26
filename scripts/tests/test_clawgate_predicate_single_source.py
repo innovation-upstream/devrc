@@ -96,10 +96,14 @@ EXPECTED_IMPORTERS = {
     # ONE definition of which base URL the task service lives on now that it is
     # a separate process from the permission router. It held
     # `ENDPOINT = "http://<host>:<port>/api/tasks"` and could not follow that
-    # split. Its Signal twin (scripts/signal/clawgate.py) cannot import the
-    # module — it ships in an image that COPYs its own directory by name — and
-    # carries a deliberate copy pinned by
-    # scripts/tests/test_clawgate_task_base_url_single_source.py.
+    # split. ⚠ Its Signal twin (scripts/signal/clawgate.py) still holds that
+    # literal and is deliberately NOT on this ledger: its one caller is the
+    # `draft` CLI subcommand, which the deployed pod never runs, and the module
+    # ships in an image that COPYs its own directory by name — so importing the
+    # shared module there means widening a security-motivated allowlist for a
+    # path that cannot post a card today. Fixing it is its own change; see
+    # scripts/mail-actions/tests/test_clawgate_task.py for the guard that keeps
+    # the literal from coming back HERE.
     "scripts/mail-actions/clawgate.py",
     # 🔴 The write-back guard takes only `TASK_API_URL_VARS` — the task-API base-URL
     # ledger — NOT the pending/stuck predicate, so it renders none of this queue and

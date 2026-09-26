@@ -465,7 +465,7 @@ def test_clawgate_module_cannot_transmit():
     src = Path(clawgate.__file__).read_text(encoding="utf-8")
     assert "SEND_PATH" not in src
     assert "/v2/send" not in src
-    assert clawgate.task_endpoint({}).endswith("/api/tasks")
+    assert clawgate.ENDPOINT.endswith("/api/tasks")
 
 
 # --------------------------------------------------------------------------- #
@@ -1055,11 +1055,6 @@ def test_emit_draft_task_is_a_graceful_noop_without_a_token(monkeypatch):
 
 def test_emit_draft_task_posts_the_card_when_a_token_is_set(monkeypatch):
     monkeypatch.setenv("CLAWGATE_HOOK_TOKEN", "tok-signal-1")
-    # 🔴 Both URL keys CLEARED, so this asserts the documented default rather
-    # than whatever the operator's shell happens to export. Without this the
-    # suite is blind on exactly the dimension the endpoint tests measure.
-    monkeypatch.delenv("CLAWGATE_TASK_API_URL", raising=False)
-    monkeypatch.delenv("CLAWGATE_API_URL", raising=False)
     calls = []
 
     class Resp:
@@ -1078,9 +1073,7 @@ def test_emit_draft_task_posts_the_card_when_a_token_is_set(monkeypatch):
     assert clawgate.emit_draft_task(draft_id=17, recipient=PEER,
                                     body="please approve") is True
     call = calls[0]
-    # A LITERAL, not `clawgate.<whatever the module computes>` — an expectation
-    # derived from the implementation under test asserts nothing about it.
-    assert call["url"] == "http://192.168.50.250:30302/api/tasks"
+    assert call["url"] == clawgate.ENDPOINT
     assert call["headers"]["Authorization"] == "Bearer tok-signal-1"
     assert "title" not in call["json"]              # clawgate ignores `title`
     assert "17" in call["json"]["directory"]

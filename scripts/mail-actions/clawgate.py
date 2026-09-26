@@ -18,11 +18,26 @@ text as `directory` (mirroring `repo-cos/clawgate.py`, which already gets this r
 used to hold `ENDPOINT = "http://<host>:<port>/api/tasks"` and read nothing but
 the token from the environment, so it could not follow the task service's split
 out of the permission router: whichever host the literal named was the host it
-kept posting to. The precedence
-(`CLAWGATE_TASK_API_URL` -> `CLAWGATE_API_URL` -> the shared default) is NOT
-re-spelled here — it is `scripts/lib/clawgate_tasks.task_base_url`, loaded by
-explicit path below, so this producer and the board pollers cannot disagree
-about where the task service is.
+kept posting to. The precedence is NOT re-spelled here — it is
+`scripts/lib/clawgate_tasks.task_base_url`, loaded by explicit path below, so
+this producer and the board pollers cannot disagree about where the task service
+is.
+
+🔴 AND IT IS RESOLVED FROM ~/.claude/clawgate.env, not from `os.environ` alone.
+An earlier revision of this fix read only the process environment, justified by
+"a systemd unit's `Environment=`". That was measured FALSE: `--emit-clawgate` is
+manual/on-demand (`claude/skills/mailbox/SKILL.md`), no unit sets any
+`CLAWGATE_*`, and the host this runs on DOES have ~/.claude/clawgate.env
+carrying both the token and the task base. So it resolved through the one
+channel that carries nothing. `task_base_url` now layers the file under the
+process environment; see its docstring for the five-step precedence.
+
+⚠ THE TOKEN IS STILL TAKEN FROM `os.environ` ONLY, and that asymmetry is known
+rather than overlooked. It is the subject of its own open PR
+(`fix/307-clawgate-token-resolver`) and is deliberately not folded in here:
+until it lands, this module is a graceful no-op unless the operator's shell
+carries `CLAWGATE_HOOK_TOKEN` — and when it does, the base URL it posts at is
+now the configured one rather than a guess.
 """
 from __future__ import annotations
 
@@ -75,13 +90,15 @@ def _load_clawgate_tasks():
                       "../lib/ and $DEVRC_DIR/scripts/lib/)")
 
 
-def task_endpoint(env=None) -> str:
+def task_endpoint(env=None, path=None) -> str:
     """The `POST /api/tasks` URL for the TASK service, resolved at CALL TIME.
 
-    `env` is any mapping (the process environment by default), so a test can
-    drive the resolution without touching `os.environ`.
+    Both arguments are pass-through to the shared resolver: `env` is the
+    override layer (the process environment by default) and `path` the env file
+    (~/.claude/clawgate.env by default), so a test can drive BOTH layers without
+    touching the process environment or the real file.
     """
-    return _load_clawgate_tasks().task_base_url(env) + TASKS_PATH
+    return _load_clawgate_tasks().task_base_url(env, path) + TASKS_PATH
 
 
 # clawgate renders `directory` as the Task card's title; trim to a sane label length.
@@ -113,7 +130,8 @@ def emit_task(*, who: str, ask: str, deadline: str | None, amount: str | None,
     """Emit one clawgate Task card for an action item. Returns True if posted.
 
     The endpoint is resolved AFTER the token check, so the no-token no-op stays
-    exactly what it was: nothing is loaded, nothing is read, nothing is posted.
+    exactly what it was: the shared module is not loaded, ~/.claude/clawgate.env
+    is not opened, nothing is posted.
     """
     token = os.environ.get("CLAWGATE_HOOK_TOKEN")
     if not token:
