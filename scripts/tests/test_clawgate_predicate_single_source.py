@@ -537,11 +537,43 @@ def test_the_test_directory_filter_covers_the_SIBLING_suites_too():
     assert not _is_test_file("scripts/lib/tests_helper.py")
 
 
+#: 🔴 NAMES THE MODULE, DOES NOT LOAD IT — pardoned, and the pardon is TWO-WAY.
+#: `_loads_shared_module` counts any non-docstring string constant containing the
+#: module name, because a loader cannot avoid naming its target. The registrant is
+#: the one file that names it for a different reason: its `HOOK_LIBRARY_MODULES`
+#: ledger lists the BASENAMES deployed into `~/.claude/hooks/`, and
+#: `clawgate_tasks.py` is on it because the write-back guard's deployed copy needs
+#: the module as a sibling. Calling that an importer would be a wrong label on a
+#: real ledger; deleting the detector's string branch would blind it to every
+#: explicit-path loader. So it is excluded BY NAME, and
+#: `test_the_pardoned_file_really_does_still_name_the_module` fails if it ever stops
+#: naming it — which would mean the deploy ledger lost the entry.
+NAMES_BUT_DOES_NOT_LOAD = {
+    "scripts/claude-hooks/register-nudge-hook.py",
+}
+
+
+def test_the_pardoned_file_really_does_still_name_the_module():
+    """The other half of the pardon. A forgiven path that no longer hits is a rubber
+    stamp outliving the thing it stamped — and here it would mean the shared module
+    had silently dropped out of the hooks-directory deploy ledger, which is exactly
+    the arrangement the write-back guard's store copy depends on."""
+    for rel in sorted(NAMES_BUT_DOES_NOT_LOAD):
+        p = REPO / rel
+        assert p.exists(), rel
+        assert _loads_shared_module(p), (
+            "%s no longer names %s — if the deploy ledger dropped it, the deployed "
+            "write-back guard cannot resolve its task-API base at all; if it was "
+            "only a rename, move this entry with it" % (rel, LIB_REL))
+
+
 def test_exactly_the_expected_surfaces_import_the_shared_module():
     found = set()
     for p in python_files(REPO / "scripts"):
         rel = p.relative_to(REPO).as_posix()
         if _is_test_file(rel) or rel == LIB_REL:
+            continue
+        if rel in NAMES_BUT_DOES_NOT_LOAD:
             continue
         if _loads_shared_module(p):
             found.add(rel)
