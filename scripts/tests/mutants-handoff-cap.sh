@@ -1110,6 +1110,23 @@ run 'rule-p-stamps-a-run-it-never-refused' \
 run 'rule-p-crashes-instead-of-degrading' \
   test_it_degrades_to_NO_RATCHET_when_its_own_code_explodes \
   '/^def size_ratchet_report/,/^def size_ratchet_override_note/ s|    except (Exception, SystemExit):|    except SystemExit:|'
+# 🔴 THE CONTROL-CHARACTER REPAIR, ONE ROW PER CHANNEL, ADDED #1871 ROUND 2 AND
+# NOT YET SCORED BY AN AUTHORITATIVE SWEEP. The repair had NO row at all before
+# this: `rule-p-override-not-stamped-on-the-commit` blanks the whole trailer
+# value, which is a different mutation and is killed by a plain-ASCII fixture.
+#
+# 🔴 TWO ROWS RATHER THAN ONE INSIDE `_printable_clipped`, DELIBERATELY. Mutating
+# that function's body removes the repair from BOTH channels at once, so either
+# test kills it and neither channel is isolated — `claude/RULES.md`'s "isolate the
+# mutation" in its plainest form. Each row here drops the repair at ONE call site
+# and leaves the clip, so the mutant is exactly "this channel prints raw".
+# Both anchors occur 1x in `handoff_doc.py`; the replacements change one line each.
+run 'rule-p-override-echo-not-repaired' \
+  test_a_reason_carrying_a_CONTROL_character_is_REPAIRED_ON_STDOUT_TOO \
+  's|_printable_clipped(reason, SIZE_RATCHET_ECHO_MAX)|_clip(reason, SIZE_RATCHET_ECHO_MAX)|'
+run 'rule-p-override-trailer-not-repaired' \
+  test_a_reason_carrying_a_CONTROL_character_still_STAMPS_the_commit \
+  's|_printable_clipped(reason, SIZE_RATCHET_REASON_MAX)|_clip(reason, SIZE_RATCHET_REASON_MAX)|'
 run 'rule-p-comment-reword-control' SURVIVES \
   's|# --- rule (p): a doc already over its ceiling may not GROW|# --- rule p: size ratchet (reworded comment)|'
 

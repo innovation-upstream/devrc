@@ -1281,6 +1281,22 @@ which returns `True` and is 138,791 B, i.e. **73,255 B over the 65,536 B ceiling
 carries a `GRANDFATHERED` entry of its own. So the remedy points at a file that is in
 rule (p)'s population.
 
+🔴 **THAT IS A LIVE SIZE OF A MONOTONIC SINK, SO RE-MEASURE IT RATHER THAN QUOTING IT.**
+Both figures above go stale the next time that document is appended to, and the section
+40 lines up already insists on a command beside any literal — it was written without one,
+which is the same defect one paragraph over. The ceiling is not measured here at all; it
+is `handoff_budget.MAX_BYTES`, owned by `scripts/tests/test_handoff_doc_size.py`.
+
+```bash
+stat -c %s <cairn>/claudedocs/handoff-cairn-control-plane-archive.md   # 138791 when written
+python3 -c 'import sys; sys.path.insert(0, "scripts/lib"); import handoff_budget as b; print(b.MAX_BYTES)'
+```
+
+⚠ The `<cairn>/` prefix is not decoration: `test_doc_path_rot.py` reads a bare
+`claudedocs/…` written about another repo as local rot and calls it a dead path. That
+gate's own one-token convention is `<repo>/…`, and it is what keeps the line above
+invisible to it.
+
 ⚠ **IT IS STILL NOT REFUSED IN PRACTICE, AND THAT IS THE PRECISE CLAIM.** Remedy 2's
 write is **out of band**: `handoff_doc.py` writes exactly one path per run,
 `claudedocs/handoff-<topic>.md` for the `--topic` it was given, so an archive move made
@@ -1303,10 +1319,18 @@ made things worse than it found them.
 🔴 **WHO MAY PULL IT: the AGENT may pull it; the reason MUST say whether an operator
 approved it.** That is an operator ruling and it is deliberately **not**
 `--leak-pre-existing-approved`'s rule, which is the operator's call and where the skill
-tells the executor to stop. The sentence is one string —
-`handoff_doc.SIZE_RATCHET_WHO_MAY` — carried verbatim by the refusal, by `--help`, by
-`SKILL.md` step 5 and by this line, and pinned in all four as a whole normalised string
-so a reword in one place cannot quietly disagree with the others.
+tells the executor to stop.
+
+The sentence is one string — `handoff_doc.SIZE_RATCHET_WHO_MAY` — carried verbatim by
+**the refusal, the override block above the diff, `--help`, `SKILL.md` step 5, and this
+line**, and pinned in every one of them as a whole normalised string, so a reword in one
+place cannot quietly disagree with the others. ⚠ **This list said "all four" and named a
+different four**, omitting the override block — the same member the tool's own comment,
+the pinning test's docstring and that test's failure message were each dropping too, so
+the set was written down four times and was short in all four.
+`test_the_SKILL_and_the_TOOL_agree_on_WHO_may_pull_the_ratchet_override`'s `sites` dict
+is the ledger that actually fails; this is prose, so enumerate rather than count and read
+it there if the two disagree.
 
 `--override-size-ratchet "<why>"`. The reason is **required**; an empty one is refused
 at argument-validation time with **exit 2**, not 14 — an empty flag is a complaint

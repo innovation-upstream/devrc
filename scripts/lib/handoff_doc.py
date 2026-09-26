@@ -3335,11 +3335,25 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
 # `test_handoff_doc_size.py` is exactly where nothing else would ever notice.
 SIZE_RATCHET_FLAG = "--override-size-ratchet"
 
-#: 🔴 WHO MAY PULL RULE (p)'S OVERRIDE, AS ONE STRING — the refusal, `--help`,
-#: `claude/skills/handoff/SKILL.md` and `reference/write-gate.md` §I all carry
-#: THIS text, and
-#: `test_the_SKILL_and_the_TOOL_agree_on_WHO_may_pull_the_ratchet_override`
-#: pins the whole normalised sentence in every one of them.
+#: 🔴 WHO MAY PULL RULE (p)'S OVERRIDE, AS ONE STRING. The sites that carry THIS
+#: text, ENUMERATED in full — because the set was written down FOUR times across
+#: three files and every one of them was short by the SAME member: this comment
+#: listed four, the pinning test's docstring said "OVER FOUR SITES" and merged the
+#: override note into `--help`'s bullet, its failure message said "all four
+#: sites", and `write-gate.md` §I enumerated a DIFFERENT four. None of them named
+#: `size_ratchet_override_note`:
+#:
+#:   * `size_ratchet_report` — the refusal;
+#:   * `size_ratchet_override_note` — the block above the diff. THE MEMBER ALL
+#:     FOUR COUNTS DROPPED;
+#:   * `build_parser` — `--help`;
+#:   * `claude/skills/handoff/SKILL.md` step 5;
+#:   * `claude/skills/handoff/reference/write-gate.md` §I.
+#:
+#: `test_the_SKILL_and_the_TOOL_agree_on_WHO_may_pull_the_ratchet_override` owns
+#: the machine-readable version of that list (its `sites` dict) and pins the whole
+#: normalised sentence in every member. It is the thing that FAILS; this list is a
+#: claim, so read it there if the two ever disagree.
 #:
 #: 🔴 IT IS DELIBERATELY NOT THE LEAK GATE'S RULE, AND THE DIFFERENCE IS THE
 #: POINT. `--leak-pre-existing-approved` is the OPERATOR's call and the skill
@@ -3380,11 +3394,27 @@ SIZE_RATCHET_TRAILER_KEY = "Size-Ratchet-Override"
 #:
 #: ⚠ AND STDOUT IS NOT THE BACKUP THIS COMMENT USED TO CALL IT. It said "the
 #: FULL reason is on stdout", which is false past 240 characters:
-#: `size_ratchet_override_note` clips its own echo to 240, so a 631-char reason
-#: reaches NEITHER channel whole. Stdout carries strictly MORE (240 > 200) and
-#: that is the whole of the relation — pinned by
-#: `test_the_two_CHANNELS_clip_the_reason_at_DIFFERENT_widths`, because a
-#: comment is a claim too and this one was wrong twice.
+#: `size_ratchet_override_note` clips its own echo to `SIZE_RATCHET_ECHO_MAX`, so
+#: a 631-char reason reaches NEITHER channel whole.
+#:
+#: 🔴 THE RELATION BETWEEN THE TWO CHANNELS HAS TWO DIMENSIONS, AND THIS COMMENT
+#: HAS NOW BEEN WRONG ABOUT IT THREE TIMES. It last said stdout carrying strictly
+#: more "is the whole of the relation", which was false in the worse direction:
+#: the two also differed in REPAIR. Only the trailer ran
+#: `session_trailer.printable_for_trailer`, so a reason carrying `\x1b` reached
+#: stdout RAW — measured on this tree before the fix: the echo line held a
+#: literal `\x1b` and `\x01` while the commit held `�`. Both dimensions, as
+#: they stand:
+#:
+#:   WIDTH  — differs, deliberately. 240 on stdout, 200 on the trailer.
+#:   REPAIR — IDENTICAL, since #1871 round 2. Both channels go through
+#:            `_printable_clipped`, which is the one place clip-then-repair is
+#:            expressed.
+#:
+#: Pinned by `test_the_two_CHANNELS_clip_the_reason_at_DIFFERENT_widths` (width)
+#: and `test_a_reason_carrying_a_CONTROL_character_is_REPAIRED_ON_STDOUT_TOO`
+#: (repair, and that the two agree). A comment is a claim too, and this is the
+#: claim that has needed correcting every round.
 #:
 #: ⚠ THE CLIP IS ONLY TWO THIRDS OF THAT GUARANTEE, AND THE MISSING THIRD WAS
 #: MEASURED FALSE RATHER THAN SUSPECTED. `_clip` collapses PYTHON whitespace,
@@ -3396,6 +3426,34 @@ SIZE_RATCHET_TRAILER_KEY = "Size-Ratchet-Override"
 #: False, trailer absent, no diagnostic. The long and multi-line cases this
 #: comment was written about DID land, which is why the hole survived.
 SIZE_RATCHET_REASON_MAX = 200
+
+#: How much of the reason reaches the STDOUT echo. Wider than the trailer's clip
+#: on purpose — stdout is not bounded by `session_trailer.valid_id` — and NAMED
+#: rather than left as a literal in `size_ratchet_override_note` so the comment
+#: above can state the width relation against something a reader can grep.
+#:
+#: 🔴 IT IS NOT A SECOND SPELLING OF THE REPAIR. The two channels differ in this
+#: number and in NOTHING else; both reach `_printable_clipped`. That was not true
+#: before #1871 round 2 and the comment above records what it cost.
+SIZE_RATCHET_ECHO_MAX = 240
+
+
+def _printable_clipped(reason: str, limit: int) -> str:
+    """`reason` whitespace-collapsed, clipped to `limit`, then REPAIRED.
+
+    🔴 THE ONE PLACE CLIP-THEN-REPAIR IS EXPRESSED, for both channels. It exists
+    because there were two: `_ratchet_trailer_value` repaired and
+    `size_ratchet_override_note` did not, so a reason carrying `\\x1b[2K` could
+    visually rewrite the `Reason given:` line and the `DELIBERATE OVERRIDE` block
+    ON THE ONE CHANNEL A HUMAN READS BEFORE APPROVING, while the commit recorded
+    the truth. `claude/RULES.md`: one rule, one place — and here the second copy
+    was not a stale duplicate but an ABSENCE, which is the shape a duplicated
+    predicate takes when one site simply never got the rule.
+
+    🔴 CLIP FIRST, REPAIR SECOND. See `_ratchet_trailer_value`, which owns that
+    ordering's measurement; the ordering is expressed HERE so both callers get it.
+    """
+    return session_trailer.printable_for_trailer(_clip(reason, limit))
 
 
 def _ratchet_trailer_value(reason: str) -> str:
@@ -3418,8 +3476,7 @@ def _ratchet_trailer_value(reason: str) -> str:
     length-preserving (one mark per refused character), so running it after the
     clip cannot push the value back over `SIZE_RATCHET_REASON_MAX`.
     """
-    return session_trailer.printable_for_trailer(
-        _clip(reason, SIZE_RATCHET_REASON_MAX))
+    return _printable_clipped(reason, SIZE_RATCHET_REASON_MAX)
 
 
 def size_ratchet_report(relpath: str, merged_text: str, base_text: str) -> str:
@@ -3503,6 +3560,16 @@ def size_ratchet_override_note(
     makes it readable off the artefact afterwards. Neither is the other's
     backup.
 
+    🔴 AND THE ECHO IS REPAIRED, NOT RAW, BECAUSE THIS IS THE CHANNEL A HUMAN
+    READS BEFORE APPROVING. It used to be `_clip(reason, 240)` with no
+    `printable_for_trailer`, so a reason carrying `\\x1b[2K` — one paste of
+    coloured terminal output away — could erase and rewrite the `Reason given:`
+    line and the `DELIBERATE OVERRIDE` block on screen, while the commit trailer
+    recorded the truth. That is the worse direction of the two: the durable record
+    was intact and the surface the decision is taken on was forgeable. Both
+    channels now go through `_printable_clipped` and differ only in width; the
+    relation, both dimensions of it, is stated at `SIZE_RATCHET_REASON_MAX`.
+
     ⚠ NOT "THE OPERATOR" — that word stood here and in the block below, and it
     was a claim about WHO, not about the mechanism. `SIZE_RATCHET_WHO_MAY` owns
     that claim now, and `leak_approved_note`, which this is shaped after, is the
@@ -3540,7 +3607,8 @@ def size_ratchet_override_note(
             f"is {pos.after:,} B against an allowance of {pos.allowance:,} B, "
             f"over by {pos.over_by:,} B, and this update adds "
             f"{pos.delta:,} B more.",
-            f"  Reason given: {_clip(reason, 240)}",
+            f"  Reason given: "
+            f"{_printable_clipped(reason, SIZE_RATCHET_ECHO_MAX)}",
             f"  This is a DELIBERATE OVERRIDE, not a clean result, and it is "
             f"stamped `{SIZE_RATCHET_TRAILER_KEY}:` on the commit — "
             f"{SIZE_RATCHET_WHO_MAY}. Nothing here checked the reason; what was "

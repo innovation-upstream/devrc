@@ -8301,6 +8301,87 @@ class TestADocOverItsCeilingMayNotGrow:
         # would satisfy the assertion above.
         assert "\x1b" not in msg and "\x01" not in msg, repr(msg)
 
+    #: A reason whose controls are an ANSI ERASE-LINE sequence rather than inert
+    #: bytes. `\x1b[2K` clears the line the cursor is on and `\r` returns to
+    #: column 0, so on a terminal this rewrites whatever was printed before it.
+    #: `_clip` collapses the `\r` as whitespace; the `\x1b[2K` is what survives
+    #: and is the part that forges the surface.
+    RATCHET_REASON_ANSI = "pasted \x1b[2K\rall clean"
+    #: One mark per refused character, and only `\x1b` is refused — `[2K` is
+    #: ordinary printable text, which is the point: the repair neutralises the
+    #: INTRODUCER and the rest becomes visible evidence that something was pasted.
+    RATCHET_REASON_ANSI_ECHOED = "pasted �[2K all clean"
+
+    def test_a_reason_carrying_a_CONTROL_character_is_REPAIRED_ON_STDOUT_TOO(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 STDOUT IS THE CHANNEL A HUMAN READS BEFORE APPROVING, AND NOTHING
+        PINNED IT. `test_a_reason_carrying_a_CONTROL_character_still_STAMPS_the_commit`
+        asserts only on the commit message, and
+        `test_the_two_CHANNELS_clip_the_reason_at_DIFFERENT_widths` asserts only
+        widths — so the echo carried the reason RAW while every test was green.
+
+        MEASURED RED at `decd266a`: the `Reason given:` line held a literal
+        `\\x1b` and `\\x01` where the trailer held `\\ufffd`. With an erase-line
+        sequence that is not cosmetic — the printed `Reason given:` line and the
+        `DELIBERATE OVERRIDE` block can be visually rewritten on screen while the
+        commit records the truth, which is the wrong half to leave forgeable.
+
+        THREE CLAIMS, not one:
+          1. no C0 introducer reaches stdout at all (the channel-level hazard);
+          2. the echoed value is the expected repaired LITERAL (not derived from
+             the implementation);
+          3. the two channels agree — same repair, not two spellings of one. The
+             fixture is short enough that neither clip bites, so any difference
+             between them is a difference in REPAIR and nothing else.
+        """
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        res = run_tool(oversize_repo, hd.SIZE_RATCHET_FLAG,
+                       self.RATCHET_REASON_ANSI, "--confirm", update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+
+        # 1. The channel-level claim. `\x1b` enters this run ONLY through the
+        #    reason, so its presence anywhere on stdout is the defect.
+        assert "\x1b" not in res.stdout, (
+            "a raw ESC reached the approval surface, so the printed override "
+            f"block can be rewritten on a terminal: {res.stdout!r}")
+        assert "SIZE RATCHET OVERRIDDEN" in res.stdout, (
+            "the override block is absent, so assertion 1 passed vacuously: "
+            f"{res.stdout}")
+
+        # 2. The literal.
+        echoed = next((ln.split("Reason given: ", 1)[1]
+                       for ln in res.stdout.splitlines()
+                       if "Reason given: " in ln), None)
+        assert echoed == self.RATCHET_REASON_ANSI_ECHOED, repr(echoed)
+
+        # 3. The relation between the two channels.
+        msg = _sh("git", "log", "-1", "--format=%B", cwd=oversize_repo)
+        stamped = next((ln.split(": ", 1)[1] for ln in msg.splitlines()
+                        if ln.startswith(f"{hd.SIZE_RATCHET_TRAILER_KEY}: ")),
+                       None)
+        assert stamped == echoed, (
+            "the two channels repaired the same reason differently — which is "
+            "the state this fix removed, and the one a reader cannot see: "
+            f"stdout {echoed!r} vs commit {stamped!r}")
+
+    def test_the_INERT_controls_are_repaired_on_stdout_as_well(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        """The second shape, on the SAME fixture the commit-side test uses — so
+        the two channels are asserted over one input and a repair that special-
+        cased ESC would still be caught by `\\x01`."""
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        res = run_tool(oversize_repo, hd.SIZE_RATCHET_FLAG,
+                       self.RATCHET_REASON_CONTROL, "--confirm", update=upd)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "\x1b" not in res.stdout and "\x01" not in res.stdout, repr(
+            res.stdout)
+        echoed = next((ln.split("Reason given: ", 1)[1]
+                       for ln in res.stdout.splitlines()
+                       if "Reason given: " in ln), None)
+        assert echoed == self.RATCHET_REASON_CONTROL_STAMPED, repr(echoed)
+
     def test_a_reason_LONGER_than_the_clip_still_STAMPS_the_commit(
         self, oversize_repo: Path, tmp_path: Path
     ) -> None:
@@ -8334,7 +8415,14 @@ class TestADocOverItsCeilingMayNotGrow:
         `size_ratchet_override_note` clips its echo at 240, so a 631-char reason
         reaches NEITHER channel whole. What is true — stdout carries strictly
         more than the trailer, and both are bounded — is what the comment now
-        says and what this pins, with both widths as literals."""
+        says and what this pins, with both widths as literals.
+
+        ⚠ SCOPED TO WIDTH, AND SAYING SO IS THE POINT. The comment this corrects
+        went on to call the width relation "the whole of the relation", which was
+        false: the channels also differed in REPAIR, and this test could not see
+        it because its fixture is 79 plain-ASCII words.
+        `test_a_reason_carrying_a_CONTROL_character_is_REPAIRED_ON_STDOUT_TOO`
+        owns that dimension. Neither test is the other's coverage."""
         upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
         res = run_tool(oversize_repo, hd.SIZE_RATCHET_FLAG,
                        self.RATCHET_REASON_LONG, "--confirm", update=upd)
@@ -8531,11 +8619,26 @@ def test_the_status_token_rule_p_prints_is_the_one_the_legend_lists() -> None:
 
 #: 🔴 WHO MAY PULL RULE (p)'S OVERRIDE, AS A WHOLE NORMALISED STRING.
 #:
-#: A LITERAL COPY, not `hd.SIZE_RATCHET_WHO_MAY`, and that is the whole point:
-#: every site below interpolates the constant, so a test that read the constant
-#: too would pass on any reword — including one that flipped the flag back to
-#: operator-only — because all four sites would move together. The literal is
-#: what makes the reword go red and forces the decision to be taken again.
+#: A LITERAL COPY, not `hd.SIZE_RATCHET_WHO_MAY`, and the reason written here
+#: before was FALSE — worth recording, because it was false in the way that makes
+#: a guard look better than it is.
+#:
+#: ⚠ THE RETRACTED REASON: "every site interpolates the constant, so a
+#: constant-reading test would pass on any reword because all the sites move
+#: together." Two of the five do NOT interpolate it — `SKILL.md` and
+#: `write-gate.md` carry the sentence as literal markdown and do not move with the
+#: constant — so a constant-reading test would have gone RED on exactly those two.
+#: The stated mechanism does not exist.
+#:
+#: 🔴 THE REAL REASON, WHICH IS NARROWER AND STILL SUFFICIENT: a constant-reading
+#: test's redness depends on a reworder FORGETTING the two markdown files, and its
+#: own failure message would tell them to go fix them. An editor who reworded the
+#: constant and updated all five sites — the careful editor, the one a good failure
+#: message produces — would leave that test GREEN, and the operator's ruling would
+#: have flipped with no gate saying so. The literal is what no consistent edit can
+#: satisfy: a reword cannot land without touching THIS line, which is the line
+#: whose comment says the sentence is an operator ruling. The pin buys a forced
+#: decision, not detection of a forgetful edit.
 #:
 #: 🔴 A WHOLE SENTENCE RATHER THAN A KEYWORD, because a guard on words is
 #: walkable by rewording: "AGENT" and "operator" both appear in
@@ -8565,8 +8668,14 @@ def _normalised(text: str) -> str:
 
 
 def test_the_SKILL_and_the_TOOL_agree_on_WHO_may_pull_the_ratchet_override() -> None:
-    """🔴 A SEAM LEDGER OVER FOUR SITES, one of which is the only file the
-    executing agent reads.
+    """🔴 A SEAM LEDGER OVER THE SITES `sites` ENUMERATES BELOW, one of which is
+    the only file the executing agent reads.
+
+    ⚠ NO COUNT IN THIS DOCSTRING, DELIBERATELY. It said "OVER FOUR SITES" over a
+    `sites` dict of five, and the bullets below merged the override note into
+    `--help`'s line — the same member three other places in this change were also
+    dropping. `sites` is the ledger; prose that counts it goes stale against it
+    silently, which is `evictable_note`'s claim 7 re-learned two files over.
 
     Operator ruling: rule (p)'s override is NOT operator-only — the agent may
     pull it, and the requirement that replaces approval is that the reason SAY
@@ -8575,7 +8684,9 @@ def test_the_SKILL_and_the_TOOL_agree_on_WHO_may_pull_the_ratchet_override() -> 
     read at three different moments by two different readers:
 
       * `size_ratchet_report` — read at the moment the refusal fires;
-      * `--help` / `size_ratchet_override_note` — read by whoever types the flag;
+      * `size_ratchet_override_note` — the block above the diff, read AFTER the
+        flag was pulled, by whoever is about to approve the write;
+      * `--help` — read by whoever is deciding whether to type the flag;
       * `claude/skills/handoff/SKILL.md` step 5 — the ONLY file the executing
         agent reads at step 5, and therefore the one that decides whether it
         pulls the flag at all;
@@ -8592,7 +8703,8 @@ def test_the_SKILL_and_the_TOOL_agree_on_WHO_may_pull_the_ratchet_override() -> 
         "handoff_doc.SIZE_RATCHET_WHO_MAY was reworded. That sentence is the "
         "operator's ruling on who may pull "
         f"{hd.SIZE_RATCHET_FLAG}; if the ruling really changed, change this pin "
-        "and all four sites in the same commit.\n"
+        "and every site the `sites` ledger in this test enumerates, in the same "
+        "commit.\n"
         f"  pinned: {RATCHET_WHO_MAY_PIN!r}\n"
         f"  actual: {_normalised(hd.SIZE_RATCHET_WHO_MAY)!r}"
     )

@@ -46,8 +46,11 @@ WHAT THE GRANDFATHER LEDGER IS, AND IS NOT
 ------------------------------------------
 An enumeration, never a pattern — `drift-check.sh`'s allowlist argument: an
 unknown entry is not covered by default, so a NEW doc over the ceiling fails
-rather than being swept in by a glob. And a RATCHET, not an exemption; it is
-pinned four ways, so every direction of drift comes back here:
+rather than being swept in by a glob. And a RATCHET, not an exemption; every
+direction of drift comes back here, through the checks ENUMERATED below rather
+than through a count of them -- this sentence said "pinned four ways" over a list
+of five for as long as the list has had five entries, which is the miscount
+`RATCHET_WHO_MAY_PIN`'s comment in `test_handoff_doc.py` records two files over:
 
   a. a doc over MAX_BYTES with no entry            -> FAIL (the ceiling itself)
   b. a doc over its own entry's allowance          -> FAIL (the ratchet)
@@ -70,9 +73,26 @@ stale. `handoff_budget.LIVES_ELSEWHERE` declares them, and
 `test_every_FOREIGN_entry_is_declared_and_is_NOT_a_devrc_document` spends the
 declaration in the other direction: the day devrc grows a doc with one of those
 names, two documents share one allowance, and that test is what makes it loud.
-⚠ (d) IS GONE FOR THOSE ENTRIES, and nothing replaces it — a rename in another
-repo leaves a stale entry no gate can see. A gate reads one tree; that is the
-price of a cross-repo ledger, not an oversight.
+
+🔴 AND FOR A FOREIGN ENTRY (b), (c) AND (e)'S TIGHTNESS HALF ARE GONE TOO — NOT
+ONLY (d). An earlier wording of this paragraph named (d) alone, which reads as
+"one check traded for a declaration" and is wrong about three more.
+`oversize_findings` computes those three inside
+`for path, size in sorted(sizes.items())`, and a foreign path is never in
+`sizes` — so they are not weakened, they never run. Watched both ways with the
+real function: PRESENT in `sizes`, each of the three fires; ABSENT, all three are
+empty. Only (e)'s WELL-FORMEDNESS half survives, in
+`test_every_grandfathered_entry_is_a_correctly_stepped_allowance`, which reads
+the ledger and not the tree.
+
+⚠ NOTHING REPLACES ANY OF THEM, AND THERE IS NO SECOND CHANNEL. `handoff_doc`'s
+"DELETE its GRANDFATHERED entry" warning is `and gated`, and
+`gate_enforces_budget` is False in every repo these entries name. So a foreign
+doc pruned back under the ceiling keeps a slack allowance nothing will tighten,
+and a foreign rename leaves a stale entry nothing can see. A gate reads one tree;
+that is the price of a cross-repo ledger, paid deliberately, not an oversight —
+and since #1871 round 2 it is paid on 71 of 82 entries, which
+`handoff_budget.GRANDFATHERED`'s own header states at full size.
 
 🔴 WHY THE ALLOWANCE IS QUANTISED RATHER THAN THE MEASURED SIZE. Pinning each
 doc at exactly the bytes it has today makes the gate red on the very NEXT byte
