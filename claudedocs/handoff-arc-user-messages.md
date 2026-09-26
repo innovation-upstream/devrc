@@ -123,32 +123,57 @@ through the gate; this body is the retirement.
 - The `8/8 KILLED` battery result, the `160 passed` figure and the 967,441-byte probe were
   verified for STRUCTURE by round 0, not re-run by it.
 ## Verification of #1883 — what was and was NOT run
-- ✅ **Mutation battery `mutation_battery_arc_extractor_footer.py`: 8/8 KILLED, positive
-  control fired.** It paid for itself on its first run: C0 — dropping `"next_command"` from
-  `run_arc`'s JSON dict — scored **SURVIVED**, because
-  `test_the_JSON_carries_the_command_and_NULL_when_there_is_none` asserted against
-  `extractor_next_command(...)` directly and never touched the JSON path. Its NAME claimed a
-  relationship its BODY did not check (the `guards-narrower` shape). The test now goes
-  through `run_arc` and parses the output. Registered two-way in
-  `test_mutation_battery_anchors.py`.
-- ✅ **160 passed** across `test_find_session_arc.py`, `test_find_session_skill_contract.py`,
-  `test_find_session_skill_cli.py`; **38 passed / 4 skipped** on the anchor ledger.
-- ✅ **Live positive control:** `--arc handoff-clawgate-to-muster-extraction.md` renders the
-  footer, and the exact command it printed runs at **rc 0** — 7 sessions, 199 messages,
-  967,441 bytes. The claim that the printed line WORKS is measured, not inferred.
-- ⏳ **`scripts/scoped-tests.sh` — IN FLIGHT, NO VERDICT YET.** Its first run reported
-  `RESULT: FAIL (exit=3)` having run **nothing**: `logrotate`/`dash` missing from PATH,
-  because a fresh worktree copies `.envrc` (`use opencode`) which carries no gate toolchain.
-  🔴 **The background wrapper reported exit 0 over that failure** — the runner's own
-  `RESULT:` line is what said otherwise. Re-running under `nix develop`; it selected 6 of
-  368 files, a superset of the three modules already green plus `test_find_session_live.py`,
-  `test_transcript_search.py` and `check-clickup-addressed/tests/test_shared_walk.py`.
-  **Those three have NOT been observed green — do not report this change as fully gated.**
-- ❌ **Neither `nix build` sandbox tier was run locally.** The dev-host tier and the sandbox
-  tier are blind to different things; Tekton runs the sandbox one.
-- ⚠ **The handoff write gate reported `leakscan: NO SCANNER FOUND`** — a pass by absence,
-  not a clean result. Checked by hand instead: no IPs, URLs, tokens, real media paths or
-  client names in this doc.
+🔴 **REWRITTEN 2026-09-26 after round 1. The previous version of this section carried three
+wrong numbers and an account of `C0` that its own doc contradicted 80 lines earlier — read
+this one.** Round 1 found them; they are listed at the bottom so the shape is recorded.
+
+- ✅ **Mutation battery: 10 mutants (`C0`, `F1`–`F8`, `X1`), and it is now MULTI-FILE.**
+  Round 1 measured that `F8` kills the seam guard's old extractor-blind form and its widened
+  form *identically*, so a `9/9 KILLED` that read as "every guard's ability to go red is
+  verified" vouched for the widening **not at all** — and the battery structurally could not,
+  because it mutated `find-session.py` while every discriminating mutant lives in
+  `extract_user_msgs.py`. It now declares `TARGETS`, keeps each target's pristine text, and
+  asserts the restore **by digest** (a silently failed restore scores borrowed kills).
+- ✅ **The seam guard is on its THIRD version, and v1 and v2 were both wrong.** v1 never
+  imported the extractor. v2 added `assert "arc_seed_to_doc" in body` — a SPELLED guard that
+  mutant `X1` walks straight past by leaving the name in a *comment* while deleting the call.
+  v3 injects a recording stub through `arc_sessions`' own `find_session` parameter and asserts
+  the call HAPPENED with the seed, so it pins a RELATIONSHIP rather than a word. v2's
+  docstring also claimed the resolver was asserted "by IDENTITY" — false about the objects:
+  `_load_find_session()` returns a third module instance.
+- ✅ **Guards: 7** in `TestTheArcNamesTheExtractor`.
+- ✅ **Live positive control:** the footer's printed command runs at rc 0 against a real arc,
+  and round 1 independently confirmed the footer's session count matches the extractor's.
+- ✅ **Merged tree MEASURED by round 1**, not assumed: the base moved to `63361f48`, one
+  commit touching **none** of this PR's files; merged-tree runs were green across the modules
+  that could reach it.
+- ✅ **CI: all four Tekton legs passed** — but on `1b2bcb3e`, **before** the round-0 and
+  round-1 fixes. Every later head needs its own run.
+- 🔴 **The local `gate.sh --tier all` pytest tier is UNMEASURED, not failed.** It was
+  **killed at its own 3600s cap** (`exit=124`, `RESULT: FAIL (exit=143)` = SIGTERM) with two
+  other full suites from another checkout on the same box — the contention truncation
+  `CLAUDE.md` documents, where the dev-host tier produces no verdict. `GATE: RESULT=FAIL
+  exit=1` is that timeout, **not a failing test**. The **node** and **go** tiers both passed
+  at `SCOPE: FULL`.
+- ❌ **Neither `nix build` sandbox tier was run locally** at any head.
+
+### What round 1 found wrong in the PREVIOUS version of this section
+Recorded because all four are the same shape — a verification claim that reads as checked:
+- "Battery: **8 mutants**" and "**8/8 KILLED**" — it was **9** at that head, and `8/8` was
+  listed among figures explicitly said to have been *verified for structure*.
+- "**160 passed**" — it was **159**. The delta is the JSON test the round-0 fix deleted,
+  which the doc knew about elsewhere.
+- The ✅ bullet still described `C0` as "dropping `next_command` from `run_arc`'s JSON dict"
+  and the JSON test as "now goes through `run_arc`" — both deleted by then, and stated 80
+  lines *after* the corrected account, so a reader scrolling here met the stale one first
+  with no supersede marker. The routing section got a banner; this one did not.
+- "asserts the resolver is SHARED" — see the seam-guard bullet above; there was no such
+  assertion.
+
+🔴 **The lesson this section is now the third instance of: a fix round's own PROSE is the
+likeliest next finding.** Rounds 0 and 1 each found false claims written by the round before
+it, none of them logic bugs. If you are writing a verification sentence here, the number in it
+is a claim like any other — re-derive it at the head you are describing.
 ## The routing measurement — RE-DERIVED, and the mechanism RETRACTED
 🔴 **Both the original justification and its first replacement were wrong. Read this section
 before quoting any number from this doc's history.** The surviving claim is about two
