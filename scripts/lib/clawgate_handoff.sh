@@ -77,6 +77,49 @@ set -uo pipefail
 #: Fallback base URL, matching scripts/lib/clawgate_tasks.py's DEFAULT_API_URL.
 CLAWGATE_DEFAULT_API_URL="http://192.168.50.250:30302"
 
+#: 🔴 THE TASK-SIDE BASE URL LEDGER — ORDERED, SPECIFIC FIRST, AND A DELIBERATE
+#: DUPLICATE OF `TASK_API_URL_VARS` IN scripts/lib/clawgate_tasks.py.
+#:
+#: WHY THERE ARE TWO BASE URLS AT ALL. The task/board service was extracted out
+#: of the permission router, so two PROCESSES now answer on two base URLs:
+#:
+#:   router side  — /api/attention, /api/layout, /api/term, /api/tmux,
+#:                  /api/transcripts/*, /api/send, /health
+#:   task side    — /api/tasks*, /api/agents*, /agent/task*
+#:
+#: EVERY URL THIS FILE BUILDS IS TASK SIDE — there is not one router-side
+#: request here, which is why `clawgate_resolve` resolves ONE base and hands it
+#: to everything. `test_the_url_families_this_script_builds_are_a_pinned_LEDGER`
+#: fails if that ever stops being true, in either direction. Adding a
+#: router-side request means resolving a SECOND base beside this one; it does
+#: NOT mean widening this ledger.
+#:
+#: 🔴 THIS IS NOT A COSMETIC SPLIT, AND THE ROUTER'S COPY IS NOT A HARMLESS
+#: STAND-IN. Measured live 2026-09-25 with both base URLs set: the two hosts are
+#: different processes reporting different versions, and while 437 of 439 tasks
+#: agreed byte-for-byte on `updatedAt`/`status`, the two that DISAGREED were
+#: exactly the two dispatched that day — the router still called them `open`
+#: with a four-day-old timestamp while the task service had them `in_progress`,
+#: updated hours earlier. So the stale rows are precisely the IN-FLIGHT ones,
+#: i.e. the only rows a handoff is ever about. A board read on the router base
+#: answers confidently and is wrong about live work.
+#:
+#: ⚠ ORDER IS THE CONTRACT, not decoration. The specific key wins and
+#: `CLAWGATE_API_URL` is the FALLBACK, so a host that has not been told about
+#: the split resolves to exactly what it resolved to before. Swapping these two
+#: entries silently un-splits the services again.
+#:
+#: 🔴 WHY IT IS DUPLICATED RATHER THAN SHARED. The authority is python and this
+#: is bash: importing it would put `python3` in the preflight ledger of a file
+#: that is also SOURCED by `scripts/resume-state.sh`, to read two strings this
+#: file can read itself — and it already duplicates `CLAWGATE_DEFAULT_API_URL`
+#: and the whole env-file parser (`clawgate_env_get`) from that same module for
+#: the same reason. The duplicate is not left to a comment to hold:
+#: `test_the_shell_task_url_ledger_matches_PYTHON` reads `TASK_API_URL_VARS` out
+#: of `clawgate_tasks.py` and fails if these two names, or their ORDER, drift.
+#: Space-separated to match the two vocabularies below; split by the shell.
+CLAWGATE_TASK_API_URL_VARS="CLAWGATE_TASK_API_URL CLAWGATE_API_URL"
+
 #: Where the hook token and base URL live, RELATIVE to $HOME. Expanded at call
 #: time, never at source time — a caller may set HOME after sourcing.
 CLAWGATE_ENV_REL=".claude/clawgate.env"
@@ -730,6 +773,34 @@ clawgate_env_get(){
   return 1
 }
 
+# `clawgate_task_base [env-path]` — the base URL for a TASK-SIDE request, with
+# its trailing slash stripped. Always prints exactly one line and never fails:
+# with neither variable set it falls back to `CLAWGATE_DEFAULT_API_URL`, so a
+# caller never has to decide what an absent answer means.
+#
+# 🔴 THE PRECEDENCE IS `$CLAWGATE_TASK_API_URL_VARS` AND NOTHING ELSE — see that
+# constant for the ledger, the measurement behind it and why it is a duplicate
+# of the python one rather than an import. Open-coding the order at a call site
+# is how this bug regenerates at N sites and is wrong at N-1 of them in the same
+# direction (claude/RULES.md -> "One rule, one place"); this file had exactly one
+# such site and it read the ROUTER variable while building task-side paths on it.
+#
+# ⚠ AN EMPTY VALUE COUNTS AS UNSET, matching python's `_base_from` and the
+# shell's own `${A:-$B}`. `clawgate_env_get` already returns non-zero for an
+# empty value, so `CLAWGATE_TASK_API_URL=` falls THROUGH to the router variable
+# instead of resolving to a bare path — which would build `/api/tasks` with no
+# host and fail as a curl URL error rather than as the misconfiguration it is.
+clawgate_task_base(){
+  local path="${1:-$HOME/$CLAWGATE_ENV_REL}" name v
+  for name in $CLAWGATE_TASK_API_URL_VARS; do
+    if v=$(clawgate_env_get "$name" "$path"); then
+      printf '%s\n' "${v%/}"
+      return 0
+    fi
+  done
+  printf '%s\n' "${CLAWGATE_DEFAULT_API_URL%/}"
+}
+
 # `clawgate_zero_probe <base> <curl-config> <out-file> <session-id-under-test>`
 # — the POSITIVE CONTROL behind rc 5's upgraded wording. Prints the control
 # session id on stdout and leaves that session's response body in <out-file>;
@@ -920,9 +991,16 @@ clawgate_resolve(){
 
   local env_path base tok
   env_path="$HOME/$CLAWGATE_ENV_REL"
-  base=$(clawgate_env_get CLAWGATE_API_URL "$env_path") || base=""
-  [ -n "$base" ] || base="$CLAWGATE_DEFAULT_API_URL"
-  base=${base%/}
+  # 🔴 THE TASK BASE, NOT THE ROUTER ONE. Every request below is task-side
+  # (`/api/sessions/{id}/tasks` under test, and the control's `/api/tasks?limit=1`
+  # + its own `/api/sessions/{id}/tasks`), so this resolves ONE base through
+  # `clawgate_task_base` and there is no second one to get wrong. This line read
+  # `CLAWGATE_API_URL` directly until 2026-09-25, which sent all three at the
+  # RETIRED router — see `CLAWGATE_TASK_API_URL_VARS` for what that costs: the
+  # router's board is stale for exactly the in-flight tasks a handoff is about,
+  # so the wrong answer arrived as a confident 200 and got written into two
+  # handoff documents as a reading of the live board.
+  base=$(clawgate_task_base "$env_path")
   if ! tok=$(clawgate_env_get CLAWGATE_HOOK_TOKEN "$env_path"); then
     echo "clawgate: DID NOT ANSWER — no CLAWGATE_HOOK_TOKEN in $env_path, so the board was never asked. UNKNOWN, not empty."
     return 4

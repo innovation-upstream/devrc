@@ -2900,6 +2900,305 @@ RESUME_PINS: list[tuple[str, str]] = [
 ]
 
 
+# --------------------------------------------------------------------------- #
+# §7 WHICH SERVICE the board request reaches
+# --------------------------------------------------------------------------- #
+#: 🔴 THREE PAIRWISE-DISTINCT BASES, AND NONE OF THEM IS THE DEFAULT CONSTANT.
+#: The subject has a third tier — `CLAWGATE_DEFAULT_API_URL` — so a fixture that
+#: happened to equal it could not tell "resolved the variable I set" from "fell
+#: all the way through to the default" (`claude/RULES.md` -> a fixture that can
+#: only ever produce the constant's own value cannot see the mutant that
+#: hardcodes it). Distinct HOSTS as well as distinct ports, so a substring
+#: assertion cannot match the wrong one: `…:7001` is not a prefix of `…:7002`,
+#: and neither name contains the other.
+TASK_BASE = "http://task-side.invalid:7001"
+ROUTER_BASE = "http://router-side.invalid:7002"
+
+#: The variable names, as LITERALS. Never imported from the subject — a harness
+#: that derives the name from the code it tests cannot see the code reading a
+#: name that does not exist, which is the failure the module docstring's §3
+#: describes and the one this whole class exists to pin.
+TASK_URL_VAR = "CLAWGATE_TASK_API_URL"
+ROUTER_URL_VAR = "CLAWGATE_API_URL"
+
+#: 🔴 THE TASK-SIDE ROUTE FAMILIES, spelled here rather than read from the
+#: subject, so the ledger test below is a real two-way check. The authority is
+#: clawgatectl's `taskSidePrefixes` (`cmd/clawgatectl/client.go`) in a DIFFERENT
+#: repository, which no test here can see — same cross-repo seam as
+#: `ROLE_VOCAB` above, and the same mitigation: pin it, and re-read it by hand.
+#: Verified against that file 2026-09-25.
+TASK_SIDE_PREFIXES = ("/api/tasks", "/api/agents", "/agent/task")
+
+
+def env_file(*, task: str | None = None, router: str | None = None,
+             token: str = SENTINEL_TOKEN) -> str:
+    """A clawgate.env naming whichever base URLs a case needs.
+
+    `None` means the key is ABSENT — not empty. The two are different inputs to
+    the precedence and are driven separately below.
+    """
+    lines = []
+    if router is not None:
+        lines.append(f"{ROUTER_URL_VAR}={router}")
+    if task is not None:
+        lines.append(f"{TASK_URL_VAR}={task}")
+    lines.append(f"CLAWGATE_HOOK_TOKEN={token}")
+    return "\n".join(lines) + "\n"
+
+
+def requested_bases(resolver) -> list[str]:
+    """The `scheme://host:port` of every URL the subject actually requested.
+
+    🔴 THE URL IS THE ONLY PLACE THE CHOSEN BASE BECOMES OBSERVABLE. stdout
+    cannot distinguish "asked the right service" from "asked the wrong one and
+    described the right answer" — the same reasoning as
+    `TestOpencodeSessionIdIsTierZero._main_url_ids`, one field to the left.
+    """
+    return [m.group(1) for u in urls(resolver)
+            if (m := re.match(r"(\w+://[^/]+)", u))]
+
+
+def task_side_paths(src: str) -> list[str]:
+    """Every path this script concatenates onto `"$base`, in source order.
+
+    Read STRUCTURALLY out of the shell source rather than listed by hand, so a
+    fourth URL appearing in the subject grows this list and fails the ledger
+    instead of quietly inheriting whichever base happens to be in scope.
+    """
+    return [m.group(1) for m in re.finditer(r'"\$base(/[^"]*)"', src)]
+
+
+class TestTheBoardRequestGoesToTheTaskService:
+    """🔴 THE REGRESSION CLASS. Watched RED at `origin/main` (c1fbd27c), where
+    `clawgate_resolve` read `CLAWGATE_API_URL` and built `/api/tasks` and
+    `/api/sessions/{id}/tasks` on it — the RETIRED permission router.
+
+    WHY IT MATTERS MORE THAN ITS SIZE. This script is what `/handoff` and
+    `/resume` run on every session to decide which task a session belongs to,
+    so every session inherited the wrong instrument. Measured live 2026-09-25
+    with both variables set to different hosts: the two services are different
+    processes on different versions, 437 of 439 tasks agreed exactly, and the
+    two that DISAGREED were precisely the two dispatched that day — the router
+    still called them `open` on a four-day-old timestamp while the task service
+    had them `in_progress`. The rows the router is stale about are the in-flight
+    ones, which are the only rows a handoff is ever about.
+    """
+
+    # ------------------------------------------------ the precedence, in order
+    def test_the_board_request_goes_to_the_TASK_base_when_both_are_set(self, resolver):
+        """Both variables set, to DIFFERENT hosts. The specific key wins."""
+        r = resolver(ONE, env_file=env_file(task=TASK_BASE, router=ROUTER_BASE))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert requested_bases(resolver) == [TASK_BASE], (
+            f"the board request reached the WRONG service.\n"
+            f"urls={urls(resolver)}"
+        )
+        # Both directions: a subject that asked NEITHER would satisfy the
+        # absence half on its own.
+        assert ROUTER_BASE not in "\n".join(urls(resolver)), urls(resolver)
+
+    def test_an_ABSENT_task_variable_falls_back_to_the_router_base(self, resolver):
+        """🔴 ALSO THE POSITIVE CONTROL FOR THE ASSERTION ABOVE. A harness that
+        could never observe `ROUTER_BASE` on the wire would report a reassuring
+        "the router was not asked" whether or not that was true. Here the router
+        base is the CORRECT answer, so watching it appear proves the instrument
+        can see it (`claude/RULES.md` -> "can it ever observe the thing?").
+
+        It is also the compatibility claim: a host that never heard of the split
+        resolves to exactly what it resolved to before this change, so
+        introducing the second key moved no request's destination."""
+        r = resolver(ONE, env_file=env_file(router=ROUTER_BASE))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert requested_bases(resolver) == [ROUTER_BASE], urls(resolver)
+
+    def test_an_EMPTY_task_variable_falls_THROUGH_rather_than_building_a_bare_path(
+            self, resolver):
+        """`CLAWGATE_TASK_API_URL=` is unset, matching python's `_base_from` and
+        the shell's own `${A:-$B}`. Taking it literally would build `/api/tasks`
+        with no host — a curl URL error that reads like an outage rather than
+        like the misconfiguration it is."""
+        r = resolver(ONE, env_file=env_file(task="", router=ROUTER_BASE))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert requested_bases(resolver) == [ROUTER_BASE], urls(resolver)
+
+    def test_NEITHER_variable_set_falls_back_to_the_DEFAULT_constant(self, resolver):
+        """The third tier. Driven because the two fixtures above are both
+        distinct from it, so nothing else in this class would notice a subject
+        that lost the fallback entirely."""
+        r = resolver(ONE, env_file=f"CLAWGATE_HOOK_TOKEN={SENTINEL_TOKEN}\n")
+        assert r.returncode == 0, r.stdout + r.stderr
+        default = re.search(r'CLAWGATE_DEFAULT_API_URL="([^"]+)"',
+                            LIB.read_text(encoding="utf-8")).group(1)
+        assert requested_bases(resolver) == [default.rstrip("/")], (
+            f"with neither variable set the request must fall back to "
+            f"{default!r}. An EMPTY list here means the subject built a URL "
+            f"with no host at all — the resolver lost its last tier and curl "
+            f"was handed a bare path.\nurls={urls(resolver)}"
+        )
+
+    def test_a_trailing_slash_on_the_task_base_is_stripped_once(self, resolver):
+        """The paths are CONCATENATED, so a trailing slash would build
+        `//api/sessions/...`. net/http's ServeMux cleans and REDIRECTS on that,
+        which curl does not follow here — a 301 that reads as a dead board."""
+        r = resolver(ONE, env_file=env_file(task=TASK_BASE + "/", router=ROUTER_BASE))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert urls(resolver) and all("//api/" not in u for u in urls(resolver)), (
+            f"a trailing slash survived into the request path.\nurls={urls(resolver)}"
+        )
+        assert requested_bases(resolver) == [TASK_BASE], urls(resolver)
+
+    # ------------------------------------- EVERY request, not just the first
+    def test_the_CONTROL_probe_requests_go_to_the_task_base_TOO(self, resolver):
+        """🔴 THE SEAM THE SINGLE-URL TEST ABOVE CANNOT SEE. `resolve` issues
+        THREE requests on the zero path — the session under test, the control's
+        `/api/tasks?limit=1`, and that control session's own links — and the
+        control is only a control if it shares every step with the request under
+        test. Split them across two services and the probe stops being a control
+        and becomes a second sample of a different unknown: muster's task list
+        could name a session clawgate's thread table has never seen, and the
+        rc 5 wording would then be upgraded or not for reasons having nothing to
+        do with the id under test.
+
+        Three URLs asserted, not one, because a subject that fixed only the line
+        it was pointed at would pass every other test in this class."""
+        r = resolver(NONE, env_file=env_file(task=TASK_BASE, router=ROUTER_BASE),
+                     tasklist=tasklist_naming(CTL_SID), control=control_links())
+        assert r.returncode == 5, r.stdout + r.stderr
+        got = urls(resolver)
+        assert len(got) == 3, f"expected the three zero-path requests, got {got}"
+        assert requested_bases(resolver) == [TASK_BASE] * 3, got
+        # and the control really did run — otherwise the three-way assertion
+        # above could be satisfied by three copies of the same request.
+        assert any("/api/tasks" in u for u in got), got
+        assert norm(r.stdout) == upgraded_zero_wording(), r.stdout
+
+    # ---------------------------------------------------------- the two ledgers
+    def test_the_shell_task_url_ledger_matches_PYTHON(self):
+        """🔴 THE DUPLICATE IS BOUND MECHANICALLY, NOT BY A COMMENT. The shell
+        cannot import `TASK_API_URL_VARS`, so it re-spells it — and a re-spelling
+        nothing checks is exactly the "one rule, two places, wrong at one of
+        them" shape the python module's own docstring is about. This reads the
+        python ledger and fails if the two names, or their ORDER, drift.
+
+        Order is asserted as a SEQUENCE, never as a set: swapping the two
+        entries silently un-splits the services again and a set comparison would
+        not notice."""
+        shell = re.search(r'CLAWGATE_TASK_API_URL_VARS="([^"]+)"',
+                          LIB.read_text(encoding="utf-8"))
+        assert shell, "the shell no longer declares a task-URL ledger at all"
+        assert tuple(shell.group(1).split()) == tuple(_ct.TASK_API_URL_VARS), (
+            f"the shell ledger {shell.group(1).split()} and python's "
+            f"{list(_ct.TASK_API_URL_VARS)} have drifted — they are the SAME "
+            f"precedence and the order is the contract."
+        )
+        # The literals this file spells, checked against python too, so a
+        # simultaneous rename on BOTH sides cannot satisfy the comparison above
+        # while silently reading a variable nobody sets.
+        assert tuple(_ct.TASK_API_URL_VARS) == (TASK_URL_VAR, ROUTER_URL_VAR)
+
+    def test_the_shell_carries_the_same_DEFAULT_as_python(self):
+        """The third tier is duplicated for the same reason and gets the same
+        binding. Without this, a shell default drifting from python's would send
+        an unconfigured host somewhere python would not."""
+        shell = re.search(r'CLAWGATE_DEFAULT_API_URL="([^"]+)"',
+                          LIB.read_text(encoding="utf-8"))
+        assert shell, "the shell no longer declares a default base URL"
+        assert shell.group(1) == _ct.DEFAULT_API_URL
+
+    def test_the_url_families_this_script_builds_are_a_pinned_LEDGER(self):
+        """🔴 A SEAM GUARD ON THE RELATIONSHIP, not on a component. Every URL in
+        this script is task-side, which is why `clawgate_resolve` resolves ONE
+        base. That is only safe while it stays true — a router-side request
+        added later would silently inherit the task base and 404 against the
+        wrong service, and no other test here would see it.
+
+        So the LEDGER is asserted, and it fails when the set GROWS *or* SHRINKS:
+        a fourth URL is an unclassified path that somebody must classify
+        deliberately, and a missing one means a request this guard thought it
+        was covering has moved somewhere it is not."""
+        paths = task_side_paths(LIB.read_text(encoding="utf-8"))
+        assert paths == [
+            "/api/tasks?limit=1",              # clawgate_zero_probe, request 1
+            "/api/sessions/$sid/tasks",        # clawgate_zero_probe, request 2
+            "/api/sessions/$sid/tasks",        # clawgate_resolve, the request under test
+        ], (
+            "the set of URLs this script builds has changed. Classify each new "
+            "one router/task DELIBERATELY — do not widen this ledger to make it "
+            "pass. A router-side path needs its OWN base, resolved beside "
+            "clawgate_task_base, not through it."
+        )
+
+    def test_the_path_ledger_scan_can_actually_FIRE(self):
+        """POSITIVE CONTROL for the scan above. A regex wired to nothing returns
+        the same empty list for a clean file as for a file full of URLs, and
+        this repo has already shipped one scan that was wrong in exactly that
+        way (see `laundered_readers`). Feed it a decoy that MUST produce a
+        non-zero count and watch the number move."""
+        decoy = 'curl "$base/api/attention" && curl "$base/api/tasks?limit=1"\n'
+        assert task_side_paths(decoy) == ["/api/attention", "/api/tasks?limit=1"]
+        assert task_side_paths("no urls here at all\n") == []
+
+    def test_the_board_path_under_test_is_classified_TASK_side(self):
+        """🔴 BOTH PATHS ARE TASK-SIDE UPSTREAM — CITED, NOT ARGUED.
+
+        `/api/tasks` is task-side under clawgatectl's `taskSidePrefixes`
+        (`cmd/clawgatectl/client.go`), which is what the first assertion reads.
+
+        `/api/sessions/{id}/tasks` is NOT in that list — and an earlier revision
+        of this test concluded from that absence that the classification was an
+        unmade judgement, and argued it from first principles over ~20 lines.
+        That was the wrong file. The authority is muster's route partition,
+        `internal/api/testdata/routes.partition.tsv:160`, which already assigns
+        it explicitly:
+
+            muster <TAB> server.go:registerNotesRoutes <TAB> GET /api/sessions/{id}/tasks
+
+        Verified 2026-09-26: the only row in that 162-data-row file naming
+        `/api/sessions` (negative control, an invented path: 0 rows), and
+        clawgatectl never mentions `/api/sessions` at all (0, against 7 for
+        `/api/tasks`) — which is why consulting only clawgatectl made a settled
+        question look open. Two upstream ledgers, and the narrower one's silence
+        is not the wider one's verdict.
+
+        🔴 NO ASSERTION HERE WATCHES THAT FILE. It is in a DIFFERENT repository
+        that no test in this one can open — the same cross-repo seam as
+        `TASK_SIDE_PREFIXES` above, with the same mitigation: cite it, and
+        re-read it by hand. A prior revision carried an assertion whose message
+        claimed to fire "if upstream ever classifies /api/sessions/* explicitly"
+        while comparing against the hand-spelled tuple in THIS file; it could
+        never observe upstream, and the condition it warned about had already
+        happened. It was deleted rather than narrowed — a guard that reads as
+        coverage while providing none is worse than no guard.
+
+        What IS mechanically pinned below is the only thing this repo owns: that
+        `clawgate_resolve` resolves through the one task-side resolver and never
+        reads the router variable directly again.
+        """
+        # `/api/tasks*` — mechanical, straight off clawgatectl's ledger.
+        assert any("/api/tasks?limit=1".startswith(p) for p in TASK_SIDE_PREFIXES)
+        # Both paths resolve to ONE base here, whatever the upstream ledgers say.
+        src = LIB.read_text(encoding="utf-8")
+        body = shell_fn_body(src, "clawgate_resolve")
+        # 🔴 COMMENTS STRIPPED BEFORE EITHER CHECK, and this is not tidiness.
+        # The prose above the call names `clawgate_task_base` as well, so a
+        # substring check against the RAW body is satisfied by the comment.
+        # Measured 2026-09-26 with an isolated mutant that replaced the call
+        # with `base=${CLAWGATE_DEFAULT_API_URL%/}` and changed nothing else:
+        # the body still spelled the name 1x, called it 0x, and this test
+        # PASSED. Same family as "a name count cannot tell a tombstone from a
+        # survivor" — grep the live construct, not the name.
+        code = "\n".join(ln for ln in body.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        assert re.search(r"\$\(\s*clawgate_task_base\b", code), (
+            "clawgate_resolve no longer CALLS the one task-side resolver "
+            "(a comment naming it does not count)"
+        )
+        assert not re.search(r"clawgate_env_get\s+CLAWGATE_API_URL", code), (
+            "clawgate_resolve reads the ROUTER variable directly again — that "
+            "is the defect this class exists to pin."
+        )
+
+
 class TestSkillsAndCodeAgree:
     @pytest.mark.parametrize("phrase,why", HANDOFF_PINS, ids=[w for _, w in HANDOFF_PINS])
     def test_handoff_skill_pins(self, phrase, why):
