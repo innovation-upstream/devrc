@@ -126,7 +126,7 @@ def test_emit_task_posts_directory_payload_with_bearer(monkeypatch):
 
 
 # -- the TASK base URL comes from configuration, not a literal -----------------
-# 🔴 RED AT origin/main (bf28baa99): this module held
+# 🔴 RED AT origin/main (adf1ccb6): this module held
 # `ENDPOINT = "http://192.168.50.250:30302/api/tasks"` and read nothing but the
 # token from the environment, so every assertion below that names a configured
 # host failed with the literal's host instead. The task/board service was
@@ -183,10 +183,13 @@ def test_task_endpoint_strips_a_trailing_slash(monkeypatch):
 
 
 def test_task_endpoint_with_neither_variable_set_is_unchanged(monkeypatch):
-    """🔴 An INVARIANT GUARD, not a regression test — it is GREEN at
-    origin/main too, and deliberately so. It pins the thing this change must
-    NOT move: on a host told nothing about the split, the endpoint is byte for
-    byte what the old literal was."""
+    """🔴 AN INVARIANT GUARD, NOT A REGRESSION TEST — counted as neither.
+
+    It pins the thing this change must NOT move: on a host told nothing about
+    the split, the endpoint is byte for byte what the old literal was. It does
+    go red at adf1ccb6, but only because `task_endpoint` does not exist there
+    at all — the VALUE it asserts was already what that tree produced. Do not
+    read it as evidence the fix works; the two tests above are that."""
     _both_unset(monkeypatch)
     assert clawgate.task_endpoint() == DEFAULT_BASE + "/api/tasks"
 

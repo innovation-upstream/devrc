@@ -1,6 +1,6 @@
 """The Signal notifier's TASK base URL comes from configuration, not a literal.
 
-🔴 RED AT origin/main (bf28baa99). `scripts/signal/clawgate.py` held
+🔴 RED AT origin/main (adf1ccb6). `scripts/signal/clawgate.py` held
 `ENDPOINT = "http://192.168.50.250:30302/api/tasks"` and read nothing from the
 environment but the hook token, so every assertion here that names a configured
 host failed with the literal's host instead. The task/board service was
@@ -86,9 +86,12 @@ def test_task_endpoint_strips_a_trailing_slash(monkeypatch):
 
 
 def test_task_endpoint_with_neither_variable_set_is_unchanged(monkeypatch):
-    """🔴 An INVARIANT GUARD, not a regression test — GREEN at origin/main too,
-    deliberately. It pins what this change must NOT move: a pod told nothing
-    about the split posts exactly where the old literal pointed."""
+    """🔴 AN INVARIANT GUARD, NOT A REGRESSION TEST — counted as neither.
+
+    It pins what this change must NOT move: a pod told nothing about the split
+    posts exactly where the old literal pointed. It does go red at adf1ccb6,
+    but only because `task_endpoint` does not exist there at all — the VALUE it
+    asserts was already what that tree produced."""
     monkeypatch.delenv("CLAWGATE_TASK_API_URL", raising=False)
     monkeypatch.delenv("CLAWGATE_API_URL", raising=False)
     assert clawgate.task_endpoint() == DEFAULT_BASE + "/api/tasks"
