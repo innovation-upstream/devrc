@@ -85,12 +85,12 @@ MIN_SKILLS = 30
 # --------------------------------------------------------------------------- #
 MEASURED_ENTRIES = 36
 MEASURED_TIER_A_ENTRIES = 23
-MEASURED_TIER_A_CHARS = 7_510
+MEASURED_TIER_A_CHARS = 7_504
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 7_695
+MEASURED_UNDER_LEDGER_CHARS = 7_689
 # ...and what the same 36 entries would cost with every skill tier A. The
 # difference is what the ledger buys: 3,316 chars.
-MEASURED_ALL_TIER_A_CHARS = 11_011
+MEASURED_ALL_TIER_A_CHARS = 11_005
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
@@ -105,6 +105,12 @@ MEASURED_ALL_TIER_A_CHARS = 11_011
 # 7,510 / 23 = 326.5; headroom below the mean bounds an AVERAGE entry, not every
 # entry. Do not treat the 107 as licence — the descriptions gate above this one
 # is still pinned at 0 headroom and reds on the next addition.
+#
+# 🔴 2026-09-25: `opencode` was RENAMED `opencode-dispatch` — the exact product
+# name made every bare mention of "opencode" route into the dispatch skill. The
+# +10 name growth was paid for by -16 of mechanism prose in its own description,
+# so the block fell 7,510 -> 7,504 across the same 23 entries and the ceiling
+# stays 7,617: headroom is 113. The mean tier-A entry is 7,504 / 23 = 326.3.
 #
 # The 254 chars of headroom this paragraph used to assert were consumed by the
 # RAISE in #1391 (7,242/7,496 -> 7,639/7,639), not by the re-base below; an

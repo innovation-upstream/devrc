@@ -313,7 +313,11 @@ MIN_LISTING_ENTRIES = 30
 # (see the warning above), so demotion does not move it. Headroom is 0 by
 # choice, re-pinned to the exact measurement.
 # If you are reading this while adding a skill: you do not get to raise it too.
-LISTING_TOTAL_CEILING_CHARS = 10_832
+# 🔴 LOWERED 10,832 -> 10,826 on 2026-09-25: `opencode` was RENAMED
+# `opencode-dispatch` (+10 name chars) and its own description paid it back with
+# -16 of mechanism prose. Re-pinned to the exact measurement; headroom stays 0
+# by choice.
+LISTING_TOTAL_CEILING_CHARS = 10_826
 
 # The skills deployed by `mkOutOfStoreSymlink` from `scripts/` instead of by the
 # recursive `claude/skills` mapping (`nix/home.nix`). They are listing entries
@@ -831,7 +835,7 @@ def test_control_the_module_measures_the_real_tree_not_a_fixture():
     """Cheap tripwire against this file drifting into self-referential green:
     the live entries must include skills this module never names."""
     names = {name for _, name, _ in _entries()}
-    for expected in ("clickup", "browser", "dl-router", "opencode",
+    for expected in ("clickup", "browser", "dl-router", "opencode-dispatch",
                      "session-manager"):
         assert expected in names, (
             f"`{expected}` is not in the scanned listing -- discovery is reading "
