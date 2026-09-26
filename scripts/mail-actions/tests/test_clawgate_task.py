@@ -256,20 +256,22 @@ def test_with_no_configuration_at_all_the_endpoint_is_unchanged(monkeypatch,
     assert clawgate.task_endpoint() == DEFAULT_BASE + TASKS
 
 
-def test_an_unreadable_env_file_resolves_rather_than_raising(monkeypatch,
+def test_an_UNOPENABLE_env_file_resolves_rather_than_raising(monkeypatch,
                                                              tmp_path):
-    """A base URL has a defined answer without the file, so an absent or
-    unreadable one is a STATE, not an error. (`read_clawgate_task_env` keeps the
-    raising read — it must also produce a token, which "no file" genuinely
-    defeats.)"""
+    """A base URL has a defined answer without the file, so a file that cannot
+    be opened is a STATE, not an error. (`read_clawgate_task_env` keeps the
+    raising read — it must also produce a token, which no file genuinely
+    defeats.)
+
+    🔴 A DIRECTORY, not `chmod 000`. A mode-based test is decided by the uid the
+    suite runs under — root opens an 0o000 file happily — so it would assert one
+    thing on a developer box and another in a sandbox. `IsADirectoryError` is
+    the same `OSError` family and is uid-independent.
+    """
     _clear_env(monkeypatch)
-    path = _env_file(monkeypatch, tmp_path, "CLAWGATE_API_URL=%s\n"
-                     % FILE_ROUTER_BASE)
-    path.chmod(0o000)
-    try:
-        assert clawgate.task_endpoint() == DEFAULT_BASE + TASKS
-    finally:
-        path.chmod(0o600)
+    path = _env_file(monkeypatch, tmp_path)   # no file written
+    path.mkdir()
+    assert clawgate.task_endpoint() == DEFAULT_BASE + TASKS
 
 
 # -- the POST itself ---------------------------------------------------------- #
