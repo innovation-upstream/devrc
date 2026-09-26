@@ -23,6 +23,12 @@ so an import would mean widening a deliberately narrow, security-motivated
 allowlist to carry a six-hundred-line module for three lines of it. The copy is
 kept instead — and pinned HERE, mechanically, rather than by good intentions.
 
+⚠ THE WIDENING IS POSSIBLE AND IS ALREADY PROPOSED ELSEWHERE (an open PR ships a
+different shared module into that image for the hook token). So this guard is
+not defending a permanent arrangement; it is what will still be failing, loudly
+and by name, on the day the copy should have been replaced by an import and was
+not.
+
 WHAT IS CHECKED, AND WHY BEHAVIOURALLY
 --------------------------------------
 🔴 A guard on the LEDGER alone is a guard on a SPELLING: the two modules could

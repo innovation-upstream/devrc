@@ -33,6 +33,16 @@ against this directory's contents. So there is no import that works here without
 widening a deliberately narrow, security-motivated allowlist to carry a
 six-hundred-line module for three lines of it.
 
+⚠ THAT WIDENING IS POSSIBLE, AND SOMEBODY HAS PROPOSED IT — say so rather than
+leave a future reader thinking the door is locked. An open PR
+(`fix/307-clawgate-token-resolver`, #655) ships a DIFFERENT shared module into
+this image for the hook token, by adding one COPY line, one dockerignore entry
+and a pin in tests/test_image_deps.py. The judgement here is a trade, not an
+impossibility: three lines of precedence did not seem worth a fourth ledger
+plus a six-hundred-line module in a pod that only ever runs the ingest loop. If
+that PR lands, replacing this copy with an import is the obvious follow-up and
+the guard below is what will tell you the copy is still here.
+
 The copy is therefore pinned MECHANICALLY rather than by good intentions:
 scripts/tests/test_clawgate_task_base_url_single_source.py asserts this module's
 ledger, its default and its resolution BEHAVIOUR against the shared module's,
