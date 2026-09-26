@@ -3152,17 +3152,30 @@ def budget_position(relpath: str, merged_text: str, base_text: str) -> BudgetPos
     🔴 THE NUMBERS COME FROM `handoff_budget` AND ARE NOT COPIED HERE. That
     module owns `MAX_BYTES` and `GRANDFATHERED` precisely because a second
     reader appeared; a literal in this file would be a third.
+
+    🔴 AND THE KEY LOOKUP IS `handoff_budget.lookup`, NOT A `.get`. A ledger entry
+    for a document in ANOTHER repository is keyed by `digest_key(relpath)` because
+    devrc is public; `lookup` tries the plaintext key and then the digest, and it
+    is the ONE place that rule is spelled. A bare `.get(relpath)` here would
+    resolve devrc's own documents and answer "no entry" for every foreign one —
+    i.e. hand them the bare ceiling and refuse the next update to a document that
+    was grandfathered on purpose. `claude/RULES.md`: one rule, one place.
+
+    🔴 ONE LOOKUP, TWO FIELDS. `allowance` and `grandfathered` are derived from a
+    single `lookup` result rather than from two calls, so they cannot disagree
+    about whether the document has an entry at all.
     """
     is_doc = relpath.startswith("claudedocs/") and "/handoff-" in "/" + relpath
     after = len(merged_text.encode("utf-8"))
     before = len(base_text.encode("utf-8"))
+    hit = handoff_budget.lookup(relpath, handoff_budget.GRANDFATHERED)
     return BudgetPosition(
         is_handoff_doc=is_doc,
         after=after,
         before=before,
         delta=after - before,
-        allowance=handoff_budget.GRANDFATHERED.get(relpath, handoff_budget.MAX_BYTES),
-        grandfathered=relpath in handoff_budget.GRANDFATHERED,
+        allowance=handoff_budget.MAX_BYTES if hit is None else hit,
+        grandfathered=hit is not None,
     )
 
 

@@ -66,13 +66,25 @@ and (d) is what catches a rename or a move into `claudedocs/archive/`.
 
 🔴 AND SINCE #1871 THE LEDGER COVERS DOCUMENTS IN OTHER REPOSITORIES, WHICH IS
 WHY (d) HAS AN EXCEPTION AT ALL. `handoff_doc.py` enforces rule (p) against a
-`--repo` the caller names and looks the allowance up by a BARE repo-relative
-path, so an over-ceiling doc in cairn or homelab-talos needs an entry HERE. This
-module reads only devrc's tree, so every such entry is a path (d) would call
-stale. `handoff_budget.LIVES_ELSEWHERE` declares them, and
+`--repo` the caller names and looks the allowance up by a repo-relative path
+carrying no repo component, so an over-ceiling doc in another checkout needs an
+entry HERE. This module reads only devrc's tree, so every such entry is a key (d)
+would call stale. `handoff_budget.LIVES_ELSEWHERE` declares them, and
 `test_every_FOREIGN_entry_is_declared_and_is_NOT_a_devrc_document` spends the
 declaration in the other direction: the day devrc grows a doc with one of those
 names, two documents share one allowance, and that test is what makes it loud.
+
+🔴 A FOREIGN ENTRY'S KEY IS A DIGEST OF ITS PATH, NOT THE PATH, BECAUSE devrc IS
+PUBLIC — `handoff_budget.digest_key` owns the scheme and states plainly that it
+is not a secret. Three consequences bind this module: the allowance lookup goes
+through `handoff_budget.lookup` (plaintext key, then digest) in BOTH
+`oversize_findings` and production, never a bare `.get`; the collision guard
+RESOLVES rather than intersecting raw keys, because a raw-key intersection
+against devrc's plaintext corpus is empty by construction and would pass while
+measuring nothing; and
+`test_every_ledger_KEY_is_a_devrc_path_or_a_WELL_FORMED_digest` is what stops a
+plaintext foreign key being re-added by the next person, who will reach for the
+path because that is what the failure messages here hand them.
 
 🔴 AND FOR A FOREIGN ENTRY (b), (c) AND (e)'S TIGHTNESS HALF ARE GONE TOO — NOT
 ONLY (d). An earlier wording of this paragraph named (d) alone, which reads as
@@ -153,7 +165,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 import handoff_index  # noqa: E402
 from handoff_budget import (  # noqa: E402
-    GRANDFATHER_STEP, GRANDFATHERED, LIVES_ELSEWHERE, MAX_BYTES,
+    FOREIGN_KEY_HEX, FOREIGN_KEY_PREFIX, GRANDFATHER_STEP, GRANDFATHERED,
+    LIVES_ELSEWHERE, MAX_BYTES, digest_key, is_foreign_key, lookup,
     tightest_allowance)
 
 # The hard per-document ceiling. See "WHERE THE NUMBER COMES FROM" above.
@@ -266,10 +279,18 @@ def oversize_findings(
     inputs — a ceiling test reads a tree it never writes, so on a compliant tree
     nothing exercises them and they would be asserted-but-never-watched.
 
-    `elsewhere` names ledger paths whose document is in ANOTHER repository, so
+    `elsewhere` names ledger KEYS whose document is in ANOTHER repository, so
     (d) must not read their absence from `sizes` as staleness. 🔴 IT DEFAULTS
     EMPTY, which is what keeps the stale branch exercised: every existing control
     calls this with two arguments and still watches (d) fire.
+
+    🔴 THE ALLOWANCE IS RESOLVED THROUGH `handoff_budget.lookup`, NOT
+    `ledger.get`, because a foreign entry's key is a DIGEST of its path. On
+    devrc's own tree that resolves plaintext-first and is therefore identical to
+    the `.get` it replaced; the difference only shows on a path whose digest is in
+    the ledger, which is exactly the collision
+    `test_every_FOREIGN_entry_is_declared_and_is_NOT_a_devrc_document` fails on —
+    so the two agree about which shapes are loud.
     """
     over_ceiling: list[str] = []
     over_allowance: list[str] = []
@@ -278,7 +299,7 @@ def oversize_findings(
     mis_stepped: list[str] = []
 
     for path, size in sorted(sizes.items()):
-        allowance = ledger.get(path)
+        allowance = lookup(path, ledger)
         if allowance is None:
             if size > MAX_BYTES:
                 over_ceiling.append(
@@ -306,6 +327,12 @@ def oversize_findings(
                 f'{size:,} B — replace the line with `"{path}": {tight:_},`'
             )
 
+    # 🔴 PLAIN MEMBERSHIP, NOT `lookup`, AND THE ASYMMETRY IS DELIBERATE. This
+    # loop iterates the ledger's OWN keys, which are spelled identically in
+    # `elsewhere`, so there is nothing to resolve. Resolving here would be a
+    # WIDENING in the wrong direction: a genuinely stale devrc entry whose path
+    # happened to digest to a declared foreign key would be exempted from (d)
+    # instead of reported.
     for path in sorted(ledger):
         if path not in sizes and path not in elsewhere:
             stale.append(
@@ -606,16 +633,27 @@ def test_every_FOREIGN_entry_is_declared_and_is_NOT_a_devrc_document():
     the one structure in this module that can make a real stale entry invisible.
     Three claims, each a different way that goes wrong:
 
-      1. every declared path is actually IN the ledger — a declaration for a path
+      1. every declared key is actually IN the ledger — a declaration for a key
          nobody grandfathered exempts nothing and reads as if it did;
-      2. no declared path is present in devrc's OWN corpus. The ledger key is a
-         bare repo-relative path, so a devrc doc of that name would share one
+      2. no declared key RESOLVES to a document in devrc's OWN corpus. The ledger
+         key carries no repo — the path itself for a devrc doc, `digest_key(path)`
+         for a foreign one — so a devrc doc of that name would share one
          allowance with a foreign document, and whichever is smaller would be
          silently governed by the other's number. This is the assertion that
          makes the ledger header's collision hazard MECHANICAL rather than a
          comment;
       3. the exemption is not a blanket one — an UNDECLARED absent path must
          still be reported stale, driven through the REAL checker.
+
+    🔴 CLAIM 2 RESOLVES THROUGH `lookup` RATHER THAN INTERSECTING RAW KEYS, AND
+    THAT IS THE WHOLE DIFFERENCE BETWEEN A GUARD AND A DECORATION HERE. Every
+    foreign key is a digest and every devrc path is plaintext, so
+    `set(LIVES_ELSEWHERE) & set(sizes)` — which is what this assertion used to
+    be — is now EMPTY BY CONSTRUCTION: it would pass forever, on any tree, while
+    measuring nothing. `claude/RULES.md`: a guard can be SPELLED rather than
+    structural, so ask whether it can pass while the hazard exists in a different
+    shape. The hazard's shape changed with the key, and the control below is what
+    proves the resolution actually reaches the digest.
 
     ⚠ WHAT IT CANNOT DO: confirm a declared document still exists where it is
     declared to live. This suite reads one tree. That is stated in the module
@@ -624,19 +662,30 @@ def test_every_FOREIGN_entry_is_declared_and_is_NOT_a_devrc_document():
     """
     undeclared = sorted(set(LIVES_ELSEWHERE) - set(GRANDFATHERED))
     assert not undeclared, (
-        "LIVES_ELSEWHERE names paths that are not in GRANDFATHERED, so the "
+        "LIVES_ELSEWHERE names keys that are not in GRANDFATHERED, so the "
         "declaration exempts nothing while reading as though it did: "
         f"{undeclared}"
     )
 
+    # 🔴 POSITIVE CONTROL FOR THE RESOLUTION ITSELF, BEFORE THE ZERO IT PRODUCES
+    # IS READ AS EVIDENCE. A digest-keyed declaration must be reachable from the
+    # PATH, and a path whose digest is absent must not resolve — otherwise the
+    # empty intersection below is a fact about `lookup` and not about the corpus.
+    # The path is synthetic: naming a real foreign document here would re-publish
+    # the name the digest exists to keep out of this tree.
+    probe = "claudedocs/handoff-a-synthetic-foreign-topic.md"
+    assert lookup(probe, {digest_key(probe): "some-other-repo"}) == "some-other-repo"
+    assert lookup(probe, {digest_key(probe + "x"): "some-other-repo"}) is None
+
     sizes = this_repos_corpus()
-    collisions = sorted(set(LIVES_ELSEWHERE) & set(sizes))
+    collisions = sorted(p for p in sizes if lookup(p, LIVES_ELSEWHERE) is not None)
     assert not collisions, (
-        "a path declared as living in ANOTHER repo is also a handoff doc in "
-        "THIS one, and the ledger key carries no repo — so one allowance now "
-        "governs two different documents. Rename one, or split the ledger by "
-        "repo; do NOT pick a value silently. Offenders (path -> declared "
-        "repo): " + repr({p: LIVES_ELSEWHERE[p] for p in collisions})
+        "a devrc handoff doc RESOLVES to a ledger key declared as living in "
+        "ANOTHER repo — by its own name or by its digest — and the ledger key "
+        "carries no repo, so one allowance now governs two different documents. "
+        "Rename one, or split the ledger by repo; do NOT pick a value silently. "
+        "Offenders (devrc path -> declared repo): "
+        + repr({p: lookup(p, LIVES_ELSEWHERE) for p in collisions})
     )
 
     # 🔴 POSITIVE CONTROL for the exemption's narrowness, through the REAL
@@ -648,6 +697,93 @@ def test_every_FOREIGN_entry_is_declared_and_is_NOT_a_devrc_document():
         {"declared.md": "some-other-repo"},
     )
     assert [x.split(":")[0] for x in both["stale"]] == ["undeclared.md"], both
+
+
+def test_every_ledger_KEY_is_a_devrc_path_or_a_WELL_FORMED_digest():
+    """🔴 THE PUBLIC-REPO REMEDIATION, MADE MECHANICAL INSTEAD OF A ONE-OFF SCRUB.
+
+    devrc is a PUBLIC repository and this ledger is the only place in it that has
+    ever had to name a document in another one, so a foreign entry is keyed by
+    `handoff_budget.digest_key(path)`. That scrub is worth nothing on its own: the
+    next person adding an entry for a doc in another checkout will reach for the
+    path, because that is what the failure message they are pasting hands them.
+
+    Two claims, and TOGETHER they leave no third option for a plaintext foreign
+    key:
+
+      1. every `LIVES_ELSEWHERE` key is a well-formed digest. A foreign entry
+         spelled as a readable path is the disclosure the re-keying removed, and
+         this is the assertion that refuses it;
+      2. every `GRANDFATHERED` key is either declared foreign, or a plaintext
+         `claudedocs/…` path whose basename the shared handoff-name predicate
+         accepts. A key that is neither resolves for no document at all while
+         reading as an allowance — the same shape as a stale entry, minus the
+         check that catches one.
+
+    So a foreign entry re-added in plaintext is either left UNDECLARED, and check
+    (d) reports it stale because devrc's tree does not hold it, or DECLARED, and
+    claim 1 refuses it. It also fails on a change to `FOREIGN_KEY_HEX` or to
+    `FOREIGN_KEY_PREFIX`, because every stored key was generated at the old
+    values and `is_foreign_key` validates against the new ones — which is the
+    right direction: shortening the digest is a real weakening of the collision
+    bound `digest_key`'s comment computes.
+
+    ⚠ IT IS TREE-INDEPENDENT AND IT IS NOT A LEAK SCAN. It says nothing about
+    prose elsewhere in the repo naming a foreign document; it governs the ledger.
+    """
+    not_digested = sorted(k for k in LIVES_ELSEWHERE if not is_foreign_key(k))
+    assert not not_digested, (
+        "a FOREIGN ledger entry is keyed by a readable path rather than by "
+        f"`digest_key(path)`. devrc is PUBLIC and this ledger is the only place "
+        f"in it that names another repo's documents, so the key must be "
+        f"`{FOREIGN_KEY_PREFIX}` followed by {FOREIGN_KEY_HEX} lowercase hex "
+        f"characters. Replace each offender with `digest_key(\"<the path>\")` in "
+        f"BOTH dicts and say in the commit message how many entries moved, not "
+        f"which. Offenders: {not_digested}"
+    )
+
+    malformed = sorted(
+        k for k in GRANDFATHERED
+        if not is_foreign_key(k)
+        and not (k.startswith(handoff_index.HANDOFF_DIR + "/")
+                 and handoff_index._HANDOFF_NAME.match(k.rsplit("/", 1)[-1]))
+    )
+    assert not malformed, (
+        "a GRANDFATHERED key is neither a well-formed foreign digest nor a "
+        f"plaintext {handoff_index.HANDOFF_DIR}/ path this gate's own name "
+        "predicate accepts, so it can never resolve for any document while "
+        f"still reading as an allowance. Offenders: {malformed}"
+    )
+
+
+def test_the_ledger_RESOLVER_reads_a_digest_key_and_prefers_plaintext():
+    """🔴 `handoff_budget.lookup`, DRIVEN DIRECTLY, because it is the seam every
+    reader of this ledger now sits behind.
+
+    `budget_position` (production, rule (p)) and `oversize_findings` (this module)
+    both resolve through it, and neither can see the digest arm on devrc's own
+    tree — every devrc key is plaintext, so the digest fallback never executes
+    there. A mutant deleting that fallback therefore SURVIVES everything else in
+    this module while silently handing all 71 foreign documents the bare ceiling.
+    This is the test that reaches it.
+
+    Four claims, at a boundary and a middle: a plaintext key resolves; a digest
+    key resolves FROM THE PATH; a miss is `None` rather than an exception; and
+    plaintext WINS over a digest present in the same ledger, which is the
+    precedence `lookup`'s docstring states and the only way a devrc entry cannot
+    be shadowed.
+    """
+    p = "claudedocs/handoff-a-synthetic-topic.md"
+    other = "claudedocs/handoff-another-synthetic-topic.md"
+
+    assert lookup(p, {p: 81_920}) == 81_920
+    assert lookup(p, {digest_key(p): 98_304}) == 98_304
+    assert lookup(p, {digest_key(other): 98_304}) is None
+    assert lookup(p, {}) is None
+    # Precedence, watched rather than assumed: both keys present, plaintext wins.
+    assert lookup(p, {p: 81_920, digest_key(p): 98_304}) == 81_920
+    # …and the digest is a function of the WHOLE path, not of the basename.
+    assert digest_key(p) != digest_key("claudedocs/archive/handoff-a-synthetic-topic.md")
 
 
 def test_every_grandfathered_entry_is_a_correctly_stepped_allowance():

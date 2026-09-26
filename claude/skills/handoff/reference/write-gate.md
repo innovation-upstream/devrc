@@ -1213,9 +1213,17 @@ them is exactly how they went wrong. **Re-measure rather than believe them.** Tw
 commands, run inside the measured repo (`<cairn>`, whose doc this was):
 
 ```bash
-git cat-file -s 3c4a1c6:claudedocs/handoff-cairn-control-plane.md   # 64097
-git cat-file -s 219d58e:claudedocs/handoff-cairn-control-plane.md   # 139371
+git cat-file -s 3c4a1c6:claudedocs/handoff-<arc>.md   # 64097
+git cat-file -s 219d58e:claudedocs/handoff-<arc>.md   # 139371
 ```
+
+⚠ **`<arc>` IS A PLACEHOLDER AND THE DOCUMENT IS NOT NAMED HERE, WHICH IS A REAL COST
+STATED RATHER THAN HIDDEN.** devrc is a PUBLIC repository and that document is not in it;
+`scripts/lib/handoff_budget.py` keys every such entry by a digest of its path for the same
+reason, and its `digest_key` comment states what that does and does not buy. So these two
+commands are re-runnable only by someone who already knows which arc it was — the two
+revisions and the two byte counts are what identify it, and the branch that measured it is
+where the name is.
 
 ⚠ **THE FIRST PAIR WRITTEN HERE WAS WRONG, AND ONLY THE WHOLE-DOCUMENT ROW HAS BEEN
 RE-MEASURED.** It read 63,433 B → 134,563 B, x2.1. Neither figure reproduces at **any**
@@ -1276,7 +1284,8 @@ Two ways, and the first is usually the right one:
 
 🔴 **REMEDY 2's DESTINATION IS ITSELF A GOVERNED DOCUMENT, AND BOTH HALVES OF THAT
 MATTER.** A `claudedocs/handoff-<arc>-archive.md` sink matches `is_handoff_doc` like any
-other doc — MEASURED on `<cairn>/claudedocs/handoff-cairn-control-plane-archive.md`,
+other doc — MEASURED on `<cairn>/claudedocs/handoff-<arc>-archive.md` (the same arc as the
+table above, and unnamed for the same reason),
 which returns `True` and is 138,791 B, i.e. **73,255 B over the 65,536 B ceiling** and now
 carries a `GRANDFATHERED` entry of its own. So the remedy points at a file that is in
 rule (p)'s population.
@@ -1288,7 +1297,7 @@ which is the same defect one paragraph over. The ceiling is not measured here at
 is `handoff_budget.MAX_BYTES`, owned by `scripts/tests/test_handoff_doc_size.py`.
 
 ```bash
-stat -c %s <cairn>/claudedocs/handoff-cairn-control-plane-archive.md   # 138791 when written
+stat -c %s <cairn>/claudedocs/handoff-<arc>-archive.md   # 138791 when written
 python3 -c 'import sys; sys.path.insert(0, "scripts/lib"); import handoff_budget as b; print(b.MAX_BYTES)'
 ```
 

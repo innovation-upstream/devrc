@@ -184,11 +184,16 @@ MUTANTS = [
     #
     # 🔴 AND SINCE #1871 THE LEDGER HOLDS ENTRIES FOR DOCUMENTS IN OTHER REPOS,
     # WHICH MAKES THE CHOICE OF ANCHOR LOAD-BEARING IN A NEW WAY: C4 and C5 must
-    # anchor on an entry whose document is in devrc. Point either at a path in
-    # `LIVES_ELSEWHERE` and it SURVIVES while looking correct — `over_allowance`
-    # and `over_ceiling` both need the doc to be IN the scanned corpus, and a
-    # foreign one never is. C11 is immune (it is a pure ledger check) but is
-    # listed with them because the re-check is one habit, not three.
+    # anchor on an entry whose document is in devrc. Point either at a foreign
+    # entry and it SURVIVES while looking correct — `over_allowance` and
+    # `over_ceiling` both need the doc to be IN the scanned corpus, and a foreign
+    # one never is. C11 is immune (it is a pure ledger check) but is listed with
+    # them because the re-check is one habit, not three.
+    # ⚠ THAT TRAP IS NOW HARD TO FALL INTO RATHER THAN CLOSED, and the difference
+    # matters. A foreign entry's key is `digest_key(path)` (devrc is public), so
+    # the anchors below are visibly the only PATH-shaped keys in the dict and a
+    # foreign one cannot be picked by pasting a familiar name. Nothing ASSERTS the
+    # anchor is a devrc entry, so the habit stands.
     ("C4", "deletion", "silently drop a document from the ledger",
      '    "claudedocs/handoff-nix-disk-cleanup.md": 114_688,\n',
      "",
@@ -251,6 +256,28 @@ MUTANTS = [
      "LIVES_ELSEWHERE: dict[str, str] = {\n"
      '    "claudedocs/handoff-tmux-webapp.md": "some-other-repo",\n',
      "test_every_FOREIGN_entry_is_declared_and_is_NOT_a_devrc_document"),
+    # 🔴 THE PUBLIC-REPO HAZARD (#1871, the re-key). A foreign entry is keyed by
+    # `digest_key(path)` because devrc is PUBLIC, and the way that decays is not a
+    # stale entry or a collision — both covered above — but the NEXT PERSON adding
+    # an entry in PLAINTEXT, because a plaintext path is what the failure message
+    # they are pasting hands them. The planted key is a synthetic name and is
+    # deliberately NOT in `GRANDFATHERED`, which is the shape a real re-add takes
+    # (nobody adds to one dict on purpose); the named test's claim 1 is what fires
+    # on the readable key, and it is the one this row is scored against.
+    ("C15", "insertion", "re-add a FOREIGN entry spelled as a readable path",
+     "LIVES_ELSEWHERE: dict[str, str] = {\n",
+     "LIVES_ELSEWHERE: dict[str, str] = {\n"
+     '    "claudedocs/handoff-a-plaintext-foreign-key.md": "some-other-repo",\n',
+     "test_every_ledger_KEY_is_a_devrc_path_or_a_WELL_FORMED_digest"),
+    # 🔴 THE RESOLVER, WHICH NOTHING ELSE IN THIS SUITE REACHES. `lookup` tries the
+    # plaintext key first, so on devrc's own 11 entries the digest arm never
+    # executes — every other row here, and every fixture in the ceiling module,
+    # would pass with it deleted while all 71 foreign documents silently fell back
+    # to the bare ceiling.
+    ("C16", "deletion", "drop the DIGEST arm of the one ledger resolver",
+     "        hit = ledger.get(digest_key(relpath))\n",
+     "        hit = None\n",
+     "test_the_ledger_RESOLVER_reads_a_digest_key_and_prefers_plaintext"),
 ]
 
 #: 🔴 EVERY ROW, BECAUSE THIS BATTERY SPANS THREE FILES. The anchors module
@@ -284,6 +311,8 @@ TARGETS = {
     "C12": IDX,
     "C13": IDX,
     "C14": BUD,
+    "C15": BUD,
+    "C16": BUD,
 }
 
 

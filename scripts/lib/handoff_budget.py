@@ -34,7 +34,11 @@ is unchanged and still decides the direction every such gate must fail in.
 """
 from __future__ import annotations
 
+import hashlib
 import math
+import typing
+
+_V = typing.TypeVar("_V")
 
 # UP requires saying in the commit message which document could not be expressed
 # in the budget, and why eviction was not the answer.
@@ -63,12 +67,96 @@ GATE_RELPATH = "scripts/tests/test_handoff_doc_size.py"
 # working margin rather than a rounding artefact.
 GRANDFATHER_STEP = 16_384
 
+# 🔴 A FOREIGN ENTRY IS KEYED BY A DIGEST OF ITS PATH, BECAUSE THIS REPOSITORY IS
+# PUBLIC. `devrc` is the only repo whose documents this gate can read, and the
+# ledger is the only place in the tree that has ever had to NAME a document in
+# another one — so a plaintext key here publishes another repo's internal topic
+# list to anyone reading the tree or any index built over it. The remedy is
+# uniform and needs no per-repo judgement: a key naming a document in THIS repo
+# stays readable, a key naming a document in ANY other repo is a digest.
+#
+# 🔴 IT IS NOT A SECRET, AND SAYING SO IS PART OF THE DESIGN RATHER THAN A
+# CAVEAT ON IT. There is no salt and no key: `digest_key` is a pure, documented
+# function of the path, so anyone who GUESSES a path can confirm it in one line.
+# What it buys is exactly two things — the names are not READABLE and not
+# INDEXABLE in a public tree — and nothing else. A comment here claiming
+# confidentiality would be precisely the kind of false claim the rest of this
+# module's comments exist to correct.
+FOREIGN_KEY_PREFIX = "foreign:"
+
+# 🔴 HOW LONG THE DIGEST IS, AS ARITHMETIC RATHER THAN TASTE. The only property
+# the length has to buy is that two DIFFERENT documents never resolve to one key,
+# and the expected number of collisions over n keys is `n(n-1)/2 / 16**N`. At
+# N=16 (64 bits) that is 1.4e-16 over today's 71 foreign entries and 2.7e-14 even
+# over a thousand — so the collision guard in `test_handoff_doc_size.py` is what
+# would catch one and will never have to. Shorter is measurably worse (N=8 gives
+# 1.2e-4 over a thousand, which is a real number, not a rounding of zero);
+# longer buys nothing, because for an unsalted digest of a guessable slug LENGTH
+# IS NOT SECRECY and the paragraph above is the honest statement of what it is.
+FOREIGN_KEY_HEX = 16
+
+
+def digest_key(relpath: str) -> str:
+    """The ledger key for a document in ANOTHER repository. PURE.
+
+    `relpath` is spelled exactly as a devrc key would be — repo-relative, POSIX
+    separators, e.g. `claudedocs/handoff-<topic>.md`. UTF-8 is named rather than
+    inherited so the function cannot disagree with itself across environments.
+
+    🔴 NOT A SECRET. See `FOREIGN_KEY_PREFIX`'s comment, which states the whole
+    of what this buys; do not add a salt and do not describe this as hiding
+    anything from someone who guesses the path.
+    """
+    return FOREIGN_KEY_PREFIX + hashlib.sha256(
+        relpath.encode("utf-8")).hexdigest()[:FOREIGN_KEY_HEX]
+
+
+def is_foreign_key(key: str) -> bool:
+    """Is this ledger key a digest rather than a readable devrc path?
+
+    🔴 A WELL-FORMEDNESS TEST, NOT A `startswith`. A key carrying the prefix and
+    something that is not a `FOREIGN_KEY_HEX`-character lowercase hex digest is a
+    malformed ledger — it resolves for no document while reading as an allowance —
+    and `test_every_ledger_KEY_is_a_devrc_path_or_a_WELL_FORMED_digest` is what
+    fails on it. A plaintext path answers False, which is what every caller
+    branches on.
+    """
+    if not key.startswith(FOREIGN_KEY_PREFIX):
+        return False
+    rest = key[len(FOREIGN_KEY_PREFIX):]
+    return (len(rest) == FOREIGN_KEY_HEX
+            and all(c in "0123456789abcdef" for c in rest))
+
+
+def lookup(relpath: str, ledger: dict[str, _V]) -> _V | None:
+    """🔴 THE ONE RESOLVER: the plaintext key first, then the digest.
+
+    Every reader of `GRANDFATHERED` or `LIVES_ELSEWHERE` goes through this, and
+    that is `claude/RULES.md`'s one-rule-one-place rather than tidiness. A second,
+    open-coded `ledger.get(relpath)` anywhere would resolve devrc's 11 documents
+    and answer `None` for all 71 foreign ones — an allowance that reads as absent,
+    i.e. the bare ceiling, i.e. rule (p) refusing the next update to a document
+    the operator grandfathered on purpose. The failure would be silent in devrc,
+    which is the only repo any gate here can see.
+
+    PLAINTEXT FIRST, for two reasons: a devrc entry cannot then be shadowed by a
+    digest collision, and every synthetic ledger the controls in
+    `test_handoff_doc_size.py` drive this with keeps working unchanged.
+    """
+    hit = ledger.get(relpath)
+    if hit is None:
+        hit = ledger.get(digest_key(relpath))
+    return hit
+
+
 # 🔴 THE LEDGER. Explicit and ENUMERATED, never a pattern — an unlisted document
 # over the ceiling is a failure by default.
 #
-# path -> allowance in bytes, which must be `ceil(measured / GRANDFATHER_STEP) *
+# key -> allowance in bytes, which must be `ceil(measured / GRANDFATHER_STEP) *
 # GRANDFATHER_STEP`. Do not hand-compute it: every failure message prints the
-# exact line to paste.
+# exact line to paste. The key is a repo-relative PATH for a devrc document and
+# `digest_key(path)` for a document in any other repo; `lookup` resolves both and
+# no call site chooses between them.
 #
 # 🔴 REMOVING AN ENTRY IS THE GOAL — FOR A devrc ENTRY. A devrc doc that comes
 # back under MAX_BYTES fails (c) until its entry is deleted.
@@ -117,11 +205,13 @@ GRANDFATHER_STEP = 16_384
 # authority. An allowance only ever changes by a deliberate edit to its line
 # below.
 #
-# 🔴 THE KEY IS A BARE REPO-RELATIVE PATH, AND SINCE #1871 THIS LEDGER COVERS
-# DOCUMENTS IN OTHER REPOSITORIES TOO. `handoff_doc.py` runs against a `--repo`
-# the caller names, so rule (p) reads this dict for a doc in ANY checkout, and
-# the lookup carries no repo component. Two consequences the next person adding
-# an entry has to hold at once:
+# 🔴 THE KEY CARRIES NO REPO — NEITHER SPELLING OF IT — AND SINCE #1871 THIS
+# LEDGER COVERS DOCUMENTS IN OTHER REPOSITORIES. `handoff_doc.py` runs against a
+# `--repo` the caller names, so rule (p) reads this dict for a doc in ANY
+# checkout, and the lookup is by bare repo-relative path in both spellings: the
+# path itself for a devrc doc, `digest_key(path)` for a foreign one. Digesting it
+# changes nothing about this — a digest of a path is still a function of the path
+# alone. Two consequences the next person adding an entry has to hold at once:
 #
 #   * 🔴 ONE ENTRY GOVERNS EVERY REPO THAT HAS A DOC OF THAT NAME. There is no
 #     collision today, measured across ALL FIVE repos this tool can be pointed
@@ -175,6 +265,11 @@ GRANDFATHERED: dict[str, int] = {
     # --- against, grandfathered so rule (p) ratchets each doc from where it is
     # --- rather than refusing their next update on day one.
     #
+    # 🔴 EVERY KEY BELOW IS A DIGEST AND NOT A PATH, BECAUSE THIS REPOSITORY IS
+    # PUBLIC. `digest_key` owns the scheme, the arithmetic behind its length, and
+    # the plain statement that it is NOT a secret — read it there rather than
+    # re-deriving either half here.
+    #
     # 🔴 READ THE SCALE BEFORE READING THE RULING AS CHEAP, BECAUSE THE SCALE IS
     # WHAT IT COSTS. This ledger goes from 28 entries to 82 and `LIVES_ELSEWHERE`
     # from 17 to 71. 71 of 82 entries — the large majority — are therefore
@@ -183,13 +278,25 @@ GRANDFATHERED: dict[str, int] = {
     # this comment. That is not a caveat on the decision; it is the decision. A
     # ledger designed as a ratchet is, after this change, mostly a list of
     # allowances that no gate will ever tighten. It was taken knowingly — the
-    # alternative was refusing the next update to 54 live documents in a repo
+    # alternative was refusing the next update to 71 live documents in repos
     # devrc's gate has never been able to read — and it is written here at full
     # size so nobody later reports it as a discovery.
     #
-    # 🔴 EVERY PATH BELOW IS ALSO IN `LIVES_ELSEWHERE`. Measured 2026-09-25 with
-    # `handoff_index.handoff_paths_on_disk`, over the population enumerated from
-    # `handoff_index.REPO_ENV_HANDLES` ITSELF plus cairn, which has no handle:
+    # 🔴 EVERY KEY BELOW IS ALSO IN `LIVES_ELSEWHERE`, AND THAT IS NOW THE ONLY
+    # PLACE THE REPO IS WRITTEN DOWN — the key no longer says, and neither does
+    # the order.
+    #
+    # 🔴 TO ADD AN ENTRY FOR A DOCUMENT IN ANOTHER REPO, COMPUTE THE KEY. Do not
+    # write the path, in either dict — and do not hand-derive the digest either,
+    # because the prefix and the length are constants this module owns:
+    #
+    #   python3 -c 'import sys; sys.path.insert(0, "scripts/lib"); \
+    #     import handoff_budget as b; print(b.digest_key("claudedocs/handoff-<topic>.md"))'
+    #
+    # The population that produced this block was measured 2026-09-25 with
+    # `handoff_index.handoff_paths_on_disk`, over the
+    # population enumerated from `handoff_index.REPO_ENV_HANDLES` ITSELF plus
+    # cairn, which has no handle:
     #
     #   repo (label)        docs   over its allowance with this block in place
     #   devrc                136   0
@@ -213,100 +320,107 @@ GRANDFATHERED: dict[str, int] = {
     # REFUSAL'S OWN REMEDY 2 WORTH READING TWICE — see `write-gate.md` §I, which
     # owns that finding. It gets an entry like the rest: the operator's ruling
     # was to grandfather, never to exempt archives from `is_handoff_doc`.
-    "claudedocs/handoff-cairn-control-plane.md": 98_304,
-    "claudedocs/handoff-cairn-control-plane-archive.md": 147_456,
-    "claudedocs/handoff-chief-cairn-client.md": 163_840,
-    "claudedocs/handoff-clawgate-task-detail-page.md": 81_920,
-    "claudedocs/handoff-clawgate-to-muster-extraction.md": 163_840,
-    "claudedocs/handoff-clawgate-ux-audit.md": 114_688,
-    "claudedocs/handoff-clickup-mirror.md": 294_912,
-    "claudedocs/handoff-clickup-mirror-check.md": 98_304,
-    "claudedocs/handoff-comic-flex.md": 360_448,
-    "claudedocs/handoff-homelab-ci-alerting-lock-leak.md": 98_304,
-    "claudedocs/handoff-media-autoremixer.md": 98_304,
-    "claudedocs/handoff-nebula-pre-departure-hardening.md": 98_304,
-    "claudedocs/handoff-promptver-teardown.md": 81_920,
-    "claudedocs/handoff-session-makework-audit.md": 147_456,
-    "claudedocs/handoff-tekton-ci-budget-sizing.md": 98_304,
-    "claudedocs/handoff-tekton-ci-speedup.md": 180_224,
-    "claudedocs/handoff-tekton-remote-dispatch.md": 327_680,
-
-    # --- #1871 round 2: the SAME ruling, applied to the population the
-    # --- first cut MIS-MEASURED. 54 documents in $DATAPACKET, none of which
-    # --- the three-repo scan could see. Sorted by path, not by size, so a
-    # --- reader can find an entry; the sizes are in no comment here by the
-    # --- ⚠ rule above `MAX_BYTES`.
     #
-    # 🔴 THE TIGHTEST GAP IN THIS BLOCK IS 571 B
-    # (`handoff-linstor-commitment-visibility.md`, 179,653 B against an
-    # allowance of 180,224 B). Every one of the 54 is STRICTLY above its
-    # measured size, which is the ruling: grandfather at the quantum so
-    # nothing is red on its own next byte. A doc whose size were an exact
-    # multiple of the step would break that — `tightest_allowance` returns
+    # 🔴 THE TIGHTEST GAP IN THIS BLOCK IS 571 B — 179,653 B measured against an
+    # allowance of 180,224 B — and the entry is deliberately NOT named, because
+    # naming it is the disclosure the digest exists to prevent. Every one of the
+    # 71 is STRICTLY above its measured size, which is the ruling: grandfather at
+    # the quantum so nothing is red on its own next byte. A doc whose size were an
+    # exact multiple of the step would break that — `tightest_allowance` returns
     # the size itself there — and none of these is.
-    "claudedocs/handoff-abuse-detection-moderator-dashboard.md": 163_840,
-    "claudedocs/handoff-alert-recall-and-skill-consumers.md": 147_456,
-    "claudedocs/handoff-app-blocks-bridge-validator-counter.md": 81_920,
-    "claudedocs/handoff-app-blocks-earning-and-supply.md": 81_920,
-    "claudedocs/handoff-app-blocks-loading-skeleton.md": 81_920,
-    "claudedocs/handoff-app-blocks-orchestrator-access.md": 147_456,
-    "claudedocs/handoff-app-blocks-post-from-app.md": 114_688,
-    "claudedocs/handoff-app-frame-redesign.md": 163_840,
-    "claudedocs/handoff-app-listing-collaborators-2026-08-13.md": 98_304,
-    "claudedocs/handoff-app-listing-polish-and-coverage.md": 147_456,
-    "claudedocs/handoff-app-taste-rollout.md": 163_840,
-    "claudedocs/handoff-appblock-tool-calling.md": 425_984,
-    "claudedocs/handoff-appblocks-flag-access.md": 163_840,
-    "claudedocs/handoff-apps-build-consolidation.md": 131_072,
-    "claudedocs/handoff-bot-account-detection-research.md": 81_920,
-    "claudedocs/handoff-cairn-backup-durability.md": 131_072,
-    "claudedocs/handoff-civitai-ci-sharding-and-mock-drift.md": 81_920,
-    "claudedocs/handoff-claude-pool.md": 180_224,
-    "claudedocs/handoff-clickhouse-tracker-dead-letter.md": 98_304,
-    "claudedocs/handoff-clickup-task-audit.md": 196_608,
-    "claudedocs/handoff-clickup-urgent-high-triage.md": 81_920,
-    "claudedocs/handoff-cocry-tiering-2026-08-12.md": 114_688,
-    "claudedocs/handoff-cp-k8s-skew.md": 98_304,
-    "claudedocs/handoff-csam-archive-oom.md": 131_072,
-    "claudedocs/handoff-datapacket-api.md": 131_072,
-    "claudedocs/handoff-db-pool-defaults-2026-08-17.md": 98_304,
-    "claudedocs/handoff-discord-tester-feedback-isolation.md": 98_304,
-    "claudedocs/handoff-dp-error-triage.md": 147_456,
-    "claudedocs/handoff-dp-prod-excursion-smt-and-hpa-floors.md": 81_920,
-    "claudedocs/handoff-dp1-node-cost-and-drainability-archive.md": 81_920,
-    "claudedocs/handoff-dp1-node-cost-and-drainability.md": 131_072,
-    "claudedocs/handoff-draft-reaper-bug.md": 81_920,
-    "claudedocs/handoff-endpoint-load-and-cache-exposure-2026-08-23.md": 81_920,
-    "claudedocs/handoff-etcd-cp-disk.md": 147_456,
-    "claudedocs/handoff-external-ip-source-drift.md": 147_456,
-    "claudedocs/handoff-faro-rum-blind-spot.md": 98_304,
-    "claudedocs/handoff-feedback-triage-surface.md": 81_920,
-    "claudedocs/handoff-hidemeta-derivative-strip.md": 147_456,
-    "claudedocs/handoff-image-cacher-cf-edge-ttl-tradeoff.md": 114_688,
-    "claudedocs/handoff-kafka-cdc-exposure.md": 131_072,
-    "claudedocs/handoff-linstor-commitment-visibility.md": 180_224,
-    "claudedocs/handoff-meilisearch-relocation.md": 98_304,
-    "claudedocs/handoff-minio-chat-storage.md": 131_072,
-    "claudedocs/handoff-model-benchmarking-mobile-chrome.md": 98_304,
-    "claudedocs/handoff-mongo-ha.md": 114_688,
-    "claudedocs/handoff-og-500s-and-redis-cow-headroom.md": 163_840,
-    "claudedocs/handoff-playable-collections-feedback-round-3.md": 98_304,
-    "claudedocs/handoff-playable-collections-feedback-round-4.md": 163_840,
-    "claudedocs/handoff-r2-b2-tiering-thrash.md": 196_608,
-    "claudedocs/handoff-skill-prune-campaign.md": 81_920,
-    "claudedocs/handoff-ssr-cpu-regression.md": 180_224,
-    "claudedocs/handoff-staging-preview-next-orch.md": 81_920,
-    "claudedocs/handoff-verify-b2-grain-and-ci-consolidation-2026-08-12.md": 114_688,
-    "claudedocs/handoff-wedge-wave-per-node-and-inverted-hypothesis-2026-08-14.md": 81_920,
+    #
+    # ⚠ SORTED BY KEY, WHICH IS TO SAY SORTED BY DIGEST AND THEREFORE BY NOTHING
+    # A READER CAN USE. That is deliberate in the same direction as the digest
+    # itself: a block sorted by plaintext path publishes the alphabetical order of
+    # the names it is hiding, which narrows a guess. Do not scan this block to
+    # find an entry — digest the path.
+    "foreign:00a6bb3a110d6f24": 147_456,
+    "foreign:06795c4d08f2b8ed": 98_304,
+    "foreign:06ee3daeedea79e7": 196_608,
+    "foreign:078d96426d88ba97": 131_072,
+    "foreign:094d6215d64a2c69": 180_224,
+    "foreign:0b2a8bcb8a0a79a2": 81_920,
+    "foreign:0c760cd7ecb0899c": 147_456,
+    "foreign:12e00341f7b3af1b": 114_688,
+    "foreign:1bc5e278c87f7197": 81_920,
+    "foreign:1bc92a3244e7ff1b": 81_920,
+    "foreign:20681fde4c8918ce": 81_920,
+    "foreign:20dc7371927a25d7": 81_920,
+    "foreign:24b84976e42ca765": 81_920,
+    "foreign:3659ea15f321c01e": 131_072,
+    "foreign:3adf06b9266a73b6": 81_920,
+    "foreign:44f36be723873626": 131_072,
+    "foreign:46fdcd4b092d473f": 163_840,
+    "foreign:51988807443f550b": 98_304,
+    "foreign:51bcb04416a3d48c": 131_072,
+    "foreign:5599546e551fc247": 147_456,
+    "foreign:56c7ad75c8085995": 98_304,
+    "foreign:57d37b95a40228b1": 98_304,
+    "foreign:584885c94a5e64d7": 98_304,
+    "foreign:589c8685b63d336a": 163_840,
+    "foreign:5d729f9457db1be9": 81_920,
+    "foreign:634bb85403a0b6a4": 98_304,
+    "foreign:6551bbcce46e2da5": 98_304,
+    "foreign:6a7e4c0956982593": 98_304,
+    "foreign:6c84b350020fd167": 180_224,
+    "foreign:6df616eb20582ce9": 163_840,
+    "foreign:6e5abc9df8910d1f": 81_920,
+    "foreign:701522030b30a553": 114_688,
+    "foreign:77a95bd83499edbe": 163_840,
+    "foreign:85b5773be4e98918": 147_456,
+    "foreign:8a5c456391d51c93": 425_984,
+    "foreign:8c01d0730b50e086": 147_456,
+    "foreign:8e8639de61ccca87": 294_912,
+    "foreign:94bf72302023e839": 163_840,
+    "foreign:9906052c59f2921d": 98_304,
+    "foreign:9e18c0a48af69ec9": 98_304,
+    "foreign:9f906590bb6b02dd": 147_456,
+    "foreign:a21c154b80a0e824": 114_688,
+    "foreign:a2cff16912388ad3": 147_456,
+    "foreign:a54d698a4a360f96": 98_304,
+    "foreign:aab3a955ea0f9dc2": 81_920,
+    "foreign:ac2a0093518c7779": 81_920,
+    "foreign:ad62fed4ccfa9228": 131_072,
+    "foreign:ae3dfc66a8ea0ea4": 114_688,
+    "foreign:b336690a745e8339": 81_920,
+    "foreign:baebd7e094de26f4": 98_304,
+    "foreign:bc3c981116058e7c": 180_224,
+    "foreign:bdd015812770e390": 98_304,
+    "foreign:c0852103a8ce6314": 180_224,
+    "foreign:c692f26aa64cb268": 196_608,
+    "foreign:c731a9df4b10b4af": 147_456,
+    "foreign:c777a90f7da2224a": 81_920,
+    "foreign:ce16bba9538fac32": 81_920,
+    "foreign:d35f716fd62ff827": 327_680,
+    "foreign:d8cc4a483c72f4a4": 131_072,
+    "foreign:db9105fcdb125a02": 98_304,
+    "foreign:ddf4d01af2679aab": 81_920,
+    "foreign:dfb4571624cc46e0": 98_304,
+    "foreign:e1187ee96f4f7c4a": 163_840,
+    "foreign:e118a726cef81700": 131_072,
+    "foreign:e27faebfc6a3469f": 147_456,
+    "foreign:e3ee69dd4457de02": 114_688,
+    "foreign:e47637b067a09857": 360_448,
+    "foreign:eb27b1240d7c541a": 163_840,
+    "foreign:fa4c2a2b41797d4f": 81_920,
+    "foreign:fd753d2573b8f4a4": 114_688,
+    "foreign:fdd309570487cf03": 163_840,
 }
 
-# 🔴 THE LEDGER PATHS WHOSE DOCUMENT IS NOT IN devrc, and the repo that holds
+# 🔴 THE LEDGER KEYS WHOSE DOCUMENT IS NOT IN devrc, and the repo that holds
 # each. A SECOND STRUCTURE RATHER THAN A RICHER VALUE ON PURPOSE:
 # `GRANDFATHERED` stays `dict[str, int]` because `handoff_doc.budget_position`
-# reads it with a bare `.get(relpath, MAX_BYTES)` and three mutation rows in
-# `scripts/tests/mutation_battery_handoff_archive_and_cap.py` anchor on whole
-# ledger lines — widening the value would move all four for a field only one
-# reader wants.
+# reads it for ONE number through `lookup`, and three mutation rows in
+# `scripts/tests/mutation_battery_handoff_archive_and_cap.py` (C4, C5, C11) anchor
+# on whole ledger lines — widening the value would move all four for a field only
+# one reader wants.
+#
+# 🔴 AND SINCE THE KEYS HERE ARE DIGESTS, THIS DICT IS THE ONLY PLACE THE REPO IS
+# WRITTEN DOWN AT ALL. That is a reason to keep the second structure rather than
+# an argument against it: the alternative — a repo label welded onto the
+# `GRANDFATHERED` value — would put a foreign document's repo beside its
+# allowance and still tell you nothing about WHICH document, while costing the
+# four movements above.
 #
 # 🔴 WHAT IT BUYS, AND WHAT IT COSTS — AND THE COST IS WIDER THAN (d), WHICH IS
 # WHAT AN EARLIER WORDING HERE GOT WRONG. It buys exactly one thing: an entry
@@ -350,87 +464,103 @@ GRANDFATHERED: dict[str, int] = {
 #     ledger and not the tree, so every entry here — foreign included — is still
 #     pinned to a multiple of `GRANDFATHER_STEP` and strictly over `MAX_BYTES`.
 #   * `test_handoff_doc_size.py` spends this mapping the other way, asserting
-#     that every path here IS in `GRANDFATHERED` and is NOT present in devrc — so
-#     the collision hazard the ledger's header names fails LOUDLY the day devrc
-#     grows a doc of one of these names, rather than silently handing two
-#     documents one allowance.
+#     that every key here IS in `GRANDFATHERED` and that NO devrc document
+#     RESOLVES to one of them — so the collision hazard the ledger's header names
+#     fails LOUDLY the day devrc grows a doc of one of these names, rather than
+#     silently handing two documents one allowance.
+#     🔴 THAT CHECK RESOLVES THROUGH `lookup` RATHER THAN INTERSECTING RAW KEYS,
+#     AND THE DIGEST IS EXACTLY WHY. Every key here is a digest and every devrc
+#     path is plaintext, so a raw-key intersection is EMPTY BY CONSTRUCTION — it
+#     would pass forever while measuring nothing, which is the failure mode the
+#     re-keying was most likely to introduce. Its own positive control watches the
+#     digest half of that resolution move.
+#   * `test_every_ledger_KEY_is_a_devrc_path_or_a_WELL_FORMED_digest` closes the
+#     loop the other way, and the two together are what make the re-keying
+#     permanent rather than a one-off scrub: a foreign entry re-added in PLAINTEXT
+#     is either left undeclared — and (d) then reports it stale, because devrc's
+#     tree does not hold it — or declared here, where that test refuses it for
+#     being a readable path. There is no third option.
 LIVES_ELSEWHERE: dict[str, str] = {
-    "claudedocs/handoff-cairn-control-plane.md": "cairn",
-    "claudedocs/handoff-cairn-control-plane-archive.md": "cairn",
-    "claudedocs/handoff-chief-cairn-client.md": "homelab-talos",
-    "claudedocs/handoff-clawgate-task-detail-page.md": "homelab-talos",
-    "claudedocs/handoff-clawgate-to-muster-extraction.md": "homelab-talos",
-    "claudedocs/handoff-clawgate-ux-audit.md": "homelab-talos",
-    "claudedocs/handoff-clickup-mirror.md": "homelab-talos",
-    "claudedocs/handoff-clickup-mirror-check.md": "homelab-talos",
-    "claudedocs/handoff-comic-flex.md": "homelab-talos",
-    "claudedocs/handoff-homelab-ci-alerting-lock-leak.md": "homelab-talos",
-    "claudedocs/handoff-media-autoremixer.md": "homelab-talos",
-    "claudedocs/handoff-nebula-pre-departure-hardening.md": "homelab-talos",
-    "claudedocs/handoff-promptver-teardown.md": "homelab-talos",
-    "claudedocs/handoff-session-makework-audit.md": "homelab-talos",
-    "claudedocs/handoff-tekton-ci-budget-sizing.md": "homelab-talos",
-    "claudedocs/handoff-tekton-ci-speedup.md": "homelab-talos",
-    "claudedocs/handoff-tekton-remote-dispatch.md": "homelab-talos",
-
-    # #1871 round 2 — the 54 $DATAPACKET documents. Same ruling, correct
-    # population. The value is a repo LABEL and never a path, for
-    # `handoff_index.REPO_ENV_HANDLES`' own stated reason: this repo is
-    # PUBLIC.
-    "claudedocs/handoff-abuse-detection-moderator-dashboard.md": "datapacket-talos",
-    "claudedocs/handoff-alert-recall-and-skill-consumers.md": "datapacket-talos",
-    "claudedocs/handoff-app-blocks-bridge-validator-counter.md": "datapacket-talos",
-    "claudedocs/handoff-app-blocks-earning-and-supply.md": "datapacket-talos",
-    "claudedocs/handoff-app-blocks-loading-skeleton.md": "datapacket-talos",
-    "claudedocs/handoff-app-blocks-orchestrator-access.md": "datapacket-talos",
-    "claudedocs/handoff-app-blocks-post-from-app.md": "datapacket-talos",
-    "claudedocs/handoff-app-frame-redesign.md": "datapacket-talos",
-    "claudedocs/handoff-app-listing-collaborators-2026-08-13.md": "datapacket-talos",
-    "claudedocs/handoff-app-listing-polish-and-coverage.md": "datapacket-talos",
-    "claudedocs/handoff-app-taste-rollout.md": "datapacket-talos",
-    "claudedocs/handoff-appblock-tool-calling.md": "datapacket-talos",
-    "claudedocs/handoff-appblocks-flag-access.md": "datapacket-talos",
-    "claudedocs/handoff-apps-build-consolidation.md": "datapacket-talos",
-    "claudedocs/handoff-bot-account-detection-research.md": "datapacket-talos",
-    "claudedocs/handoff-cairn-backup-durability.md": "datapacket-talos",
-    "claudedocs/handoff-civitai-ci-sharding-and-mock-drift.md": "datapacket-talos",
-    "claudedocs/handoff-claude-pool.md": "datapacket-talos",
-    "claudedocs/handoff-clickhouse-tracker-dead-letter.md": "datapacket-talos",
-    "claudedocs/handoff-clickup-task-audit.md": "datapacket-talos",
-    "claudedocs/handoff-clickup-urgent-high-triage.md": "datapacket-talos",
-    "claudedocs/handoff-cocry-tiering-2026-08-12.md": "datapacket-talos",
-    "claudedocs/handoff-cp-k8s-skew.md": "datapacket-talos",
-    "claudedocs/handoff-csam-archive-oom.md": "datapacket-talos",
-    "claudedocs/handoff-datapacket-api.md": "datapacket-talos",
-    "claudedocs/handoff-db-pool-defaults-2026-08-17.md": "datapacket-talos",
-    "claudedocs/handoff-discord-tester-feedback-isolation.md": "datapacket-talos",
-    "claudedocs/handoff-dp-error-triage.md": "datapacket-talos",
-    "claudedocs/handoff-dp-prod-excursion-smt-and-hpa-floors.md": "datapacket-talos",
-    "claudedocs/handoff-dp1-node-cost-and-drainability-archive.md": "datapacket-talos",
-    "claudedocs/handoff-dp1-node-cost-and-drainability.md": "datapacket-talos",
-    "claudedocs/handoff-draft-reaper-bug.md": "datapacket-talos",
-    "claudedocs/handoff-endpoint-load-and-cache-exposure-2026-08-23.md": "datapacket-talos",
-    "claudedocs/handoff-etcd-cp-disk.md": "datapacket-talos",
-    "claudedocs/handoff-external-ip-source-drift.md": "datapacket-talos",
-    "claudedocs/handoff-faro-rum-blind-spot.md": "datapacket-talos",
-    "claudedocs/handoff-feedback-triage-surface.md": "datapacket-talos",
-    "claudedocs/handoff-hidemeta-derivative-strip.md": "datapacket-talos",
-    "claudedocs/handoff-image-cacher-cf-edge-ttl-tradeoff.md": "datapacket-talos",
-    "claudedocs/handoff-kafka-cdc-exposure.md": "datapacket-talos",
-    "claudedocs/handoff-linstor-commitment-visibility.md": "datapacket-talos",
-    "claudedocs/handoff-meilisearch-relocation.md": "datapacket-talos",
-    "claudedocs/handoff-minio-chat-storage.md": "datapacket-talos",
-    "claudedocs/handoff-model-benchmarking-mobile-chrome.md": "datapacket-talos",
-    "claudedocs/handoff-mongo-ha.md": "datapacket-talos",
-    "claudedocs/handoff-og-500s-and-redis-cow-headroom.md": "datapacket-talos",
-    "claudedocs/handoff-playable-collections-feedback-round-3.md": "datapacket-talos",
-    "claudedocs/handoff-playable-collections-feedback-round-4.md": "datapacket-talos",
-    "claudedocs/handoff-r2-b2-tiering-thrash.md": "datapacket-talos",
-    "claudedocs/handoff-skill-prune-campaign.md": "datapacket-talos",
-    "claudedocs/handoff-ssr-cpu-regression.md": "datapacket-talos",
-    "claudedocs/handoff-staging-preview-next-orch.md": "datapacket-talos",
-    "claudedocs/handoff-verify-b2-grain-and-ci-consolidation-2026-08-12.md": "datapacket-talos",
-    "claudedocs/handoff-wedge-wave-per-node-and-inverted-hypothesis-2026-08-14.md": "datapacket-talos",
+    # 🔴 THE KEY IS A DIGEST; THE VALUE IS A REPO LABEL AND STAYS READABLE, AND
+    # THAT ASYMMETRY IS MEASURED RATHER THAN JUDGED. Every label below already
+    # appears in devrc's own tree in over a hundred tracked files each
+    # (`cairn` 162, `homelab-talos` 222, `datapacket-talos` 125, measured over
+    # `git ls-files` at the commit that introduced this block), so digesting a
+    # label would hide nothing that is not already published and would cost the
+    # only thing the value is for: telling a reader which checkout to go and look
+    # in. The value is a LABEL and never a path — that half is unchanged, and its
+    # reason is `handoff_index.REPO_ENV_HANDLES`' own: this repo is PUBLIC.
+    "foreign:00a6bb3a110d6f24": "datapacket-talos",
+    "foreign:06795c4d08f2b8ed": "homelab-talos",
+    "foreign:06ee3daeedea79e7": "datapacket-talos",
+    "foreign:078d96426d88ba97": "datapacket-talos",
+    "foreign:094d6215d64a2c69": "datapacket-talos",
+    "foreign:0b2a8bcb8a0a79a2": "datapacket-talos",
+    "foreign:0c760cd7ecb0899c": "datapacket-talos",
+    "foreign:12e00341f7b3af1b": "datapacket-talos",
+    "foreign:1bc5e278c87f7197": "datapacket-talos",
+    "foreign:1bc92a3244e7ff1b": "homelab-talos",
+    "foreign:20681fde4c8918ce": "datapacket-talos",
+    "foreign:20dc7371927a25d7": "homelab-talos",
+    "foreign:24b84976e42ca765": "datapacket-talos",
+    "foreign:3659ea15f321c01e": "datapacket-talos",
+    "foreign:3adf06b9266a73b6": "datapacket-talos",
+    "foreign:44f36be723873626": "datapacket-talos",
+    "foreign:46fdcd4b092d473f": "homelab-talos",
+    "foreign:51988807443f550b": "homelab-talos",
+    "foreign:51bcb04416a3d48c": "datapacket-talos",
+    "foreign:5599546e551fc247": "datapacket-talos",
+    "foreign:56c7ad75c8085995": "datapacket-talos",
+    "foreign:57d37b95a40228b1": "datapacket-talos",
+    "foreign:584885c94a5e64d7": "datapacket-talos",
+    "foreign:589c8685b63d336a": "datapacket-talos",
+    "foreign:5d729f9457db1be9": "datapacket-talos",
+    "foreign:634bb85403a0b6a4": "datapacket-talos",
+    "foreign:6551bbcce46e2da5": "homelab-talos",
+    "foreign:6a7e4c0956982593": "datapacket-talos",
+    "foreign:6c84b350020fd167": "datapacket-talos",
+    "foreign:6df616eb20582ce9": "homelab-talos",
+    "foreign:6e5abc9df8910d1f": "datapacket-talos",
+    "foreign:701522030b30a553": "datapacket-talos",
+    "foreign:77a95bd83499edbe": "datapacket-talos",
+    "foreign:85b5773be4e98918": "homelab-talos",
+    "foreign:8a5c456391d51c93": "datapacket-talos",
+    "foreign:8c01d0730b50e086": "datapacket-talos",
+    "foreign:8e8639de61ccca87": "homelab-talos",
+    "foreign:94bf72302023e839": "datapacket-talos",
+    "foreign:9906052c59f2921d": "homelab-talos",
+    "foreign:9e18c0a48af69ec9": "datapacket-talos",
+    "foreign:9f906590bb6b02dd": "datapacket-talos",
+    "foreign:a21c154b80a0e824": "homelab-talos",
+    "foreign:a2cff16912388ad3": "cairn",
+    "foreign:a54d698a4a360f96": "datapacket-talos",
+    "foreign:aab3a955ea0f9dc2": "datapacket-talos",
+    "foreign:ac2a0093518c7779": "datapacket-talos",
+    "foreign:ad62fed4ccfa9228": "datapacket-talos",
+    "foreign:ae3dfc66a8ea0ea4": "datapacket-talos",
+    "foreign:b336690a745e8339": "datapacket-talos",
+    "foreign:baebd7e094de26f4": "datapacket-talos",
+    "foreign:bc3c981116058e7c": "homelab-talos",
+    "foreign:bdd015812770e390": "datapacket-talos",
+    "foreign:c0852103a8ce6314": "datapacket-talos",
+    "foreign:c692f26aa64cb268": "datapacket-talos",
+    "foreign:c731a9df4b10b4af": "datapacket-talos",
+    "foreign:c777a90f7da2224a": "datapacket-talos",
+    "foreign:ce16bba9538fac32": "datapacket-talos",
+    "foreign:d35f716fd62ff827": "homelab-talos",
+    "foreign:d8cc4a483c72f4a4": "datapacket-talos",
+    "foreign:db9105fcdb125a02": "cairn",
+    "foreign:ddf4d01af2679aab": "datapacket-talos",
+    "foreign:dfb4571624cc46e0": "homelab-talos",
+    "foreign:e1187ee96f4f7c4a": "datapacket-talos",
+    "foreign:e118a726cef81700": "datapacket-talos",
+    "foreign:e27faebfc6a3469f": "datapacket-talos",
+    "foreign:e3ee69dd4457de02": "datapacket-talos",
+    "foreign:e47637b067a09857": "homelab-talos",
+    "foreign:eb27b1240d7c541a": "datapacket-talos",
+    "foreign:fa4c2a2b41797d4f": "datapacket-talos",
+    "foreign:fd753d2573b8f4a4": "datapacket-talos",
+    "foreign:fdd309570487cf03": "datapacket-talos",
 }
 
 

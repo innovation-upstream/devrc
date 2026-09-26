@@ -1055,11 +1055,20 @@ run 'rule-p-ceiling-boundary-fires-AT-the-line' \
 # spellings. Only the guard that MOVES the ceiling can see it.
 run 'rule-p-ceiling-is-a-second-literal' \
   test_the_CEILING_is_read_from_handoff_budget_and_not_copied \
-  's|allowance=handoff_budget.GRANDFATHERED.get(relpath, handoff_budget.MAX_BYTES),|allowance=handoff_budget.GRANDFATHERED.get(relpath, 65_536),|'
+  's|allowance=handoff_budget.MAX_BYTES if hit is None else hit,|allowance=65_536 if hit is None else hit,|'
 # The ledger half of the same claim.
 run 'rule-p-grandfathered-ledger-ignored' \
   test_a_GRANDFATHERED_allowance_is_what_it_measures_against \
-  's|allowance=handoff_budget.GRANDFATHERED.get(relpath, handoff_budget.MAX_BYTES),|allowance=handoff_budget.MAX_BYTES,|'
+  's|allowance=handoff_budget.MAX_BYTES if hit is None else hit,|allowance=handoff_budget.MAX_BYTES,|'
+# 🔴 THE FOREIGN-KEY RESOLUTION, WHICH THE devrc-ONLY FIXTURES ABOVE CANNOT SEE.
+# Since #1871 a ledger entry for a doc in another repo is keyed by
+# `handoff_budget.digest_key(path)` (devrc is public), and `lookup` is the one
+# resolver. Open-coding a bare `.get` back into `budget_position` resolves devrc's
+# 11 entries and answers None for all 71 foreign ones — the bare ceiling, i.e.
+# rule (p) refusing the next update to every document the operator grandfathered.
+run 'rule-p-reads-the-ledger-without-the-digest-resolver' \
+  test_rule_p_resolves_a_FOREIGN_ledger_entry_through_its_DIGEST \
+  's|    hit = handoff_budget.lookup(relpath, handoff_budget.GRANDFATHERED)|    hit = handoff_budget.GRANDFATHERED.get(relpath)|'
 # 🔴 THE SEAM. Two sites read one `budget_position`; a refusal and a warning
 # quoting different numbers about one document is the failure this shape exists
 # to prevent, and each site is individually correct while it happens.

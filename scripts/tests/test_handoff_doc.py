@@ -6794,6 +6794,23 @@ def _budget(relpath, after_bytes, before_bytes=1000, *, gated=True):
                              gated=gated)
 
 
+def _a_devrc_ledger_entry():
+    """`(relpath, allowance)` for a ledger entry whose key is a READABLE PATH.
+
+    🔴 EXPLICIT, WHERE THIS USED TO BE `next(iter(GRANDFATHERED.items()))`. Since
+    #1871 the majority of that dict is keyed by `handoff_budget.digest_key(path)`,
+    because devrc is public and a plaintext key publishes another repo's topic
+    list — and a digest is not a path, so `budget_position.is_handoff_doc` answers
+    False for one and `budget_warning` returns "" whatever the size. The three
+    callers below would then assert against an empty string.
+    Taking the first entry happened to keep working only because devrc's own 11
+    entries are declared first; that is insertion order, not a property, and
+    nothing would have told us the day it changed.
+    """
+    return next((p, a) for p, a in hd.handoff_budget.GRANDFATHERED.items()
+                if not hd.handoff_budget.is_foreign_key(p))
+
+
 def test_the_RED_gate_claim_is_made_ONLY_where_the_gate_actually_READS():
     """🔴 THE PAIR. `test_no_handoff_doc_exceeds_its_budget` enumerates
     `claudedocs/` under its OWN root, so it is blind to every repo that does not
@@ -6854,7 +6871,7 @@ def test_EVERY_branch_that_names_the_gate_is_repo_aware():
         assert prescription not in ungated_over, (prescription, ungated_over)
 
     # GRANDFATHERED-recovery band — names a ledger file an ungated repo lacks.
-    path, allowance = next(iter(hd.handoff_budget.GRANDFATHERED.items()))
+    path, allowance = _a_devrc_ledger_entry()
     assert allowance > ceiling, "fixture assumes a raised entry"
     assert "GRANDFATHERED" in _budget(path, ceiling - 1, gated=True)
     assert _budget(path, ceiling - 1, gated=False) == "", \
@@ -6938,17 +6955,61 @@ def test_it_does_not_tell_you_to_delete_an_open_investigation():
 def test_a_GRANDFATHERED_doc_is_measured_against_ITS_allowance_not_the_ceiling():
     """A doc in the ledger is legitimately over the base ceiling; warning on that
     would fire forever on 12 documents and train everyone to ignore the line."""
-    path, allowance = next(iter(hd.handoff_budget.GRANDFATHERED.items()))
+    path, allowance = _a_devrc_ledger_entry()
     assert allowance > hd.handoff_budget.MAX_BYTES, "fixture assumes a raised entry"
     assert _budget(path, hd.handoff_budget.MAX_BYTES + 10) == "", "warned inside its allowance"
     over = _budget(path, allowance + 1)
     assert "OVER ITS SIZE BUDGET" in over and "grandfathered allowance" in over, over
 
 
+def test_rule_p_resolves_a_FOREIGN_ledger_entry_through_its_DIGEST(monkeypatch):
+    """🔴 THE ARM EVERY devrc FIXTURE IN THIS FILE IS STRUCTURALLY BLIND TO.
+
+    Since #1871 a ledger entry for a document in ANOTHER repository is keyed by
+    `handoff_budget.digest_key(path)`, because devrc is public and a plaintext key
+    publishes that repo's topic list. 71 of the 82 entries are that shape, and
+    `budget_position` reaches them only through `handoff_budget.lookup`, which
+    tries the plaintext key FIRST — so on devrc's own 11 entries the digest arm
+    never executes. Replacing `lookup` with a bare `.get` therefore passes every
+    other assertion in this module while handing all 71 foreign documents the bare
+    ceiling: rule (p) refusing the next update to each of them, silently, in repos
+    no gate here can read.
+
+    The path is SYNTHETIC on purpose — naming a real foreign document in a test
+    would put back the name the digest exists to keep out of this public tree.
+
+    The last three lines are the control: with the entry removed the SAME path
+    gets the bare ceiling, so the assertions above are facts about the digest
+    resolution rather than about a path that would have resolved anyway.
+    """
+    rel = "claudedocs/handoff-a-synthetic-foreign-topic.md"
+    key = hd.handoff_budget.digest_key(rel)
+    assert key not in hd.handoff_budget.GRANDFATHERED, "fixture must plant its own"
+    allowance = (hd.handoff_budget.MAX_BYTES
+                 + 2 * hd.handoff_budget.GRANDFATHER_STEP)
+    monkeypatch.setitem(hd.handoff_budget.GRANDFATHERED, key, allowance)
+
+    pos = hd.budget_position(rel, "x" * (hd.handoff_budget.MAX_BYTES + 10),
+                             "x" * 1000)
+    assert pos.grandfathered is True, pos
+    assert pos.allowance == allowance, pos
+    # Both consumers of that one computation agree about it.
+    assert _budget(rel, hd.handoff_budget.MAX_BYTES + 10) == "", \
+        "inside a foreign allowance, so silent"
+    over = _budget(rel, allowance + 1)
+    assert "grandfathered allowance" in over, over
+
+    monkeypatch.delitem(hd.handoff_budget.GRANDFATHERED, key)
+    bare = hd.budget_position(rel, "x" * (hd.handoff_budget.MAX_BYTES + 10),
+                              "x" * 1000)
+    assert bare.grandfathered is False, bare
+    assert bare.allowance == hd.handoff_budget.MAX_BYTES, bare
+
+
 def test_a_doc_BACK_UNDER_the_ceiling_says_to_DELETE_its_ledger_entry():
     """The ledger is a ratchet. An entry left behind licenses the regrowth it was
     installed to catch — the owning test fails on it, so say so here first."""
-    path = next(iter(hd.handoff_budget.GRANDFATHERED))
+    path, _ = _a_devrc_ledger_entry()
     out = _budget(path, hd.handoff_budget.MAX_BYTES - 1)
     assert "DELETE its `GRANDFATHERED` entry" in out, out
 
