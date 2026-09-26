@@ -83,7 +83,9 @@ BATTERIES = (
     "mutation_battery_extract_user_msgs.py",
     # Single-file (`find-session.py`), so no `TARGETS`. Guards the arc footer that
     # names that same extractor — the DETERMINISTIC half of the routing whose
-    # prose half (a "Load when" row) was measured firing in 1 of 3 sessions.
+    # prose half (a "Load when" row) reached 3 of 6 sessions where the tool itself
+    # reached 6 of 6. (This read "1 of 3" — a count stale within minutes of being
+    # taken; re-derived by round 0 of the audit ladder.)
     "mutation_battery_arc_extractor_footer.py",
 )
 
