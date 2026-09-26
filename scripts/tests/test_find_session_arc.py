@@ -16,6 +16,7 @@ task's criterion 11 names.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -727,6 +728,196 @@ class TestTrailerValuesAreValidatedOnREAD:
         cmd = ha.ArcMember("x;rm -rf /", ha.ROLE_WROTE).resume_command()
         assert cmd != "claude --resume x;rm -rf /"
         assert "'" in cmd, f"an odd id reached a pasteable command unquoted: {cmd}"
+
+
+def _extractor_path():
+    """`EXTRACTOR_REL` resolved against the repo root.
+
+    ⚠ Two call sites used to spell this `fs.EXTRACTOR_REL.split("scripts/", 1)[1]`
+    joined onto `parents[1]`, which raises a bare `IndexError` naming the idiom
+    rather than the problem if the constant ever stops containing `scripts/`. The
+    constant is repo-relative, so the repo root is the direct base.
+    """
+    return Path(__file__).resolve().parents[2] / fs.EXTRACTOR_REL
+
+
+def _load_extractor():
+    """Import `extract_user_msgs.py` the way its own `--arc` path is reached.
+
+    Import-time effects are limited to a `sys.path.insert` that `find-session.py`
+    (already exec'd above) performs identically — no argparse, no writes, no
+    network — so this is order-independent under `--dist loadfile`.
+    """
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("eum_seam", str(_extractor_path()))
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestTheArcNamesTheExtractor:
+    """🔴 THE ROUTING GUARDS FOR THE SURFACE WITH THE WIDER MEASURED REACH.
+
+    #1870 shipped `extract_user_msgs.py --arc` and routed it from a "Load when" row
+    in `/resume`'s SKILL.md, readable only where that skill's body loads. Measured
+    over the **6** sessions that asked the operator's standing end-of-arc question
+    after #1870 merged: `--arc` ran in **6 of 6**, the reference file was read in
+    **3 of 6**, and two sessions re-found the script with
+    `find $DEVRC/scripts -name 'extract_user_msgs*'`. These guards pin the footer
+    that goes where all six already looked. ⚠ n=6, a COUNT and not a rate.
+
+    ⚠ This docstring said "3 of 3 / 1 of 3" and named an end-of-arc MECHANISM. The
+    counts were stale within minutes and the mechanism was refuted; the retraction
+    lives once, in `find_session.extractor_next_command`, and is deliberately not
+    restated here.
+
+    🔴 THE SEAM GUARD IS THE LOAD-BEARING ONE. A footer that renders perfectly
+    while naming a path that does not exist, or a seed the extractor rejects, is
+    inert in exactly the way a rendering test cannot see — the "verified in
+    isolation" hazard, two components each fine and the seam broken. ⚠ There is
+    **ONE** such guard, and this docstring claimed TWO: the seed test asserted
+    `arc_seed_to_doc(doc) == doc` without importing the extractor at all, so it
+    could not see the extractor stopping to call it. That was a description wider
+    than its implementation — the `guards-narrower` shape — found by round 0 of the
+    audit ladder. It now imports `extract_user_msgs` and crosses the seam for real.
+    """
+
+    @staticmethod
+    def _report(n_members=2, doc="handoff-arc-fixture.md"):
+        r = ha.ArcReport(doc=doc, repo="devrc", total_commits=3,
+                         unstamped_commits=0)
+        r.members = [ha.ArcMember(f"{i}" * 8 + "-1111-4111-8111-111111111111",
+                                  ha.ROLE_WROTE)
+                     for i in range(1, n_members + 1)]
+        return r
+
+    def test_a_resolved_arc_NAMES_the_extractor_command(self):
+        rendered = fs.render_arc(self._report())
+        assert fs.EXTRACTOR_REL in rendered
+        assert "--arc handoff-arc-fixture.md" in rendered
+
+    def test_the_command_carries_the_RESOLVED_doc_not_the_users_seed(self):
+        """The seed may be a slug, a path, or a SESSION ID; only `report.doc` is
+        the basename that resolved. Echoing the seed back would print a command
+        whose `--arc` re-runs the session-id indirection for no reason, and would
+        be flatly wrong for a seed that resolved via a genesis message."""
+        rendered = fs.render_arc(self._report(doc="handoff-real-slug.md"))
+        assert "--arc handoff-real-slug.md" in rendered
+
+    def test_a_MEASURED_EMPTY_arc_names_NO_command(self):
+        """🔴 NOT COSMETIC. The extractor exits non-zero on an arc that resolved
+        with no members, so a command printed here is an invitation that cannot
+        answer — the reassuring-command shape the coverage line exists to refuse.
+        Asserted on the WHOLE rendering, not just the absence of a heading: a
+        partial line still tells an agent the tool applies."""
+        empty = ha.ArcReport(doc="handoff-arc-fixture.md", repo="devrc")
+        rendered = fs.render_arc(empty)
+        assert fs.extractor_next_command(empty) is None
+        assert fs.EXTRACTOR_REL not in rendered
+        assert "extract_user_msgs" not in rendered
+        assert "NEXT" not in rendered
+
+    def test_the_member_COUNT_is_the_real_one_and_singular_reads_right(self):
+        """Pins the count against `len(members)` rather than a constant, and uses
+        1 and 3 — never 2 alone, which cannot see a hardcoded plural."""
+        assert "1 session of this arc" in fs.render_arc(self._report(1))
+        assert "3 sessions of this arc" in fs.render_arc(self._report(3))
+
+    def test_the_command_sits_BELOW_the_coverage_line(self):
+        """The gaps qualify the chain the command extracts from. An agent that
+        reads the command first and stops has skipped them, so ordering is a
+        behavioural claim, not layout."""
+        rendered = fs.render_arc(self._report())
+        assert rendered.index("carry no session id") < rendered.index("NEXT —")
+
+    # ---------------- the seam: the printed line must actually work ----------- #
+
+    def test_the_NAMED_PATH_EXISTS_in_this_repo(self):
+        """🔴 SEAM GUARD. `EXTRACTOR_REL` is a string; nothing else in this module
+        would notice the script being renamed or moved, and the footer would keep
+        printing a confident path to a file that is not there."""
+        target = _extractor_path()
+        assert target.is_file(), (
+            f"the arc footer names {fs.EXTRACTOR_REL}, which does not exist")
+
+    def test_the_printed_SEED_is_one_the_EXTRACTOR_ACCEPTS(self):
+        """🔴 SEAM GUARD. It pins a RELATIONSHIP — that the extractor ROUTES its
+        `--arc` seed through `find_session.arc_seed_to_doc` — not a word, and not
+        either component on its own.
+
+        ⚠ TWO EARLIER VERSIONS WERE BOTH WRONG, each written while fixing the one
+        before it. Recorded so a third is not derived.
+
+        v1 asserted `fs.arc_seed_to_doc(doc) == doc` and never imported the
+        extractor: a unit test of `find-session` alone, blind to the seam.
+
+        v2 imported the extractor and added `assert "arc_seed_to_doc" in body` — a
+        SPELLED guard, and the hazard walked straight past it. MEASURED (battery
+        `X1`): replace the extractor's call with `handoff_arc.doc_basename(seed)`
+        and leave `# was fs.arc_seed_to_doc(...)` above it, and v2 stays GREEN with
+        the seam broken — after which `--arc <session-uuid>` resolves in
+        `find-session` and exits 3 in the extractor, because the UUID branch lives
+        only in `arc_seed_to_doc`. v2's docstring also claimed the resolver was
+        asserted "by IDENTITY", which was false about the objects:
+        `_load_find_session()` returns a THIRD module instance, so `their_fs is fs`
+        is False and no `is` check was ever present. `claude/RULES.md` — "a guard
+        can be SPELLED rather than STRUCTURAL: assert the STATE, never a word
+        another feature can spell."
+
+        v3 injects a recording stub through `arc_sessions`' own `find_session`
+        parameter and asserts the call HAPPENED, carrying the seed. A rewrite that
+        stops calling the resolver records no call and fails here. The behavioural
+        half is kept too, because a relationship check alone would happily pass a
+        resolver that rejects every seed the footer prints.
+        """
+        eum = _load_extractor()
+
+        # --- the RELATIONSHIP: the extractor's seed MUST reach this resolver ---
+        class _Reached(Exception):
+            """Raised just past the seam, so the case needs no repo and no git."""
+
+        calls = []
+
+        class _RecordingFS:
+            # The REAL class, so the extractor's `except fs.ArcUnmeasured` is valid.
+            ArcUnmeasured = fs.ArcUnmeasured
+            # 🔴 `handoff_arc` IS PRESENT SO THE MUTANT REACHES THE ASSERTION BELOW
+            # RATHER THAN DYING ON AN AttributeError. Without it, mutant `X1` —
+            # which rewrites the seam to `fs.handoff_arc.doc_basename(seed)` — blew
+            # up in the extractor at `extract_user_msgs.py:269` and the guard went
+            # red for a reason that says nothing about the seam. MEASURED: with
+            # `assert calls == [seed]` DELETED, X1 was still red, so the battery
+            # reported a kill for an assertion that was not there. That is the
+            # "still red with your guard deleted" shape — `claude/RULES.md`,
+            # unreachable-guards. The extractor's own suite's fake carries this
+            # attribute for the same reason.
+            handoff_arc = fs.handoff_arc
+            ROOT = None
+
+            @staticmethod
+            def arc_seed_to_doc(seed, root=None):
+                calls.append(seed)
+                return "handoff-arc-fixture.md"
+
+            @staticmethod
+            def arc_report(basename):
+                raise _Reached(basename)
+
+        seed = "a-seed-only-the-resolver-can-map"
+        with pytest.raises(_Reached) as caught:
+            eum.arc_sessions(seed, find_session=_RecordingFS())
+        assert calls == [seed], (
+            "the extractor did NOT route its --arc seed through "
+            "`arc_seed_to_doc`, so every footer this module prints hands its seed "
+            f"to a resolver the extractor no longer calls (calls={calls!r})")
+        assert str(caught.value) == "handoff-arc-fixture.md", (
+            "the basename the resolver returned did not reach `arc_report`")
+
+        # --- and BEHAVIOURALLY: that resolver accepts what the footer prints ---
+        doc = "handoff-arc-fixture.md"
+        assert eum._load_find_session().arc_seed_to_doc(doc) == doc, (
+            f"the extractor's own resolver rejects {doc!r}, which is exactly what "
+            "every footer this module prints hands to it")
 
 
 class TestEverySessionOnTheOldestCommitIsOriginated:

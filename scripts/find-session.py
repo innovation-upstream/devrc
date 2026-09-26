@@ -66,6 +66,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime, time, timedelta
@@ -1154,6 +1155,69 @@ def arc_repo_for(basename, env=None):
     return None, None
 
 
+#: The extractor's path inside the repo, relative to the `$DEVRC` handle every
+#: session already has exported (CLAUDE.md, "Canonical env handles"). Kept as a
+#: constant so the rendered line and its guard cannot name different files.
+EXTRACTOR_REL = "scripts/session-analysis/extract_user_msgs.py"
+
+
+def extractor_next_command(report):
+    """The `extract_user_msgs.py --arc …` line printed under a resolved arc.
+
+    🔴 THIS RIDES THE SURFACE WITH THE WIDER MEASURED REACH. It is a claim about
+    two surfaces' REACH, deliberately NOT about why the narrower one misses —
+    see the retraction below. #1870 shipped the arc-scoped extractor and routed it
+    from a "Load when" row in `/resume`'s SKILL.md, which can only be read in a
+    session where that skill's body loads. Measured over the **6** sessions that
+    asked the operator's standing question — *"anything left outstanding from this
+    arc?"* — after #1870 merged: `find-session --arc` ran in **6 of 6**, the
+    reference file was read in **3 of 6**, and two sessions re-found the extractor
+    with `find $DEVRC/scripts -name 'extract_user_msgs*'`. So this line goes where
+    every one of them already looked: the tool the agent reached for names the next
+    one. Deterministic, per RULES.md "Deterministic Over Prose".
+
+    ⚠ **n=6, and it was n=3 when this was written** — two more sessions landed
+    within 11 minutes of the first commit and a sixth during the audit that caught
+    it. The population grows ~1/h under active work. It is a COUNT, not a rate;
+    do not re-tune routing off it.
+
+    🔴 RETRACTED — DO NOT RE-DERIVE: *"a row in one skill's body only fires when
+    that skill loads, and this question arrives at the END of an arc, in sessions
+    that never ran `/resume`."* That named a mechanism from ONE session, and the
+    mechanism is unestablished. Two later candidates were also refuted: the
+    kickoff-paste population shows **0 of 617** pastes expanding as a command, but
+    that zero is true BY CONSTRUCTION (a session where the command fires opens with
+    `<command-message>`, so the "starts with /resume" filter excludes it), and
+    INDENTATION is not the cause either — all 4 flush-left pastes equally failed to
+    expand while several indented ones did. What IS measured: **352 of 617** such
+    sessions never load `/resume`'s body at all, cause UNKNOWN. That gap is real,
+    it is tracked separately, and nothing here depends on explaining it. Three
+    successive mechanisms for this absence have now been wrong; if you are
+    reaching for a fourth, you are the fourth — an absence is the observable the
+    most causes share (RULES.md, "an EMPTY RESULT cannot distinguish two
+    mechanisms").
+
+    🔴 RETURNS None FOR A MEASURED-EMPTY ARC, DELIBERATELY. The extractor exits
+    non-zero when an arc resolves with no members, so printing the command there
+    would hand over an invitation that cannot answer — the reassuring-command
+    shape this report's own coverage line exists to refuse. An arc with members is
+    the only state in which the next step is real.
+
+    Note what this line does NOT claim: the arc walk is `--claude-only`, so an
+    extraction scoped to these same sessions inherits that gap. That is already
+    stated once, by `arc_report`'s unmeasured note, and is deliberately not
+    restated here — one rule, one place.
+    """
+    if not report.members:
+        return None
+    n = len(report.members)
+    return ("NEXT — the operator's own messages across "
+            f"{n} session{'' if n == 1 else 's'} of this arc:\n"
+            f"  python3 $DEVRC/{EXTRACTOR_REL} --arc {shlex.quote(report.doc)}\n"
+            "  (add --jsonl for the canonical record; output scales with the "
+            "arc, so size it before reading it whole)")
+
+
 def render_arc(report, unresolved_note=None):
     """The human rendering of an arc. Ids and repo LABELS only — never a path."""
     out = [f"ARC: {report.doc}  (repo {report.repo or 'unknown'})", ""]
@@ -1176,6 +1240,12 @@ def render_arc(report, unresolved_note=None):
         out.append(f"! {note}")
     if unresolved_note:
         out.append(f"! {unresolved_note}")
+    # 🔴 LAST, AND BELOW THE COVERAGE LINE ON PURPOSE. The gaps qualify the chain
+    # this command is about to extract from; an agent that reads the command first
+    # and stops has skipped them.
+    hint = extractor_next_command(report)
+    if hint:
+        out.extend(["", hint])
     return "\n".join(out)
 
 
@@ -1264,6 +1334,13 @@ def run_arc(a):
             "coverage": handoff_arc.coverage_line(report),
             "readers_measured": report.readers_measured,
             "unmeasured": report.unmeasured_notes,
+            # ⚠ NO `next_command` HERE, DELETED 2026-09-26 AND NOT AN OVERSIGHT.
+            # It shipped for one round, justified as "a machine caller must be able
+            # to branch on it" — a hypothesis, not a consumer. Measured reach: 0 of
+            # 6. Five of those six sessions DID call `--arc --json`, and each parsed
+            # `members` and discarded the rest, so the field never entered an
+            # agent's context. The human footer covers every reader that sees the
+            # rendering. Re-add it when a caller exists and is named here.
         }, indent=2))
         return EXIT_OK
     print(render_arc(report))

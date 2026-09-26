@@ -157,6 +157,16 @@ python3 $DEVRC/scripts/find-session.py --arc handoff-<topic>.md    # or a slug, 
   under and this repo is PUBLIC.
 - **Exit 5 is not an empty arc.** It means no repo handle this shell can see holds the doc, so
   nothing was read at all.
+- 🔴 **A resolved arc PRINTS ITS OWN NEXT STEP — quote the `NEXT —` line, don't re-derive
+  it.** For *"anything left outstanding from this arc / check my messages / was it all
+  addressed"*, the footer names
+  `extract_user_msgs.py --arc <doc>`, which extracts the operator's own messages across
+  exactly these sessions. It is **absent on a measured-empty arc** on purpose (the extractor
+  exits non-zero there), and absent is a reading — not a missing line to work around.
+  ⚠ **Output scales with the arc and there is no answering mode**: one 7-session arc measured
+  199 messages / 967 KB, so size it before reading it whole, and expect to synthesise (a
+  subagent over the extracted file is the measured-normal path, not a workaround). Detail:
+  `~/.claude/skills/handoff/reference/user-messages.md`.
 
 ## What to do (the archive search)
 
