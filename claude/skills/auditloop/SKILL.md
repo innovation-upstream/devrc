@@ -1,6 +1,6 @@
 ---
 name: auditloop
-description: "Operate auditloop — the hosted UX-audit crawler at auditloop.zacx.dev (multi-viewport crawl, axe a11y, perf/web-vitals, run diffs and trends, vision-LLM notes, login recipes). Deploy it, manage targets/runs/plugin tokens, read the cost dashboard. Use for: auditloop, auditloop.zacx.dev, deploying or operating it, the plugin push API, the read API, the auditloop self-harness."
+description: "Operate auditloop — the hosted UX-audit crawler at auditloop.zacx.dev (multi-viewport crawl, axe a11y, perf/web-vitals, run diffs and trends, vision-LLM notes, login recipes). Deploy it, manage targets/runs/plugin tokens, read the cost dashboard. Use for: auditloop, deploying or operating it, the plugin push API, the read/write API, auditloopctl (the CLI), the self-harness."
 ---
 
 # auditloop operations
@@ -47,9 +47,15 @@ A per-target findings-count-over-time inline-SVG sparkline above the run list
 (`internal/db/trend.go` `TargetFindingTrend`, owner-scoped) — catches slow creep the pairwise
 P2 diff can't.
 
-### Read API — machine consumers (per-user, read-only)
+### Machine API — per-user keys, scope `read` or `write`
 Mint a key in the dashboard **"API access"** card (crypto/rand→base64url, sha256-stored,
 rotatable, **shown once**); consumer sets **`AUDITLOOP_API_TOKEN`** + `Authorization: Bearer`.
+**The scope selector defaults to `read`.** A `write` key (PR #73) additionally drives every
+gated mutation route — 🔴 it is equivalent to the owner's session for mutations: it can store
+**and read back stored login credentials in plaintext**, mint push tokens, and revoke the
+owner's other keys. Treat a leaked write key as a password compromise and rotate the SITE
+credentials, not just the key. Convention: keep it in `AUDITLOOP_API_WRITE_TOKEN` and export
+into `AUDITLOOP_API_TOKEN` only for the step that needs it.
 Owner-scoped routes (SQL-scoped, foreign→404):
 `GET /api/audit/targets/{id-or-name}/runs` · `…/runs/latest` (→report.json bytes) ·
 `/api/audit/runs/{id}` (→report.json) · `/api/audit/artifacts/{key}` (bytes, per-object
@@ -64,6 +70,31 @@ This is how CI/Tekton + the naida `fetch-findings` helper pull findings back.
 ```bash
 curl -H "Authorization: Bearer $AUDITLOOP_API_TOKEN" https://auditloop.zacx.dev/api/audit/targets/<spec>/runs/latest
 ```
+
+### 🔴 `auditloopctl` — the CLI DOCUMENTS ITSELF; do not brief a session from prose
+```bash
+cd ~/workspace/auditloop && go build -o bin/auditloopctl ./cmd/auditloopctl   # bin/ is gitignored
+bin/auditloopctl --help
+```
+`--help` **is** the contract and is the ONLY place the verb table and exit codes are stated —
+deliberately, so they cannot drift from the binary. It carries every verb, a `[WRITE]` marker
+on the five that need a write key (`run start` · `walkthrough start` · `walkthrough evaluate` ·
+`config set` · `config infer`), the exit-code contract, and the rate limits. **To instruct
+another session, point it at the binary and that command** — not at a pasted verb list.
+
+- **Configuration is exactly two env vars**: `AUDITLOOP_URL` + `AUDITLOOP_API_TOKEN`. Nothing else.
+- **Exit codes are a CI contract**: `0` ok / no regression · `1` REGRESSION (fail the build) ·
+  `3` INFRASTRUCTURE, the driver never ran (RETRY, report no verdict) · `2` usage/transport,
+  **never a product verdict**. The 1-vs-3 split is the whole point (see #45).
+- **The gate predicate is stated in ONE place — `internal/gate`'s package comment.** Branch on
+  the exit code; never re-derive it. `new_task_blockers` is reported and deliberately NOT gated on.
+- A **read** key on a write verb 401s indistinguishably from a missing/revoked key — the CLI
+  names that cause first. Check scope before chasing auth.
+- There is no per-subcommand help. Which HTTP route a verb hits is at the call site in
+  `internal/auditloopctl/commands.go`.
+- 🔴 **`auditloopctl gate` has NO CONSUMER as of 2026-09-26** — no pipeline calls it (swept:
+  `homelab-talos`, `vetr`, `devrc` → zero refs). The mechanism exists and is unused; do not
+  read this block as evidence a live gate exists.
 
 **LLM cost tracking** — per-run + per-cell USD/tokens + Prometheus metrics (see Monitoring).
 
