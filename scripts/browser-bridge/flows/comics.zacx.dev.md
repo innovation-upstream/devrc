@@ -113,7 +113,7 @@ is what proved a *different* nginx was answering after the first fix.
 | lane | host | auth | service worker |
 |---|---|---|---|
 | **A — LAN** | `http://comic-flex.homelab.lan` | **none** | 🔴 **never registers** |
-| **B — public** | `https://comics.zacx.dev` | Authelia passkey | registers |
+| **B — public** | `https://comics.zacx.dev` | the APP's own e-mailed sign-in link — **NOT Authelia** | registers |
 
 🔴 **Lane A is STRUCTURALLY BLIND to every service-worker and cache bug.** A SW
 needs a secure context; plain HTTP that is not `localhost` is not one, so no worker
@@ -121,19 +121,54 @@ ever installs on the LAN host. A clean Lane A pass says nothing about a stale-sh
 bug. If you need a secure context without Authelia, `kubectl port-forward` and use
 `http://localhost:<port>` — that **is** a secure context.
 
-🔴 **Lane A is the right lane for everything else.** It is the same app, the same
-`app.js`, no login, no redirects, and no chance of disturbing the operator's
-session. Older attempts failed by reaching for Lane B out of habit, getting `302`/
-`303` to Authelia, and reporting the feature broken.
+🔴 **Lane A is still the right default, but its reason has WEAKENED — re-read the
+next section before you choose.** It is the same app, the same `app.js`, no login,
+no redirects, and no chance of disturbing the operator's session. ⚠ The old
+sentence here said older attempts failed by "getting `302`/`303` to Authelia";
+that redirect is now the APP's own `/login`, which is a different gate with
+different consequences.
 
-## 🔴 Authelia: a human gate, and one you can permanently break
+🔴 **AND LANE A CANNOT DO EVERYTHING — `api.sessionOnlyPaths` IS THE LIST.** An
+unauthenticated LAN request IS the pinned owner, so it is refused for the routes
+the operator excluded: share/unshare, the username, the six list writes, upload,
+the two comic-metadata writes, `/api/collections/visibility` and
+`/api/collections/sharelink`. **Minting or revoking a share link, publishing, and
+sharing are Lane-B-only by design** — reaching for Lane A there gets a refusal
+that is the feature working.
 
-- Login is a **passkey**. It needs a physical authenticator touch. **No agent can
-  log in here.** If Lane B returns `login.zacx.dev`, the session is gone and only
-  the operator can restore it — say so and stop; do not hunt for a workaround.
-- 🔴 **NEVER visit `https://login.zacx.dev/logout`, and never click Sign out.** A
-  dispatched agent did exactly that "to test session expiry", ended the operator's
-  session, and blocked its own remaining objectives.
+## ⚠ AUTHELIA IS GONE FROM THIS HOST — corrected 2026-09-26, and the stale version cost nothing only because it was caught
+
+🔴 **`comics.zacx.dev` IS NO LONGER BEHIND AUTHELIA.** `ZacxDev/homelab-infra#758`
+removed the middleware on 2026-09-08, and
+`clusters/production/apps/nebula/gateway/comics-ingress.yaml` is a bare `Host()`
+rule with **zero** middlewares. Re-measured 2026-09-26 from an arbitrary host,
+direct-origin versus through Cloudflare, byte-identical on every path: `/health`
+**200/200**, and `/`, `/discover`, `/admin`, `/ui/admin/search` all **303 to the
+app's OWN `/login`** — not to `login.zacx.dev`.
+
+⚠ **WHAT THE STALE VERSION SAID, AND WHY IT MATTERED:** *"Login is a passkey… No
+agent can log in here."* Read literally that is a reason to give up on Lane B
+before trying, and a session did exactly the opposite of giving up only because it
+re-measured first — the operator's profile held a live app session and the lane
+worked immediately. **A doc that tells you a lane is impossible is the most
+expensive kind of stale.**
+
+- **The app's own gate is a passwordless E-MAIL LINK (GoTrue), not a passkey.** So
+  an agent still cannot log in — the link goes to the operator's mailbox — but the
+  reason, the failure mode and the recovery are all different. If Lane B returns
+  the app's `/login`, the app session has expired; say so and stop.
+- 🔴 **`GOTRUE_DISABLE_SIGNUP` is `false`, so anyone on the internet can create an
+  account here.** That is deliberate (sharing is why the instance exists). It also
+  means "is signed in" is a much weaker statement on this host than it was under
+  Authelia's `user:zach`/`user:cam` allowlist.
+- ⚠ **The `login.zacx.dev` rows below still apply to OTHER hosts behind Authelia,
+  just not to this one.** The `null`-from-CSP measurement at the top of this file is
+  unaffected and still correct for both.
+- 🔴 **NEVER visit `https://login.zacx.dev/logout`, and never click Sign out — on
+  ANY host.** A dispatched agent did exactly that "to test session expiry", ended
+  the operator's session, and blocked its own remaining objectives. ⚠ On
+  comics.zacx.dev the button now ends the APP session rather than the Authelia one,
+  which is *easier* to restore and still not yours to end.
 - Timeouts (`clusters/production/flux-system/charts/authelia/authelia.yaml`):
   `inactivity: 5m` · `expiration: 1h` · `remember_me: 1M`.
   🔴 **Remember-me beats inactivity.** With the box ticked the session survives an
