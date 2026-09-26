@@ -3139,46 +3139,61 @@ class TestTheBoardRequestGoesToTheTaskService:
         assert task_side_paths("no urls here at all\n") == []
 
     def test_the_board_path_under_test_is_classified_TASK_side(self):
-        """🔴 THE CLASSIFICATION ITSELF, stated rather than assumed — and the one
-        judgement in this change that is not mechanical.
+        """🔴 BOTH PATHS ARE TASK-SIDE UPSTREAM — CITED, NOT ARGUED.
 
-        `/api/tasks` is task-side under clawgatectl's own `taskSidePrefixes`.
-        `/api/sessions/{id}/tasks` is NOT in that list, and is not in
-        `routerSidePrefixes` either: the upstream classifier calls it
-        `sideUnclassified` and routes it to the router by DEFAULT — which that
-        file's own comment defines as "the pre-split destination … and the
-        completeness guard fails on it, which is the signal to classify it
-        deliberately". Unclassified means NOBODY DECIDED, not "the router is
-        correct"; clawgatectl never builds this path, so it was never asked.
+        `/api/tasks` is task-side under clawgatectl's `taskSidePrefixes`
+        (`cmd/clawgatectl/client.go`), which is what the first assertion reads.
 
-        It is classified TASK side here on three grounds, measured 2026-09-25:
-          * it reads the `task_sessions` table and returns TASK rows — the same
-            data `/api/tasks` serves, which is unambiguously task-side;
-          * both services answer it 200, so the endpoint's EXISTENCE decides
-            nothing — but their task data diverges on exactly the in-flight
-            rows, and only the task service is current;
-          * `clawgate_zero_probe` pairs it with `/api/tasks?limit=1` as a
-            control, and a control split across two services is not a control.
+        `/api/sessions/{id}/tasks` is NOT in that list — and an earlier revision
+        of this test concluded from that absence that the classification was an
+        unmade judgement, and argued it from first principles over ~20 lines.
+        That was the wrong file. The authority is muster's route partition,
+        `internal/api/testdata/routes.partition.tsv:160`, which already assigns
+        it explicitly:
 
-        This test pins the REASONING's conclusion so a future reader who
-        disagrees has to change an assertion rather than quietly re-point a URL.
+            muster <TAB> server.go:registerNotesRoutes <TAB> GET /api/sessions/{id}/tasks
+
+        Verified 2026-09-26: the only row in that 162-data-row file naming
+        `/api/sessions` (negative control, an invented path: 0 rows), and
+        clawgatectl never mentions `/api/sessions` at all (0, against 7 for
+        `/api/tasks`) — which is why consulting only clawgatectl made a settled
+        question look open. Two upstream ledgers, and the narrower one's silence
+        is not the wider one's verdict.
+
+        🔴 NO ASSERTION HERE WATCHES THAT FILE. It is in a DIFFERENT repository
+        that no test in this one can open — the same cross-repo seam as
+        `TASK_SIDE_PREFIXES` above, with the same mitigation: cite it, and
+        re-read it by hand. A prior revision carried an assertion whose message
+        claimed to fire "if upstream ever classifies /api/sessions/* explicitly"
+        while comparing against the hand-spelled tuple in THIS file; it could
+        never observe upstream, and the condition it warned about had already
+        happened. It was deleted rather than narrowed — a guard that reads as
+        coverage while providing none is worse than no guard.
+
+        What IS mechanically pinned below is the only thing this repo owns: that
+        `clawgate_resolve` resolves through the one task-side resolver and never
+        reads the router variable directly again.
         """
-        # `/api/tasks*` — mechanical, straight off the upstream ledger.
+        # `/api/tasks*` — mechanical, straight off clawgatectl's ledger.
         assert any("/api/tasks?limit=1".startswith(p) for p in TASK_SIDE_PREFIXES)
-        # `/api/sessions/{id}/tasks` — NOT mechanical; the judgement above.
-        assert not any("/api/sessions/x/tasks".startswith(p)
-                       for p in TASK_SIDE_PREFIXES), (
-            "upstream now classifies /api/sessions/* explicitly — re-read "
-            "cmd/clawgatectl/client.go and reconcile this comment with it."
-        )
-        # Whatever the upstream ledger says, BOTH must resolve to ONE base here.
+        # Both paths resolve to ONE base here, whatever the upstream ledgers say.
         src = LIB.read_text(encoding="utf-8")
         body = shell_fn_body(src, "clawgate_resolve")
-        assert "clawgate_task_base" in body, (
-            "clawgate_resolve no longer resolves its base through the one "
-            "task-side resolver"
+        # 🔴 COMMENTS STRIPPED BEFORE EITHER CHECK, and this is not tidiness.
+        # The prose above the call names `clawgate_task_base` as well, so a
+        # substring check against the RAW body is satisfied by the comment.
+        # Measured 2026-09-26 with an isolated mutant that replaced the call
+        # with `base=${CLAWGATE_DEFAULT_API_URL%/}` and changed nothing else:
+        # the body still spelled the name 1x, called it 0x, and this test
+        # PASSED. Same family as "a name count cannot tell a tombstone from a
+        # survivor" — grep the live construct, not the name.
+        code = "\n".join(ln for ln in body.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        assert re.search(r"\$\(\s*clawgate_task_base\b", code), (
+            "clawgate_resolve no longer CALLS the one task-side resolver "
+            "(a comment naming it does not count)"
         )
-        assert not re.search(r"clawgate_env_get\s+CLAWGATE_API_URL", body), (
+        assert not re.search(r"clawgate_env_get\s+CLAWGATE_API_URL", code), (
             "clawgate_resolve reads the ROUTER variable directly again — that "
             "is the defect this class exists to pin."
         )
