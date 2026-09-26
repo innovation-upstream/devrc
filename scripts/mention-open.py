@@ -176,6 +176,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -307,7 +308,12 @@ TARGET_VALUES = (TARGET_TUI, TARGET_BROWSER)
 # only for a real failure, and `mention-known-repos-refresh.service` sets
 # `SuccessExitStatus=4`. An unauthenticated host is quiet; a broken run toasts.
 #
-# `nix/home.nix` → `systemd.user.timers.mention-known-repos-refresh`, daily.
+# `nix/home.nix` → `systemd.user.timers.mention-known-repos-refresh`, every four
+# hours (`OnCalendar = "*-*-* 00/4:00:00"`, plus 900s of jitter). ⚠ IT WAS DAILY
+# UNTIL 2026-09-21 and several paragraphs in this file still said so days after
+# it changed — the cadence is COPIED here, and a copy goes stale silently. The
+# one copy that cannot is `REFRESH_INTERVAL_DAYS`, which a test pins against the
+# unit; this line is prose, so distrust it and read the nix.
 #
 # 🔴 THE SIGNAL BELOW STAYS, AND IS NOW A DEADMAN RATHER THAN A REMINDER. Its
 # job changed: it used to say "you never ran the generator", which the operator
@@ -329,9 +335,15 @@ TARGET_VALUES = (TARGET_TUI, TARGET_BROWSER)
 # Seven days is a week of repo-creating, not a tuned constant; it is pinned at
 # two points (fresh and stale) rather than at a boundary, and it is not
 # env-overridable because a run must not be able to excuse itself. ⚠ It is
-# deliberately NOT re-tuned to the timer's daily period: a 2-day threshold would
-# fire on one missed run, and a laptop that spends a weekend closed is not a
-# fault. Seven days means "several consecutive runs did not happen".
+# deliberately NOT re-tuned to the timer's period, and the ARGUMENT for that
+# survived the move to a four-hourly cadence while its ARITHMETIC did not. It
+# used to read "a 2-day threshold would fire on one missed run"; at six runs a
+# day a threshold that short would fire after a dozen. The reason it stays at
+# seven is the other half of that sentence, which is about the OPERATOR and not
+# about the unit: a laptop that spends a weekend closed is not a fault, and a
+# deadman that toasts for it is one nobody reads. Seven days is what makes
+# "several consecutive runs did not happen" unambiguous — it is now ~42 of them,
+# so the threshold is, if anything, more conservative than it was.
 STALE_MAPPING_DAYS = 7
 
 # ⚠ `ROFI_THEME = "gruvbox-dark-hard"` USED TO BE HERE and is GONE with the rofi
@@ -665,6 +677,144 @@ CLASS_IMPOSSIBLE = 3    # max_ref == 0 — no issues and no pull requests at all
 PLAUSIBILITY_CLASSES = (CLASS_PLAUSIBLE, CLASS_BELOW, CLASS_UNKNOWN,
                         CLASS_IMPOSSIBLE)
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE STALENESS TOLERANCE — WHY `BELOW` WAS WHERE THE OPERATOR'S ROW KEPT
+# LANDING, AND WHY THE FIX IS A MARGIN RATHER THAN A DEMOTION.
+#
+# `CLASS_BELOW` means `max_ref < N`. A reference that REALLY EXISTS cannot be
+# below its own repository's head, so at CLICK TIME a genuinely-existing `#N`
+# can only be filed BELOW two ways: the table was STALE, or the operator clicked
+# a number belonging to a DIFFERENT repository.
+#
+# MEASURED, click-time telemetry, n=71: the class of the row the operator
+# actually PICKED was `below` 54 times against `plausible` 17 — roughly three
+# clicks in four wanted a row the sort had put behind EVERY plausible row.
+# Replaying the same picks against a CURRENT table gives 115 plausible / 6
+# below, and of 100 distinct `(repo, n)` picks checked against the GitHub API
+# **94 exist and 6 do not**. Wrong-repo is therefore ~6% of it; the whole
+# remaining difference between those two numbers IS the staleness.
+#
+# ⚠ THE `below` ROWS AND THE NON-EXISTENT PICKS ARE IN CONTAINMENT, NOT
+# EQUALITY: `non-existent ⊆ below`, strictly. They were the SAME SIX at the
+# 121-row corpus and at every size through 136; at row 137 a genuine fresh-PR
+# click appeared and the sets diverged, so "the same six" is an accident of
+# timing and must not be carried as a durable claim. ⚠ The comparison also only
+# works by luck — `6 below` is a ROW count out of 121 and `6 non-existent` is a
+# DISTINCT-PAIR count out of 100, comparable only because each of those pairs
+# happened to be clicked exactly once. A bad reference clicked twice breaks it
+# silently.
+#
+# 🔴 A RETRACTED READING, KEPT SO NOBODY RE-DERIVES IT.
+# `claudedocs/proposal-mention-picker-visibility.md` §(B) attributes the same 54
+# vs 17 to the CLASS TERM BEING WRONG and proposes demoting it. That is
+# refuted by its own §1.4, which measures the class term as the sharpest thing
+# in the sort (a 394-row universe narrowed to a median of ~2 candidate rows).
+# Its rebuttal of staleness — "the table is refreshed by a timer, last run
+# within 5h of the measurement" — is a NON-SEQUITUR: the recorded class is a
+# fact about the table at CLICK time, not at measurement time. The proposal also
+# reports the same quantity twice with opposite answers (§1.4's 104/5 against
+# §(B)'s 17/54) and never reconciles them; the reconciliation is this paragraph.
+#
+# 🔴 THE LIVE REPRODUCTION THAT MOTIVATED THIS IS NOW FIXED BY THE TIMER, NOT BY
+# THE MARGIN — SAID HERE SO NOBODY CREDITS THE WRONG MECHANISM. At the time of
+# writing the table's entry for the busiest repository read 1809 while its live
+# head was 1828, off a table 0.71 days old, and every click on one of those
+# nineteen references was classed BELOW. That table could only get 0.71 days old
+# because the refresh ran DAILY; the unit now fires every four hours (see
+# `REFRESH_INTERVAL_DAYS`), so a gap of 19 on the fastest repository is no longer
+# reachable while the refresh is on schedule — and it is NOT inside the margin
+# below either.
+#
+# 🔴 AND THE TIMER DOES NOT SUBSUME THE MARGIN — MEASURED, NOT ASSUMED. The 65
+# click-time `below` rows decompose with ZERO residual into 59 stale-table and 6
+# wrong-repo. All 59 references exist; every one was younger than 24 h at click
+# time (median 22 minutes), and 54 of the 59 were created LESS THAN FOUR HOURS
+# before the click — inside ONE interval of the new cadence. So #1831 alone
+# would have fixed at most 5 of 59. The sharpest case is a gap of 3 against a
+# 3.6 h-old table with the reference created 94 SECONDS earlier: no cadence
+# short of continuous reaches that, and a margin does. That — plus a broken
+# refresh, an unauthenticated host, or a laptop clicking on resume — is the
+# window this covers.
+#
+# 🔴 THE VELOCITY HALF IS MEASURED; THE INTERVAL IS OBSERVED. Which is which
+# matters more than either number, so it is said here rather than left to be
+# inferred.
+#
+# `RANGE_GROWTH_PER_DAY` is an UPPER BOUND on how fast any repository in this
+# operator's universe allocates reference numbers, so `age x rate` is the growth
+# that COULD have happened since the table was written — a quantity, not a knob.
+# MEASURED over the eight highest-numbered repositories in the live table
+# (issues+PRs created in the preceding 14 days): 34.1, 23.2, 11.2, 10.9, 10.4,
+# 8.9, 4.8 and 0.0 per day. The fastest of them re-measured over 31 days gives
+# 39.0/day. 40 sits above both; raising it past the real maximum buys nothing
+# and only blurs the class.
+#
+# ⚠ IT IS ONE GLOBAL RATE, NOT A PER-REPO VELOCITY. Nothing records a previous
+# snapshot of the table, so a per-repo rate is not derivable from host state at
+# click time; the global bound over-serves the slow repositories by exactly the
+# amount one refresh interval allows. That cost is measured, below.
+RANGE_GROWTH_PER_DAY = 40.0
+
+# 🔴 THE CAP ON THE MARGIN IS THE REFRESH INTERVAL, AND IT IS OBSERVABLE
+# OPERATIONAL STATE RATHER THAN A TUNABLE. An earlier revision of this file
+# carried `PLAUSIBLE_MARGIN_MAX = 60`, chosen empirically to sit under the
+# smallest wrong-repo gap; it is DELETED, because a constant nobody can derive
+# from anything is a constant nobody can check. What replaces it is the period
+# of the unit that writes the file, so the margin re-tightens by itself whenever
+# the cadence changes and there is nothing left to tune.
+#
+# WHAT IT SAYS SEMANTICALLY, which is the reason to prefer it over any number:
+# inside ONE refresh interval the table is merely BEHIND — a run is legitimately
+# outstanding and `age x rate` bounds what it has not seen yet. PAST one
+# interval the table is not stale, it is UNMAINTAINED: a run that should have
+# landed did not, and no growth model licenses guessing how far behind it is. So
+# the honest answer there is the PRE-MARGIN class, which is exactly what
+# `min(age, REFRESH_INTERVAL_DAYS)` encodes — tolerance stops growing rather
+# than being extrapolated across missed runs. `ordering_state` then throws the
+# table away entirely at `STALE_MAPPING_DAYS`.
+#
+# 🔴 THE JITTER IS PART OF THE INTERVAL, NOT A ROUNDING ALLOWANCE. The unit sets
+# `RandomizedDelaySec = 900` on top of `OnCalendar = "*-*-* 00/4:00:00"`, so a
+# run may legitimately land 4h15m after the previous one WITHOUT anything being
+# wrong. The margin has to be an UPPER BOUND on what could have happened while
+# the refresh is on schedule, so the bound is taken over the worst on-schedule
+# case; using the nominal 4h would file a perfectly healthy 4h10m-old table's
+# freshest references as BELOW.
+#
+# ⚠ BOTH NUMBERS ARE COPIES OF `nix/home.nix`, AND A COPY IS A CLAIM. They are
+# pinned two-way by `test_the_REFRESH_INTERVAL_matches_the_units_own_period`,
+# which parses the timer block out of that file, recomputes this float, and
+# fails if the unit is edited, renamed or deleted without this line moving.
+_REFRESH_PERIOD_SECONDS = 4 * 3600   # OnCalendar = "*-*-* 00/4:00:00"
+_REFRESH_JITTER_SECONDS = 900        # RandomizedDelaySec = 900
+REFRESH_INTERVAL_DAYS = (
+    (_REFRESH_PERIOD_SECONDS + _REFRESH_JITTER_SECONDS) / 86400.0)
+
+# ⚠ THE SEPARATION THE CAP HAS TO RESPECT, RE-CHECKED AT THE 4-HOURLY CADENCE.
+# `ceil(REFRESH_INTERVAL_DAYS x RANGE_GROWTH_PER_DAY)` is 8. The 6 picks naming a
+# number no such repository has have gaps (`n - max_ref`) of 37, 60, 98, 134,
+# 146 and 1810 against LIVE heads, so the cap clears the smallest of them by 29.
+# The gap is MONOTONE in table age (an older table can only make `max_ref`
+# smaller, so the gap larger), which is what makes one cap hold at EVERY age
+# rather than only at the age it was measured.
+#
+# 🔴 BUT THE LEDGER ITSELF ERODES, WHICH IS THE STRONGEST ARGUMENT AGAINST ANY
+# FIXED CEILING. `max_ref` only grows, so every refresh SHRINKS these gaps: the
+# smallest was 74 before #1831 and is 37 days later. At the retired ceiling of
+# 60, TWO of the six would now be promoted into PLAUSIBLE — the exact failure
+# that ceiling existed to prevent — while at the derived cap of 8, none is. A
+# constant sized against a decaying measurement goes wrong on a schedule nobody
+# is watching; a cap derived from the refresh interval cannot.
+#
+# ⚠ THE COST, NAMED RATHER THAN DISCOVERED: a repository really does allocate
+# more than 8 references in some four-hour windows, and a click on one of those
+# still falls back to BELOW. That is the limit the separation imposes, not an
+# oversight — the fastest measured repository runs at 39.0/day, i.e. 6.9 per
+# interval, so 8 covers the AVERAGE worst case and not every burst. Tightening
+# the cadence is the lever that shrinks that residue; widening the cap is not,
+# because the wrong-repo ledger is where it must stay.
+# --------------------------------------------------------------------------- #
+
 # What `ordering_state` reports, and what the picker header says. A THREE-WAY
 # split rather than a boolean, because "there is no table yet" and "the table
 # stopped being refreshed" need different next moves from the operator: the
@@ -781,7 +931,57 @@ def universe_candidates(num: str, universe: list[str]) -> list[dict]:
             for full in universe]
 
 
-def plausibility_class(num: str, max_ref: int | None) -> int:
+def plausible_margin(age_days: float | None) -> int:
+    """How far BELOW `N` a recorded head may sit and still be PLAUSIBLE, given
+    how old the range table is. Pure, total, never raises.
+
+    `min(age, REFRESH_INTERVAL_DAYS) x RANGE_GROWTH_PER_DAY`, rounded up — see
+    the block above those two constants for the measurement, and for why the cap
+    is the refresh unit's own period rather than a tuned number.
+
+    🔴 THE CAP IS INSIDE THE `min`, NOT APPLIED TO THE PRODUCT, AND THAT IS THE
+    WHOLE SEMANTIC CLAIM. Capping the AGE says "past one refresh interval I stop
+    believing I know how far behind this table is"; capping the PRODUCT would
+    say "I know, and it is at most this many references", which is a growth
+    extrapolation across missed runs that nothing here can support. The two
+    happen to produce the same integer today; they are different claims, and the
+    one written is the one that stays true if either constant moves.
+
+    🔴 THE AGE IS OBSERVABLE STATE, NOT A SECOND CONSTANT. It is the table's own
+    mtime, already measured once per click by `ranges_age_days` and already
+    carried to every consumer — so a FRESH table keeps the sharp, pre-margin
+    class and only a table that has had time to fall behind buys any tolerance.
+    That is what stops the margin from being a flat widening of Tier A.
+
+    🔴 EVERY UNUSABLE AGE IS 0, AND 0 IS EXACTLY PRE-MARGIN BEHAVIOUR. `None`
+    (`ranges_age_days` could not `stat` the file), a non-number, a NaN, an
+    infinity, a negative age: all degrade to the old class rather than raising.
+    This runs on a detached click handler with nowhere to print a traceback, so
+    a broken clock or a missing file must cost the operator a worse ORDER and
+    never a dead click — the same posture `load_known_ranges` takes, and the
+    reason the margin is a DEFAULTED parameter everywhere it travels.
+
+    ⚠ A STRING THAT PARSES IS STILL REJECTED, and the type check is what does
+    it rather than a `float()` in a `try`. `ranges_age_days` returns `float |
+    None`, so a `"1.0"` arriving here means a CALLER passed the wrong thing —
+    coercing it would grant a full day of tolerance off a type error and leave
+    nothing to find. `bool` is excluded explicitly for the reason
+    `load_known_ranges` excludes it: it is an `int` subclass, so `True` would
+    otherwise sail in as one day.
+
+    ⚠ NEVER NEGATIVE. A negative margin would move rows the other way — it would
+    file a repository whose head is PAST `N` as BELOW — which is a different
+    defect from the one this exists to fix, and a silent one.
+    """
+    if isinstance(age_days, bool) or not isinstance(age_days, (int, float)):
+        return 0
+    age = float(age_days)
+    if not math.isfinite(age) or age <= 0.0:
+        return 0
+    return math.ceil(min(age, REFRESH_INTERVAL_DAYS) * RANGE_GROWTH_PER_DAY)
+
+
+def plausibility_class(num: str, max_ref: int | None, margin: int = 0) -> int:
     """Which of the four classes a repository falls in for a clicked `#num`.
 
     `max_ref is None` is UNKNOWN — the table has no entry, because the repo was
@@ -795,6 +995,19 @@ def plausibility_class(num: str, max_ref: int | None) -> int:
     evidence at all. `regen-known-repos.py` keeps them apart on the write side
     by OMITTING an unanswered repo rather than writing a 0; this keeps them
     apart on the read side.
+
+    🔴 `margin` IS THE STALENESS TOLERANCE, AND IT DEFAULTS TO 0 SO THAT EVERY
+    CALLER THAT CANNOT MEASURE ONE GETS THE OLD BEHAVIOUR. `plausible_margin`
+    computes it from the table's age; see the block above `RANGE_GROWTH_PER_DAY`
+    for why a stale table is where three clicks in four were being mis-filed.
+
+    🔴 `max_ref == 0` STAYS IMPOSSIBLE AT EVERY MARGIN, AND THE ORDER OF THESE
+    TWO BRANCHES IS WHAT ENFORCES IT. A repository with no issues and no pull
+    requests AT ALL cannot contain `#N` however stale the snapshot is — 0 is the
+    one value the table reports that no amount of growth can be hiding, because
+    growth is what would have moved it off 0 in the first place. Widening
+    IMPOSSIBLE by the margin would promote the 45% of this universe that has
+    never had a reference, which is the largest and cheapest half of the win.
     """
     if max_ref is None:
         return CLASS_UNKNOWN
@@ -807,7 +1020,11 @@ def plausibility_class(num: str, max_ref: int | None) -> int:
         return CLASS_UNKNOWN
     if max_ref <= 0:
         return CLASS_IMPOSSIBLE
-    return CLASS_PLAUSIBLE if max_ref >= n else CLASS_BELOW
+    # 🔴 CLAMPED AT 0 HERE TOO, NOT ONLY IN `plausible_margin`. This is a public
+    # parameter with a default, so a caller can hand it anything; a negative
+    # margin must never be able to NARROW the class.
+    return (CLASS_PLAUSIBLE if max_ref + max(0, margin) >= n
+            else CLASS_BELOW)
 
 
 def load_known_ranges(path: Path | None = None) -> dict[str, int]:
@@ -861,7 +1078,9 @@ def ordering_state(ranges: dict[str, int], age: float | None) -> str:
     """One of `ORDER_STATES`, from the table and its age. No I/O.
 
     🔴 STALE MEANS THE TABLE IS IGNORED, NOT TRUSTED-WITH-A-WARNING. Past
-    `STALE_MAPPING_DAYS` the daily refresh has missed SEVERAL runs, and the two
+    `STALE_MAPPING_DAYS` the four-hourly refresh has missed dozens of runs (it
+    was daily when this sentence was written, and "SEVERAL" understated it by a
+    factor of six the moment the cadence changed), and the two
     misclassifications that follow point in opposite directions: a repo that has
     advanced past `N` is filed BELOW, and a repo that gained its first reference
     is filed IMPOSSIBLE. Ordering on that is worse than not ordering — it is
@@ -1002,8 +1221,8 @@ def pick_scores(picks: list[dict], num: str,
     return scores
 
 
-def measured_rank_key(full: str, num: str,
-                      ranges: dict[str, int]) -> tuple[int, int]:
+def measured_rank_key(full: str, num: str, ranges: dict[str, int],
+                      margin: int = 0) -> tuple[int, int]:
     """`(class, distance)` — the MEASURED half of `order_universe`'s sort key.
 
     🔴 EXTRACTED SO THE SORT AND THE PROMOTION GATE CANNOT DISAGREE. The
@@ -1024,15 +1243,27 @@ def measured_rank_key(full: str, num: str,
     `distance` is 0 for every row outside `PLAUSIBLE`, exactly as in
     `order_universe`, so it can never reorder a class whose members were never
     compared on it.
+
+    🔴 THE DISTANCE IS AN ABSOLUTE VALUE, AND IT HAD TO BECOME ONE THE MOMENT
+    THE MARGIN EXISTED. Before the margin, `PLAUSIBLE` implied `max_ref >= N`,
+    so `max_ref - N` was never negative and `abs()` is a no-op on every case
+    that could previously arise — which is why no existing test can see this
+    change. A margin admits rows with `max_ref < N`, and on those the raw
+    subtraction is NEGATIVE: it would sort a repository whose stale head is 19
+    short of `N` AHEAD of one whose head is exactly `N`, i.e. ahead of an exact
+    fit, purely because the table had not caught up with it. `abs` reads the
+    term as it is documented — how far this repository's head is from the
+    clicked number, in either direction — so the nearest head wins and the
+    tolerance never outranks a measurement.
     """
     low = full.lower()
     max_ref = ranges.get(low)
-    klass = plausibility_class(num, max_ref)
+    klass = plausibility_class(num, max_ref, margin)
     try:
         target = int(num)
     except (TypeError, ValueError):
         target = None
-    distance = (max_ref - target
+    distance = (abs(max_ref - target)
                 if klass == CLASS_PLAUSIBLE and target is not None
                    and max_ref is not None
                 else 0)
@@ -1040,7 +1271,8 @@ def measured_rank_key(full: str, num: str,
 
 
 def order_universe(universe: list[str], num: str, ranges: dict[str, int],
-                   scores: dict[str, float] | None = None) -> list[str]:
+                   scores: dict[str, float] | None = None,
+                   margin: int = 0) -> list[str]:
     """The picker's universe rows, ordered by whether each repo could plausibly
     have `#num`. Pure — no I/O, no clock.
 
@@ -1052,6 +1284,11 @@ def order_universe(universe: list[str], num: str, ranges: dict[str, int],
          rows it says nothing about;
       3. the Tier B SCORE, descending — the operator's own picks, breaking ties
          the two above leave.
+
+    `margin` is the staleness tolerance the class is computed with — 0, the
+    default, is the pre-margin class. See `plausible_margin` and the block above
+    `RANGE_GROWTH_PER_DAY`: with a day-old table, three picks in four were
+    landing in `BELOW`, which this key ranks behind EVERY plausible row.
 
     🔴 AND THAT IS THE WHOLE KEY — THERE IS DELIBERATELY NO NAME IN IT. A
     trailing `name.lower()` was tried and REMOVED: it makes the function
@@ -1118,7 +1355,7 @@ def order_universe(universe: list[str], num: str, ranges: dict[str, int],
         # 🔴 THE MEASURED HALF COMES FROM `measured_rank_key`, NOT A SECOND
         # COPY. The promotion gate reads the same function, so the sort and the
         # gate cannot drift apart.
-        klass, distance = measured_rank_key(full, num, ranges)
+        klass, distance = measured_rank_key(full, num, ranges, margin)
         # 🔴 DISTANCE BEFORE SCORE — see the docstring. Tier B breaks ties Tier A
         # leaves; it does not overrule Tier A's first choice.
         return (klass, distance, -scores.get(full.lower(), 0.0))
@@ -1469,9 +1706,17 @@ CLASS_NAMES = {
 # a new measurement depends on — with no error and a row that still parses.
 # `test_the_click_DIM_ledger_FITS_the_collectors_own_dim_CAP` is the seam guard:
 # neither module's suite can see this from its own side.
+#
+# 🔴 AND IT IS NOW EXACTLY FULL: 16 fields against `invocation._MAX_DIMS` of 16.
+# The `ordered_rank` paragraph in `click_dims` says "room for two more click
+# dims today" — `margin` and `plausibility_premargin` ARE those two, so that
+# sentence is spent and the next field added here needs one removed or the cap
+# raised. The seam test above is what fails rather than the row silently losing
+# its last column.
 CLICK_DIM_FIELDS = ("repo", "platform", "picker_shown", "offered_total",
-                    "rank", "plausibility", "reason", "ordered", "pinned_above",
-                    "surface", "ordering", "tier_a", "tier_b", "queried")
+                    "rank", "plausibility", "plausibility_premargin", "reason",
+                    "ordered", "pinned_above", "surface", "ordering", "margin",
+                    "tier_a", "tier_b", "queried")
 
 
 def click_dims(repo: str = "", platform: str = "",
@@ -1479,11 +1724,13 @@ def click_dims(repo: str = "", platform: str = "",
                offered_total: int | None = None,
                rank: int | None = None,
                plausibility: int | None = None,
+               plausibility_premargin: int | None = None,
                reason: str | None = None,
                ordered: bool | None = None,
                pinned_above: int | None = None,
                surface: str | None = None,
                ordering: str | None = None,
+               margin: int | None = None,
                tier_a: int | None = None,
                tier_b: int | None = None,
                queried: bool | None = None) -> dict:
@@ -1574,6 +1821,32 @@ def click_dims(repo: str = "", platform: str = "",
       * `tier_a` is the same shape but NEAR-CONSTANT — read it as a
         partial-table detector; `_ordered_universe` explains why at length, with
         the measurement.
+      * `margin` is the STALENESS TOLERANCE the sort ran with, in references —
+        `plausible_margin(table age)`. It belongs with these three and not with
+        `plausibility` because it describes the SORT, not the chosen row: it is
+        a property of the ordering that produced the whole list, exactly as
+        `ordering`, `tier_a` and `tier_b` are, and it is absent on the same
+        predicate for the same reason.
+
+    🔴 `plausibility_premargin` IS WHY THE MARGIN DID NOT DESTROY ITS OWN
+    INSTRUMENT, AND IT IS A SEPARATE FIELD ON PURPOSE. `plausibility` is the
+    whole evidence base for the finding that produced the margin — the class of
+    the row the operator PICKED, `below` 54 times against `plausible` 17 — and
+    the margin makes that same field start reporting the POST-margin class. Left
+    at one field, "the ranking improved" and "the classifier was widened" become
+    the same observation under the same name, and the measurement that justified
+    the change can never be repeated.
+    🔴 `margin` ALONE DOES NOT CLOSE THAT, WHICH IS WHY THERE ARE TWO FIELDS.
+    `plausibility=plausible, margin=8` is still ambiguous: the row may have been
+    plausible anyway, or promoted by the tolerance, and telling those apart needs
+    `max_ref` and `N`, neither of which is emitted (and `max_ref` cannot be —
+    the universe names private repositories). `plausibility_premargin` is
+    computed with margin 0 from the SAME `order_ranges` dict, so
+    `plausibility_premargin != plausibility` is a MECHANICAL test for "this row
+    was promoted by the staleness tolerance", with nothing to infer.
+    It is gated on `ordered` and absent exactly when `plausibility` is, so the
+    pair is always both-present or both-absent and no consumer has to handle a
+    half-populated row.
     ⚠ THE CROSS-HOST ARGUMENT THAT USED TO BE HERE IS RETRACTED — measured, all
     85 click rows came from one host. See `_ordered_universe`.
     All three are ABSENT when no ordering ran (the auto-open path, and any
@@ -1681,9 +1954,12 @@ def click_dims(repo: str = "", platform: str = "",
     The promoted row is the single exception (position 0, `rank < pinned_above`
     — see the `ordered` paragraph), and it is DERIVABLE from the three dims
     already emitted, so adding a field would still be a second source of truth.
-    ⚠ The dim cap was MEASURED before deciding, not assumed: `_MAX_DIMS` leaves
-    room for two more click dims today (drops begin at the 17th), so this is a
-    design call and not a budget one.
+    ⚠ The dim cap was MEASURED before deciding, not assumed: `_MAX_DIMS` left
+    room for two more click dims when that was written (drops begin at the
+    17th), so this was a design call and not a budget one. ⚠ THAT ROOM IS NOW
+    SPENT — `margin` and `plausibility_premargin` took both slots, so the same
+    question asked again today IS a budget one. See the note on
+    `CLICK_DIM_FIELDS`.
     A fourth field carrying the difference would be a second source of truth
     that can disagree with the first, for a value a consumer computes in one
     subtraction. `test_the_WITHIN_block_rank_is_derivable_from_the_emitted_dims`
@@ -1698,6 +1974,13 @@ def click_dims(repo: str = "", platform: str = "",
         dims["rank"] = int(rank)
     if plausibility is not None and plausibility in CLASS_NAMES:
         dims["plausibility"] = CLASS_NAMES[plausibility]
+    # LEDGERED OR DROPPED, and a NAME rather than an ordinal, for exactly the
+    # reasons stated above `CLASS_NAMES` and above `plausibility` — this field
+    # is read alongside that one and must behave identically or the comparison
+    # between them is not a comparison.
+    if (plausibility_premargin is not None
+            and plausibility_premargin in CLASS_NAMES):
+        dims["plausibility_premargin"] = CLASS_NAMES[plausibility_premargin]
     if reason is not None:
         dims["reason"] = str(reason)
     if ordered is not None:
@@ -1717,6 +2000,8 @@ def click_dims(repo: str = "", platform: str = "",
     # the other half — it fails rather than letting the drop be silent.
     if ordering is not None and ordering in ORDER_STATES:
         dims["ordering"] = ordering
+    if margin is not None:
+        dims["margin"] = int(margin)
     if tier_a is not None:
         dims["tier_a"] = int(tier_a)
     if tier_b is not None:
@@ -1742,8 +2027,8 @@ def emit_click(outcome: str, **dims) -> str:
     ⚠ WHAT IS STILL OUTSIDE, ENUMERATED RATHER THAN SUMMARISED — and the
     enumeration was itself incomplete on its first draft, which is worth
     recording in the one paragraph whose subject is completeness:
-      * the picker arm's `picked_rank`, `picked_platform`, `picked_class` and
-        `picked_ordered` lookups;
+      * the picker arm's `picked_rank`, `picked_platform`, `picked_class`,
+        `picked_class_premargin` and `picked_ordered` lookups;
       * the AUTO arm's `candidates[0]["platform"]` subscript;
       * `repo_of_github_url(...)` on both arms.
     None is moved in here, because doing so would mean handing this function the
@@ -3284,8 +3569,8 @@ def mapping_age_days(path: Path | None = None) -> float | None:
 def staleness_note(path: Path | None = None) -> str:
     """"the repo mapping is N days old — …" when it is, else "".
 
-    🔴 IT IS THE TIMER'S DEADMAN. See `STALE_MAPPING_DAYS`. A daily unit
-    regenerates this file, so past seven days SEVERAL consecutive runs did not
+    🔴 IT IS THE TIMER'S DEADMAN. See `STALE_MAPPING_DAYS`. A FOUR-HOURLY unit
+    regenerates this file, so past seven days dozens of consecutive runs did not
     land — the unit is failing, the token expired, or the host was off — and
     none of those is visible anywhere else, because a stale mapping's only
     symptom is a picker appearing where a resolution used to.
@@ -3294,11 +3579,20 @@ def staleness_note(path: Path | None = None) -> str:
     would send the operator to re-run a generator by hand instead of looking at
     the unit that is silently failing. It names a COUNT, a CONSTANT PATH and a
     UNIT NAME — never a row.
+
+    ⚠ AND IT USED TO SAY "the daily refresh", WHICH WENT FALSE THE DAY THE UNIT
+    BECAME FOUR-HOURLY. It now says "the refresh" — no cadence at all — because
+    a cadence spelled into an operator-facing string is a second copy of
+    `nix/home.nix` that nothing can pin, and the number was never what the
+    operator needed: the actionable half is the unit name and the count of days.
+    Pinned as a WHOLE NORMALISED STRING by
+    `test_the_STALENESS_NOTE_text_is_pinned_WHOLE_and_names_no_cadence`, because
+    a guard on the word "daily" is walkable by rewording.
     """
     age = mapping_age_days(path)
     if age is None or age < STALE_MAPPING_DAYS:
         return ""
-    return (f"the repo mapping is {age:.0f} days old — the daily refresh has "
+    return (f"the repo mapping is {age:.0f} days old — the refresh has "
             f"not landed, so a repository created since then cannot resolve; "
             f"check `systemctl --user status mention-known-repos-refresh` "
             f"or run scripts/regen-known-repos.py")
@@ -3688,7 +3982,7 @@ def _ordered_universe(
     `load_known_ranges()` at the caller. The click telemetry reports which
     plausibility class the row the operator CHOSE was in, and a class computed
     from a second read can disagree with the order the operator was actually
-    looking at — the table is rewritten by a daily unit. A telemetry row that
+    looking at — the table is rewritten every four hours. A telemetry row that
     describes a different ordering from the one on screen is worse than no row.
 
     ⚠ IT IS `{}` IN EVERY DEGRADED STATE, AND THAT IS LOAD-BEARING RATHER THAN
@@ -3701,8 +3995,8 @@ def _ordered_universe(
     🔴 THE AGE COMES BACK WITH THE STATE, AND THAT IS THE "ONE MEASUREMENT, TWO
     READERS" RULE `mapping_age_days` states. The state is DECIDED from the
     file's mtime and the header then REPORTS that mtime; a second `stat` for
-    the report can disagree with the first — the file is rewritten by a daily
-    unit — and a note whose age contradicted the verdict beside it would read
+    the report can disagree with the first — the file is rewritten every four
+    hours — and a note whose age contradicted the verdict beside it would read
     as a bug in the note. `universe_note` already makes exactly this argument
     about its own date/age pair.
 
@@ -3743,10 +4037,20 @@ def _ordered_universe(
     # than argued about.
     now = time.time()
     scores = pick_scores(load_picks(now=now), num, now=now)
-    rows = order_universe(universe, num, ranges, scores)
-    # Counted from the SAME `ranges` dict the sort used, not re-read: a header
-    # that disagreed with the order beside it would read as a bug in the note.
-    classes = [plausibility_class(num, ranges.get(r.lower())) for r in rows]
+    # 🔴 ONE MTIME READING, ONE MARGIN — the same "one measurement, two readers"
+    # discipline this docstring states for the age and the table. `age` here is
+    # the value the STATE was decided from and the value that travels back to
+    # the caller, so the caller's `plausible_margin(order_age)` is arithmetic on
+    # the identical float rather than a second `stat`. Deterministic and pure,
+    # so the two sites cannot disagree — which is why this is not smuggled into
+    # the return tuple.
+    margin = plausible_margin(age)
+    rows = order_universe(universe, num, ranges, scores, margin)
+    # Counted from the SAME `ranges` dict AND the SAME margin the sort used, not
+    # re-read: a header that disagreed with the order beside it would read as a
+    # bug in the note.
+    classes = [plausibility_class(num, ranges.get(r.lower()), margin)
+               for r in rows]
     # Counted from the SAME `ranges` and `scores` the sort used — a second read
     # could disagree with the order the operator is looking at, which is the
     # rule `_ordered_universe`'s docstring states for the age and the table.
@@ -3919,6 +4223,16 @@ def main(argv: list[str] | None = None) -> int:
     # `_ordered_universe`. `(0, 0)` while no ordering has run, which is what the
     # telemetry reads to OMIT both dims rather than ship a misleading zero.
     order_contrib = (0, 0)
+    # 🔴 THE STALENESS TOLERANCE THE SORT USED, DERIVED ONCE FROM `order_age`
+    # RATHER THAN RE-DERIVED AT EACH READER. Four sites below need the margin as
+    # the SORT used it — the promotion gate's two `measured_rank_key` calls, the
+    # click telemetry's `picked_class`, and the `margin` dim itself, which is
+    # what makes the other three auditable — and a margin computed from a
+    # second mtime read could describe a different ordering from the one on
+    # screen. `plausible_margin` is pure, so this is arithmetic on the float
+    # `_ordered_universe` already measured, not a second `stat`. 0 until an
+    # ordering runs, which is exactly the pre-margin class.
+    order_margin = 0
     _universe_rows: list[list[dict]] = []
 
     def universe_rows() -> list[dict]:
@@ -3939,11 +4253,12 @@ def main(argv: list[str] | None = None) -> int:
         the alternative is a reader re-deriving that three-way exclusivity from
         scratch. What it must NOT do is read as a live optimisation."""
         nonlocal order_state, order_counts, order_age, order_ranges
-        nonlocal order_contrib
+        nonlocal order_contrib, order_margin
         if not _universe_rows:
             (rows, order_state, order_counts, order_age,
              order_ranges, order_contrib) = _ordered_universe(universe_repos,
                                                              num)
+            order_margin = plausible_margin(order_age)
             _universe_rows.append(universe_candidates(num, rows))
         return _universe_rows[0]
 
@@ -4131,15 +4446,20 @@ def main(argv: list[str] | None = None) -> int:
         # score is not available here, so a tie Tier B would have broken reads
         # as "not separated" and the promotion is skipped. It under-promotes
         # rather than over-claims; that asymmetry is deliberate.
+        #
+        # 🔴 THE SAME `order_margin` THE SORT USED. Omitting it here would
+        # reproduce, in the gate, exactly the drift the extraction of
+        # `measured_rank_key` exists to prevent: the gate would compute a
+        # pre-margin class while the rows on screen were ranked with one.
         top_key = (measured_rank_key(repo_of_github_url(ordered_rows[0]["url"]),
-                                     num, order_ranges)
+                                     num, order_ranges, order_margin)
                    if ordered_rows else None)
         top_is_separated = bool(
             top_key is not None
             and top_key[0] == CLASS_PLAUSIBLE
             and not any(
                 measured_rank_key(repo_of_github_url(c["url"]), num,
-                                  order_ranges) == top_key
+                                  order_ranges, order_margin) == top_key
                 for c in ordered_rows[1:]))
         # 🔴 GUARDED ON `extra`, NOT ON `universe`. A host whose whole universe
         # is the pane's own repo dedupes to nothing, and setting
@@ -4357,10 +4677,17 @@ def main(argv: list[str] | None = None) -> int:
     # Keyed on `universe_shown` — the same predicate `ordering_note` uses, and
     # set by ALL THREE arms that put universe rows into `candidates` and by none
     # that does not — so a picker holding only measured rows never claims an
-    # ordering it did not do. An ordering that did not run OMITS all three dims:
+    # ordering it did not do. An ordering that did not run OMITS all FOUR dims:
     # `tier_b=0` has to mean "ran, learned nothing" or the host with no pick log
     # is indistinguishable from every click that never reached the sort.
-    order_dims = ({"ordering": order_state,
+    #
+    # 🔴 `margin` RIDES HERE AND NOT ON THE PICKED ROW, BECAUSE IT DESCRIBES THE
+    # SORT. It is the tolerance the whole list was ranked with, exactly as
+    # `ordering` is the verdict the whole list was ranked under — and putting it
+    # here is what makes it obey the same omission rule: a `margin=0` emitted
+    # for a click that never reached the sort would read as "the table was
+    # fresh", which is the silent-zero shape this module is written against.
+    order_dims = ({"ordering": order_state, "margin": order_margin,
                    "tier_a": order_contrib[0], "tier_b": order_contrib[1]}
                   if universe_shown else {})
 
@@ -4503,8 +4830,34 @@ def main(argv: list[str] | None = None) -> int:
     # ...and the class is reported only for a row the ordering actually placed.
     # It used to be emitted whenever the ordering RAN, which made a pinned pane
     # repo indistinguishable from a universe row ranked at the same position.
-    picked_class = (plausibility_class(num, order_ranges.get(picked_repo.lower()))
-                    if picked_repo and order_ranges and picked_ordered else None)
+    # 🔴 WITH `order_margin`, BECAUSE THIS DIM IS THE INSTRUMENT THAT MEASURED
+    # THE DEFECT. It must report the class the operator was LOOKING AT; a
+    # pre-margin class emitted beside a margin-ranked list would keep reporting
+    # `below` for rows the picker had already promoted, and the next reader
+    # would re-derive the retracted diagnosis from it.
+    #
+    # 🔴 AND THE PRE-MARGIN CLASS GOES OUT BESIDE IT, FROM THE SAME `order_ranges`
+    # AT MARGIN 0 — WHICH IS THE ONLY THING THAT KEEPS THE INSTRUMENT ALIVE. The
+    # line above silently changes what `plausibility` MEANS under an unchanged
+    # field name: after it, "below 54 vs plausible 17" cannot be re-measured,
+    # because the same query now answers a different question and nothing on the
+    # row says which. Two fields make the separation MECHANICAL — a row where
+    # they differ was promoted by the tolerance — rather than something a reader
+    # has to infer from `margin` plus two numbers that are not emitted. Gated on
+    # the IDENTICAL predicate, so they are both present or both absent.
+    # 🔴 ONE PREDICATE, ONE PLACE. Three readers below need "was this row placed
+    # by the ordering, against a table we actually have?" and an open-coded copy
+    # at each is how two of them end up disagreeing — the field pair would then
+    # be half-populated, which is the one shape `click_dims` promises never to
+    # emit. It is the SAME condition the single `picked_class` line carried
+    # before the pre-margin field existed; it has a name now, not a new meaning.
+    _picked_measurable = bool(picked_repo and order_ranges and picked_ordered)
+    _picked_max_ref = (order_ranges.get(picked_repo.lower())
+                       if _picked_measurable else None)
+    picked_class = (plausibility_class(num, _picked_max_ref, order_margin)
+                    if _picked_measurable else None)
+    picked_class_premargin = (plausibility_class(num, _picked_max_ref)
+                              if _picked_measurable else None)
     picked_platform = next((c["platform"] for c in candidates
                             if c["url"] == url), "")
     rc, surface = open_reference(url)
@@ -4512,6 +4865,7 @@ def main(argv: list[str] | None = None) -> int:
                picker_shown=picker_was_shown(reason),
                offered_total=len(candidates),
                rank=picked_rank, plausibility=picked_class,
+               plausibility_premargin=picked_class_premargin,
                ordered=picked_ordered if picked_rank is not None else None,
                pinned_above=pinned_above, reason=reason, surface=surface,
                queried=queried, **order_dims)
