@@ -1,6 +1,6 @@
 ---
 name: civitai-app-fleet
-description: "Bulk iteration across the Civitai App Block fleet (gen-matrix, sensei, model-benchmarking, playable-collections, custom-generators, app-requests, generate-from-model, panorama-360, oauth-probe) — rolling one change through every app repo — plus release: civitai app submit, version bumps, a refused submit, deploy state. Platform-side ops is the `app-blocks` skill in talos-infra."
+description: "Bulk iteration across the Civitai App Block fleet (gen-matrix, sensei, model-benchmarking, playable-collections, custom-generators, app-requests, generate-from-model, panorama-360, oauth-probe) plus release: civitai app submit, version bumps, a refused submit, deploy state. Platform-side ops is the `app-blocks` skill in talos-infra."
 argument-hint: "<action> — inventory | state <app> [version] | floor <app> | preflight <dir> [floor] [--allow-downgrade] | fan-out"
 allowed-tools: Bash, Read, Edit, Write, Grep, Glob
 ---
