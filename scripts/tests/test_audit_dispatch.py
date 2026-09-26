@@ -1264,6 +1264,16 @@ def run_main(argv, **kw):
     # a round-0 test cannot silently fall through to the REAL `_read_round_zero`
     # and read whatever this HOST happens to have deployed under `~/.claude`.
     round_zero_reader = kw.pop("round_zero_reader", fake_round_zero)
+    # 🔴 POPPED AND FIXTURE-DEFAULTED for BOTH of `round_zero_reader`'s reasons.
+    # (a) Anything left in `kw` is forwarded to `make_runner`, which does not
+    # take it — an un-popped reader is a TypeError, not a silent pass.
+    # (b) The REAL `_read_operator_asks` shells out to git AND to
+    # `extract_user_msgs.py`, which then reads THIS HOST's transcript corpus
+    # under `~/.claude/projects`. A round-0 test falling through to it would
+    # pass or fail on whichever sessions happen to be on the machine, and would
+    # read nothing at all in the `nix build` sandbox tier. `fake_asks` is
+    # resolved at call time, so its definition further down this file is fine.
+    operator_asks_reader = kw.pop("operator_asks_reader", fake_asks)
     runner = kw.pop("runner", None) or make_runner(**kw)
     rc = ad.main(
         argv,
@@ -1272,6 +1282,7 @@ def run_main(argv, **kw):
         stderr=err,
         checklist_reader=fake_checklist,
         round_zero_reader=round_zero_reader,
+        operator_asks_reader=operator_asks_reader,
     )
     return rc, out.getvalue(), err.getvalue()
 
@@ -9975,6 +9986,36 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
 INVARIANT_GUARDS_AND_LEDGERS = frozenset({
+    # 🔴 THE OPERATOR-ASKS GUARDS, AND THEY ARE GUARDS RATHER THAN REGRESSION
+    # COVERAGE ON PURPOSE. At `62b516a4` the `operator_asks_reader` seam does not
+    # exist, so every one of them is red there for a TypeError — an API error, not
+    # the defect. `claude/RULES.md` is explicit that a test which cannot be watched
+    # to fail FOR ITS OWN CAUSE is an invariant guard and must be labelled one
+    # rather than counted as regression coverage, so that is what these are.
+    #
+    # Their evidence is a MUTATION BATTERY instead, run 2026-09-26 under
+    # PYTHONDONTWRITEBYTECODE=1 over `scripts/lib/operator_asks.py`: 10 mutants,
+    # 10 KILLED, each by the named test, with both controls fired (C0 unmutated
+    # GREEN, and a known-fatal rename RED so the harness is provably able to go
+    # red). The mutants that matter are the two that reintroduce the defect —
+    # dropping the UNKNOWN directive on a PARTIAL read, and letting the empty
+    # block render quietly.
+    #
+    # ⚠ `test_the_asks_still_ship_when_the_SKILL_is_unreadable` is the one that
+    # WAS watched red for its own cause, against an intermediate state of this
+    # branch rather than a repo ref: the first draft returned early on the
+    # unreadable-skill path and silently dropped the block. It is listed here and
+    # not in RED_AT_BASE because RED_AT_BASE means "red at a named BASE REF", and
+    # an intermediate state of my own branch is not one.
+    "test_round_zero_carries_the_operators_asks_BEFORE_the_section",
+    "test_no_other_round_pays_for_the_asks",
+    "test_the_asks_still_ship_when_the_SKILL_is_unreadable",
+    "test_the_real_reader_never_returns_an_empty_block_when_everything_fails",
+    "test_the_real_reader_reports_a_missing_module_rather_than_raising",
+    "test_the_real_reader_reads_the_PR_body_when_no_commit_carries_a_trailer",
+    "test_the_real_reader_uses_the_BODY_scan_and_not_gits_trailer_parser",
+    "test_a_nonzero_extractor_exit_becomes_a_REASON_not_an_absence_of_asks",
+    "test_the_asks_are_scoped_to_THIS_PRs_commits_and_not_the_whole_CHECKOUT",
     # 🔴 THE UNEARNED-LEDGER GUARDS (round 25), AND THEY ARE GUARDS FOR THREE
     # DIFFERENT REASONS. Written out because the one-line version ("the rest
     # error for want of a symbol") is FALSE for two of them, and this module
@@ -13202,3 +13243,220 @@ def test_the_payload_field_the_gate_enforces_is_documented_in_the_skill():
     assert _norm_ws("the gate is advisory and may be skipped") not in _norm_ws(
         body
     )
+
+
+# ---------------------------------------------------------------------------
+# ROUND 0 — the operator's own asks, as attribution input for step 1
+#
+# 🔴 The reader is INJECTED in every test here, for the same reason
+# `round_zero_reader` is: the real one shells out to git and to
+# `extract_user_msgs.py` and then reads THIS HOST's transcript corpus under
+# `~/.claude/projects`. That is neither hermetic nor present in the `nix build`
+# sandbox tier, so a test that fell through to it would pass or fail on
+# whichever sessions happen to be on the machine.
+#
+# Fixtures are SYNTHETIC. `devrc` is public and `CLAUDE.md` forbids committing
+# captured text of any kind, including in a fixture.
+# ---------------------------------------------------------------------------
+
+ASKS_FIXTURE = (
+    "## THE OPERATOR'S OWN ASKS — attribution input for step 1\n"
+    "\n> keep the retry, I want the loud failure\n"
+)
+
+
+def fake_asks(_runner, _repo_dir, _data, extractor=None):
+    return ASKS_FIXTURE
+
+
+def test_round_zero_carries_the_operators_asks_BEFORE_the_section():
+    """🔴 ORDER IS THE POINT, not mere presence.
+
+    The section's step 1 is "question every requirement, and NAME its author of
+    record". The asks are that step's INPUT. An input printed after the
+    instruction that consumes it gets read second or not at all — the same
+    ordering argument the section itself makes about its steps 3-4.
+    """
+    rc, out, err = run_main(["900", "--round", "0"], operator_asks_reader=fake_asks)
+    assert rc == 0, f"round 0 exited {rc}: {err}"
+    assert ASKS_FIXTURE in out, (
+        f"round 0 dispatched with no operator asks at all:\n{out[:1500]}"
+    )
+    assert out.index(ASKS_FIXTURE) < out.index(ROUND_ZERO_FIXTURE), (
+        "the asks are printed AFTER the section that consumes them"
+    )
+
+
+def test_no_other_round_pays_for_the_asks():
+    """It shells out to git and to the extractor. A round that never prints the
+    block must not read it — that is paid work with no consumer, which is
+    exactly what round 0 itself exists to delete."""
+    calls = []
+
+    def counting(_runner, _repo_dir, _data, extractor=None):
+        calls.append(1)
+        return ASKS_FIXTURE
+
+    for rnd in ("1", "2", "3"):
+        calls.clear()
+        rc, out, err = run_main(["900", "--round", rnd, "--payload", "10"],
+                                operator_asks_reader=counting)
+        assert ASKS_FIXTURE not in out, f"round {rnd} printed the asks block"
+        assert not calls, f"round {rnd} READ the asks and threw them away"
+
+
+def test_the_asks_still_ship_when_the_SKILL_is_unreadable():
+    """Two independent failures. An unreadable SKILL.md costs the instructions,
+    not the attribution input — and an auditor told to go read the section by
+    hand needs the operator's asks MORE than one handed the section inline. An
+    earlier draft returned early on this path and silently dropped the block.
+    """
+    rc, out, err = run_main(["900", "--round", "0"],
+                            round_zero_reader=lambda _d: None,
+                            operator_asks_reader=fake_asks)
+    assert rc == 0, f"round 0 exited {rc}: {err}"
+    assert "COULD NOT INLINE the round-0 section" in out
+    assert ASKS_FIXTURE in out, (
+        "the asks were dropped because the SKILL was unreadable — two "
+        f"unrelated failures collapsed into one:\n{out[:1500]}"
+    )
+
+
+def test_the_real_reader_never_returns_an_empty_block_when_everything_fails():
+    """🔴 THE LOAD-BEARING CASE, exercised against the REAL reader.
+
+    An absent or empty asks block restores the defect this feature exists to
+    prevent: round 0 reads "nobody asked for this" and proposes a deletion. So
+    with git failing, no comments, no body and no extractor, the reader must
+    still produce a block carrying the UNKNOWN directive.
+    """
+    def broken_runner(cmd, cwd=None):
+        return 1, "", "fatal: not a git repository"
+
+    block = ad._read_operator_asks(broken_runner, "/nowhere", {})
+    assert block, "the real reader returned an empty block on total failure"
+    assert "UNATTRIBUTED-UNKNOWN" in block, block
+    assert "not an absence of asks" in block.lower(), block
+
+
+def test_the_real_reader_reports_a_missing_module_rather_than_raising(monkeypatch):
+    """A partial deploy (a `cp -a` of a worktree, a half-shipped `scripts/lib`)
+    must degrade into a named UNKNOWN in the brief, not a traceback that stops
+    the audit."""
+    monkeypatch.setattr(ad, "operator_asks", None)
+    monkeypatch.setattr(ad, "_OPERATOR_ASKS_IMPORT_ERROR", "no module named x")
+    block = ad._read_operator_asks(lambda *a, **k: (0, "", ""), "/nowhere", {})
+    assert "COULD NOT LOAD" in block and "no module named x" in block
+    assert "UNATTRIBUTED-UNKNOWN" in block
+
+
+def test_the_real_reader_reads_the_PR_body_when_no_commit_carries_a_trailer():
+    """The coverage case, and the reason the PR's own text is a source at all:
+    25 of the 60 newest `main` commits carry no trailer (measured 2026-09-26).
+    """
+    def runner(cmd, cwd=None):
+        if cmd[:2] == ["git", "-C"]:
+            return 0, "chore: a commit with no trailer\x1e", ""
+        raise AssertionError(f"the extractor was run with no session ids: {cmd}")
+
+    block = ad._read_operator_asks(
+        runner, "/nowhere",
+        {"body": "please keep this behind a flag",
+         "comments": [{"author": {"login": "ZacxDev"}, "body": "and log it"}]},
+    )
+    assert "> please keep this behind a flag" in block
+    assert "> and log it" in block
+    # the session source still failed, so the directive must still ship
+    assert "UNATTRIBUTED-UNKNOWN" in block
+
+
+def test_the_real_reader_uses_the_BODY_scan_and_not_gits_trailer_parser():
+    """🔴 MEASURED on `c0fd28e3`: git's own
+    `%(trailers:key=Claude-Session-Id,valueonly)` prints EMPTY while the body
+    holds 12 occurrences, because a GitHub squash body concatenates every
+    squashed message and the ids do not land in git's final trailer block.
+
+    The fixture is that shape: a subject, a blank line, a trailer, and then
+    MORE prose after it — which is what stops git's parser seeing a trailer
+    block at all.
+    """
+    sid = "aaaaaaaa-1111-4222-8333-444444444444"
+    squashed = (
+        "feat: something (#1)\n\n"
+        f"Claude-Session-Id: {sid}\n\n"
+        "* an earlier commit subject\n\n"
+        f"Claude-Session-Id: {sid}\n\n"
+        "trailing prose that ends the message\n"
+    )
+    seen = {}
+
+    def runner(cmd, cwd=None):
+        seen["cmd"] = cmd
+        return 0, json.dumps(
+            {"kind": "typed", "text": "do not add a retry", "session_id": sid}), ""
+
+    block = ad._read_operator_asks(runner, "/nowhere", {
+        "commits": [{"messageHeadline": "feat: something (#1)",
+                     "messageBody": squashed}],
+    })
+    assert seen.get("cmd"), "the extractor was never invoked — no id was resolved"
+    assert seen["cmd"].count("--session") == 1, (
+        f"the repeated id was not de-duped: {seen['cmd']}"
+    )
+    assert "> do not add a retry" in block
+
+
+def test_a_nonzero_extractor_exit_becomes_a_REASON_not_an_absence_of_asks():
+    sid = "aaaaaaaa-1111-4222-8333-444444444444"
+
+    def runner(cmd, cwd=None):
+        return 5, "", "NOTHING WAS READ"
+
+    block = ad._read_operator_asks(runner, "/nowhere", {
+        "commits": [{"messageHeadline": "x",
+                     "messageBody": f"Claude-Session-Id: {sid}"}],
+    })
+    assert "resolved to no readable transcript" in block, block
+    assert "UNATTRIBUTED-UNKNOWN" in block
+
+
+def test_the_asks_are_scoped_to_THIS_PRs_commits_and_not_the_whole_CHECKOUT():
+    """🔴 THE SCOPE DEFECT, found by a live run and by no fixture.
+
+    An earlier draft resolved sessions from `git log -40` of the checkout, so a
+    ONE-session PR's brief came back carrying asks from seven unrelated arcs
+    across four repos. That is worse than no attribution: it invites the auditor
+    to attribute a requirement to an ask about something else entirely.
+
+    The guard is that the reader runs NO git command at all — the trailers come
+    from `gh`'s own `commits` field, which is already fetched. Asserted as "git
+    was never invoked" rather than "the right ids came back", because the latter
+    stays green against a reader that reads BOTH.
+    """
+    mine = "aaaaaaaa-1111-4222-8333-444444444444"
+    theirs = "bbbbbbbb-5555-4666-8777-888888888888"
+    seen = []
+
+    def runner(cmd, cwd=None):
+        seen.append(cmd)
+        if cmd and cmd[0] == "git":
+            # A repo-wide scan would find the OTHER session here.
+            return 0, f"someone else's work\n\nClaude-Session-Id: {theirs}\n", ""
+        return 0, json.dumps(
+            {"kind": "typed", "text": "my own ask", "session_id": mine}), ""
+
+    block = ad._read_operator_asks(runner, "/nowhere", {
+        "commits": [{"messageHeadline": "mine",
+                     "messageBody": f"Claude-Session-Id: {mine}"}],
+    })
+    assert not any(c and c[0] == "git" for c in seen), (
+        f"the reader ran a git command, so its scope is the CHECKOUT and not "
+        f"this PR: {[c for c in seen if c and c[0] == 'git']}"
+    )
+    extractor = [c for c in seen if any("extract_user_msgs" in str(x) for x in c)]
+    assert extractor, f"the extractor was never invoked: {seen}"
+    assert mine in extractor[0], extractor[0]
+    assert theirs not in " ".join(extractor[0]), (
+        "another session's id reached the extractor"
+    )
+    assert "> my own ask" in block
