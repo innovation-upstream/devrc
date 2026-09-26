@@ -881,6 +881,17 @@ class TestTheArcNamesTheExtractor:
         class _RecordingFS:
             # The REAL class, so the extractor's `except fs.ArcUnmeasured` is valid.
             ArcUnmeasured = fs.ArcUnmeasured
+            # 🔴 `handoff_arc` IS PRESENT SO THE MUTANT REACHES THE ASSERTION BELOW
+            # RATHER THAN DYING ON AN AttributeError. Without it, mutant `X1` —
+            # which rewrites the seam to `fs.handoff_arc.doc_basename(seed)` — blew
+            # up in the extractor at `extract_user_msgs.py:269` and the guard went
+            # red for a reason that says nothing about the seam. MEASURED: with
+            # `assert calls == [seed]` DELETED, X1 was still red, so the battery
+            # reported a kill for an assertion that was not there. That is the
+            # "still red with your guard deleted" shape — `claude/RULES.md`,
+            # unreachable-guards. The extractor's own suite's fake carries this
+            # attribute for the same reason.
+            handoff_arc = fs.handoff_arc
             ROOT = None
 
             @staticmethod

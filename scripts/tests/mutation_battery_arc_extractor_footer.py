@@ -194,6 +194,24 @@ def main() -> int:
     results, control = [], None
     try:
         for mid, _kind, _desc, old, new, node in MUTANTS:
+            # 🔴 RESTORE *EVERY* TARGET AT THE TOP OF EACH ITERATION, NOT JUST THE
+            # ONE ABOUT TO BE MUTATED. Writing only `target` self-restores that file
+            # and leaves a SIBLING carrying the previous mutant's damage, so the next
+            # mutant runs against a tree with two mutations and its kill may belong
+            # entirely to the earlier one — a BORROWED KILL.
+            #
+            # MEASURED, and this battery shipped with the bug: `F8` (find-session.py)
+            # runs immediately before `X1` (extract_user_msgs.py) and both name the
+            # SAME expected killer, so X1 was scored KILLED on a tree still carrying
+            # F8. Control that proved it — neuter X1's replacement to a semantic
+            # no-op, seam fully intact, and the run STILL printed
+            # `X1: KILLED … 10/10 KILLED`. The digest check below could not see it:
+            # it runs ONCE after the loop, so it is structurally blind to mid-loop
+            # cross-file contamination. Both sibling multi-file batteries in this
+            # directory already restore per iteration — copy them, not this file's
+            # history.
+            for path, text in pristine.items():
+                path.write_text(text, encoding="utf-8")
             target = TARGETS[mid]
             base = pristine[target]
             n = base.count(old)
