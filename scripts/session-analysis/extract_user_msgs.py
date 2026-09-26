@@ -195,8 +195,65 @@ def message_of(raw):
     return ("typed", txt)
 
 
-def records_of(path, session_id=None):
+#: `kind` for an answer the operator gave to an `AskUserQuestion` prompt. A
+#: THIRD kind beside `typed` and `command`, opt-in via `records_of(...,
+#: include_answers=True)` and `--include-answers`, so every existing consumer
+#: filtering on `typed` — the `find-session --arc` footer among them — is
+#: untouched and its output does not move.
+KIND_ANSWER = "answer"
+
+#: The tool whose result IS the operator speaking. Matched STRUCTURALLY: a
+#: `tool_result` block's `tool_use_id` against an assistant `tool_use` of this
+#: name. Never by the text, because a `tool_result` block is also how every
+#: Bash/Read/Grep result arrives and those are not the operator.
+ASK_TOOL_NAME = "AskUserQuestion"
+
+
+def answer_ids(records):
+    """The `tool_use` ids of every `AskUserQuestion` an assistant issued.
+
+    Separate pass because a `tool_result` names the id of a `tool_use` that
+    appeared EARLIER, and a single streaming pass cannot know, at the moment it
+    meets the result, whether the call was this tool or a Bash.
+    """
+    out = set()
+    for r in records:
+        if r.get("type") != "assistant" or r.get("isSidechain"):
+            continue
+        for c in (r.get("message") or {}).get("content") or []:
+            if (isinstance(c, dict) and c.get("type") == "tool_use"
+                    and c.get("name") == ASK_TOOL_NAME and c.get("id")):
+                out.add(c["id"])
+    return out
+
+
+def answer_text(block):
+    """The operator's answer text out of one `tool_result` block, or ''."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return clean_text(content)
+    if isinstance(content, list):
+        return clean_text("".join(
+            x.get("text", "") for x in content
+            if isinstance(x, dict) and x.get("type") == "text"))
+    return ""
+
+
+def records_of(path, session_id=None, include_answers=False):
     """Yield `{session_id, project, ts, kind, text}` for one transcript file.
+
+    🔴 `include_answers` RECOVERS A CLASS THIS TOOL STRUCTURALLY COULD NOT SEE,
+    and it is large. `extract_from_content` says "ignore tool_result" — correct
+    for Bash and Read output, and wrong for one tool: an `AskUserQuestion`
+    answer is the OPERATOR, arriving in a `tool_result` block. MEASURED
+    2026-09-26 over this host's corpus: **1,491 answer records across 594
+    sessions, 837,635 B** — against 895,672 B for the entire `typed` operator
+    corpus, so it is 71% again on top of everything this tool could previously
+    report. Median 479 B, max 2,037 B. 24 carry a free-text `notes:` (the
+    operator's own words); the rest record a decision.
+
+    It is OPT-IN so no shipped consumer's output moves — the `find-session
+    --arc` footer from #1883 is mid-measurement and must not change under it.
 
     `project` is always derived from the path — it had a parameter that no
     caller and no test ever passed.
@@ -205,30 +262,49 @@ def records_of(path, session_id=None):
     session_id = session_id if session_id is not None else path.stem
     project = path.parent.name
     with open(path, errors="replace") as f:
+        parsed = []
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                obj = json.loads(line)
+                parsed.append(json.loads(line))
             except ValueError:
                 continue
-            if obj.get("type") != "user" or obj.get("isMeta"):
+    # Only materialised when the caller asked for answers — the default path
+    # still streams nothing extra into memory beyond the list above, and the
+    # id scan is skipped entirely.
+    ids = answer_ids(parsed) if include_answers else set()
+    for obj in parsed:
+        if obj.get("type") != "user" or obj.get("isMeta"):
+            continue
+        # sidechain == a subagent's own transcript, not user-typed
+        if obj.get("isSidechain"):
+            continue
+        msg = obj.get("message") or {}
+        if msg.get("role") != "user":
+            continue
+        base = {"session_id": session_id, "project": project,
+                "ts": obj.get("timestamp") or ""}
+        for raw in extract_from_content(msg.get("content")):
+            got = message_of(raw)
+            if got is None:
                 continue
-            # sidechain == a subagent's own transcript, not user-typed
-            if obj.get("isSidechain"):
+            kind, text = got
+            yield {**base, "kind": kind, "text": text}
+        if not ids:
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
                 continue
-            msg = obj.get("message") or {}
-            if msg.get("role") != "user":
+            if block.get("tool_use_id") not in ids:
                 continue
-            for raw in extract_from_content(msg.get("content")):
-                got = message_of(raw)
-                if got is None:
-                    continue
-                kind, text = got
-                yield {"session_id": session_id, "project": project,
-                       "ts": obj.get("timestamp") or "", "kind": kind,
-                       "text": text}
+            text = answer_text(block)
+            if text:
+                yield {**base, "kind": KIND_ANSWER, "text": text}
 
 
 # --------------------------------------------------------------------------- #
@@ -451,6 +527,14 @@ output
   --jsonl               one canonical record per line:
                         {session_id, project, arc_role, ts, kind, text}
   -o PATH               write to PATH instead of stdout
+  --include-answers     also emit kind=answer — the operator's replies to an
+                        AskUserQuestion prompt, which arrive in a tool_result
+                        block this tool otherwise ignores. MEASURED 1,491
+                        records / 837,635 B on this host, against 895,672 B
+                        for the whole typed corpus, so it is 71% again on top
+                        of everything the default can report. OFF by default:
+                        it changes WHAT IS EMITTED, not which sessions are
+                        selected, and no shipped consumer's output may move.
 
 exit codes — a zero cannot distinguish a wrong name from an empty arc, so
 each reason has its own code and prints on stderr:
@@ -492,6 +576,13 @@ def build_parser():
                    help="keep every repeat; by default an identical message "
                         "seen twice in the selection is emitted once and the "
                         "suppressed count is reported")
+    p.add_argument("--include-answers", action="store_true",
+                   help="also emit the operator's answers to AskUserQuestion "
+                        "prompts, as kind=answer. They arrive in a tool_result "
+                        "block, which this tool otherwise ignores — MEASURED "
+                        "1,491 records / 837,635 B on this host, against "
+                        "895,672 B for the whole typed corpus. OFF by default "
+                        "so no existing consumer's output moves.")
     p.add_argument("--root", default=None,
                    help=argparse.SUPPRESS)   # tests point this at a fixture
     return p
@@ -605,7 +696,8 @@ def main(argv=None):
         # handler, and makes `opened` true of files that were read and held
         # nothing, which is exactly the population exit 6 is about.
         try:
-            recs = list(records_of(path, session_id=sid))
+            recs = list(records_of(path, session_id=sid,
+                                  include_answers=a.include_answers))
         except OSError as exc:
             unreadable.append(f"{sid}: {exc}")
             continue

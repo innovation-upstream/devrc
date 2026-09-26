@@ -9993,13 +9993,20 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     # to fail FOR ITS OWN CAUSE is an invariant guard and must be labelled one
     # rather than counted as regression coverage, so that is what these are.
     #
-    # Their evidence is a MUTATION BATTERY instead, run 2026-09-26 under
-    # PYTHONDONTWRITEBYTECODE=1 over `scripts/lib/operator_asks.py`: 10 mutants,
-    # 10 KILLED, each by the named test, with both controls fired (C0 unmutated
-    # GREEN, and a known-fatal rename RED so the harness is provably able to go
-    # red). The mutants that matter are the two that reintroduce the defect —
-    # dropping the UNKNOWN directive on a PARTIAL read, and letting the empty
-    # block render quietly.
+    # Their evidence is a MUTATION BATTERY instead, RE-RUN 2026-09-26 after round
+    # 0's findings landed, under PYTHONDONTWRITEBYTECODE=1 over
+    # `scripts/lib/operator_asks.py`: **17 mutants, 17 KILLED, 0 SKIPPED**, each
+    # by the named test, with both controls fired (C0 unmutated GREEN, and a
+    # known-fatal rename RED so the harness is provably able to go red).
+    # ⚠ ONE NUMBER, ONE PLACE: an earlier revision of this comment said "10
+    # mutants, 10 KILLED" while the commit message said 17 — the battery had been
+    # extended and this copy was not, so the PR shipped both figures and neither
+    # said which files it spanned. Round 0 caught it. The 17 are all over
+    # `operator_asks.py`; the four mutants that matter most are the ones that
+    # reintroduce a defect this ladder already paid for — dropping the UNKNOWN
+    # directive on a PARTIAL read, letting the empty block render quietly,
+    # silently dropping the operator's ANSWERS again, and re-adding a source or a
+    # cap that was measured dead.
     #
     # ⚠ `test_the_asks_still_ship_when_the_SKILL_is_unreadable` is the one that
     # WAS watched red for its own cause, against an intermediate state of this
@@ -10012,10 +10019,13 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     "test_the_asks_still_ship_when_the_SKILL_is_unreadable",
     "test_the_real_reader_never_returns_an_empty_block_when_everything_fails",
     "test_the_real_reader_reports_a_missing_module_rather_than_raising",
-    "test_the_real_reader_reads_the_PR_body_when_no_commit_carries_a_trailer",
+    "test_the_real_reader_reads_the_operators_PR_COMMENTS_when_no_trailer_exists",
     "test_the_real_reader_uses_the_BODY_scan_and_not_gits_trailer_parser",
     "test_a_nonzero_extractor_exit_becomes_a_REASON_not_an_absence_of_asks",
     "test_the_asks_are_scoped_to_THIS_PRs_commits_and_not_the_whole_CHECKOUT",
+    # Round 0 of this PR's own ladder produced these three.
+    "test_a_non_owner_PR_comment_is_not_inlined_as_an_operator_ask",
+    "test_the_extractor_is_invoked_with_include_answers",
     # 🔴 THE UNEARNED-LEDGER GUARDS (round 25), AND THEY ARE GUARDS FOR THREE
     # DIFFERENT REASONS. Written out because the one-line version ("the rest
     # error for want of a symbol") is FALSE for two of them, and this module
@@ -13350,24 +13360,67 @@ def test_the_real_reader_reports_a_missing_module_rather_than_raising(monkeypatc
     assert "UNATTRIBUTED-UNKNOWN" in block
 
 
-def test_the_real_reader_reads_the_PR_body_when_no_commit_carries_a_trailer():
-    """The coverage case, and the reason the PR's own text is a source at all:
-    25 of the 60 newest `main` commits carry no trailer (measured 2026-09-26).
-    """
+def test_the_real_reader_reads_the_operators_PR_COMMENTS_when_no_trailer_exists():
+    """The coverage case: 25 of the 60 newest `main` commits carry no trailer
+    (measured 2026-09-26), and a PR comment is the operator's own words.
+
+    🔴 THE PR **DESCRIPTION** IS NOT READ — dropped on the operator's call after
+    round 0 measured that 1 of the 60 newest merged devrc PR bodies names an ask
+    while it supplied 83% of the block on devrc#1887. This asserts the absence,
+    because a source that quietly comes back is how agent prose gets filed as
+    the operator's requirement."""
     def runner(cmd, cwd=None):
-        if cmd[:2] == ["git", "-C"]:
-            return 0, "chore: a commit with no trailer\x1e", ""
         raise AssertionError(f"the extractor was run with no session ids: {cmd}")
 
     block = ad._read_operator_asks(
         runner, "/nowhere",
-        {"body": "please keep this behind a flag",
-         "comments": [{"author": {"login": "ZacxDev"}, "body": "and log it"}]},
+        {"body": "PROSE THE AGENT WROTE ABOUT ITS OWN CHANGE",
+         "commits": [{"messageHeadline": "x", "messageBody": "no trailer here"}],
+         "comments": [{"authorAssociation": "OWNER",
+                       "author": {"login": "ZacxDev"}, "body": "and log it"}]},
     )
-    assert "> please keep this behind a flag" in block
     assert "> and log it" in block
+    assert "PROSE THE AGENT WROTE" not in block, (
+        "the PR description came back as a source"
+    )
     # the session source still failed, so the directive must still ship
     assert "UNATTRIBUTED-UNKNOWN" in block
+
+
+def test_a_non_owner_PR_comment_is_not_inlined_as_an_operator_ask():
+    """`civitai-deploy` posts 74% of comments on the 60 newest `civitai/civitai`
+    PRs. The old bot denylist did not name it and would have inlined it."""
+    def runner(cmd, cwd=None):
+        raise AssertionError("should not reach the extractor")
+
+    block = ad._read_operator_asks(runner, "/nowhere", {
+        "commits": [{"messageHeadline": "x", "messageBody": "no trailer"}],
+        "comments": [{"authorAssociation": "NONE",
+                      "author": {"login": "civitai-deploy"},
+                      "body": "DEPLOY PREVIEW READY"}],
+    })
+    assert "DEPLOY PREVIEW READY" not in block
+    assert "non-owner author skipped" in block
+
+
+def test_the_extractor_is_invoked_with_include_answers():
+    """🔴 The gap round 0 found: without the flag, the operator's answers to a
+    question this session asked are invisible, and those are exactly the records
+    that AUTHORISE a design decision."""
+    sid = "aaaaaaaa-1111-4222-8333-444444444444"
+    seen = {}
+
+    def runner(cmd, cwd=None):
+        seen["cmd"] = cmd
+        return 0, json.dumps(
+            {"kind": "answer", "text": "the first option", "session_id": sid}), ""
+
+    block = ad._read_operator_asks(runner, "/nowhere", {
+        "commits": [{"messageHeadline": "x",
+                     "messageBody": f"Claude-Session-Id: {sid}"}],
+    })
+    assert "--include-answers" in seen["cmd"], seen["cmd"]
+    assert "> the first option" in block
 
 
 def test_the_real_reader_uses_the_BODY_scan_and_not_gits_trailer_parser():

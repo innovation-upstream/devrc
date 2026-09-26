@@ -230,7 +230,13 @@ SKILL_RELS = (
 # before — so the prediction worked and the instruction did not, which is the
 # `/resume`-body finding in miniature (a route in prose only fires if something
 # makes you read it).
-MIN_TESTS = 195
+# 🔴 RAISED AGAIN 2026-09-26, 195 -> 197, at m = 207 — COUNTED the same way, from
+# a `--collect-only` on the module (`207 tests collected`) through the same
+# formula, `207 - min(50, max(1, 207 // 20))` = 207 - 10 = 197. Two node ids were
+# added by round 0's own fixes on the same branch (a non-owner comment guard and
+# an `--include-answers` guard) and one was renamed. The number is the formula's
+# output on a counted m, NOT 195 + 2.
+MIN_TESTS = 197
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised

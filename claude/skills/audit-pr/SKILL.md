@@ -129,25 +129,22 @@ deleted is the waste this exists to catch. Work them in order; do not skip ahead
    round** (`#N round R`), a `RULES.md`/`CLAUDE.md` bullet (quote it), or **unattributed** — which
    is itself a finding.
    🔴 **THE ASK IS IN YOUR BRIEF — READ IT BEFORE ATTRIBUTING ANYTHING.** `## THE OPERATOR'S OWN
-   ASKS` carries Zach's own messages **verbatim**, resolved from `Claude-Session-Id:` trailers in
-   the PR's commit bodies plus the PR description and his own PR comments. "Quote the ask" used to
-   be unreachable — you are dispatched read-only and never had the transcript — so requirements
-   Zach stated in as many words landed on `unattributed`, and the **deletion candidate that
-   produces is aimed at something he directly asked for**. If a requirement answers an ask in that
-   block, its author is **Zach**: quote it, and do not propose deleting it on the grounds that
-   nobody asked.
+   ASKS` carries Zach's own messages **verbatim** — his typed messages and his answers to any
+   question the session asked him, from `Claude-Session-Id:` trailers in this PR's commit bodies,
+   plus his own PR comments. "Quote the ask" used to be unreachable — you are dispatched read-only
+   and never had the transcript — so requirements Zach stated in as many words landed on
+   `unattributed`, and the **deletion candidate that produces is aimed at something he directly
+   asked for**. If a requirement answers an ask in that block, its author is **Zach**: quote it,
+   and do not propose deleting it on the grounds that nobody asked. ⚠ It is his words ONLY — no
+   agent output, and **not the PR description**, which here is usually written by the agent. The
+   block prints the transcript paths for the agent side; read them when a requirement turns on it.
    🔴 **AN UNREADABLE SOURCE IS NOT AN ABSENCE OF ASKS, AND THE BLOCK SAYS WHICH IT IS.** Trailer
    coverage is partial by nature — 35 of the 60 newest `main` commits, measured 2026-09-26 — so a
    source reading `UNKNOWN` is the ORDINARY case. Record those requirements as
    **`UNATTRIBUTED-UNKNOWN`**, which is *not* `unattributed`, and never raise a deletion candidate
    whose whole case is that nobody asked for it; say the source was unreadable instead.
-   ⚠ The block carries **Zach's words only, no agent output**, and it **clips each message's tail**
-   at a byte cap (the head is the instruction, the tail is usually pasted output) — so a clipped
-   message is not a complete ask. It prints the command for the full text and the transcript paths
-   for the agent side; read them when a requirement turns on what was clipped.
-   ⚠ **An ask is not a specification.** Questioning it is still this step's job — that is the whole
-   "requirements from smart people are the most dangerous" case. Question it **as Zach's, out
-   loud**, rather than silently treating it as unowned. 🔴 **A requirement whose author is a PRIOR ROUND OF THIS LADDER is the
+   ⚠ **An ask is not a specification** — questioning it is still this step's job. Question it **as
+   Zach's, out loud**, rather than silently treating it as unowned. 🔴 **A requirement whose author is a PRIOR ROUND OF THIS LADDER is the
    highest-scrutiny class, not the safest.** It arrives carrying a measured incident and a case
    history, so re-opening it reads as ignoring evidence and nobody does — the "requirements from
    smart people are the most dangerous" case exactly. Then make it less dumb: name the requirement

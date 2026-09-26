@@ -4,79 +4,85 @@
 WHAT PROBLEM THIS SOLVES. Round 0 step 1 says "Question every requirement, and
 NAME its author of record: Zach (quote the ask), a prior audit round, a
 `RULES.md`/`CLAUDE.md` bullet, or **unattributed**". The auditor is dispatched
-READ-ONLY with a diff and a PR — it has never had any way to READ what the
-operator asked for, so "quote the ask" was unreachable and every requirement
-whose author was Zach landed on `unattributed`, which the section then treats as
-a finding. The failure that produces is a round-0 deletion candidate aimed at
-something the operator asked for in as many words.
+READ-ONLY with a diff and a PR, so "quote the ask" had no source: requirements
+the operator stated in as many words landed on `unattributed`, which the section
+treats as a finding, and the deletion candidate that produces is aimed at
+something he requested.
 
-🔴 THE CENTRAL HAZARD IS THE EMPTY CASE, NOT THE FULL ONE. Trailer coverage on
-`main` is partial — `session_trailer.py` measures 47 of the last 100 and 67 of
-the last 200 carrying one, and a re-measure here on 2026-09-26 over the 60
-newest commits found 35 by a BODY scan against 17 by git's own trailer parser.
-So "no asks could be read" is a COMMON outcome, and an empty block that reads as
-"the operator asked for nothing" would actively LICENSE the deletion suggestion
-this module exists to prevent. Every unreadable source therefore renders as a
-named UNKNOWN with an explicit instruction, never as an absence. `render()` has
-no code path that emits a quiet empty block.
+🔴 THE CENTRAL HAZARD IS THE EMPTY CASE, NOT THE FULL ONE. Trailer coverage is
+partial — measured 2026-09-26 over the 60 newest `main` commits, 35 carry a
+`Claude-Session-Id:` by a BODY scan and 17 by git's own trailer parser. So "no
+ask could be read" is a COMMON outcome, and an empty block reading as "the
+operator asked for nothing" would actively LICENSE the deletion suggestion this
+module exists to prevent. Every unreadable source renders as a named UNKNOWN
+with an explicit directive, never as an absence; `render()` has no code path
+that emits a quiet empty block.
 
-🔴 READ THE COMMIT **BODY**, NEVER git's TRAILER PARSER. Measured 2026-09-26 on
-`c0fd28e3`, the squash merge of devrc#1883: `git log -1
+🔴 READ THE COMMIT **BODY**, NEVER git's TRAILER PARSER. Measured on `c0fd28e3`,
+the squash merge of devrc#1883: `git log -1
 --format='%(trailers:key=Claude-Session-Id,valueonly)'` prints EMPTY while the
-body holds 12 occurrences of `Claude-Session-Id: ad781c3f-…`. GitHub's squash
-body concatenates every squashed commit message, so the ids do not sit in git's
-final trailer block. That is why this module calls
-`handoff_arc.trailer_ids(body)` and not `git --format=%(trailers:…)`: same
+body holds 12 occurrences of `Claude-Session-Id: ad781c3f-…`, because a GitHub
+squash body concatenates every squashed message and the ids do not land in git's
+final trailer block. So this module calls `handoff_arc.trailer_ids(body)`: same
 predicate, one definition, and the one that can see a squash.
 
-🔴 THE HARD PART IS THE CLASSIFIER, NOT THE BUDGET — AND `kind: "typed"` IS NOT
-THE OPERATOR. `extract_user_msgs.py` emits a row per user-ROLE transcript
-record, but Claude Code injects several kinds of machine-generated content as
-user-role records, and they dwarf the human. MEASURED 2026-09-26 over 981
-sessions / 23,734 user-role text records / 139,541,944 B on this host:
+🔴 `kind: "typed"` IS NOT THE OPERATOR — BUT ALMOST ALL OF THE DIFFERENCE IS ONE
+CLASS, AND THE UPSTREAM TOOL ALREADY REMOVES THE REST. Measured 2026-09-26 over
+**the population `parse_typed_rows` actually receives** — 18,494 `typed` rows /
+55,551,545 B, i.e. what `extract_user_msgs.records_of` EMITS, not what the raw
+transcripts hold:
 
-    injected SKILL BODIES  83,065,007 B  59.5%   median 25,255 B   (n=3,039)
-    <task-notification>    54,311,593 B  38.9%   median  5,446 B   (n=9,971)
-    hook feedback             822,615 B   0.6%   median  1,030 B   (n=  631)
-    <command-message/name/local-command-*>
-                              161,000 B   0.1%
-    THE OPERATOR            1,175,592 B   0.84%  median     18 B   (n=8,663)
+    <task-notification>   10,007 rows   54,654,875 B   98.39%   (subagent results)
+    a harness-authored note    13 rows          998 B    0.00%
+    THE OPERATOR            8,474 rows      895,672 B    1.61%   median 17 B
 
-**The operator is 0.84% of it, with a median message of 18 bytes.** A round-0
-block built on `kind == "typed"` alone is therefore ~99% subagent results and
-skill bodies — it would bury the ask it exists to surface, and an auditor
-skimming it would attribute requirements to text the operator never wrote.
-`non_operator_reason()` is the enumeration that removes them, and it names the
-reason per record so the ledger can report what it dropped.
+🔴 AND THAT TABLE REPLACES A WRONG ONE — DO NOT RE-DERIVE THE OLD SHAPE. An
+earlier version of this module classified SIX leading tags plus injected SKILL
+BODIES, hook feedback and an interrupt prefix, and its docstring called skill
+bodies "THE HARDEST CLASS TO SPOT … 59.5% of all user-role bytes". **Every one of
+those eight families fires ZERO times in production**, because they are removed
+UPSTREAM by the only producer this module consumes from
+(`scripts/session-analysis/extract_user_msgs.py`):
 
-⚠ THE SKILL-BODY CLASS IS THE ONE THAT IS EASY TO MISS: it carries no wrapping
-tag, so it looks exactly like prose until you notice it is 25 KB of `<topic>` /
-`<repo>` / `<sha>` placeholders. It is identified by the literal header Claude
-Code puts above an invoked skill, not by size — a long ask must survive.
+  * `records_of` drops `isMeta` records, and an injected skill body IS
+    `isMeta: true` — measured, 1,156 of 1,166 such records in the first 400
+    transcripts, and 0 could ever reach here;
+  * `COMMAND_NAME` routes `<command-name>`/`<command-message>` to
+    `kind == "command"`, which `parse_typed_rows` drops a line earlier;
+  * `clean_text` strips `<system-reminder>` and `<local-command-stdout>`;
+  * `BOILERPLATE_PREFIXES` there already holds `"[Request interrupted"` and
+    `"Caveat: The messages below"` — so re-spelling them here was the same
+    predicate at two sites, which `claude/RULES.md` forbids.
 
-THE CAP IS A BACKSTOP, NOT A BUDGET. With the classifier in place the operator's
-own messages are tiny: p90 245 B, p99 1,254 B, max 16,404 B across all 8,663.
-`PER_MESSAGE_CAP = 4000` clips 45 of 8,663 (0.5%). It exists so one pathological
-paste cannot dominate a brief, NOT to control the corpus size — that problem was
-an artefact of counting machine output as the operator.
+The 59.5% figure was real but measured on the WRONG POPULATION: raw user-role
+transcript records, which this module never sees. Found by round 0 of the audit
+ladder on devrc#1887 and reproduced independently. The lesson worth keeping: a
+filter's population is whatever its PRODUCER hands it, and measuring the corpus
+instead is how eight guards got written for classes that cannot arrive.
 
-🔴 AN EARLIER VERSION OF THIS MODULE GOT THIS WRONG AND THE NUMBERS ARE KEPT SO
-NOBODY RE-DERIVES THEM. It measured 812 B - 239,589 B of "operator messages" per
-PR and concluded the bulk was the operator PASTING tool output, sizing a
-per-message cap against that. Both halves were false: the bulk was
-`<task-notification>` and skill bodies, and the operator's real text for those
-same PRs is a couple of KB. The live end-to-end run is what exposed it — the
-unit tests all passed, because every fixture was a hand-written ask.
+🔴 NO CAP, NO CEILING — AND BOTH WERE DELETED AS MEASURED DEAD WEIGHT. An earlier
+version carried `PER_MESSAGE_CAP` (clipping each message's tail) and
+`BLOCK_CEILING` (a whole-block backstop) with a clip marker, byte accounting and
+a withheld-text ledger. Measured: the cap clipped **20 of 8,474 operator
+messages (0.24%)** and the ceiling fired **never** — the largest per-session ask
+corpus on this host is 10,016 B against a 49,152 B ceiling. The operator's own
+answer, recovered from the very transcript this feature reads, was *"user
+messages only, my messages are never that big"*. Operator sizes: median 17 B,
+p90 235 B, p99 907 B, max 16,404 B.
 
 🔴 NEVER SUMMARISE AN ASK. A paraphrase of "the user directly asked for this" is
-exactly the evidence that goes missing, so this module clips and elides but has
-no summarising path at all. Clipping is reported in bytes and messages so the
-auditor knows what it is NOT seeing.
+exactly the evidence that goes missing, so this module has no summarising path.
 
 WHAT THIS DELIBERATELY DOES NOT CARRY: any agent/assistant output. The operator
-asked for their own messages only. The agent side is reachable and
-`agent_side_reference()` prints how, per session, rather than leaving the
-auditor to guess a path.
+asked for his own messages only — and for a way to reach the agent side "if
+needed", which `agent_side_reference()` prints rather than inlining.
+
+⚠ NOT A SOURCE, DELIBERATELY: the PR DESCRIPTION. An earlier version read it,
+captioned "probably written by the agent". Measured over the 60 newest merged
+devrc PRs, **1** body names an ask and **4** contain any blockquote — so on ~98%
+of PRs it contributed agent prose under a heading saying it was the operator's,
+and on devrc#1887 itself it was 83% of the block. Operator's call, 2026-09-26:
+dropped. PR COMMENTS stay — measured 115 across the 120 newest devrc PRs.
 """
 
 from __future__ import annotations
@@ -91,37 +97,19 @@ from typing import Iterable, Sequence
 import handoff_arc
 import session_trailer
 
-# Bytes of each message kept, clipping the TAIL. A BACKSTOP against one
-# pathological paste, not a budget: measured over 8,663 real operator messages
-# this clips 45 of them (0.5%). See the module docstring.
-PER_MESSAGE_CAP = 4000
-
-# Backstop on the whole rendered ask corpus. Did not fire on any of the 7 PRs
-# measured; it exists so brief size cannot be unbounded in a population those 7
-# did not contain.
-BLOCK_CEILING = 49152
-
-# What a clipped message says. Counted in the ledger so the elision is a number,
-# not a vibe.
-CLIP_MARK = "  […  clipped {withheld:,} B of {full:,} — read the full text, below …]"
-
 SOURCE_SESSION = "session transcript"
-SOURCE_PR_BODY = "PR description"
 SOURCE_PR_COMMENT = "PR comment"
 
-# Ordered most- to least-authoritative. A session transcript is what the
-# operator actually typed while the work happened; a PR description is often
-# written BY the agent about the work, so it is read but ranked below and
-# labelled, never merged into the session rows.
-SOURCE_ORDER = (SOURCE_SESSION, SOURCE_PR_BODY, SOURCE_PR_COMMENT)
+#: Most- to least-authoritative. A session transcript is what the operator typed
+#: while the work happened; a PR comment is still his words but written after.
+SOURCE_ORDER = (SOURCE_SESSION, SOURCE_PR_COMMENT)
 
 HEADING = "## THE OPERATOR'S OWN ASKS — attribution input for step 1"
 
-# The instruction that makes an UNKNOWN safe. It is a STRING CONSTANT because
-# two tests pin it: one that it appears whenever any source is unreadable, and
-# one that it appears even when SOME asks were read (a partial read is still a
-# partial read, and the sources that failed are the ones a deletion candidate
-# would be wrong about).
+#: The instruction that makes an UNKNOWN safe. A STRING CONSTANT because tests
+#: pin it: it must appear whenever ANY source is unreadable, including when other
+#: sources DID answer — a partial read is still partial, and the source that
+#: failed is the one a deletion candidate would be wrong about.
 UNKNOWN_DIRECTIVE = (
     "🔴 **A SOURCE THAT COULD NOT BE READ IS NOT AN ABSENCE OF ASKS.** Where a "
     "source below says UNKNOWN, you have no evidence either way about what the "
@@ -131,16 +119,16 @@ UNKNOWN_DIRECTIVE = (
     "for it. Say the source was unreadable instead."
 )
 
-# Bots that comment on devrc PRs. A bot comment is not an ask, and letting one
-# through would attribute a requirement to the operator that they never made.
-# An enumeration, not a pattern: an unknown author is treated as the OPERATOR
-# (the fail-safe direction here is to over-include an ask, never to drop one),
-# and the ledger prints who was skipped so the enumeration is visible.
-KNOWN_BOT_LOGINS = frozenset({
-    "github-actions", "github-actions[bot]", "dependabot", "dependabot[bot]",
-    "codecov", "codecov[bot]", "claude", "claude[bot]", "copilot",
-    "copilot-pull-request-reviewer[bot]",
-})
+#: 🔴 OWNERSHIP, NOT A BOT DENYLIST. An earlier version enumerated nine bot
+#: logins. Measured: it filtered **0** of the 115 comments across the 120 newest
+#: devrc PRs (all from the operator), and MISSED the one real bot population in a
+#: repo `/audit-pr` runs against — `civitai-deploy` posts 130 of 177 comments
+#: (74%) on the 60 newest `civitai/civitai` PRs and would have been inlined AS
+#: the operator's asks. Nine declarations, zero instances, and wrong in
+#: direction. `authorAssociation` is on every comment row `gh` already returns,
+#: so this is one predicate over data in hand instead of a list that only grows
+#: when somebody remembers. `claude/RULES.md` → "declarations-vs-instances".
+OWNER_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
 
 @dataclass(frozen=True)
@@ -152,10 +140,7 @@ class Ask:
     who: str = ""
     session_id: str = ""
     role: str = ""
-
-    @property
-    def full_len(self) -> int:
-        return len(self.text)
+    kind: str = ""
 
 
 @dataclass(frozen=True)
@@ -169,10 +154,10 @@ class Unmeasured:
 def session_ids_from_bodies(bodies: Iterable[str]) -> tuple[str, ...]:
     """Distinct session ids across several commit bodies, first-appearance order.
 
-    Delegates the per-body scan to `handoff_arc.trailer_ids`, which is the one
-    definition of "a safe session-id trailer in a commit body" and the one that
-    sees a squash. De-duping ACROSS bodies is this function's only addition: a
-    squash body plus the branch's own commits name the same session repeatedly.
+    Delegates the per-body scan to `handoff_arc.trailer_ids` — the one
+    definition of "a safe session-id trailer in a commit body", and the one that
+    sees a squash. De-duping ACROSS bodies is the only addition: a squash body
+    plus the branch's own commits name the same session repeatedly.
     """
     out: list[str] = []
     for body in bodies:
@@ -182,32 +167,14 @@ def session_ids_from_bodies(bodies: Iterable[str]) -> tuple[str, ...]:
     return tuple(out)
 
 
-def clip(text: str, cap: int = PER_MESSAGE_CAP) -> tuple[str, int]:
-    """-> (kept, withheld_bytes). Clips the TAIL; the head is the instruction.
-
-    Returns the text unchanged and 0 when it fits, so a caller can report
-    "clipped" off the second element alone without re-comparing lengths.
-
-    A non-positive cap keeps nothing and reports the whole message withheld,
-    rather than raising: a misconfigured cap must degrade into a loud ledger
-    line, not into a traceback in the middle of assembling a brief.
-    """
-    if cap <= 0:
-        return "", len(text)
-    if len(text) <= cap:
-        return text, 0
-    return text[:cap], len(text) - cap
-
-
 def safe_label(sid: str, width: int = 8) -> str:
     """A short, PRINTABLE handle for a session id.
 
     Every id this module renders goes through here. `session_trailer.valid_id`
     is the safety gate — an id it refuses renders as `<unsafe-id>` rather than
-    reaching a terminal, because the brief is printed to a tty and an escape
-    sequence in a commit body is a real observed hazard (`handoff_arc`'s own
-    comment records `\\x1b[2J\\x1b]0;PWNED\\x07` reaching terminals raw from
-    commit bodies in four repos).
+    reaching a terminal, because the brief is printed to a tty and
+    `handoff_arc`'s own comment records `\\x1b[2J\\x1b]0;PWNED\\x07` reaching
+    terminals raw out of commit bodies in four repos.
 
     The truncation is COSMETIC and carries no shape claim: ids from other
     runtimes are not uuids and a short prefix is still a usable label.
@@ -217,114 +184,77 @@ def safe_label(sid: str, width: int = 8) -> str:
     return sid[:width]
 
 
-def is_bot(login: str) -> bool:
-    """Is this comment author a known bot?
+def is_owner(association: str) -> bool:
+    """Is this comment author the repo's own side rather than a bot or drive-by?
 
-    Case-folded because GitHub logins are case-insensitive and the ledger
-    prints what it skipped. An UNKNOWN login is NOT a bot: over-including one
-    ask is recoverable, dropping the operator's own ask is the failure this
-    module exists to prevent.
+    Case-folded because the API's spelling is not something to depend on. An
+    UNRECOGNISED value is NOT an owner — the opposite direction from the old bot
+    list, and deliberately: here the failure is *including a bot's words as the
+    operator's ask*, which manufactures an author of record, and that is worse
+    than missing one comment the operator can restate.
     """
-    return (login or "").strip().lower() in KNOWN_BOT_LOGINS
+    return (association or "").strip().upper() in OWNER_ASSOCIATIONS
 
 
 def asks_from_comments(comments: Sequence[dict]) -> tuple[list[Ask], int]:
-    """-> (operator asks, bots_skipped). `comments` is `gh pr view --json comments`."""
+    """-> (operator asks, non_owner_skipped). `comments` is `gh pr view --json comments`."""
     out: list[Ask] = []
     skipped = 0
     for c in comments or []:
         if not isinstance(c, dict):
             continue
-        login = ((c.get("author") or {}) or {}).get("login") or ""
         body = (c.get("body") or "").strip()
         if not body:
             continue
-        if is_bot(login):
+        if not is_owner(c.get("authorAssociation")):
             skipped += 1
             continue
+        login = ((c.get("author") or {}) or {}).get("login") or ""
         out.append(Ask(source=SOURCE_PR_COMMENT, text=body, who=login))
     return out, skipped
 
 
-#: Machine-generated content Claude Code injects as a user-ROLE record, keyed by
-#: the LEADING tag of the record. An ENUMERATION, derived by walking 981
-#: sessions rather than guessed — see the module docstring for the byte shares.
-#: An unlisted tag is treated as the OPERATOR, which is the safe direction here:
-#: over-including one record is recoverable, dropping the ask is the defect.
-INJECTED_LEADING_TAGS = (
-    "task-notification",    # a SUBAGENT's result — 38.9% of all user-role bytes
-    "command-message",      # a slash command expanding
-    "command-name",
-    "local-command-stdout",
-    "local-command-caveat",
-    "system-reminder",
-)
+#: The two `kind`s of `extract_user_msgs.py` row that are the operator speaking.
+#: `answer` needs `--include-answers` and is 71% again on top of `typed` — see
+#: that script's own docstring for the measurement. `command` is excluded: a bare
+#: `/slash` (8 B) is an invocation, not an ask.
+OPERATOR_KINDS = ("typed", "answer")
 
-#: The literal header Claude Code writes above an invoked skill's body. THE
-#: HARDEST CLASS TO SPOT: a skill body carries no wrapping tag, so it reads as
-#: prose until you notice it is 25 KB of `<topic>`/`<repo>` placeholders. 59.5%
-#: of all user-role bytes. Matched on this HEADER and never on size, because a
-#: long ask must survive.
-SKILL_BODY_HEADER = "Base directory for this skill:"
+#: The only machine-generated class that reaches this module. Everything else is
+#: removed upstream — see the module docstring for the eight families that were
+#: deleted for firing zero times, and why.
+TASK_NOTIFICATION_TAG = "<task-notification>"
 
-#: A blocking hook's message, replayed to the model as a user record.
-HOOK_FEEDBACK_MARKERS = ("Stop hook feedback:", "PostToolUse:", "PreToolUse:")
+#: A harness-authored note with no wrapping tag and no header. 13 records / 998 B
+#: on this host — kept because it DID fire, and because a subagent-stopped notice
+#: reads exactly like the operator speaking.
+HARNESS_NOTE_PATTERNS = ("was stopped by the user.",)
 
-#: Harness-authored notes that sit in a user-role record with no wrapping tag
-#: and no header. Found by the LIVE run, not by any fixture — which is the
-#: argument for keeping this an open enumeration rather than claiming it closed.
-#: `PREFIXES` is anchored at the start; `CONTAINS` is not, because the agent
-#: name in the middle varies.
-INTERRUPT_PREFIX = "[Request interrupted"
-HARNESS_NOTE_PATTERNS = (
-    'was stopped by the user.',      # "Background agent \"...\" was stopped by the user."
-    'Caveat: The messages below were generated',
-)
-
-#: How far into a record the non-tag markers are looked for. Bounded so a record
-#: that merely QUOTES one of these strings further down — an ask ABOUT a hook, or
-#: about this very module — is not misclassified as machine output.
+#: How far in the note markers are looked for, so an ask ABOUT one survives.
 _MARKER_WINDOW = 400
 
 
 def non_operator_reason(text: str) -> str:
-    """Why this user-role record is NOT the operator speaking, or "".
+    """Why this row is NOT the operator speaking, or "".
 
-    🔴 RETURNS A REASON, NOT A BOOLEAN, so the ledger can say WHAT it dropped
-    and how much. A count of "records skipped" with no reason is the kind of
-    silent filter that hides a classifier bug for weeks.
+    🔴 RETURNS A REASON, NOT A BOOLEAN, so the ledger can name WHAT it dropped
+    and how much. This filter decides 98.39% of the bytes; a silent one would
+    hide a classifier bug indefinitely.
     """
     t = (text or "").lstrip()
     if not t:
         return "empty"
-    for tag in INJECTED_LEADING_TAGS:
-        if t.startswith(f"<{tag}>"):
-            return f"<{tag}> — machine-generated, not typed by the operator"
+    if t.startswith(TASK_NOTIFICATION_TAG):
+        return f"{TASK_NOTIFICATION_TAG} — a subagent's result, not the operator"
     head = t[:_MARKER_WINDOW]
-    if SKILL_BODY_HEADER in head:
-        return "an injected SKILL BODY — instructions the harness delivered"
-    for m in HOOK_FEEDBACK_MARKERS:
-        if m in head:
-            return f"hook feedback ({m.rstrip(':')}) — a guard speaking, not the operator"
-    if t.startswith(INTERRUPT_PREFIX):
-        return "an interrupt marker written by the harness"
     for m in HARNESS_NOTE_PATTERNS:
         if m in head:
             return "a harness-authored note, not typed by the operator"
     return ""
 
 
-def parse_typed_rows(jsonl_text: str) -> tuple[list[Ask], dict]:
-    """-> (operator asks, {reason: count}) from `extract_user_msgs.py --jsonl`.
-
-    🔴 `kind == "typed"` IS NOT THE OPERATOR — it is "this was a user-role
-    record", and 99.16% of those bytes on this host are subagent results and
-    injected skill bodies. So the row kind is a necessary filter and nowhere
-    near a sufficient one; `non_operator_reason` is the rest of it.
-
-    The `command` kind is dropped too — a bare `/slash` (measured at 8 B) is an
-    invocation, not an ask.
-    """
+def parse_rows(jsonl_text: str) -> tuple[list[Ask], dict]:
+    """-> (operator asks, {reason: count}) from `extract_user_msgs.py --jsonl`."""
     out: list[Ask] = []
     dropped: dict[str, int] = {}
     for line in (jsonl_text or "").splitlines():
@@ -334,15 +264,14 @@ def parse_typed_rows(jsonl_text: str) -> tuple[list[Ask], dict]:
         try:
             row = json.loads(line)
         except ValueError:
-            # A single unparseable line is not a reason to lose the rest. It is
-            # not silently dropped either: it is counted as a drop REASON, so a
-            # corrupt stream shows up in the ledger instead of as a short block.
+            # Not silently lost: counted as a drop REASON, so a corrupt stream
+            # shows in the ledger rather than as a short block.
             dropped["an unparseable --jsonl line"] = (
                 dropped.get("an unparseable --jsonl line", 0) + 1)
             continue
         if not isinstance(row, dict):
             continue
-        if row.get("kind") != "typed":
+        if row.get("kind") not in OPERATOR_KINDS:
             continue
         text = (row.get("text") or "").strip()
         reason = non_operator_reason(text)
@@ -355,17 +284,15 @@ def parse_typed_rows(jsonl_text: str) -> tuple[list[Ask], dict]:
             text=text,
             session_id=row.get("session_id") or "",
             role=row.get("arc_role") or "",
+            kind=row.get("kind") or "",
         ))
     return out, dropped
 
 
-# `extract_user_msgs.py`'s own exit vocabulary, so a non-zero becomes a REASON a
-# human can act on instead of "the command failed". Imported as prose rather
-# than by `from … import` because that script is not an importable module path
-# (a hyphenated directory sibling), and a second copy of the NUMBERS would be a
-# ledger to keep in step — so the numbers live here once, keyed to the reason
-# strings that script prints, and `test_the_extractor_exit_vocabulary_is_pinned`
-# reads them back OUT of the script's own `--help`.
+#: `extract_user_msgs.py`'s own exit vocabulary, so a non-zero becomes a REASON
+#: rather than "the command failed". The numbers live here once and
+#: `test_the_extractor_exit_vocabulary_is_pinned_to_what_the_script_documents`
+#: reads them back OUT of that script's `--help`, two-way.
 EXTRACTOR_REASONS = {
     2: "bad invocation of the extractor, or its output could not be written",
     3: "the arc seed named no handoff doc, or no checkout holds it (NOTHING MEASURED)",
@@ -388,21 +315,16 @@ def transcript_paths(ids: Sequence[str], projects_root=None) -> list[str]:
     """Every on-disk transcript for these session ids, for the agent-side route.
 
     Globbed rather than constructed: a session's project directory is derived
-    from its cwd and this module has no business re-deriving that mangling. A
-    session with no file on THIS host simply contributes nothing, which
-    `agent_side_reference` reports as a count rather than implying the session
-    does not exist.
+    from its cwd and this module has no business re-deriving that mangling.
 
-    🔴 TWO SEPARATE GUARDS, because they cover different characters and
-    `handoff_arc`'s own comment is explicit that a copy of one is not the other.
+    🔴 TWO SEPARATE GUARDS, covering different characters.
     `session_trailer.valid_id` is the WRITER'S OWN safety predicate — it rejects
     every C0 control, which is what could reach a terminal raw — and it is
-    called, never re-spelled. It does **not** reject glob metacharacters, which
-    are not controls, so `glob.escape` covers the second hazard: an id holding
-    `*` or `[` would otherwise match transcripts belonging to other sessions and
-    the brief would attribute their asks to this PR. Neither guard inspects the
-    id's SHAPE — a `ses_…` token from another runtime is a legitimate value and
-    an opaque one.
+    called, never re-spelled. It does NOT reject glob metacharacters, which are
+    not controls, so `glob.escape` covers the second hazard: an id holding `*` or
+    `[` would otherwise match transcripts belonging to OTHER sessions and the
+    brief would attribute their asks to this PR. Neither inspects the id's
+    SHAPE — a `ses_…` token from another runtime is legitimate and opaque.
     """
     root = Path(projects_root) if projects_root else Path.home() / ".claude" / "projects"
     out: list[str] = []
@@ -415,12 +337,11 @@ def transcript_paths(ids: Sequence[str], projects_root=None) -> list[str]:
 
 
 def agent_side_reference(ids: Sequence[str], projects_root=None) -> list[str]:
-    """The block saying this carries the operator ONLY, and how to get the rest.
+    """Says this carries the operator ONLY, and how to reach the rest.
 
-    Requested explicitly by the operator: user messages only, with a reference
-    for pulling the agent side "if needed". It is a REFERENCE and not an
-    inlined extraction because agent output is the bulk of a transcript and
-    round 0 is about what was ASKED, not what was answered.
+    Requested explicitly by the operator — *"dont include agent responses, but
+    include a reference on how to pull the agent responses if needed"* — so both
+    halves of that sentence are implemented here, and neither is invented.
     """
     lines = [
         "**This block is the operator's own words ONLY — no agent or tool "
@@ -445,13 +366,10 @@ def agent_side_reference(ids: Sequence[str], projects_root=None) -> list[str]:
     return lines
 
 
-def _render_asks(asks: Sequence[Ask], cap: int, ceiling: int) -> tuple[list[str], dict]:
-    """The verbatim ask bodies, grouped by source then session. -> (lines, ledger)."""
+def _render_asks(asks: Sequence[Ask]) -> tuple[list[str], dict]:
+    """The verbatim ask bodies, grouped by source then session."""
     lines: list[str] = []
-    led = {"messages": 0, "clipped": 0, "withheld": 0, "inlined": 0,
-           "dropped_to_ceiling": 0}
-    spent = 0
-    ceiling_hit = False
+    led = {"messages": 0, "bytes": 0, "answers": 0}
 
     by_source: dict[str, list[Ask]] = {}
     for a in asks:
@@ -462,19 +380,6 @@ def _render_asks(asks: Sequence[Ask], cap: int, ceiling: int) -> tuple[list[str]
         if not group:
             continue
         lines += ["", f"### from the {source}"]
-        if source == SOURCE_PR_BODY:
-            # 🔴 SAY WHOSE WORDS THESE ARE. A PR description in this repo is
-            # usually written BY THE AGENT about the work, so filing it under a
-            # heading that says "the operator's own asks" would manufacture an
-            # author of record. It is read because it is the ONLY source on a PR
-            # whose commits carry no trailer — measured, 25 of the 60 newest
-            # `main` commits — not because it is authoritative.
-            lines += [
-                "⚠ A PR description here is usually written **by the agent** "
-                "about the work, not typed by the operator. Treat it as "
-                "context, and do NOT record it as `Zach (quote the ask)` unless "
-                "the wording is plainly his.",
-            ]
         last_key = None
         for a in group:
             key = (a.session_id, a.who)
@@ -483,40 +388,29 @@ def _render_asks(asks: Sequence[Ask], cap: int, ceiling: int) -> tuple[list[str]
                 role = f" ({a.role})" if a.role else ""
                 lines += ["", f"**{label}{role}**"]
                 last_key = key
-            if ceiling_hit:
-                led["dropped_to_ceiling"] += 1
-                continue
-            kept, withheld = clip(a.text, cap)
-            if spent + len(kept) > ceiling:
-                ceiling_hit = True
-                led["dropped_to_ceiling"] += 1
-                continue
-            spent += len(kept)
             led["messages"] += 1
-            led["inlined"] += len(kept)
-            if withheld:
-                led["clipped"] += 1
-                led["withheld"] += withheld
-            for ln in kept.splitlines() or [""]:
+            led["bytes"] += len(a.text)
+            if a.kind == "answer":
+                led["answers"] += 1
+                # Labelled because it is a DECISION rather than a free-text
+                # ask: the operator picked an option, sometimes with a note.
+                lines.append("_(an answer to a question this session asked)_")
+            for ln in a.text.splitlines() or [""]:
                 lines.append(f"> {ln}")
-            if withheld:
-                lines.append(CLIP_MARK.format(withheld=withheld, full=a.full_len))
             lines.append("")
     return lines, led
 
 
 def render(asks: Sequence[Ask], unmeasured: Sequence[Unmeasured] = (),
-           session_ids: Sequence[str] = (), bots_skipped: int = 0,
-           dropped: dict | None = None,
-           cap: int = PER_MESSAGE_CAP, ceiling: int = BLOCK_CEILING,
-           projects_root=None) -> str:
+           session_ids: Sequence[str] = (), non_owner_skipped: int = 0,
+           dropped: dict | None = None, projects_root=None) -> str:
     """The round-0 asks block. NEVER returns a quiet empty block.
 
-    🔴 There is no path through this function that renders nothing. With no
-    asks AND no unmeasured sources — which means the caller consulted no source
-    at all — it says exactly that, because "we looked nowhere" and "the
-    operator asked for nothing" are different facts and only one of them
-    licenses a deletion candidate.
+    🔴 No path through this function renders nothing. With no asks AND no
+    unmeasured sources — meaning the caller consulted no source at all — it says
+    exactly that, because "we looked nowhere" and "the operator asked for
+    nothing" are different facts and only one of them licenses a deletion
+    candidate.
     """
     lines = [HEADING, ""]
 
@@ -535,7 +429,7 @@ def render(asks: Sequence[Ask], unmeasured: Sequence[Unmeasured] = (),
             "listed below with the reason it did not answer.",
         ]
 
-    body, led = _render_asks(asks, cap, ceiling)
+    body, led = _render_asks(asks)
     lines += body
 
     lines += ["", "**Sources read:**"]
@@ -546,16 +440,15 @@ def render(asks: Sequence[Ask], unmeasured: Sequence[Unmeasured] = (),
             + ", ".join(safe_label(s) for s in session_ids)
         )
     for reason, n in sorted((dropped or {}).items(), key=lambda kv: -kv[1]):
-        # 🔴 REASONS, NOT A BARE COUNT. 99.16% of user-role bytes on this host
-        # are machine-generated, so this filter does nearly all the work and a
-        # silent one would hide a classifier bug indefinitely. A reader can see
-        # here whether the thing that was dropped SHOULD have been.
+        # 🔴 REASONS, NOT A BARE COUNT. This filter decides 98.39% of the bytes,
+        # so a reader must be able to see whether what it dropped SHOULD have
+        # been dropped.
         lines.append(f"  {SOURCE_SESSION}: dropped {n} record(s) — {reason}")
-    if bots_skipped:
+    if non_owner_skipped:
         lines.append(
-            f"  {SOURCE_PR_COMMENT}: {bots_skipped} bot comment(s) skipped "
-            "(an enumerated login list; an UNKNOWN author is kept as the "
-            "operator, never dropped)"
+            f"  {SOURCE_PR_COMMENT}: {non_owner_skipped} comment(s) from a "
+            "non-owner author skipped (bots and drive-by comments are not the "
+            "operator; an UNRECOGNISED association is treated as non-owner)"
         )
     for u in unmeasured:
         lines.append(f"  ! {u.source}: UNKNOWN — {u.reason}")
@@ -565,36 +458,25 @@ def render(asks: Sequence[Ask], unmeasured: Sequence[Unmeasured] = (),
             "assembly, not about the operator."
         )
 
+    answers = f" · of which answers to a question: {led['answers']}" if led["answers"] else ""
     lines += [
         "",
-        f"**Ledger:** operator asks: {led['messages']} inlined "
-        f"({led['inlined']:,} B) · clipped: {led['clipped']} "
-        f"({led['withheld']:,} B withheld) · dropped to the block ceiling: "
-        f"{led['dropped_to_ceiling']}",
+        f"**Ledger:** operator asks: {led['messages']} ({led['bytes']:,} B)"
+        f"{answers}",
     ]
-    if led["clipped"] or led["dropped_to_ceiling"]:
-        lines.append(
-            "  Clipping keeps each message's HEAD, which is where the "
-            "instruction is; the tail is usually pasted output. Withheld text "
-            "is NOT absent ask — pull the full set with:"
+    if session_ids:
+        # Always printed, not only on a truncation: the auditor may want the
+        # operator's words from a session the trailers named even when this
+        # block already inlined them, and there is no clipping any more.
+        cmd = " ".join(
+            f"--session {shlex.quote(s)}"
+            for s in session_ids if session_trailer.valid_id(s)
         )
-        if session_ids:
-            # 🔴 QUOTED AT THE RENDER POINT. `handoff_arc`'s own comment says
-            # the hazard lives here and not in the safety filter: this string is
-            # printed for a human to paste into a shell, so the id is quoted
-            # rather than interpolated bare. Safety-filtered too — an id that
-            # `valid_id` refuses is dropped from the command instead of being
-            # quoted into it, because quoting does not neutralise an escape
-            # sequence written to a tty.
-            cmd = " ".join(
-                f"--session {shlex.quote(s)}"
-                for s in session_ids if session_trailer.valid_id(s)
+        if cmd:
+            lines.append(
+                "  Re-read them yourself: python3 $DEVRC/scripts/"
+                f"session-analysis/extract_user_msgs.py --include-answers {cmd}"
             )
-            if cmd:
-                lines.append(
-                    "  python3 $DEVRC/scripts/session-analysis/"
-                    f"extract_user_msgs.py {cmd}"
-                )
 
     if unmeasured or not asks:
         lines += ["", UNKNOWN_DIRECTIVE]

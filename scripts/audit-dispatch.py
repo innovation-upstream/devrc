@@ -1939,15 +1939,17 @@ def gh_pr_facts(runner, pr, repo=None):
     against `gh`'s own field list) — `url` is what carries the base repo, and
     `pr_slug` reads it.
     """
-    # `body` and each comment's `author` are read for ROUND 0's attribution
-    # input only (`operator_asks`): the PR description and the operator's own
-    # comments are where an ask lands when no commit carries a session trailer,
-    # which is 25 of the 60 newest `main` commits. `author` is what separates the
-    # operator's comment from a bot's — without it every bot comment would be
-    # attributed to the operator as a requirement they never stated.
+    # `commits` and each comment's `authorAssociation` are read for ROUND 0's
+    # attribution input (`operator_asks`): `commits` carries the
+    # `Claude-Session-Id:` trailers that resolve THIS PR's sessions, and the
+    # association is what separates the operator's own comment from a bot's.
+    # 🔴 `body` is deliberately NOT read — the PR DESCRIPTION was dropped as a
+    # source (operator's call, 2026-09-26): measured over the 60 newest merged
+    # devrc PRs, 1 body names an ask and 4 carry any blockquote, so it
+    # contributed agent prose under a heading saying it was the operator's.
     cmd = ["gh", "pr", "view", str(pr), "--json",
            "title,url,baseRefName,headRefOid,isCrossRepository,"
-           "headRepository,headRepositoryOwner,comments,body,commits"]
+           "headRepository,headRepositoryOwner,comments,commits"]
     if repo:
         cmd += ["--repo", repo]
     rc, out, err = runner(cmd)
@@ -5500,18 +5502,15 @@ def _read_operator_asks(runner, repo_dir, data, extractor=None):
     asks = []
     dropped: dict = {}
 
-    # (1) the PR's own text. Already fetched, so it costs nothing and it is the
-    # source that answers when no commit carries a trailer.
-    body = (data.get("body") or "").strip()
-    if body:
-        asks.append(operator_asks.Ask(
-            source=operator_asks.SOURCE_PR_BODY, text=body))
+    # (1) the operator's own PR comments. Already fetched, so they cost nothing,
+    # and they are the source that answers when no commit carries a trailer —
+    # measured 115 comments across the 120 newest devrc PRs.
     raw_comments = data.get("comments")
     if isinstance(raw_comments, list):
-        got, bots = operator_asks.asks_from_comments(raw_comments)
+        got, non_owner = operator_asks.asks_from_comments(raw_comments)
         asks += got
     else:
-        bots = 0
+        non_owner = 0
         unmeasured.append(operator_asks.Unmeasured(
             operator_asks.SOURCE_PR_COMMENT,
             "`gh` returned no comments array for this PR"))
@@ -5554,7 +5553,16 @@ def _read_operator_asks(runner, repo_dir, data, extractor=None):
                 "anything"))
 
     if ids:
-        cmd = ["python3", str(extractor or EXTRACTOR), "--jsonl"]
+        # 🔴 `--include-answers` IS LOAD-BEARING HERE. The operator's replies to
+        # a question this session asked arrive in a `tool_result` block, which
+        # the extractor's default path ignores — so without this flag the
+        # requirements statement that AUTHORISES a design decision is invisible
+        # to the very block meant to surface it. That happened on devrc#1887:
+        # the block missed 612 B stating the operator's requirements, including
+        # both answers deciding its own open forks, and round 0 caught it.
+        # Measured: 1,491 such records / 837,635 B on this host.
+        cmd = ["python3", str(extractor or EXTRACTOR), "--jsonl",
+               "--include-answers"]
         for sid in ids:
             cmd += ["--session", sid]
         rc, out, err = runner(cmd)
@@ -5563,7 +5571,7 @@ def _read_operator_asks(runner, repo_dir, data, extractor=None):
                 operator_asks.SOURCE_SESSION,
                 operator_asks.extractor_reason(rc, err)))
         else:
-            got, dropped = operator_asks.parse_typed_rows(out)
+            got, dropped = operator_asks.parse_rows(out)
             if not got:
                 # 🔴 THE REASON MATTERS AND IT IS NOT ALWAYS THE SAME. With
                 # drops, the transcripts held only machine-generated records
@@ -5583,8 +5591,8 @@ def _read_operator_asks(runner, repo_dir, data, extractor=None):
             asks += got
 
     return operator_asks.render(
-        asks, unmeasured=unmeasured, session_ids=ids, bots_skipped=bots,
-        dropped=dropped)
+        asks, unmeasured=unmeasured, session_ids=ids,
+        non_owner_skipped=non_owner, dropped=dropped)
 
 
 def build_parser():
