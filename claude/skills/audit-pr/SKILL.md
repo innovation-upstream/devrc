@@ -222,6 +222,37 @@ Ask the re-auditor to:
 round 1: Y) · elapsed: Z`. X is what the gate below reads; without it the flattening shows only in
 hindsight — on #498 the plateau was diagnosed six rounds late.
 
+### 🔴 THE LADDER'S BOOKKEEPING IS A SEPARATE FAILURE SURFACE FROM THE AUDIT
+
+Two ways a round's work is lost or mis-aimed before the next auditor ever reads a line of code.
+
+**(a) A REBASE ORPHANS THE SHA THE PREVIOUS ROUND READ, and the next round's range is written in
+terms of it.** A round audits up to tip `A`; pushing that round's fix rebases the branch, so `A` is
+now a dangling object and its branch identity is some `A'`. `audit-dispatch.py --emit-claims` stamps
+whatever `<to>` the last block carried — i.e. the ORPHANED `A` — as the next round's `<from>`, giving
+a range that resolves only from the loose objects on one machine and **not at all** in the auditor's
+fresh worktree. The tell is that every commit on the branch carries an identical committer date.
+**After any rebase, pass `--audited <A'>` explicitly**, and prove `A'` is `A` before you assert it:
+`git log -1 --format='%ci %s'` on both, then `git diff A A'` — expect only commits the rebase pulled
+in from the base branch. Say in the comment which sha you re-anchored and why, or the next reader
+cannot tell a correction from a typo.
+
+**(b) A ROUND'S FINDINGS CAN END UP LIVING ONLY IN A SESSION TRANSCRIPT.** A round that runs late in a
+session, is applied, and is then handed to the next session via a handoff has *no durable copy of what
+it found* — the handoff records that the round happened, not what it said. Recovering one cost a hunt
+through `~/.claude/projects/**.jsonl` for the subagent's `<task-notification>` payload, and that only
+worked because the transcript had not been rotated. **Post the claims block in the SAME session the
+round runs**, not in the one that dispatches the next round: it is the only durable copy, it is what
+the next brief is assembled from, and writing it is how you find out the round's own dispositions were
+vaguer than you remembered.
+
+⚠ Two mechanical notes that cost a round each. `gh issue comment <pr>` and `gh pr comment <pr>` both
+post the ISSUE comment the script reads — a PR **review** comment is invisible to it, and that is the
+distinction that matters, not which verb you type. And validate a block **before** posting:
+`audit-dispatch.py <pr> --round N --claims-file <draft.md> --out /dev/null` parses it without
+consulting `gh`, so a malformed fence is caught locally; re-run WITHOUT `--claims-file` afterwards to
+confirm the posted copy is what the brief actually reads.
+
 ### 🔴 THE FIX ROUND'S OWN PROSE IS THE LIKELIEST NEXT FINDING — a false claim replaced by a differently false one
 
 The delta bullet above says to hunt regressions the fix round introduced. **The one it actually
