@@ -275,8 +275,8 @@ MANAGED_SHELL_HOOK_SCRIPTS = frozenset({
 })
 
 HOOK_LIBRARY_MODULES = frozenset({"agent_ledger.py", "bg_command_capture.py",
-                                  "guard_core.py", "hook_telemetry.py",
-                                  "session_trailer.py"})
+                                  "clawgate_tasks.py", "guard_core.py",
+                                  "hook_telemetry.py", "session_trailer.py"})
 
 REGISTRAR_SCRIPT = "register-nudge-hook.py"
 

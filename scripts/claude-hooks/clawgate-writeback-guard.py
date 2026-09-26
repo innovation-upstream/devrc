@@ -31,9 +31,11 @@ so after the rename `tracked_ids` would stay empty and Stop would return before
 reaching any verdict — not a block, not a notice, NOTHING, which is also exactly what
 a correctly-written-back session looks like. Both spellings therefore land BEFORE the
 rename, from one tuple (`TASK_CLI_NAMES`) that also drives which clients the live read
-tries. The live read additionally honours `CLAWGATE_TASKS_API_URL` from the SAME
+tries. The live read additionally honours `CLAWGATE_TASK_API_URL` from the SAME
 `~/.claude/clawgate.env`; `CLAWGATE_API_URL` is NOT repointed, because
-`clawgate-hook.sh` reads it for `/api/send` — permission routing, which stays.
+`clawgate-hook.sh` reads it for `/api/send` — permission routing, which stays. That
+name is NOT spelled in this file: `scripts/lib/clawgate_tasks.TASK_API_URL_VARS` owns
+the ordered ledger and this hook reads it from there — see `task_api_url_vars`.
 
 WHAT FIRES IT — THREE CONDITIONS, ALL REQUIRED
 -----------------------------------------------
@@ -608,10 +610,88 @@ CLAWGATE_ENV = "~/.claude/clawgate.env"
 #
 # Unset -> this list falls through to `CLAWGATE_API_URL` and everything behaves exactly
 # as it did, which is what makes the change safe to land before muster exists.
-TASK_API_URL_VARS = ("CLAWGATE_TASKS_API_URL", "CLAWGATE_API_URL")
+#
+# 🔴 THE LEDGER IS NOT SPELLED HERE ANY MORE, AND THAT IS THE WHOLE FIX. This file
+# open-coded its own tuple naming a variable NOTHING SETS — a plural `…_TASKS_…`
+# spelling that only ever existed in the extraction PLAN, while the CLI, the server's
+# generated agent env file and the operator's own `~/.claude/clawgate.env` all settled
+# on the singular one. The two spellings never had to agree, so they did not, and the
+# failure was INVISIBLE: an unset name falls through to `CLAWGATE_API_URL`, the router
+# answers `/api/tasks/<id>` with a right-looking 200, and the guard reports verdicts
+# read off the wrong service. One rule, one place — `scripts/lib/clawgate_tasks.py`
+# owns the ordered ledger and every consumer takes it from there.
+def _load_clawgate_tasks():
+    """`scripts/lib/clawgate_tasks.py`, loaded by EXPLICIT PATH (the same idiom as
+    `scripts/bar-status-poll`'s `_load_clawgate_tasks`) — never via `sys.path`, so
+    nothing else under `scripts/lib/` can shadow a name this hook relies on.
+
+    🔴 THREE CANDIDATE PATHS, BECAUSE THIS FILE HAS TWO CARRIERS. Deployed, it is a
+    lone nix-store copy at `~/.claude/hooks/`, where `scripts/lib/` is unreachable
+    through `__file__` — so `nix/home.nix` lands the SAME source file beside it and
+    the sibling is tried FIRST (the arrangement `agent-ledger-hook.py` and
+    `bg-command-capture.py` already have). In the checkout it resolves through
+    `../lib/`. `$DEVRC_DIR` is the last resort for a copy invoked from neither.
+
+    Raises rather than falling back to a tuple of its own: a private second spelling
+    is exactly the bug this indirection removes, and a fallback would reintroduce it
+    at the one moment nobody is looking.
+    """
+    import importlib.machinery
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    devrc = os.environ.get("DEVRC_DIR") or os.path.expanduser("~/workspace/devrc")
+    for path in (os.path.join(here, "clawgate_tasks.py"),
+                 os.path.join(here, os.pardir, "lib", "clawgate_tasks.py"),
+                 os.path.join(devrc, "scripts", "lib", "clawgate_tasks.py")):
+        if os.path.exists(path):
+            loader = importlib.machinery.SourceFileLoader("_wb_clawgate_tasks", path)
+            spec = importlib.util.spec_from_file_location("_wb_clawgate_tasks", path,
+                                                          loader=loader)
+            mod = importlib.util.module_from_spec(spec)
+            loader.exec_module(mod)
+            return mod
+    raise ImportError(
+        "scripts/lib/clawgate_tasks.py not found (tried this hook's own directory, "
+        "../lib/ and $DEVRC_DIR/scripts/lib/)")
+
+
+#: Memo for the module above. 🔴 LOADED ON FIRST USE, NOT AT IMPORT, and that is a
+#: cost claim with a measurement behind it: this hook runs after EVERY tool call, its
+#: deployed copy lives on a READ-ONLY nix-store path where `__pycache__` can never be
+#: written, and so a top-level import would recompile the shared module from source on
+#: every single call. Every reader of the ledger below is on the Stop path, so the
+#: PostToolUse fast path pays exactly nothing — the same trade as `_sp`/`_sh`.
+_clawgate_tasks = None
+
+
+def _cg():
+    """The shared module, imported on first use — see `_load_clawgate_tasks`."""
+    global _clawgate_tasks
+    if _clawgate_tasks is None:
+        _clawgate_tasks = _load_clawgate_tasks()
+    return _clawgate_tasks
+
+
+def task_api_url_vars():
+    """The ordered task-base ledger, from the ONE module that defines it.
+
+    A tuple copy, so a caller cannot mutate the shared module's own constant.
+    """
+    return tuple(_cg().TASK_API_URL_VARS)
+
+
 # Same shape for the bearer token: muster may reuse clawgate's hook token or mint its
 # own (unsettled in the extraction plan), so BOTH are supported and the specific one
 # wins. Nothing here ever prints a token.
+#
+# ⚠ NOT CHANGED BY THE URL FIX ABOVE, AND THE DIFFERENCE IS WORTH STATING. The
+# task-specific TOKEN name is also set by nothing today — the CLI's ledger is
+# `envToken = "CLAWGATE_HOOK_TOKEN"` and there is no task-side token anywhere. But its
+# fallback lands on a key that IS set, so this tuple resolves correctly and the entry
+# is dead-but-harmless forward compatibility, not a misroute. The URL entry was
+# different in kind: its fallback resolved to a DIFFERENT SERVICE that answers the
+# same routes. Left alone deliberately rather than swept up — if the extraction
+# settles on one token, this is the place that already models it.
 TASK_TOKEN_VARS = ("CLAWGATE_TASKS_HOOK_TOKEN", "CLAWGATE_HOOK_TOKEN")
 # The one path the curl fallback fetches. Only ONE spelling is possible here — a
 # fallback has to pick — and this is the one the extraction plan's evidence says
@@ -1318,10 +1398,11 @@ def task_endpoint(task_id, env_path=CLAWGATE_ENV):
     Never includes a token. `env_path` is reported UNEXPANDED (the default is the
     tilde form) so the notice does not splice $HOME into text the model may quote on.
     """
-    url, var = _first_set(_env_file(env_path), TASK_API_URL_VARS)
+    names = task_api_url_vars()
+    url, var = _first_set(_env_file(env_path), names)
     if not url:
         return ("unresolved: %s names none of %s"
-                % (env_path, " / ".join(TASK_API_URL_VARS)))
+                % (env_path, " / ".join(names)))
     return "%s%s (from %s in %s)" % (url.rstrip("/"),
                                      TASK_API_PATH_FMT % int(task_id), var, env_path)
 
@@ -1329,7 +1410,8 @@ def task_endpoint(task_id, env_path=CLAWGATE_ENV):
 def _via_cli(binary, task_id, timeout, api_url=None):
     """One task read through one CLI binary — `clawgatectl` or `muster`.
 
-    🔴 `--api-url` is passed ONLY for `CLAWGATE_TASKS_API_URL`, never for
+    🔴 `--api-url` is passed ONLY for the task-specific key (the FIRST entry in the
+    shared `TASK_API_URL_VARS` ledger), never for the generic
     `CLAWGATE_API_URL`. Both CLIs already read `CLAWGATE_API_URL` out of the same env
     file themselves (clawgatectl's `config.go` precedence is file -> env -> flag), so
     passing it would be a second spelling of a default. The TASKS key is the one they
@@ -1369,14 +1451,15 @@ def _via_curl(task_id, timeout, env_path=CLAWGATE_ENV, why=None):
     """
     conf = _env_file(env_path)
     # 🔴 The TASKS-specific keys win, and `CLAWGATE_API_URL` is the FALLBACK, not the
-    # target. See TASK_API_URL_VARS for why repointing that key is forbidden.
-    url = _first_set(conf, TASK_API_URL_VARS)[0]
+    # target. See `task_api_url_vars` for why repointing that key is forbidden.
+    names = task_api_url_vars()
+    url = _first_set(conf, names)[0]
     token = _first_set(conf, TASK_TOKEN_VARS)[0]
     if not url or not token:
         raise LiveReadError(
             "%s has no API url/token for the task board (wanted one of %s plus one "
             "of %s) (first client: %s)"
-            % (os.path.expanduser(env_path), " / ".join(TASK_API_URL_VARS),
+            % (os.path.expanduser(env_path), " / ".join(names),
                " / ".join(TASK_TOKEN_VARS), why or "no task CLI was reached"))
     cfg = "".join([
         "silent\n", "fail\n",
@@ -1443,7 +1526,7 @@ def _read_task(task_id, timeout, env_path):
     # do not "close the gap", and do not count it as coverage.
     _sp()
     # Only the TASKS-specific override is handed to the CLI; see `_via_cli`.
-    api_url = _env_file(env_path).get(TASK_API_URL_VARS[0])
+    api_url = _env_file(env_path).get(task_api_url_vars()[0])
     # 🔴 EVERY client's failure is carried forward, not just the first. With one client
     # "first client: …" was the whole diagnosis; with two, reporting only one of them
     # points at the wrong subsystem — the exact shape that has cost this repo whole
@@ -1728,7 +1811,7 @@ def unknown_text(task_id, first_read_ts, error, session_id="", endpoint=None):
         "  %(dismiss)s"
         % {"id": int(task_id), "ts": first_read_ts, "err": _scrub(str(error), 160),
            "endpoint": endpoint or "unresolved (the reader failed before one was bound)",
-           "tasks_var": TASK_API_URL_VARS[0], "env": CLAWGATE_ENV,
+           "tasks_var": task_api_url_vars()[0], "env": CLAWGATE_ENV,
            "dismiss": dismiss_cmd(task_id, session_id)}
     )
 

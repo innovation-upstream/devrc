@@ -1890,6 +1890,21 @@ in
   home.file.".claude/hooks/clawgate-writeback-guard.py" = {
     source = ../scripts/claude-hooks/clawgate-writeback-guard.py;
   };
+  # 🔴 clawgate_tasks.py MUST land next to it, for exactly the reason session_trailer
+  # and agent_ledger do: a home-manager STORE COPY cannot reach scripts/lib/ through
+  # `__file__`, and Python puts the SCRIPT's own directory on sys.path. The hook takes
+  # the task-API base-URL ledger (`TASK_API_URL_VARS`) from this module instead of
+  # spelling it — it used to spell a variable name NOTHING SET, which resolved by
+  # fallback to the permission-router base and read verdicts off the wrong service,
+  # silently, because that service answers the same routes with a 200.
+  #
+  # The SAME source file `scripts/bar-status-poll` and `scripts/session-manager` load
+  # out of the checkout — one implementation, three carriers, never three copies of the
+  # ledger. Deploying the hook without this file is a green switch and a hook that
+  # reaches NO VERDICT (the #452 shape), so both must be `git add`ed.
+  home.file.".claude/hooks/clawgate_tasks.py" = {
+    source = ../scripts/lib/clawgate_tasks.py;
+  };
   # 🔴 THE HANDOFF WRITE GUARD — the write-back guard's counterpart on the OTHER
   # record. That one makes a clawgate pickup report back to the board; this one makes
   # a session that RESUMED a handoff doc write one before it stops.

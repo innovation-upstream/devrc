@@ -42,6 +42,7 @@ WHAT THIS FILE IS FOR
      `forces_a_continuation(<the emitted JSON>)`, whose rule is transcribed from the
      installed bundle (see the module docstring of the hook).
 """
+import ast
 import importlib.machinery
 import importlib.util
 import io
@@ -556,6 +557,31 @@ def test_the_positive_control_for_that_deferral(home):
     assert "subprocess" in mods
     assert "shutil" in mods
     assert not os.path.exists(stale)
+
+
+def test_the_fast_path_never_LOADS_the_shared_ledger_module(home):
+    """🔴 THE THIRD DEFERRAL, AND IT IS A COST CLAIM SO IT GETS A MEASUREMENT.
+
+    The task-base ledger now comes from `scripts/lib/clawgate_tasks.py` instead of
+    being spelled here, and that module is ~600 lines. The DEPLOYED copy of this hook
+    sits on a read-only nix-store path where `__pycache__` can never be written, so a
+    top-level import would recompile it from source on EVERY tool call — the exact
+    cost `_sp`/`_sh` were deferred to avoid. Every reader of the ledger is Stop-only.
+
+    `-X importtime` cannot see this one (an explicit `SourceFileLoader.exec_module`
+    bypasses the import hook it instruments), so the measurement is the hook's own
+    memo: still `None` means nothing loaded it. The positive control is the half that
+    stops this passing for a loader that is simply broken.
+    """
+    guard._clawgate_tasks = None
+    guard.post_tool_use(bash("ls -la"))
+    assert guard._clawgate_tasks is None, \
+        "the PostToolUse fast path loaded the shared module — it runs after every " \
+        "tool call and the deployed copy cannot cache the bytecode"
+    # POSITIVE CONTROL: the Stop-path reader really does load it, so the None above
+    # is the deferral working rather than a memo nothing ever fills.
+    assert guard.task_api_url_vars()
+    assert guard._clawgate_tasks is not None
 
 
 def test_a_read_records_the_first_timestamp_and_never_moves_it(home):
@@ -3628,12 +3654,98 @@ def test_the_cli_name_ledger_is_pinned_in_BOTH_directions():
 
     LITERALS, never `guard.TASK_CLI_NAMES` on both sides — an expectation read out of
     the module under test asserts only that the module agrees with itself.
+
+    🔴 THE URL LEDGER IS THE ONE THAT WAS WRONG, AND ITS SPELLING IS LOAD-BEARING.
+    It read `CLAWGATE_` + `TASKS_API_URL` — PLURAL — which is a name nothing anywhere
+    sets: the CLI's own ledger is `envTaskAPIURL = "CLAWGATE_TASK_API_URL"`, the
+    server writes the singular into every agent's env file, and so does the
+    operator's `~/.claude/clawgate.env`. The plural survived only in the extraction
+    PLAN. An unset first entry is not an error — it falls through to
+    `CLAWGATE_API_URL` — so the guard read the permission ROUTER's board, which
+    answers the same routes with a right-looking 200. This assertion is what made
+    that load-bearing: it pinned the wrong name, so fixing it failed the suite.
     """
     assert guard.TASK_CLI_NAMES == ("clawgatectl", "muster")
-    assert guard.TASK_API_URL_VARS == ("CLAWGATE_TASKS_API_URL", "CLAWGATE_API_URL")
+    assert guard.task_api_url_vars() == ("CLAWGATE_TASK_API_URL", "CLAWGATE_API_URL")
     assert guard.TASK_TOKEN_VARS == ("CLAWGATE_TASKS_HOOK_TOKEN",
                                      "CLAWGATE_HOOK_TOKEN")
     assert guard.TASK_API_PATH_FMT == "/api/tasks/%d"
+
+
+def _code_string_constants(path):
+    """Every string CONSTANT in a file that is not a docstring.
+
+    🔴 CODE, NOT PROSE. The same distinction `test_clawgate_predicate_single_source`
+    draws: a file that merely WRITES ABOUT a variable name has not re-spelled the
+    ledger, and a guard that cannot tell the two apart fails on every doc edit until
+    someone deletes it.
+    """
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    docstrings = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+            continue
+        body = getattr(node, "body", None) or []
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            docstrings.add(id(body[0].value))
+    return [n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and id(n) not in docstrings]
+
+
+def test_the_url_ledger_is_the_SHARED_one_and_this_hook_keeps_no_copy():
+    """🔴 THE SEAM, PINNED AS A RELATIONSHIP. The literal above says what the ledger
+    reads today; this says it is the SAME tuple the rest of the repo resolves
+    against, so the two cannot drift the way they already did once. It fails if
+    either side changes alone — in EITHER direction.
+
+    The second half is the structural one, and it is what a value check cannot do:
+    the hook must not carry a private spelling AT ALL. Pinning only the value is
+    walkable by re-adding a copy that happens to agree on the day it is written,
+    which is exactly how this started — the copy was correct when the extraction
+    plan was written and the implementation then chose a different name.
+    """
+    cg = _load("clawgate_tasks_shared_undertest",
+               str(ROOT / "scripts" / "lib" / "clawgate_tasks.py"))
+    assert guard.task_api_url_vars() == tuple(cg.TASK_API_URL_VARS)
+    offenders = [s for s in _code_string_constants(HOOK)
+                 if s in cg.TASK_API_URL_VARS]
+    assert offenders == [], (
+        "the hook re-spells %s in CODE — take the ledger from "
+        "scripts/lib/clawgate_tasks.TASK_API_URL_VARS instead, or the two drift "
+        "again" % (sorted(set(offenders)),))
+
+
+def test_the_positive_control_for_that_structural_half(tmp_path):
+    """🔴 Without this the assertion above is indistinguishable from an AST walk
+    wired to nothing — an empty offender list means "no copy" only once the detector
+    has been watched to find one. Both directions: a CODE constant is caught, the
+    same name in a DOCSTRING is not."""
+    cg = _load("clawgate_tasks_for_control",
+               str(ROOT / "scripts" / "lib" / "clawgate_tasks.py"))
+    name = cg.TASK_API_URL_VARS[0]
+    in_code = tmp_path / "copy.py"
+    in_code.write_text('VARS = ("%s", "CLAWGATE_API_URL")\n' % name)
+    assert name in _code_string_constants(in_code)
+    in_prose = tmp_path / "prose.py"
+    in_prose.write_text('"""Reads %s from the env file."""\nX = 1\n' % name)
+    assert name not in _code_string_constants(in_prose)
+
+
+def test_the_dead_PLURAL_spelling_is_gone_from_the_hook_and_its_suite():
+    """🔴 REMOVED, NOT KEPT ALONGSIDE. The plural is set by nothing — not this repo,
+    not the CLI, not the server, not the operator's env file — so leaving it in the
+    ledger would advertise a precedence rule no configuration can exercise, and would
+    silently re-arm the same wrong-service fallback for anyone who believed the ledger
+    and set it. A ledger that reads wider than it is is worse than a short one: it
+    stops the next reader looking.
+    """
+    dead = "CLAWGATE_" + "TASKS_API_URL"   # assembled, so this pin is not its own hit
+    for path in (Path(HOOK), Path(__file__)):
+        assert dead not in path.read_text(encoding="utf-8"), path
 
 
 def test_the_SEAM_every_cli_name_both_arms_the_trigger_and_is_tried_as_a_client(
@@ -3764,8 +3876,116 @@ def _envfile(tmp_path, name, **pairs):
     return f
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE REGRESSION: the guard read a variable name NOTHING SETS
+#
+# Measured RED at origin/main (bf28baa9) and green at HEAD. At base the hook's own
+# ledger spelled the task key PLURAL; an unset first entry is not an error, it falls
+# through to `CLAWGATE_API_URL`, so the live re-read went to the permission ROUTER —
+# which still answers `/api/tasks/<id>` with a right-looking 200. Wrong service,
+# plausible answer, no error anywhere: the reason this needed a behavioural pin and
+# not only a ledger one.
+#
+# 🔴 THE THREE URLS ARE PAIRWISE DISTINCT AND NONE OF THEM IS THE DEFAULT. A fixture
+# whose task URL could equal either the router URL or `clawgate_tasks.DEFAULT_API_URL`
+# cannot see a mutant that reaches for the wrong one, and would survive a fully green
+# suite. Asserted below rather than merely intended.
+# --------------------------------------------------------------------------- #
+ROUTER_BASE = "http://router.invalid:11"
+TASK_BASE = "http://taskboard.invalid:12"
+
+
+def test_the_fixture_urls_really_are_pairwise_distinct_and_not_the_default():
+    """The control for the two cases below. Without it a later edit could collapse
+    two of these onto one value and both tests would keep passing while measuring
+    nothing — the fixture-that-can-only-produce-the-constant trap."""
+    cg = _load("clawgate_tasks_for_fixture_check",
+               str(ROOT / "scripts" / "lib" / "clawgate_tasks.py"))
+    values = [ROUTER_BASE, TASK_BASE, cg.DEFAULT_API_URL.rstrip("/")]
+    assert len(set(values)) == len(values), values
+
+
+def test_the_TASK_base_WINS_when_both_variables_are_set_to_distinct_values(tmp_path):
+    """🔴 THE DEFECT, AS BEHAVIOUR. Both keys present, different values: the endpoint
+    the guard would read MUST be the task board's, and must NOT be the router's.
+
+    Driven through the real `task_endpoint`, which is what every LiveReadError and
+    every UNVERIFIED notice reports — so this is the string an operator is shown, not
+    an internal. RED at base: the base resolved ROUTER_BASE here.
+    """
+    envf = _envfile(tmp_path, "split.env",
+                    CLAWGATE_API_URL=ROUTER_BASE,
+                    CLAWGATE_TASK_API_URL=TASK_BASE,
+                    CLAWGATE_HOOK_TOKEN=CLAWGATE_TOKEN)
+    got = guard.task_endpoint(713, env_path=str(envf))
+    assert "%s/api/tasks/713" % TASK_BASE in got, (
+        "the guard resolved %r, not the TASK base %r — a task-side read built on the "
+        "ROUTER base reaches the wrong service, which answers it 200" % (got, TASK_BASE))
+    assert ROUTER_BASE not in got, got
+    assert "CLAWGATE_TASK_API_URL" in got, got
+
+
+def test_the_TASK_url_actually_REACHES_the_wire_not_just_the_diagnostic(tmp_path,
+                                                                        monkeypatch):
+    """The other half, because a correct diagnostic string over a wrong request is the
+    worst of both. Asserted on curl's OWN config, captured from a stub."""
+    b = _bin(tmp_path)
+    cfg_log = tmp_path / "curl-cfg-split.log"
+    mockbin.write_exec(b / "curl",
+                       _sh_capture_stdin(cfg_log) + _sh_json(task(task_id=714)))
+    _isolated_path(monkeypatch, b)
+    envf = _envfile(tmp_path, "split-wire.env",
+                    CLAWGATE_API_URL=ROUTER_BASE,
+                    CLAWGATE_TASK_API_URL=TASK_BASE,
+                    CLAWGATE_HOOK_TOKEN=CLAWGATE_TOKEN)
+    assert guard.live_task(714, timeout=5, env_path=str(envf))["id"] == 714
+    cfg = cfg_log.read_text()
+    assert "%s/api/tasks/714" % TASK_BASE in cfg, (
+        "curl was pointed at %r — the TASK base %r never reached the wire" %
+        (cfg, TASK_BASE))
+    assert ROUTER_BASE not in cfg, cfg
+
+
+def test_WITHOUT_the_task_variable_the_task_base_IS_the_router_base(tmp_path):
+    """🔴 THE FALLBACK, WHICH IS THE CASE ON A HOST THAT NEVER HEARD OF THE SPLIT.
+    The task key absent must resolve to exactly what the router key resolves to —
+    introducing the split moves no request's destination. This half passes at base
+    too (by accident: it was ALWAYS taking the fallback), and it is here so that
+    fixing the first entry cannot be "fixed" by dropping the second."""
+    envf = _envfile(tmp_path, "nosplit.env",
+                    CLAWGATE_API_URL=ROUTER_BASE,
+                    CLAWGATE_HOOK_TOKEN=CLAWGATE_TOKEN)
+    got = guard.task_endpoint(715, env_path=str(envf))
+    assert "%s/api/tasks/715" % ROUTER_BASE in got, got
+    assert "CLAWGATE_API_URL" in got, got
+
+
+def test_the_shared_ledger_module_is_deployed_BESIDE_the_hook(tmp_path):
+    """🔴 THE DEPLOY COUPLING, PINNED. The hook takes the ledger from
+    `scripts/lib/clawgate_tasks.py`, and its deployed copy is a lone nix-store file
+    in `~/.claude/hooks/` from which `scripts/lib/` is unreachable through `__file__`.
+    Ship one without the other and the switch is GREEN while the Stop path cannot
+    resolve a base at all — the #452 shape, and silence is the one verdict this guard
+    may never produce. Both halves asserted: the nix entry, and that the loader really
+    looks in its own directory first."""
+    nix = HOME_NIX.read_text(encoding="utf-8")
+    assert '".claude/hooks/clawgate_tasks.py"' in nix, \
+        "nix/home.nix must land scripts/lib/clawgate_tasks.py beside the hook"
+    assert "../scripts/lib/clawgate_tasks.py" in nix, nix
+    # ...and the sibling is genuinely the first path tried: put a decoy there and
+    # watch the loader prefer it over the checkout's real module.
+    sibling = tmp_path / "clawgate_tasks.py"
+    sibling.write_text('TASK_API_URL_VARS = ("DECOY_FIRST", "DECOY_SECOND")\n')
+    shim = tmp_path / "shim.py"
+    shim.write_text(Path(HOOK).read_text(encoding="utf-8"))
+    decoyed = _load("clawgate_writeback_guard_decoyed", str(shim))
+    assert decoyed.task_api_url_vars() == ("DECOY_FIRST", "DECOY_SECOND"), \
+        "the loader did not try its own directory first, so the deployed sibling " \
+        "would be ignored in favour of whatever $DEVRC_DIR happens to hold"
+
+
 def test_the_TASKS_url_is_passed_to_the_cli_as_api_url(tmp_path, monkeypatch):
-    """🔴 `CLAWGATE_TASKS_API_URL` HAS TO ARRIVE ON THE COMMAND LINE. Both CLIs read
+    """🔴 `CLAWGATE_TASK_API_URL` HAS TO ARRIVE ON THE COMMAND LINE. Both CLIs read
     `CLAWGATE_API_URL` out of the same env file themselves, but neither knows about the
     TASKS key — so without the flag the new variable is inert and the guard keeps
     reading the OLD board, reporting a missing write-back for a comment that landed on
@@ -3780,7 +4000,7 @@ def test_the_TASKS_url_is_passed_to_the_cli_as_api_url(tmp_path, monkeypatch):
     envf = _envfile(tmp_path, "tasks.env",
                     CLAWGATE_API_URL=CLAWGATE_URL,
                     CLAWGATE_HOOK_TOKEN=CLAWGATE_TOKEN,
-                    CLAWGATE_TASKS_API_URL=MUSTER_URL)
+                    CLAWGATE_TASK_API_URL=MUSTER_URL)
     assert guard.live_task(MUSTER_READ_ID, timeout=5,
                            env_path=str(envf))["id"] == MUSTER_READ_ID
     argv = argv_log.read_text()
@@ -3829,7 +4049,7 @@ def test_the_curl_fallback_prefers_the_TASKS_url_and_the_TASKS_token(tmp_path,
     envf = _envfile(tmp_path, "both.env",
                     CLAWGATE_API_URL=CLAWGATE_URL,
                     CLAWGATE_HOOK_TOKEN=CLAWGATE_TOKEN,
-                    CLAWGATE_TASKS_API_URL=MUSTER_URL,
+                    CLAWGATE_TASK_API_URL=MUSTER_URL,
                     CLAWGATE_TASKS_HOOK_TOKEN=MUSTER_TOKEN)
     got = guard.live_task(MUSTER_API_ID, timeout=5, env_path=str(envf))
     assert got["id"] == MUSTER_API_ID
@@ -3894,10 +4114,10 @@ def test_task_endpoint_names_the_url_AND_the_variable_it_came_from(tmp_path):
     using" is exactly the question a half-finished cutover raises, so the variable name
     is part of the answer. Three distinct states, three distinct strings."""
     tasks = _envfile(tmp_path, "e1.env", CLAWGATE_API_URL=CLAWGATE_URL,
-                     CLAWGATE_TASKS_API_URL=MUSTER_URL)
+                     CLAWGATE_TASK_API_URL=MUSTER_URL)
     got = guard.task_endpoint(MUSTER_API_ID, env_path=str(tasks))
     assert "%s/api/tasks/%d" % (MUSTER_URL, MUSTER_API_ID) in got, got
-    assert "CLAWGATE_TASKS_API_URL" in got, got
+    assert "CLAWGATE_TASK_API_URL" in got, got
     assert CLAWGATE_URL not in got, got
 
     legacy = _envfile(tmp_path, "e2.env", CLAWGATE_API_URL=CLAWGATE_URL)
@@ -3907,7 +4127,7 @@ def test_task_endpoint_names_the_url_AND_the_variable_it_came_from(tmp_path):
 
     got = guard.task_endpoint(MUSTER_API_ID, env_path=str(tmp_path / "nothing.env"))
     assert "unresolved" in got, got
-    assert "CLAWGATE_TASKS_API_URL" in got, got
+    assert "CLAWGATE_TASK_API_URL" in got, got
     # 🔴 never a token, on any of the three paths
     for tok in (MUSTER_TOKEN, CLAWGATE_TOKEN):
         assert tok not in got
@@ -3924,13 +4144,13 @@ def test_every_LiveReadError_carries_the_endpoint_it_could_not_reach(tmp_path,
     _isolated_path(monkeypatch, b)
     envf = _envfile(tmp_path, "unreach.env", CLAWGATE_API_URL=CLAWGATE_URL,
                     CLAWGATE_HOOK_TOKEN=CLAWGATE_TOKEN,
-                    CLAWGATE_TASKS_API_URL=MUSTER_URL,
+                    CLAWGATE_TASK_API_URL=MUSTER_URL,
                     CLAWGATE_TASKS_HOOK_TOKEN=MUSTER_TOKEN)
     with pytest.raises(guard.LiveReadError) as e:
         guard.live_task(710, timeout=5, env_path=str(envf))
     assert "curl rc=7" in str(e.value)
     assert "%s/api/tasks/710" % MUSTER_URL in e.value.endpoint, e.value.endpoint
-    assert "CLAWGATE_TASKS_API_URL" in e.value.endpoint
+    assert "CLAWGATE_TASK_API_URL" in e.value.endpoint
 
 
 def test_the_endpoint_is_bound_even_when_NO_client_ran_at_all(tmp_path, monkeypatch):
@@ -3938,7 +4158,7 @@ def test_the_endpoint_is_bound_even_when_NO_client_ran_at_all(tmp_path, monkeypa
     can name the endpoint is the env file read before the attempt."""
     b = _bin(tmp_path)
     _isolated_path(monkeypatch, b)
-    envf = _envfile(tmp_path, "noclient.env", CLAWGATE_TASKS_API_URL=MUSTER_URL,
+    envf = _envfile(tmp_path, "noclient.env", CLAWGATE_TASK_API_URL=MUSTER_URL,
                     CLAWGATE_TASKS_HOOK_TOKEN=MUSTER_TOKEN)
     with pytest.raises(guard.LiveReadError) as e:
         guard.live_task(711, timeout=5, env_path=str(envf))
@@ -3954,7 +4174,7 @@ def test_an_unreachable_board_is_a_systemMessage_that_NAMES_the_endpoint(home,
     variable to set are in the text. Both halves in one test, because they are one
     trade: the rung is only defensible BECAUSE the text is diagnosable."""
     err = guard.LiveReadError("curl rc=7", endpoint="%s/api/tasks/%d (from "
-                              "CLAWGATE_TASKS_API_URL in ~/.claude/clawgate.env)"
+                              "CLAWGATE_TASK_API_URL in ~/.claude/clawgate.env)"
                               % (MUSTER_URL, MUSTER_READ_ID))
     r = Reader(raises=err)
     guard.post_tool_use(bash("muster task get %d" % MUSTER_READ_ID), now=READ_EPOCH)
@@ -3976,7 +4196,7 @@ def test_an_unreachable_board_is_a_systemMessage_that_NAMES_the_endpoint(home,
     text = out["systemMessage"]
     assert "UNVERIFIED for task %d" % MUSTER_READ_ID in text
     assert "%s/api/tasks/%d" % (MUSTER_URL, MUSTER_READ_ID) in text, text
-    assert "CLAWGATE_TASKS_API_URL" in text, text
+    assert "CLAWGATE_TASK_API_URL" in text, text
     assert "~/.claude/clawgate.env" in text, text
 
 
@@ -4041,7 +4261,7 @@ def test_a_hanging_task_CLI_becomes_a_timeout_LiveReadError_not_an_AttributeErro
     b = _bin(tmp_path)
     _hang_stub(tmp_path, "clawgatectl", b)
     _isolated_path(monkeypatch, b)
-    envf = _envfile(tmp_path, "hang-cli.env", CLAWGATE_TASKS_API_URL=MUSTER_URL,
+    envf = _envfile(tmp_path, "hang-cli.env", CLAWGATE_TASK_API_URL=MUSTER_URL,
                    CLAWGATE_TASKS_HOOK_TOKEN=MUSTER_TOKEN)
     with pytest.raises(guard.LiveReadError) as e:
         guard.live_task(712, timeout=HANG_TIMEOUT, env_path=str(envf))
@@ -4062,7 +4282,7 @@ def test_a_hanging_CURL_becomes_a_timeout_LiveReadError_not_an_AttributeError(
     b = _bin(tmp_path)
     _hang_stub(tmp_path, "curl", b)
     _isolated_path(monkeypatch, b)
-    envf = _envfile(tmp_path, "hang-curl.env", CLAWGATE_TASKS_API_URL=MUSTER_URL,
+    envf = _envfile(tmp_path, "hang-curl.env", CLAWGATE_TASK_API_URL=MUSTER_URL,
                    CLAWGATE_TASKS_HOOK_TOKEN=MUSTER_TOKEN)
     with pytest.raises(guard.LiveReadError) as e:
         guard.live_task(713, timeout=HANG_TIMEOUT, env_path=str(envf))
