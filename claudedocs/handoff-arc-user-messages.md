@@ -25,27 +25,29 @@ the archaeology each time. Two halves: **scope** an extraction to one arc's sess
   operator reads that count.
 
 ## State now
-- ✅ **Scope: SHIPPED** in `#1870` (`e48eebac`) — `--arc` / `--session` / `--ids-file`, the
-  resolver imported rather than re-spelled, loud-empty exit codes. 322x smaller on a
-  2-session arc (27 records, 172 KiB, against 13,768 records / 54.1 MiB corpus-wide).
-- 🔶 **Route: `#1883` OPEN, not merged.** `render_arc` prints the extractor command under
-  every resolved arc. Round 0 of the audit ladder ran before the merge decision and
-  questioned the requirement; its findings are applied:
-  - **`next_command` DROPPED from `--json`** — measured reach **0 of 6**. Five of the six
-    sessions called `--arc --json` and each parsed `members` and discarded the rest, so the
-    field never entered an agent's context. It shipped on a hypothesised caller that does
-    not exist. Re-add it when one is named.
-  - **The seed guard now crosses the seam it claimed.** It asserted
-    `arc_seed_to_doc(doc) == doc` without importing the extractor, so it was blind to the
-    only way that seam breaks. It now loads `extract_user_msgs` through the extractor's own
-    loader and asserts the resolver is SHARED. It was also **the one guard with no mutant**;
-    `F8` now covers it.
-  - **"Two seam guards" was wrong — there is ONE**, plus the path-existence check.
-  - Guards: **7** (was 8; the JSON test went with its field). Battery: **8 mutants**, C0
-    re-pointed because the field its old anchor named is gone.
-- ⚠ **Five routes now point at this one tool**, not two: the `/resume` row, the reference
-  doc, a cairn task board entry, this footer, and `find-session`'s own SKILL.md. `RULES.md`
-  "One rule, one place" points the other way; not resolved here, recorded.
+- 🔴 **SHIPPED AND VERIFIED.** `#1883` squash-merged as **`c0fd28e3`** (2026-09-26T16:23:53Z),
+  branch deleted. Merge confirmed **by CONTENT** — the footer, this doc and the battery are all
+  on `origin/main` — never by ancestry, because a squash is never an ancestor of its base.
+- **CI was green on the exact merged head `1b87ad81`**, all four legs, sandbox tier:
+  `pytests` 24,257 passed / 0 failed, `nodetests` 1,720, `gotests` 461, `cairn-client-runs`.
+- **Deployed to BOTH hosts** via `scripts/ship.sh` (rc 0). Every per-host line read, not the
+  verdict: workbench `63361f48 → c0fd28e3`, 624 artifacts resolve / **0 dangling**, 442
+  repo-sourced / **0 stale**; laptop the same sha, 590 resolve / 0 dangling, 437 / 0 stale.
+  Cross-host agreement asserted — both at `c0fd28e3`. Neither host skipped.
+- ✅ **VERIFIED AGAINST THE SYMPTOM, not the rollout.** `readlink -f
+  ~/.claude/skills/find-session/SKILL.md` → `/nix/store/pz6bbghd…-devrc-claude-skills/…` — a
+  NEW store path (was `jappawqv…`), so the switch genuinely swapped the `home.file` copy — and
+  it carries the routing line. Then the live tool on a real arc printed:
+  `NEXT — the operator's own messages across 2 sessions of this arc:` with the runnable
+  command. The `find-session.py` half needs no switch (the skill invokes `$DEVRC/scripts/…`
+  from the working tree); the SKILL.md half did, which is why `ship.sh` and not a bare pull.
+- Worktree removed, branch pruned, no leaked processes. The only dirty paths on either host are
+  two untracked `claudedocs/scope-chief-*.md` that predate this session; `ship.sh` classified
+  them against 189 nix-read paths and confirmed no nix path reads them.
+- ⚠ **No `clawgate-task:` field.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
+  this session. Its positive control fired (the same endpoint returned 1 link for another
+  session, so the board is reachable and the token accepted), but a WRONG session id also
+  answers 200 with an empty array, so this is a real reading and **not** a clean bill of health.
 
 ## The routing measurement — why a second mechanism was needed
 🔴 **SUPERSEDED 2026-09-26 — EVERY NUMBER AND THE MECHANISM IN THIS SECTION WERE WRONG.
@@ -90,6 +92,34 @@ through the gate; this body is the retirement.
   extraction scoped to those sessions inherits that gap. `arc_report` states this once, in
   its unmeasured note; the footer deliberately does not restate it.
 
+- 🔴 **A SQUASH MERGE *does* carry every squashed commit's `Claude-Session-Id:` trailer, so a
+  doc created mid-effort CAN resolve its own arc.** This doc asserted the opposite — that
+  `--arc handoff-arc-user-messages.md` would report "this commit's writer only" because
+  `resolve_arc` reads trailers on commits *touching the doc* and the doc did not exist while
+  the work happened. MEASURED after the merge: it resolves **2** sessions, role-tagged —
+  `785fb10c` RESUMED (built #1870) and `ad781c3f` ORIGINATED (`commits: c0fd28e3`) — with
+  `0 of 1 commit(s) on this doc carry no session id`. The mechanism missed: GitHub's squash
+  body concatenates every commit message, and `handoff_arc` scans the whole BODY for trailers
+  rather than only git's final trailer block (which is exactly why that reader was written that
+  way — see `test_gits_own_trailer_parser_MISSES_what_this_reader_finds`). **Still absent:** the
+  opencode originator `ses_f2925a2e4ffeS4sq0qg70iGC52`, which committed nothing, and no
+  mechanism can recover a session that never wrote a commit.
+- 🔴 **The gate's own timeout is not a test failure, and it reads exactly like one.** The local
+  `gate.sh --tier all` printed `GATE: RESULT=FAIL exit=1` with `pytest exit=124 (timeout after
+  3600s)` / `RESULT: FAIL (exit=143)` = SIGTERM — the pytest tier was KILLED at its cap with
+  three concurrent full suites from other checkouts on the box. That leg is **UNMEASURED**, not
+  failed; its `node` and `go` tiers passed at `SCOPE: FULL`. CI's sandbox tier is what actually
+  covered pytest.
+- ⚠ **`| tail` ate an exit code again, in this very session**: `audit-dispatch.py --round 3 …
+  | tail -6` printed `exit=0` for a run whose real status was **5** (the attribution gate
+  firing). Re-run redirecting to a file and read `$?` — the trap is documented and was still
+  hit.
+- 🔴 **A `mutation_battery_*.py` copy placed in `scripts/tests/` to run a control will fail the
+  two-way ledger** (`test_the_battery_ledger_names_every_python_instrument` globs
+  `mutation_battery_*.py` and `mutants-*.py`). Name a throwaway control something matching
+  neither, and delete it in the same command. Also: a battery resolves its own root from
+  `__file__`, so a scratchpad copy cannot run — it must sit beside the real one.
+
 ## The arc's own sessions — prose, because the resolver cannot see them
 - `ses_f2925a2e4ffeS4sq0qg70iGC52` (opencode, devrc, 2026-09-25) — **originated.** Traced
   the handoff/resume infra and produced Rec 2 (the selectors) + Rec 3 (the routing).
@@ -103,14 +133,26 @@ through the gate; this body is the retirement.
   shipped tool in anger; the source of the routing measurement above.
 
 ## NEXT — ranked
-1. **Investigate the 352-of-617 gap** (its own section above). Do not fix it on a
-   mechanism — find a distinguishing signal first.
-2. **Re-read the reach comparison at n≥10.** Already reachable: 6 post-merge sessions
-   existed by 2026-09-26 04:42Z and the population grows ~1/h under active work, ~5/day at
-   baseline. **Closing condition:** the operator reads the count. 🔴 Do not re-tune off n=6.
-3. **Decide the answering mode.** One 7-session arc extracts to 967,441 bytes / 199
-   messages, so synthesis is still a subagent's job. Options: leave it, or emit ask-shaped
-   rows. **Operator's call — do not build it unasked.**
+1. **Investigate the 352-of-617 `/resume`-body gap** (block above). Do NOT fix it on a
+   mechanism — find a discriminating upstream signal first. Repo: `devrc`, likely
+   `claude/skills/resume/`, `claude/skills/handoff/` and the transcript corpus; no file is
+   known to be at fault yet. **Closing condition:** a named upstream signal separating ≥2
+   candidate mechanisms is measured, OR the operator reads the measurement and closes it
+   won't-fix.
+   forcing: none
+2. **Read the reach comparison at n≥10.** The footer is live on both hosts as of
+   `c0fd28e3`. Population growth, carried forward so this item is self-contained:
+   **≈1/h under active work, ≈0.22/h (~5/day) at baseline**, and **6** post-merge sessions
+   already existed by 2026-09-26 04:42Z. So n≥10 is hours away under load, ~a day idle.
+   Re-run the count and compare extractor use before/after this deploy.
+   **Closing condition:** the operator reads that count. 🔴 Do not re-tune the routing off
+   n=6.
+   forcing: none
+3. **Decide the answering mode.** One 7-session arc extracts to 967,441 bytes / 199 messages,
+   so synthesis is still a subagent's job and the footer routes to a tool that cannot directly
+   answer the question motivating it. Options: leave it, or emit ask-shaped rows.
+   **Operator's call — do not build it unasked.**
+   forcing: none
 
 ## UNMEASURED — do not report these as absences
 - **The peer host (laptop) was never walked** for any figure in this doc.
@@ -246,3 +288,66 @@ is what produced 352. Any re-measurement must use a string absent from the front
   as won't-fix. Mechanical half: `<0.57` on a re-run of the same probe after any change.
 - **Blast radius if real:** every route that rides `/resume`'s body, not just this one row —
   which is why it is worth its own investigation rather than a patch here.
+## Open investigations — live diagnosis state
+
+### 57% of `/resume` kickoff-paste sessions never load `/resume`'s SKILL.md body — cause UNKNOWN
+as-of: 2026-09-26
+- **Symptom + exact repro:** a session opened by pasting the kickoff block `/handoff` emits
+  proceeds without `/resume`'s body in context, so every route that lives in that body (the
+  `user-messages.md` "Load when" row among them) is silently absent. Repro: open any session
+  from a pasted kickoff block and grep the transcript for a body-only string.
+- **Observed (with values):** over the local Claude corpus — **617** sessions whose first user
+  message starts with `/resume`; **613** of them indented; **0** carrying
+  `<command-name>resume</command-name>` within 6 records; **352 (57%)** with no `/resume` body
+  marker anywhere in the transcript. Independently measured twice (audit round 0: ≥351; this
+  session: 352) with *different* markers.
+- **Ruled out:** ~~"the question arrives at the END of an arc, in sessions that never ran
+  `/resume`"~~ — `6ef53792`'s first message IS an indented `/resume` paste, so it was invoked.
+  `via: measurement`
+- **Ruled out:** ~~"the paste never expands — 0 of 617"~~ — that zero is true BY CONSTRUCTION:
+  the population filter is *"first user message starts with `/resume`"*, and a session where
+  the command actually fires opens with `<command-message>` instead, so the filter excludes
+  every expanded case. A selection effect. `via: measurement`
+- **Ruled out:** ~~"indentation prevents expansion"~~ — all **4** flush-left pastes equally
+  failed to expand, while several *indented* sessions do carry a resume `<command-name>`.
+  `via: measurement`
+- **Ruled out:** ~~"there is no gap; the body always loads"~~ — this was my FIRST probe and it
+  was wired to nothing: it searched for the skill's `description`, which ships in the always-on
+  skill LISTING in every session, so it matched 100% of transcripts. Any re-measurement must
+  use a string absent from the frontmatter. `via: measurement`
+- **Leading hypothesis:** none worth the name. Three mechanisms have been asserted and
+  withdrawn. 🔴 **"I could not find a cause" is the finding here** — reaching for a fourth is
+  what regenerated the error three times (`claude/RULES.md`, "an EMPTY RESULT cannot
+  distinguish two mechanisms": name the upstream signal that would separate two candidates
+  BEFORE proposing one).
+- **Next probe:** compare, for the SAME operator-pasted block, one session where the body
+  loaded against one where it did not, and diff what precedes the first user record — the
+  discriminator must be an *upstream* signal (a system-reminder, a listing state, a settings
+  difference), not another reading of the absence. Start:
+  `python3 -c` over the 617 transcripts, bucketing by whether the body marker is present, then
+  diff the pre-first-user records of one member of each bucket.
+
+## Defects (batched)
+- 🔴 **The squash subject on `main` permanently asserts the retracted claim**:
+  `feat(find-session): a resolved arc names the extractor, because the prose route fired 1 of 3
+  (#1883)`. GitHub took the first commit's subject; "1 of 3" was re-derived to 3 of 6, and "the
+  prose route fired" rests on a mechanism retracted three times. Not editable without rewriting
+  a shared `main`, so it stands. The retraction is in the code docstring, the test docstring,
+  this doc and two PR comments — a reader following the title into the code meets it at once,
+  but `git log --oneline` will keep asserting the false version.
+- ⚠ **This doc predicted the arc would resolve to ONE session, and it resolves to TWO** — see
+  the Gotchas entry. The prediction is corrected there rather than deleted, because the reason
+  it was wrong is the reusable part.
+
+## How to verify
+```bash
+# 1. the footer renders on a real arc, from the DEPLOYED path
+python3 $DEVRC/scripts/find-session.py --arc handoff-arc-user-messages.md   # expect a `NEXT —` block
+# 2. the command it prints actually runs (the positive control that matters)
+python3 $DEVRC/scripts/session-analysis/extract_user_msgs.py --arc handoff-arc-user-messages.md >/dev/null; echo "rc=$?"
+# 3. the guards, and the battery whose no-op control must SURVIVE
+nix develop $DEVRC -c python3 -m pytest $DEVRC/scripts/tests/test_find_session_arc.py -q -k ArcNamesTheExtractor
+PYTHONDONTWRITEBYTECODE=1 python3 $DEVRC/scripts/tests/mutation_battery_arc_extractor_footer.py  # expect 10/10 + C0 KILLED
+# 4. both hosts carry it
+bash $DEVRC/scripts/drift-check.sh   # read every per-host line, not the verdict
+```
