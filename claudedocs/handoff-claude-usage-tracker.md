@@ -22,108 +22,99 @@ Scope + live recon (API schema, endpoints): `claudedocs/proposal-claude-usage-tr
   Verdict rule: ADDRESSED ⇒ arc CLOSED; NOT ⇒ name the one item.
 
 ## State now
-- 🔴 **THE CLICK PATH RAN — and the widget WORKS.** The operator reloaded on the laptop
-  and reported back on real behaviour: the card renders, it collapses to a pill, and the
-  other-accounts section is populated. That is the first time anything in this arc has
-  been observed in a browser, and it retires the whole "never registered / never loaded"
-  framing that dominated the last three docs.
-- 🔴 **AND IT SURFACED TWO DEFECTS, WHICH ARE ONE MECHANISM.** Verbatim: *"the widget
-  needs to live-refresh, currently it requires full page reload after switching accounts
-  to update"* and *"cycled through a bunch of accounts while widget was minimized, the
-  accounts usage/reset didn't update in the widget"*. Root cause: **nothing re-probes on
-  an in-tab account switch.** The four triggers that refresh stored data are
-  `autoRun` at `document_idle`, the SW's `onTabUpdated(status=complete)`,
-  `onTabActivated`, and the 15-minute `cu-reprobe` alarm — an SPA account switch inside
-  one tab fires none of the first three, so the numbers could only move on the alarm.
-  Minimized was incidental (a collapsed widget paints only the pill).
-- **PR #1835 OPEN** — `fix/claude-usage-live-refresh`, head `114205a1`, `MERGEABLE`,
-  `mergeStateStatus: UNSTABLE` with all four Tekton checks **pending** at the time of
-  writing. Adds a cheap active-org check to `content_probe.js`; manifest **0.3.0 →
-  0.3.1**. NOT merged, NOT shipped, NOT observed in a browser.
-- 🔴 **THE WIDGET WAS NEVER THE FAULT, and three rivals were ruled out by reading the
-  code rather than assumed** — worth keeping, because the reported symptom points
-  squarely at the widget and a session that starts there will burn hours:
-  `content_widget.js` already repaints on a 30s tick AND on `chrome.storage.onChanged`,
-  collapsed or not (so "collapsed skips repaint" is false); `handleReport` merges via
-  `mergeStored` into the stored map (so "a probe overwrites the other accounts" is
-  false); `PROBE_MIN_INTERVAL_MS` is **30s** and gates only the WORKER'S ASK, never the
-  content script's auto-run (so "the cycle was rate-limited" is false).
-- **MEASURED 2026-09-21, the fact that proved a reload was genuinely required** —
-  laptop Brave's browser process started `2026-09-20 14:52:54`; the 0.3.0 files landed
-  `2026-09-21 00:07:46`, **~9h later**. So the registered extension was running
-  pre-0.3.0 code. This is the general instrument: compare `/proc/<brave-pid>` start time
-  against the extension dir's newest mtime instead of guessing whether a reload is due.
-- **Registration, re-measured on the laptop (positive-controlled against
-  `browser-bridge-ext`, which returns the same two profiles):** `Default` →
-  `onglbmcagkpoaapfeeoepblcbeanfanl` loading from
-  `~/workspace/devrc/scripts/claude-usage/extension`; `Profile 1` →
-  `doiabidngiihgfkpgdcmeccjohjgfmoe` loading from `~/.local/share/claude-usage-ext`.
-  Both manifests on disk read 0.3.0. The **workbench is still unregistered in all
-  profiles** (same positive control returns `Default` + `Profile 2`).
-- **The two stores, measured — this is the `.local` split, in bytes:** Default/repo-path
-  `3,268,444 B` with `12,456` `resetsAt` occurrences; Profile 1/`.local` **`811 B`,
-  `0` `resetsAt`**. The repo-path registration is the one with all the account history.
+- 🔴 **ALL THREE PRs MERGED AND SHIPPED — the previous doc was written BEFORE any of it.**
+  #1834 squash `4048e2b1`; **#1836 squash `6087617c`**; **#1835 squash `702a07d8`** — the
+  live-refresh fix. Verified by CONTENT, never by `gh pr merge`'s rc: `checkActiveOrg`
+  present on `origin/main` in `scripts/claude-usage/extension/content_probe.js`, manifest
+  reads **0.3.1**.
+- **`scripts/ship.sh` rc=0, and it compared BOTH hosts** — "converged + verified — 2 hosts
+  compared, both at `702a07d8` (local=workbench remote=laptop)". Managed artifacts on both:
+  0 dangling, 0 absent, 0 stale. ⚠ The laptop answered on `10.42.0.100` after
+  `192.168.50.155` was unreachable — normal nebula fallback, not a fault.
+- 🔴 **THE LAPTOP IS NOW RUNNING 0.3.1, ESTABLISHED BY MEASUREMENT RATHER THAN BY A VERSION
+  STRING.** Brave's browser process started **2026-09-23 14:36:21**; the extension files are
+  stamped **2026-09-21 12:52:13** — the process is NEWER, so Brave re-read the directory at
+  startup and the running code is the new one. This is the instrument the last doc proposed,
+  used in anger: `getManifest()` describes the DIRECTORY, so only process-start-vs-file-mtime
+  settles what is EXECUTING. **The reload clause is met; nobody had to click Reload — a
+  browser restart did it.**
+- **And the extension is demonstrably alive, not merely loaded:** the Default/repo-path store
+  is **6,748,391 B** (was 3,268,444 B on 2026-09-21), newest write **2026-09-25 16:18**, and
+  it holds **16 distinct org uuids**. 🔴 **That growth does NOT prove the live-refresh
+  trigger works** — a page load and the 15-minute `cu-reprobe` alarm write the same rows, so
+  the number cannot discriminate. See the open investigation.
+- 🔴 **RANK 2 HAS ESCALATED AND THE OLD NUMBER IS STALE — DO NOT READ `Profile 1` AS
+  DORMANT.** Re-measured 2026-09-26: the `Profile 1` / `.local` registration
+  (`doiabidngiihgfkpgdcmeccjohjgfmoe`) store is **4,861,557 B**. On 2026-09-21 it was
+  **811 B with 0 `resetsAt`**, which this doc's own retirement annotation still quotes and
+  which it used to argue that no report had ever finished there. **That is now false.** Both
+  registrations are actively recording, so the split is real and live: each popup shows a
+  genuinely partial view of the accounts. The README (`scripts/claude-usage/README.md`,
+  lines 8–11) **still names `.local` as the load path** — re-read on `origin/main` today.
+- **CI NEVER RAN for #1835, and it was not a failure.** The gate TaskRun
+  `devrc-ci-qv67h-gate` hit `TaskRunTimeout` after `1h0m0s` having never started; all four
+  checks posted **`error`** (not `failure`) reading *"NO CAPACITY: <leg> — the gate never
+  started (queued past its deadline). Not a code failure."* **Zero legs executed.** The
+  `report` task DID run, so the checks resolved to `error` rather than hanging `pending`
+  forever — that is NOT the documented `timeouts.tasks` shape.
+- 🔴 **SO THE SANDBOX TIER WAS RUN BY HAND INSTEAD — three runs, and the third is the one
+  that matters.** Sequentially, never combined (contention produces false reds):
+  `nodetests` @ `114205a1` → `RESULT: PASS (exit=0)`, `SCOPE: FULL`, 1720 tests ·
+  `pytests` @ `114205a1` → `RESULT: PASS (exit=0)`, `SCOPE: FULL`, 30 of 30 targets ·
+  **`nodetests` @ `702a07d8` (the MERGED tree) → `RESULT: PASS`, `SCOPE: FULL`, 1720 tests.**
+  The first two are branch greens and say nothing about the tree the merge creates; the third
+  is what closes that. ⚠ `pytests` was NOT re-run on the merged tree — `origin/main` had not
+  touched `scripts/claude-usage/` and `merge-tree --write-tree` exited 0, so the risk was
+  judged low. That is a judgement, not a measurement.
 - **Earlier arc, carried forward — do not let a status rewrite drop these two:**
   #1792 MERGED (`da695960`); #1806 MERGED (`7d323b48`) — the duplicate-notification fix;
-  **#1803 CLOSED unmerged**, superseded by #1804, which fixed the same red the other
-  way: **it pins opencode back to 1.18.29 via a frozen input, because 1.18.30 cannot run
-  a prompt.** That pin is durable — do not "modernise" the input without re-running
-  `test_opencode_engine.py`. #1801 MERGED (squash `52571758`); #1808 MERGED (squash
-  `62bd4d9a`); #1817 MERGED (squash `4487d2dd`).
-- **Audit ladder on #1817 is CLOSED at round 4** — a clean round ENDS the ladder and
-  none was run to confirm it. Per-round detail is under `## Defects (batched)` and in
-  the three `audit-claims` ISSUE comments on that PR. #1835 has had **no audit round at
-  all** yet; its `## Defects` entry is self-review only.
-- **Hosts:** both at `b84745f2`, one docs commit behind `origin/main` (`825b6f25`, an
-  unrelated initiative). `~/.local/share/claude-usage-ext/manifest.json` present on the
-  workbench at 0.3.0, so that clause of the closing condition is met.
-- **Deploy/verify status, honestly:** #1817 is merged and shipped and its widget is
-  observed working. #1835 is none of those things. The closing condition is **NOT met**;
-  the unmet clauses are the badge/toast/popup half of the click path, and now the
-  live-refresh fix on top of it.
-- **This doc was landed from a worktree off PR #1834's branch, not off `origin/main`.**
-  #1834 was open and rewrote `## State now` wholesale over the same file; basing on
-  `origin/main` would have produced a guaranteed textual conflict and lost one session's
-  findings. Worktree `/tmp/devrc-handoff-cu2`, branch `docs/handoff-cu-live-refresh`,
-  **stacked on `docs/handoff-cu-availability-shipped`** — so #1834 must merge FIRST, or
-  this PR retargeted.
+  **#1803 CLOSED unmerged**, superseded by #1804, which fixed the same red the other way:
+  **it pins opencode back to 1.18.29 via a frozen input, because 1.18.30 cannot run a
+  prompt.** That pin is durable — do not "modernise" the input without re-running
+  `test_opencode_engine.py`. #1801 MERGED (`52571758`); #1808 MERGED (`62bd4d9a`);
+  #1817 MERGED (`4487d2dd`).
+- **Audit ladder on #1817 is CLOSED at round 4** — a clean round ENDS the ladder and none was
+  run to confirm it; per-round detail is under `## Defects (batched)`. 🔴 **#1835 was merged
+  with NO audit round at all** — its `## Defects` entry is self-review only. That was a
+  deliberate call under "merge and ship", and it is the one quality gate this arc skipped.
+- **Deploy/verify status, honestly:** merged, shipped, converged, and the new code is
+  EXECUTING on the laptop. **Still never observed: the toolbar badge, the popup, a threshold
+  toast, and the live-refresh behaviour itself.** The closing condition is **NOT met**.
+- **Hosts:** base clone was `behind 1` at the time of writing (ordinary; `origin/main` has
+  moved ~10 commits in 5 days, none touching `scripts/claude-usage/`).
 
 ## Next steps (ranked)
-1. **Merge #1835, ship, reload, and run the click path AGAIN — the arc's closing
-   condition, now with a second thing to check.** `scripts/ship.sh` both hosts → on the
-   laptop `brave://extensions` → **Reload** *Claude Usage Tracker* in the **Default**
-   profile (NOT `Profile 1`) → confirm the card reads **0.3.1** → open `claude.ai`.
-   Then the two checks that are new: **switch accounts WITHOUT reloading the page** and
-   confirm the card follows within ~10s, and confirm the still-unverified half of the
-   original condition — **toolbar badge shows session %, the popup lists accounts, a
-   threshold toast fires**. Capture the service-worker console on any misbehaviour
-   BEFORE diagnosing.
-   ⚠ Expect a **dimmed card with a saturated green or red dot** for a stale record. That
-   is correct — it is what makes the card agree with the list.
-   `forcing: user` — no test can prove an MV3 content script re-probes in a real SPA,
-   and only a human can click Reload.
-2. **Remove the `Profile 1` registration** pointing at `~/.local/share/claude-usage-ext`
-   (`brave://extensions` in that profile), **and delete the `.local` load-path claim**
-   from `scripts/claude-usage/extension/manifest.json`'s comment and
-   `scripts/claude-usage/README.md` (still present — re-read 2026-09-21, README lines
-   8–11). Two instances = two independent stores; the measurement is now in `State now`
-   (3.2 MB / 12,456 `resetsAt` vs 811 B / 0).
-   `forcing: user` — a live cause of the "only showing the currently logged in one"
-   symptom the operator reported.
-3. **`SCOPE: FULL` is printed on a run that did not complete.** MEASURED 2026-09-20 on
-   the dev-host pytest tier: `SCOPE: FULL (30 of 30 hermetic target(s))` alongside
-   `RESULT: FAIL (exit=143)` on a run that finished **21 of 30** targets (22,275 passed,
-   0 failed; killed by `timeout --kill-after=30s 3600`). The `SCOPE:` line reports the
-   INTENDED target set, not what finished. `gate.sh` exits **91 = PARTIAL** precisely
-   when a tier does not report `SCOPE: FULL`, so a killed run that still claims it
-   defeats that mechanism; only `RESULT:` distinguishes them. Fix in
+1. **CONFIRM THE THREE UNOBSERVED CLAUSES — the closing condition, and the code is already
+   running so this is now pure observation with NO deploy step.** On the laptop, open
+   `claude.ai` in the **Default** profile (not `Profile 1`) and check: (a) the toolbar
+   **badge** shows a session % · (b) the **popup** lists accounts · (c) a threshold **toast**
+   fires. Then the #1835 behaviour: **switch accounts WITHOUT reloading the page** and
+   confirm the card follows within ~10s.
+   ⚠ Do NOT re-verify by version string — that clause is already settled by measurement (see
+   `State now`). ⚠ Expect a dimmed card with a saturated green or red dot for a stale record;
+   that is correct.
+   `forcing: user` — no test can prove an MV3 content script re-probes in a real SPA, and a
+   badge/toast/popup can only be seen by a human.
+2. **THE `.local` SPLIT IS NOW LIVE, NOT LATENT — remove the `Profile 1` registration**
+   (`brave://extensions` in that profile), **and delete the `.local` load-path claim** from
+   `scripts/claude-usage/README.md` (lines 8–11) and the manifest comment. Re-measured
+   2026-09-26: Profile 1's store is **4,861,557 B**, up from 811 B, so both registrations are
+   recording and neither popup can show all 16 accounts.
+   `forcing: user` — it is actively splitting the operator's account data today, and the
+   symptom he reported ("only showing the currently logged in one") is a consequence.
+3. **`SCOPE: FULL` is printed on a run that did not complete.** MEASURED 2026-09-20 on the
+   dev-host pytest tier: `SCOPE: FULL (30 of 30 hermetic target(s))` alongside
+   `RESULT: FAIL (exit=143)` on a run that finished **21 of 30** targets (killed by
+   `timeout --kill-after=30s 3600`). The `SCOPE:` line reports the INTENDED target set, not
+   what finished, and `gate.sh` exits **91 = PARTIAL** precisely when a tier does not report
+   `SCOPE: FULL` — so a killed run that still claims it defeats that mechanism. Fix in
    `scripts/run-tests.sh`.
-   `forcing: gate` — it is a false-green surface in the gate's own stop mechanism.
+   `forcing: gate` — a false-green surface in the gate's own stop mechanism.
 4. Re-propose the probe-dedup cut from #1806 (one page load still costs
-   `2x(/api/organizations + one /usage per org)`). ⚠ **Re-scope it first: #1835 already
-   built the `runProbe(pre)` door** that lets a caller hand over an org list it already
-   fetched, which is the same lever — the remaining waste is the auto-run/`onTabUpdated`
-   double-fire, not the org fetch.
+   `2x(/api/organizations + one /usage per org)`). ⚠ **Re-scope first: #1835 already built the
+   `runProbe(pre)` door** that lets a caller hand over an already-fetched org list, which is
+   the same lever — the remaining waste is the auto-run/`onTabUpdated` double-fire, not the
+   org fetch.
    `forcing: none`
 
 ## Defects (batched)
@@ -357,45 +348,81 @@ Scope + live recon (API schema, endpoints): `claudedocs/proposal-claude-usage-tr
   array, so this cannot distinguish "touched no task" from "wrong id" — it is not a
   clean bill of health.
 
+- 🔴 **`NO CAPACITY` IS A LIVE FAILURE MODE AGAIN, AND `CLAUDE.md` SAYS IT IS NOT.** That file
+  argues branch protection need not wait on Tekton capacity, citing 2026-09-10: *zero
+  exit-255 across 2,179 step terminations, the devrc-ci node at 14% CPU requests,
+  `NO CAPACITY` once in 80 heads.* On 2026-09-21 #1835's gate TaskRun timed out at `1h0m0s`
+  **having never started**, and all four checks posted `error` / `NO CAPACITY … the gate never
+  started (queued past its deadline)`. One occurrence is not a trend and does not overturn
+  that measurement — but the paragraph reads as settled, and it is not. Worth re-deriving
+  before anyone cites it again. A NEW arc if acted on, not a rank here.
+- 🔴 **`error` vs `failure` EARNED ITS RULE.** All four checks were red-coloured, and the
+  correct reading was "there is nothing here to debug against your diff". The distinguishing
+  evidence is in the status DESCRIPTION, not the colour and not the roll-up. The follow-on
+  is the useful half: **when the gate cannot run, run its tier yourself** —
+  `nix build <tree>#checks.x86_64-linux.{nodetests,pytests}`, one at a time, is the SAME
+  derivation Tekton builds, so it is a substitute rather than an approximation.
+- 🔴 **SQUASH-MERGING A STACKED PARENT BREAKS THE CHILD, AND `CLEAN` BEFOREHAND DOES NOT WARN
+  YOU.** #1836 was `MERGEABLE`/`CLEAN` against `docs/handoff-cu-availability-shipped`; the
+  moment #1834 was squash-merged it went **`CONFLICTING`**, because a squash is a NEW commit
+  and the child's own commits are not ancestors of it — the content still merged fine, the
+  *history* did not. GitHub auto-retargeted the base to `main` but could not fix the conflict.
+  Remedy that worked: worktree off current `main`, `git show <child-branch>:<file> > <file>`
+  (the child's final content IS the desired end state, since `main` already carries the
+  parent's), one commit, `push --force-with-lease` to the same branch so the PR updates
+  rather than a new one being opened. 🔴 **Cheaper alternative not taken: merge the child
+  FIRST, bottom-up, or don't stack a docs PR on a docs PR at all.**
+- **The stack existed for a good reason and would be built again** — #1834 was open over the
+  SAME file and rewrote `## State now` wholesale, so writing off `origin/main` would have
+  conflicted textually and cost one session its findings. The lesson is about the MERGE
+  ORDER, not about the stacking.
+- **A browser restart is a reload.** The arc spent three documents treating "click Reload in
+  `brave://extensions`" as the only way to get new unpacked-extension code running, and
+  `forcing: user` was justified partly on it. Brave re-reads an unpacked extension's
+  directory at startup, so an ordinary restart between sessions did it for free — which is
+  why the version clause closed with nobody acting on rank 1.
+
 ## How to verify
-- **#1835's tests, the subset that matters** (the sweep's own negative control):
+- **What is EXECUTING on the laptop** (the only check that settles it — a manifest version
+  describes the directory, not the running code):
   ```bash
-  nix develop ~/workspace/devrc -c node --test ~/workspace/devrc/scripts/claude-usage/tests/switch-watcher.test.mjs
+  ssh zach@10.42.0.100 'for p in $(pgrep -x brave); do stat -c %y /proc/$p; done | sort | head -1
+    find ~/workspace/devrc/scripts/claude-usage/extension -type f -printf "%TY-%Tm-%Td %TH:%TM\n" | sort -r | head -1'
   ```
-  Expect `pass 13 · fail 0`. A `fail 1` naming
-  *"the switch watcher is missing — this suite is asserting nothing"* means you are on a
-  tree without the fix, not that the fix is broken.
-- **Node tier (dev host)** — read the runner's own `RESULT:`/`SCOPE:` lines, never a
-  piped exit code:
+  Process start NEWER than the newest file ⇒ that code is loaded. Process start OLDER ⇒ a
+  reload is genuinely due.
+- **Both registrations and their store sizes** (rank 2's evidence; the zero is meaningless
+  without the `browser-bridge-ext` control):
   ```bash
-  nix develop ~/workspace/devrc -c bash ~/workspace/devrc/scripts/run-node-tests.sh ~/workspace/devrc
+  ssh zach@10.42.0.100 'grep -l claude-usage       ~/.config/BraveSoftware/Brave-Browser/*/Preferences
+                        grep -l browser-bridge-ext ~/.config/BraveSoftware/Brave-Browser/*/Preferences
+                        du -sb ~/.config/BraveSoftware/Brave-Browser/*/"Local Extension Settings"/{onglbmcagkpoaapfeeoepblcbeanfanl,doiabidngiihgfkpgdcmeccjohjgfmoe} 2>/dev/null'
   ```
-  At `114205a1`: `RESULT: PASS (exit=0)`, `SCOPE: FULL`, `tests=1720`, claude-usage
-  `files=15 tests=271 floor=246`.
 - **#1835 landed (by CONTENT, never by `gh pr merge`'s rc):**
   ```bash
   gh pr view 1835 --repo innovation-upstream/devrc --json state,mergedAt,mergeCommit
   git -C ~/workspace/devrc grep -q checkActiveOrg origin/main -- scripts/claude-usage/extension/content_probe.js && echo present
   ```
-- **Is a Brave reload actually due?** — compare the running browser against the files on
-  disk, instead of guessing:
+- **The fix's own tests** — a `fail 1` naming *"the switch watcher is missing — this suite is
+  asserting nothing"* means you are on a tree without the fix, not that the fix is broken:
   ```bash
-  for p in $(pgrep -x brave); do stat -c %y /proc/$p; done | sort | head -1   # browser start
-  find ~/workspace/devrc/scripts/claude-usage/extension -type f -printf '%TY-%Tm-%Td %TH:%TM\n' | sort -r | head -1
+  nix develop ~/workspace/devrc -c node --test ~/workspace/devrc/scripts/claude-usage/tests/switch-watcher.test.mjs
   ```
-  A file mtime NEWER than the process start means the running code is stale.
-- **Is it REGISTERED, and in which profile** (run on the host you are actually using —
-  this answer differs per host, and the zero is meaningless without the control):
+  Expect `pass 13 · fail 0`.
+- **The SANDBOX tier — the one Tekton builds; run them ONE AT A TIME, a combined red is
+  untrustworthy:**
   ```bash
-  grep -l 'claude-usage'      ~/.config/BraveSoftware/Brave-Browser/*/Preferences
-  grep -l 'browser-bridge-ext' ~/.config/BraveSoftware/Brave-Browser/*/Preferences   # positive control
+  nix build ~/workspace/devrc#checks.x86_64-linux.nodetests --no-link -L
+  nix build ~/workspace/devrc#checks.x86_64-linux.pytests  --no-link -L
   ```
-- 🔴 **CLOSING CONDITION — what is still unverified, stated exactly:** claude.ai open
-  after a Reload to **0.3.1** → (a) **switch accounts with NO page reload; the card must
-  follow within ~10s** · (b) toolbar **badge** shows session % · (c) **popup** lists
-  accounts · (d) a threshold **toast** fires. (a) is new with #1835; (b)–(d) were in the
-  original condition and have still never been observed. The card itself and the
-  other-accounts section ARE now confirmed working.
+  Read the runner's own `RESULT:` / `SCOPE:` lines, never a piped exit code. A build printing
+  NOTHING is the CACHED case, not a pass.
+- 🔴 **CLOSING CONDITION — exactly what is still unobserved.** Reload/version: **MET by
+  measurement**. Card + other-accounts section: **MET** (operator, 2026-09-21). Still never
+  seen: **(a)** toolbar badge shows session % · **(b)** popup lists accounts · **(c)** a
+  threshold toast fires · **(d)** #1835's live refresh — an account switch with NO page
+  reload moves the card. (d) is new since the condition was frozen and does not extend it;
+  (a)–(c) are the original unmet clauses.
 ## Open investigations — live diagnosis state
 
 ### ~~The `.local` deploy UNLOADS the extension from Brave on every home-manager switch~~ SUPERSEDED 2026-09-21 — REFUTED; see the "SUPERSEDED —" block below
@@ -527,3 +554,53 @@ Profile-1 reading.
   survived (it does NOT across a real document load) and whether `location.href`
   changed. Two facts, one switch, and they settle both the mechanism and whether an
   href poll can see it.
+
+### Is the live-refresh fix actually WORKING? The code is running and nothing observed discriminates
+- as-of: 2026-09-26
+- **Symptom + exact repro:** the original defect — switch accounts inside one claude.ai tab;
+  the card keeps showing the previous account until a full page reload. Fixed in #1835
+  (`702a07d8`); never observed working.
+- **Observed (with values):** the fix IS executing — laptop Brave started
+  `2026-09-23 14:36:21`, extension files stamped `2026-09-21 12:52:13`, so the process
+  post-dates the files and re-read the directory at startup; load-path manifest `0.3.1`;
+  `grep -c checkActiveOrg content_probe.js` = **5** on that host. Store activity: Default
+  store `6,748,391 B` (from `3,268,444 B` on 09-21), newest write `2026-09-25 16:18`,
+  **16 distinct org uuids**.
+- **Ruled out:** "the new code is not deployed / not loaded" — `via: measurement`, the
+  process-start-vs-file-mtime comparison above, which is the only thing that settles what is
+  EXECUTING (a version string describes the directory). · "the extension is loaded but
+  inert" — `via: measurement`, the store grew 3.5 MB and wrote yesterday.
+- 🔴 **NOT ruled out, and this is the point:** that the growth was produced by the NEW
+  trigger. A page load and the 15-minute `cu-reprobe` alarm write the same rows, so store
+  size, row count and mtime **cannot discriminate** `checkActiveOrg` firing from the two
+  pre-existing paths — `via: code`, the three converge on one `handleReport`.
+- **Leading hypothesis:** it works. Every unit is pinned (13 tests, 7/7 mutation sweep) and
+  the code is demonstrably running — but that is an argument, not an observation, and the
+  whole arc's lesson is that per-surface evidence missed the seam.
+- **Next probe:** in the Default profile's service-worker console
+  (`brave://extensions` → *Claude Usage Tracker* → service worker), run
+  `chrome.storage.local.get(["lastActiveOrg"]).then(console.log)`, note the value, switch
+  accounts in an ALREADY-OPEN claude.ai tab without reloading, wait ~15s, and re-run it. A
+  changed `lastActiveOrg` with no navigation is the fix working; unchanged after 60s is the
+  fix dead. 🔴 Do it inside 15 minutes of a page load or the alarm will confound it.
+
+### Profile 1's `.local` store went from 811 B to 4.9 MB — the "dormant second registration" reading is dead
+- as-of: 2026-09-26
+- **Symptom + exact repro:** two registrations of this extension on the laptop, with separate
+  extension ids and therefore separate `chrome.storage.local` stores, so each popup can only
+  ever show the accounts visited in its own profile.
+- **Observed (with values):** `Default` → `onglbmcagkpoaapfeeoepblcbeanfanl` from
+  `~/workspace/devrc/scripts/claude-usage/extension`, store `6,748,391 B`. `Profile 1` →
+  `doiabidngiihgfkpgdcmeccjohjgfmoe` from `~/.local/share/claude-usage-ext`, store
+  **`4,861,557 B`** — it was `811 B` with `0` `resetsAt` five days earlier.
+- **Ruled out:** "Profile 1 is unused, so the split is theoretical" — `via: measurement`,
+  4.9 MB of recorded reports. 🔴 **This retires a claim THIS DOCUMENT still makes** in the
+  `RESOLVED — "chrome.storage.local is 0 bytes on the laptop"` annotation further up, which
+  quotes the 811 B / 0 reading and concludes no report had ever finished there. True on
+  2026-09-21, false now; the annotation has been marked.
+- **Leading hypothesis:** the operator used `Profile 1` for claude.ai at some point after
+  09-21, and that profile's copy has been snapshotting ever since — independently, into a
+  store nothing merges.
+- **Next probe:** none needed for the diagnosis; it is ranked item 2. If you want the split
+  quantified before deleting, dump both stores' org-uuid sets and diff them — the
+  interesting number is how many accounts exist in ONLY one of the two.
