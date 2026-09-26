@@ -60,7 +60,9 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   `~/.local/bin/claim-work` → `scripts/claim-work.sh`, i.e. the shared-queue LOCK itself,
   which FAILS OPEN — so a checkout that moves it makes every concurrent session read "no
   claim exists".** Also `opencode-dispatch`, `dl-route`, `peer-host`, `cairn-who`,
-  `cairn-validate`, `stt` and the `opencode` skill body. `home-manager switch --flake
+  `cairn-validate`, `stt` and the `opencode-dispatch` skill body (renamed from
+  `opencode` 2026-09-25 — the exact product name routed every bare mention into
+  the dispatch skill). `home-manager switch --flake
   ~/workspace/devrc` likewise builds **whatever is checked out**.
   Keep this clone on `main`; that is what makes it a safe deploy target.
   🔴 **`git stash` is banned here for a DIFFERENT reason, and the worktree does NOT fix it:**
@@ -172,7 +174,7 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
 ## Layout
 - `nix/` — home-manager modules (`programs/zsh`, tmux, nvim, i3, …). `flake.nix` at root.
 - `scripts/` — utility scripts (prefer extending these over re-typing inline bash / heredocs).
-- `claude/` — **global Claude Code config, managed declaratively**: `RULES.md` (+ `RULES-ARCHIVE.md`), `PRINCIPLES.md`, and **every skill under `claude/skills/<name>/SKILL.md`** (+ its `reference/`, which ships too). `nix/home.nix` symlinks these into `~/.claude/`, so both hosts stay in sync. **Edit them HERE + `home-manager switch`/`ship.sh` — NOT `~/.claude/*`** (read-only nix-store symlinks). 🔴 **`claude/commands/` NO LONGER EXISTS** — upstream merged custom commands into skills, so all 17 migrated to `claude/skills/` (a skill still gives you `/<name>`, and now also auto-fires on its description). **opencode commands are auto-generated** from these skills by `scripts/opencode/generate-commands.py` (nix derivation `opencodeCommands` in `nix/home.nix`), deployed to `~/.config/opencode/commands/`. This makes every skill show as `/<name>` in opencode's TUI autocomplete (source="command" with hints, instead of source="skill" with empty hints). Deliberate MUTABLE exceptions: the `browser` + `dl-router` skills (`mkOutOfStoreSymlink` onto `scripts/`, edits apply with no switch) and `~/.claude/CLAUDE.md` (genuinely per-host, unreferenced by `home.nix`). New-host caveat: `home.file.force` does NOT clobber a pre-existing *foreign* `~/.claude/RULES.md` or `skills/*` — `rm` those once before the first switch. Also managed: `~/.claude/hooks/bash-guard.py` (from `scripts/claude-hooks/`; `dropStaleClaudeHooks` displaces a hand-placed regular file, `force` alone cannot).
+- `claude/` — **global Claude Code config, managed declaratively**: `RULES.md` (+ `RULES-ARCHIVE.md`), `PRINCIPLES.md`, and **every skill under `claude/skills/<name>/SKILL.md`** (+ its `reference/`, which ships too). `nix/home.nix` symlinks these into `~/.claude/`, so both hosts stay in sync. **Edit them HERE + `home-manager switch`/`ship.sh` — NOT `~/.claude/*`** (read-only nix-store symlinks). 🔴 **`claude/commands/` NO LONGER EXISTS** — upstream merged custom commands into skills, so all 17 migrated to `claude/skills/` (a skill still gives you `/<name>`, and now also auto-fires on its description). **opencode commands are auto-generated** from these skills by `scripts/opencode/generate-commands.py` (nix derivation `opencodeCommands` in `nix/home.nix`), deployed to `~/.config/opencode/commands/`. This makes every skill show as `/<name>` in opencode's TUI autocomplete (source="command" with hints, instead of source="skill" with empty hints). Deliberate MUTABLE exceptions: the `browser` + `dl-router` + `opencode-dispatch` skills (`mkOutOfStoreSymlink` onto `scripts/`, edits apply with no switch) and `~/.claude/CLAUDE.md` (genuinely per-host, unreferenced by `home.nix`). New-host caveat: `home.file.force` does NOT clobber a pre-existing *foreign* `~/.claude/RULES.md` or `skills/*` — `rm` those once before the first switch. Also managed: `~/.claude/hooks/bash-guard.py` (from `scripts/claude-hooks/`; `dropStaleClaudeHooks` displaces a hand-placed regular file, `force` alone cannot).
 - **`reference/` vs `flows/` inside a skill**: `reference/` holds durable FACTS you verify
   against; `flows/` (sibling dir, same `cp -R` deploy, no nix change needed) holds PROCEDURES you
   execute step by step. 🔴 A `flows/` file does **not** auto-fire the way a skill `description`
@@ -195,7 +197,7 @@ is preserved verbatim in `docs/LAYOUT.md` (not auto-loaded, and stale by design)
 | `scripts/mail-actions/` | `mailbox` | email-automation layer over the self-hosted inbox (**separate from activity telemetry**) |
 | `scripts/check-clickup-addressed/` | `check-clickup-addressed` | did the work on a ClickUp ticket actually happen — reads session transcripts for completion signals (migrated out of datapacket-talos 2026-08-22) |
 | `nix/i3/`, `nix/graphical.nix`, `scripts/bar-status-poll` | `bar` | i3 + i3status-rust bar, count blocks, dunst toasts |
-| `scripts/opencode/` | `opencode` | dispatch a task to the headless opencode agent (`opencode-dispatch`), + its config/agents/guard plugin |
+| `scripts/opencode/` | `opencode-dispatch` | dispatch a task to the headless opencode agent (the `opencode-dispatch` CLI), + its config/agents/guard plugin |
 
 Repo-level facts that are NOT in any skill — they live here on purpose:
 - 🔴 **A NEW file must be `git add`ed or the flake silently omits it from the deploy.** Applies to every managed path: a new skill, a new `reference/*.md` inside one, an extension file, a hook or a test. The switch succeeds and the file simply is not there.

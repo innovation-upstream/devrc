@@ -1045,11 +1045,11 @@ def test_the_tier_guard_short_circuits_before_invoking_git(tmp_path, monkeypatch
 
 def test_home_nix_deploys_the_skill_as_an_out_of_store_symlink():
     src = HOME_NIX.read_text()
-    for target in ('".claude/skills/opencode/SKILL.md"',
-                   '".claude/skills/opencode/opencode-dispatch"',
+    for target in ('".claude/skills/opencode-dispatch/SKILL.md"',
+                   '".claude/skills/opencode-dispatch/opencode-dispatch"',
                    '".local/bin/opencode-dispatch"'):
         assert target in src, f"home.nix does not deploy {target}"
-    block = src[src.index('".claude/skills/opencode/SKILL.md"'):]
+    block = src[src.index('".claude/skills/opencode-dispatch/SKILL.md"'):]
     assert "mkOutOfStoreSymlink" in block[:400], (
         "the executable must be an mkOutOfStoreSymlink like browser/dl-route, so "
         "an edit applies without a home-manager switch"
