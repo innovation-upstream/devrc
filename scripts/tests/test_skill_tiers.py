@@ -85,12 +85,12 @@ MIN_SKILLS = 30
 # --------------------------------------------------------------------------- #
 MEASURED_ENTRIES = 36
 MEASURED_TIER_A_ENTRIES = 23
-MEASURED_TIER_A_CHARS = 7_504
+MEASURED_TIER_A_CHARS = 7_491
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 7_689
+MEASURED_UNDER_LEDGER_CHARS = 7_676
 # ...and what the same 36 entries would cost with every skill tier A. The
 # difference is what the ledger buys: 3,316 chars.
-MEASURED_ALL_TIER_A_CHARS = 11_005
+MEASURED_ALL_TIER_A_CHARS = 10_992
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
@@ -99,12 +99,25 @@ MEASURED_ALL_TIER_A_CHARS = 11_005
 # tier-A addition of any size reds this gate. The mean tier-A entry is
 # 7,617 / 22 = 346.2.
 #
+# 2026-09-26: `civitai-app-fleet`'s description gained two app names
+# (`panorama-360`, `oauth-probe`) — +27 chars, which left the TIER-A ceiling alone
+# (80 of headroom remained) but broke the LISTING-TOTAL ratchet in
+# `test_skill_descriptions.py` by exactly 27. Paid per that gate's own eviction
+# playbook step 1, NOT by raising either ceiling: the clause "rolling one change
+# through every app repo" came out of the same description, since it restates the
+# opening "Bulk iteration across the … fleet" and is already spelled out in the
+# skill BODY, which costs 0 until the skill is invoked. Net −18 chars against the
+# pre-PR tree, so MEASURED_TIER_A_CHARS is 7,491 across 23 entries and headroom
+# against the unchanged 7,617 ceiling is **126**. The mean tier-A entry is
+# 7,491 / 23 = 325.7.
+#
 # 2026-09-14: adding `the-algorithm` (tier A) and cutting mechanism prose from
 # five descriptions put MEASURED_TIER_A_CHARS at 7,510 across 23 entries — the
-# ceiling was left at 7,617, so headroom is 107, NOT 0. The mean tier-A entry is
+# ceiling was left at 7,617, so headroom was 107, NOT 0. The mean tier-A entry was
 # 7,510 / 23 = 326.5; headroom below the mean bounds an AVERAGE entry, not every
-# entry. Do not treat the 107 as licence — the descriptions gate above this one
-# is still pinned at 0 headroom and reds on the next addition.
+# entry. Do not treat the headroom as licence — the descriptions gate above this
+# one is the one that actually went red in 2026-09-26's +27, on the SUM rather
+# than on this block.
 #
 # 🔴 2026-09-25: `opencode` was RENAMED `opencode-dispatch` — the exact product
 # name made every bare mention of "opencode" route into the dispatch skill. The

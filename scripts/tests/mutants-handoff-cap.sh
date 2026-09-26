@@ -103,6 +103,34 @@ cp -a "$SRC/scripts/tests/conftest.py" "$ROOT/scripts/tests/" 2>/dev/null
 # sweep against a suite that was already failing for an unrelated reason.
 mkdir -p "$ROOT/scripts/tests/fixtures"
 cp -a "$SRC/scripts/tests/fixtures/." "$ROOT/scripts/tests/fixtures/"
+# 🔴 THE AUDITOR AND ITS OWN SIBLING, AND THE BATTERY WAS RED WITHOUT THEM.
+# `evictable_note` resolves `handoff-audit.py` RELATIVE TO THE MODULE
+# (`__file__/../../handoff-audit.py`), so in a copy that lacks it the function
+# returns "" — by design, it never raises — and twelve `evictable_note` /
+# budget-note tests fail at the BASELINE. `handoff-audit.py` in turn
+# `SystemExit`s at module level without `skill-audit.py`, so copying one without
+# the other swaps a silent "" for a caught SystemExit and leaves the same twelve
+# red.
+#
+# ⚠ THIS FILE'S COPY LIST DID NOT MOVE WHEN #1815 ADDED `evictable_note`, so the
+# battery has exited 1 at its own baseline control ever since — which is the good
+# outcome of the two available: the control refused to score a sweep against a
+# suite that was already failing, rather than printing a screen of `ok`. It is
+# still a permanently-red gate, which `claude/RULES.md` says is worse than none.
+# MEASURED at `4c9a3f58` (before rule (p)): the same twelve names, same order.
+#
+# 🔴 AND THE CHAIN IS THREE DEEP, NOT TWO — MEASURED by adding the first two and
+# watching ELEVEN of the twelve stay red. `skill-audit.py` reads its ceiling and
+# working-margin floor out of `scripts/browser-bridge/tests/test_skill_size.py`
+# at MODULE level, deliberately keeping no copy of the numbers, and `SystemExit`s
+# naming that path when it is absent. The tell is worth writing down: the
+# traceback names a BROWSER-BRIDGE size gate on a battery about handoff-doc
+# rules, which reads as an unrelated breakage rather than as a missing copy.
+cp -a "$SRC/scripts/handoff-audit.py" "$ROOT/scripts/"
+cp -a "$SRC/scripts/skill-audit.py" "$ROOT/scripts/"
+mkdir -p "$ROOT/scripts/browser-bridge/tests"
+cp -a "$SRC/scripts/browser-bridge/tests/test_skill_size.py" \
+      "$ROOT/scripts/browser-bridge/tests/"
 # The suite reads the skill body (TestSkillAndModuleAgree) and its reference dir.
 cp -a "$SRC/claude/skills/handoff/SKILL.md" "$ROOT/claude/skills/handoff/"
 cp -a "$SRC/claude/skills/handoff/reference/." \
@@ -966,6 +994,150 @@ run 'new-docs-are-ratcheted-too' \
   's|^    if is_new_doc:|    if False:|'
 run 'rule-n-comment-reword-control' SURVIVES \
   's|# --- rule (n): the rank queue does not GROW its unforced half|# --- rule n: rank ratchet (reworded comment)|'
+
+printf '\n== rule (p): an over-ceiling doc may not GROW (must be KILLED) ==\n'
+# 🔴 THE REFUSAL ITSELF. Everything else in this block is a boundary or a
+# recording; this row is the rule.
+run 'rule-p-refusal-never-fires' \
+  test_an_over_ceiling_doc_that_GROWS_is_REFUSED \
+  's|^    if ratchet and not args.size_ratchet_override:|    if False and not args.size_ratchet_override:|'
+# 🔴 THE TWO HALVES OF THE CONDITION GET SEPARATE ROWS — mutating both together
+# would delete the guard with its enclosing condition and prove nothing about
+# either half. This is the OPERATOR OPT-IN half: a flag the code ignores is a
+# refusal nobody can clear, on the one write path that records a session.
+run 'rule-p-override-ignored' \
+  test_the_override_LANDS_the_growth_and_SAYS_SO_above_the_diff \
+  's|^    if ratchet and not args.size_ratchet_override:|    if ratchet and True:|'
+# 🔴 THE DELTA ARM. Without it the rule stops being a ratchet on GROWTH and
+# becomes a flat refusal on every over-budget doc — including the EVICTING
+# delta, which is the one route out that is not the override. That is the
+# permanently-red gate `claude/RULES.md` forbids, and this row is what makes the
+# escape's own test bind (it PASSES at the pre-rule base, by construction).
+#
+# 🔴 THE FOUR PREDICATE ROWS BELOW ARE UNRANGED, AND THAT IS A CHANGE WITH TWO
+# REASONS. They used to carry `/^def size_ratchet_report/,/^def
+# size_ratchet_override_note/` because `size_ratchet_override_note` re-derived
+# the identical predicate and a bare `s|…|` would have mutated both copies at
+# once — wider than the expression that can be wrong. That duplicate is DELETED
+# (`claude/RULES.md`, one rule one place), so each expression now occurs EXACTLY
+# ONCE in the module. Second reason, and the one that makes the un-ranging worth
+# doing rather than merely possible: `test_mutants_handoff_cap.py`'s scraper only
+# captures an expression STARTING `s|` or `s@`, and 🔴 a ranged row does not
+# simply drop out of it — MEASURED, and the flattering reading is the wrong one.
+# The scraper skips FORWARD to the next such line, so a ranged row is recorded
+# carrying a LATER row's expression and the rows in between disappear. At the
+# commit before this one that was 5 rule-(p) rows: `rule-p-ignores-the-DELTA`
+# paired with the ALLOWANCE expression, four more absent entirely, and the rot
+# guard green over all of it. Un-ranging is what makes each row answer for its own
+# expression (98 -> 102 rows scraped, all four names now present).
+# 🔴 Before re-ranging any of them, or before restating the predicate anywhere in
+# `handoff_doc.py` — a docstring counts — check the pattern still occurs once:
+# two matches is a mutation that no longer isolates what its name claims.
+run 'rule-p-ignores-the-DELTA' \
+  test_the_same_delta_LANDS_when_it_EVICTS_at_least_as_much \
+  's|or pos.delta <= 0:|or False:|'
+# The BOUNDARY of that arm, one byte over: `delta == 0` must LAND — an
+# over-budget doc may be rewritten in place.
+run 'rule-p-delta-boundary-excludes-a-flat-update' \
+  test_the_boundary_is_a_POSITIVE_delta_not_a_NON_NEGATIVE_one \
+  's|or pos.delta <= 0:|or pos.delta < 0:|'
+# 🔴 THE CEILING ARM. Dropping it ratchets EVERY handoff doc, which is a
+# different rule wearing this one's name — and the corpus median is 13,730 B.
+run 'rule-p-ignores-the-CEILING' \
+  test_a_doc_UNDER_its_ceiling_GROWS_exactly_as_before \
+  's|or pos.over_by <= 0 |or False |'
+# Its boundary: a doc sitting exactly ON its allowance is not over it.
+run 'rule-p-ceiling-boundary-fires-AT-the-line' \
+  test_the_ceiling_boundary_is_STRICTLY_over_not_at \
+  's|or pos.over_by <= 0 |or pos.over_by < 0 |'
+# 🔴 THE NUMBER'S OWNER. A literal here is the same VALUE and therefore invisible
+# to every other row in this block — they all use documents far over both
+# spellings. Only the guard that MOVES the ceiling can see it.
+run 'rule-p-ceiling-is-a-second-literal' \
+  test_the_CEILING_is_read_from_handoff_budget_and_not_copied \
+  's|allowance=handoff_budget.MAX_BYTES if hit is None else hit,|allowance=65_536 if hit is None else hit,|'
+# The ledger half of the same claim.
+run 'rule-p-grandfathered-ledger-ignored' \
+  test_a_GRANDFATHERED_allowance_is_what_it_measures_against \
+  's|allowance=handoff_budget.MAX_BYTES if hit is None else hit,|allowance=handoff_budget.MAX_BYTES,|'
+# 🔴 THE FOREIGN-KEY RESOLUTION, WHICH THE devrc-ONLY FIXTURES ABOVE CANNOT SEE.
+# Since #1871 a ledger entry for a doc in another repo is keyed by
+# `handoff_budget.digest_key(path)` (devrc is public), and `lookup` is the one
+# resolver. Open-coding a bare `.get` back into `budget_position` resolves devrc's
+# 11 entries and answers None for all 71 foreign ones — the bare ceiling, i.e.
+# rule (p) refusing the next update to every document the operator grandfathered.
+run 'rule-p-reads-the-ledger-without-the-digest-resolver' \
+  test_rule_p_resolves_a_FOREIGN_ledger_entry_through_its_DIGEST \
+  's|    hit = handoff_budget.lookup(relpath, handoff_budget.GRANDFATHERED)|    hit = handoff_budget.GRANDFATHERED.get(relpath)|'
+# 🔴 THE SEAM. Two sites read one `budget_position`; a refusal and a warning
+# quoting different numbers about one document is the failure this shape exists
+# to prevent, and each site is individually correct while it happens.
+run 'rule-p-quotes-a-different-overage-than-the-warning' \
+  test_the_refusal_and_the_WARNING_quote_the_SAME_two_numbers \
+  's|f"{pos.allowance:,} B, over by {pos.over_by:,} B "|f"{pos.allowance:,} B, over by {pos.after:,} B "|'
+# The reason is the whole point of the override; an empty one records nothing
+# while still suppressing the refusal.
+run 'rule-p-override-reason-not-required' \
+  test_the_override_REQUIRES_a_reason \
+  's|^    if args.size_ratchet_override is not None and not args.size_ratchet_override.strip():|    if False:|'
+# 🔴 THE DURABLE HALF of the record. stdout survives only in a transcript
+# shipped as a bounded TAIL; `git log` is what a later reader actually has.
+run 'rule-p-override-not-stamped-on-the-commit' \
+  test_the_override_is_STAMPED_on_the_commit \
+  's|                _ratchet_trailer_value(args.size_ratchet_override)|                ""|'
+# The IMMEDIATE half, which the trailer is not a backup for.
+run 'rule-p-override-note-suppressed' \
+  test_the_override_LANDS_the_growth_and_SAYS_SO_above_the_diff \
+  's|^    if ratchet_override:|    if False:|'
+# 🔴 THE FALSE-RECORD DIRECTION. Keying the stamp on the FLAG rather than on
+# whether the rule fired puts an override of nothing on an ordinary commit.
+run 'rule-p-stamps-a-run-it-never-refused' \
+  test_the_override_is_SILENT_on_a_run_the_ratchet_would_not_refuse \
+  's|                if ratchet_override else ""|                if args.size_ratchet_override else ""|'
+# 🔴 THE HAZARD THIS RULE IS NOT ALLOWED TO CREATE. The write path is the only
+# step that records a session, so a bug in the ratchet must cost the ratchet and
+# never the record.
+#
+# 🔴 THIS ONE STAYS RANGED, AND IT IS THE EXCEPTION TO THE NOTE ABOVE. Deleting
+# the duplicated predicate did not make this pattern unique: the handler idiom
+# `except (Exception, SystemExit):` occurs THREE times in `handoff_doc.py` —
+# `evictable_note`, `size_ratchet_report` and `size_ratchet_override_note`, whose
+# own handler is what the direct call in
+# `test_it_degrades_to_NO_RATCHET_when_its_own_code_explodes` exercises. Unranged,
+# this row would mutate all three at once and die for the wrong reason.
+#
+# 🔴 AND THE COST IS NOT "INVISIBLE TO THE ROT GUARD", IT IS WORSE THAN THAT —
+# MEASURED, because the obvious reading is wrong. `test_mutants_handoff_cap.py`'s
+# scraper skips forward from a `run` line to the next expression STARTING `s|`, so
+# a ranged row does not drop out: it is captured carrying the expression of some
+# LATER row, and the rows in between vanish. Measured on this file: at the commit
+# before this one, 5 rule-(p) rows were mis-paired or missing, and THIS row was
+# reported healthy off `rule-p-comment-reword-control`'s expression while its own
+# was never checked. Un-ranging the four predicate rows above closed four of the
+# five; this one is unfixable from here and is left stated. Do not read a green
+# `test_every_mutation_row_still_changes_its_target` as covering this row.
+run 'rule-p-crashes-instead-of-degrading' \
+  test_it_degrades_to_NO_RATCHET_when_its_own_code_explodes \
+  '/^def size_ratchet_report/,/^def size_ratchet_override_note/ s|    except (Exception, SystemExit):|    except SystemExit:|'
+# 🔴 THE CONTROL-CHARACTER REPAIR, ONE ROW PER CHANNEL, ADDED #1871 ROUND 2 AND
+# NOT YET SCORED BY AN AUTHORITATIVE SWEEP. The repair had NO row at all before
+# this: `rule-p-override-not-stamped-on-the-commit` blanks the whole trailer
+# value, which is a different mutation and is killed by a plain-ASCII fixture.
+#
+# 🔴 TWO ROWS RATHER THAN ONE INSIDE `_printable_clipped`, DELIBERATELY. Mutating
+# that function's body removes the repair from BOTH channels at once, so either
+# test kills it and neither channel is isolated — `claude/RULES.md`'s "isolate the
+# mutation" in its plainest form. Each row here drops the repair at ONE call site
+# and leaves the clip, so the mutant is exactly "this channel prints raw".
+# Both anchors occur 1x in `handoff_doc.py`; the replacements change one line each.
+run 'rule-p-override-echo-not-repaired' \
+  test_a_reason_carrying_a_CONTROL_character_is_REPAIRED_ON_STDOUT_TOO \
+  's|_printable_clipped(reason, SIZE_RATCHET_ECHO_MAX)|_clip(reason, SIZE_RATCHET_ECHO_MAX)|'
+run 'rule-p-override-trailer-not-repaired' \
+  test_a_reason_carrying_a_CONTROL_character_still_STAMPS_the_commit \
+  's|_printable_clipped(reason, SIZE_RATCHET_REASON_MAX)|_clip(reason, SIZE_RATCHET_REASON_MAX)|'
+run 'rule-p-comment-reword-control' SURVIVES \
+  's|# --- rule (p): a doc already over its ceiling may not GROW|# --- rule p: size ratchet (reworded comment)|'
 
 
 printf '\n== controls ==\n'

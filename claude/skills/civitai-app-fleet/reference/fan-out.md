@@ -5,6 +5,12 @@ app repos in an afternoon: a toolchain pass, a guard backport, a guard fix,
 version bumps, and six submits. Everything below is a thing that went wrong or
 nearly did.
 
+⚠ **"Seven" is that session's count, not today's** — the fleet is **nine** as of
+2026-09-25 (`panorama-360` and `oauth-probe` joined and nothing updated the
+prose, which is the drift this note exists to stop). Every "seven" below is a
+historical measurement and is left as written; read the current membership from
+`fleet.py`'s `REPOS`, never from this page.
+
 ## Before dispatching
 
 Run `fleet.py`. Do not write repo shape into a brief from memory — the default

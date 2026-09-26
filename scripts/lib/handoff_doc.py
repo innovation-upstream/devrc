@@ -240,6 +240,8 @@ EXIT CODES
  12  rank-growth     — rule (n): the queue's `forcing: none` half grew
  13  leak-refused    — rule (o): the repo's own leak scanner would not vouch for
      the delta, or could not be run at all; the write is rolled back
+ 14  size-ratchet    — rule (p): the doc is already over its byte ceiling and
+     this update would make it BIGGER
 """
 
 from __future__ import annotations
@@ -406,6 +408,57 @@ target tree can be red for something this call did not cause, and the honest
 answer to that is an operator who read the output and said so, recorded on the
 run. It does not cover the arm where the scanner could not be RUN: there is no
 verdict to have read.
+"""
+
+EXIT_SIZE_RATCHET = 14
+"""Rule (p). The doc is ALREADY over its ceiling and this update GROWS it.
+
+🔴 NOT A SECOND CEILING, AND READING IT AS ONE GETS THE DESIGN BACKWARDS. A doc
+UNDER its allowance is untouched by this rule however much it adds — that
+population is `budget_warning`'s, and it still only warns. What is ratcheted is
+the doc already past the line: it may be updated, it may shrink, it may not
+GROW. Same idiom as rule (n) and as the repo's byte gates — the number may fall
+freely and may not rise.
+
+🔴 WHY A REFUSAL WHERE `budget_warning` DELIBERATELY REFUSES NOTHING. That
+warning has been printed on every over-budget write since #1648 and the
+mechanism it names went on regardless: MEASURED on one arc, a document a prune
+had landed UNDER the ceiling more than DOUBLED inside a week, the growth landing
+in `Gotchas`. 🔴 THE BYTES AND THE `git cat-file -s` COMMANDS THAT RE-MEASURE
+THEM LIVE IN ONE PLACE — `claude/skills/handoff/reference/write-gate.md` §I — and
+are NOT restated here, because the restated copies are what went wrong: the first
+pair written down reproduced at no revision of the measured file. ⚠ AND NO
+`Gotchas` RATIO IS QUOTED, HERE OR THERE. This sentence carried "62% of it";
+round 1 of #1871's audit re-measured it and it reproduces on neither reading of
+the source row, so §I now declines to publish one rather than pick.
+
+The growth is STRUCTURAL rather than careless: the bucket rules forbid durable
+content in a REPLACE section, so the correct remedy for a finding is "move it to
+`Gotchas`", which APPENDS. That section has an entry rule and no exit rule; it is
+monotonic by construction, and a warning is not a counterweight to a
+construction. A prose prune discipline was tried IN the document and the section
+regrew within seven days of being read.
+
+🔴 THE OVERRIDE IS NOT A CONVENIENCE, IT IS WHAT MAKES THE REFUSAL SAFE.
+`/handoff`'s write path is the ONLY step that records a session — see
+`evictable_note`, which may not even RAISE in this path — and
+`~/.claude/hooks/handoff-write-guard.py` blocks Stop until a handoff is written.
+A refusal with no escape could therefore cost a session its record, which is
+strictly worse than an oversized doc (`handoff_budget`'s own header measures
+that trade: 22 of 253 sessions never recorded, ZERO of them because a gate
+correctly declined). `--override-size-ratchet "<why>"` always clears it, the
+reason is REQUIRED, and it is recorded on the run AND on the commit. 🔴 AND IT IS
+NOT OPERATOR-ONLY, UNLIKE `--leak-pre-existing-approved`: `SIZE_RATCHET_WHO_MAY`
+is the one place that says who may pull it and what the reason then owes.
+
+⚠ AND IT REACHES A DOC'S FIRST WRITE, WHICH IS NOT THE CASE THE RULE IS NAMED
+FOR. `before` is 0 for a new doc, so a first write larger than the ceiling is a
+positive delta over the line and is refused. That is the stated predicate
+(merged over the ceiling AND net delta positive) rather than an oversight: rule
+(n) grandfathers round 1 because it compares a COUNT across rounds and a new doc
+has no previous round to have grown since, while this rule compares BYTES
+against a fixed ceiling, which a new doc can be over on its first day. The
+override is the escape, and it says why on the commit.
 """
 
 
@@ -2999,13 +3052,25 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         # number that does not actually clear the overage sends an author cutting
         # and leaves them still red — the one outcome worse than saying nothing.
         # 🔴 SCOPED TO THE `over_by > 0` CALLERS, which since #1826 means the
-        # GATED over-budget arm alone. The two `over_by=0` callers — the near
-        # arm, and the UNGATED over-budget arm — deliberately take the `else`
-        # branch and state no relation to any overage. For the near arm there
-        # is no overage to relate to. For the ungated arm it is a choice: no
-        # gate will go red there, so "still red" cannot happen, and the arm's
-        # own comment explains why it declines to assert a deficit against a
-        # ceiling nothing enforces. ⚠ The COST is real and is recorded there:
+        # GATED over-budget arm alone. EVERY OTHER caller passes `over_by=0`
+        # deliberately, takes the `else` branch, and states no relation to any
+        # overage.
+        # ⚠ NO COUNT HERE, AND THE MISSING NUMBER IS THE FIX. This said "the
+        # two `over_by=0` callers" and rule (p) made it THREE in the PR that
+        # added it — a bare count is wrong from the moment a caller lands, and
+        # wrong silently, because nothing reads a comment's arithmetic. The
+        # sites are enumerated instead, and `git grep -n
+        # 'evictable_note(merged_text'` is what re-derives the list:
+        #   * `budget_warning`'s UNGATED over-budget arm — a CHOICE: no gate
+        #     will go red there, so "still red" cannot happen, and that arm's
+        #     own comment explains why it declines to assert a deficit against
+        #     a ceiling nothing enforces;
+        #   * `budget_warning`'s NEAR arm — there is no overage to relate to;
+        #   * `size_ratchet_report`, rule (p) — the zero withholds the WRONG
+        #     threshold rather than an unenforced one, for the reason stated at
+        #     that call site: clearing the refusal needs a net delta of 0, not a
+        #     cleared overage.
+        # ⚠ The UNGATED arm's zero has a real COST, recorded at that arm:
         # 12 of the 13 docs that arm newly reaches have `net < over_by`, and
         # it is the reader who must subtract. Round 1 of #1826 found this
         # comment asserting, unscoped, a rule that its newest caller breaks.
@@ -3051,6 +3116,69 @@ def evictable_note(merged_text: str, over_by: int) -> str:
         return ""
 
 
+class BudgetPosition(typing.NamedTuple):
+    """Where a merged handoff doc sits against its byte allowance. PURE.
+
+    🔴 ONE COMPUTATION, TWO CONSUMERS, AND THAT IS THE WHOLE REASON IT IS A
+    FUNCTION RATHER THAN FIVE LINES IN EACH. `budget_warning` PRINTS "over by
+    N B (+D B this update)"; rule (p) REFUSES on those same two numbers. A
+    second derivation is how a warning and a refusal come to disagree about one
+    document — `claude/RULES.md`'s one-rule-one-place, in the shape where the
+    disagreement is invisible because each site is individually correct.
+
+    🔴 `is_handoff_doc` IS PART OF THE ANSWER RATHER THAN A CALLER'S CHECK, for
+    the same reason: "which paths does the budget govern?" is one predicate, and
+    a second spelling of it is what would let the ratchet bind a path the
+    warning is silent about.
+    """
+
+    is_handoff_doc: bool
+    after: int
+    before: int
+    delta: int
+    allowance: int
+    grandfathered: bool
+
+    @property
+    def over_by(self) -> int:
+        """Bytes past the allowance. NEGATIVE when there is room — callers that
+        print it all guard on `after > allowance` first."""
+        return self.after - self.allowance
+
+
+def budget_position(relpath: str, merged_text: str, base_text: str) -> BudgetPosition:
+    """Size the merge against `handoff_budget`'s ledger. PURE, and NO gate.
+
+    🔴 THE NUMBERS COME FROM `handoff_budget` AND ARE NOT COPIED HERE. That
+    module owns `MAX_BYTES` and `GRANDFATHERED` precisely because a second
+    reader appeared; a literal in this file would be a third.
+
+    🔴 AND THE KEY LOOKUP IS `handoff_budget.lookup`, NOT A `.get`. A ledger entry
+    for a document in ANOTHER repository is keyed by `digest_key(relpath)` because
+    devrc is public; `lookup` tries the plaintext key and then the digest, and it
+    is the ONE place that rule is spelled. A bare `.get(relpath)` here would
+    resolve devrc's own documents and answer "no entry" for every foreign one —
+    i.e. hand them the bare ceiling and refuse the next update to a document that
+    was grandfathered on purpose. `claude/RULES.md`: one rule, one place.
+
+    🔴 ONE LOOKUP, TWO FIELDS. `allowance` and `grandfathered` are derived from a
+    single `lookup` result rather than from two calls, so they cannot disagree
+    about whether the document has an entry at all.
+    """
+    is_doc = relpath.startswith("claudedocs/") and "/handoff-" in "/" + relpath
+    after = len(merged_text.encode("utf-8"))
+    before = len(base_text.encode("utf-8"))
+    hit = handoff_budget.lookup(relpath, handoff_budget.GRANDFATHERED)
+    return BudgetPosition(
+        is_handoff_doc=is_doc,
+        after=after,
+        before=before,
+        delta=after - before,
+        allowance=handoff_budget.MAX_BYTES if hit is None else hit,
+        grandfathered=hit is not None,
+    )
+
+
 def budget_warning(relpath: str, merged_text: str, base_text: str, *,
                    gated: bool) -> str:
     """A one-block warning, or "" when there is nothing worth saying.
@@ -3061,14 +3189,17 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
     🔴 `gated` IS REQUIRED AND HAS NO DEFAULT, deliberately. A default is how the
     false claim survived: every caller got the devrc answer whether or not it was
     writing to devrc. Pass `gate_enforces_budget(repo)`.
+
+    ⚠ IT STILL REFUSES NOTHING, and that sentence is now narrower than it reads.
+    Rule (p) (`size_ratchet_report`) DOES refuse, on a subset of this function's
+    over-budget population, and fires BEFORE this is called — so an over-budget
+    block printed by this function is one rule (p) let through.
     """
-    if not relpath.startswith("claudedocs/") or "/handoff-" not in "/" + relpath:
+    pos = budget_position(relpath, merged_text, base_text)
+    if not pos.is_handoff_doc:
         return ""
-    after = len(merged_text.encode("utf-8"))
-    before = len(base_text.encode("utf-8"))
-    allowance = handoff_budget.GRANDFATHERED.get(relpath, handoff_budget.MAX_BYTES)
-    grandfathered = relpath in handoff_budget.GRANDFATHERED
-    delta = after - before
+    after, delta = pos.after, pos.delta
+    allowance, grandfathered = pos.allowance, pos.grandfathered
     sign = "+" if delta >= 0 else ""
 
     if after > allowance and not gated:
@@ -3181,6 +3312,323 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
         note = evictable_note(merged_text, 0)
         return f"{head}\n{note}" if note else head
     return ""
+
+
+# --- rule (p): a doc already over its ceiling may not GROW --------------------
+#
+# 🔴 THE MECHANISM THIS RULE INTERRUPTS, and it is the SAME SHAPE as rule (n)'s
+# self-extending rank queue one level down: a section with an ENTRY RULE AND NO
+# EXIT RULE. `Gotchas` and `Open investigations` APPEND by design, the bucket
+# rules forbid durable content anywhere else, so "move it to `Gotchas`" is the
+# CORRECT remedy for every finding and the section is monotonic by construction.
+# MEASURED on one arc: a prune landed the doc under the ceiling and it more than
+# DOUBLED inside a week, the growth landing in `Gotchas`. The figures, and the two
+# commands that re-measure them, are owned by
+# `claude/skills/handoff/reference/write-gate.md` §I — one place, never restated.
+# ⚠ THE `Gotchas` RATIO IS NOT AMONG THEM. This line carried "62% of the file"
+# while claiming to restate nothing; #1871 round 1 re-measured it and §I now
+# publishes no ratio at all, so quoting one here would make this the only source.
+#
+# 🔴 SO THE RATCHET IS ON GROWTH, NOT ON SIZE. A doc under its allowance is not
+# this rule's population at all — `budget_warning` keeps that one, and keeps
+# only warning about it. Over the line, the delta must be <= 0. That is
+# escapable by doing the intended work rather than only by overriding, which is
+# what keeps it off `claude/RULES.md`'s permanently-red list.
+#
+# 🔴 WHAT IT DELIBERATELY DOES NOT DO: it does not check WHERE the bytes came
+# from or where they went. A net-zero delta that deleted a gotcha to pay for a
+# new one satisfies it, and nothing here can tell that from an eviction. The
+# refusal says so in its own words, because a ratchet whose cheapest escape is
+# deletion has made things worse than it found them — `test_handoff_doc_size.py`
+# owns that playbook and this rule is only the pressure that sends people to it.
+#
+# ⚠ AND IT IS NOT GATED ON `gate_enforces_budget`. Unlike the RED-gate claim in
+# `budget_warning`, this refusal asserts nothing about anyone's CI: it is this
+# tool's own verdict, taken here, true in any repo. A repo that ships no
+# `test_handoff_doc_size.py` is exactly where nothing else would ever notice.
+SIZE_RATCHET_FLAG = "--override-size-ratchet"
+
+#: 🔴 WHO MAY PULL RULE (p)'S OVERRIDE, AS ONE STRING. The sites that carry THIS
+#: text, ENUMERATED in full — because the set was written down FOUR times across
+#: three files and every one of them was short by the SAME member: this comment
+#: listed four, the pinning test's docstring said "OVER FOUR SITES" and merged the
+#: override note into `--help`'s bullet, its failure message said "all four
+#: sites", and `write-gate.md` §I enumerated a DIFFERENT four. None of them named
+#: `size_ratchet_override_note`:
+#:
+#:   * `size_ratchet_report` — the refusal;
+#:   * `size_ratchet_override_note` — the block above the diff. THE MEMBER ALL
+#:     FOUR COUNTS DROPPED;
+#:   * `build_parser` — `--help`;
+#:   * `claude/skills/handoff/SKILL.md` step 5;
+#:   * `claude/skills/handoff/reference/write-gate.md` §I.
+#:
+#: `test_the_SKILL_and_the_TOOL_agree_on_WHO_may_pull_the_ratchet_override` owns
+#: the machine-readable version of that list (its `sites` dict) and pins the whole
+#: normalised sentence in every member. It is the thing that FAILS; this list is a
+#: claim, so read it there if the two ever disagree.
+#:
+#: 🔴 IT IS DELIBERATELY NOT THE LEAK GATE'S RULE, AND THE DIFFERENCE IS THE
+#: POINT. `--leak-pre-existing-approved` is the OPERATOR's call and the skill
+#: tells the executor to stop; this flag is not. Operator decision: the agent may
+#: pull it, and what is required instead is that the reason SAY so, because an
+#: overridden round that reads afterwards like an approved one is the failure
+#: this flag's reason exists to prevent. A guard on words is walkable by
+#: rewording, which is why the four sites share one string rather than four
+#: paraphrases that "agree".
+#:
+#: ⚠ AND THE CODE USED TO CLASSIFY IT THE OTHER WAY — the refusal announced it as
+#: an operator opt-in, `size_ratchet_override_note`'s docstring and its printed
+#: block both said OPERATOR, and the `--help` said nothing about who at all. That
+#: was wrong in the direction that matters: an agent reading it would either not
+#: pull a flag it is allowed to pull, or pull it and record nothing about
+#: approval. ⚠ The old wording is DESCRIBED rather than QUOTED, for the reason
+#: `size_ratchet_override_note`'s docstring gives about restating a string in this
+#: file: rule (n)'s refusal still carries it, and a second verbatim copy here
+#: would widen any `sed` that isolates that one.
+SIZE_RATCHET_WHO_MAY = (
+    "the AGENT may pull it; the reason MUST say whether an operator approved it"
+)
+
+#: The commit trailer that makes an overridden run readable off the ARTEFACT.
+#: Same argument as `LEAK_TRAILER_KEY`, which it deliberately mirrors: stdout
+#: survives only as long as a transcript `scripts/transcript-push.sh` ships as a
+#: bounded TAIL, so an override early in a long session is unrecoverable from
+#: it. `git log` is forever.
+SIZE_RATCHET_TRAILER_KEY = "Size-Ratchet-Override"
+
+#: How much of the operator's reason reaches the commit trailer.
+#:
+#: 🔴 A CLIP, BECAUSE THE APPENDER FAILS SILENTLY RATHER THAN LOUDLY.
+#: `session_trailer.valid_id` rejects a value over 256 chars or carrying a
+#: newline, and `append_trailer` then returns the message UNCHANGED — so a long
+#: or multi-line reason would leave the run claiming a durable record that does
+#: not exist. The value is clipped here so the trailer always lands.
+#:
+#: ⚠ AND STDOUT IS NOT THE BACKUP THIS COMMENT USED TO CALL IT. It said "the
+#: FULL reason is on stdout", which is false past 240 characters:
+#: `size_ratchet_override_note` clips its own echo to `SIZE_RATCHET_ECHO_MAX`, so
+#: a 631-char reason reaches NEITHER channel whole.
+#:
+#: 🔴 THE RELATION BETWEEN THE TWO CHANNELS HAS TWO DIMENSIONS, AND THIS COMMENT
+#: HAS NOW BEEN WRONG ABOUT IT THREE TIMES. It last said stdout carrying strictly
+#: more "is the whole of the relation", which was false in the worse direction:
+#: the two also differed in REPAIR. Only the trailer ran
+#: `session_trailer.printable_for_trailer`, so a reason carrying `\x1b` reached
+#: stdout RAW — measured on this tree before the fix: the echo line held a
+#: literal `\x1b` and `\x01` while the commit held `�`. Both dimensions, as
+#: they stand:
+#:
+#:   WIDTH  — differs, deliberately. 240 on stdout, 200 on the trailer.
+#:   REPAIR — IDENTICAL, since #1871 round 2. Both channels go through
+#:            `_printable_clipped`, which is the one place clip-then-repair is
+#:            expressed.
+#:
+#: Pinned by `test_the_two_CHANNELS_clip_the_reason_at_DIFFERENT_widths` (width)
+#: and `test_a_reason_carrying_a_CONTROL_character_is_REPAIRED_ON_STDOUT_TOO`
+#: (repair, and that the two agree). A comment is a claim too, and this is the
+#: claim that has needed correcting every round.
+#:
+#: ⚠ THE CLIP IS ONLY TWO THIRDS OF THAT GUARANTEE, AND THE MISSING THIRD WAS
+#: MEASURED FALSE RATHER THAN SUSPECTED. `_clip` collapses PYTHON whitespace,
+#: which is a strict subset of what `valid_id` refuses: a reason carrying a
+#: non-whitespace C0 control — `\x1b` out of pasted coloured terminal output,
+#: `\x01` — passed the clip untouched, failed `valid_id`, and the commit got NO
+#: trailer while stdout and `write-gate.md` had both already promised one.
+#: MEASURED at `f4b98ce7`: `"urgent\x1bfix"` clipped to 10 chars, `valid_id`
+#: False, trailer absent, no diagnostic. The long and multi-line cases this
+#: comment was written about DID land, which is why the hole survived.
+SIZE_RATCHET_REASON_MAX = 200
+
+#: How much of the reason reaches the STDOUT echo. Wider than the trailer's clip
+#: on purpose — stdout is not bounded by `session_trailer.valid_id` — and NAMED
+#: rather than left as a literal in `size_ratchet_override_note` so the comment
+#: above can state the width relation against something a reader can grep.
+#:
+#: 🔴 IT IS NOT A SECOND SPELLING OF THE REPAIR. The two channels differ in this
+#: number and in NOTHING else; both reach `_printable_clipped`. That was not true
+#: before #1871 round 2 and the comment above records what it cost.
+SIZE_RATCHET_ECHO_MAX = 240
+
+
+def _printable_clipped(reason: str, limit: int) -> str:
+    """`reason` whitespace-collapsed, clipped to `limit`, then REPAIRED.
+
+    🔴 THE ONE PLACE CLIP-THEN-REPAIR IS EXPRESSED, for both channels. It exists
+    because there were two: `_ratchet_trailer_value` repaired and
+    `size_ratchet_override_note` did not, so a reason carrying `\\x1b[2K` could
+    visually rewrite the `Reason given:` line and the `DELIBERATE OVERRIDE` block
+    ON THE ONE CHANNEL A HUMAN READS BEFORE APPROVING, while the commit recorded
+    the truth. `claude/RULES.md`: one rule, one place — and here the second copy
+    was not a stale duplicate but an ABSENCE, which is the shape a duplicated
+    predicate takes when one site simply never got the rule.
+
+    🔴 CLIP FIRST, REPAIR SECOND. See `_ratchet_trailer_value`, which owns that
+    ordering's measurement; the ordering is expressed HERE so both callers get it.
+    """
+    return session_trailer.printable_for_trailer(_clip(reason, limit))
+
+
+def _ratchet_trailer_value(reason: str) -> str:
+    """`reason`, repaired and clipped to something a trailer can carry.
+
+    🔴 THE POST-CONDITION IS THE POINT, NOT THE TWO STEPS:
+    `session_trailer.valid_id` accepts the result for EVERY `str` input that is
+    not whitespace-only, and `_ratchet_trailer_value` is the only place that
+    promise is made. Pinned by
+    `test_every_ratchet_reason_reaches_a_value_the_APPENDER_ACCEPTS`, which
+    asserts the relationship rather than either step's spelling.
+
+    🔴 CLIP FIRST, REPAIR SECOND, AND THE OTHER ORDER WAS MEASURED WRONG WHILE
+    WRITING THIS FIX rather than reasoned about. `_clip` collapses whitespace,
+    and a tab or a newline is whitespace a reason may legitimately carry —
+    `"line one\\nline two"` has always reached the commit as `line one line
+    two`. Repairing first turns those into replacement marks BEFORE `_clip` can
+    see them as whitespace, so it fixes the control-character hole by breaking
+    the multi-line case the clip was originally written for. Repair is
+    length-preserving (one mark per refused character), so running it after the
+    clip cannot push the value back over `SIZE_RATCHET_REASON_MAX`.
+    """
+    return _printable_clipped(reason, SIZE_RATCHET_REASON_MAX)
+
+
+def size_ratchet_report(relpath: str, merged_text: str, base_text: str) -> str:
+    """Rule (p)'s refusal, or "" when this update may land.
+
+    🔴 NEVER RAISES, AND THAT IS A CONTRACT RATHER THAN CAUTION — the identical
+    one `evictable_note` carries, for the identical reason. This runs in the
+    WRITE PATH, which is the only step that records a session; an exception here
+    would take `/handoff`'s landing step down to decorate a refusal. Any failure
+    of this function's OWN code therefore degrades to "no ratchet" — the
+    behaviour before this rule existed — rather than to a crash.
+
+    🔴 THE PREDICATE IS `after > allowance AND delta > 0`, both from
+    `budget_position`, so it cannot disagree with the warning that prints the
+    same two numbers three lines later.
+    """
+    try:
+        pos = budget_position(relpath, merged_text, base_text)
+        if not pos.is_handoff_doc or pos.over_by <= 0 or pos.delta <= 0:
+            return ""
+        which = ("its grandfathered allowance" if pos.grandfathered
+                 else "the handoff-document ceiling")
+        # 🔴 `over_by=0` ON PURPOSE, AND IT IS NOT THE SAME CHOICE THE UNGATED
+        # WARNING MAKES. There the zero withholds a threshold nothing enforces;
+        # here it withholds the WRONG threshold. Clearing this refusal does not
+        # require clearing the overage — it requires a net delta of 0 — so a
+        # note reading "does NOT clear the N B you are over by" would send an
+        # author cutting toward a number this rule never asked for. The number
+        # that clears it is `delta`, and the remedy lines below state it.
+        # `evictable_note`'s buckets are NOT widened for this caller (#1821):
+        # its three-way branch is reused exactly as it stands.
+        note = evictable_note(merged_text, 0)
+        return "\n".join([
+            "status=size-ratchet",
+            "NOTHING WRITTEN — not the doc, not a commit, not a ref.",
+            f"  This document is ALREADY over its size budget and this update "
+            f"makes it BIGGER: {pos.after:,} B against {which} of "
+            f"{pos.allowance:,} B, over by {pos.over_by:,} B "
+            f"(+{pos.delta:,} B this update).",
+            *([note] if note else []),
+            "  An over-budget doc may still be UPDATED — it may not GROW. Land "
+            f"the same round with a net delta of 0 or less, i.e. free up "
+            f"{pos.delta:,} B:",
+            "    1. shrink a REPLACE section in THIS delta. `State now`, `Next "
+            "steps` and `How to verify` are rewritten wholesale, so what they "
+            "no longer need to say costs nothing to drop.",
+            "    2. or MOVE what has closed out of the document first, in its "
+            "own commit, to the arc's archive file — then re-run this update "
+            "unchanged. `Gotchas` and `Open investigations` APPEND here, so "
+            "this tool cannot shrink them for you.",
+            "  🔴 Do NOT satisfy this by DELETING an open investigation, a "
+            "gotcha or a ruled-out theory. Eviction means MOVE, leaving a "
+            "pointer: those sections exist so a future session does not repeat "
+            "work already done, and nothing in this rule can tell a deletion "
+            "from an eviction — the arithmetic is identical.",
+            f'  Overrides: {SIZE_RATCHET_FLAG} "<why>" — '
+            f"{SIZE_RATCHET_WHO_MAY}. The reason is REQUIRED and is recorded on "
+            f"the run AND stamped `{SIZE_RATCHET_TRAILER_KEY}:` on the commit, "
+            f"so an overridden round does not read afterwards as a clean one.",
+        ])
+    except (Exception, SystemExit):
+        # 🔴 `SystemExit` IS NOT AN `Exception` — `evictable_note` above execs a
+        # sibling module that raises exactly that at module level when one of
+        # ITS siblings is missing, so a bare `except Exception` would leave the
+        # likeliest failure uncaught, on the write path. KeyboardInterrupt is
+        # deliberately NOT caught: a human interrupting the write must still
+        # interrupt it. Same reasoning, same words, as `evictable_note`'s own
+        # handler — see there.
+        return ""
+
+
+def size_ratchet_override_note(
+    relpath: str, merged_text: str, base_text: str, reason: str
+) -> str:
+    """Rule (p) fired and the CALLER cleared it. WRITTEN. Never raises.
+
+    🔴 AN OVERRIDDEN RUN MUST NOT READ LIKE A RUN THAT WAS NEVER OVER THE LINE,
+    which is the whole reason the flag takes a reason at all. Same shape as
+    `leak_approved_note`, and the same two channels: this note is what makes the
+    decision readable AT THE MOMENT it is taken, the commit trailer is what
+    makes it readable off the artefact afterwards. Neither is the other's
+    backup.
+
+    🔴 AND THE ECHO IS REPAIRED, NOT RAW, BECAUSE THIS IS THE CHANNEL A HUMAN
+    READS BEFORE APPROVING. It used to be `_clip(reason, 240)` with no
+    `printable_for_trailer`, so a reason carrying `\\x1b[2K` — one paste of
+    coloured terminal output away — could erase and rewrite the `Reason given:`
+    line and the `DELIBERATE OVERRIDE` block on screen, while the commit trailer
+    recorded the truth. That is the worse direction of the two: the durable record
+    was intact and the surface the decision is taken on was forgeable. Both
+    channels now go through `_printable_clipped` and differ only in width; the
+    relation, both dimensions of it, is stated at `SIZE_RATCHET_REASON_MAX`.
+
+    ⚠ NOT "THE OPERATOR" — that word stood here and in the block below, and it
+    was a claim about WHO, not about the mechanism. `SIZE_RATCHET_WHO_MAY` owns
+    that claim now, and `leak_approved_note`, which this is shaped after, is the
+    one that really is operator-only. The two flags differ on exactly this point.
+
+    🔴 SILENT WHEN THE RATCHET WOULD NOT HAVE FIRED, AND `main()` IS THE ONE
+    PLACE THAT DECIDES IT. A flag that prints a block on every run it is passed
+    on is a flag people learn to pass by reflex and a block nobody reads —
+    `declared_forcing_none_report`'s stated reason. `main()` calls this only when
+    `size_ratchet_report` returned non-empty, and that non-emptiness IS the
+    predicate; there is deliberately no copy of it here.
+
+    🔴 THERE USED TO BE, AND IT WAS DELETED RATHER THAN KEPT AS A BELT-AND-BRACES
+    CHECK. The line that stood here restated `size_ratchet_report`'s three-way
+    guard verbatim — `claude/RULES.md`'s duplicated predicate, one rule at two
+    sites. Its stated justification was "so a DIRECT caller cannot announce an
+    override of a rule that never fired", and the caller it protected against
+    does not exist: `main()` is the only production call; the one direct call in
+    the suite monkeypatches `budget_position` to raise, so it lands in the
+    handler below without ever reaching the predicate; and no test can bind a
+    branch nothing takes. A guard no caller reaches reads as coverage and
+    provides none.
+
+    🔴 IT IS DESCRIBED ABOVE RATHER THAN QUOTED, AND THAT IS LOAD-BEARING. The
+    mutation rows for `size_ratchet_report`'s copy are UNRANGED `sed`
+    expressions now that this one is gone, so a verbatim restatement anywhere in
+    this file — a docstring included — gives each of them a SECOND match and
+    makes the mutation wider than the expression it claims to isolate.
+    `scripts/tests/mutants-handoff-cap.sh`, rule (p) block.
+    """
+    try:
+        pos = budget_position(relpath, merged_text, base_text)
+        return "\n".join([
+            f"🔴 SIZE RATCHET OVERRIDDEN by {SIZE_RATCHET_FLAG} — this document "
+            f"is {pos.after:,} B against an allowance of {pos.allowance:,} B, "
+            f"over by {pos.over_by:,} B, and this update adds "
+            f"{pos.delta:,} B more.",
+            f"  Reason given: "
+            f"{_printable_clipped(reason, SIZE_RATCHET_ECHO_MAX)}",
+            f"  This is a DELIBERATE OVERRIDE, not a clean result, and it is "
+            f"stamped `{SIZE_RATCHET_TRAILER_KEY}:` on the commit — "
+            f"{SIZE_RATCHET_WHO_MAY}. Nothing here checked the reason; what was "
+            f"cleared is the delta below.",
+        ])
+    except (Exception, SystemExit):
+        return ""
 
 
 def _clip(text: str, limit: int) -> str:
@@ -4630,6 +5078,28 @@ def build_parser() -> argparse.ArgumentParser:
         "failure to start the process, or a declared scanner path that is not a "
         "runnable file.",
     )
+    # 🔴 THE ESCAPE HATCH FOR RULE (p), AND ITS REASON IS NOT OPTIONAL. The
+    # write path is the only step that records a session, so this refusal must
+    # always be clearable — and an override with no stated reason records
+    # nothing while still suppressing the refusal, which is the unfalsifiable
+    # shape `--override-attribution-gate` is refused for in `audit-dispatch.py`.
+    # An empty value is therefore a USAGE refusal (exit 2), never
+    # EXIT_SIZE_RATCHET: that number is the RULE's verdict about a document, and
+    # returning it from argument validation would tell a caller its doc grew
+    # when the truth is that a flag was empty.
+    p.add_argument(
+        SIZE_RATCHET_FLAG,
+        metavar="REASON",
+        dest="size_ratchet_override",
+        help="override the status=size-ratchet refusal: land this update even "
+        "though the doc is already over its byte ceiling and this delta makes "
+        f"it bigger. Unlike {LEAK_PRE_EXISTING_FLAG}, {SIZE_RATCHET_WHO_MAY}. "
+        "REASON is REQUIRED — it is printed above the diff and "
+        f"stamped `{SIZE_RATCHET_TRAILER_KEY}: <why>` on the commit, so the "
+        "round does not read afterwards as one that was never over the line. "
+        "The ordinary fix is a net delta of 0 or less; the refusal spells out "
+        "both ways to get one.",
+    )
     p.add_argument(
         "--push",
         action="store_true",
@@ -4676,10 +5146,12 @@ def resolve_session_id(env: typing.Mapping[str, str] | None = None) -> str:
 
 
 def commit_message(
-    subject: str, session_id: str | None = None, leak_trailer: str = ""
+    subject: str, session_id: str | None = None, leak_trailer: str = "",
+    ratchet_trailer: str = "",
 ) -> str:
     """`subject`, carrying exactly one `Claude-Session-Id:` trailer when known,
-    and a `Leak-Gate-Approved:` trailer when rule (o) was approved through.
+    a `Leak-Gate-Approved:` trailer when rule (o) was approved through, and a
+    `Size-Ratchet-Override:` trailer when rule (p) was.
 
     🔴 THE TRAILER IS WHAT MAKES A HANDOFF DOC'S ARC RECONSTRUCTIBLE — it is the
     WRITER half `scripts/lib/handoff_arc.py` reads, and the half that includes
@@ -4723,6 +5195,13 @@ def commit_message(
     if leak_trailer:
         message = session_trailer.append_trailer(
             message, leak_trailer, key=LEAK_TRAILER_KEY)
+    # 🔴 SAME APPENDER, THIRD KEY. Rule (p)'s override is the second operator
+    # decision this tool can be asked to take on its own authority, and it gets
+    # the same durable record as rule (o)'s for the same reason: the run's
+    # stdout survives only in a transcript shipped as a bounded TAIL.
+    if ratchet_trailer:
+        message = session_trailer.append_trailer(
+            message, ratchet_trailer, key=SIZE_RATCHET_TRAILER_KEY)
     return message
 
 
@@ -4737,6 +5216,29 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "--push requires --confirm: the push is the half the gate exists "
             "for, so it never happens without the confirmed write.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    # 🔴 AN OVERRIDE WITH NO REASON IS THE THING RULE (p) EXISTS TO STOP. The
+    # flag would still SUPPRESS the refusal — `""` is not falsy to an
+    # `is not None` presence test and is falsy to an `if` — so whichever way the
+    # branch that consumes it were spelled, one reading silently lands an
+    # over-budget growth with the record blank. Refused BEFORE anything is read,
+    # so it fires identically in a repo where the rule could never fire, and
+    # refused with EXIT_USAGE rather than EXIT_SIZE_RATCHET: this is a complaint
+    # about an ARGUMENT, not a verdict about a document.
+    if args.size_ratchet_override is not None and not args.size_ratchet_override.strip():
+        print(
+            f"{SIZE_RATCHET_FLAG} was given an EMPTY reason "
+            f"({args.size_ratchet_override!r}).\n"
+            f"  The reason is the whole point of the flag: it is printed above "
+            f"the diff and stamped `{SIZE_RATCHET_TRAILER_KEY}:` on the commit, "
+            f"so the next reader can see that this round grew a document "
+            f"already over its ceiling, and why. An empty one records nothing "
+            f"while still suppressing the refusal.\n"
+            f"  Pass what you would have written in the doc: "
+            f'`{SIZE_RATCHET_FLAG} "the incident writeup has to land tonight; '
+            f'the prune is ranked first for the next round"`.',
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -5143,6 +5645,33 @@ def main(argv: list[str] | None = None) -> int:
         print(undefined_done, file=sys.stderr)
         return EXIT_UNDEFINED_DONE
 
+    # ---- rule (p): a doc already over its ceiling may not GROW --------------
+    # 🔴 ABOVE `budget_warning` AND NOT BESIDE IT, for the reason the comment
+    # below already gives about the other refusals: that warning asserts "this
+    # is a WARNING, not a refusal" and names a gate that "WILL GO RED on
+    # `main`", and both are false of a run whose stderr says NOTHING WRITTEN.
+    # The two read the SAME two numbers out of `budget_position`, so there is no
+    # window in which they can disagree about the document — only about what to
+    # do, which is the difference this rule adds.
+    #
+    # 🔴 ONE PREDICATE DECIDES ALL THREE CONSEQUENCES — the refusal, the
+    # disclosure note and the commit trailer — and it is the non-emptiness of
+    # `ratchet`. Asking "is this doc over and growing?" a second time at the
+    # note and a third time at the trailer is the duplicated-predicate shape
+    # `claude/RULES.md` says ends up wrong at N-1 sites; here it would let a
+    # commit carry an override stamp for a rule that never fired.
+    ratchet = size_ratchet_report(relpath, merged_text, base_text)
+    if ratchet and not args.size_ratchet_override:
+        print(ratchet, file=sys.stderr)
+        return EXIT_SIZE_RATCHET
+    ratchet_override = (
+        size_ratchet_override_note(
+            relpath, merged_text, base_text, args.size_ratchet_override
+        )
+        if ratchet and args.size_ratchet_override
+        else ""
+    )
+
     # 🔴 #1648's size-budget warning, MOVED BELOW THE REFUSALS (audit F4). It
     # still sits above the diff, which is where its own tests pin it and where it
     # belongs — it is a fact about the text a human is about to approve. What it
@@ -5157,6 +5686,11 @@ def main(argv: list[str] | None = None) -> int:
                                  gated=gate_enforces_budget(repo))
     if budget_note:
         print(budget_note)
+    # Rule (p)'s disclosure, immediately under the size block it is about: the
+    # two are one story, and a reader who sees the bytes has to see in the same
+    # breath that a refusal on them was cleared by hand.
+    if ratchet_override:
+        print(ratchet_override)
     warning = dropped_durable_report(report.dropped)
     if warning:
         print(warning)
@@ -5371,7 +5905,17 @@ def main(argv: list[str] | None = None) -> int:
         # IT. `[:100]` bounds the summary line; applying it to the whole message
         # would have cut a trailer off exactly when the summary was longest,
         # i.e. silently and on the busiest commits.
-        message = commit_message(subject, leak_trailer=verdict.trailer)
+        message = commit_message(
+            subject,
+            leak_trailer=verdict.trailer,
+            # 🔴 KEYED ON THE NOTE, NOT ON THE FLAG. A reason passed on a run
+            # rule (p) never refused would otherwise stamp a commit with an
+            # override of nothing — see the ONE-PREDICATE comment at the rule.
+            ratchet_trailer=(
+                _ratchet_trailer_value(args.size_ratchet_override)
+                if ratchet_override else ""
+            ),
+        )
         # Path-limited on purpose: exactly one commit, carrying exactly the
         # diff that was shown, even if the caller had other work staged.
         git(repo, "commit", "-m", message, "--", relpath)

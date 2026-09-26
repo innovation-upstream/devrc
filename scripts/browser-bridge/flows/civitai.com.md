@@ -74,10 +74,20 @@ After the swap, **verify identity from the server**, never from the avatar:
 `nav https://civitai.com/api/auth/session` → assert `user.id` is the one you wanted
 and `impersonatedBy` is absent. Then purge account-scoped `localStorage` (below).
 
-🔴 **Read `needsSignIn` on the target row before clicking.** A row rendered with a
+🔴 **Read `needsLogin` on the target row before clicking.** A row rendered with a
 `Sign in` hint has aged out of the seamless window and clicking it lands you in the
 SSO gate you cannot automate — a different outcome from a silent swap, and the only
 signal distinguishing them is that hint.
+
+⚠ **The field is `needsLogin`; the rendered text is `Sign in`.** This file said
+`needsSignIn` — a name that exists nowhere in civitai — because the *label* was
+read back as the *field*. There is nothing in the DOM to grep for either: the
+hint is a bare `<span class="text-xs opacity-60">Sign in</span>` with no
+attribute of its own, so the only selector you have is the visible string.
+Source, if you need to re-check: `needsLogin` in
+`src/components/CivitaiWrapped/AccountProvider.tsx` (set to
+`!(id in deviceAccounts)`) and its render in
+`src/components/AppLayout/AppHeader/UserMenu.tsx`.
 
 🔴 **A text scan for `Logout` finds nothing even though it is right there** — the
 switcher's footer actions are ICON buttons with no text nodes. Do not conclude a
@@ -172,11 +182,24 @@ entry is missing"**, and reads as a product bug.
 - **`/models` returning 200 is the positive control** that the session works at
   all. Run it before diagnosing anything from an `/apps` 404.
 
-## `/apps` needs a long settle (~9s)
+## `/apps` needs a long settle (~9s), and `wake --wait` CANNOT give you 9s
 
 Cards arrive via tRPC, and a hidden tab is throttled (mechanism:
 `reference/spa-wake.md`). A browser read of `/apps` needs roughly **9 s after
 `wake`** before the rail is populated.
+
+🔴 **`wake --wait` is capped at 6000 ms and clamps SILENTLY** —
+`WAKE_SETTLE_MAX_MS = 6000` in `extension/protocol.js`, applied by `clampWakeMs`
+as a bare `Math.min`, with no warning and no error. It is not a policy number:
+the ceiling is `CDP_OP_BUDGET_MS − CDP_COMMAND_TIMEOUT_MS − 1s`, so a larger
+value cannot be honoured without the op timing out. Anything you write above 6000
+is a 6000 you have hidden from yourself. So spend the settle in two parts:
+
+```bash
+$BB --instance work --tab "$TAB" wake --wait 6000   # the whole budget, once
+sleep 4                                             # the rest, outside the op
+$BB --instance work --tab "$TAB" js '…'             # then read
+```
 
 Use `document.body.innerText.length` as a **sanity floor** — about **221 chars**
 means the page shell rendered and the content did **not**. Assert the floor;
@@ -246,26 +269,50 @@ own build and can keep its testids — see the App Block section below.
 page: `/apps/run/<slug>` embeds `https://<slug>.civit.ai/` as an OOPIF. A read or
 click without `--frame` addresses the civitai shell and finds nothing.
 
+🔴 **There is a DEEPER doc for the block itself: `flows/civit.ai.md`** — the App
+Block host, its boot handshake, and the 404 that looks like an app. **The bridge
+will not route you there until your FIRST `--frame` op**, because `site_flows` is
+keyed on the host of the result envelope's `url` (`_domain_from_result` in
+`server.py`): a plain op on `/apps/run/<slug>` reports the TAB's url
+(`civitai.com` → this file), and only a `--frame` op reports the FRAME's url
+(`<slug>.civit.ai` → that one). So the routing arrives one step after you needed
+it — read `flows/civit.ai.md` now, not when the envelope names it. This section
+is the entry point; that file is the depth.
+
 ### The recipe (measured 2026-08-26 on `/apps/run/sensei`)
 
 ```bash
 BB=~/workspace/devrc/scripts/browser-bridge/browser
 $BB --instance work open https://civitai.com/apps/run/sensei     # lands HIDDEN
-$BB --instance work --tab "$TAB" wake --wait 12000               # tab level, once
+$BB --instance work --tab "$TAB" wake --wait 6000                # tab level, once — 6000 IS THE CAP
+sleep 6                                                          # the rest of the settle, outside the op
 $BB --instance work --tab "$TAB" frames                          # -> the block's frameId
 # every subsequent read AND input op carries --frame:
 $BB --instance work --tab "$TAB" --frame "$FR" text
 ```
+
+🔴 **This recipe used to say `--wait 12000` — double the cap, silently clamped to
+6000.** `WAKE_SETTLE_MAX_MS = 6000` (`extension/protocol.js`); `clampWakeMs` is a
+bare `Math.min` with no warning. Writing a bigger number does not buy a longer
+settle, it just makes the number you wrote down a fiction. Put the extra wait in
+a `sleep` between ops, as above.
 
 🔴 **The frameId is per-tab and not stable** — 437 in one run, 484 in the next, same
 URL and same page. Re-run `frames`; never carry one over.
 
 ⚠ Two op-level refusals you WILL hit here; both are expected and both are already
 documented in `reference/spa-wake.md` — don't re-diagnose them:
-`open <url> --wake=MS` → `cdp_attach_refused:<no-scheme>` (open succeeded, exit 3;
-re-issue `wake` as its own call), and `wake --frame <id>` →
-`wake_with_frame_unsupported` (un-throttling is tab-level; wake the TAB, then
-re-issue the frame read).
+`open <url> --wake=MS` → **`cdp_attach_refused:about:`** (open succeeded, exit 3;
+the tab was still `about:blank` because navigation had not committed, and
+`about:` is not an attachable scheme — re-issue `wake` as its own call), and
+`wake --frame <id>` → `wake_with_frame_unsupported` (un-throttling is tab-level;
+wake the TAB, then re-issue the frame read).
+
+⚠ **`cdp_attach_refused:<no-scheme>` is a DIFFERENT failure** — the url is
+absent or uncommitted, so `new URL()` throws and there is no scheme to name
+(`cdpSchemeOf` in `extension/protocol.js`). This file used to print that one for
+the `open --wake` case, which sends you looking for a missing url that is not the
+problem.
 
 **Harvest selectors with a `js` enumeration, not `text --annotated`.** Annotated
 returned 60–69 element records (~600 log lines) for this one small app; a one-line
@@ -289,14 +336,37 @@ So: **enumerate testids inside the frame before selector-hunting.** Assuming the
 strip here costs you the one-line selector and pushes you onto DOM-shape paths for
 nothing. (The host page's strip still stands — see `## Selectors on civitai`.)
 
-### 🔴 `js` runs in an ISOLATED world — you cannot observe the network
+### 🔴 A `window.fetch` hook inside the block catches NOTHING — and the reason is not the world
 
-The DOM is shared; `window` is not. Hooking `window.fetch` to prove a request fired
-**intercepts nothing** and returns an empty list that reads exactly like *"no request
-was made"*. That already produced one false negative on this page. There is no
-network layer available to you inside a block — **every observation must be a DOM
-observation**, and a verdict must be built from controls (below), not from an absence
-of intercepted traffic.
+**The operating rule is unchanged and load-bearing:** hooking `window.fetch` to
+prove a request fired **intercepts nothing** and returns an empty list that reads
+exactly like *"no request was made"*. That produced one false negative on this
+page. **Every observation must be a DOM observation**, and a verdict must be
+built from the controls below, never from an absence of intercepted traffic.
+
+🔴 **What this section used to give as the MECHANISM — "`js` runs in an ISOLATED
+world, the DOM is shared but `window` is not" — is WRONG for a block, and it is
+the load-bearing half, because it tells you the hook is impossible when in fact
+it installs and still sees nothing.** `js`/`eval --frame` is the one op that does
+NOT use `chrome.scripting`: it runs your string through CDP `Runtime.evaluate`
+(`cdpFrameEval` in `extension/service_worker.js`), and that path forks:
+
+- **same-process iframe** → `Page.createIsolatedWorld` → isolated, `window` not shared;
+- **cross-origin OOPIF** → evaluated in the frame's own flat auto-attached
+  session with **no `contextId`**, i.e. that frame's **MAIN world** — the page's
+  own `window`, `fetch` included.
+
+`/apps/run/<slug>` is the second case by this file's own first paragraph, so your
+hook lands on the block's real `window.fetch`. `reference/frames-cdp.md` has had
+this right all along ("same-process frames in an isolated world, a cross-origin
+OOPIF in its own flat session"); only this file was wrong.
+
+⚠ **So the empty result is UNDIAGNOSED, not explained.** Plausible rivals nobody
+has separated: the request had already fired before the hook was installed, the
+app uses XHR / `sendBeacon` / a worker rather than `fetch`, or the module captured
+`fetch` at import time. Don't spend the budget re-deriving a mechanism — use the
+DOM controls below, which do not depend on knowing which. If you *do* want the
+network, `reference/frames-cdp.md` is the place to start, not a `fetch` shim.
 
 ### 🔴 Input inside `--frame` is SYNTHETIC — so it needs its own control
 
@@ -328,6 +398,31 @@ does nothing, silently. Measured that the read is a **moving** signal and not a
 constant — `sendDisabled: true` on an empty composer, `false` after `type 'What is
 DreamShaper?'` (value read back verbatim), `true` again after the send. If it is
 still `true`, the input did not take: retry the `type`, do not click.
+
+### 🔴 "The hit-test passed but the click did nothing" — two causes, both mundane
+
+This signature is **not** a bug in the bridge and **not** an `isTrusted` gate, and
+it is worth naming because both explanations below are cheap to check and neither
+is where anyone looks first:
+
+1. **The tab got RE-throttled.** A reload re-throttles it, and clicks then go
+   silently inert — mechanism in `reference/spa-wake.md` ("After a RELOAD the tab
+   is RE-THROTTLED") and the one-liner in the bridge `SKILL.md`. Nothing in this
+   file used to mention it, so the App Block recipe above reads as though the
+   single `wake` holds for the session. It does not: **re-`wake` after any
+   navigation or reload**, then re-run `frames` (the frameId changed too).
+2. **The control is genuinely `disabled`.** The composer case above is one
+   instance; the scope-consent dialog is the other, and it is the one that
+   catches people. `BlockConsentModal`'s **Allow** button is
+   `disabled={budgetBlocksSubmit}`, where
+   `budgetBlocksSubmit = grantsSpend && limitEnabled && !budgetValid` — so for a
+   spend-scoped app with the daily limit toggled on, **Allow stays dead until a
+   valid integer budget is in the field**, between
+   `BLOCK_CONSENT_BUDGET_MIN_PER_DAY` and `BLOCK_CONSENT_BUDGET_MAX_PER_DAY`. A
+   hit-test passes on it happily. ⚠ That dialog belongs to the **host page**, not
+   the block — drive it with a **top-frame** `click`, with no `--frame`, or you
+   will hunt for it inside the iframe and correctly find nothing. Read
+   `.disabled` before every click you intend to draw a conclusion from.
 
 ### 🔴 Three controls that turn a null into a verdict
 
