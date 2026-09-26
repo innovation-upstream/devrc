@@ -48,26 +48,26 @@ the archaeology each time. Two halves: **scope** an extraction to one arc's sess
   "One rule, one place" points the other way; not resolved here, recorded.
 
 ## The routing measurement — why a second mechanism was needed
-🔴 **The prose route could only fire when `/resume` fired, and this question arrives at the
-END of an arc.** Measured over the local Claude corpus (peer host NOT walked — see
-UNMEASURED): the question appears in **254 sessions**, of which only **3** came after
-#1870 merged.
+🔴 **SUPERSEDED 2026-09-26 — EVERY NUMBER AND THE MECHANISM IN THIS SECTION WERE WRONG.
+Read `## The routing measurement — RE-DERIVED, and the mechanism RETRACTED` below instead.**
 
-| session | `/resume` ran | reference read | extractor used | `--arc` used |
-|---|---|---|---|---|
-| `d80f8849` | yes | **2x** | yes, immediately, no hunting | 3x |
-| `4861069d` | yes | **0x** | yes — but re-found by `find $DEVRC/scripts -name 'extract_user_msgs*'` | 2x |
-| `6ef53792` | **no** | 0x | **no** | 6x |
+Nothing from this section survives except the bare fact that a routing gap exists. Briefly,
+so a reader who lands here does not go looking:
 
-- `find-session --arc` fired in **3 of 3**. The reference file was read in **1 of 3**.
-- `6ef53792` never invoked `/resume`, so the row was never in its context at all. That is
-  the structural half: a row in one skill's body cannot route a question that arrives in
-  sessions which never load that skill.
-- `4861069d` had the row in context and still hunted the filesystem for the script.
-- 🔴 **So the routing now rides the surface that fired every time.** `find-session.py --arc`
-  prints the `extract_user_msgs.py --arc <doc>` line under every resolved arc
-  (`extractor_next_command`), below the coverage line on purpose. Deterministic rather
-  than prose, per `claude/RULES.md` → "Deterministic Over Prose".
+- `3` post-merge sessions was really **6**; `1 of 3` reference reads was **3 of 6**;
+  `2 of 3` extractor uses was **5 of 6**. The counts were stale within minutes of being
+  taken — two of the six sessions landed 3 and 11 minutes after this arc's first commit.
+- The mechanism it asserted — *"the prose route could only fire when `/resume` fired, and
+  this question arrives at the END of an arc"* — is **retracted**, along with two later
+  candidates. All three are listed in the new section. The cause is UNKNOWN.
+
+⚠ **This block was left asserting the old reading for one commit**, because the corrected
+section was written under a DIFFERENT heading, so the write gate appended it instead of
+replacing this one — exactly the failure `handoff/reference/supersede.md` documents
+("append preserves the old block VERBATIM… a reader meets whichever comes first in the
+file"). Caught by a tree-wide sweep for the retracted string, not by reading the doc. The
+gate's section-delta keys on the heading, so the heading above cannot be struck through
+through the gate; this body is the retirement.
 
 ## Gotchas measured here
 - 🔴 **A doc created now does NOT retro-resolve its own arc.** `resolve_arc` reads
