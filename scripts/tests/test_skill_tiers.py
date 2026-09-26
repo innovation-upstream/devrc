@@ -85,12 +85,12 @@ MIN_SKILLS = 30
 # --------------------------------------------------------------------------- #
 MEASURED_ENTRIES = 36
 MEASURED_TIER_A_ENTRIES = 23
-MEASURED_TIER_A_CHARS = 7_491
+MEASURED_TIER_A_CHARS = 7_485
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 7_676
+MEASURED_UNDER_LEDGER_CHARS = 7_670
 # ...and what the same 36 entries would cost with every skill tier A. The
 # difference is what the ledger buys: 3,316 chars.
-MEASURED_ALL_TIER_A_CHARS = 10_992
+MEASURED_ALL_TIER_A_CHARS = 10_986
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
@@ -122,8 +122,10 @@ MEASURED_ALL_TIER_A_CHARS = 10_992
 # 🔴 2026-09-25: `opencode` was RENAMED `opencode-dispatch` — the exact product
 # name made every bare mention of "opencode" route into the dispatch skill. The
 # +10 name growth was paid for by -16 of mechanism prose in its own description,
-# so the block fell 7,510 -> 7,504 across the same 23 entries and the ceiling
-# stays 7,617: headroom is 113. The mean tier-A entry is 7,504 / 23 = 326.3.
+# a −6 delta against the tree the rename was made on. Merged with the
+# 2026-09-26 `civitai-app-fleet` cut above, the block is 7,485 across 23
+# entries and the ceiling stays 7,617: headroom is 132. The mean tier-A entry
+# is 7,485 / 23 = 325.4.
 #
 # The 254 chars of headroom this paragraph used to assert were consumed by the
 # RAISE in #1391 (7,242/7,496 -> 7,639/7,639), not by the re-base below; an

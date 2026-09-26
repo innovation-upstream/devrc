@@ -315,9 +315,10 @@ MIN_LISTING_ENTRIES = 30
 # If you are reading this while adding a skill: you do not get to raise it too.
 # 🔴 LOWERED 10,832 -> 10,826 on 2026-09-25: `opencode` was RENAMED
 # `opencode-dispatch` (+10 name chars) and its own description paid it back with
-# -16 of mechanism prose. Re-pinned to the exact measurement; headroom stays 0
-# by choice.
-LISTING_TOTAL_CEILING_CHARS = 10_826
+# -16 of mechanism prose. The 2026-09-26 `civitai-app-fleet` cut (−19 net) then
+# landed under it, so the merged tree re-pins to the exact measurement:
+# 10,832 -> 10,807. Headroom stays 0 by choice.
+LISTING_TOTAL_CEILING_CHARS = 10_807
 
 # The skills deployed by `mkOutOfStoreSymlink` from `scripts/` instead of by the
 # recursive `claude/skills` mapping (`nix/home.nix`). They are listing entries
