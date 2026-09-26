@@ -37,17 +37,31 @@ the archaeology each time. Two halves: **scope** an extraction to one arc's sess
 - ✅ **VERIFIED AGAINST THE SYMPTOM, not the rollout.** `readlink -f
   ~/.claude/skills/find-session/SKILL.md` → `/nix/store/pz6bbghd…-devrc-claude-skills/…` — a
   NEW store path (was `jappawqv…`), so the switch genuinely swapped the `home.file` copy — and
-  it carries the routing line. Then the live tool on a real arc printed:
-  `NEXT — the operator's own messages across 2 sessions of this arc:` with the runnable
-  command. The `find-session.py` half needs no switch (the skill invokes `$DEVRC/scripts/…`
-  from the working tree); the SKILL.md half did, which is why `ship.sh` and not a bare pull.
-- Worktree removed, branch pruned, no leaked processes. The only dirty paths on either host are
-  two untracked `claudedocs/scope-chief-*.md` that predate this session; `ship.sh` classified
-  them against 189 nix-read paths and confirmed no nix path reads them.
-- ⚠ **No `clawgate-task:` field.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
-  this session. Its positive control fired (the same endpoint returned 1 link for another
-  session, so the board is reachable and the token accepted), but a WRONG session id also
-  answers 200 with an empty array, so this is a real reading and **not** a clean bill of health.
+  it carries the routing line. The live tool on a real arc printed `NEXT — the operator's own
+  messages across 2 sessions of this arc:` with the runnable command.
+- ⚠ **No `clawgate-task:` field.** `clawgate_handoff.sh resolve` exited **5** again on
+  2026-09-26T17:3xZ — 0 tasks for this session; its positive control fired (1 link for
+  `bb1489f3`), so the board is reachable, but a WRONG id also answers 200 with an empty array.
+  A real reading, **not** a clean bill of health.
+
+### 2026-09-26, later session — the arc's own DoD is at n=0, and the split-out gap now HAS a discriminator
+- 🔴 **The closing condition was RUN and is NOT met, because its population is EMPTY.** Counting
+  sessions with a user-typed occurrence of the operator's end-of-arc question whose first
+  occurrence postdates `c0fd28e3` (16:23:53Z): **1**, and that one is the measuring session
+  itself (`77c0a3a7`), which matched only because it read this doc. **Real post-merge n = 0.**
+  NEXT #2 stands verbatim; do not re-tune off n=0 any more than off n=6. (Pattern counted:
+  `anything (left )?outstanding|sessions associated with this handoff|check my messages`,
+  user-typed only — looser than the shipped one, hence 445 corpus-wide against 259. Different
+  instrument, not a contradiction.)
+- ✅ **The 352-of-617 gap is MEASURED to its discriminator** — see the new Open-investigations
+  block, which RETIRES the `Leading hypothesis` and `Next probe` lines of the block above it.
+  Headline: the body loads **iff the model elects to call the `Skill` tool**; every
+  environmental signal upstream of that election is identical across the two buckets. The
+  first half of that item's closing condition ("a named upstream signal separating ≥2 candidate
+  mechanisms is measured") is met; the operator-reads-it half is not.
+- ⚠ **Nothing was changed, so the gap's MECHANICAL half (`<0.57` on a re-run) is untested** and
+  will stay untested until somebody changes something. 56% is the CURRENT reading, not a
+  post-fix one.
 
 ## The routing measurement — why a second mechanism was needed
 🔴 **SUPERSEDED 2026-09-26 — EVERY NUMBER AND THE MECHANISM IN THIS SECTION WERE WRONG.
@@ -133,20 +147,22 @@ through the gate; this body is the retirement.
   shipped tool in anger; the source of the routing measurement above.
 
 ## NEXT — ranked
-1. **Investigate the 352-of-617 `/resume`-body gap** (block above). Do NOT fix it on a
-   mechanism — find a discriminating upstream signal first. Repo: `devrc`, likely
-   `claude/skills/resume/`, `claude/skills/handoff/` and the transcript corpus; no file is
-   known to be at fault yet. **Closing condition:** a named upstream signal separating ≥2
-   candidate mechanisms is measured, OR the operator reads the measurement and closes it
-   won't-fix.
+1. **Land + close the `/resume`-body gap on the first half of its own closing condition.** The
+   named upstream signal exists and is measured (block above); what remains is the operator
+   reading it and deciding whether the "why does it elect not to" half stays open. Repo `devrc`;
+   no code change is proposed and none should be made on a guess.
+   **Closing condition:** the operator reads the measurement and either closes it, or names the
+   one thing still wanted. 🔴 Do NOT re-derive the 622/349 — it is reproduced three times.
    forcing: none
-2. **Read the reach comparison at n≥10.** The footer is live on both hosts as of
-   `c0fd28e3`. Population growth, carried forward so this item is self-contained:
-   **≈1/h under active work, ≈0.22/h (~5/day) at baseline**, and **6** post-merge sessions
-   already existed by 2026-09-26 04:42Z. So n≥10 is hours away under load, ~a day idle.
-   Re-run the count and compare extractor use before/after this deploy.
-   **Closing condition:** the operator reads that count. 🔴 Do not re-tune the routing off
-   n=6.
+2. **Read the reach comparison at n≥10.** The footer is live on both hosts as of `c0fd28e3`.
+   Real post-merge receipts of the question: **0** as of 2026-09-26T17:1xZ. Population growth,
+   carried forward so this item stays self-contained: **≈1/h under active work, ≈0.22/h
+   (~5/day) at baseline**, and **6** PRE-merge sessions already existed by 2026-09-26 04:42Z
+   (that 6 is the n the reach comparison was taken at — it is not a post-merge receipt).
+   So n≥10 is hours away under load, ~a day idle. Re-run the count and compare extractor use
+   before/after this deploy.
+   **Closing condition:** the operator reads that count. 🔴 Do not re-tune the routing off n=6,
+   and do not read n=0 as a failure of the routing.
    forcing: none
 3. **Decide the answering mode.** One 7-session arc extracts to 967,441 bytes / 199 messages,
    so synthesis is still a subagent's job and the footer routes to a tool that cannot directly
@@ -272,22 +288,28 @@ asserted and withdrawn. If you are reaching for a fourth, you are the fourth —
 upstream signal that would distinguish it first, or write that there is none.
 
 ## The 352-of-617 gap — SPLIT OUT, not fixed here
-🔴 **MEASURED and unexplained: of 617 sessions opening with a `/resume` kickoff paste, 352
-(57%) never load `/resume`'s SKILL.md body at all.** Independently reproduced twice with
-different markers (audit: ≥351; this session: 352).
+🔴 **MEASURED TO ITS DISCRIMINATOR 2026-09-26 — this section used to end "the cause is
+genuinely unknown", and it is not unknown any more.** Of **622** sessions opening with a
+`/resume` kickoff paste, **349 (56%)** never load `/resume`'s SKILL.md body — reproduced three
+times (audit ≥351; 352; 349 over a wider corpus and a 3-marker union). **The body loads iff the
+model elects to call the `Skill` tool:** `Skill(resume)` ⟺ `Launching skill: resume` ⟺ body
+present, 255/255 with zero disagreements — and **every environmental signal upstream of that
+election is identical across the two buckets.** Full values and controls in the
+Open-investigations block below.
 
-⚠ **The first probe for this was wired to nothing** and is worth recording: it searched for
-the resume skill's `description`, which ships in the always-on skill LISTING in *every*
-session, so it matched 100% of transcripts and "proved" there was no gap. A body-only marker
-is what produced 352. Any re-measurement must use a string absent from the frontmatter.
+⚠ **The first probe for this was wired to nothing** and is still worth recording: it searched
+the resume skill's `description`, which ships in the always-on skill LISTING in *every* session,
+so it matched 100% of transcripts and "proved" there was no gap. **Any re-measurement must use a
+string absent from the frontmatter — and present in every revision of the body.**
 
-- **This is NOT this arc's work and must not be fixed on a guess** — all three candidate
-  mechanisms above are retracted, so the cause is genuinely unknown.
-- **Closing condition:** a named upstream signal that distinguishes at least two candidate
-  mechanisms is identified and measured, OR the operator reads the measurement and closes it
-  as won't-fix. Mechanical half: `<0.57` on a re-run of the same probe after any change.
-- **Blast radius if real:** every route that rides `/resume`'s body, not just this one row —
-  which is why it is worth its own investigation rather than a patch here.
+- **This is still NOT this arc's work**, and no fix should be made on a guess: what the model's
+  election depends on is UNMEASURED, and the seven prompt-side features tested do not separate.
+- **Closing condition — first half MET:** a named upstream signal separating ≥2 candidate
+  mechanisms is measured (it separates "something upstream blocks the load", now refuted, from
+  "the model does not call the tool", now confirmed). Remaining: the operator reads it.
+  Mechanical half `<0.57` is **untested and will stay so until something is changed**.
+- **Blast radius, now quantified:** a route riding `/resume`'s body reaches **41%** of
+  kickoff-paste sessions. That is the number that justifies routing from tool output instead.
 ## Open investigations — live diagnosis state
 
 ### 57% of `/resume` kickoff-paste sessions never load `/resume`'s SKILL.md body — cause UNKNOWN
@@ -327,6 +349,70 @@ as-of: 2026-09-26
   `python3 -c` over the 617 transcripts, bucketing by whether the body marker is present, then
   diff the pre-first-user records of one member of each bucket.
 
+### RESOLVED to its discriminator — the `/resume` body loads iff the model calls the `Skill` tool; nothing upstream differs
+as-of: 2026-09-26
+🔴 **This block SUPERSEDES the `Leading hypothesis:` and `Next probe:` lines of
+`### 57% of /resume kickoff-paste sessions never load /resume's SKILL.md body — cause UNKNOWN`
+above.** That block's symptom, values and four eliminations all still stand; its
+`Leading hypothesis: none worth the name` and its `Next probe` are **retired — the probe has
+been run, and running it again is wasted work.** The heading itself could not be struck
+through: `## Open investigations` is an APPEND heading and `handoff_doc.py` appends a same-named
+block rather than replacing it, so this body is the retirement (`handoff/reference/supersede.md`
+names exactly this failure — a reader meets whichever comes first in the file, which is the old
+one).
+
+- **Symptom + exact repro:** unchanged from the block above.
+- **Observed (with values):** 977 Claude transcripts on the workbench; **622** whose first
+  non-sidechain user message starts with `/resume` (was 617 — the corpus grew); **349 (56%)**
+  carry no body marker. Third independent reproduction, this one over a 3-marker union.
+  Three-way cross-tab over all 622, with **zero** disagreements —
+  `A` = a `Skill` tool_use with `input.skill == "resume"`, `B` = the literal
+  `Launching skill: resume`, `C` = a body marker:
+
+  | A | B | C | sessions |
+  |---|---|---|---|
+  | yes | yes | yes | **255** |
+  | no | no | yes | 18 |
+  | no | no | no | **349** |
+
+  `A and not B = 0`; `A and not C = 0`. **Whenever the tool was called it worked, 255/255 — there
+  is no harness failure to find.** The **pre-first-user records are structurally identical**
+  between buckets (the diff the old block asked for, run in aggregate rather than one-vs-one):
+  `mode` 100%/100%, `permission-mode` 100%/100%, the three hook attachments 74%/74%,
+  `bridge-session` 58%/63%, mean pre-records **5.53 vs 5.57**; `version` `2.1.232` 100%/99%,
+  `entrypoint` `cli` 100%/100%, `permissionMode` `default` ~100%, model `claude-opus-5`
+  100%/100%. **The divergence starts at the model's first tool call:** fired ⇒ 68%
+  `Skill(resume)` / 28% `Read`; never-fired ⇒ **0%** `Skill` / **82%** `Read` / 17% `Bash`.
+  The 18 body-without-tool sessions all reference the resume `SKILL.md` path explicitly, 6 of
+  them via `Read`/`Bash`/`Agent` on it — they fetched the body BY HAND, the same signature as
+  the two sessions that `find`-ed the extractor off the filesystem. `6ef53792`, the single
+  session retracted mechanism #1 was built on, is one of the 18.
+- **Ruled out:** ~~"the marker is younger than the bodies it is testing, so an older body scores
+  as a miss"~~ — all three body-only markers (`rebuild context fast`, the `# /resume — …` H1,
+  `Then wait for direction`) are present in **38 of 38** revisions of the body since
+  2026-06-30, `claude/commands/resume.md` era included. Positive control: a HEAD-only string
+  (`cairn recall`) was correctly reported ABSENT from `5dd2a644`, so the check can say no.
+  `via: measurement`
+- **Ruled out:** ~~the whole CLASS "something upstream of the model prevents the skill from
+  loading"~~ — which is where all three previously-retracted mechanisms live. Refuted
+  POSITIVELY, not by another absence: every environmental record is identical across buckets,
+  and 255/255 invocations succeeded. Also 2 of 622 DO carry
+  `<command-name>resume</command-name>` and both loaded the body, so expansion works — it is
+  merely rare in a population defined to exclude it. `via: measurement`
+- **Ruled out:** ~~"a prompt-side feature of the kickoff block decides it"~~ — fire-rate sits at
+  **39–53%** across every split tested: block length, whether the block names a next action,
+  "read first"/"canonical handoff" wording, an absolute doc path, a `do NOT` imperative, a 🔴.
+  Nothing separates. `via: measurement`
+- **Leading hypothesis:** the election itself. A route living in a skill BODY reaches **41%**
+  (255/622) of kickoff-paste sessions, because the body is downstream of a choice the model
+  makes with no environmental input that differs. **This is a measurement of #1883's premise,
+  not a new mechanism** — and it is where the evidence stops. Why the model elects not to is
+  UNMEASURED; the seven features above are ruled out and an eighth is not.
+- **Next probe:** none for the mechanism — 🔴 **do not open a fourth.** The remaining probe is
+  the operator reading this. If a probe IS wanted, the only honest one left is prospective: log
+  the election (fired / not) per kickoff session going forward and see whether it correlates
+  with anything not already tested, rather than mining the same 622.
+
 ## Defects (batched)
 - 🔴 **The squash subject on `main` permanently asserts the retracted claim**:
   `feat(find-session): a resolved arc names the extractor, because the prose route fired 1 of 3
@@ -351,3 +437,24 @@ PYTHONDONTWRITEBYTECODE=1 python3 $DEVRC/scripts/tests/mutation_battery_arc_extr
 # 4. both hosts carry it
 bash $DEVRC/scripts/drift-check.sh   # read every per-host line, not the verdict
 ```
+
+**Rebuilding the body-load measurement** (no script is committed for it; the probes lived in a
+session scratchpad and are gone). Over `~/.claude/projects/*/*.jsonl`:
+1. **Population** — first record with `type=="user"`, falsy `isSidechain`, non-empty text;
+   keep the session iff `text.lstrip().startswith("/resume")`. Expect ~622 and rising.
+2. **Bucket** — `C` = any of the three body-only markers above appears anywhere in the file.
+   🔴 A marker must be absent from the SKILL.md **frontmatter** (the `description` ships in the
+   always-on skill LISTING in every session and matches 100% of transcripts) **and** present in
+   every revision of the body — check the second with `git show <rev>:<path>` over
+   `git log -- claude/skills/resume/SKILL.md claude/commands/resume.md`, plus a HEAD-only
+   control string that must come back absent.
+3. **Discriminator** — `A` = a `Skill` tool_use with `input.skill == "resume"`;
+   `B` = the literal `Launching skill: resume`. Cross-tab `A × B × C`; expect `A⟺B⟺C|A` with
+   zero disagreements.
+4. **Upstream diff** — bucket by `B`, then compare the records BEFORE the first user message in
+   aggregate (`type`, and `attachment.type` for attachments), plus `version` / `entrypoint` /
+   `permissionMode` / first-assistant `message.model`. Expect them identical; that identity is
+   the finding.
+🔴 **zsh has no word-splitting** — `for rev in $revs` over a newline-joined string loops ONCE
+and every per-revision check reports a vacuous clean. Hit in this session; write these in
+Python, or use `${=revs}`.
