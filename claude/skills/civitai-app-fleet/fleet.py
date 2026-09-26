@@ -29,8 +29,9 @@ Usage:
     fleet.py --no-platform   # skip `civitai app status` (no CLI / no auth)
     fleet.py --no-fetch      # do not write to the shared clones
 
-🔴 BY DEFAULT THIS RUNS `git fetch` IN SEVEN CLONES OTHER SESSIONS ARE STANDING
-IN. That is a write to a shared checkout, so it is stated here rather than left
+🔴 BY DEFAULT THIS RUNS `git fetch` IN EVERY CLONE IN `REPOS` (nine today) WHILE
+OTHER SESSIONS ARE STANDING IN THEM. That is a write to a shared checkout, so it
+is stated here rather than left
 to be discovered, and `--no-fetch` turns it off. To run without touching
 anything at all you need BOTH `--no-fetch` and `--no-platform`.
 
@@ -55,11 +56,11 @@ row — so a GLOBAL fetch failure (no network, no SSH agent, VPN down) collapsed
 every row and this tool emitted no inventory at all. Serving probably-correct
 data with a caveat beats serving none.
 
-⚠ Measured, because the first wording of this paragraph overstated it by 7×:
-ONE unreachable remote collapses exactly ONE row — the other six print in full.
-The all-seven case needs a cause common to all seven. The bug was real; the
-blast radius written down for it was not, and a reader told the rows are coupled
-when they are independent will mis-triage the next occurrence.
+⚠ Measured, because the first wording of this paragraph overstated it by the full
+row count: ONE unreachable remote collapses exactly ONE row — every OTHER row
+prints in full. The all-rows case needs a cause common to all of them. The bug
+was real; the blast radius written down for it was not, and a reader told the
+rows are coupled when they are independent will mis-triage the next occurrence.
 
 Exit is non-zero when a row could not be READ (missing checkout, non-repository,
 unreadable column) or when a fetch FAILED. `--no-fetch` alone does not fail: you
@@ -80,6 +81,23 @@ import sys
 # even this is checked: a missing checkout is reported, never skipped.
 WORKSPACE = os.path.expanduser("~/workspace/civit")
 
+# 🔴 THIS LIST IS CURATED, SO IT IS THE ONE COLUMN THAT *CAN* ROT — and it did.
+# It sat at seven while `panorama-360` and `oauth-probe` were already live apps
+# with their own repos and their own release cadence, so every bulk pass silently
+# skipped two and every doc in this skill said "seven".
+#
+# It is deliberately NOT derived from the filesystem: `~/workspace/civit` holds
+# ~28 directories carrying a `block.manifest.json`, nearly all of them worktrees
+# and scratch clones of the repos below, so a glob enumerates the same app four
+# times over. Re-derive it against the PLATFORM instead, which lists one row per
+# app:
+#
+#     civitai app status | awk 'NR>2 && $2 ~ /^[0-9]/ {print $1}' | sort -u
+#
+# and diff that against the third column here. Throwaway probe slugs that are
+# deliberately NOT fleet members (`dogfood-probe-hello`, `dogfood2-hello`,
+# `w6-ui-dogfood`, `ab-img-poster`) show up in that diff; a slug with its own repo
+# and its own release cadence belongs in the list.
 REPOS = [
     # (local dir, github slug, app slug)
     ("civitai-app-gen-matrix", "ZacxDev/civitai-app-gen-matrix", "gen-matrix"),
@@ -89,6 +107,11 @@ REPOS = [
     ("civitai-app-requests", "ZacxDev/civitai-app-requests", "app-requests"),
     ("civitai-app-sensei", "ZacxDev/civitai-app-sensei", "sensei"),
     ("civitai-block-generate-from-model", "ZacxDev/civitai-block-generate-from-model", "generate-from-model"),
+    # 🔴 NOT under ZacxDev — this one lives in the `civitai` org, and its repo name
+    # drops the `civitai-` prefix the other eight carry. Both halves are guessable
+    # wrong from the app slug; read them here.
+    ("civitai-app-panorama-360", "civitai/app-panorama-360", "panorama-360"),
+    ("civitai-app-oauth-probe", "ZacxDev/civitai-app-oauth-probe", "oauth-probe"),
 ]
 
 _RUN = subprocess.run  # patched by tests; see app_state.py for why this seam exists
