@@ -224,7 +224,17 @@ def is_the_operator(comment: object) -> tuple[bool, str]:
         return True, ""
     if v is False:
         login = ((comment.get("author") or {}) or {}).get("login") or "someone else"
-        return False, f"written by {login}, not the operator"
+        # 🔴 WORDED AS THE FIELD'S ACTUAL CLAIM, not as an identity verdict.
+        # `viewerDidAuthor` is about whoever `gh` is AUTHENTICATED AS. On the
+        # operator's own host that is the operator, which is the whole basis for
+        # using it — but under a CI token or a shared credential the operator's
+        # OWN comment returns false, and a reason reading "not the operator" would
+        # then be flatly untrue while the ask was dropped. Round 2 of the
+        # devrc#1887 ladder found the wording.
+        return False, (
+            f"written by {login}, which is not the account `gh` is "
+            "authenticated as"
+        )
     return False, (
         f"`{VIEWER_FIELD}` was absent, so authorship could not be established — "
         "NOT a claim that the operator did not write it"
@@ -262,7 +272,7 @@ def asks_from_comments(comments: Sequence[dict]) -> tuple[list[Ask], dict, int]:
 
 
 #: The two `kind`s of `extract_user_msgs.py` row that are the operator speaking.
-#: `answer` needs `--include-answers` and is 71% again on top of `typed` — see
+#: `answer` needs `--include-answers` and is 93.5% again on top of `typed` — see
 #: that script's own docstring for the measurement. `command` is excluded: a bare
 #: `/slash` (8 B) is an invocation, not an ask.
 OPERATOR_KINDS = ("typed", "answer")
@@ -399,12 +409,31 @@ EXTRACTOR_REASONS = {
 }
 
 
-#: Lines the extractor writes to stderr while STILL EXITING 0 — each one says a
-#: part of the selection was not read. They are prefixed `!` by that tool
-#: (`extract_user_msgs.py`'s own coverage notes), which is the marker this reads.
-#: 🔴 A rc-0 RUN WITH ONE OF THESE IS A PARTIAL READ, and treating it as complete
-#: is what suppressed the UNKNOWN directive on a half-resolved session set.
+#: Lines the extractor writes to stderr while STILL EXITING 0. They are prefixed
+#: `!` by that tool (`print(f"! {note}", file=err)`), which is the marker this
+#: reads — the prefix is the contract, the wording is that tool's to change.
+#: 🔴 A rc-0 RUN WITH ONE OF THESE IS USUALLY A PARTIAL READ, and treating it as
+#: complete is what suppressed the UNKNOWN directive on a half-resolved set.
 _COVERAGE_NOTE_PREFIX = "!"
+
+#: 🔴 …EXCEPT ONE FAMILY, WHICH IS INFORMATION AND NOT A GAP. The extractor also
+#: emits, with the same `!`, "N session(s) are ABSENT from this report because
+#: dedup suppressed every one of their messages as a repeat of another session's
+#: — **they are not empty**". Those messages WERE read and ARE in the output,
+#: attributed to the other session. Reading it as a gap puts a false UNKNOWN and
+#: the directive on a COMPLETE read — and dedup is on by default, so it fires on
+#: any PR whose trailers name two sessions of one arc (the extractor's own comment
+#: calls that the ordinary case: "the same kickoff pasted into every resumed
+#: session"). A permanent UNKNOWN is a permanently-red gate: it teaches the reader
+#: to skip the line that matters. Round 2 of the devrc#1887 ladder found it.
+#:
+#: ⚠ THIS IS A WORDING DEPENDENCY, WHICH THE PREFIX RULE OTHERWISE AVOIDS — so it
+#: is pinned TWO-WAY against the extractor's own source by
+#: `test_the_dedup_note_wording_is_pinned_to_the_extractor`. If that tool rewords
+#: the note the test fails LOUDLY rather than this silently reverting to a false
+#: UNKNOWN. And the fail-safe direction is preserved: an `!` line this does not
+#: recognise is treated as a GAP, so a reword over-reports rather than hiding one.
+NOT_A_GAP_MARKERS = ("they are not empty",)
 
 
 def coverage_notes(stderr: str) -> list[str]:
@@ -418,8 +447,12 @@ def coverage_notes(stderr: str) -> list[str]:
     out: list[str] = []
     for line in (stderr or "").splitlines():
         t = line.strip()
-        if t.startswith(_COVERAGE_NOTE_PREFIX) and len(t) > 1:
-            out.append(t.lstrip("! ").strip())
+        if not (t.startswith(_COVERAGE_NOTE_PREFIX) and len(t) > 1):
+            continue
+        note = t.lstrip("! ").strip()
+        if any(m in note for m in NOT_A_GAP_MARKERS):
+            continue        # information, not a gap — see NOT_A_GAP_MARKERS
+        out.append(note)
     return out
 
 
@@ -624,12 +657,16 @@ def render(asks: Sequence[Ask], unmeasured: Sequence[Unmeasured] = (),
 
     lines += [
         "",
-        "🔴 **QUOTE AN ASK IN YOUR REPORT, BUT DO NOT COMMIT ONE.** This repo is "
-        "PUBLIC and `CLAUDE.md` forbids committing captured text — message "
-        "bodies, prompts, transcript content — however it arrives. Findings land "
-        "in tracked `claudedocs/**.md` and in public PR comments, and the `.md` "
-        "surface is gated by nothing, so this is yours to hold: paraphrase or "
-        "elide when a finding goes into a file.",
+        "🔴 **DO NOT PUBLISH A QUOTED ASK — ON ANY SURFACE THAT LEAVES THIS "
+        "MACHINE.** That includes a tracked file, a commit message, **a PR "
+        "comment or review**, and anything posted to an external service. This "
+        "repo is PUBLIC and `CLAUDE.md` forbids committing captured text — "
+        "message bodies, prompts, transcript content — however it arrives; no "
+        "gate covers `.md` or a PR comment, so it is yours to hold. Quote an ask "
+        "only in what you hand back to the operator; paraphrase or elide it "
+        "everywhere else. ⚠ An earlier wording NAMED PR comments as a "
+        "destination and then scoped the rule to files, which permitted the "
+        "exposure its own heading forbids.",
     ]
     lines += [""] + agent_side_reference(session_ids, projects_root=projects_root)
     return "\n".join(lines)

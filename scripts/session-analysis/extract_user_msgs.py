@@ -248,7 +248,7 @@ def records_of(path, session_id=None, include_answers=False):
     answer is the OPERATOR, arriving in a `tool_result` block. MEASURED
     2026-09-26 over this host's corpus: **1,491 answer records across 594
     sessions, 837,635 B** — against 895,672 B for the entire `typed` operator
-    corpus, so it is 92% again on top of everything this tool could previously
+    corpus, so it is 93.5% again on top of everything this tool could previously
     report. Median 479 B, max 2,037 B. 24 carry a free-text `notes:` (the
     operator's own words); the rest record a decision.
 
@@ -272,66 +272,80 @@ def records_of(path, session_id=None, include_answers=False):
             except ValueError:
                 continue
 
-    # 🔴 THE DEFAULT PATH STREAMS. `answer_ids` genuinely needs the whole file (a
-    # `tool_result` names a `tool_use` that appeared earlier), so the answers
-    # path materialises — but making that unconditional taxed every caller for a
-    # feature they did not ask for. MEASURED over 984 transcripts / 2.79 GB,
-    # `--jsonl -o`, 4 interleaved runs at load ~9: streaming 10.0-11.3 s and
-    # 222 MB peak RSS; materialising 17.3-26.3 s and 256 MB. So 1.6-2.4x wall for
-    # nothing. ⚠ An earlier revision claimed "the default path still streams
-    # nothing extra into memory beyond the list above" — self-contradictory, the
-    # list WAS the whole file on both paths. Round 1 of the devrc#1887 ladder
-    # measured it.
+    # 🔴 THE DEFAULT PATH STREAMS, AND THE CONSUMER LOOP IS INSIDE THE `with`
+    # BECAUSE THAT IS WHAT MAKES IT TRUE. `answer_ids` genuinely needs the whole
+    # file (a `tool_result` names a `tool_use` that appeared earlier), so the
+    # answers path materialises; the default path hands the consumer a GENERATOR.
+    #
+    # ⚠ THIS COMMENT HAS NOW BEEN WRONG TWICE, IN OPPOSITE WAYS, AND THE SECOND
+    # TIME IT ASSERTED THE FIX IT DID NOT MAKE — which is worse, because the next
+    # reader trying to make this stream would have believed it done.
+    #   * `697387c6` materialised UNCONDITIONALLY and said "the default path
+    #     still streams nothing extra into memory beyond the list above":
+    #     self-contradictory, the list WAS the whole file.
+    #   * `9b61b26d` moved that list into an `else` branch, wrote "🔴 THE DEFAULT
+    #     PATH STREAMS", and still built `list(_parse(f))` — because the consumer
+    #     loop sat OUTSIDE the `with`, so a generator could not survive it. Round
+    #     2 of the devrc#1887 ladder measured the default path unmoved and caught
+    #     the sentence.
+    #
+    # 🔴 AND THE PERFORMANCE NUMBER WAS MIS-ATTRIBUTED. The measurement — 984
+    # transcripts / 2.79 GB, `--jsonl -o`, 4 interleaved runs at load ~9:
+    # 10.0-11.3 s / 222 MB against 17.3-26.3 s / 256 MB — is REAL, but it
+    # compares `62b516a4` (this generator, streaming) against `697387c6` (the
+    # unconditional materialise). It was never a base-vs-`9b61b26d` reading, and
+    # quoting it beside that commit implied a regression had been removed when it
+    # had only been moved. The 1.6-2.4x is what THIS revision removes.
     with open(path, errors="replace") as f:
         if include_answers:
             parsed = list(_parse(f))
             ids = answer_ids(parsed)
-            source = parsed
+            source: object = parsed
         else:
             ids = set()
-            source = list(_parse(f))
-    for obj in source:
-        if obj.get("type") != "user" or obj.get("isMeta"):
-            continue
-        # sidechain == a subagent's own transcript, not user-typed
-        if obj.get("isSidechain"):
-            continue
-        # 🔴 A COMPACTION SUMMARY IS THE MODEL'S PROSE, NOT THE OPERATOR'S. It
-        # arrives as a `user` record with `isCompactSummary: true` and opens
-        # "This session is being continued from a previous conversation…".
-        # MEASURED 2026-09-26: 16 such records on this host, ALL 16 previously
-        # emitted as user-typed, carrying 211,362 B — **23.8% of the entire
-        # operator corpus**, and 212x the largest harness class any downstream
-        # filter removes. Round 1 of the devrc#1887 ladder found it. It also
-        # matters for a PUBLIC repo: `CLAUDE.md` names "a model's summaries of
-        # them" as captured text that must never be committed, and this tool's
-        # output gets quoted into handoff docs.
-        if obj.get("isCompactSummary"):
-            continue
-        msg = obj.get("message") or {}
-        if msg.get("role") != "user":
-            continue
-        base = {"session_id": session_id, "project": project,
-                "ts": obj.get("timestamp") or ""}
-        for raw in extract_from_content(msg.get("content")):
-            got = message_of(raw)
-            if got is None:
+            source = _parse(f)          # a GENERATOR — nothing is materialised
+        for obj in source:  # type: ignore[union-attr]
+            if obj.get("type") != "user" or obj.get("isMeta"):
                 continue
-            kind, text = got
-            yield {**base, "kind": kind, "text": text}
-        if not ids:
-            continue
-        content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict) or block.get("type") != "tool_result":
+            # sidechain == a subagent's own transcript, not user-typed
+            if obj.get("isSidechain"):
                 continue
-            if block.get("tool_use_id") not in ids:
+            # 🔴 A COMPACTION SUMMARY IS THE MODEL'S PROSE, NOT THE OPERATOR'S. It
+            # arrives as a `user` record with `isCompactSummary: true` and opens
+            # "This session is being continued from a previous conversation…".
+            # MEASURED 2026-09-26: 16 such records on this host, ALL 16 previously
+            # emitted as user-typed, carrying 211,362 B — **23.6% of the entire
+            # operator corpus**, and 212x the largest harness class any downstream
+            # filter removes. Round 1 of the devrc#1887 ladder found it. It also
+            # matters for a PUBLIC repo: `CLAUDE.md` names "a model's summaries of
+            # them" as captured text that must never be committed, and this tool's
+            # output gets quoted into handoff docs.
+            if obj.get("isCompactSummary"):
                 continue
-            text = answer_text(block)
-            if text:
-                yield {**base, "kind": KIND_ANSWER, "text": text}
+            msg = obj.get("message") or {}
+            if msg.get("role") != "user":
+                continue
+            base = {"session_id": session_id, "project": project,
+                    "ts": obj.get("timestamp") or ""}
+            for raw in extract_from_content(msg.get("content")):
+                got = message_of(raw)
+                if got is None:
+                    continue
+                kind, text = got
+                yield {**base, "kind": kind, "text": text}
+            if not ids:
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                if block.get("tool_use_id") not in ids:
+                    continue
+                text = answer_text(block)
+                if text:
+                    yield {**base, "kind": KIND_ANSWER, "text": text}
 
 
 # --------------------------------------------------------------------------- #

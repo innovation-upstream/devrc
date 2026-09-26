@@ -1939,10 +1939,16 @@ def gh_pr_facts(runner, pr, repo=None):
     against `gh`'s own field list) — `url` is what carries the base repo, and
     `pr_slug` reads it.
     """
-    # `commits` and each comment's `authorAssociation` are read for ROUND 0's
+    # `commits` and each comment's `viewerDidAuthor` are read for ROUND 0's
     # attribution input (`operator_asks`): `commits` carries the
-    # `Claude-Session-Id:` trailers that resolve THIS PR's sessions, and the
-    # association is what separates the operator's own comment from a bot's.
+    # `Claude-Session-Id:` trailers that name THIS PR's sessions, and
+    # `viewerDidAuthor` is what separates the operator's own comment from a
+    # teammate's or a bot's. 🔴 DO NOT SWAP IT FOR `authorAssociation` — that is
+    # repo MEMBERSHIP, it admitted ten devrc collaborators and the
+    # `civitai-deploy` bot, and `operator_asks.VIEWER_FIELD`'s comment records
+    # both wrong answers. This comment named the association until round 2 of the
+    # devrc#1887 ladder found it still here, above the very field list a
+    # maintainer edits.
     # 🔴 `body` is deliberately NOT read — the PR DESCRIPTION was dropped as a
     # source (operator's call, 2026-09-26): measured over the 60 newest merged
     # devrc PRs, 1 body names an ask and 4 carry any blockquote, so it

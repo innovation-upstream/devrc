@@ -625,12 +625,18 @@ def test_the_comment_source_declares_that_REVIEW_comments_are_invisible():
     assert "REVIEW comment" in out
 
 
-def test_the_block_warns_against_committing_a_quoted_ask():
-    """This repo is PUBLIC and findings land in tracked `.md`, which no content
-    gate covers."""
+def test_the_block_warns_against_publishing_a_quoted_ask():
+    """This repo is PUBLIC and findings land in tracked `.md` AND in public PR
+    comments, neither of which any content gate covers.
+
+    ⚠ This used to assert `DO NOT COMMIT ONE`, matching a warning whose scope was
+    files only while its own text named PR comments as a destination. The
+    surface-coverage assertion is in
+    `test_the_captured_text_warning_covers_every_surface_not_just_files`; this one
+    keeps the presence check."""
     out = oa.render([oa.Ask(source=oa.SOURCE_SESSION, text="x", session_id=SID_A)],
                     session_ids=(SID_A,), projects_root="/nonexistent")
-    assert "DO NOT COMMIT ONE" in out
+    assert "DO NOT PUBLISH A QUOTED ASK" in out
 
 
 def test_the_agents_own_preview_block_is_stripped_from_an_answer():
@@ -666,7 +672,7 @@ class TestRoundOneSeamFindings(TestTheSeamWithTheRealProducer):
 
     def test_a_model_authored_compaction_summary_is_NOT_the_operator(self, tmp_path):
         """🔴 THE LARGEST MISCLASSIFICATION LEFT. Measured over this host: 16
-        records carrying **211,362 B = 23.8% of the entire operator corpus** —
+        records carrying **211,362 B = 23.6% of the entire operator corpus** —
         212x the one harness family kept — all of them a MODEL's summary of a
         conversation, emitted as the operator's verbatim ask. `CLAUDE.md` also
         names "a model's summaries of them" as captured text a public repo must
@@ -709,3 +715,67 @@ class TestRoundOneSeamFindings(TestTheSeamWithTheRealProducer):
         assert eum.build_parser().parse_args([]).include_answers is False, (
             "the CLI default flipped — the shipped footer's output moves"
         )
+
+
+# --------------------------------------------------------------------------
+# 🔴 ROUND 2's FINDINGS
+# --------------------------------------------------------------------------
+
+def test_the_dedup_note_is_NOT_read_as_a_coverage_gap():
+    """🔴 A FALSE UNKNOWN ON A COMPLETE READ. The extractor emits, with the same
+    `!`, "N session(s) are ABSENT … because dedup suppressed every one of their
+    messages as a repeat of another session's — they are not empty". Those
+    messages WERE read and ARE in the output. Dedup is on by default and
+    `audit-dispatch` does not disable it, so this fires on any PR whose trailers
+    name two sessions of one arc — and a permanent UNKNOWN teaches the reader to
+    skip the line that matters."""
+    err = ("! 1 session(s) are ABSENT from this report because dedup suppressed "
+           "every one of their messages as a repeat of another session's — they "
+           "are not empty: bbbbbbbb-5555-4666-8777-888888888888\n"
+           "sessions=2 msgs=4 deduped=1 out=-\n")
+    assert oa.coverage_notes(err) == [], oa.coverage_notes(err)
+
+
+def test_an_UNRECOGNISED_note_IS_still_read_as_a_gap():
+    """The fail-safe direction: over-report rather than hide one. If the extractor
+    adds a note family this does not know, it must count as a gap."""
+    notes = oa.coverage_notes("! some future note nobody here anticipated\n")
+    assert len(notes) == 1, notes
+
+
+def test_the_dedup_note_wording_is_pinned_to_the_extractor():
+    """🔴 TWO-WAY, because this is the module's one WORDING dependency — the
+    prefix is otherwise the contract. If the extractor rewords the dedup note,
+    this fails LOUDLY rather than silently reverting to a false UNKNOWN."""
+    src = (SCRIPTS / "session-analysis" / "extract_user_msgs.py").read_text()
+    for marker in oa.NOT_A_GAP_MARKERS:
+        assert marker in src, (
+            f"{marker!r} is no longer in the extractor's source — either it "
+            "reworded the dedup note (update NOT_A_GAP_MARKERS) or the note is "
+            "gone (delete the marker). Leaving it stale makes a real gap "
+            "invisible."
+        )
+
+
+def test_the_captured_text_warning_covers_every_surface_not_just_files():
+    """🔴 The earlier wording NAMED PR comments as a destination and then scoped
+    the rule to files — permitting exactly the exposure its own heading forbids.
+    'Wider on one axis, narrower on another'."""
+    out = oa.render([oa.Ask(source=oa.SOURCE_SESSION, text="x", session_id=SID_A)],
+                    session_ids=(SID_A,), projects_root="/nonexistent")
+    assert "ANY SURFACE THAT LEAVES THIS MACHINE" in out
+    assert "PR comment or review" in out
+    assert "when a finding goes into a file" not in out, (
+        "the file-only scoping came back"
+    )
+
+
+def test_a_non_operator_reason_does_not_assert_an_identity_it_cannot_know():
+    """`viewerDidAuthor` is about whoever `gh` is authenticated as. Under a CI or
+    shared token the operator's OWN comment returns false, and a reason reading
+    'not the operator' would be flatly untrue."""
+    ok, why = oa.is_the_operator(
+        {"viewerDidAuthor": False, "author": {"login": "ZacxDev"}})
+    assert not ok
+    assert "authenticated as" in why
+    assert why != "written by ZacxDev, not the operator"

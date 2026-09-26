@@ -203,8 +203,46 @@ MUTANTS = (
         "an rc-0 PARTIAL read is treated as full coverage, because the "
         "extractor's own `!` notes are not read",
         "test_a_rc0_coverage_note_becomes_an_UNKNOWN",
-        '        if t.startswith(_COVERAGE_NOTE_PREFIX) and len(t) > 1:',
+        '        if not (t.startswith(_COVERAGE_NOTE_PREFIX) and len(t) > 1):',
+        "        if True:",
+    ),
+    (
+        "M21",
+        "the dedup note is read as a coverage GAP, so a COMPLETE read carries a "
+        "false UNKNOWN and the directive — a permanent UNKNOWN teaches the reader "
+        "to skip the line that matters",
+        "test_the_dedup_note_is_NOT_read_as_a_coverage_gap",
+        "        if any(m in note for m in NOT_A_GAP_MARKERS):",
         "        if False:",
+    ),
+    (
+        "M22",
+        "an UNRECOGNISED `!` note stops counting as a gap, so a note family the "
+        "extractor adds later is silently hidden instead of over-reported",
+        "test_an_UNRECOGNISED_note_IS_still_read_as_a_gap",
+        "        out.append(note)",
+        "        pass",
+    ),
+    (
+        "M23",
+        "the captured-text warning narrows back to files only, permitting the "
+        "exposure its own heading forbids",
+        "test_the_captured_text_warning_covers_every_surface_not_just_files",
+        '        "🔴 **DO NOT PUBLISH A QUOTED ASK — ON ANY SURFACE THAT LEAVES THIS "',
+        '        "🔴 **DO NOT COMMIT A QUOTED ASK into a file. "',
+    ),
+    (
+        "M24",
+        "a non-operator reason asserts an identity the field cannot establish — "
+        "untrue under a CI or shared `gh` credential",
+        "test_a_non_operator_reason_does_not_assert_an_identity_it_cannot_know",
+        # ⚠ MUTATES THE SECOND LINE OF THE CONCATENATION, NOT THE FIRST. An
+        # earlier row rewrote the f-string and produced a SYNTAX ERROR, so the
+        # module failed to import, the suite errored with no FAILED line, and the
+        # row scored WRONG-REASON — a mutant that dies of its own malformation
+        # tests nothing. Keep every mutation syntactically valid.
+        '            "authenticated as"',
+        '            ""',
     ),
     (
         "M19",
@@ -283,6 +321,27 @@ def main(argv=None):
         return 1
 
     killed = survived = skipped = 0
+    try:
+        killed, survived, skipped = _sweep(rows, original, restore)
+    finally:
+        # 🔴 IN A `finally`, AS BOTH PREDECESSORS DO. Without it a Ctrl-C or any
+        # exception mid-sweep leaves `scripts/lib/operator_asks.py` MUTATED in a
+        # shared, tracked checkout — e.g. `if False:` in the operator-identity
+        # predicate — and the next `/audit-pr --round 0` reads that module live.
+        # The digest check only runs on paths that reach it. Round 2 of the
+        # devrc#1887 ladder found this missing.
+        restore()
+
+    print(f"\n{killed} KILLED · {survived} SURVIVED/WRONG-REASON · "
+          f"{skipped} SKIPPED · of {len(rows)}")
+    print(f"restored by digest: "
+          f"{hashlib.sha256(SCRIPT.read_text().encode()).hexdigest() == digest}")
+    return 1 if (survived or skipped) else 0
+
+
+def _sweep(rows, original, restore):
+    """One mutant at a time. -> (killed, survived, skipped)."""
+    killed = survived = skipped = 0
     for mid, why, killer, old, new in rows:
         n = original.count(old)
         if n != 1:
@@ -308,12 +367,7 @@ def main(argv=None):
             print(f"🔴 WRONG-REASON {mid}: red, but {killer} not among "
                   f"{sorted(fails)} — it died for a different reason")
 
-    restore()
-    print(f"\n{killed} KILLED · {survived} SURVIVED/WRONG-REASON · "
-          f"{skipped} SKIPPED · of {len(rows)}")
-    print(f"restored by digest: "
-          f"{hashlib.sha256(SCRIPT.read_text().encode()).hexdigest() == digest}")
-    return 1 if (survived or skipped) else 0
+    return killed, survived, skipped
 
 
 if __name__ == "__main__":

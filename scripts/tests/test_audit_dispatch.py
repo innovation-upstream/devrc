@@ -10027,6 +10027,9 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     # the PR-comment coverage test, was RENAMED rather than added).
     "test_a_non_owner_PR_comment_is_not_inlined_as_an_operator_ask",
     "test_the_extractor_is_invoked_with_include_answers",
+    # Round 2: the seam that carried round 1's headline fix, plus its control.
+    "test_a_rc0_run_carrying_a_COVERAGE_NOTE_yields_UNKNOWN_and_the_directive",
+    "test_a_rc0_run_with_CLEAN_stderr_does_not_manufacture_an_UNKNOWN",
     # 🔴 THE UNEARNED-LEDGER GUARDS (round 25), AND THEY ARE GUARDS FOR THREE
     # DIFFERENT REASONS. Written out because the one-line version ("the rest
     # error for want of a symbol") is FALSE for two of them, and this module
@@ -13401,7 +13404,10 @@ def test_a_non_owner_PR_comment_is_not_inlined_as_an_operator_ask():
                       "body": "DEPLOY PREVIEW READY"}],
     })
     assert "DEPLOY PREVIEW READY" not in block
-    assert "civitai-deploy" in block and "not the operator" in block
+    # `MEMBER` is the association BOTH earlier predicates admitted on; the skip
+    # names the author and the field's actual claim, never an identity verdict.
+    assert "civitai-deploy" in block
+    assert "authenticated as" in block
 
 
 def test_the_extractor_is_invoked_with_include_answers():
@@ -13514,3 +13520,59 @@ def test_the_asks_are_scoped_to_THIS_PRs_commits_and_not_the_whole_CHECKOUT():
         "another session's id reached the extractor"
     )
     assert "> my own ask" in block
+
+
+def test_a_rc0_run_carrying_a_COVERAGE_NOTE_yields_UNKNOWN_and_the_directive():
+    """🔴 THE SEAM THAT CARRIED ROUND 1'S HEADLINE FIX, AND WAS UNGUARDED.
+
+    `coverage_notes()` had a unit test and `render`'s UNKNOWN line had one, but no
+    test drove `_read_operator_asks` down the rc-0-WITH-A-NOTE path — every other
+    test here returns `(0, out, "")` with EMPTY stderr. So the three wiring lines
+    could be deleted and the whole suite stayed green while the original 🔴 was
+    fully restored: a half-resolved session set rendering as a complete read.
+    Round 2 of this PR's own ladder found it, and named it the isolation-seam
+    class the new battery cannot see either (it is single-target on
+    `operator_asks.py`).
+    """
+    sid = "aaaaaaaa-1111-4222-8333-444444444444"
+    missing = "dddddddd-1111-4222-8333-444444444444"
+    note = (f"! 1 of 2 selected session(s) have NO transcript on this host "
+            f"(peer host? pruned?): {missing}\n"
+            "sessions=1 msgs=1 deduped=0 out=-\n")
+
+    def runner(cmd, cwd=None):
+        return 0, json.dumps(
+            {"kind": "typed", "text": "the one ask that WAS read",
+             "session_id": sid}), note
+
+    block = ad._read_operator_asks(runner, {
+        "commits": [{"messageHeadline": "x", "messageBody":
+                     f"Claude-Session-Id: {sid}\nClaude-Session-Id: {missing}"}],
+    })
+    assert "> the one ask that WAS read" in block
+    assert "UNKNOWN — 1 of 2 selected session(s)" in block, (
+        f"rc 0 with a coverage note produced no UNKNOWN:\n{block}"
+    )
+    assert "UNATTRIBUTED-UNKNOWN" in block, (
+        "the directive was suppressed on a PARTIAL read — the exact defect"
+    )
+
+
+def test_a_rc0_run_with_CLEAN_stderr_does_not_manufacture_an_UNKNOWN():
+    """The negative control. A permanent UNKNOWN is a permanently-red gate."""
+    sid = "aaaaaaaa-1111-4222-8333-444444444444"
+
+    def runner(cmd, cwd=None):
+        return 0, json.dumps(
+            {"kind": "typed", "text": "an ask", "session_id": sid}), \
+            "sessions=1 msgs=1 deduped=0 out=-\n"
+
+    block = ad._read_operator_asks(runner, {
+        "commits": [{"messageHeadline": "x",
+                     "messageBody": f"Claude-Session-Id: {sid}"}],
+        "comments": [],
+    })
+    assert "> an ask" in block
+    assert "UNATTRIBUTED-UNKNOWN" not in block, (
+        f"a clean read was reported as partial:\n{block}"
+    )

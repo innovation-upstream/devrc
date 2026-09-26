@@ -236,7 +236,14 @@ SKILL_RELS = (
 # added by round 0's own fixes on the same branch (a non-owner comment guard and
 # an `--include-answers` guard) and one was renamed. The number is the formula's
 # output on a counted m, NOT 195 + 2.
-MIN_TESTS = 197
+# 🔴 RAISED AGAIN 2026-09-26, 197 -> 199, at m = 209 — COUNTED the same way, from
+# a `--collect-only` on the module (`209 tests collected`) through the same
+# formula, `209 - min(50, max(1, 209 // 20))` = 209 - 10 = 199. Two node ids were
+# added by round 2's fixes on the same branch (the rc-0 coverage-note seam and its
+# clean-stderr control). ⚠ `197 + 2` happens to give 199 here too — the agreement
+# is a coincidence, not a method, and the paragraph above records the round where
+# that arithmetic would have been one too high.
+MIN_TESTS = 199
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
