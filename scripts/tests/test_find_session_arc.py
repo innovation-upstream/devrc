@@ -16,6 +16,7 @@ task's criterion 11 names.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -727,6 +728,121 @@ class TestTrailerValuesAreValidatedOnREAD:
         cmd = ha.ArcMember("x;rm -rf /", ha.ROLE_WROTE).resume_command()
         assert cmd != "claude --resume x;rm -rf /"
         assert "'" in cmd, f"an odd id reached a pasteable command unquoted: {cmd}"
+
+
+class TestTheArcNamesTheExtractor:
+    """🔴 THE ROUTING GUARD FOR A PROSE ROUTE THAT WAS MEASURED NOT TO FIRE.
+
+    #1870 shipped `extract_user_msgs.py --arc` and routed it from a "Load when"
+    row in `/resume`'s SKILL.md. Measured over the three sessions that asked the
+    operator's standing end-of-arc question after that landed: `--arc` ran in 3 of
+    3, the reference file was read in 1 of 3, and one session re-found the script
+    with `find $DEVRC/scripts -name 'extract_user_msgs*'` while the row sat unread
+    in its context. These guards pin the deterministic replacement — the tool that
+    DID fire every time names the next one.
+
+    🔴 The two seam guards are the load-bearing ones. A footer that renders
+    perfectly while naming a path that does not exist, or a seed the extractor
+    rejects, is inert in exactly the way a rendering test cannot see — the
+    "verified in isolation" hazard, two components each fine and the seam broken.
+    """
+
+    @staticmethod
+    def _report(n_members=2, doc="handoff-arc-fixture.md"):
+        r = ha.ArcReport(doc=doc, repo="devrc", total_commits=3,
+                         unstamped_commits=0)
+        r.members = [ha.ArcMember(f"{i}" * 8 + "-1111-4111-8111-111111111111",
+                                  ha.ROLE_WROTE)
+                     for i in range(1, n_members + 1)]
+        return r
+
+    def test_a_resolved_arc_NAMES_the_extractor_command(self):
+        rendered = fs.render_arc(self._report())
+        assert fs.EXTRACTOR_REL in rendered
+        assert "--arc handoff-arc-fixture.md" in rendered
+
+    def test_the_command_carries_the_RESOLVED_doc_not_the_users_seed(self):
+        """The seed may be a slug, a path, or a SESSION ID; only `report.doc` is
+        the basename that resolved. Echoing the seed back would print a command
+        whose `--arc` re-runs the session-id indirection for no reason, and would
+        be flatly wrong for a seed that resolved via a genesis message."""
+        rendered = fs.render_arc(self._report(doc="handoff-real-slug.md"))
+        assert "--arc handoff-real-slug.md" in rendered
+
+    def test_a_MEASURED_EMPTY_arc_names_NO_command(self):
+        """🔴 NOT COSMETIC. The extractor exits non-zero on an arc that resolved
+        with no members, so a command printed here is an invitation that cannot
+        answer — the reassuring-command shape the coverage line exists to refuse.
+        Asserted on the WHOLE rendering, not just the absence of a heading: a
+        partial line still tells an agent the tool applies."""
+        empty = ha.ArcReport(doc="handoff-arc-fixture.md", repo="devrc")
+        rendered = fs.render_arc(empty)
+        assert fs.extractor_next_command(empty) is None
+        assert fs.EXTRACTOR_REL not in rendered
+        assert "extract_user_msgs" not in rendered
+        assert "NEXT" not in rendered
+
+    def test_the_member_COUNT_is_the_real_one_and_singular_reads_right(self):
+        """Pins the count against `len(members)` rather than a constant, and uses
+        1 and 3 — never 2 alone, which cannot see a hardcoded plural."""
+        assert "1 session of this arc" in fs.render_arc(self._report(1))
+        assert "3 sessions of this arc" in fs.render_arc(self._report(3))
+
+    def test_the_command_sits_BELOW_the_coverage_line(self):
+        """The gaps qualify the chain the command extracts from. An agent that
+        reads the command first and stops has skipped them, so ordering is a
+        behavioural claim, not layout."""
+        rendered = fs.render_arc(self._report())
+        assert rendered.index("carry no session id") < rendered.index("NEXT —")
+
+    # ---------------- the seam: the printed line must actually work ----------- #
+
+    def test_the_NAMED_PATH_EXISTS_in_this_repo(self):
+        """🔴 SEAM GUARD. `EXTRACTOR_REL` is a string; nothing else in this module
+        would notice the script being renamed or moved, and the footer would keep
+        printing a confident path to a file that is not there."""
+        target = Path(__file__).resolve().parents[1] / fs.EXTRACTOR_REL.split(
+            "scripts/", 1)[1]
+        assert target.is_file(), (
+            f"the arc footer names {fs.EXTRACTOR_REL}, which does not exist")
+
+    def test_the_printed_SEED_is_one_the_EXTRACTOR_ACCEPTS(self):
+        """🔴 SEAM GUARD, and the one a render test structurally cannot make. The
+        footer promises `--arc <report.doc>` works. The extractor resolves its seed
+        through `find_session.arc_seed_to_doc`, so that function — not a second
+        spelling of it — is what must accept a bare basename. If it ever stopped,
+        every footer this module prints would be a command that exits non-zero.
+        """
+        doc = "handoff-arc-fixture.md"
+        assert fs.arc_seed_to_doc(doc) == doc
+
+    def test_the_JSON_carries_the_command_and_NULL_when_there_is_none(
+            self, monkeypatch, capsys):
+        """A machine caller must branch on "no next step" without string-matching
+        for one, which is why the empty case is `None` and not `""`.
+
+        🔴 THIS TEST GOES THROUGH `run_arc` AND PARSES THE JSON, and an earlier
+        version did neither — it asserted `extractor_next_command(...)` directly
+        while its NAME claimed the JSON was covered. The mutation battery's
+        positive control (dropping the `"next_command"` key from `run_arc`'s dict)
+        SURVIVED against it, which is what exposed the gap: a docstring claiming a
+        relationship while the body inspected one side. Reading as coverage while
+        providing none is worse than none, because it stops anyone looking.
+        """
+        for n, expected in ((2, True), (0, False)):
+            report = (self._report(n) if n else
+                      ha.ArcReport(doc="handoff-arc-fixture.md", repo="devrc"))
+            monkeypatch.setattr(fs, "arc_report", lambda _b, report=report: report)
+            rc = fs.run_arc(fs.parse_args(["--arc", "handoff-arc-fixture.md",
+                                           "--json"]))
+            assert rc == fs.EXIT_OK
+            payload = json.loads(capsys.readouterr().out)
+            assert "next_command" in payload, (
+                "the JSON dropped the key entirely — a caller branching on it "
+                "cannot tell 'no next step' from 'this tool has no such field'")
+            assert (payload["next_command"] is not None) is expected
+            if expected:
+                assert fs.EXTRACTOR_REL in payload["next_command"]
 
 
 class TestEverySessionOnTheOldestCommitIsOriginated:

@@ -81,6 +81,10 @@ BATTERIES = (
     # different skills — a section-level mapping would bucket them
     # together and score one against the other's suite.
     "mutation_battery_extract_user_msgs.py",
+    # Single-file (`find-session.py`), so no `TARGETS`. Guards the arc footer that
+    # names that same extractor — the DETERMINISTIC half of the routing whose
+    # prose half (a "Load when" row) was measured firing in 1 of 3 sessions.
+    "mutation_battery_arc_extractor_footer.py",
 )
 
 # 🔴 PYTHON MUTATION INSTRUMENTS THIS MODULE CANNOT PIN, each with its reason.
