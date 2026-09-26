@@ -68,12 +68,23 @@ GATE_RELPATH = "scripts/tests/test_handoff_doc_size.py"
 GRANDFATHER_STEP = 16_384
 
 # 🔴 A FOREIGN ENTRY IS KEYED BY A DIGEST OF ITS PATH, BECAUSE THIS REPOSITORY IS
-# PUBLIC. `devrc` is the only repo whose documents this gate can read, and the
-# ledger is the only place in the tree that has ever had to NAME a document in
-# another one — so a plaintext key here publishes another repo's internal topic
-# list to anyone reading the tree or any index built over it. The remedy is
-# uniform and needs no per-repo judgement: a key naming a document in THIS repo
-# stays readable, a key naming a document in ANY other repo is a digest.
+# PUBLIC. `devrc` is the only repo whose documents this gate can read, and a
+# plaintext key here publishes another repo's internal topic list, IN BULK and in
+# one sorted block, to anyone reading the tree or any index built over it. The
+# remedy is uniform and needs no per-repo judgement: a key naming a document in
+# THIS repo stays readable, a key naming a document in ANY other repo is a digest.
+#
+# ⚠ THE LEDGER IS NOT THE ONLY PLACE IN THE TREE THAT NAMES A FOREIGN DOCUMENT,
+# AND AN EARLIER DRAFT OF THIS COMMENT SAID IT WAS. MEASURED at the re-key
+# commit, scanning all 1,545 tracked files for each of the 71 slugs this ledger
+# used to carry in plaintext: 9 of them still appear, in 6 tracked files, across
+# two other repositories. All 9 pre-date this branch — verified at the
+# merge-base, where the same 6 files already carried them — so they are a
+# RESIDUAL and not a regression, and scrubbing them is a separate disclosure
+# decision nobody has taken. What is true of the ledger is narrower and is what
+# the re-key is for: it is the only place that named them IN BULK, enumerated and
+# machine-readable. Do not read the digests as a leak scan; see the scope
+# disclaimer on `test_every_ledger_KEY_is_a_devrc_path_or_a_WELL_FORMED_digest`.
 #
 # 🔴 IT IS NOT A SECRET, AND SAYING SO IS PART OF THE DESIGN RATHER THAN A
 # CAVEAT ON IT. There is no salt and no key: `digest_key` is a pure, documented
@@ -216,12 +227,18 @@ def lookup(relpath: str, ledger: dict[str, _V]) -> _V | None:
 #   * 🔴 ONE ENTRY GOVERNS EVERY REPO THAT HAS A DOC OF THAT NAME. There is no
 #     collision today, measured across ALL FIVE repos this tool can be pointed
 #     at — the four `handoff_index.REPO_ENV_HANDLES` resolve, plus cairn, which
-#     has NO handle and was therefore enumerated by hand: 572 handoff docs, 0
-#     filenames appearing in two repos, and 0 of the 54 paths added below
-#     colliding with the 28 that were already here. ⚠ THE PREVIOUS ROUND
-#     MEASURED THIS OVER THREE REPOS — devrc, cairn, homelab-talos — off guessed
-#     paths rather than off the handles, and missed 357 documents and 54 breaches
-#     entirely. Enumerate from `REPO_ENV_HANDLES`, never from a path anyone
+#     has NO handle and was therefore enumerated by hand: 572 handoff docs when
+#     the 54 entries below were added, 0 filenames appearing in two repos, and 0
+#     of those 54 paths colliding with the 28 that were already here. ⚠ THE
+#     CORPUS TOTAL IS A MOVING NUMBER — it has already grown since, so treat it as
+#     the scale of that measurement and not as today's count. ⚠ AND THE PREVIOUS
+#     ROUND MEASURED THIS OVER THREE REPOS — devrc, cairn, homelab-talos — off
+#     guessed paths rather than off the handles, so it never resolved TWO of the
+#     four handles: it missed $DATAPACKET's 357 documents, all 54 breaches among
+#     them, and $CIVITAI's handful, which hold no breach. "357" is that one
+#     repo's corpus, NOT the number of documents the round was blind to — the two
+#     unseen handles together held one more than that at the time and more than
+#     that now. Enumerate from `REPO_ENV_HANDLES`, never from a path anyone
 #     writes down. Both directions of the collision detector were watched to
 #     move: injecting one repo's doc name into another's set takes the count from
 #     0 to 1, so the zero is a fact about the corpus and not about a detector
@@ -483,12 +500,20 @@ GRANDFATHERED: dict[str, int] = {
 LIVES_ELSEWHERE: dict[str, str] = {
     # 🔴 THE KEY IS A DIGEST; THE VALUE IS A REPO LABEL AND STAYS READABLE, AND
     # THAT ASYMMETRY IS MEASURED RATHER THAN JUDGED. Every label below already
-    # appears in devrc's own tree in over a hundred tracked files each
-    # (`cairn` 162, `homelab-talos` 222, `datapacket-talos` 125, measured over
-    # `git ls-files` at the commit that introduced this block), so digesting a
-    # label would hide nothing that is not already published and would cost the
-    # only thing the value is for: telling a reader which checkout to go and look
-    # in. The value is a LABEL and never a path — that half is unchanged, and its
+    # appears in devrc's own tree in well over a hundred tracked files each, so
+    # digesting a label would hide nothing that is not already published and
+    # would cost the only thing the value is for: telling a reader which checkout
+    # to go and look in. RE-DERIVE IT RATHER THAN TRUSTING A NUMBER HERE — a
+    # previous draft wrote the three counts out and attributed them to one commit,
+    # where ONE of the three was already off by one; at the commit before it the
+    # other TWO were off by one instead, so the three were never true together at
+    # any single ref. The cause is this comment: the block that quotes the counts
+    # is itself one of the files being counted:
+    #
+    #     for l in cairn homelab-talos datapacket-talos; do
+    #       printf '%s %s\n' "$l" "$(git grep -l -F -- "$l" | wc -l)"; done
+    #
+    # The value is a LABEL and never a path — that half is unchanged, and its
     # reason is `handoff_index.REPO_ENV_HANDLES`' own: this repo is PUBLIC.
     "foreign:00a6bb3a110d6f24": "datapacket-talos",
     "foreign:06795c4d08f2b8ed": "homelab-talos",

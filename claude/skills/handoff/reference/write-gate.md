@@ -1302,9 +1302,16 @@ python3 -c 'import sys; sys.path.insert(0, "scripts/lib"); import handoff_budget
 ```
 
 ⚠ The `<cairn>/` prefix is not decoration: `test_doc_path_rot.py` reads a bare
-`claudedocs/…` written about another repo as local rot and calls it a dead path. That
-gate's own one-token convention is `<repo>/…`, and it is what keeps the line above
-invisible to it.
+`claudedocs/…` written about another repo as local rot and calls it a dead path, and
+`<repo>/…` is that gate's own one-token convention for exactly this case. 🔴 **But it
+is NOT what keeps the line above invisible, and an earlier draft said it was.** That
+gate opts a token out on `META` — any of `<>{}*?[]$()|!=%@,"'\…` anywhere in it
+(rule 3) — so the `<arc>` placeholder ALONE already exempts this token. Driven
+through the gate's own `_is_path_claim` at four points: as written → not a claim;
+prefix deleted, `<arc>` kept → still not a claim; prefix kept, `<arc>` resolved →
+still not a claim; **both** resolved → a claim, and reported dead. So either
+placeholder suffices independently, and the prefix is the right convention to keep
+for the day the arc is spelled out — not the mechanism operating here.
 
 ⚠ **IT IS STILL NOT REFUSED IN PRACTICE, AND THAT IS THE PRECISE CLAIM.** Remedy 2's
 write is **out of band**: `handoff_doc.py` writes exactly one path per run,

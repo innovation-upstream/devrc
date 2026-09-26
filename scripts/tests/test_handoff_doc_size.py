@@ -702,11 +702,18 @@ def test_every_FOREIGN_entry_is_declared_and_is_NOT_a_devrc_document():
 def test_every_ledger_KEY_is_a_devrc_path_or_a_WELL_FORMED_digest():
     """🔴 THE PUBLIC-REPO REMEDIATION, MADE MECHANICAL INSTEAD OF A ONE-OFF SCRUB.
 
-    devrc is a PUBLIC repository and this ledger is the only place in it that has
-    ever had to name a document in another one, so a foreign entry is keyed by
-    `handoff_budget.digest_key(path)`. That scrub is worth nothing on its own: the
-    next person adding an entry for a doc in another checkout will reach for the
-    path, because that is what the failure message they are pasting hands them.
+    devrc is a PUBLIC repository and this ledger is the only place in it that
+    names foreign documents IN BULK — enumerated, sorted and machine-readable —
+    so a foreign entry is keyed by `handoff_budget.digest_key(path)`. That scrub
+    is worth nothing on its own: the next person adding an entry for a doc in
+    another checkout will reach for the path, because that is what the failure
+    message they are pasting hands them.
+
+    ⚠ "IN BULK" IS THE WHOLE OF THE CLAIM, AND AN EARLIER DRAFT OVERSTATED IT AS
+    "the only place in the tree". MEASURED at the re-key commit over all 1,545
+    tracked files: 9 of the 71 formerly-plaintext slugs still appear, in 6 files,
+    from two other repositories — all 9 present at the merge-base, so a residual
+    that pre-dates this branch rather than anything this ledger controls.
 
     Two claims, and TOGETHER they leave no third option for a plaintext foreign
     key:
@@ -714,11 +721,23 @@ def test_every_ledger_KEY_is_a_devrc_path_or_a_WELL_FORMED_digest():
       1. every `LIVES_ELSEWHERE` key is a well-formed digest. A foreign entry
          spelled as a readable path is the disclosure the re-keying removed, and
          this is the assertion that refuses it;
-      2. every `GRANDFATHERED` key is either declared foreign, or a plaintext
+      2. every `GRANDFATHERED` key is either DIGEST-SHAPED or a plaintext
          `claudedocs/…` path whose basename the shared handoff-name predicate
          accepts. A key that is neither resolves for no document at all while
          reading as an allowance — the same shape as a stale entry, minus the
          check that catches one.
+
+    🔴 CLAIM 2 IS A SHAPE TEST, NOT A MEMBERSHIP TEST, AND THE DIFFERENCE IS
+    DELIBERATE. It branches on `is_foreign_key(k)` — prefix plus
+    `FOREIGN_KEY_HEX` hex characters — and NEVER on `k in LIVES_ELSEWHERE`, so a
+    digest-shaped `GRANDFATHERED` key that nobody declared foreign PASSES here.
+    A membership arm was considered and NOT added, because the case is already
+    covered and covered better: driven through the real `oversize_findings` with
+    a digest key absent from `elsewhere`, check (d) reports it stale (1 finding);
+    with the same key declared, 0. Adding the arm here would be a second copy of
+    one predicate — wrong at one of the two sites the first time either moves —
+    and it would report "malformed key" for an entry whose actual defect is a
+    MISSING DECLARATION, which is what (d)'s message already says correctly.
 
     So a foreign entry re-added in plaintext is either left UNDECLARED, and check
     (d) reports it stale because devrc's tree does not hold it, or DECLARED, and
@@ -735,11 +754,17 @@ def test_every_ledger_KEY_is_a_devrc_path_or_a_WELL_FORMED_digest():
     assert not not_digested, (
         "a FOREIGN ledger entry is keyed by a readable path rather than by "
         f"`digest_key(path)`. devrc is PUBLIC and this ledger is the only place "
-        f"in it that names another repo's documents, so the key must be "
+        f"in it that names another repo's documents IN BULK — enumerated and "
+        f"machine-readable — so the key must be "
         f"`{FOREIGN_KEY_PREFIX}` followed by {FOREIGN_KEY_HEX} lowercase hex "
         f"characters. Replace each offender with `digest_key(\"<the path>\")` in "
         f"BOTH dicts and say in the commit message how many entries moved, not "
-        f"which. Offenders: {not_digested}"
+        f"which. 🔴 THAT LAST CLAUSE IS ABOUT YOUR COMMIT MESSAGE AND NOTHING "
+        f"ENFORCES IT: there is no `commit-msg` hook here, and this gate reads "
+        f"tracked FILES, which a commit message is not. A sibling commit in the "
+        f"PR that added this test spelled five foreign slugs and six of their "
+        f"byte sizes in its message and had to be reworded and force-pushed. "
+        f"Offenders: {not_digested}"
     )
 
     malformed = sorted(
