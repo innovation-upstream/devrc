@@ -314,6 +314,14 @@ absent or uncommitted, so `new URL()` throws and there is no scheme to name
 the `open --wake` case, which sends you looking for a missing url that is not the
 problem.
 
+🔴 **`div[role="status"]` IS NOT UNIQUE ON `/apps/run/<slug>` — do not anchor a
+wait on it.** The host loading veil, `BlockFallback` and the consent notice all
+carry that role, so a read that resolves it is resolving whichever one is mounted
+at that instant. It has worked only when the veil had already gone; as a wait
+condition it is a race, and a race whose failure mode is reading the veil's text
+and reporting it as the block's. Anchor on something the block itself owns — a
+testid from the enumeration below, or the block's own frame plus a visible string.
+
 **Harvest selectors with a `js` enumeration, not `text --annotated`.** Annotated
 returned 60–69 element records (~600 log lines) for this one small app; a one-line
 enumeration returns every control with its testid:
