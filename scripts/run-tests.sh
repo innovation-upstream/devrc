@@ -3997,6 +3997,21 @@ EXPECTED_SKIPS=(
   # mechanism — a battery added to `BATTERIES` without a line here is a silently
   # collapsed skip group, so land both in the SAME commit.
   "scripts/tests|mutation_battery_arc_extractor_footer[.]py has no multi-site row"
+  # The FIFTH, added with `mutation_battery_operator_asks.py` (#1887 — round 0's
+  # attribution block). 🔴 AND THE "LOOK HERE FIRST" ABOVE PAID OFF A SECOND TIME,
+  # ON THE SAME SHAPE, WITH ONE EXTRA TWIST WORTH RECORDING: the check read
+  # `FAILED … collected=24348 passed=24341 skipped=7 failed=0` while `main` read
+  # `collected=24297 passed=24291 skipped=6 failed=0` and SUCCESS. **The whole
+  # signal was the skip count, 6 -> 7** — the verdict contradicted its own
+  # `failed=0`, exactly as predicted, and diffing the two descriptions attributed
+  # it in one read.
+  # ⚠ WHY IT TOOK FOUR AUDIT ROUNDS TO GET HERE ANYWAY: every local run on that
+  # branch was `python3 -m pytest <paths>`, which bypasses this guard entirely
+  # (`CLAUDE.md` says so in as many words), and nobody ran `gh pr checks` until
+  # round 3. A guard that only the guarded runner can fire is invisible to a
+  # subset run, and "999 tests green" was true of a selection that could not
+  # contain it. Land the battery and this line in the SAME commit.
+  "scripts/tests|mutation_battery_operator_asks[.]py has no multi-site row"
 )
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
 # carried two regression pins against the LIVE datapacket-talos skill corpus, a
