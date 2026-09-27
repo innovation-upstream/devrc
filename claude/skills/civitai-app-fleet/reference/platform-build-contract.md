@@ -41,10 +41,11 @@ The npm branch's was never in doubt.
 🔴 **THE CONSEQUENCE THAT GETS MIS-ATTRIBUTED: `ERR_PNPM_IGNORED_BUILDS` IS A CI
 GATE, NOT A PLATFORM ONE.** Because the platform passes `--ignore-scripts`, it
 can never raise that error — GitHub Actions, which passes no such flag, is what
-raises it. ⚠ **Measured on pnpm 10.28.1 and 11.8.0** (with `strictDepBuilds` on, a
-postinstall dep errors without the flag and exits 0 with it). The platform builder is
-reported to run **pnpm 12.6.0**, which is unmeasured here — 12 errors where 10 only
-warns, so confirm the version before quoting this as settled for the builder. So a fix for it that goes green is evidence about **CI**, and a claim
+raises it. ⚠ **Measured on pnpm 10.28.1 and 11.8.0 only**, with `strictDepBuilds` on: a
+postinstall dep errors without `--ignore-scripts` and exits 0 with it. The builder is
+reported elsewhere to run **pnpm 12.6.0**, which is NOT measured here and for which no
+source is cited — so treat the flag's effect as established for 10/11 and unconfirmed
+for the builder's actual version. So a fix for it that goes green is evidence about **CI**, and a claim
 that `allowBuilds` was "confirmed against the real platform build" is wrong.
 🔴 **No build can discriminate the two** where `allowBuilds` and
 `minimumReleaseAgeExclude` landed in the same commit, which is how the wrong
