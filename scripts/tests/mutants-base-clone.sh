@@ -59,6 +59,11 @@ run 'hoist-prune-above-optout' KILLED \
   's|if \[ "${BASE_CLONE_NO_REFRESH:-0}" = "1" \]; then|if false; then|'
 run 'break-recoverability-scan' KILLED \
   's|rev-list -n 100|rev-list -n 0|'
+# 🔴 The REFRESH_PATHS regression, mechanised: this mutant IS the pre-change hook's
+# path list, so a KILLED verdict here is the red half of case 10's red->green matrix
+# re-derived on demand instead of quoted from a commit message.
+run 'drop-agents-md-entry'     KILLED \
+  's|^REFRESH_PATHS=(CLAUDE.md AGENTS.md .claude/skills)$|REFRESH_PATHS=(CLAUDE.md .claude/skills)|'
 
 printf '\n== unreachable-by-construction backstops (SURVIVES is EXPECTED, not a gap) ==\n'
 printf '   `hash-object` fatals on a directory so one never reaches the prune, and\n'
