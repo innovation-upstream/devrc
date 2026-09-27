@@ -6,9 +6,10 @@
 # clone is never written to and silently falls behind. That is harmless for
 # WRITES -- `git worktree add <path> origin/<branch>` resolves the remote-tracking
 # ref, so a clone 700 commits behind still produces a current worktree -- but it
-# is dangerous for READS: CLAUDE.md and .claude/skills/** load into the agent's
-# context FROM THE WORKING TREE, so a stale clone serves stale,
-# authoritative-looking instructions with nothing to indicate it.
+# is dangerous for READS: CLAUDE.md, AGENTS.md and .claude/skills/** load into the
+# agent's context FROM THE WORKING TREE, so a stale clone serves stale,
+# authoritative-looking instructions with nothing to indicate it. REFRESH_PATHS is
+# the one list; do not restate it anywhere else.
 #
 # What it does NOT do: move HEAD. `merge --ff-only` would need a clean tree and
 # would move the branch; refreshing specific paths needs neither and cannot
@@ -25,7 +26,24 @@
 set -uo pipefail
 
 # Paths whose CONTENT is loaded into agent context from the working tree.
-REFRESH_PATHS=(CLAUDE.md .claude/skills)
+#
+# 🔴 AGENTS.md is here because a filename walked around the whole hook. In a repo
+# using the AGENTS.md convention, CLAUDE.md is a STUB whose entire payload is the
+# line `@AGENTS.md` and the substance lives in AGENTS.md -- measured on a cairn
+# clone: CLAUDE.md 267 bytes, AGENTS.md 31,330 bytes. The stub never changes, so
+# the hook faithfully refreshed a file that cannot go stale and never touched the
+# one that loads 31 KB of authoritative-looking instructions into every session.
+# Listing both is correct for BOTH conventions: `git diff --name-only <ref> -- <p>`
+# reports content, so a pathspec absent from both trees is simply not listed (rc 0,
+# no output -- measured on a repo with no AGENTS.md), and this hook must not care
+# which convention a repo uses.
+#
+# Spelling is load-bearing -- see the rmdir climb below. A TOP-LEVEL FILE entry
+# (CLAUDE.md, AGENTS.md) is the safe shape: `dirname` yields `.`, so the climb's
+# own `[ "$d" != "." ]` condition stops it before the first rmdir and the entry is
+# never consulted as a bound. A NESTED entry must be spelled the way `dirname`
+# yields it (`.claude/skills`, not `.claude/skills/`).
+REFRESH_PATHS=(CLAUDE.md AGENTS.md .claude/skills)
 
 # Guard the VALUE, not just the cd: an empty ROOT sails past `cd "$ROOT" || exit`
 # on bash <= 5.2, where `cd ""` is a no-op returning 0.
@@ -232,7 +250,10 @@ for p in "${to_prune[@]:-}"; do
     # entry must be spelled the way `dirname` yields it -- `.claude/skills`, not
     # `.claude/skills/`. A future entry that is a NESTED FILE (`docs/AGENTS.md`)
     # would bound at the file and leave its parent directory climbable; the current
-    # two-entry list has no such case. Unbounded it walked past its own scope:
+    # three-entry list has no such case -- CLAUDE.md and AGENTS.md are TOP-LEVEL
+    # files, for which `dirname` yields `.` and the `while` condition below ends the
+    # climb before any rmdir runs, so those two are never consulted as bounds at
+    # all. Unbounded it walked past its own scope:
     # on a repo whose only skill was deleted upstream it removed `.claude/skills`
     # AND `.claude` -- empty and harmless, but `.claude` is not a path this hook is
     # allowed to touch, and anything probing `[ -d .claude ]` would see it vanish.
@@ -310,9 +331,15 @@ if [ "$n_fail" -gt 0 ]; then
 $(printf '    %s\n' "${failed[@]}")"
 fi
 
+# 🔴 DERIVED from REFRESH_PATHS, never restated. This sentence used to hardcode
+# "CLAUDE.md and .claude/skills/**" -- a second copy of the list, which is how the
+# report would have gone on claiming a scope the array no longer had the moment
+# AGENTS.md was added. One rule, one place.
+synced="$(printf '%s, ' "${REFRESH_PATHS[@]}")"; synced="${synced%, }"
+
 ctx="$ctx
 
-Only CLAUDE.md and .claude/skills/** are synced; the rest of this tree is still
+Only $synced (directories recursively) are synced; the rest of this tree is still
 $BEHIND commit(s) behind. Before relying on any OTHER doc claim that is
 load-bearing in a plan -- a limit, a retention figure, an arming state, a 'this is
 impossible' -- read it from the ref: git show $UP:<path>

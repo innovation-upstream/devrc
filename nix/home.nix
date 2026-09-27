@@ -2074,9 +2074,15 @@ in
   # then.
   #
   # Its regression suite is `scripts/tests/test_base_clone_staleness.sh`, run by
-  # `scripts/run-tests.sh` as a SHELL_TESTS target (24 assertions / 8 cases,
-  # offline synthetic fixtures). Every case there is a defect that actually
-  # shipped; run it before changing this script.
+  # `scripts/run-tests.sh` as a SHELL_TESTS target (offline synthetic fixtures).
+  # Every case there is a defect that actually shipped; run it before changing this
+  # script.
+  #
+  # ⚠️ This comment used to carry a count ("24 assertions / 8 cases") and it was
+  # already wrong by the time anyone read it — the suite was at 48. A stale count
+  # makes the next reader distrust a working suite, so the number is deliberately
+  # gone; the suite prints its own, and its header says the same thing for the same
+  # reason. Run it rather than quoting it.
   home.file.".claude/hooks/base-clone-staleness.sh" = {
     source = ../scripts/claude-hooks/base-clone-staleness.sh;
     executable = true;

@@ -457,6 +457,107 @@ pre "dotted file arrived" "$([ -e "$W/.claude/skills/dotty/v1..v2.md" ] && echo 
         "$(jq -r '.systemMessage' <<<"$OUT" 2>/dev/null | grep -c 'FAILED')" "0"
 }
 
+# ---------------------------------------------------------------------------
+# Fixture: the AGENTS.md convention. CLAUDE.md is a STUB whose entire payload is
+# `@AGENTS.md`; the substance is AGENTS.md. Measured on a cairn clone: CLAUDE.md
+# 267 bytes, AGENTS.md 31,330 bytes.
+#
+# 🔴 The stub is what makes this shape able to SEE the defect. Every other fixture
+# here advances CLAUDE.md, so with AGENTS.md absent from REFRESH_PATHS the hook
+# still refreshed something and still emitted a report -- structurally blind. Here
+# the stub is left byte-identical on purpose, so a hook that syncs only CLAUDE.md
+# has literally nothing to do while 31 KB of authoritative instructions stay stale.
+mkfixture_agents() { # mkfixture_agents <name> -> echoes the work dir
+  local r="$TMP/$1-remote.git" w="$TMP/$1-work" a="$TMP/$1-author"
+  git init -q --bare "$r"
+  git clone -q "$r" "$w" 2>/dev/null
+  git -C "$w" checkout -q -b fixture
+  mkdir -p "$w/.claude/skills/demo"
+  printf '@AGENTS.md\n' > "$w/CLAUDE.md"
+  printf 'AGENTS v1: the rules that actually load\n' > "$w/AGENTS.md"
+  printf 'demo skill v1\n' > "$w/.claude/skills/demo/SKILL.md"
+  git -C "$w" add CLAUDE.md AGENTS.md .claude/skills/demo/SKILL.md
+  git -C "$w" "${GIT_ID[@]}" commit -qm c1
+  git -C "$w" push -q origin fixture
+  git -C "$w" branch -q --set-upstream-to=origin/fixture fixture
+  git clone -q -b fixture "$r" "$a" 2>/dev/null
+  echo "$w"
+}
+
+# Advance AGENTS.md ONLY. CLAUDE.md is deliberately not touched -- a stub does not
+# change, and a fixture that moved it too would pass on the broken hook.
+advance_agents() { # advance_agents <name> <agents-body>
+  local a="$TMP/$1-author"
+  printf '%s\n' "$2" > "$a/AGENTS.md"
+  git -C "$a" add AGENTS.md
+  git -C "$a" "${GIT_ID[@]}" commit -qm "advance agents"
+  git -C "$a" push -q origin fixture
+}
+
+say "10. AGENTS.md is refreshed in a repo where CLAUDE.md is only a stub"
+# Defect: REFRESH_PATHS was (CLAUDE.md .claude/skills), so in an AGENTS.md repo the
+# hook refreshed the one file that never changes and never refreshed the one that
+# loads. The exact failure the hook exists to prevent, walked around by a filename.
+# RED at the parent of the REFRESH_PATHS change, GREEN with it.
+W=$(mkfixture_agents t10)
+advance_agents t10 "AGENTS v2: the substance moved and the stub did not"
+git -C "$W" fetch -q origin fixture
+pre "AGENTS.md is stale" \
+    "$([ "$(blob "$W" AGENTS.md)" != "$(upblob "$W" AGENTS.md)" ] && echo yes || echo no)" "yes" && {
+  # 🔴 The precondition that makes the case DISCRIMINATING rather than merely
+  # passing: the stub is already current, so CLAUDE.md alone gives the hook nothing.
+  pre "the CLAUDE.md stub is already current (so it cannot carry the case)" \
+      "$(blob "$W" CLAUDE.md)" "$(upblob "$W" CLAUDE.md)" && {
+    OUT=$(run_hook "$W"); vecho "$OUT"
+    check "stale AGENTS.md refreshed to upstream" \
+          "$(blob "$W" AGENTS.md)" "$(upblob "$W" AGENTS.md)"
+    check "content is upstream's, read from disk" \
+          "$(cat "$W/AGENTS.md")" "AGENTS v2: the substance moved and the stub did not"
+    check "report names AGENTS.md as refreshed" \
+          "$(jq -r '.hookSpecificOutput.additionalContext' <<<"$OUT" 2>/dev/null | grep -c '^    AGENTS.md$')" "1"
+    # The scope sentence is DERIVED from REFRESH_PATHS rather than restated. A
+    # hardcoded "CLAUDE.md and .claude/skills/**" fails this -- which is the point:
+    # a report that under-states what it synced is a stale claim in the same class
+    # as the bug above.
+    check "scope sentence names AGENTS.md (derived, not restated)" \
+          "$(jq -r '.hookSpecificOutput.additionalContext' <<<"$OUT" 2>/dev/null | grep -c 'Only .*AGENTS\.md.* are synced')" "1"
+    check "no FAILED bucket" "$(grep -c 'FAILED' <<<"$OUT")" "0"
+  }
+}
+
+say "10b. pruning a TOP-LEVEL entry does not climb out of the repo"
+# 🔴 The constraint the REFRESH_PATHS comment states, pinned. The rmdir climb is
+# bounded by EXACT string compare against the array, so a new entry's spelling is
+# load-bearing. For a top-level FILE `dirname` yields `.` and the climb's own
+# `[ "$d" != "." ]` condition ends it before the first rmdir -- the entry is never
+# consulted as a bound. This asserts that shape holds rather than reasoning about
+# it, and it is the assertion that would catch a future nested entry spelled wrong.
+#
+# ⚠️ HONEST LABEL, measured: against the pre-change hook the first two assertions go
+# RED (AGENTS.md was in no REFRESH_PATHS entry, so nothing was pruned) and the last
+# three are INVARIANT guards -- they pass there too, because a hook that prunes
+# nothing also climbs nowhere. They are not vacuous: the first two are what prove
+# the prune path is REACHED, which is the only thing that makes "the root survived"
+# an observation about the climb rather than about a feature that never ran.
+W=$(mkfixture_agents t10b)
+advance_delete t10b AGENTS.md
+git -C "$W" fetch -q origin fixture
+pre "AGENTS.md present here, absent upstream" \
+    "$([ -e "$W/AGENTS.md" ] && echo yes || echo no)=$(git -C "$W" cat-file -e origin/fixture:AGENTS.md 2>/dev/null && echo yes || echo no)" \
+    "yes=no" && {
+  OUT=$(run_hook "$W"); vecho "$OUT"
+  check "deleted-upstream AGENTS.md is GONE locally" \
+        "$([ -e "$W/AGENTS.md" ] && echo yes || echo no)" "no"
+  check "reported as pruned, NOT failed" \
+        "$(jq -r '.systemMessage' <<<"$OUT" 2>/dev/null | grep -c 'pruned 1 deleted upstream')" "1"
+  check "the repo root still exists" \
+        "$([ -d "$W" ] && echo yes || echo no)" "yes"
+  check "the .git dir was not climbed into" \
+        "$([ -d "$W/.git" ] && echo yes || echo no)" "yes"
+  check "unrelated siblings untouched" \
+        "$([ -e "$W/CLAUDE.md" ] && [ -e "$W/.claude/skills/demo/SKILL.md" ] && echo yes || echo no)" "yes"
+}
+
 printf '\n=====================================\n'
 printf 'PASS %d   FAIL %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
