@@ -61,13 +61,6 @@ tell is a refusal naming a COMMENT COUNT rather than an error.** Check both surf
 concluding it is absent — `gh api repos/<o>/<r>/issues/<n>/comments` *and* `.../pulls/<n>/comments`,
 since the script reads only the first.
 
-**`--check-record <pr>` answers "does the anchor EXIST?" in one call** — it compares the newest
-block's `<to>` against the PR's CURRENT head, reading BOTH comment surfaces. rc 0 in sync · rc 6
-absent or stale · rc 11 could not measure, which is never a finding. Measured on
-`ZacxDev/naida-ai#256`: three rounds ran and ZERO blocks were ever posted, so every mechanism
-above was structurally unable to fire and the ladder ended because the operator merged it, not
-because anything said so. Run it before believing a ladder has a record.
-
 🔴 **`--claims-file <path>` is the offline seam, and its cost is INVISIBLE in the brief's own
 commands.** It unblocks a delta round with no public write — useful when the repo is public and the
 block has not been cleared for posting — but it consults no `gh`, so the run never learns
@@ -202,13 +195,10 @@ cannot license skipping a round. Every stop rule below is unchanged by it.
 **Ledger:** `round 0 · requirements: N (unattributed: U) · deletion candidates: D`. Deleting
 nothing at all is reportable — say what you examined to get there.
 
-**Post the deletion candidates as a MACHINE-READABLE block as well** — a fence `audit-round-0`,
-one `D<n> — <what>` line per candidate; `audit-dispatch.py <pr> --round 0` emits the skeleton in
-its OUTPUT section. It is the only part of round 0 anything later reads. A later round records
-what became of each with `--emit-claims --dispositions "D1=kept:<why>,D2=deleted"`, and that
-round's brief then names the ids still unanswered and any `kept` carrying no reason. Measured on
-`ZacxDev/naida-ai#256`: five candidates, zero deleted and TWO GROWN — the #1 candidate went 67 →
-167 lines — with nothing recording that the deletion pass had been inverted.
+**Post the deletion candidates as a MACHINE-READABLE block as well** — `--round 0`'s OUTPUT
+section emits the skeleton and states the contract; a later round answers it with
+`--emit-claims --dispositions "D1=kept:<why>,D2=deleted"`. Evidence for why:
+`reference/round-ladder-evidence.md` → "round 0's deletion pass had no reader".
 
 ## THE CHECKLIST — the nine axes (runs AFTER round 0)
 
@@ -253,13 +243,6 @@ Ask the re-auditor to:
 **Carry the ledger in every round's summary**: `round N · payload lines changed THIS round: X (since
 round 1: Y) · elapsed: Z`. X is what the gate below reads; without it the flattening shows only in
 hindsight — on #498 the plateau was diagnosed six rounds late.
-
-**A fix round LARGER than the round it audited is reported beside THE LEDGER** as `SCOPE
-EXPANSION`, from each block's own `<from>..<to>` churn. It sets no rc: a root-cause fix is
-legitimately bigger than the symptom it replaces. It IS a finding when the round answered a
-*questioned requirement* by BUILDING something — on `ZacxDev/naida-ai#256` round 0 asked whether
-an unretried transport error was the right requirement, and the fix round shipped a retry
-subsystem (`push.ts` +212/−24, against the original fix's +91/−33). Say which of the two yours is.
 
 ### 🔴 THE FIX ROUND'S OWN PROSE IS THE LIKELIEST NEXT FINDING — a false claim replaced by a differently false one
 

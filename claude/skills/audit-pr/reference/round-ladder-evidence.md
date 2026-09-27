@@ -888,3 +888,34 @@ has violated the rule.
 ⚠ **The `AMBIGUOUS` verdict is pinned by tests but has NEVER fired on the real corpus.** It
 needs `fired == 0` while `ambig > 0`, and every real rule with in-interval matches also has
 later ones. Recorded as an untested-in-production branch rather than as working coverage.
+
+---
+
+## 2026-09-27 · `ZacxDev/naida-ai` #256 — round 0's deletion pass had no reader
+
+The measurement behind **post the deletion candidates as a MACHINE-READABLE block**
+(`audit-round-0` fence, answered by a later round's `dispositions=` field).
+
+Round 0 raised **five** deletion candidates. **Zero were deleted and two were GROWN** — the
+#1 candidate went 67 → 167 lines and its file 626 → 1040 — and nothing recorded that the
+deletion pass had been INVERTED, because round 0's verdict is prose no later round reads.
+Every candidate was individually re-argued by a round that had never been handed the list.
+
+⚠ **The same PR is NOT evidence for two adjacent readings that were proposed off it and
+deleted before merge**, and the disqualifier is the same for both: `#256` ran round 0 +
+round 1 + a fix round, posted **zero** `audit-claims` blocks, and never reached round 2 —
+while both readings gated on `round >= 2` AND on posted blocks.
+
+- A **ladder-record existence check** (`--check-record`) duplicated
+  `scripts/ladder-range-coverage.py`, which already reports TAIL-adjacency with the commit
+  subject and handles the zero-block case. Measured on devrc #1887, the existing script
+  printed `🔴 GAP round 3 'to' → head (TAIL): a8857aa3..1780318b — 1 commit(s), 15 line(s)`
+  plus the subject, against `LADDER RECORD STALE: … (1 commit(s) ahead)`. Its one genuinely
+  new capability — reading the REVIEW-comment surface — was folded into that script instead.
+- A **`SCOPE EXPANSION`** reading (this round's churn vs the round it audited) fired off a
+  bare `if newer <= older` with no margin and no ratio. Measured on devrc, 3 of 5 fires were
+  inside 25% — #1797 fired at 19 vs 17 lines — against an incident whose shape was 2.3×. A
+  🔴-prefixed line firing at +2 lines is the permanently-red gate `claude/RULES.md` forbids.
+  The payload-vs-scaffolding ratio the operator actually asked about is already measured by
+  `THE LEDGER`'s `payload=` field; a churn-vs-churn reading answers a different question. If
+  it returns, it returns with a margin derived from a corpus rather than invented.

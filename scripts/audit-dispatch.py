@@ -1637,89 +1637,6 @@ def unearned_ledger_summary(un):
 
 
 # --------------------------------------------------------------------------- #
-# 🔴 SCOPE EXPANSION — the FIX ROUND that is bigger than what it audited.
-# --------------------------------------------------------------------------- #
-# MEASURED on `ZacxDev/naida-ai` #256: the fix round changed MORE PAYLOAD than the
-# commit it audited — `push.ts` +212/−24 against the original fix's +91/−33 —
-# because it answered round 0's *questioned requirement* ("a transport error is
-# fatal, unretried") by BUILDING A RETRY SUBSYSTEM. Every round was individually
-# reasonable and the ladder grew the thing it was reviewing.
-#
-# 🔴 A REPORT, AND IT SETS NO RC — the unearned ledger's three reasons, unchanged:
-# the expensive direction is the FALSE STOP, a bigger fix round is sometimes
-# right, and the auditor is the reader who can tell which this is.
-ScopeExpansion = namedtuple(
-    "ScopeExpansion", "newer_round older_round newer older reason"
-)
-
-SCOPE_EXPANSION_HEAD = (
-    "## 🔴 THIS ROUND'S FIXES ARE LARGER THAN THE ROUND THEY AUDITED"
-)
-
-
-def _round_range_total(block, churn):
-    """-> (total changed lines, reason). One block's own `<from>..<to>` churn.
-
-    THE RANGE IS THE BLOCK'S OWN — that round's fix range, not the next round's
-    delta. `measure_rounds_executable_churn` states the semantics once.
-    """
-    if not (block.audited_from and block.audited_to):
-        return None, (
-            f"round {block.round_no}'s block records no two-sha range, so that "
-            "round's own churn cannot be identified"
-        )
-    if same_commit(block.audited_from, block.audited_to):
-        return None, (
-            f"round {block.round_no} records a SELF-RANGE "
-            f"`{block.audited_from}..{block.audited_to}` — it spans nothing, so "
-            "a 0 off it would be structural and not measured"
-        )
-    got = (churn or {}).get(block.round_no)
-    if got is None:
-        return None, f"round {block.round_no}'s range was never measured here"
-    if got.reason is not None:
-        return None, f"round {block.round_no}: {got.reason}"
-    return got.added + got.deleted, None
-
-
-def scope_expansion(blocks, churn):
-    """-> `ScopeExpansion`, or None when there is no PAIR of blocks to compare.
-
-    `churn` is `{round_no: RangeChurn}` from the ledger's OWN numstat reading,
-    measured by the caller so this stays pure and drivable with no git.
-    """
-    by_round = {b.round_no: b for b in blocks}
-    if len(by_round) < 2:
-        return None
-    newer = by_round[max(by_round)]
-    older = by_round[max(r for r in by_round if r != newer.round_no)]
-    a, why_a = _round_range_total(newer, churn)
-    b, why_b = _round_range_total(older, churn)
-    return ScopeExpansion(
-        newer.round_no, older.round_no, a, b, why_a or why_b,
-    )
-
-
-def scope_expansion_summary(se):
-    """-> the ONE sentence all three surfaces print, or "" when nothing to say.
-
-    One rule, one place: stderr, the brief section and the pasted block print
-    THIS string, never a second spelling of the comparison.
-    """
-    if se is None:
-        return ""
-    if se.reason is not None:
-        return f"SCOPE EXPANSION: NOT MEASURED ({se.reason})"
-    if se.newer <= se.older:
-        return ""
-    return (
-        f"🔴 SCOPE EXPANSION — this round's fixes changed {se.newer} line(s); "
-        f"the round it audited changed {se.older}. The fix is larger than the "
-        "thing it reviewed."
-    )
-
-
-# --------------------------------------------------------------------------- #
 # 🔴 ROUND 0'S DISPOSITIONS — whether the deletion pass was ANSWERED.
 # --------------------------------------------------------------------------- #
 RoundZeroDispositions = namedtuple(
@@ -2004,7 +1921,7 @@ Facts = namedtuple(
     "worktree branch dirty prev_sha emit_from claims claims_round checklist "
     "ledger assembled_at claims_source head_check base_assumed "
     "base_assumed_reason repo_unknown_reason round_zero payload gate_override "
-    "unearned operator_asks scope dispositions dispositions_arg",
+    "unearned operator_asks dispositions dispositions_arg",
     # `round_zero` is appended LAST and defaulted so the two existing
     # constructions — one here, one in the suite — keep working unchanged. It is
     # None for every round except 0, and None AT round 0 means the skill was
@@ -2028,16 +1945,15 @@ Facts = namedtuple(
     # `_read_operator_asks` has no path that returns None — an absent block
     # restores the defect this whole field exists to prevent.
     #
-    # `scope` (a `ScopeExpansion`) and `dispositions` (a
-    # `RoundZeroDispositions`) are appended last and carry the same meaning for
-    # None as `unearned`: this run never computed one, so the section is SILENT
-    # rather than printing a verdict off a reading nobody made.
+    # `dispositions` (a `RoundZeroDispositions`) is appended last and carries the
+    # same meaning for None as `unearned`: this run never computed one, so the
+    # section is SILENT rather than printing a verdict off a reading nobody made.
     # `dispositions_arg` is the RAW `--dispositions` value this run would WRITE,
     # kept separate from the READING for `prev_sha`/`emit_from`'s reason: one is
     # what this round records, the other is what the ladder already recorded,
     # and collapsing two anchors into one field is the defect this module has
     # already fixed once.
-    defaults=(None, None, None, None, None, None, None, None),
+    defaults=(None, None, None, None, None, None, None),
 )
 # 🔴 `repo_unknown_reason` — ROUND 13'S NINTH INSTANCE, AND THE THIRD IN THIS
 # EXACT FAMILY. `no_sha_reason` was `headRefOid`, `base_assumed_reason` was
@@ -2557,124 +2473,6 @@ def measure_ledger(runner, repo_dir, prev_sha, base, head_check=None):
     return LedgerReport(
         churn.files, churn.added, churn.deleted, churn.commits,
         churn.churn_commits, None, None, None
-    )
-
-
-# --------------------------------------------------------------------------- #
-# 🔴 `--check-record` — DOES THE LADDER'S DELTA ANCHOR EXIST AT ALL?
-# --------------------------------------------------------------------------- #
-# MEASURED on `ZacxDev/naida-ai` #256, which ran round 0 + round 1 + a fix round
-# and merged: `gh api repos/…/issues/256/comments` returns ONE comment carrying
-# ZERO `audit-claims` blocks and `.../pulls/256/comments` returns none either. So
-# there was no `payload=` field, no ledger line, the two-consecutive-zero gate was
-# STRUCTURALLY unable to fire, and `--round 2` would have hit the "no
-# audit-claims block in any of the N comment(s) read" refusal. The ladder ended
-# because the operator merged it, not because any mechanism fired.
-#
-# This mode asks the one question that HAS an answer in that state: is the newest
-# recorded `audited_to` the PR's CURRENT head? Every unresolvable state is COULD
-# NOT MEASURE with its reason and never rc 6 — a false ABSENT on a healthy ladder
-# is the expensive direction here.
-LADDER_RECORD_RC = 6
-LADDER_RECORD_UNMEASURED_RC = 11
-LADDER_RECORD_UNMEASURED = "LADDER RECORD: COULD NOT MEASURE"
-
-
-def ladder_record(runner, repo_dir, blocks, review_blocks, head_sha, commits,
-                  no_sha_reason=None, review_reason=None):
-    """-> (rc, one line). rc 0 in sync, 6 a finding, 11 could not measure.
-
-    🔴 `review_reason` IS WHY THE REVIEW SURFACE COULD NOT BE READ. Without it an
-    ABSENT verdict would be reported off an empty set that might only be empty
-    because the second `gh` call failed — `claude/RULES.md`'s "an EMPTY RESULT
-    cannot distinguish two mechanisms".
-    """
-    def unmeasured(why):
-        return LADDER_RECORD_UNMEASURED_RC, f"{LADDER_RECORD_UNMEASURED} — {why}"
-
-    if not head_sha:
-        return unmeasured(
-            "the PR's head sha is not known here ("
-            + (no_sha_reason or "no caller said why") + "), so there is nothing "
-            "to compare the newest block's `audited_to` against"
-        )
-    if commits is None:
-        return unmeasured(
-            "this run could not read how many commits the PR carries, and "
-            "ABSENT is only a finding on a PR that HAS a commit to anchor on"
-        )
-    if commits == 0:
-        return unmeasured(
-            "the PR reports 0 commits, so there is no head for a record to "
-            "anchor on and an absent record is the correct state"
-        )
-    if not blocks:
-        if review_blocks:
-            return LADDER_RECORD_RC, (
-                "LADDER RECORD: block found as a REVIEW comment — invisible to "
-                "the delta anchor; repost it as an ISSUE comment"
-            )
-        if review_reason:
-            return unmeasured(
-                "no `audit-claims` block is on the ISSUE comments, and the "
-                f"REVIEW surface could not be read ({review_reason}) — so "
-                "'absent' and 'posted where nothing reads it' are "
-                "indistinguishable from here"
-            )
-        return LADDER_RECORD_RC, (
-            f"LADDER RECORD ABSENT: {commits} commit(s) on this PR, 0 "
-            "audit-claims block(s) — the delta anchor does not exist"
-        )
-    newest = newest_block(blocks)
-    to = newest.audited_to
-    if not to:
-        return unmeasured(
-            f"the newest block (round {newest.round_no}) carries no `<to>` sha, "
-            "so it records no head this run can compare"
-        )
-    for sha in (to, head_sha):
-        rc, _, err = runner(
-            ["git", "-C", repo_dir, "cat-file", "-e", f"{sha}^{{commit}}"]
-        )
-        if rc != 0:
-            detail = err.strip() or f"rc {rc}"
-            return unmeasured(
-                f"`{sha}` is not an object in {repo_dir} ({detail}). This "
-                "script never FETCHES, so the assembly checkout can "
-                "legitimately lack a commit that is fine on the PR — re-run "
-                "where the objects are present"
-            )
-    if same_commit(to, head_sha):
-        return 0, f"LADDER RECORD: in sync at {to}"
-    rc, _, err = runner(
-        ["git", "-C", repo_dir, "merge-base", "--is-ancestor", to, head_sha]
-    )
-    if rc == 1:
-        return unmeasured(
-            f"`{to}` is NOT an ancestor of the PR's head `{head_sha}` — the "
-            "branch was REBASED, so the recorded anchor has a rebased twin and "
-            "this comparison cannot say whether the record is stale. Carry the "
-            "anchor across with `git range-diff <old-base>..<old-tip> "
-            "<new-base>..<new-tip>`, confirm every commit maps `=`, and record "
-            "the mapping on the PR"
-        )
-    if rc != 0:
-        return unmeasured(
-            f"`git merge-base --is-ancestor {to} {head_sha}` exited {rc}: "
-            f"{err.strip() or 'no output'}"
-        )
-    rc, out, err = runner(
-        ["git", "-C", repo_dir, "rev-list", "--count", f"{to}..{head_sha}"]
-    )
-    if rc != 0 or not out.strip().isdigit():
-        return unmeasured(
-            f"`git rev-list --count {to}..{head_sha}` exited {rc} and printed "
-            f"{out.strip()!r}: {err.strip() or 'no stderr'}"
-        )
-    return LADDER_RECORD_RC, (
-        f"LADDER RECORD STALE: newest block records to={to}, head is "
-        f"{head_sha} ({out.strip()} commit(s) ahead) — the fix round(s) after "
-        f"{to} left no record"
     )
 
 
@@ -5363,39 +5161,11 @@ def render_unearned_ledger(facts):
     return "\n".join(lines)
 
 
-def render_scope_expansion(facts):
-    """The scope-expansion report IN THE BRIEF — "" when there is nothing to say.
-
-    🔴 THREE SURFACES, ONE SENTENCE, for `render_unearned_ledger`'s reason:
-    stderr is the operator's, this is the auditor's, and the note above the
-    emitted block is what lands on the PR for the NEXT reader.
-    """
-    line = scope_expansion_summary(facts.scope)
-    if not line:
-        return ""
-    return "\n".join([
-        SCOPE_EXPANSION_HEAD,
-        "",
-        line,
-        "",
-        "Both numbers are total changed lines over each block's OWN "
-        "`audited=<from>..<to>` range, with the ledger's flags "
-        "(`--remerge-diff`, `--not <base>`). 🔴 **This is not a verdict and it "
-        "ends nothing** — a root-cause fix is legitimately larger than the "
-        "symptom that prompted it. It IS one when the round answered a "
-        "QUESTIONED REQUIREMENT by BUILDING something: on `ZacxDev/naida-ai` "
-        "#256 round 0 asked whether an unretried transport error was the right "
-        "requirement and the fix round shipped a retry subsystem. **Say in your "
-        "report which of the two this round is.**",
-    ])
-
-
 def render_round_zero_dispositions(facts):
     """Round 0's candidates, and whether this ladder ANSWERED them.
 
-    🔴 BESIDE THE LEDGER BECAUSE THAT IS WHERE THE PAYLOAD NUMBERS ARE. On
-    `ZacxDev/naida-ai` #256 five candidates were raised, zero deleted and TWO
-    GROWN, and no round after it was ever handed the list.
+    🔴 BESIDE THE LEDGER BECAUSE THAT IS WHERE THE PAYLOAD NUMBERS ARE. The
+    measured failure this answers is stated once, above `ROUND_ZERO_FENCE`.
     """
     line = round_zero_dispositions_summary(facts.dispositions)
     if not line:
@@ -5446,10 +5216,9 @@ def render_brief(facts):
         # later and the reader has already formed a view.
         render_unearned_ledger(facts),
         # 🔴 BESIDE THE LEDGER FOR THE SECTION ABOVE'S REASON: THE LEDGER hands
-        # the auditor this round's churn, and these two say what that churn is
-        # larger than and which of round 0's candidates it was to answer. Later
-        # in the document and the reader has already formed a view.
-        render_scope_expansion(facts),
+        # the auditor this round's churn, and this says which of round 0's
+        # deletion candidates that churn was meant to answer. Later in the
+        # document and the reader has already formed a view.
         render_round_zero_dispositions(facts),
         render_gate_override(facts),
         # 🔴 THE PROSE DETERMINATION IS NOT HERE, AND ITS ABSENCE IS THE FIX.
@@ -5560,13 +5329,6 @@ def emit_claims_skeleton(facts, head_sha):
     if facts.unearned is not None and facts.unearned.self_ranges:
         lines.append("  🔴 UNEARNED LEDGER — " + unearned_ledger_summary(
             facts.unearned))
-    # 🔴 THE SCOPE-EXPANSION NOTE, on the artefact that lands on the PR — the
-    # third surface `render_scope_expansion` names, OUTSIDE the fence for the
-    # legend's mechanical reason: a non-numbered line INSIDE the body is folded
-    # into the claim above it by `_items_from_body`.
-    scope_line = scope_expansion_summary(facts.scope)
-    if scope_line:
-        lines.append("  " + scope_line)
     # 🔴 `dispositions=` GOES BEFORE `audited=`, NEVER AFTER — the FIFTH-FIELD
     # note above states the mechanism: `_EMITTED_AUDITED` captures to END OF LINE
     # on purpose, so a field after `audited=` makes the round trip compare two
@@ -6102,16 +5864,6 @@ def build_parser():
     ap.add_argument("--check", metavar="FILE",
                     help="check an EXISTING brief file for missing invariant "
                          "clauses and exit; consults no PR and no git")
-    # 🔴 THE MODE THAT ASKS WHETHER THE LADDER LEFT A RECORD AT ALL. See
-    # `ladder_record`: on `ZacxDev/naida-ai` #256 three rounds ran and ZERO
-    # blocks were ever posted, so every mechanism in this script was
-    # structurally unable to fire and nothing said so.
-    ap.add_argument("--check-record", action="store_true",
-                    help="compare the newest `audit-claims` block's "
-                         "`audited_to` against the PR's CURRENT head and exit. "
-                         "Reads BOTH comment surfaces (issue AND review), "
-                         "assembles no brief. rc 0 in sync, 6 absent or stale, "
-                         "11 could not measure.")
     ap.add_argument("--dispositions", metavar="SPEC",
                     help="what became of round 0's deletion candidates — "
                          "`D1=kept:<why>,D2=deleted`. Written into the "
@@ -6201,66 +5953,6 @@ def check_brief_file(path, out_stream, err_stream):
     return 0
 
 
-def _gh_json(runner, cmd):
-    """-> (parsed, reason). A failed or unparseable `gh` read is NEVER a zero."""
-    rc, out, err = runner(cmd)
-    if rc != 0:
-        return None, f"`{' '.join(cmd[:4])}` exited {rc}: " + (
-            (err or out).strip() or "no output")
-    try:
-        return json.loads(out), None
-    except ValueError as e:
-        return None, f"`{' '.join(cmd[:4])}` returned unparseable JSON: {e}"
-
-
-def check_record_mode(args, runner, cwd, out_stream, err_stream):
-    """`--check-record` — print one line and exit. Assembles no brief.
-
-    🔴 IT READS BOTH COMMENT SURFACES: `gh pr view --json comments` returns ISSUE
-    comments only, so a block posted as a REVIEW is invisible to every other
-    reader here. "Absent" and "somewhere nothing reads" need different fixes, so
-    they are different lines.
-    """
-    repo_dir, _ = gather_repo_facts(runner, cwd)
-    data, comment_texts = gh_pr_facts(runner, args.pr, args.repo)
-    if data.get("_error"):
-        print(f"🔴 `gh pr view {args.pr}` failed: {data['_error']}",
-              file=err_stream)
-        return 3
-    slug = pr_slug(data, args.repo)
-    cmd = ["gh", "pr", "view", str(args.pr), "--json", "commits"]
-    if args.repo:
-        cmd += ["--repo", args.repo]
-    commits_data, why = _gh_json(runner, cmd)
-    commits = None
-    if why is None and isinstance(commits_data.get("commits"), list):
-        commits = len(commits_data["commits"])
-    review_texts, review_reason = [], (
-        None if slug else
-        "this run never learned which repository the PR lives in, so the "
-        "review-comment endpoint has no path"
-    )
-    if slug:
-        got, review_reason = _gh_json(
-            runner, ["gh", "api", f"repos/{slug}/pulls/{args.pr}/comments"]
-        )
-        review_texts = [
-            c.get("body") or "" for c in (got or []) if isinstance(c, dict)
-        ]
-    blocks, _ = parse_claims_blocks(comment_texts)
-    review_blocks, _ = parse_claims_blocks(review_texts)
-    rc, line = ladder_record(
-        runner, repo_dir, blocks, review_blocks,
-        (data.get("headRefOid") or ""), commits,
-        no_sha_reason=(
-            "`gh pr view` was consulted and reported no `headRefOid` for this PR"
-        ),
-        review_reason=review_reason,
-    )
-    print(line, file=out_stream if rc == 0 else err_stream)
-    return rc
-
-
 def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
          checklist_reader=None, round_zero_reader=None,
          operator_asks_reader=None):
@@ -6287,11 +5979,6 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         return check_brief_file(args.check, out_stream, err_stream)
     if args.pr is None:
         parser.error("the PR number is required (or use --check FILE)")
-    # 🔴 BEFORE THE ROUND VALIDATION BELOW, because this mode consults no round:
-    # it asks whether a record EXISTS, which is the question that has an answer
-    # when every other one is structurally unanswerable.
-    if args.check_record:
-        return check_record_mode(args, runner, cwd, out_stream, err_stream)
 
     # 🔴 A NEGATIVE ROUND USED TO ASSEMBLE A ROUND-1 BRIEF IN SILENCE. Every
     # gate in this module is spelled `>= 2` or `< 2`, so `--round -1` fell
@@ -6885,31 +6572,6 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         )
         if args.round_no >= 2 and gate_rounds else {}
     )
-    # 🔴 THE SCOPE-EXPANSION READING, over the SAME two blocks the gate reads and
-    # through the ledger's own `measure_range_churn` — not a second way to count.
-    # Scoped to a delta round for `measure_rounds_executable_churn`'s reason: a
-    # ladder can carry a dozen blocks and this consults exactly two.
-    scope = None
-    # 🔴 THE TWO NEWEST ROUNDS *PRESENT*, not `gate_rounds`. The gate's pair is
-    # `{newest, newest-1}` whether or not round newest-1 posted a block, and
-    # measuring a set the comparison does not read would report NOT MEASURED on
-    # every ladder with a missing intermediate block — a state the skill
-    # documents as ordinary.
-    scope_rounds = sorted({b.round_no for b in blocks})[-2:]
-    if args.round_no >= 2 and len(scope_rounds) == 2:
-        range_churn = {
-            b.round_no: measure_range_churn(
-                runner, repo_dir, b.audited_from, b.audited_to, base_for_range
-            )
-            for b in blocks
-            if b.round_no in scope_rounds and b.audited_from and b.audited_to
-            and not same_commit(b.audited_from, b.audited_to)
-        }
-        scope = scope_expansion(blocks, range_churn)
-        scope_line = scope_expansion_summary(scope)
-        if scope_line:
-            print("⚠ " + scope_line, file=err_stream)
-
     # 🔴 ROUND 0'S DISPOSITIONS, read from the SAME comment texts. Silent on a PR
     # that never posted a round-0 block — see `round_zero_dispositions`.
     dispositions = None
@@ -7115,7 +6777,6 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         # forced it to re-derive them from `blocks` — a second copy of the
         # predicate, at the one site that has to be right.
         unearned=unearned,
-        scope=scope,
         dispositions=dispositions,
         dispositions_arg=args.dispositions,
     )
