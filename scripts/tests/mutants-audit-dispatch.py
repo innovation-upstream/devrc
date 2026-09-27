@@ -218,7 +218,32 @@ SKILL_RELS = (
 # files that NAME what changed, and that module names the HARNESS rather than
 # the target. Assume a change adding tests to `test_audit_dispatch.py` needs
 # this literal moved, and run that module by hand.
-MIN_TESTS = 187
+# 🔴 RAISED AGAIN 2026-09-26, 187 -> 195, at m = 205 — COUNTED the same way,
+# from a `--collect-only` on the module (`205 tests collected`) put through the
+# same formula, `205 - min(50, max(1, 205 // 20))` = 205 - 10 = 195. Nine node
+# ids were added by `feat/audit-pr-round0-operator-asks`; the number is the
+# formula's output on a counted m, NOT 187 + 9 (which is 196 — one too high, and
+# would have refused every run, exactly the arithmetic trap the paragraph above
+# records). ⚠ AND THE PARAGRAPH ABOVE PREDICTED THIS CORRECTLY: it says to
+# assume a change adding tests to `test_audit_dispatch.py` needs this literal
+# moved and to run that module by hand. It was read AFTER the gate failed, not
+# before — so the prediction worked and the instruction did not, which is the
+# `/resume`-body finding in miniature (a route in prose only fires if something
+# makes you read it).
+# 🔴 RAISED AGAIN 2026-09-26, 195 -> 197, at m = 207 — COUNTED the same way, from
+# a `--collect-only` on the module (`207 tests collected`) through the same
+# formula, `207 - min(50, max(1, 207 // 20))` = 207 - 10 = 197. Two node ids were
+# added by round 0's own fixes on the same branch (a non-owner comment guard and
+# an `--include-answers` guard) and one was renamed. The number is the formula's
+# output on a counted m, NOT 195 + 2.
+# 🔴 RAISED AGAIN 2026-09-26, 197 -> 199, at m = 209 — COUNTED the same way, from
+# a `--collect-only` on the module (`209 tests collected`) through the same
+# formula, `209 - min(50, max(1, 209 // 20))` = 209 - 10 = 199. Two node ids were
+# added by round 2's fixes on the same branch (the rc-0 coverage-note seam and its
+# clean-stderr control). ⚠ `197 + 2` happens to give 199 here too — the agreement
+# is a coincidence, not a method, and the paragraph above records the round where
+# that arithmetic would have been one too high.
+MIN_TESTS = 199
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised

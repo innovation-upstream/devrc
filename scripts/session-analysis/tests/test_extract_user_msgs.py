@@ -1054,7 +1054,16 @@ class TestHelpNamesEverySelector:
         vaguer 'no example' failure below."""
         parser = X.build_parser()
         dests = {a.dest for a in parser._actions
-                 if a.dest not in ("help", "jsonl", "out", "no_dedup", "root")}
+                 # 🔴 THE EXCLUSION LIST IS "NOT A SELECTOR", NOT "BORING".
+                 # A selector decides WHICH SESSIONS are read; these decide
+                 # WHAT IS EMITTED from the ones already chosen.
+                 # `include_answers` is the latter — it adds a `kind` to the
+                 # output of whatever selection ran — so it is documented
+                 # under EPILOG's `output` section, and adding it to
+                 # SELECTOR_DESTS instead would demand a selector example for
+                 # a flag that selects nothing.
+                 if a.dest not in ("help", "jsonl", "out", "no_dedup", "root",
+                                   "include_answers")}
         assert dests == self.SELECTOR_DESTS, (
             f"a selector was added or removed: {sorted(dests)}. Give it an "
             "example in EPILOG and add it here.")

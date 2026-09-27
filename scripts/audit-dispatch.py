@@ -242,6 +242,26 @@ from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
 
+# `scripts/lib` is not a package and this file sits in `scripts/`, so the path
+# insert is how every sibling script reaches these modules (`find-session.py`
+# does the same thing on the same line). Resolved from `__file__` rather than
+# the cwd: this script is routinely run with `--repo` against a different
+# checkout, and a cwd-relative import would load ANOTHER tree's copy.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+
+# 🔴 IMPORTED SOFTLY, AND THE FAILURE IS REPORTED RATHER THAN RAISED. The
+# operator-asks block is an ATTRIBUTION INPUT to round 0, not a precondition for
+# assembling a brief: a missing `scripts/lib` (a `cp -a` of a worktree, a
+# partial deploy) must degrade into a named UNKNOWN in the brief, never into a
+# traceback that stops the audit. `_read_operator_asks` checks for None.
+try:  # noqa: E402
+    import operator_asks
+except ImportError as _e:  # pragma: no cover - exercised via the None path
+    operator_asks = None
+    _OPERATOR_ASKS_IMPORT_ERROR = str(_e)
+else:
+    _OPERATOR_ASKS_IMPORT_ERROR = ""
+
 # --------------------------------------------------------------------------- #
 # THE INVARIANT CLAUSES — the whole point of the script.
 # --------------------------------------------------------------------------- #
@@ -1749,7 +1769,7 @@ Facts = namedtuple(
     "worktree branch dirty prev_sha emit_from claims claims_round checklist "
     "ledger assembled_at claims_source head_check base_assumed "
     "base_assumed_reason repo_unknown_reason round_zero payload gate_override "
-    "unearned",
+    "unearned operator_asks",
     # `round_zero` is appended LAST and defaulted so the two existing
     # constructions — one here, one in the suite — keep working unchanged. It is
     # None for every round except 0, and None AT round 0 means the skill was
@@ -1765,7 +1785,14 @@ Facts = namedtuple(
     # `render_unearned_ledger` treats exactly like "nothing unearned": SILENT.
     # Printing a section off a reading nobody made would be the reassuring zero
     # this module refuses everywhere else.
-    defaults=(None, None, None, None),
+    #
+    # 🔴 `operator_asks` is appended last for the same compatibility reason, and
+    # its None means something DIFFERENT from every field above: not "nothing was
+    # read" but "this round does not print the block at all" (every round except
+    # 0). At round 0 it is ALWAYS a non-empty string, because
+    # `_read_operator_asks` has no path that returns None — an absent block
+    # restores the defect this whole field exists to prevent.
+    defaults=(None, None, None, None, None),
 )
 # 🔴 `repo_unknown_reason` — ROUND 13'S NINTH INSTANCE, AND THE THIRD IN THIS
 # EXACT FAMILY. `no_sha_reason` was `headRefOid`, `base_assumed_reason` was
@@ -1912,9 +1939,23 @@ def gh_pr_facts(runner, pr, repo=None):
     against `gh`'s own field list) — `url` is what carries the base repo, and
     `pr_slug` reads it.
     """
+    # `commits` and each comment's `viewerDidAuthor` are read for ROUND 0's
+    # attribution input (`operator_asks`): `commits` carries the
+    # `Claude-Session-Id:` trailers that name THIS PR's sessions, and
+    # `viewerDidAuthor` is what separates the operator's own comment from a
+    # teammate's or a bot's. 🔴 DO NOT SWAP IT FOR `authorAssociation` — that is
+    # repo MEMBERSHIP, it admitted ten devrc collaborators and the
+    # `civitai-deploy` bot, and `operator_asks.VIEWER_FIELD`'s comment records
+    # both wrong answers. This comment named the association until round 2 of the
+    # devrc#1887 ladder found it still here, above the very field list a
+    # maintainer edits.
+    # 🔴 `body` is deliberately NOT read — the PR DESCRIPTION was dropped as a
+    # source (operator's call, 2026-09-26): measured over the 60 newest merged
+    # devrc PRs, 1 body names an ask and 4 carry any blockquote, so it
+    # contributed agent prose under a heading saying it was the operator's.
     cmd = ["gh", "pr", "view", str(pr), "--json",
            "title,url,baseRefName,headRefOid,isCrossRepository,"
-           "headRepository,headRepositoryOwner,comments"]
+           "headRepository,headRepositoryOwner,comments,commits"]
     if repo:
         cmd += ["--repo", repo]
     rc, out, err = runner(cmd)
@@ -4750,7 +4791,12 @@ def render_checklist(facts):
     # returns the round-0 section INSTEAD of the checklist, not before it.
     if facts.round_no == 0:
         if not facts.round_zero:
-            return "\n".join([
+            # 🔴 THE ASKS STILL SHIP HERE. The two failures are independent: an
+            # unreadable SKILL.md costs the instructions, not the attribution
+            # input, and an auditor told to read the section by hand needs the
+            # operator's asks more than one handed the section inline. An earlier
+            # draft returned early and silently dropped the block on this path.
+            out = [
                 "## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE",
                 "",
                 "⚠ **COULD NOT INLINE the round-0 section** — "
@@ -4758,17 +4804,27 @@ def render_checklist(facts):
                 "here, so no instructions are printed rather than a guess at "
                 "them. Read its **ROUND 0** section and work its steps in "
                 "order, or re-run this assembly where the skill is readable.",
-            ])
-        return "\n".join([
-            "## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE",
-            "",
+            ]
+            if facts.operator_asks:
+                out += ["", facts.operator_asks]
+            return "\n".join(out)
+        # 🔴 THE ASKS BLOCK GOES **BEFORE** THE SECTION, NOT AFTER IT. Step 1 of
+        # that section is "question every requirement, and NAME its author of
+        # record"; the asks are that step's input, and an input printed after
+        # the instruction that consumes it is read second or not at all. Same
+        # ordering argument the section itself makes about steps 3-4.
+        parts = ["## ROUND 0 — QUESTION THE REQUIREMENT, THEN DELETE", ""]
+        if facts.operator_asks:
+            parts += [facts.operator_asks, ""]
+        parts += [
             "This round works the section below **instead of** the nine axes, "
             "which are not in this brief. Do not audit for correctness here: "
             "that is round 1's job, and doing it first is the ordering failure "
             "this round exists to prevent.",
             "",
             facts.round_zero,
-        ])
+        ]
+        return "\n".join(parts)
     lines = ["## AUDIT FOR", ""]
     if facts.round_no >= 2:
         lines += [
@@ -5411,6 +5467,155 @@ def _read_round_zero(repo_dir):
     return None
 
 
+#: Where the extractor lives, relative to this file. Resolved from `__file__`
+#: for the same reason as the `sys.path` insert above: `--repo` routinely points
+#: at another checkout and the extractor that ships BESIDE this script is the one
+#: whose `--jsonl` contract these readers are written against.
+EXTRACTOR = Path(__file__).resolve().parent / "session-analysis" / "extract_user_msgs.py"
+
+
+def _read_operator_asks(runner, data, extractor=None):
+    """ROUND 0's attribution input. -> a rendered block, always a string.
+
+    🔴 EVERY FAILURE PATH RETURNS A BLOCK, NEVER None OR "". The block's whole
+    purpose is to stop round 0 proposing the deletion of something the operator
+    asked for, and an absent block restores exactly that failure — so an
+    unimportable module, a `gh` error, a repo with no trailers and an extractor
+    that exits non-zero all render as a NAMED UNKNOWN carrying
+    `operator_asks.UNKNOWN_DIRECTIVE`. There is no quiet path.
+
+    🔴 SESSION IDS COME FROM COMMIT BODIES, NOT FROM git's TRAILER PARSER — see
+    `operator_asks`' module docstring for the measurement on `c0fd28e3`, where
+    `%(trailers:key=Claude-Session-Id,valueonly)` is EMPTY and the body holds 12.
+    """
+    if operator_asks is None:
+        # Rendered by hand because the renderer is the thing that is missing.
+        # It still carries the directive, which is the load-bearing half.
+        return "\n".join([
+            "## THE OPERATOR'S OWN ASKS — attribution input for step 1",
+            "",
+            "🔴 **COULD NOT LOAD `scripts/lib/operator_asks.py`** — "
+            f"{_OPERATOR_ASKS_IMPORT_ERROR or 'import failed'}. No ask was read "
+            "from any source.",
+            "",
+            "🔴 **A SOURCE THAT COULD NOT BE READ IS NOT AN ABSENCE OF ASKS.** "
+            "Record every requirement as `UNATTRIBUTED-UNKNOWN` and do NOT "
+            "raise a deletion candidate whose whole case is that nobody asked "
+            "for it.",
+        ])
+
+    unmeasured = []
+    asks = []
+    dropped: dict = {}
+
+    # (1) the operator's own PR comments. Already fetched, so they cost nothing,
+    # and they are the source that answers when no commit carries a trailer —
+    # measured 115 comments across the 120 newest devrc PRs.
+    raw_comments = data.get("comments")
+    if isinstance(raw_comments, list):
+        got, comment_skips, comments_examined = \
+            operator_asks.asks_from_comments(raw_comments)
+        asks += got
+    else:
+        comment_skips, comments_examined = {}, None
+        unmeasured.append(operator_asks.Unmeasured(
+            operator_asks.SOURCE_PR_COMMENT,
+            "`gh` returned no comments array for this PR"))
+
+    # (2) the session transcripts, which is what the operator actually typed
+    # WHILE the work happened — the authoritative source, and the partial one.
+    #
+    # 🔴 SCOPED TO **THIS PR'S OWN COMMITS**, from `gh`'s `commits` field. An
+    # earlier draft scanned `git log -40` of the checkout and pulled in every
+    # session that had touched the repo recently: a one-session PR's brief came
+    # back carrying asks from SEVEN unrelated arcs across four repos, which is
+    # worse than no attribution — it invites the auditor to attribute a
+    # requirement to an ask about something else entirely. Found by the live
+    # end-to-end run; every unit test passed, because the fixtures injected the
+    # commit bodies directly and so could not see the SCOPE being wrong.
+    #
+    # Using `gh`'s field rather than git also means the trailers are read even
+    # when this checkout has never fetched the branch, and it costs no extra
+    # call — `gh_pr_facts` already fetched it.
+    ids = ()
+    raw_commits = data.get("commits")
+    if not isinstance(raw_commits, list):
+        unmeasured.append(operator_asks.Unmeasured(
+            operator_asks.SOURCE_SESSION,
+            "`gh` returned no commits array for this PR, so no session could "
+            "be resolved"))
+    else:
+        bodies = [
+            (c.get("messageHeadline") or "") + "\n" + (c.get("messageBody") or "")
+            for c in raw_commits if isinstance(c, dict)
+        ]
+        ids = operator_asks.session_ids_from_bodies(bodies)
+        if not ids:
+            unmeasured.append(operator_asks.Unmeasured(
+                operator_asks.SOURCE_SESSION,
+                f"none of this PR's {len(bodies)} commit(s) carries a "
+                "`Claude-Session-Id:` trailer — coverage is partial by nature "
+                "(35 of the 60 newest `main` commits, measured 2026-09-26), so "
+                "this says NOTHING about whether the operator asked for "
+                "anything"))
+
+    if ids:
+        # 🔴 `--include-answers` IS LOAD-BEARING HERE. The operator's replies to
+        # a question this session asked arrive in a `tool_result` block, which
+        # the extractor's default path ignores — so without this flag the
+        # requirements statement that AUTHORISES a design decision is invisible
+        # to the very block meant to surface it. That happened on devrc#1887:
+        # the block missed 612 B stating the operator's requirements, including
+        # both answers deciding its own open forks, and round 0 caught it.
+        # Measured: 1,491 such records / 837,635 B on this host.
+        cmd = ["python3", str(extractor or EXTRACTOR), "--jsonl",
+               "--include-answers"]
+        for sid in ids:
+            cmd += ["--session", sid]
+        rc, out, err = runner(cmd)
+        if rc != 0:
+            unmeasured.append(operator_asks.Unmeasured(
+                operator_asks.SOURCE_SESSION,
+                operator_asks.extractor_reason(rc, err)))
+        else:
+            # 🔴 rc 0 IS NOT FULL COVERAGE, AND THE PROOF IS ON STDERR. The
+            # extractor exits 0 having read only SOME of the ids it was given,
+            # and says so there: "N of M selected session(s) have NO transcript
+            # on this host (peer host? pruned?)", plus unreadable transcripts and
+            # dedup-emptied sessions. An earlier revision read `out` and threw
+            # `err` away, so a HALF-resolved set rendered as a complete read with
+            # no UNKNOWN and no directive — handing round 0 exactly the licence
+            # to delete that this whole module exists to remove. The operator
+            # runs TWO HOSTS, so a missing transcript is the ORDINARY case, not a
+            # corner. Round 1 of the devrc#1887 ladder found it.
+            for note in operator_asks.coverage_notes(err):
+                unmeasured.append(operator_asks.Unmeasured(
+                    operator_asks.SOURCE_SESSION, note))
+            got, dropped = operator_asks.parse_rows(out)
+            if not got:
+                # 🔴 THE REASON MATTERS AND IT IS NOT ALWAYS THE SAME. With
+                # drops, the transcripts held only machine-generated records
+                # (subagent results, injected skill bodies) — the operator
+                # genuinely typed nothing in them. With no drops, nothing was
+                # there at all. Both are UNKNOWN for attribution; conflating
+                # them would hide a classifier that has started eating asks.
+                why = (
+                    "the extractor exited 0 and every user-role record in "
+                    "those transcripts was machine-generated, not typed"
+                    if dropped else
+                    "the extractor exited 0 and the transcripts held no "
+                    "user-typed message at all"
+                )
+                unmeasured.append(operator_asks.Unmeasured(
+                    operator_asks.SOURCE_SESSION, why))
+            asks += got
+
+    return operator_asks.render(
+        asks, unmeasured=unmeasured, session_ids=ids,
+        comment_skips=comment_skips, comments_examined=comments_examined,
+        dropped=dropped)
+
+
 def build_parser():
     ap = argparse.ArgumentParser(
         prog="audit-dispatch.py",
@@ -5513,7 +5718,8 @@ def check_brief_file(path, out_stream, err_stream):
 
 
 def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
-         checklist_reader=None, round_zero_reader=None):
+         checklist_reader=None, round_zero_reader=None,
+         operator_asks_reader=None):
     # `checklist_reader` is injected by the test suite so no test depends on
     # whether THIS HOST happens to have the skill deployed under ~/.claude —
     # a suite that reads the ambient home is not hermetic, and the sandbox gate
@@ -5523,6 +5729,10 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
     # change the signature every existing injection is written against.
     checklist_reader = checklist_reader or _read_checklist
     round_zero_reader = round_zero_reader or _read_round_zero
+    # Third reader, same seam and same reason: a test must not depend on this
+    # HOST's transcript corpus under `~/.claude/projects`, which is neither
+    # hermetic nor present in the `nix build` sandbox tier.
+    operator_asks_reader = operator_asks_reader or _read_operator_asks
     parser = build_parser()
     args = parser.parse_args(argv)
     out_stream = stdout or sys.stdout
@@ -6295,6 +6505,11 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         # never prints, and reading the skill twice per run to no effect is
         # the kind of dead work round 0 itself exists to delete.
         round_zero=round_zero_reader(repo_dir) if args.round_no == 0 else None,
+        # Read ONLY at round 0, for the same reason as `round_zero` — and this
+        # one also SHELLS OUT (git + the extractor), so reading it on a round
+        # that never prints it would be paid work with no consumer.
+        operator_asks=(operator_asks_reader(runner, data)
+                       if args.round_no == 0 else None),
         payload=args.payload,
         # 🔴 CARRIED ONLY WHEN THE GATE ACTUALLY FIRED. `args.gate_override` is
         # what the operator TYPED; this field is what gets RECORDED, and
