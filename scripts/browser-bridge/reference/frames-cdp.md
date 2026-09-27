@@ -161,3 +161,28 @@ takes the lighter non-CDP path and shows no banner.
 
 Result payloads land under `.result.data` in the JSON (the envelope is
 `{"ok":true,"result":{"id","ok","data":{...}}}`).
+
+## A `flows/*.md` file can contradict this one — and pinning it was DECLINED
+
+This file is the authority on which world a frame eval lands in, and a site flow has
+already carried the opposite claim: `flows/civitai.com.md` asserted a blanket
+"isolated world" for `js --frame`, while `cdpFrameEval` actually forks — same-process
+→ `Page.createIsolatedWorld`; cross-origin OOPIF → `Runtime.evaluate` with **no
+`contextId`**, i.e. that frame's own MAIN world, the page's `window` and `fetch`
+included. That flow has since been corrected. The general hazard has not gone away,
+because nothing checks a flow file's prose.
+
+⚠ **A guard for it was MEASURED AND DECLINED — do not re-propose it.** The proposal
+was to assert every backticked identifier in `flows/*.md` against the bridge source,
+justified as catching "three of four" contradicted items. Measured: **1 identifier
+matched, 15 did not**, and the catch rate against the items actually contradicted was
+**ZERO** — one was a wrong CASE rather than a wrong string, one camelCase in another
+repo, one a number, one an English phrase. It would have needed an allowlist larger
+than its signal. So when a flow contradicts this file, **this file wins and the flow
+gets fixed**; there is no guard, by decision.
+
+🔴 Note what the corrected OOPIF finding does NOT license. The original OBSERVATION —
+a `window.fetch` hook catching nothing — is real, but the world was never the
+explanation, so an empty intercept list is **UNDIAGNOSED, not explained**. Rivals
+nobody has separated: the request fired before the hook was installed, or the app
+uses XHR / `sendBeacon` / a worker rather than `fetch`.

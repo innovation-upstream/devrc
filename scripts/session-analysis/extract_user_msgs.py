@@ -195,8 +195,65 @@ def message_of(raw):
     return ("typed", txt)
 
 
-def records_of(path, session_id=None):
+#: `kind` for an answer the operator gave to an `AskUserQuestion` prompt. A
+#: THIRD kind beside `typed` and `command`, opt-in via `records_of(...,
+#: include_answers=True)` and `--include-answers`, so every existing consumer
+#: filtering on `typed` — the `find-session --arc` footer among them — is
+#: untouched and its output does not move.
+KIND_ANSWER = "answer"
+
+#: The tool whose result IS the operator speaking. Matched STRUCTURALLY: a
+#: `tool_result` block's `tool_use_id` against an assistant `tool_use` of this
+#: name. Never by the text, because a `tool_result` block is also how every
+#: Bash/Read/Grep result arrives and those are not the operator.
+ASK_TOOL_NAME = "AskUserQuestion"
+
+
+def answer_ids(records):
+    """The `tool_use` ids of every `AskUserQuestion` an assistant issued.
+
+    Separate pass because a `tool_result` names the id of a `tool_use` that
+    appeared EARLIER, and a single streaming pass cannot know, at the moment it
+    meets the result, whether the call was this tool or a Bash.
+    """
+    out = set()
+    for r in records:
+        if r.get("type") != "assistant" or r.get("isSidechain"):
+            continue
+        for c in (r.get("message") or {}).get("content") or []:
+            if (isinstance(c, dict) and c.get("type") == "tool_use"
+                    and c.get("name") == ASK_TOOL_NAME and c.get("id")):
+                out.add(c["id"])
+    return out
+
+
+def answer_text(block):
+    """The operator's answer text out of one `tool_result` block, or ''."""
+    content = block.get("content")
+    if isinstance(content, str):
+        return clean_text(content)
+    if isinstance(content, list):
+        return clean_text("".join(
+            x.get("text", "") for x in content
+            if isinstance(x, dict) and x.get("type") == "text"))
+    return ""
+
+
+def records_of(path, session_id=None, include_answers=False):
     """Yield `{session_id, project, ts, kind, text}` for one transcript file.
+
+    🔴 `include_answers` RECOVERS A CLASS THIS TOOL STRUCTURALLY COULD NOT SEE,
+    and it is large. `extract_from_content` says "ignore tool_result" — correct
+    for Bash and Read output, and wrong for one tool: an `AskUserQuestion`
+    answer is the OPERATOR, arriving in a `tool_result` block. MEASURED
+    2026-09-26 over this host's corpus: **1,491 answer records across 594
+    sessions, 837,635 B** — against 895,672 B for the entire `typed` operator
+    corpus, so it is 93.5% again on top of everything this tool could previously
+    report. Median 479 B, max 2,037 B. 24 carry a free-text `notes:` (the
+    operator's own words); the rest record a decision.
+
+    It is OPT-IN so no shipped consumer's output moves — the `find-session
+    --arc` footer from #1883 is mid-measurement and must not change under it.
 
     `project` is always derived from the path — it had a parameter that no
     caller and no test ever passed.
@@ -204,31 +261,105 @@ def records_of(path, session_id=None):
     path = Path(path)
     session_id = session_id if session_id is not None else path.stem
     project = path.parent.name
-    with open(path, errors="replace") as f:
-        for line in f:
+
+    def _parse(fh):
+        for line in fh:
             line = line.strip()
             if not line:
                 continue
             try:
-                obj = json.loads(line)
+                yield json.loads(line)
             except ValueError:
                 continue
+
+    # 🔴 THE DEFAULT PATH STREAMS, AND THE CONSUMER LOOP IS INSIDE THE `with`
+    # BECAUSE THAT IS WHAT MAKES IT TRUE. `answer_ids` genuinely needs the whole
+    # file (a `tool_result` names a `tool_use` that appeared earlier), so the
+    # answers path materialises; the default path hands the consumer a GENERATOR.
+    #
+    # ⚠ THIS COMMENT HAS NOW BEEN WRONG TWICE, IN OPPOSITE WAYS, AND THE SECOND
+    # TIME IT ASSERTED THE FIX IT DID NOT MAKE — which is worse, because the next
+    # reader trying to make this stream would have believed it done.
+    #   * `90f5aa74` materialised UNCONDITIONALLY and said "the default path
+    #     still streams nothing extra into memory beyond the list above":
+    #     self-contradictory, the list WAS the whole file.
+    #   * `9b61b26d` moved that list into an `else` branch, wrote "🔴 THE DEFAULT
+    #     PATH STREAMS", and still built `list(_parse(f))` — because the consumer
+    #     loop sat OUTSIDE the `with`, so a generator could not survive it. Round
+    #     2 of the devrc#1887 ladder measured the default path unmoved and caught
+    #     the sentence.
+    #
+    # 🔴 AND THE PERFORMANCE NUMBER WAS MIS-ATTRIBUTED — TWICE, THE SECOND TIME BY
+    # THE COMMENT CORRECTING THE FIRST. `84d91b19` re-attributed it to `697387c6`,
+    # which STREAMS: measured per commit, `62b516a4` streams, `697387c6` streams,
+    # `90f5aa74` materialises and carries the self-contradictory sentence,
+    # `9b61b26d` materialises in an `else`. So that correction named a comparison
+    # between two identical implementations. Round 3 found it. Do not re-derive the
+    # pair from memory — the shas above were each read with `git show`.
+    # The measurement — 984
+    # transcripts / 2.79 GB, `--jsonl -o`, 4 interleaved runs at load ~9:
+    # 10.0-11.3 s / 222 MB against 17.3-26.3 s / 256 MB — is REAL, but it
+    # compares `62b516a4` (this generator, streaming) against `90f5aa74` (the
+    # unconditional materialise). It was never a base-vs-`9b61b26d` reading, and
+    # quoting it beside that commit implied a regression had been removed when it
+    # had only been moved. The 1.6-2.4x is what THIS revision removes.
+    with open(path, errors="replace") as f:
+        if include_answers:
+            parsed = list(_parse(f))
+            ids = answer_ids(parsed)
+            source = parsed
+        else:
+            ids = set()
+            source = _parse(f)          # a GENERATOR — nothing is materialised
+        # ⚠ NO `# type: ignore` HERE. An earlier revision carried
+        # `source: object` plus `# type: ignore[union-attr]`; measured with
+        # pyright, the diagnostics are IDENTICAL with and without it (it narrows
+        # `source` by assignment, so there was no `union-attr` to silence) and the
+        # annotation WIDENED the declared type, which is the opposite of the
+        # point. A `# type: ignore[CODE]` is a claim that a specific diagnostic
+        # exists; that one did not. Round 3 measured it.
+        for obj in source:
             if obj.get("type") != "user" or obj.get("isMeta"):
                 continue
             # sidechain == a subagent's own transcript, not user-typed
             if obj.get("isSidechain"):
                 continue
+            # 🔴 A COMPACTION SUMMARY IS THE MODEL'S PROSE, NOT THE OPERATOR'S. It
+            # arrives as a `user` record with `isCompactSummary: true` and opens
+            # "This session is being continued from a previous conversation…".
+            # MEASURED 2026-09-26: 16 such records on this host, ALL 16 previously
+            # emitted as user-typed, carrying 211,362 B — **23.6% of the entire
+            # operator corpus**, and 212x the largest harness class any downstream
+            # filter removes. Round 1 of the devrc#1887 ladder found it. It also
+            # matters for a PUBLIC repo: `CLAUDE.md` names "a model's summaries of
+            # them" as captured text that must never be committed, and this tool's
+            # output gets quoted into handoff docs.
+            if obj.get("isCompactSummary"):
+                continue
             msg = obj.get("message") or {}
             if msg.get("role") != "user":
                 continue
+            base = {"session_id": session_id, "project": project,
+                    "ts": obj.get("timestamp") or ""}
             for raw in extract_from_content(msg.get("content")):
                 got = message_of(raw)
                 if got is None:
                     continue
                 kind, text = got
-                yield {"session_id": session_id, "project": project,
-                       "ts": obj.get("timestamp") or "", "kind": kind,
-                       "text": text}
+                yield {**base, "kind": kind, "text": text}
+            if not ids:
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                if block.get("tool_use_id") not in ids:
+                    continue
+                text = answer_text(block)
+                if text:
+                    yield {**base, "kind": KIND_ANSWER, "text": text}
 
 
 # --------------------------------------------------------------------------- #
@@ -451,6 +582,14 @@ output
   --jsonl               one canonical record per line:
                         {session_id, project, arc_role, ts, kind, text}
   -o PATH               write to PATH instead of stdout
+  --include-answers     also emit kind=answer — the operator's replies to an
+                        AskUserQuestion prompt, which arrive in a tool_result
+                        block this tool otherwise ignores. MEASURED 1,491
+                        records / 837,635 B on this host, against 895,672 B
+                        for the whole typed corpus, so it nearly DOUBLES what the
+                        default can report. OFF by default:
+                        it changes WHAT IS EMITTED, not which sessions are
+                        selected, and no shipped consumer's output may move.
 
 exit codes — a zero cannot distinguish a wrong name from an empty arc, so
 each reason has its own code and prints on stderr:
@@ -492,6 +631,14 @@ def build_parser():
                    help="keep every repeat; by default an identical message "
                         "seen twice in the selection is emitted once and the "
                         "suppressed count is reported")
+    p.add_argument("--include-answers", action="store_true",
+                   help="also emit the operator's answers to AskUserQuestion "
+                        "prompts, as kind=answer. They arrive in a tool_result "
+                        "block, which this tool otherwise ignores — MEASURED "
+                        "1,491 records / 837,635 B on this host, against "
+                        "895,672 B for the whole typed corpus — it nearly doubles it. "
+                        "OFF by default "
+                        "so no existing consumer's output moves.")
     p.add_argument("--root", default=None,
                    help=argparse.SUPPRESS)   # tests point this at a fixture
     return p
@@ -600,12 +747,25 @@ def main(argv=None):
     for sid, path in sources:
         # 🔴 MATERIALISED INSIDE THE `try`, ON PURPOSE. `records_of` is a
         # generator, so its `open()` runs on the first `next()`, not at the
-        # call — and an OSError from a MID-FILE read escapes at a different
-        # point from one at open. Consuming it here puts both inside one
-        # handler, and makes `opened` true of files that were read and held
-        # nothing, which is exactly the population exit 6 is about.
+        # call. Consuming it here puts every read inside one handler, and makes
+        # `opened` true of files that were read and held nothing, which is
+        # exactly the population exit 6 is about.
+        #
+        # ⚠ WHERE AN OSError SURFACES DEPENDS ON THE FLAG, AND THIS SENTENCE HAS
+        # BEEN WRONG TWICE. On the DEFAULT path `records_of` streams, so a
+        # mid-file read error surfaces at a LATER `next()` than one at open; with
+        # `--include-answers` the file is read to completion first, so both
+        # surface at the first. Either way the arm holds, because `list(...)` is
+        # inside this `try` — that is the only claim this comment needs.
+        #   * `9b61b26d` wrote "both now surface at the same `next()`", true only
+        #     while it materialised unconditionally.
+        #   * `84d91b19` restored streaming on the default path and left that
+        #     sentence standing, re-falsifying it. Round 3 found it.
+        # A maintainer restructuring this `try` on the strength of the old
+        # sentence would have been reasoning from an invalidated claim.
         try:
-            recs = list(records_of(path, session_id=sid))
+            recs = list(records_of(path, session_id=sid,
+                                  include_answers=a.include_answers))
         except OSError as exc:
             unreadable.append(f"{sid}: {exc}")
             continue

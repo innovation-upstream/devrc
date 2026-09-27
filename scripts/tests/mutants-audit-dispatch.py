@@ -80,9 +80,26 @@ TEST_REL = "scripts/tests/test_audit_dispatch.py"
 HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
 # Non-stdlib modules `TEST_REL` imports at module scope. See the copy loop in
 # `main()` for why they have to be in the sandbox at all.
+# 🔴 AND `scripts/lib/operator_asks.py` IS ONE OF THEM NOW. MEASURED on the merge
+# of `feat/audit-pr-round0-operator-asks` (#1887) with this branch: without it the
+# BASELINE goes red on eight `operator_asks` tests, `main()` returns 2, and every
+# row below is refused — "the unmutated tree is already failing", which reads as a
+# broken tree rather than an incomplete copy list. The pattern the comment above
+# describes is exactly this one recurring: a new module the TEST module reaches
+# has to be named here, and nothing warns when it is not.
 TESTLIB_RELS = (
     "scripts/testlib/__init__.py",
     "scripts/testlib/hermetic_git.py",
+    # ⚠ AND ITS OWN THREE IMPORTS, which is the part a one-line fix misses:
+    # `operator_asks` imports `handoff_arc`, `session_trailer` and
+    # `transcript_search`, and `handoff_arc` imports `session_trailer` again. A
+    # sandbox with only the first gets `No module named 'handoff_arc'`, which the
+    # reader turns into a COULD NOT LOAD block — so the baseline is red with a
+    # plausible-looking message rather than an import error.
+    "scripts/lib/operator_asks.py",
+    "scripts/lib/handoff_arc.py",
+    "scripts/lib/session_trailer.py",
+    "scripts/lib/transcript_search.py",
 )
 # 🔴 A FOURTH INPUT, for the same reason as `HARNESS_REL` above: the suite now
 # carries a SEAM test that reads `claude/skills/audit-pr/SKILL.md` — the other
@@ -223,7 +240,40 @@ SKILL_RELS = (
 # files that NAME what changed, and that module names the HARNESS rather than
 # the target. Assume a change adding tests to `test_audit_dispatch.py` needs
 # this literal moved, and run that module by hand.
-MIN_TESTS = 201
+# 🔴 RAISED AGAIN 2026-09-26, 187 -> 195, at m = 205 — COUNTED the same way,
+# from a `--collect-only` on the module (`205 tests collected`) put through the
+# same formula, `205 - min(50, max(1, 205 // 20))` = 205 - 10 = 195. Nine node
+# ids were added by `feat/audit-pr-round0-operator-asks`; the number is the
+# formula's output on a counted m, NOT 187 + 9 (which is 196 — one too high, and
+# would have refused every run, exactly the arithmetic trap the paragraph above
+# records). ⚠ AND THE PARAGRAPH ABOVE PREDICTED THIS CORRECTLY: it says to
+# assume a change adding tests to `test_audit_dispatch.py` needs this literal
+# moved and to run that module by hand. It was read AFTER the gate failed, not
+# before — so the prediction worked and the instruction did not, which is the
+# `/resume`-body finding in miniature (a route in prose only fires if something
+# makes you read it).
+# 🔴 RAISED AGAIN 2026-09-26, 195 -> 197, at m = 207 — COUNTED the same way, from
+# a `--collect-only` on the module (`207 tests collected`) through the same
+# formula, `207 - min(50, max(1, 207 // 20))` = 207 - 10 = 197. Two node ids were
+# added by round 0's own fixes on the same branch (a non-owner comment guard and
+# an `--include-answers` guard) and one was renamed. The number is the formula's
+# output on a counted m, NOT 195 + 2.
+# 🔴 RAISED AGAIN 2026-09-26, 197 -> 199, at m = 209 — COUNTED the same way, from
+# a `--collect-only` on the module (`209 tests collected`) through the same
+# formula, `209 - min(50, max(1, 209 // 20))` = 209 - 10 = 199. Two node ids were
+# added by round 2's fixes on the same branch (the rc-0 coverage-note seam and its
+# clean-stderr control). ⚠ `197 + 2` happens to give 199 here too — the agreement
+# is a coincidence, not a method, and the paragraph above records the round where
+# that arithmetic would have been one too high.
+# 🔴 RAISED AGAIN by the #256 round (`--check-record` / scope expansion /
+# round-0 dispositions), 199 -> 213, at m = 224 — COUNTED the same way, from a
+# green run of the MERGED module (`224 passed`) through the same formula,
+# `224 - min(50, max(1, 224 // 20))` = 224 - 11 = 213. Fifteen node ids were added
+# by this branch; the number is the formula's output on a counted m, never
+# `199 + 15`. ⚠ COUNTED ON THE MERGE, not on the branch: `origin/main` moved under
+# this PR (#1887 landed, touching the same four files), and a floor derived before
+# that merge would have been 12 too low.
+MIN_TESTS = 213
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -4929,6 +4979,8 @@ def main() -> int:
         # floor check below catches it, and this comment is where to look.
         (root / "scripts" / "testlib").mkdir(parents=True, exist_ok=True)
         for rel in TESTLIB_RELS:
+            # Per-entry, because the tuple now spans more than one directory.
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(REPO / rel, root / rel)
         for rel in SKILL_RELS:
             (root / rel).parent.mkdir(parents=True, exist_ok=True)

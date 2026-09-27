@@ -80,9 +80,28 @@ git -C <repo> fetch origin && git -C <repo> worktree add --detach <dir> origin/<
 python3 $SKILL/preflight.py <dir> "$(python3 $SKILL/app_state.py <app> | sed 's/.*floor=//')"
 civitai app validate <dir>
 civitai app submit <dir> --package-only   # ALWAYS dry-run first: writes the zip, never submits
-civitai app submit <dir> --yes            # --yes required non-interactively
+civitai app submit <dir> --yes            # --yes REQUIRED non-interactively — see the 🔴 below
 git -C <repo> worktree remove <dir>
 ```
+
+🔴 **NEVER CONCLUDE A RELEASE WAS SUBMITTED FROM AN EXIT STATUS — confirm against
+the SERVER** (`python3 $SKILL/app_state.py <app>` or `civitai app status <app>`). That holds
+whatever the CLI returns, which is why it is the instruction rather than the mechanism
+below: **without `--yes` a non-interactive submit REFUSES**, and is *reported* to exit 0
+while doing so. `app submit
+--help` states the behaviour outright: *"In a non-interactive shell (no TTY)
+submit REFUSES unless `--yes` is given, rather than hang or submit silently"*
+(re-read 2026-09-27 on CLI 0.1.105) — that half is VERIFIED. ⚠ **The exit-0 half is
+a 2026-09-26 measurement carried forward and NOT re-run**, and the help text states
+no status either way, so treat it as unconfirmed. It is deliberately not the
+headline: the server-confirmation rule above is correct whether the CLI exits 0 or 1,
+so nothing you do depends on the unverified half.
+
+🔴 **WHEN A `0.x` DEPENDENCY MOVES MORE THAN ONE MINOR, READ THE INTERMEDIATE
+CHANGELOGS, NOT JUST THE TARGET'S.** In `0.x` a minor is where breaking changes
+live, so a `0.5.0 → 0.7.0` bump hides `0.6.0`'s entry completely — and the
+`@civitai/*` packages this fleet depends on bump like that routinely. Read every
+entry you are jumping over before calling a bump additive.
 
 🔴 **This used to say "export with `git archive`, NEVER a worktree", and that is
 RETRACTED.** The CLI dropped `.git` only as a *directory* once; since issue #409
