@@ -98,4 +98,22 @@ grep "duration = 0" ~/.config/alacritty/alacritty.toml   # bell disabled
 find ~/.config/espanso -name "*.yml" | xargs grep "mtfc"  # should find nothing
 ```
 
+## Reading a gate run's output — the byte count comes BEFORE the exit code
+
+🔴 **A `nix build` can report exit 0 having written ZERO BYTES, and that 0 is the shell's, not
+the gate's.** Measured 2026-09-26: `timeout 1800 nix build .#checks… -L 2>&1 | tail -60; echo
+"BUILD_RC=${PIPESTATUS[0]}"` run in the background completed "exit code 0" with a **0-byte**
+output file — not even the `BUILD_RC` echo landed, so nothing about the gate was readable, while
+the tree under test actually had three failures. Re-running with a plain file redirect gave
+**169 KB** and a real verdict.
+
+```bash
+nix build .#checks.x86_64-linux.pytests -L > "$LOG" 2>&1; rc=$?   # plain redirect, not a pipe
+wc -c "$LOG"                                                      # READ THIS FIRST
+```
+
+**Treat a zero-byte log as NO READING, never as a quiet success** — read the byte count before
+the exit code. Same family as counting a runner's own result lines rather than trusting `$?`, but
+one level worse: here there are no result lines to count at all.
+
 Report results as a table with Pass/Fail/Pending status.

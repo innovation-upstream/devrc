@@ -80,9 +80,25 @@ git -C <repo> fetch origin && git -C <repo> worktree add --detach <dir> origin/<
 python3 $SKILL/preflight.py <dir> "$(python3 $SKILL/app_state.py <app> | sed 's/.*floor=//')"
 civitai app validate <dir>
 civitai app submit <dir> --package-only   # ALWAYS dry-run first: writes the zip, never submits
-civitai app submit <dir> --yes            # --yes required non-interactively
+civitai app submit <dir> --yes            # --yes REQUIRED non-interactively — see the 🔴 below
 git -C <repo> worktree remove <dir>
 ```
+
+🔴 **WITHOUT `--yes` A NON-INTERACTIVE SUBMIT REFUSES — AND IS REPORTED TO EXIT 0
+DOING SO, so a script reads the refusal as a submit that happened.** `app submit
+--help` states the behaviour outright: *"In a non-interactive shell (no TTY)
+submit REFUSES unless `--yes` is given, rather than hang or submit silently"*
+(re-read 2026-09-27 on CLI 0.1.105). The refusal is the safe half; the exit status
+is the trap — **never conclude a release was submitted from a zero.** Confirm
+against the server with `python3 $SKILL/app_state.py <app>` or `civitai app status
+<app>`. ⚠ The exit-0 half is a 2026-09-26 measurement carried forward and NOT
+re-run here; the help text states no status either way.
+
+🔴 **WHEN A `0.x` DEPENDENCY MOVES MORE THAN ONE MINOR, READ THE INTERMEDIATE
+CHANGELOGS, NOT JUST THE TARGET'S.** In `0.x` a minor is where breaking changes
+live, so a `0.5.0 → 0.7.0` bump hides `0.6.0`'s entry completely — and the
+`@civitai/*` packages this fleet depends on bump like that routinely. Read every
+entry you are jumping over before calling a bump additive.
 
 🔴 **This used to say "export with `git archive`, NEVER a worktree", and that is
 RETRACTED.** The CLI dropped `.git` only as a *directory* once; since issue #409

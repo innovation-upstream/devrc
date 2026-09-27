@@ -284,6 +284,17 @@ debugging, changing or copying a specific pipeline.
     returns a confident **wrong zero** — which reads exactly like "the trigger is broken". The
     EventListener log is what discriminates: `kubectl -n tekton-ci logs -l eventlistener --since=15m`
     shows `"/trigger":"<name>"` and `ResolvedParams` for an event that DID match.
+11. 🔴 **`NO CAPACITY: <gate> — the gate never started` IS A DISTINCT STATUS FROM A FAILURE, IT
+    CLEARS ON ITS OWN, AND THE DISCRIMINATOR IS THE PER-HEAD STATUS TIMELINE.** A starved gate
+    and a genuinely red gate look the same in `gh pr checks`, which reports only the CURRENT
+    state — so it structurally cannot tell you a gate was starved and then ran. The per-head
+    status history can, because it carries every transition with its timestamp:
+    `gh api repos/<r>/commits/<sha>/statuses --jq '.[] | "\(.created_at) \(.context) \(.state) \(.description)"'`.
+    🔴 **A PR held on a capacity failure must be RE-CHECKED, never assumed still starved —
+    and the re-check may surface a genuine failure that was always there, hidden behind the gate
+    that never ran.** Measured 2026-09-26: four `devrc` gates were recorded as starved, and by
+    the time that note was next read capacity had returned and one gate had gone **red on real
+    code**. Reading the stale note instead of the timeline cost a wrong initial diagnosis.
 
 6. **A gate pod rejected at ADMISSION posts a FAILED TEST, so it reads as a bad change.**
    Two ways this has bitten, both on `devrc-ci`, both 2026-08-29/30:
