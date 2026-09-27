@@ -287,12 +287,17 @@ debugging, changing or copying a specific pipeline.
 11. 🔴 **`NO CAPACITY: <gate> — the gate never started` IS A DISTINCT STATUS FROM A FAILURE, AND
     THE PER-HEAD STATUS TIMELINE IS THE DISCRIMINATOR.** `gh pr checks` reports only the CURRENT
     state, so it structurally cannot tell you a gate was held and then ran; the status history
-    carries every transition with its timestamp:
-    `gh api repos/<r>/commits/<sha>/statuses --jq '.[] | "\(.created_at) \(.context) \(.state)"'`.
+    carries every transition with its timestamp — 🔴 **and you MUST select `.description`, because
+    that is where the `NO CAPACITY` text lives and `state` alone cannot separate a held gate from a
+    broken one: both post `error`** (gotcha 3's third shape posts `error` with an EMPTY description):
+    `gh api repos/<r>/commits/<sha>/statuses --jq '.[] | "\(.created_at) \(.context) \(.state) \(.description)"'`.
     **A PR held on that status must be RE-CHECKED, never assumed still held** — the re-check may
     surface a genuine failure the held gate was hiding. 🔴 **Do NOT attribute the clearing to a
     capacity recovery**: drain-then-green discriminates nothing, and gotcha 3's congestion framing
-    is under retraction on that exact ground. Why, and the measured incident:
+    is under retraction on that exact ground — **but only its THIRD shape**; the `exit 255`
+    signature and "congestion is an amplifier, not the cause" are untouched, so gotcha 3 still
+    asserting congestion is NOT evidence the retraction failed to land. Why, and the measured
+    incident:
     `~/workspace/devrc/claude/skills/tekton/reference/pipelines.md` → "NO CAPACITY".
 
 6. **A gate pod rejected at ADMISSION posts a FAILED TEST, so it reads as a bad change.**
