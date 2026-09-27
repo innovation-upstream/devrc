@@ -284,17 +284,24 @@ debugging, changing or copying a specific pipeline.
     returns a confident **wrong zero** — which reads exactly like "the trigger is broken". The
     EventListener log is what discriminates: `kubectl -n tekton-ci logs -l eventlistener --since=15m`
     shows `"/trigger":"<name>"` and `ResolvedParams` for an event that DID match.
-11. 🔴 **`NO CAPACITY: <gate> — the gate never started` IS A DISTINCT STATUS FROM A FAILURE, IT
-    CLEARS ON ITS OWN, AND THE DISCRIMINATOR IS THE PER-HEAD STATUS TIMELINE.** A starved gate
-    and a genuinely red gate look the same in `gh pr checks`, which reports only the CURRENT
-    state — so it structurally cannot tell you a gate was starved and then ran. The per-head
-    status history can, because it carries every transition with its timestamp:
+11. 🔴 **`NO CAPACITY: <gate> — the gate never started` IS A DISTINCT STATUS FROM A FAILURE, AND
+    THE DISCRIMINATOR IS THE PER-HEAD STATUS TIMELINE.** A gate that never started and a
+    genuinely red gate look the same in `gh pr checks`, which reports only the CURRENT state — so
+    it structurally cannot tell you a gate was held and then ran. The per-head status history
+    can, because it carries every transition with its timestamp:
     `gh api repos/<r>/commits/<sha>/statuses --jq '.[] | "\(.created_at) \(.context) \(.state) \(.description)"'`.
-    🔴 **A PR held on a capacity failure must be RE-CHECKED, never assumed still starved —
-    and the re-check may surface a genuine failure that was always there, hidden behind the gate
-    that never ran.** Measured 2026-09-26: four `devrc` gates were recorded as starved, and by
-    the time that note was next read capacity had returned and one gate had gone **red on real
-    code**. Reading the stale note instead of the timeline cost a wrong initial diagnosis.
+    🔴 **A PR held on that status must be RE-CHECKED, never assumed still held — and the re-check
+    may surface a genuine failure that was always there, hidden behind the gate that never ran.**
+    Measured 2026-09-26: four `devrc` gates were recorded as held; by the time that note was next
+    read they had run, and one had gone **red on real code**. Reading the stale note instead of
+    the timeline cost a wrong initial diagnosis.
+    🔴 **DO NOT ATTRIBUTE THE CLEARING TO CAPACITY RETURNING — that inference is RETRACTED above,
+    and this item deliberately does not make it.** Gotcha 3 records the measurement: the cause
+    was a Task whose SUMMED step requests made its pod too big to schedule, reproduced on a QUIET
+    cluster, and *"one slot cluster-wide, freed when another pipeline finished"* predicts
+    drain-then-green exactly as well as load does. So the re-check is worth running whatever the
+    mechanism, and **the observation that it later ran is evidence for neither** — read the
+    summed step requests (`scripts/tests/test_ci_step_requests.py`) before blaming load.
 
 6. **A gate pod rejected at ADMISSION posts a FAILED TEST, so it reads as a bad change.**
    Two ways this has bitten, both on `devrc-ci`, both 2026-08-29/30:
