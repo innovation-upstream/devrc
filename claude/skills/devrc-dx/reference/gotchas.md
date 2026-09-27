@@ -42,19 +42,3 @@
 - Task status is JSON-only: hooks write `status` to `~/.tmux/tasks/<wid>.json` and never
   rename the window. The tab name is left to tmux `automatic-rename` so it tracks cwd.
   Status emoji is NOT in the window name.
-- 🔴 `direnv` in this repo reads `Found RC allowed 0`, so **nothing from its `.envrc` is on
-  PATH** — a bare `python3 -m pytest` here is `No module named pytest`, which reads as a broken
-  checkout rather than an unloaded environment. And the file is not the usual flake shim:
-  `.envrc` is the single line `use opencode`, and it is **NOT tracked**
-  (`git ls-files --error-unmatch .envrc` errors). So the general "copy `.envrc` into the
-  worktree" advice buys nothing here — the opposite of `civitai-app-starters`, where `.envrc`
-  IS tracked and `git worktree add` provides it. The working instrument for this repo is the
-  flake check itself, `nix build .#checks.x86_64-linux.pytests`, which is also exactly what CI
-  runs. Re-verified 2026-09-27: `allowed 0`, `use opencode`, untracked here, tracked there.
-- 🔴 `nix-shell -p python3Packages.pytest` is NOT CI's environment and fails at **collection**,
-  not at assertion. Running the full `scripts/tests` under it dies with `3 errors during
-  collection` — `ModuleNotFoundError: No module named 'yaml'` in `test_opencode_config.py`,
-  cascading into `test_opencode_engine.py` and `test_ci_claim_matches_reality.py`. The flake's
-  gate env carries `pytest`, `pytest-xdist`, `pyyaml` and more. A bare `nix-shell -p pytest` is
-  fine for a SINGLE hermetic test file and worthless for the suite — and a collection error is
-  easy to misread as the suite being broken on your branch.

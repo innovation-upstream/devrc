@@ -193,3 +193,30 @@ quoted from `7839ef54` and are not re-derivable (the runs are pruned). They were
 19:14, 15 min before the revert, and **2 is live today**. `bb62668f`'s own subject — *"the equality
 fixed starvation and bought a queue nothing drained"* — targets the same queue the unpin is
 credited with draining. **Re-take the baseline at cpu 2 before grading a retry.**
+
+## "NO CAPACITY" — why the clearing is not evidence of anything
+
+`SKILL.md` gotcha 11 is the operating rule; this is the reasoning it withholds.
+
+**Measured 2026-09-26.** A handoff recorded four `devrc` gates as held on
+`NO CAPACITY: <gate> — the gate never started`. By the time that note was next read they had
+run, and **one had gone red on real code** — a genuine failure that had been there all along,
+invisible behind a gate that never executed. Reading the stale note instead of the timeline
+cost a wrong initial diagnosis. That is the whole case for re-checking rather than assuming.
+
+🔴 **What the incident does NOT establish is WHY the gate later ran, and the temptation to say
+"capacity returned" is the trap.** Watching the queue drain and the same commit go green is
+consistent with load — and equally consistent with *"one slot cluster-wide, freed when another
+pipeline finished"*, which is the mechanism `devrc#1787` measured for the `vetr-app-unit` gate:
+a Task declaring CPU/memory on all six SEQUENTIAL steps, summed by Tekton into a pod request no
+node could satisfy, **reproduced on a QUIET cluster**. Both stories predict drain-then-green, so
+that observation separates them not at all.
+
+**The general form, which is the transferable half:** when a remedy and a rival mechanism predict
+the same recovery, the recovery is evidence for neither. Only a control that holds one of them
+fixed — here the quiet-cluster reproduction — discriminates.
+
+⚠ **`SKILL.md` gotcha 3 still carries the congestion framing** as of this writing, with its
+retraction pending in `devrc#1787`. Read gotcha 3's current wording rather than trusting either
+this file or gotcha 11 about which way it reads; whichever PR lands first, the operating rule in
+gotcha 11 is unaffected, because it never rested on the mechanism.

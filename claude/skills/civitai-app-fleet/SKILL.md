@@ -84,15 +84,18 @@ civitai app submit <dir> --yes            # --yes REQUIRED non-interactively —
 git -C <repo> worktree remove <dir>
 ```
 
-🔴 **WITHOUT `--yes` A NON-INTERACTIVE SUBMIT REFUSES — AND IS REPORTED TO EXIT 0
-DOING SO, so a script reads the refusal as a submit that happened.** `app submit
+🔴 **NEVER CONCLUDE A RELEASE WAS SUBMITTED FROM AN EXIT STATUS — confirm against
+the SERVER** (`python3 $SKILL/app_state.py <app>` or `civitai app status <app>`). That holds
+whatever the CLI returns, which is why it is the instruction rather than the mechanism
+below: **without `--yes` a non-interactive submit REFUSES**, and is *reported* to exit 0
+while doing so. `app submit
 --help` states the behaviour outright: *"In a non-interactive shell (no TTY)
 submit REFUSES unless `--yes` is given, rather than hang or submit silently"*
-(re-read 2026-09-27 on CLI 0.1.105). The refusal is the safe half; the exit status
-is the trap — **never conclude a release was submitted from a zero.** Confirm
-against the server with `python3 $SKILL/app_state.py <app>` or `civitai app status
-<app>`. ⚠ The exit-0 half is a 2026-09-26 measurement carried forward and NOT
-re-run here; the help text states no status either way.
+(re-read 2026-09-27 on CLI 0.1.105) — that half is VERIFIED. ⚠ **The exit-0 half is
+a 2026-09-26 measurement carried forward and NOT re-run**, and the help text states
+no status either way, so treat it as unconfirmed. It is deliberately not the
+headline: the server-confirmation rule above is correct whether the CLI exits 0 or 1,
+so nothing you do depends on the unverified half.
 
 🔴 **WHEN A `0.x` DEPENDENCY MOVES MORE THAN ONE MINOR, READ THE INTERMEDIATE
 CHANGELOGS, NOT JUST THE TARGET'S.** In `0.x` a minor is where breaking changes

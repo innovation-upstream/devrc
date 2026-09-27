@@ -74,9 +74,11 @@ is wired.
 🔴 **`pnpm` prints `Already up to date` and skips its lockfile policy entirely
 when `node_modules` exists**, and `~/.cache/pnpm/lockfile-verified.jsonl` replays
 a stored result as `(verified 2h ago)`. **Same exit code either way.** The tell is
-in the CONTENT, not the status: a real run prints its own counts,
-`(185 entries in 637ms)`. Read for that line before quoting a supply-chain pass
-as evidence the policy ran.
+in the CONTENT, not the status: a real run prints a COUNTS line of its own —
+`(<N> entries in <T>)`, e.g. `(185 entries in 637ms)` on one run and
+`(216 entries in 1s)` on another, so the digits are not the thing to match.
+**Read for a counts line AT ALL**; `Already up to date` or `(verified Nh ago)`
+with no counts means the policy did not run.
 
 ## The manifest allowlist
 
