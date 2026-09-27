@@ -300,8 +300,10 @@ debugging, changing or copying a specific pipeline.
     was a Task whose SUMMED step requests made its pod too big to schedule, reproduced on a QUIET
     cluster, and *"one slot cluster-wide, freed when another pipeline finished"* predicts
     drain-then-green exactly as well as load does. So the re-check is worth running whatever the
-    mechanism, and **the observation that it later ran is evidence for neither** — read the
-    summed step requests (`scripts/tests/test_ci_step_requests.py`) before blaming load.
+    mechanism, and **the observation that it later ran is evidence for neither** — read the Task's
+    summed step requests before blaming load, per gotcha 3, which owns that remedy and names
+    whatever ledger scores it. 🔴 **Deliberately no path cited here**: gotcha 3's own citation was
+    dead when this was written, and re-typing it would have put the same dead route in two places.
 
 6. **A gate pod rejected at ADMISSION posts a FAILED TEST, so it reads as a bad change.**
    Two ways this has bitten, both on `devrc-ci`, both 2026-08-29/30:
