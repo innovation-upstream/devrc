@@ -1138,6 +1138,10 @@ def make_runner(
     local_head=None,
     git_dirs=SHARED_GIT_DIRS,
     diffs=None,
+    review_comments=(),
+    commits=2,
+    missing_objects=(),
+    is_ancestor=True,
 ):
     """A closed-world stand-in for `gh` and `git`. No process is spawned.
 
@@ -1162,6 +1166,12 @@ def make_runner(
     """
     payload = dict(pr or DEFAULT_PR)
     payload["comments"] = [{"body": c} for c in comments]
+    # 🔴 `commits` IS PART OF THE SAME PAYLOAD BECAUSE REAL `gh` ANSWERS IT FROM
+    # THE SAME ENDPOINT. `--check-record` asks `gh pr view <n> --json commits`,
+    # which returns ONLY that key; a fixture that answered it from a second,
+    # divergent place could model a PR whose comment list and commit count
+    # disagree about which PR they describe — a world `gh` cannot produce.
+    payload["commits"] = [{"oid": f"c{i}"} for i in range(commits)]
     # 🔴 ROUND 8 — THE DEFAULT IS NOW PHYSICALLY POSSIBLE IN BOTH REPO STATES.
     # "The checkout is standing on the PR" is the right default for a PR in
     # THIS repository and a flat impossibility for one in another: no commit of
@@ -1188,6 +1198,15 @@ def make_runner(
         if cmd[0] == "gh":
             if gh_rc:
                 return gh_rc, "", "gh: synthetic failure"
+            # 🔴 `gh api` IS A DIFFERENT SURFACE, NOT A SECOND SPELLING OF `gh pr
+            # view`. It is the REVIEW-comment endpoint, and the whole reason
+            # `--check-record` reads it is that `gh pr view --json comments`
+            # returns ISSUE comments only. A fake answering both with the same
+            # payload would make the two surfaces indistinguishable here, which
+            # is exactly the confusion the mode exists to resolve.
+            if cmd[1] == "api":
+                return 0, json.dumps(
+                    [{"body": c} for c in review_comments]), ""
             return 0, gh_stdout if gh_stdout is not None else json.dumps(payload), ""
         if cmd[:2] == ["git", "-C"]:
             verb = cmd[3]
@@ -1212,6 +1231,19 @@ def make_runner(
                 return (0, origin + "\n", "") if origin else (1, "", "no origin")
             if verb == "status":
                 return 0, status, ""
+            if verb == "cat-file":
+                # `git cat-file -e <sha>^{commit}` — the object-presence read
+                # `--check-record` makes before comparing anything. `missing_objects`
+                # models the routine state this script refuses to fetch away.
+                want = cmd[-1].split("^")[0]
+                if want in missing_objects:
+                    return 128, "", (
+                        f"fatal: Not a valid object name {cmd[-1]}")
+                return 0, "", ""
+            if verb == "merge-base":
+                # rc 1 is git's "NOT an ancestor" — a REBASE, which must read as
+                # could-not-measure and never as a stale record.
+                return (0, "", "") if is_ancestor else (1, "", "")
             if verb == "rev-list":
                 spec = cmd[-1]
                 ranges.append(spec)
@@ -1242,6 +1274,15 @@ def make_runner(
                     # count: the gate falls back to `payload=` exactly as it
                     # did before the measured reading existed.
                     return 0, "", ""
+                # 🔴 THE NUMSTAT ANSWER MAY DEPEND ON THE RANGE, and it has to:
+                # the scope-expansion reading compares TWO rounds' own ranges,
+                # so a constant answer makes the two sides equal BY
+                # CONSTRUCTION and the comparison structurally unable to fire —
+                # the same defect `rev_list` was measured carrying.
+                if callable(numstat):
+                    return numstat(cmd[-3])
+                if isinstance(numstat, dict):
+                    return 0, numstat.get(cmd[-3], ""), ""
                 return numstat
         raise AssertionError(f"unexpected command in a hermetic test: {cmd}")
 
@@ -9975,6 +10016,44 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
 INVARIANT_GUARDS_AND_LEDGERS = frozenset({
+    # 🔴 `--check-record`, SCOPE EXPANSION and ROUND-0 DISPOSITIONS (the #256
+    # round). ALL GUARDS, and the reason is stated at their definitions rather
+    # than here: the defect measured on `ZacxDev/naida-ai` #256 was not a WRONG
+    # answer from this script — it was three questions nothing asked. At
+    # `6975b1b2` the two new flags are `SystemExit: 2` out of argparse and the
+    # new sections simply do not exist, so a red there is a claim about a
+    # feature's absence, which this module's header says is not evidence of
+    # anything. MEASURED at `6975b1b2` — base script, THIS module unchanged,
+    # under `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`: **15 failed, 196
+    # passed**, and the 15 break down as SEVEN `SystemExit: 2` out of argparse
+    # (the two new flags do not exist), FOUR `AttributeError` for a symbol the
+    # fix introduces, and FOUR real assertions on the ANSWER (the two
+    # disposition briefs, and the scope-expansion firing and NOT-MEASURED
+    # lines). None of the four is a WRONG answer at the base — the section is
+    # simply absent — which is why not one of them is filed as regression
+    # coverage.
+    #
+    # ⚠ THREE are SILENT/NEGATIVE controls whose whole claim is that nothing
+    # fires — an in-sync ladder, a round no larger than what it audited, and a
+    # PR with no round-0 block. Their "nothing fired" assertions PASS at the
+    # base, vacuously, because no section exists to fire; their red there is the
+    # AttributeError in their own positive control. Do not read their base red
+    # as evidence about the report. Evidence: mutants CR1-CR6, SX1-SX3, RZ1-RZ4.
+    "test_check_record_reports_an_ABSENT_record_and_names_the_commit_count",
+    "test_check_record_names_a_REVIEW_comment_block_as_invisible_not_absent",
+    "test_check_record_says_in_sync_when_the_newest_block_records_the_head",
+    "test_check_record_reports_a_STALE_record_with_how_far_ahead_the_head_is",
+    "test_check_record_is_UNMEASURED_and_never_a_finding_when_it_cannot_resolve",
+    "test_check_record_is_a_single_line_verdict_and_assembles_no_brief",
+    "test_a_fix_round_larger_than_the_round_it_audited_is_REPORTED_with_no_rc",
+    "test_a_fix_round_no_larger_than_what_it_audited_reports_NOTHING",
+    "test_scope_expansion_is_NOT_MEASURED_rather_than_a_number_when_a_side_fails",
+    "test_round_zero_output_contract_emits_a_block_its_own_parser_reads_back",
+    "test_the_round_zero_candidate_parser_stops_at_the_CLOSING_fence",
+    "test_the_dispositions_field_is_written_BEFORE_audited_and_reads_back",
+    "test_an_unanswered_round_zero_candidate_is_NAMED_in_the_delta_brief",
+    "test_a_kept_disposition_carrying_no_reason_is_reported_as_deferred",
+    "test_a_PR_with_no_round_zero_block_reports_NOTHING_about_dispositions",
     # 🔴 THE UNEARNED-LEDGER GUARDS (round 25), AND THEY ARE GUARDS FOR THREE
     # DIFFERENT REASONS. Written out because the one-line version ("the rest
     # error for want of a symbol") is FALSE for two of them, and this module
@@ -13202,3 +13281,419 @@ def test_the_payload_field_the_gate_enforces_is_documented_in_the_skill():
     assert _norm_ws("the gate is advisory and may be skipped") not in _norm_ws(
         body
     )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 `--check-record`, SCOPE EXPANSION, ROUND-0 DISPOSITIONS
+# --------------------------------------------------------------------------- #
+# MEASURED on `ZacxDev/naida-ai` #256, which ran round 0 + round 1 + a fix round
+# and then merged:
+#   * `gh api repos/…/issues/256/comments` returns ONE comment carrying ZERO
+#     `audit-claims` blocks and `.../pulls/256/comments` returns none either —
+#     so there was no `payload=` field, no ledger line, the two-consecutive-zero
+#     gate was STRUCTURALLY unable to fire, and `--round 2` would have hit the
+#     "no audit-claims block in any of the N comment(s) read" refusal. The
+#     ladder ended because the operator merged it, not because anything fired.
+#   * round 0 raised FIVE deletion candidates. ZERO were deleted and TWO were
+#     GROWN — its #1 candidate went 67 -> 167 lines, the file 626 -> 1040 — and
+#     nothing recorded that the deletion pass had been INVERTED.
+#   * the fix round changed MORE PAYLOAD than the commit it audited (`push.ts`
+#     +212/-24 against +91/-33), because it answered a *questioned requirement*
+#     by BUILDING a retry subsystem.
+#
+# 🔴 EVERY TEST BELOW IS AN INVARIANT GUARD, AND THE REASON IS NOT "the symbol
+# is missing". It is that the defect measured on #256 was not in this script at
+# all: nothing here computed a WRONG answer, the questions were simply never
+# asked. A red at `6975b1b2` is therefore `SystemExit: 2` out of argparse (the
+# two new flags) or a section that does not exist — a claim about a feature's
+# absence, which this module's own header says is not evidence of anything. Each
+# one's evidence is its in-test control plus the mutants named in the battery.
+#
+# 🔴 THE FIXTURE NUMBERS ARE PAIRWISE DISTINCT AND NONE IS A ROUND NUMBER OR A
+# RETURN CODE. `claude/RULES.md`: a fixture that can only ever produce the
+# constant's own value cannot see a mutant that hardcodes the literal. `6` and
+# `11` are the two rc values, `0`/`1` are git's ancestry answers and 2 is the
+# default commit count — so the churn and ahead-count fixtures avoid all of them.
+SCOPE_BIG_ADDED, SCOPE_BIG_DELETED = 212, 24
+SCOPE_SMALL_ADDED, SCOPE_SMALL_DELETED = 91, 33
+AHEAD_COMMITS = 37
+
+R0_BLOCK = (
+    "Round 0 report.\n\n"
+    "```audit-round-0\n"
+    "D1 — delete the hand-rolled tokenizer in push.test.mjs\n"
+    "D2 — cut the nine added CLAUDE.md lines to one line plus a pointer\n"
+    "D3 — drop the second progress spinner\n"
+    "```\n\n"
+    "D9 — this line is PROSE below the block and must not count.\n"
+)
+
+
+def check_record(**kw):
+    return run_main(["900", "--check-record"], **kw)
+
+
+def test_check_record_reports_an_ABSENT_record_and_names_the_commit_count():
+    """🔴 INVARIANT GUARD. #256's exact state: commits exist, no block does.
+
+    The count is asserted BESIDE the verdict because "absent" is only a finding
+    on a PR that HAS a commit to anchor on — a PR with none is a state where an
+    absent record is correct, and the two must not share one message.
+    """
+    rc, out, err = check_record(comments=[], commits=4)
+    assert rc == 6, f"rc={rc}\n{err}"
+    assert (
+        "LADDER RECORD ABSENT: 4 commit(s) on this PR, 0 audit-claims block(s) "
+        "— the delta anchor does not exist"
+    ) in err, err
+    # The verdict goes to STDERR, like every other finding this script reports,
+    # so a caller piping stdout does not read a finding as the brief.
+    assert "LADDER RECORD" not in out, out
+
+
+def test_check_record_names_a_REVIEW_comment_block_as_invisible_not_absent():
+    """🔴 INVARIANT GUARD, and the reachability control for the review surface.
+
+    `gh pr view --json comments` returns ISSUE comments ONLY. A block posted as
+    a review is visible to a human and invisible to every other reader in this
+    script, so "absent" would send the operator to write a block that already
+    exists. The two states share an rc and may not share a message.
+    """
+    rc, _out, err = check_record(
+        comments=[], review_comments=[CLAIMS_BLOCK_R2], commits=4,
+    )
+    assert rc == 6, f"rc={rc}\n{err}"
+    assert "block found as a REVIEW comment" in err, err
+    assert "repost it as an ISSUE comment" in err, err
+    assert "ABSENT" not in err, (
+        "the review-comment state was reported as an ABSENT record. The remedy "
+        "for absent is 'post a block'; the block exists. " + err
+    )
+
+
+def test_check_record_says_in_sync_when_the_newest_block_records_the_head():
+    """🔴 INVARIANT GUARD — the NEGATIVE control for the two rc-6 branches.
+
+    A healthy ladder must report rc 0 and say so on STDOUT. Without this the
+    whole mode could be a function that returns 6, and every firing test above
+    would still pass.
+    """
+    block = payload_block(3, PAYLOAD_NONZERO_A, frm="aaaa1111",
+                          to=DEFAULT_PR["headRefOid"][:8])
+    rc, out, err = check_record(comments=[block])
+    assert rc == 0, f"rc={rc}\n{err}"
+    assert "LADDER RECORD: in sync at" in out, out
+    assert err == "", err
+
+
+def test_check_record_reports_a_STALE_record_with_how_far_ahead_the_head_is():
+    """🔴 INVARIANT GUARD. The fix round(s) after the recorded tip left no record.
+
+    The AHEAD COUNT is the part that makes it actionable — a stale record one
+    commit behind is a forgotten `--emit-claims`; one 37 commits behind is a
+    ladder nobody recorded at all.
+    """
+    block = payload_block(3, PAYLOAD_NONZERO_A, frm="aaaa1111", to="bbbb2222")
+    rc, _out, err = check_record(
+        comments=[block], rev_list=(0, f"{AHEAD_COMMITS}\n", ""),
+    )
+    assert rc == 6, f"rc={rc}\n{err}"
+    assert "LADDER RECORD STALE: newest block records to=bbbb2222" in err, err
+    assert f"({AHEAD_COMMITS} commit(s) ahead)" in err, err
+    assert "left no record" in err, err
+
+
+def test_check_record_is_UNMEASURED_and_never_a_finding_when_it_cannot_resolve():
+    """🔴 INVARIANT GUARD — the FAIL-OPEN direction, driven in three states.
+
+    Each would be a plausible place to return 6 and each would be wrong: an
+    unresolvable record is not an absent one, and this script never FETCHES, so
+    a missing object is a routine state of a correct ladder. The rc is asserted
+    to be 11 AND asserted not to be 6 — the second half is what sees a mutant
+    that folds the two verdicts together.
+    """
+    block = payload_block(3, PAYLOAD_NONZERO_A, frm="aaaa1111", to="bbbb2222")
+    # (a) the PR's head sha is not known here at all.
+    rc, _out, err = check_record(
+        comments=[block], pr=dict(DEFAULT_PR, headRefOid=None),
+        local_head="f00dcafe",
+    )
+    assert rc == 11 and rc != 6, f"rc={rc}\n{err}"
+    assert "head sha is not known here" in err, err
+    # (b) the recorded tip is not an object in this checkout.
+    rc, _out, err = check_record(comments=[block], missing_objects=("bbbb2222",))
+    assert rc == 11 and rc != 6, f"rc={rc}\n{err}"
+    assert "never FETCHES" in err, err
+    # (c) a REBASE: the tip is not an ancestor of the head. The remedy is named.
+    rc, _out, err = check_record(comments=[block], is_ancestor=False)
+    assert rc == 11 and rc != 6, f"rc={rc}\n{err}"
+    assert "REBASED" in err and "git range-diff" in err, err
+    # (d) NO block on either surface and the REVIEW surface UNREADABLE. An
+    # ABSENT verdict here would be computed off an empty set that is empty only
+    # because the second `gh` call failed — two mechanisms, one observable.
+    rc, _out, err = check_record(
+        comments=[], commits=4,
+        pr=dict(DEFAULT_PR, url="", isCrossRepository=True),
+    )
+    assert rc == 11 and rc != 6, f"rc={rc}\n{err}"
+    assert "indistinguishable from here" in err, err
+    assert "ABSENT" not in err, err
+    assert "STALE" not in err, (
+        "a rebase was reported as a STALE record. The anchor may be perfectly "
+        "current; what is unknown is its rebased twin. " + err
+    )
+
+
+def test_check_record_is_a_single_line_verdict_and_assembles_no_brief():
+    """🔴 INVARIANT GUARD. The mode must not also emit a brief.
+
+    A mode that printed a brief as a side effect would put an audit prompt into
+    whatever consumed this rc, and the invariant-clause check would then run
+    over it. One question, one line.
+    """
+    rc, out, err = check_record(comments=[], commits=4)
+    assert rc == 6
+    for clause in ("NON-NEGOTIABLE", "AUDIT FOR", "THE LEDGER"):
+        assert clause not in out + err, (
+            f"`--check-record` emitted the brief section {clause!r}"
+        )
+    assert len([ln for ln in (out + err).splitlines() if ln.strip()]) == 1, (
+        "`--check-record` printed more than one line:\n" + out + err
+    )
+
+
+def scope_numstat(newer_spec):
+    """A `git log --numstat` answer that DIFFERS between the two rounds' ranges.
+
+    🔴 The two totals must be able to differ, or the comparison is equal by
+    construction and cannot fire. See `make_runner`'s numstat note.
+    """
+    big = f"{SCOPE_BIG_ADDED}\t{SCOPE_BIG_DELETED}\tsrc/push.ts\n"
+    small = f"{SCOPE_SMALL_ADDED}\t{SCOPE_SMALL_DELETED}\tsrc/push.ts\n"
+    return lambda spec: (0, big if spec == newer_spec else small, "")
+
+
+def two_chained_rounds(older=2, newer=3):
+    """Two blocks whose ranges chain end-to-end, as a healthy ladder's do."""
+    return [
+        payload_block(older, PAYLOAD_NONZERO_A, frm="aaaa1111", to="bbbb2222"),
+        payload_block(newer, PAYLOAD_NONZERO_B, frm="bbbb2222", to="cccc3333"),
+    ]
+
+
+def test_a_fix_round_larger_than_the_round_it_audited_is_REPORTED_with_no_rc():
+    """🔴 INVARIANT GUARD. #256's fix round, as a reading on three surfaces.
+
+    Report-only is the claim being pinned as hard as the numbers: a root-cause
+    fix is legitimately larger than the symptom, so a refusal here would be the
+    FALSE STOP the skill rejects outright. rc 0 is asserted beside the text.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "4", "--emit-claims", "--audited", "cccc3333"],
+        comments=two_chained_rounds(),
+        numstat=scope_numstat("bbbb2222..cccc3333"),
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    want = (
+        "🔴 SCOPE EXPANSION — this round's fixes changed "
+        f"{SCOPE_BIG_ADDED + SCOPE_BIG_DELETED} line(s); the round it audited "
+        f"changed {SCOPE_SMALL_ADDED + SCOPE_SMALL_DELETED}."
+    )
+    # THREE SURFACES, ONE SENTENCE: the operator's stderr, the auditor's brief,
+    # and the block that lands on the PR for the NEXT reader.
+    assert want in err, err
+    assert want in out, out
+    assert ad.SCOPE_EXPANSION_HEAD in out, out
+    paste = out.split("Paste this into the PR comment")[1]
+    assert want in paste, (
+        "the scope-expansion note is in the brief but NOT above the block the "
+        "operator pastes, so the next reader of the PR never sees it:\n" + paste
+    )
+
+
+def test_a_fix_round_no_larger_than_what_it_audited_reports_NOTHING():
+    """🔴 INVARIANT GUARD — the SILENT control, and it must stay green.
+
+    A section that fires on an ordinary converging ladder is the
+    permanently-red gate `claude/RULES.md` says trains a reader to skip it.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "4"],
+        comments=two_chained_rounds(),
+        numstat=scope_numstat("aaaa1111..bbbb2222"),
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    assert "SCOPE EXPANSION" not in out + err, out + err
+    assert ad.SCOPE_EXPANSION_HEAD not in out, out
+
+
+def test_scope_expansion_is_NOT_MEASURED_rather_than_a_number_when_a_side_fails():
+    """🔴 INVARIANT GUARD. A failed command is not a zero, and not a comparison.
+
+    The dangerous shape is a 0 on the side that could not be read: it makes
+    every round look like an expansion. So the reading carries a REASON and no
+    number, and the assertion below checks no comparison reaches the output.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "4"],
+        comments=two_chained_rounds(),
+        numstat=(0, "10\t2\tsrc/a.ts\n", "the object store is not writable"),
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    line = [ln for ln in err.splitlines() if "SCOPE EXPANSION" in ln]
+    assert line, "no scope-expansion line at all:\n" + err
+    assert "NOT MEASURED" in line[0], line[0]
+    assert "wrote to STDERR" in line[0], line[0]
+    assert "this round's fixes changed" not in out + err, (
+        "a comparison was printed off a reading that failed:\n" + out + err
+    )
+
+
+def test_round_zero_output_contract_emits_a_block_its_own_parser_reads_back():
+    """🔴 INVARIANT GUARD, and it is a ROUND TRIP rather than a spelling pin.
+
+    The reader of this shape is `parse_round_zero_candidates`. A skeleton that
+    describes the format instead of being it — or that drifts from the parser by
+    one character — leaves round 0's deletion pass with no reader again, silently,
+    which is the state measured on #256.
+    """
+    rc, out, err = run_main(["900", "--round", "0"])
+    assert rc == 0, f"rc={rc}\n{err}"
+    assert f"```{ad.ROUND_ZERO_FENCE}" in out, out
+    ids, fences = ad.parse_round_zero_candidates([out])
+    assert fences == 1, f"fences={fences}\n{out}"
+    assert ids == ("D1", "D2"), (
+        f"the block round 0 is told to post parses back as {ids!r} — this "
+        "script's own parser cannot read the skeleton it printed"
+    )
+    assert "required" in out, (
+        "the OUTPUT section mentions the block without requiring it"
+    )
+
+
+def test_the_round_zero_candidate_parser_stops_at_the_CLOSING_fence():
+    """🔴 INVARIANT GUARD. A `D<n>` line of prose BELOW the block is not a candidate.
+
+    It is the denominator of every "N unrecorded" count, so an over-wide read
+    reports candidates nobody raised and can never be answered — a permanently
+    non-zero unrecorded count, which is the same permanently-red shape.
+    """
+    ids, fences = ad.parse_round_zero_candidates([R0_BLOCK])
+    assert (ids, fences) == (("D1", "D2", "D3"), 1), f"{ids!r} {fences}"
+    assert "D9" not in ids, (
+        "a `D9 —` line of ordinary prose after the closing fence was read as a "
+        "deletion candidate"
+    )
+
+
+def test_the_dispositions_field_is_written_BEFORE_audited_and_reads_back():
+    """🔴 INVARIANT GUARD, and the ORDER is the load-bearing half.
+
+    `_EMITTED_AUDITED` captures everything after `audited=` TO END OF LINE on
+    purpose. A field written AFTER it makes the emit round trip compare
+    `A..B dispositions=…` against a reconstruction of `A..B` and REFUSE every
+    emit — correctly by its own rule and uselessly. So this asserts the order in
+    the printed header AND that the emit was not refused AND that both fields
+    come back through this script's own parser.
+    """
+    spec = "D1=kept:the tokenizer is the unit under test,D2=deleted"
+    rc, out, err = run_main(
+        ["900", "--round", "4", "--emit-claims", "--audited", "cccc3333",
+         "--payload", str(PAYLOAD_NONZERO_C), "--dispositions", spec],
+        comments=two_chained_rounds(),
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    header = [ln for ln in out.splitlines() if ln.startswith("```audit-claims")]
+    assert len(header) == 1, out
+    assert header[0].index("dispositions=") < header[0].index("audited="), (
+        "`dispositions=` was written AFTER `audited=`, which makes the emit "
+        f"round trip refuse every block:\n{header[0]}"
+    )
+    blocks, malformed = ad.parse_claims_blocks([out])
+    assert len(blocks) == 1 and not malformed, f"{blocks} {malformed}"
+    assert blocks[0].dispositions == spec, (
+        f"the field reads back as {blocks[0].dispositions!r}, not {spec!r} — a "
+        "reason carries SPACES, so a one-token reader truncates it"
+    )
+    assert blocks[0].payload == PAYLOAD_NONZERO_C, (
+        "the new field displaced the payload count the gate reads"
+    )
+    got, bad = ad.parse_dispositions(blocks[0].dispositions)
+    assert not bad and set(got) == {"D1", "D2"}, f"{got} {bad}"
+    assert got["D2"].verdict == "deleted" and got["D2"].reason is None
+
+
+def test_an_unanswered_round_zero_candidate_is_NAMED_in_the_delta_brief():
+    """🔴 INVARIANT GUARD. #256's five candidates had no reader; these do.
+
+    The ids are asserted by NAME, not merely the count: "2 unrecorded" tells the
+    auditor a number, and what makes it actionable is which ones.
+    """
+    # 🔴 INSERTED IMMEDIATELY BEFORE ` audited=`, which is where the emitter puts
+    # it and where its reader's boundary is. Put it anywhere else in the header
+    # and the field swallows whatever follows it up to `audited=` — measured
+    # while writing this test, with `payload=113` landing inside the last token.
+    answered = payload_block(
+        3, PAYLOAD_NONZERO_B, frm="bbbb2222", to="cccc3333",
+    ).replace(" audited=", " dispositions=D1=deleted audited=")
+    rc, out, err = run_main(
+        ["900", "--round", "4"],
+        comments=[R0_BLOCK, payload_block(2, PAYLOAD_NONZERO_A), answered],
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    want = "ROUND 0 DISPOSITIONS: 1 recorded, 2 unrecorded (D2, D3)"
+    assert want in out, out
+    assert want in err, err
+    assert "INVERTED" in out, (
+        "the section names the unanswered ids but not the measured failure mode "
+        "— that a candidate can be GROWN rather than merely kept:\n" + out
+    )
+
+
+def test_a_kept_disposition_carrying_no_reason_is_reported_as_deferred():
+    """🔴 INVARIANT GUARD. `kept` is a judgement; an unreasoned one is deferral.
+
+    `deleted` needs no reason — the diff is the reason. `kept` is the verdict
+    that inverted the deletion pass on #256, so it is the one that must carry a
+    why, and the report names the ids rather than only counting them.
+    """
+    answered = payload_block(
+        3, PAYLOAD_NONZERO_B, frm="bbbb2222", to="cccc3333",
+    ).replace(
+        " audited=",
+        " dispositions=D1=kept,D2=kept:load-bearing,D3=deleted audited=",
+    )
+    rc, out, err = run_main(
+        ["900", "--round", "4"],
+        comments=[R0_BLOCK, payload_block(2, PAYLOAD_NONZERO_A), answered],
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    assert "3 recorded, 0 unrecorded" in out, out
+    # 🔴 THE WHOLE ID LIST, TERMINATED. `"… NO reason: D1"` alone is a PREFIX of
+    # `"… NO reason: D1, D3"`, so it passes for a reading that also flags every
+    # `deleted` — measured: that mutant SURVIVED the prefix spelling.
+    assert "kept with NO reason: D1. `kept` is a judgement" in out, out
+    tail = out.split("kept with NO reason:")[1].split("\n")[0]
+    assert "D2" not in tail and "D3" not in tail, (
+        "a disposition that needs no reason — a `kept` that HAS one, or a "
+        "`deleted`, whose reason is the diff — was reported as reasonless: "
+        + tail
+    )
+
+
+def test_a_PR_with_no_round_zero_block_reports_NOTHING_about_dispositions():
+    """🔴 INVARIANT GUARD — the SILENT control, for the same reason as above.
+
+    Most PRs have no round-0 block. A NOT MEASURED line on every one of them is
+    a section every reader learns to skip, and it would also be wrong: a PR that
+    never ran round 0 has no deletion pass to answer.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "4"], comments=two_chained_rounds(),
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    assert "ROUND 0 DISPOSITIONS" not in out + err, out + err
+    # POSITIVE CONTROL: the same reading DOES speak when a fence exists but
+    # carries nothing readable, which is a broken record rather than no record.
+    rz = ad.round_zero_dispositions((), 1, [])
+    assert "NOT MEASURED" in ad.round_zero_dispositions_summary(rz), rz

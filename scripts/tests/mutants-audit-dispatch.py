@@ -144,6 +144,11 @@ SKILL_RELS = (
 # nobody re-ran. Read the CONSTANT, re-derive from a COUNT, and fix the prose to
 # match — never the other way round.
 #
+# 🔴 THE #256 ROUND RAISED IT 187 -> 201, at m = 211 — COUNTED from a green run
+# of the module (`211 passed`) and put through the same formula,
+# `211 - min(50, max(1, 211 // 20))` = 211 - 10 = 201. Not derived by adding
+# this round's fifteen new tests to the last sentence.
+#
 # 🔴 ROUND 16 RAISED IT AGAIN, 116 -> 120, at m = 126 — COUNTED from a green run
 # of the module (`126 passed`), `126 - min(50, max(1, 126 // 20))` = 126 - 6 =
 # 120, not derived by adding this round's four new tests to 116.
@@ -218,7 +223,7 @@ SKILL_RELS = (
 # files that NAME what changed, and that module names the HARNESS rather than
 # the target. Assume a change adding tests to `test_audit_dispatch.py` needs
 # this literal moved, and run that module by hand.
-MIN_TESTS = 187
+MIN_TESTS = 201
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -3056,6 +3061,134 @@ def the_unearned_heading_is_reworded(t):
     )
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE #256 ROUND — `--check-record` (CR), SCOPE EXPANSION (SX), ROUND-0
+# DISPOSITIONS (RZ).
+# --------------------------------------------------------------------------- #
+# Every row below mutates the NARROWEST expression that can be wrong. Two of
+# them exist because the obvious wider mutant proves nothing: dropping the whole
+# `if not blocks:` arm makes `newest_block([])` return None and the next line
+# raise, so the row would die of an `AttributeError` — killed for the wrong
+# reason, with its own assertion unreachable. `CR1` disables the REVIEW branch
+# inside that arm instead, which leaves the code runnable and the verdict wrong.
+def cr_review_surface_branch_removed(t):
+    return _swap(t, "        if review_blocks:\n", "        if False:\n")
+
+
+def cr_a_rebase_is_reported_as_stale(t):
+    """rc 1 from `merge-base --is-ancestor` is git's NOT-an-ancestor answer."""
+    return _swap(t, "    if rc == 1:\n", "    if rc == -1:\n")
+
+
+def cr_the_object_presence_check_is_dropped(t):
+    return _swap(t, "    for sha in (to, head_sha):\n", "    for sha in ():\n")
+
+
+def cr_an_unknown_head_sha_is_not_refused(t):
+    return _swap(
+        t,
+        "    if not head_sha:\n        return unmeasured(\n"
+        '            "the PR\'s head sha is not known here ("\n',
+        "    if False:\n        return unmeasured(\n"
+        '            "the PR\'s head sha is not known here ("\n',
+    )
+
+
+def cr_the_in_sync_test_becomes_plain_equality(t):
+    """`audited=` carries 8 chars and `headRefOid` carries 40."""
+    return _swap(
+        t, "    if same_commit(to, head_sha):\n", "    if to == head_sha:\n"
+    )
+
+
+def cr_a_finding_is_printed_to_stdout(t):
+    return _swap(
+        t,
+        "    print(line, file=out_stream if rc == 0 else err_stream)\n",
+        "    print(line, file=out_stream)\n",
+    )
+
+
+def cr_control_the_unknown_commit_count_branch(t):
+    """🔴 THE CONTROL. No fixture drives an unreadable commit count, so it MUST
+    survive — the fake answers `commits` out of the same payload `gh` does.
+    A red here means the rows above react to the EDIT rather than the semantics.
+    """
+    return _swap(
+        t, "    if commits is None:\n", "    if commits is None and False:\n"
+    )
+
+
+def sx_the_comparison_is_inverted(t):
+    return _swap(t, "    if se.newer <= se.older:\n",
+                 "    if se.newer >= se.older:\n")
+
+
+def sx_an_unmeasurable_side_reads_as_zero(t):
+    return _swap(
+        t,
+        '        return None, f"round {block.round_no}: {got.reason}"\n',
+        "        return 0, None\n",
+    )
+
+
+def sx_the_pasted_block_loses_the_note(t):
+    return _swap(
+        t,
+        '    if scope_line:\n        lines.append("  " + scope_line)\n',
+        '    if False:\n        lines.append("  " + scope_line)\n',
+    )
+
+
+def sx_the_brief_section_is_dropped(t):
+    return _swap(t, "        render_scope_expansion(facts),\n", "")
+
+
+def rz_the_candidate_scan_is_unbounded(t):
+    """Without the closing-fence bound, `D9 —` prose becomes a candidate."""
+    return _swap(
+        t,
+        "            close = _R0_FENCE_CLOSE.search(text, m.end())\n",
+        "            close = None\n",
+    )
+
+
+def rz_dispositions_is_written_after_audited(t):
+    return _swap(
+        t,
+        '        f"```audit-claims round={facts.round_no} payload={payload} "\n'
+        '        f"{dispositions}audited={audited}",\n',
+        '        f"```audit-claims round={facts.round_no} payload={payload} "\n'
+        '        f"audited={audited} {dispositions}",\n',
+    )
+
+
+def rz_reasonless_drops_the_kept_condition(t):
+    """`deleted` needs no reason — the diff is the reason. Only `kept` does."""
+    return _swap(
+        t,
+        '        if seen[c].verdict == "kept" and not seen[c].reason\n',
+        "        if not seen[c].reason\n",
+    )
+
+
+def rz_the_round_zero_block_becomes_a_DESCRIPTION(t):
+    return _swap(
+        t,
+        "            emit_round_zero_skeleton(),\n",
+        '            "    a fenced `audit-round-0` block, one line per '
+        'candidate",\n',
+    )
+
+
+def rz_a_PR_with_no_round_zero_block_is_reported_anyway(t):
+    return _swap(t, "    if not fences:\n", "    if not fences and False:\n")
+
+
+CR_UNMEASURED = "test_check_record_is_UNMEASURED_and_never_a_finding_when_it_cannot_resolve"
+SX_FIRES = "test_a_fix_round_larger_than_the_round_it_audited_is_REPORTED_with_no_rc"
+SX_SILENT = "test_a_fix_round_no_larger_than_what_it_audited_reports_NOTHING"
+
 # (label, expected killer set, mutation)
 ROWS = [
     ("D1  delete clause read-only",
@@ -4577,6 +4710,65 @@ ROWS = [
     ("U14 `*` becomes a comment prefix",
      {"test_the_classifier_reads_a_changed_line_the_way_git_wrote_it"},
      an_asterisk_becomes_a_comment_prefix),
+    # 🔴 THE #256 ROUND. See the block above ROWS for why each mutation is the
+    # narrowest expression rather than the whole branch.
+    ("CR1 the REVIEW-comment branch removed",
+     {"test_check_record_names_a_REVIEW_comment_block_as_invisible_not_absent"},
+     cr_review_surface_branch_removed),
+    ("CR2 a REBASE is reported as a stale record",
+     {CR_UNMEASURED}, cr_a_rebase_is_reported_as_stale),
+    ("CR3 the object-presence check dropped",
+     {CR_UNMEASURED}, cr_the_object_presence_check_is_dropped),
+    ("CR4 an unknown head sha is not refused",
+     {CR_UNMEASURED}, cr_an_unknown_head_sha_is_not_refused),
+    ("CR5 in-sync becomes plain `==`",
+     {"test_check_record_says_in_sync_when_the_newest_block_records_the_head"},
+     cr_the_in_sync_test_becomes_plain_equality),
+    # 🔴 FOUR KILLERS, MEASURED — this row does NOT isolate to the ABSENT test,
+    # and the first draft's one-name pin reported EXTRA-KILLER. Every rc-6 and
+    # rc-11 test reads the verdict off STDERR, so sending all of them to stdout
+    # empties `err` for all four. Recorded rather than narrowed: the true set is
+    # the evidence, and a pin that names one of four reads as isolation it does
+    # not have.
+    ("CR6 a finding is printed to stdout",
+     {"test_check_record_reports_an_ABSENT_record_and_names_the_commit_count",
+      "test_check_record_names_a_REVIEW_comment_block_as_invisible_not_absent",
+      "test_check_record_reports_a_STALE_record_with_how_far_ahead_the_head_is",
+      CR_UNMEASURED},
+     cr_a_finding_is_printed_to_stdout),
+    ("CR7 (control) the unknown commit-count branch",
+     SURVIVES, cr_control_the_unknown_commit_count_branch),
+    ("SX1 the size comparison inverted",
+     {SX_FIRES, SX_SILENT}, sx_the_comparison_is_inverted),
+    ("SX2 an unmeasurable side reads as 0",
+     {"test_scope_expansion_is_NOT_MEASURED_rather_than_a_number_when_a_side_fails"},
+     sx_an_unmeasurable_side_reads_as_zero),
+    ("SX3 the PASTED block loses the note",
+     {SX_FIRES}, sx_the_pasted_block_loses_the_note),
+    ("SX4 the brief section dropped",
+     {SX_FIRES}, sx_the_brief_section_is_dropped),
+    # 🔴 THREE KILLERS, MEASURED, and the extra two are the point of the bound:
+    # `R0_BLOCK`'s trailing `D9 —` line of prose becomes a FOURTH candidate, so
+    # both disposition briefs report an unrecorded id nobody raised. That is the
+    # inflated denominator the bound exists to prevent, observed rather than
+    # asserted.
+    ("RZ1 the candidate scan is unbounded",
+     {"test_the_round_zero_candidate_parser_stops_at_the_CLOSING_fence",
+      "test_an_unanswered_round_zero_candidate_is_NAMED_in_the_delta_brief",
+      "test_a_kept_disposition_carrying_no_reason_is_reported_as_deferred"},
+     rz_the_candidate_scan_is_unbounded),
+    ("RZ2 `dispositions=` written AFTER `audited=`",
+     {"test_the_dispositions_field_is_written_BEFORE_audited_and_reads_back"},
+     rz_dispositions_is_written_after_audited),
+    ("RZ3 reasonless drops the `kept` condition",
+     {"test_a_kept_disposition_carrying_no_reason_is_reported_as_deferred"},
+     rz_reasonless_drops_the_kept_condition),
+    ("RZ4 round 0's block becomes a DESCRIPTION",
+     {"test_round_zero_output_contract_emits_a_block_its_own_parser_reads_back"},
+     rz_the_round_zero_block_becomes_a_DESCRIPTION),
+    ("RZ5 a PR with no round-0 block is reported anyway",
+     {"test_a_PR_with_no_round_zero_block_reports_NOTHING_about_dispositions"},
+     rz_a_PR_with_no_round_zero_block_is_reported_anyway),
 ]
 
 

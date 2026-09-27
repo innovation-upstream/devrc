@@ -797,12 +797,20 @@ _HEADER_PAYLOAD_PRESENT = re.compile(r"\bpayload=(\S*)")
 # reword away from two spellings only one of which any guard recognises.
 PAYLOAD_PLACEHOLDER = "<count>"
 
+# 🔴 READ TO THE START OF `audited=`, NOT AS ONE TOKEN: a disposition carries a
+# REASON and a reason has spaces, so `\S+` here would truncate every one of them
+# to its first word. The emitter writes this field immediately before `audited=`
+# (see `emit_claims_skeleton`'s FIFTH-FIELD note), which is what makes that
+# field's own name a usable boundary.
+_HEADER_DISPOSITIONS = re.compile(r"\bdispositions=(.*?)(?=\s+audited=|$)")
+
 # `payload` defaults to None so every existing four-argument construction — in
 # this module and in the test suites — keeps meaning "no payload field", which
-# is exactly what a legacy block carries.
+# is exactly what a legacy block carries. `dispositions` is appended last for
+# the same reason, and None means "this block records no round-0 disposition".
 ClaimsBlock = namedtuple(
-    "ClaimsBlock", "round_no audited_from audited_to items payload",
-    defaults=(None,),
+    "ClaimsBlock", "round_no audited_from audited_to items payload dispositions",
+    defaults=(None, None),
 )
 
 
@@ -965,7 +973,11 @@ def parse_claims_blocks(texts):
                     "backticks."
                 )
 
-            blocks.append(ClaimsBlock(int(r.group(1)), frm, to, items, payload))
+            d = _HEADER_DISPOSITIONS.search(header)
+            blocks.append(ClaimsBlock(
+                int(r.group(1)), frm, to, items, payload,
+                d.group(1).strip() if d else None,
+            ))
             i = close_at + 1
     return blocks, malformed
 
@@ -1096,6 +1108,69 @@ def round_one_anchor(blocks):
     # first rather than to whichever sha sorts lower.
     candidates.sort(key=lambda c: c[0])
     return candidates[0][1] if candidates else None
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND 0'S DELETION CANDIDATES — a verdict with NO READER until now.
+# --------------------------------------------------------------------------- #
+# MEASURED on `ZacxDev/naida-ai` #256: round 0 produced FIVE deletion candidates,
+# ZERO were deleted and TWO were GROWN — its #1 candidate went 67 -> 167 lines,
+# the file 626 -> 1040 — and nothing recorded that the deletion pass had been
+# INVERTED, because round 0's verdict is prose no later round reads. So round 0
+# emits a machine-readable block too and a later round's `dispositions=` field
+# answers it. A REPORT and no rc: the disposition is a human judgement, and a
+# refusal over it is a stop the operator cannot act on.
+ROUND_ZERO_FENCE = "audit-round-0"
+_R0_FENCE_OPEN = re.compile(r"^`{3,}" + ROUND_ZERO_FENCE + r"[^\n]*$", re.M)
+# `D<n>` then an em-dash or a hyphen — tolerant on the separator a human retypes,
+# strict on the id, which is what a disposition names. The verdict vocabulary is
+# CLOSED for `payload_from_header`'s reason: an unrecognised word is reported
+# unreadable, never counted, because scoring it is the flattering answer.
+_R0_ITEM = re.compile(r"^\s*(D\d+)\s*(?:—|-{1,2})\s*\S", re.M)
+_R0_FENCE_CLOSE = re.compile(r"^`{3,}\s*$", re.M)
+_DISPOSITION = re.compile(r"^(D\d+)=(kept|deleted)(?::(.*))?$")
+
+Disposition = namedtuple("Disposition", "cid verdict reason")
+
+
+def parse_round_zero_candidates(texts):
+    """-> (candidate ids, how many `audit-round-0` fences were seen).
+
+    BOTH halves, because "a fence carrying no readable `D<n>`" and "no fence at
+    all" are different facts: a malformed block to fix, versus a PR that never
+    ran round 0.
+    """
+    ids, fences = [], 0
+    for text in texts:
+        text = text or ""
+        for m in _R0_FENCE_OPEN.finditer(text):
+            fences += 1
+            # BOUNDED AT THE CLOSING FENCE: scanning on would read a `D1 — …`
+            # line of ordinary prose as a candidate, inflating the denominator
+            # every unrecorded count is reported against.
+            close = _R0_FENCE_CLOSE.search(text, m.end())
+            body = text[m.end():close.start() if close else len(text)]
+            for im in _R0_ITEM.finditer(body):
+                if im.group(1) not in ids:
+                    ids.append(im.group(1))
+    return tuple(ids), fences
+
+
+def parse_dispositions(raw):
+    """-> ({cid: Disposition}, [unreadable tokens]) over one `dispositions=` value."""
+    out, bad = {}, []
+    for tok in (raw or "").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        m = _DISPOSITION.match(tok)
+        if not m:
+            bad.append(tok)
+            continue
+        out[m.group(1)] = Disposition(
+            m.group(1), m.group(2), (m.group(3) or "").strip() or None
+        )
+    return out, bad
 
 
 # --------------------------------------------------------------------------- #
@@ -1542,6 +1617,166 @@ def unearned_ledger_summary(un):
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 SCOPE EXPANSION — the FIX ROUND that is bigger than what it audited.
+# --------------------------------------------------------------------------- #
+# MEASURED on `ZacxDev/naida-ai` #256: the fix round changed MORE PAYLOAD than the
+# commit it audited — `push.ts` +212/−24 against the original fix's +91/−33 —
+# because it answered round 0's *questioned requirement* ("a transport error is
+# fatal, unretried") by BUILDING A RETRY SUBSYSTEM. Every round was individually
+# reasonable and the ladder grew the thing it was reviewing.
+#
+# 🔴 A REPORT, AND IT SETS NO RC — the unearned ledger's three reasons, unchanged:
+# the expensive direction is the FALSE STOP, a bigger fix round is sometimes
+# right, and the auditor is the reader who can tell which this is.
+ScopeExpansion = namedtuple(
+    "ScopeExpansion", "newer_round older_round newer older reason"
+)
+
+SCOPE_EXPANSION_HEAD = (
+    "## 🔴 THIS ROUND'S FIXES ARE LARGER THAN THE ROUND THEY AUDITED"
+)
+
+
+def _round_range_total(block, churn):
+    """-> (total changed lines, reason). One block's own `<from>..<to>` churn.
+
+    THE RANGE IS THE BLOCK'S OWN — that round's fix range, not the next round's
+    delta. `measure_rounds_executable_churn` states the semantics once.
+    """
+    if not (block.audited_from and block.audited_to):
+        return None, (
+            f"round {block.round_no}'s block records no two-sha range, so that "
+            "round's own churn cannot be identified"
+        )
+    if same_commit(block.audited_from, block.audited_to):
+        return None, (
+            f"round {block.round_no} records a SELF-RANGE "
+            f"`{block.audited_from}..{block.audited_to}` — it spans nothing, so "
+            "a 0 off it would be structural and not measured"
+        )
+    got = (churn or {}).get(block.round_no)
+    if got is None:
+        return None, f"round {block.round_no}'s range was never measured here"
+    if got.reason is not None:
+        return None, f"round {block.round_no}: {got.reason}"
+    return got.added + got.deleted, None
+
+
+def scope_expansion(blocks, churn):
+    """-> `ScopeExpansion`, or None when there is no PAIR of blocks to compare.
+
+    `churn` is `{round_no: RangeChurn}` from the ledger's OWN numstat reading,
+    measured by the caller so this stays pure and drivable with no git.
+    """
+    by_round = {b.round_no: b for b in blocks}
+    if len(by_round) < 2:
+        return None
+    newer = by_round[max(by_round)]
+    older = by_round[max(r for r in by_round if r != newer.round_no)]
+    a, why_a = _round_range_total(newer, churn)
+    b, why_b = _round_range_total(older, churn)
+    return ScopeExpansion(
+        newer.round_no, older.round_no, a, b, why_a or why_b,
+    )
+
+
+def scope_expansion_summary(se):
+    """-> the ONE sentence all three surfaces print, or "" when nothing to say.
+
+    One rule, one place: stderr, the brief section and the pasted block print
+    THIS string, never a second spelling of the comparison.
+    """
+    if se is None:
+        return ""
+    if se.reason is not None:
+        return f"SCOPE EXPANSION: NOT MEASURED ({se.reason})"
+    if se.newer <= se.older:
+        return ""
+    return (
+        f"🔴 SCOPE EXPANSION — this round's fixes changed {se.newer} line(s); "
+        f"the round it audited changed {se.older}. The fix is larger than the "
+        "thing it reviewed."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND 0'S DISPOSITIONS — whether the deletion pass was ANSWERED.
+# --------------------------------------------------------------------------- #
+RoundZeroDispositions = namedtuple(
+    "RoundZeroDispositions",
+    "candidates recorded unrecorded reasonless unreadable reason",
+)
+
+
+def round_zero_dispositions(candidates, fences, blocks):
+    """-> `RoundZeroDispositions`, or None when this PR ran no round 0.
+
+    None and not a NOT MEASURED line for the no-fence case, deliberately: such a
+    PR has no deletion pass to answer, and a section firing on every one of them
+    is the permanently-red gate `claude/RULES.md` names. A fence that IS there
+    and carries nothing readable is a broken record, and gets the reason.
+    """
+    if not fences:
+        return None
+    if not candidates:
+        return RoundZeroDispositions((), (), (), (), (), (
+            f"{fences} `{ROUND_ZERO_FENCE}` block(s) were found and NOT ONE "
+            "carries a readable `D<n> — <what>` line, so there is no candidate "
+            "set to answer"
+        ))
+    seen, bad = {}, []
+    for b in blocks:
+        got, unreadable = parse_dispositions(b.dispositions)
+        seen.update(got)
+        bad += unreadable
+    recorded = tuple(c for c in candidates if c in seen)
+    unrecorded = tuple(c for c in candidates if c not in seen)
+    reasonless = tuple(
+        c for c in recorded
+        if seen[c].verdict == "kept" and not seen[c].reason
+    )
+    # 🔴 AN UNREADABLE TOKEN GOES BESIDE THE COUNT, NEVER INSTEAD OF IT AND NEVER
+    # SILENTLY: collapsing to NOT MEASURED discards the ids that ARE answered,
+    # and dropping the token counts a candidate as unanswered when somebody
+    # answered it and mistyped. Only a reading with NOTHING readable is a
+    # NOT MEASURED.
+    return RoundZeroDispositions(
+        tuple(candidates), recorded, unrecorded, reasonless, tuple(sorted(bad)),
+        (
+            f"{len(bad)} `dispositions=` token(s) this script cannot read "
+            "and none it can: " + ", ".join(sorted(bad))
+        ) if bad and not recorded else None,
+    )
+
+
+def round_zero_dispositions_summary(rz):
+    """-> the ONE line all surfaces print, or "" when this PR ran no round 0."""
+    if rz is None:
+        return ""
+    if rz.reason is not None:
+        return f"ROUND 0 DISPOSITIONS: NOT MEASURED ({rz.reason})"
+    line = (
+        f"ROUND 0 DISPOSITIONS: {len(rz.recorded)} recorded, "
+        f"{len(rz.unrecorded)} unrecorded"
+        + (f" ({', '.join(rz.unrecorded)})" if rz.unrecorded else "")
+    )
+    if rz.reasonless:
+        line += (
+            " — kept with NO reason: " + ", ".join(rz.reasonless)
+            + ". `kept` is a judgement and an unreasoned one is not recorded, "
+            "it is deferred."
+        )
+    if rz.unreadable:
+        line += (
+            " ⚠ UNREADABLE `dispositions=` token(s): "
+            + ", ".join(rz.unreadable)
+            + " — an id answered in a spelling nothing reads is counted "
+            "UNRECORDED above."
+        )
+    return line
+
+
+# --------------------------------------------------------------------------- #
 # 🔴 THE ATTRIBUTION GATE — the skill's stop condition, as a BRANCH.
 # --------------------------------------------------------------------------- #
 # `claude/skills/audit-pr/SKILL.md`: "Two consecutive rounds whose fixes changed
@@ -1749,7 +1984,7 @@ Facts = namedtuple(
     "worktree branch dirty prev_sha emit_from claims claims_round checklist "
     "ledger assembled_at claims_source head_check base_assumed "
     "base_assumed_reason repo_unknown_reason round_zero payload gate_override "
-    "unearned",
+    "unearned scope dispositions dispositions_arg",
     # `round_zero` is appended LAST and defaulted so the two existing
     # constructions — one here, one in the suite — keep working unchanged. It is
     # None for every round except 0, and None AT round 0 means the skill was
@@ -1765,7 +2000,17 @@ Facts = namedtuple(
     # `render_unearned_ledger` treats exactly like "nothing unearned": SILENT.
     # Printing a section off a reading nobody made would be the reassuring zero
     # this module refuses everywhere else.
-    defaults=(None, None, None, None),
+    #
+    # `scope` (a `ScopeExpansion`) and `dispositions` (a
+    # `RoundZeroDispositions`) are appended last for the same reason and carry
+    # the same meaning for None: this run never computed one, so the section is
+    # SILENT rather than printing a verdict off a reading nobody made.
+    # `dispositions_arg` is the RAW `--dispositions` value this run would WRITE,
+    # kept separate from the READING for `prev_sha`/`emit_from`'s reason: one is
+    # what this round records, the other is what the ladder already recorded,
+    # and collapsing two anchors into one field is the defect this module has
+    # already fixed once.
+    defaults=(None, None, None, None, None, None, None),
 )
 # 🔴 `repo_unknown_reason` — ROUND 13'S NINTH INSTANCE, AND THE THIRD IN THIS
 # EXACT FAMILY. `no_sha_reason` was `headRefOid`, `base_assumed_reason` was
@@ -2271,6 +2516,124 @@ def measure_ledger(runner, repo_dir, prev_sha, base, head_check=None):
     return LedgerReport(
         churn.files, churn.added, churn.deleted, churn.commits,
         churn.churn_commits, None, None, None
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 `--check-record` — DOES THE LADDER'S DELTA ANCHOR EXIST AT ALL?
+# --------------------------------------------------------------------------- #
+# MEASURED on `ZacxDev/naida-ai` #256, which ran round 0 + round 1 + a fix round
+# and merged: `gh api repos/…/issues/256/comments` returns ONE comment carrying
+# ZERO `audit-claims` blocks and `.../pulls/256/comments` returns none either. So
+# there was no `payload=` field, no ledger line, the two-consecutive-zero gate was
+# STRUCTURALLY unable to fire, and `--round 2` would have hit the "no
+# audit-claims block in any of the N comment(s) read" refusal. The ladder ended
+# because the operator merged it, not because any mechanism fired.
+#
+# This mode asks the one question that HAS an answer in that state: is the newest
+# recorded `audited_to` the PR's CURRENT head? Every unresolvable state is COULD
+# NOT MEASURE with its reason and never rc 6 — a false ABSENT on a healthy ladder
+# is the expensive direction here.
+LADDER_RECORD_RC = 6
+LADDER_RECORD_UNMEASURED_RC = 11
+LADDER_RECORD_UNMEASURED = "LADDER RECORD: COULD NOT MEASURE"
+
+
+def ladder_record(runner, repo_dir, blocks, review_blocks, head_sha, commits,
+                  no_sha_reason=None, review_reason=None):
+    """-> (rc, one line). rc 0 in sync, 6 a finding, 11 could not measure.
+
+    🔴 `review_reason` IS WHY THE REVIEW SURFACE COULD NOT BE READ. Without it an
+    ABSENT verdict would be reported off an empty set that might only be empty
+    because the second `gh` call failed — `claude/RULES.md`'s "an EMPTY RESULT
+    cannot distinguish two mechanisms".
+    """
+    def unmeasured(why):
+        return LADDER_RECORD_UNMEASURED_RC, f"{LADDER_RECORD_UNMEASURED} — {why}"
+
+    if not head_sha:
+        return unmeasured(
+            "the PR's head sha is not known here ("
+            + (no_sha_reason or "no caller said why") + "), so there is nothing "
+            "to compare the newest block's `audited_to` against"
+        )
+    if commits is None:
+        return unmeasured(
+            "this run could not read how many commits the PR carries, and "
+            "ABSENT is only a finding on a PR that HAS a commit to anchor on"
+        )
+    if commits == 0:
+        return unmeasured(
+            "the PR reports 0 commits, so there is no head for a record to "
+            "anchor on and an absent record is the correct state"
+        )
+    if not blocks:
+        if review_blocks:
+            return LADDER_RECORD_RC, (
+                "LADDER RECORD: block found as a REVIEW comment — invisible to "
+                "the delta anchor; repost it as an ISSUE comment"
+            )
+        if review_reason:
+            return unmeasured(
+                "no `audit-claims` block is on the ISSUE comments, and the "
+                f"REVIEW surface could not be read ({review_reason}) — so "
+                "'absent' and 'posted where nothing reads it' are "
+                "indistinguishable from here"
+            )
+        return LADDER_RECORD_RC, (
+            f"LADDER RECORD ABSENT: {commits} commit(s) on this PR, 0 "
+            "audit-claims block(s) — the delta anchor does not exist"
+        )
+    newest = newest_block(blocks)
+    to = newest.audited_to
+    if not to:
+        return unmeasured(
+            f"the newest block (round {newest.round_no}) carries no `<to>` sha, "
+            "so it records no head this run can compare"
+        )
+    for sha in (to, head_sha):
+        rc, _, err = runner(
+            ["git", "-C", repo_dir, "cat-file", "-e", f"{sha}^{{commit}}"]
+        )
+        if rc != 0:
+            detail = err.strip() or f"rc {rc}"
+            return unmeasured(
+                f"`{sha}` is not an object in {repo_dir} ({detail}). This "
+                "script never FETCHES, so the assembly checkout can "
+                "legitimately lack a commit that is fine on the PR — re-run "
+                "where the objects are present"
+            )
+    if same_commit(to, head_sha):
+        return 0, f"LADDER RECORD: in sync at {to}"
+    rc, _, err = runner(
+        ["git", "-C", repo_dir, "merge-base", "--is-ancestor", to, head_sha]
+    )
+    if rc == 1:
+        return unmeasured(
+            f"`{to}` is NOT an ancestor of the PR's head `{head_sha}` — the "
+            "branch was REBASED, so the recorded anchor has a rebased twin and "
+            "this comparison cannot say whether the record is stale. Carry the "
+            "anchor across with `git range-diff <old-base>..<old-tip> "
+            "<new-base>..<new-tip>`, confirm every commit maps `=`, and record "
+            "the mapping on the PR"
+        )
+    if rc != 0:
+        return unmeasured(
+            f"`git merge-base --is-ancestor {to} {head_sha}` exited {rc}: "
+            f"{err.strip() or 'no output'}"
+        )
+    rc, out, err = runner(
+        ["git", "-C", repo_dir, "rev-list", "--count", f"{to}..{head_sha}"]
+    )
+    if rc != 0 or not out.strip().isdigit():
+        return unmeasured(
+            f"`git rev-list --count {to}..{head_sha}` exited {rc} and printed "
+            f"{out.strip()!r}: {err.strip() or 'no stderr'}"
+        )
+    return LADDER_RECORD_RC, (
+        f"LADDER RECORD STALE: newest block records to={to}, head is "
+        f"{head_sha} ({out.strip()} commit(s) ahead) — the fix round(s) after "
+        f"{to} left no record"
     )
 
 
@@ -4785,7 +5148,40 @@ def render_checklist(facts):
     return "\n".join(lines)
 
 
+def emit_round_zero_skeleton():
+    """A correctly-formed `audit-round-0` block — EMITTED, never described.
+
+    `emit_claims_skeleton`'s reason: the reader of this shape is
+    `parse_round_zero_candidates` and a hand-typed near-miss parses as nothing.
+    One line per DELETION CANDIDATE, the half of round 0 that had no reader.
+    """
+    return "\n".join([
+        f"```{ROUND_ZERO_FENCE}",
+        "D1 — <one DELETION CANDIDATE: what could go, in one line>",
+        "D2 — <one line, same rule>",
+        "```",
+    ])
+
+
 def render_output_contract(facts):
+    if facts.round_no == 0:
+        return "\n".join([
+            "## OUTPUT",
+            "",
+            "The round-0 verdict and the ledger line from the section above. "
+            "Then, **required**, this block — one numbered line per deletion "
+            "candidate, pasted into the PR comment verbatim:",
+            "",
+            emit_round_zero_skeleton(),
+            "",
+            "🔴 **It is the only part of round 0 anything later READS.** A later "
+            "round records what became of each candidate with `--emit-claims "
+            "--dispositions \"D1=kept:<why>,D2=deleted\"`, and the brief for "
+            "that round prints which ids are still unanswered. Prose here is "
+            "for the human; this block is for the ladder. Deleting nothing is a "
+            "legitimate answer — an EMPTY candidate list is not, unless you say "
+            "what you examined to get there.",
+        ])
     return "\n".join([
         "## OUTPUT",
         "",
@@ -4911,6 +5307,56 @@ def render_unearned_ledger(facts):
     return "\n".join(lines)
 
 
+def render_scope_expansion(facts):
+    """The scope-expansion report IN THE BRIEF — "" when there is nothing to say.
+
+    🔴 THREE SURFACES, ONE SENTENCE, for `render_unearned_ledger`'s reason:
+    stderr is the operator's, this is the auditor's, and the note above the
+    emitted block is what lands on the PR for the NEXT reader.
+    """
+    line = scope_expansion_summary(facts.scope)
+    if not line:
+        return ""
+    return "\n".join([
+        SCOPE_EXPANSION_HEAD,
+        "",
+        line,
+        "",
+        "Both numbers are total changed lines over each block's OWN "
+        "`audited=<from>..<to>` range, with the ledger's flags "
+        "(`--remerge-diff`, `--not <base>`). 🔴 **This is not a verdict and it "
+        "ends nothing** — a root-cause fix is legitimately larger than the "
+        "symptom that prompted it. It IS one when the round answered a "
+        "QUESTIONED REQUIREMENT by BUILDING something: on `ZacxDev/naida-ai` "
+        "#256 round 0 asked whether an unretried transport error was the right "
+        "requirement and the fix round shipped a retry subsystem. **Say in your "
+        "report which of the two this round is.**",
+    ])
+
+
+def render_round_zero_dispositions(facts):
+    """Round 0's candidates, and whether this ladder ANSWERED them.
+
+    🔴 BESIDE THE LEDGER BECAUSE THAT IS WHERE THE PAYLOAD NUMBERS ARE. On
+    `ZacxDev/naida-ai` #256 five candidates were raised, zero deleted and TWO
+    GROWN, and no round after it was ever handed the list.
+    """
+    line = round_zero_dispositions_summary(facts.dispositions)
+    if not line:
+        return ""
+    return "\n".join([
+        "## ROUND 0'S DELETION PASS — was it answered?",
+        "",
+        line,
+        "",
+        "🔴 **An unrecorded candidate is not one that was rejected — it is one "
+        "nobody answered**, and the measured failure is worse than silence: a "
+        "candidate can be INVERTED, i.e. the thing round 0 proposed deleting is "
+        "the thing a later round GREW. If any id above names code this round's "
+        "range touches, say whether it shrank, held or grew.",
+    ])
+
+
 def render_brief(facts):
     if facts.round_no == 0:
         kind = "ROUND 0 — REQUIREMENTS & DELETION pass (NOT a correctness audit)"
@@ -4943,6 +5389,12 @@ def render_brief(facts):
         # says which of the ladder's recorded numbers are not numbers. Put it
         # later and the reader has already formed a view.
         render_unearned_ledger(facts),
+        # 🔴 BESIDE THE LEDGER FOR THE SECTION ABOVE'S REASON: THE LEDGER hands
+        # the auditor this round's churn, and these two say what that churn is
+        # larger than and which of round 0's candidates it was to answer. Later
+        # in the document and the reader has already formed a view.
+        render_scope_expansion(facts),
+        render_round_zero_dispositions(facts),
         render_gate_override(facts),
         # 🔴 THE PROSE DETERMINATION IS NOT HERE, AND ITS ABSENCE IS THE FIX.
         # It shipped here in this PR's first draft and round-0 finding F2 caught
@@ -5052,10 +5504,25 @@ def emit_claims_skeleton(facts, head_sha):
     if facts.unearned is not None and facts.unearned.self_ranges:
         lines.append("  🔴 UNEARNED LEDGER — " + unearned_ledger_summary(
             facts.unearned))
+    # 🔴 THE SCOPE-EXPANSION NOTE, on the artefact that lands on the PR — the
+    # third surface `render_scope_expansion` names, OUTSIDE the fence for the
+    # legend's mechanical reason: a non-numbered line INSIDE the body is folded
+    # into the claim above it by `_items_from_body`.
+    scope_line = scope_expansion_summary(facts.scope)
+    if scope_line:
+        lines.append("  " + scope_line)
+    # 🔴 `dispositions=` GOES BEFORE `audited=`, NEVER AFTER — the FIFTH-FIELD
+    # note above states the mechanism: `_EMITTED_AUDITED` captures to END OF LINE
+    # on purpose, so a field after `audited=` makes the round trip compare two
+    # different quantities and REFUSE every emit.
+    dispositions = (
+        f"dispositions={facts.dispositions_arg} "
+        if facts.dispositions_arg else ""
+    )
     lines += [
         "",
         f"```audit-claims round={facts.round_no} payload={payload} "
-        f"audited={audited}",
+        f"{dispositions}audited={audited}",
         "1. <one line per thing this round's fixes CLAIM to have addressed — "
         "WHAT was claimed, never WHY it is correct>",
         "2. <one line, same rule>",
@@ -5430,6 +5897,23 @@ def build_parser():
     ap.add_argument("--check", metavar="FILE",
                     help="check an EXISTING brief file for missing invariant "
                          "clauses and exit; consults no PR and no git")
+    # 🔴 THE MODE THAT ASKS WHETHER THE LADDER LEFT A RECORD AT ALL. See
+    # `ladder_record`: on `ZacxDev/naida-ai` #256 three rounds ran and ZERO
+    # blocks were ever posted, so every mechanism in this script was
+    # structurally unable to fire and nothing said so.
+    ap.add_argument("--check-record", action="store_true",
+                    help="compare the newest `audit-claims` block's "
+                         "`audited_to` against the PR's CURRENT head and exit. "
+                         "Reads BOTH comment surfaces (issue AND review), "
+                         "assembles no brief. rc 0 in sync, 6 absent or stale, "
+                         "11 could not measure.")
+    ap.add_argument("--dispositions", metavar="SPEC",
+                    help="what became of round 0's deletion candidates — "
+                         "`D1=kept:<why>,D2=deleted`. Written into the "
+                         "`--emit-claims` block as `dispositions=`, where a "
+                         "later round's brief reads it back and names the ids "
+                         "still unanswered. A `kept` with no reason is reported "
+                         "as one.")
     ap.add_argument("--emit-claims", action="store_true",
                     help="also print an audit-claims block skeleton to paste "
                          "into this round's PR comment")
@@ -5512,6 +5996,66 @@ def check_brief_file(path, out_stream, err_stream):
     return 0
 
 
+def _gh_json(runner, cmd):
+    """-> (parsed, reason). A failed or unparseable `gh` read is NEVER a zero."""
+    rc, out, err = runner(cmd)
+    if rc != 0:
+        return None, f"`{' '.join(cmd[:4])}` exited {rc}: " + (
+            (err or out).strip() or "no output")
+    try:
+        return json.loads(out), None
+    except ValueError as e:
+        return None, f"`{' '.join(cmd[:4])}` returned unparseable JSON: {e}"
+
+
+def check_record_mode(args, runner, cwd, out_stream, err_stream):
+    """`--check-record` — print one line and exit. Assembles no brief.
+
+    🔴 IT READS BOTH COMMENT SURFACES: `gh pr view --json comments` returns ISSUE
+    comments only, so a block posted as a REVIEW is invisible to every other
+    reader here. "Absent" and "somewhere nothing reads" need different fixes, so
+    they are different lines.
+    """
+    repo_dir, _ = gather_repo_facts(runner, cwd)
+    data, comment_texts = gh_pr_facts(runner, args.pr, args.repo)
+    if data.get("_error"):
+        print(f"🔴 `gh pr view {args.pr}` failed: {data['_error']}",
+              file=err_stream)
+        return 3
+    slug = pr_slug(data, args.repo)
+    cmd = ["gh", "pr", "view", str(args.pr), "--json", "commits"]
+    if args.repo:
+        cmd += ["--repo", args.repo]
+    commits_data, why = _gh_json(runner, cmd)
+    commits = None
+    if why is None and isinstance(commits_data.get("commits"), list):
+        commits = len(commits_data["commits"])
+    review_texts, review_reason = [], (
+        None if slug else
+        "this run never learned which repository the PR lives in, so the "
+        "review-comment endpoint has no path"
+    )
+    if slug:
+        got, review_reason = _gh_json(
+            runner, ["gh", "api", f"repos/{slug}/pulls/{args.pr}/comments"]
+        )
+        review_texts = [
+            c.get("body") or "" for c in (got or []) if isinstance(c, dict)
+        ]
+    blocks, _ = parse_claims_blocks(comment_texts)
+    review_blocks, _ = parse_claims_blocks(review_texts)
+    rc, line = ladder_record(
+        runner, repo_dir, blocks, review_blocks,
+        (data.get("headRefOid") or ""), commits,
+        no_sha_reason=(
+            "`gh pr view` was consulted and reported no `headRefOid` for this PR"
+        ),
+        review_reason=review_reason,
+    )
+    print(line, file=out_stream if rc == 0 else err_stream)
+    return rc
+
+
 def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
          checklist_reader=None, round_zero_reader=None):
     # `checklist_reader` is injected by the test suite so no test depends on
@@ -5533,6 +6077,11 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         return check_brief_file(args.check, out_stream, err_stream)
     if args.pr is None:
         parser.error("the PR number is required (or use --check FILE)")
+    # 🔴 BEFORE THE ROUND VALIDATION BELOW, because this mode consults no round:
+    # it asks whether a record EXISTS, which is the question that has an answer
+    # when every other one is structurally unanswerable.
+    if args.check_record:
+        return check_record_mode(args, runner, cwd, out_stream, err_stream)
 
     # 🔴 A NEGATIVE ROUND USED TO ASSEMBLE A ROUND-1 BRIEF IN SILENCE. Every
     # gate in this module is spelled `>= 2` or `< 2`, so `--round -1` fell
@@ -5722,6 +6271,15 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             "--emit-claims prints, which this run does not pass. The flag "
             "changed NOTHING — no round's payload count was recorded, and the "
             "attribution gate reads that field.",
+            file=err_stream,
+        )
+
+    if args.dispositions and not args.emit_claims:
+        print(
+            "⚠ --dispositions is only ever written into the block "
+            "--emit-claims prints, which this run does not pass. The flag "
+            "changed NOTHING — round 0's deletion candidates are still "
+            "unanswered as far as the next round can tell.",
             file=err_stream,
         )
 
@@ -6117,6 +6675,41 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         )
         if args.round_no >= 2 and gate_rounds else {}
     )
+    # 🔴 THE SCOPE-EXPANSION READING, over the SAME two blocks the gate reads and
+    # through the ledger's own `measure_range_churn` — not a second way to count.
+    # Scoped to a delta round for `measure_rounds_executable_churn`'s reason: a
+    # ladder can carry a dozen blocks and this consults exactly two.
+    scope = None
+    # 🔴 THE TWO NEWEST ROUNDS *PRESENT*, not `gate_rounds`. The gate's pair is
+    # `{newest, newest-1}` whether or not round newest-1 posted a block, and
+    # measuring a set the comparison does not read would report NOT MEASURED on
+    # every ladder with a missing intermediate block — a state the skill
+    # documents as ordinary.
+    scope_rounds = sorted({b.round_no for b in blocks})[-2:]
+    if args.round_no >= 2 and len(scope_rounds) == 2:
+        range_churn = {
+            b.round_no: measure_range_churn(
+                runner, repo_dir, b.audited_from, b.audited_to, base_for_range
+            )
+            for b in blocks
+            if b.round_no in scope_rounds and b.audited_from and b.audited_to
+            and not same_commit(b.audited_from, b.audited_to)
+        }
+        scope = scope_expansion(blocks, range_churn)
+        scope_line = scope_expansion_summary(scope)
+        if scope_line:
+            print("⚠ " + scope_line, file=err_stream)
+
+    # 🔴 ROUND 0'S DISPOSITIONS, read from the SAME comment texts. Silent on a PR
+    # that never posted a round-0 block — see `round_zero_dispositions`.
+    dispositions = None
+    if args.round_no >= 2:
+        candidates, fences = parse_round_zero_candidates(comment_texts)
+        dispositions = round_zero_dispositions(candidates, fences, blocks)
+        rz_line = round_zero_dispositions_summary(dispositions)
+        if rz_line:
+            print("⚠ " + rz_line, file=err_stream)
+
     stop = attribution_stop(blocks, args.round_no, exec_churn)
     if stop.fires and brief_refused is None and not args.gate_override:
         print("\n".join([
@@ -6307,6 +6900,9 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         # forced it to re-derive them from `blocks` — a second copy of the
         # predicate, at the one site that has to be right.
         unearned=unearned,
+        scope=scope,
+        dispositions=dispositions,
+        dispositions_arg=args.dispositions,
     )
 
     # 🔴 THE REFUSAL'S SCOPE IS THE BRIEF, AND ONLY THE BRIEF. A refused run
