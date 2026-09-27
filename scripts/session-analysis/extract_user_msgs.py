@@ -280,7 +280,7 @@ def records_of(path, session_id=None, include_answers=False):
     # ⚠ THIS COMMENT HAS NOW BEEN WRONG TWICE, IN OPPOSITE WAYS, AND THE SECOND
     # TIME IT ASSERTED THE FIX IT DID NOT MAKE — which is worse, because the next
     # reader trying to make this stream would have believed it done.
-    #   * `697387c6` materialised UNCONDITIONALLY and said "the default path
+    #   * `90f5aa74` materialised UNCONDITIONALLY and said "the default path
     #     still streams nothing extra into memory beyond the list above":
     #     self-contradictory, the list WAS the whole file.
     #   * `9b61b26d` moved that list into an `else` branch, wrote "🔴 THE DEFAULT
@@ -289,10 +289,17 @@ def records_of(path, session_id=None, include_answers=False):
     #     2 of the devrc#1887 ladder measured the default path unmoved and caught
     #     the sentence.
     #
-    # 🔴 AND THE PERFORMANCE NUMBER WAS MIS-ATTRIBUTED. The measurement — 984
+    # 🔴 AND THE PERFORMANCE NUMBER WAS MIS-ATTRIBUTED — TWICE, THE SECOND TIME BY
+    # THE COMMENT CORRECTING THE FIRST. `84d91b19` re-attributed it to `697387c6`,
+    # which STREAMS: measured per commit, `62b516a4` streams, `697387c6` streams,
+    # `90f5aa74` materialises and carries the self-contradictory sentence,
+    # `9b61b26d` materialises in an `else`. So that correction named a comparison
+    # between two identical implementations. Round 3 found it. Do not re-derive the
+    # pair from memory — the shas above were each read with `git show`.
+    # The measurement — 984
     # transcripts / 2.79 GB, `--jsonl -o`, 4 interleaved runs at load ~9:
     # 10.0-11.3 s / 222 MB against 17.3-26.3 s / 256 MB — is REAL, but it
-    # compares `62b516a4` (this generator, streaming) against `697387c6` (the
+    # compares `62b516a4` (this generator, streaming) against `90f5aa74` (the
     # unconditional materialise). It was never a base-vs-`9b61b26d` reading, and
     # quoting it beside that commit implied a regression had been removed when it
     # had only been moved. The 1.6-2.4x is what THIS revision removes.
@@ -300,11 +307,18 @@ def records_of(path, session_id=None, include_answers=False):
         if include_answers:
             parsed = list(_parse(f))
             ids = answer_ids(parsed)
-            source: object = parsed
+            source = parsed
         else:
             ids = set()
             source = _parse(f)          # a GENERATOR — nothing is materialised
-        for obj in source:  # type: ignore[union-attr]
+        # ⚠ NO `# type: ignore` HERE. An earlier revision carried
+        # `source: object` plus `# type: ignore[union-attr]`; measured with
+        # pyright, the diagnostics are IDENTICAL with and without it (it narrows
+        # `source` by assignment, so there was no `union-attr` to silence) and the
+        # annotation WIDENED the declared type, which is the opposite of the
+        # point. A `# type: ignore[CODE]` is a claim that a specific diagnostic
+        # exists; that one did not. Round 3 measured it.
+        for obj in source:
             if obj.get("type") != "user" or obj.get("isMeta"):
                 continue
             # sidechain == a subagent's own transcript, not user-typed
@@ -735,12 +749,20 @@ def main(argv=None):
         # generator, so its `open()` runs on the first `next()`, not at the
         # call. Consuming it here puts every read inside one handler, and makes
         # `opened` true of files that were read and held nothing, which is
-        # exactly the population exit 6 is about. ⚠ This comment used to add
-        # "an OSError from a MID-FILE read escapes at a different point from
-        # one at open"; that stopped being true when `records_of` began reading
-        # the file to completion before its first yield, so both now surface at
-        # the same `next()`. The conclusion is unaffected — round 1 of the
-        # devrc#1887 ladder caught the sentence, not a defect.
+        # exactly the population exit 6 is about.
+        #
+        # ⚠ WHERE AN OSError SURFACES DEPENDS ON THE FLAG, AND THIS SENTENCE HAS
+        # BEEN WRONG TWICE. On the DEFAULT path `records_of` streams, so a
+        # mid-file read error surfaces at a LATER `next()` than one at open; with
+        # `--include-answers` the file is read to completion first, so both
+        # surface at the first. Either way the arm holds, because `list(...)` is
+        # inside this `try` — that is the only claim this comment needs.
+        #   * `9b61b26d` wrote "both now surface at the same `next()`", true only
+        #     while it materialised unconditionally.
+        #   * `84d91b19` restored streaming on the default path and left that
+        #     sentence standing, re-falsifying it. Round 3 found it.
+        # A maintainer restructuring this `try` on the strength of the old
+        # sentence would have been reasoning from an invalidated claim.
         try:
             recs = list(records_of(path, session_id=sid,
                                   include_answers=a.include_answers))

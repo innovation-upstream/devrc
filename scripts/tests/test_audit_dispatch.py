@@ -13545,9 +13545,16 @@ def test_a_rc0_run_carrying_a_COVERAGE_NOTE_yields_UNKNOWN_and_the_directive():
             {"kind": "typed", "text": "the one ask that WAS read",
              "session_id": sid}), note
 
+    # 🔴 `comments: []` IS LOAD-BEARING. Without it the PR-comment source emits
+    # its OWN UNKNOWN and pulls the directive in regardless, so the
+    # `UNATTRIBUTED-UNKNOWN` assertion below passes even with the wiring deleted —
+    # it would read as covering a defect it could not see. Round 3 observed that
+    # in a mutant run. With an empty list that source is measured, not unknown, so
+    # the session note is the ONLY thing that can produce the directive.
     block = ad._read_operator_asks(runner, {
         "commits": [{"messageHeadline": "x", "messageBody":
                      f"Claude-Session-Id: {sid}\nClaude-Session-Id: {missing}"}],
+        "comments": [],
     })
     assert "> the one ask that WAS read" in block
     assert "UNKNOWN — 1 of 2 selected session(s)" in block, (

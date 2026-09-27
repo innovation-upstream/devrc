@@ -78,11 +78,23 @@ MUTANTS = (
     ),
     (
         "M02",
-        "an id holding a glob metacharacter matches OTHER sessions' transcripts, "
-        "so their asks are attributed to this PR",
+        "an id holding a glob metacharacter reaches `find_transcript`, which globs "
+        "it UNESCAPED, so another session's transcript is attributed to this PR",
         "test_a_glob_metacharacter_in_an_id_cannot_widen_the_transcript_match",
-        'root.glob(f"*/{_glob.escape(sid)}.jsonl")',
-        'root.glob(f"*/{sid}.jsonl")',
+        "        if any(c in sid for c in _GLOB_METACHARACTERS):",
+        "        if False:",
+    ),
+    (
+        "M25",
+        "this module globs for transcripts itself again instead of delegating, so "
+        "the corpus-member filter stops applying and a `subagents/` transcript "
+        "resolves — and the jsonl-glob-site ledger goes red, which is what left "
+        "the PR head RED for three rounds. ⚠ The mutant globs `**/`, NOT `*/`: an "
+        "excluded transcript is three levels down, so a one-level glob cannot "
+        "reach it and the row would SURVIVE while testing nothing.",
+        "test_transcript_paths_EXCLUDES_a_subagent_transcript_at_its_REAL_depth",
+        "        found = transcript_search.find_transcript(sid, root=projects_root)",
+        "        found = next(iter(sorted((Path(projects_root) if projects_root else Path.home() / '.claude' / 'projects').glob(f'**/{sid}.jsonl'))), None)",
     ),
     (
         "M03",

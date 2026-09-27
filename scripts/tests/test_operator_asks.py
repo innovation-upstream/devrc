@@ -562,7 +562,29 @@ def test_a_glob_metacharacter_in_an_id_cannot_widen_the_transcript_match(tmp_pat
     (proj / f"{SID_A}.jsonl").write_text("{}\n")
     (proj / f"{SID_B}.jsonl").write_text("{}\n")
     assert oa.transcript_paths(["*"], projects_root=tmp_path) == []
+    assert oa.transcript_paths(["a[bc]d"], projects_root=tmp_path) == []
     assert len(oa.transcript_paths([SID_A], projects_root=tmp_path)) == 1
+
+
+def test_transcript_paths_EXCLUDES_a_subagent_transcript_at_its_REAL_depth(tmp_path):
+    """Delegation means `is_corpus_member` applies — and that filter became
+    load-bearing HERE only when this function started delegating.
+
+    🔴 THE FIXTURE DEPTH IS THE POINT. An excluded transcript lives at
+    `<project>/<session-id>/subagents/<id>.jsonl` — THREE levels down. The old
+    private glob was `*/`, one level, so it could never reach one: measured, 965
+    matches on this host and **0** in an excluded directory. A first version of
+    this test put the fixture one level down and therefore passed against a
+    re-introduced private glob too — it guarded nothing. `find_transcript` globs
+    `**/`, so delegating WIDENS the search to this depth, which is exactly why the
+    filter now has to be asserted."""
+    deep = tmp_path / "-home-zach-workspace-devrc" / SID_A / "subagents"
+    deep.mkdir(parents=True)
+    (deep / f"{SID_B}.jsonl").write_text("{}\n")
+    assert oa.transcript_paths([SID_B], projects_root=tmp_path) == [], (
+        "a subagents/ transcript resolved — either this module is globbing "
+        "again, or the corpus-member filter stopped being applied"
+    )
 
 
 if __name__ == "__main__":
@@ -747,6 +769,14 @@ def test_the_dedup_note_wording_is_pinned_to_the_extractor():
     """🔴 TWO-WAY, because this is the module's one WORDING dependency — the
     prefix is otherwise the contract. If the extractor rewords the dedup note,
     this fails LOUDLY rather than silently reverting to a false UNKNOWN."""
+    # 🔴 NON-EMPTY FIRST. `for marker in ()` executes ZERO assertions, so
+    # emptying the tuple made this "TWO-WAY" pin pass vacuously while the hazard
+    # it names went uncovered — the behaviour was caught only by its sibling.
+    # Round 3 measured both directions and found this one open.
+    assert oa.NOT_A_GAP_MARKERS, (
+        "NOT_A_GAP_MARKERS is empty, so every `!` note counts as a gap again and "
+        "this pin asserts nothing"
+    )
     src = (SCRIPTS / "session-analysis" / "extract_user_msgs.py").read_text()
     for marker in oa.NOT_A_GAP_MARKERS:
         assert marker in src, (

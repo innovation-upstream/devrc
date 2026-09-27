@@ -87,7 +87,6 @@ dropped. PR COMMENTS stay — measured 115 across the 120 newest devrc PRs.
 
 from __future__ import annotations
 
-import glob as _glob
 import json
 import shlex
 from dataclasses import dataclass
@@ -96,9 +95,13 @@ from typing import Iterable, Sequence
 
 import handoff_arc
 import session_trailer
+import transcript_search
 
 SOURCE_SESSION = "session transcript"
 SOURCE_PR_COMMENT = "PR comment"
+
+#: Rejected before an id reaches `find_transcript`, which globs it unescaped.
+_GLOB_METACHARACTERS = "*?[]"
 
 #: Most- to least-authoritative. A session transcript is what the operator typed
 #: while the work happened; a PR comment is still his words but written after.
@@ -429,7 +432,9 @@ _COVERAGE_NOTE_PREFIX = "!"
 #:
 #: ⚠ THIS IS A WORDING DEPENDENCY, WHICH THE PREFIX RULE OTHERWISE AVOIDS — so it
 #: is pinned TWO-WAY against the extractor's own source by
-#: `test_the_dedup_note_wording_is_pinned_to_the_extractor`. If that tool rewords
+#: `test_the_dedup_note_wording_is_pinned_to_the_extractor` — which asserts the
+#: tuple is NON-EMPTY first, because `for marker in ()` executes zero assertions
+#: and would pass vacuously. If that tool rewords
 #: the note the test fails LOUDLY rather than this silently reverting to a false
 #: UNKNOWN. And the fail-safe direction is preserved: an `!` line this does not
 #: recognise is treated as a GAP, so a reword over-reports rather than hiding one.
@@ -439,8 +444,13 @@ NOT_A_GAP_MARKERS = ("they are not empty",)
 def coverage_notes(stderr: str) -> list[str]:
     """The extractor's rc-0 partial-coverage notes, as reasons for `Unmeasured`.
 
-    Reads the `!`-prefixed lines that tool emits rather than matching their
-    wording: the sentences are its to change, the prefix is the contract. An
+    Reads the `!`-prefixed lines that tool emits. The prefix is the contract and
+    the sentences are that tool's to change — with ONE exception, which this
+    function does depend on the wording of: `NOT_A_GAP_MARKERS` excludes the dedup
+    note, and its comment explains why and how it is pinned. ⚠ This docstring used
+    to say "rather than matching their wording" flatly, four lines above a body
+    that matches wording — so a reader editing the extractor's note and checking
+    only here would conclude they were safe. An
     empty result means it reported full coverage — which is a READING, not an
     assumption, because a rc-0 run with no notes read everything it selected.
     """
@@ -468,25 +478,45 @@ def extractor_reason(rc: int, stderr: str = "") -> str:
 def transcript_paths(ids: Sequence[str], projects_root=None) -> list[str]:
     """Every on-disk transcript for these session ids, for the agent-side route.
 
-    Globbed rather than constructed: a session's project directory is derived
-    from its cwd and this module has no business re-deriving that mangling.
+    🔴 DELEGATES TO `transcript_search.find_transcript` — THE CANONICAL BY-ID
+    LOOKUP — AND MUST NOT GLOB ITSELF. An earlier revision globbed
+    `*/<id>.jsonl` here, which failed
+    `test_the_jsonl_glob_site_ledger_is_pinned_two_way`: that ledger pins every
+    `*.jsonl` walk in the tree two-way, so a private one is a failure by
+    construction. **The PR head was RED from its first commit** with CI saying so
+    on every push, and three rounds missed it because `test_transcript_search.py`
+    never contains the string `operator_asks` — no name-based selection can reach
+    it (`claude/RULES.md`'s isolation-seam class, again).
 
-    🔴 TWO SEPARATE GUARDS, covering different characters.
-    `session_trailer.valid_id` is the WRITER'S OWN safety predicate — it rejects
-    every C0 control, which is what could reach a terminal raw — and it is
-    called, never re-spelled. It does NOT reject glob metacharacters, which are
-    not controls, so `glob.escape` covers the second hazard: an id holding `*` or
-    `[` would otherwise match transcripts belonging to OTHER sessions and the
-    brief would attribute their asks to this PR. Neither inspects the id's
-    SHAPE — a `ses_…` token from another runtime is legitimate and opaque.
+    ⚠ AND THE FIRST JUSTIFICATION WRITTEN HERE FOR DELEGATING WAS FALSE. Round 3
+    argued the private glob "could resolve a `subagents/` or `wf_` transcript that
+    `find_transcript` reports as absent". MEASURED: an excluded transcript lives at
+    `<project>/<session-id>/subagents/<id>.jsonl`, three levels down, and the old
+    pattern was `*/` — one level. It matched 965 files on this host, **0** of them
+    in an excluded directory, so that divergence was unreachable. Delegation is
+    right for the ledger and for one-rule-one-place; it was never a live
+    corpus-membership bug. 🔴 Note the direction of the change: `find_transcript`
+    globs `**/`, so delegating WIDENS the search to depths the old code could not
+    see — and is safe only because `is_corpus_member` filters them. That filter is
+    now load-bearing here, which it was not before.
+
+    🔴 THE GLOB-METACHARACTER GUARD STAYS, AND IS NOW A PRECONDITION ON THE
+    CALLEE. `find_transcript` globs the id UNESCAPED, so an id holding `*` or `[`
+    would match another session's transcript there just as it did here.
+    `session_trailer.valid_id` does not reject those — they are not control
+    characters — so they are rejected explicitly before delegating. Neither guard
+    inspects the id's SHAPE: a `ses_…` token from another runtime is legitimate
+    and opaque.
     """
-    root = Path(projects_root) if projects_root else Path.home() / ".claude" / "projects"
     out: list[str] = []
     for sid in ids:
         if not session_trailer.valid_id(sid):
             continue
-        for p in sorted(root.glob(f"*/{_glob.escape(sid)}.jsonl")):
-            out.append(str(p))
+        if any(c in sid for c in _GLOB_METACHARACTERS):
+            continue
+        found = transcript_search.find_transcript(sid, root=projects_root)
+        if found:
+            out.append(str(found))
     return out
 
 
