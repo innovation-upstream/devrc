@@ -198,11 +198,25 @@ credited with draining. **Re-take the baseline at cpu 2 before grading a retry.*
 
 `SKILL.md` gotcha 11 is the operating rule; this is the reasoning it withholds.
 
-**Measured 2026-09-26.** A handoff recorded four `devrc` gates as held on
-`NO CAPACITY: <gate> — the gate never started`. By the time that note was next read they had
-run, and **one had gone red on real code** — a genuine failure that had been there all along,
-invisible behind a gate that never executed. Reading the stale note instead of the timeline
-cost a wrong initial diagnosis. That is the whole case for re-checking rather than assuming.
+**Measured 2026-09-21** (`79e0b655`, `d5f8ea99`). ONE devrc gate was held on
+`NO CAPACITY: <leg> — the gate never started (queued past its deadline)`, posting it on **all
+four of its legs** — `devrc-{pytests,nodetests,gotests,cairn-client-runs}`, each naming its own
+leg in `.description`. 🔴 **Four legs of one gate, NOT four gates** — an earlier draft of this
+paragraph said "four `devrc` gates" and that was a 4x overstatement of scope; devrc posts four
+contexts per gate, so the number four here carries no information about how many PRs were
+affected. By the time the note recording it was next read the gate had run. Reading the stale
+note instead of the timeline cost a wrong initial diagnosis, and THAT is the whole case for
+re-checking rather than assuming — the count is not part of the argument.
+
+⚠ **An earlier draft also claimed "one had gone red on real code"; that is UNCORROBORATED** —
+no handoff in this repo records it. It may have been observed live; treat it as unverified
+rather than as the measured half.
+
+🔴 **And this occurrence does NOT license the capacity reading**: its own record measured the
+nodes at **8-37% CPU** at the time and concluded *"this is NOT congestion — it matches
+#1787"*, adding that *"one occurrence is not a trend and does not overturn"* the 2026-09-10
+measurement. `CLAUDE.md`'s "capacity is not the constraint" therefore STANDS; a draft of this
+arc retracted it on this evidence and the retraction was withdrawn.
 
 🔴 **What the incident does NOT establish is WHY the gate later ran, and the temptation to say
 "capacity returned" is the trap.** Watching the queue drain and the same commit go green is

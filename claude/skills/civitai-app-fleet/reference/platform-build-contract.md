@@ -41,11 +41,17 @@ The npm branch's was never in doubt.
 🔴 **THE CONSEQUENCE THAT GETS MIS-ATTRIBUTED: `ERR_PNPM_IGNORED_BUILDS` IS A CI
 GATE, NOT A PLATFORM ONE.** Because the platform passes `--ignore-scripts`, it
 can never raise that error — GitHub Actions, which passes no such flag, is what
-raises it. ⚠ **Measured on pnpm 10.28.1 and 11.8.0 only**, with `strictDepBuilds` on: a
-postinstall dep errors without `--ignore-scripts` and exits 0 with it. The builder is
-reported elsewhere to run **pnpm 12.6.0**, which is NOT measured here and for which no
-source is cited — so treat the flag's effect as established for 10/11 and unconfirmed
-for the builder's actual version. So a fix for it that goes green is evidence about **CI**, and a claim
+raises it. ⚠ **Measured here on pnpm 10.28.1 and 11.8.0**, with `strictDepBuilds` on: a
+postinstall dep errors without `--ignore-scripts` and exits 0 with it.
+
+🔴 **THE MAJOR ASYMMETRY IS THE OPERATIVE FACT, AND IT IS WHY A LOCAL GREEN PROVES
+NOTHING HERE: pnpm 12 makes an ignored build script a HARD ERROR where pnpm 10 prints
+the identical fact as a WARNING and exits 0** — no `strictDepBuilds` needed on 12.
+Sourced, not inferred: `civitai-app-oauth-probe`'s tracked `.github/workflows/ci.yml`
+header records that the platform build runs **pnpm 12.6.0**, and `8175b31` records the
+error-vs-warning split as CI-measured on that major. 🔴 **pnpm 12 ships a NATIVE binary
+NixOS CANNOT EXECUTE, so this is not a to-do — it is permanently unmeasurable on this
+host.** Do not re-open it as "unverified"; the sources above are the evidence you get. So a fix for it that goes green is evidence about **CI**, and a claim
 that `allowBuilds` was "confirmed against the real platform build" is wrong.
 🔴 **No build can discriminate the two** where `allowBuilds` and
 `minimumReleaseAgeExclude` landed in the same commit, which is how the wrong
