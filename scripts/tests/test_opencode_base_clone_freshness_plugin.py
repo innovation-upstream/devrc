@@ -169,7 +169,7 @@ def test_hook_does_not_throw_on_null_input():
 #    because NO spawn means the sentinel must never even be attempted.
 # --------------------------------------------------------------------------- #
 
-def test_base_clone_no_refresh_1_skips_spawning(tmp_path, monkeypatch):
+def test_base_clone_no_refresh_1_skips_spawning(tmp_path):
     """When BASE_CLONE_NO_REFRESH=1, the hook must not spawn the script — even
     with a valid sessionID. We detect this by placing a sentinel script at the
     deployed path that would WRITE a marker file if spawned; the marker must
@@ -202,6 +202,15 @@ def test_base_clone_no_refresh_not_set_spawns():
     assert ".unref()" in src, (
         "plugin must call .unref() on the child — it is fire-and-forget")
     assert 'BASE_CLONE_NO_REFRESH' in src
+    # 🔴 Async spawn failures surface as an 'error' EVENT, which the hook's
+    # try/catch cannot catch; with no listener Node raises it as an uncaught
+    # exception and the whole opencode process dies in the bash pre-spawn
+    # path. The no-op listener is the fix — pin it so it cannot be removed
+    # as "dead code".
+    assert 'child.on("error"' in src, (
+        "the spawn child MUST have an 'error' listener — without one, a "
+        "spawn failure (ENOENT bash) is an uncaught exception that crashes "
+        "opencode's bash tool")
 
 
 def test_spawn_passes_the_session_cwd_to_the_child(tmp_path):

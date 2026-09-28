@@ -85,6 +85,14 @@ export const BaseCloneFreshnessPlugin = async () => ({
         stdio: "ignore",
         timeout: 60000,
       });
+      // 🔴 Spawn failures (ENOENT bash, broken PATH) arrive ASYNC as an
+      // 'error' event on the child — the try/catch above is structurally
+      // unable to catch them, and an 'error' event with NO listener is an
+      // uncaught exception that would crash the whole opencode process,
+      // here in the bash tool's pre-spawn critical path. The no-op listener
+      // IS the fix; a best-effort refresh must never be able to take the
+      // bash tool down.
+      child.on("error", () => {});
       child.unref();
     } catch {
       // best-effort — never break the bash tool
