@@ -1443,10 +1443,17 @@ def measure_executable_churn(runner, repo_dir, frm, to, base):
         "git", "-C", repo_dir, "log", "--format=", "--remerge-diff", "-p",
         "--no-color", f"{frm}..{to}", "--not", base,
     ])
+    # 🔴 `command_failed=True` below — the range itself could not be read, which
+    # on this corpus means an endpoint naming no object in THIS checkout. Still
+    # fails open, and now says so: see `unverified_payload`.
+    #
+    # 🔴 THE COMMENT IS ABOVE THE `if`, NOT INSIDE IT, AND THAT IS LOAD-BEARING.
+    # `scripts/tests/mutants-audit-dispatch.py`'s row `U11` targets these three
+    # lines as one contiguous literal; a comment between them makes the target
+    # ABSENT, and the battery then reports `MUTATION DID NOT APPLY` — measured,
+    # on this very edit. That is the right direction (a refusal, not a green),
+    # and it still means the row measured nothing.
     if rc != 0:
-        # 🔴 `command_failed=True` — the range itself could not be read, which
-        # on this corpus means an endpoint naming no object in THIS checkout.
-        # Still fails open, and now says so: see `unverified_payload`.
         return _unmeasured(
             f"`git log -p --remerge-diff {frm}..{to} --not {base}` exited "
             f"{rc}: {(err or out).strip() or 'no output'}",

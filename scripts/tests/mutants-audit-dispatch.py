@@ -2817,11 +2817,21 @@ def the_self_range_refusal_covers_the_WHOLE_corpus(t):
     3 of 159 corpus rounds carry a self-range and both measured instances are
     the FINAL block of a closed ladder, so a run whose HISTORY contains one
     would be refused for a record nothing consults.
+
+    🔴 RE-TARGETED ONTO `gate_pair`, AND ITS BLAST RADIUS GREW WITH THE TARGET.
+    That predicate used to live inside `gate_relevant_self_ranges`; it is now
+    the single owner of "which blocks can reach the gate's arithmetic", read by
+    the self-range refusal, the malformed-endpoint refusal and the
+    unverified-payload report. So this mutation widens all three at once and the
+    killer set below is larger than the row's name suggests — which is the
+    consolidation making the shared predicate's reach AUDIBLE, not the row
+    losing its meaning. The battery reported the old literal as
+    `MUTATION DID NOT APPLY`, which is how this was found.
     """
     return _swap(
         t,
-        '    pair = [b for b in (by_round.get(newest.round_no - 1), newest) if b]\n',
-        '    pair = list(by_round.values())\n',
+        '    return [b for b in (by_round.get(newest.round_no - 1), newest) if b]\n',
+        '    return list(by_round.values())\n',
     )
 
 
@@ -4642,7 +4652,11 @@ ROWS = [
       "test_a_prose_only_round_is_UNMEASURED_so_gate_3_keeps_its_population",
       "test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field",
       "test_a_measured_NON_zero_never_overrules_a_STATED_zero",
-      "test_a_SELF_RANGE_in_a_block_the_gate_reads_is_an_INPUT_refusal"},
+      "test_a_SELF_RANGE_in_a_block_the_gate_reads_is_an_INPUT_refusal",
+      # 🔴 ROUND 26's verdict-is-untouched guard. It asserts the gate still
+      # returns 5 on two MEASURED zeros, which is the literal inverse of this
+      # mutation, so it is a correct killer and not drift. MEASURED.
+      "test_the_gate_still_FIRES_when_both_rounds_measure_zero_and_resolve"},
      gate_never_fires),
     # 🔴 THE UNEARNED-LEDGER ROWS. See the UL-series banner above the mutation
     # functions for why each targets the narrowest expression rather than the
@@ -4679,8 +4693,17 @@ ROWS = [
     ("UV3 the PASTED block drops the could-not-measure note",
      {"test_the_block_the_operator_PASTES_carries_the_could_not_measure_note"},
      the_pasted_block_drops_the_unverified_note),
+    # 🔴 THE SECOND KILLER WAS NOT PREDICTED AND IS THE BETTER EVIDENCE OF THE
+    # TWO. `…FAILS_OPEN_on_a_block_that_carries_no_payload_field` drives a
+    # corpus whose gate-read rounds are UNMEASURED for a reason that is not a
+    # failed command, and asserts the run is quiet — so it sees this mutation
+    # from a completely different fixture than the silence control does. Two
+    # independent corpora, one predicted and one not: `claude/RULES.md` says a
+    # green sweep is only a claim about the mutations you IMAGINED, and the
+    # corollary is that an unimagined KILLER is a widening worth recording.
     ("UV4 the report fires on EVERY unmeasured cause",
-     {"test_a_ladder_whose_ranges_all_RESOLVE_reports_NOTHING_anywhere"},
+     {"test_a_ladder_whose_ranges_all_RESOLVE_reports_NOTHING_anywhere",
+      "test_the_gate_FAILS_OPEN_on_a_block_that_carries_no_payload_field"},
      the_report_is_keyed_to_every_unmeasured_cause),
     ("UV5 the malformed refusal reads the whole ladder",
      {"test_a_MALFORMED_endpoint_the_gate_does_NOT_read_is_not_refused"},
@@ -4705,8 +4728,15 @@ ROWS = [
      {"test_an_UNRESOLVABLE_range_endpoint_says_COULD_NOT_MEASURE_on_stderr",
       "test_an_UNRESOLVABLE_range_endpoint_reports_it_IN_THE_BRIEF"},
      the_numerator_becomes_the_denominator),
+    # 🔴 `…prescribes_actually_runs` ALSO FIRES, AND IT IS THE STRONGER HALF.
+    # That guard reads the refusal's own rc out of the case table and RUNS the
+    # remedy it prints; the rc is part of the case precisely because the input
+    # refusals and the gate's verdict are different numbers. So the class guard
+    # catches this without anyone adding a row — which is what its docstring
+    # claims, measured here rather than asserted. Not predicted.
     ("UV11 the INPUT refusal returns the gate's verdict",
-     {"test_a_STRUCTURALLY_MALFORMED_endpoint_is_an_INPUT_refusal"},
+     {"test_a_STRUCTURALLY_MALFORMED_endpoint_is_an_INPUT_refusal",
+      "test_every_command_a_refusal_prescribes_actually_runs"},
      the_input_refusal_speaks_the_gates_verdict),
     ("G2  ONE zero round ends the ladder (`and` -> `or`)",
      {"test_the_gate_needs_two_CONSECUTIVE_zero_rounds_and_nothing_less"},
@@ -4773,11 +4803,18 @@ ROWS = [
     # DOES fire, so any mutant that stops the measured reading working fails
     # them too. That is the controls doing their job, and the rows still
     # isolate what they name — each set is about the measured reading.
+    # 🔴 THE THREE ROWS BELOW EACH GAINED ROUND 26's VERDICT-IS-UNTOUCHED GUARD.
+    # It drives the comment-only corpus and asserts rc 5 WITH `both MEASURED` in
+    # the refusal, so any mutation that stops a measured zero reaching the gate
+    # — U1, U3 — or measures the wrong range — U4 — kills it. Correct killers,
+    # MEASURED, and the reason that guard is worth its row: it pins the gate's
+    # verdict against a change whose whole subject is the REPORTING beside it.
     ("U1  a measured zero never overrules a stated count",
      {"test_two_rounds_that_changed_only_COMMENTS_arm_the_gate",
       "test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field",
       "test_a_prose_only_round_is_UNMEASURED_so_gate_3_keeps_its_population",
-      "test_a_round_that_changed_an_EXECUTABLE_line_still_reads_non_zero"},
+      "test_a_round_that_changed_an_EXECUTABLE_line_still_reads_non_zero",
+      "test_the_gate_still_FIRES_when_both_rounds_measure_zero_and_resolve"},
      the_measured_zero_never_overrules_a_stated_count),
     ("U2  the measurement overrules in BOTH directions",
      {"test_a_measured_NON_zero_never_overrules_a_STATED_zero",
@@ -4787,14 +4824,26 @@ ROWS = [
     ("U3  a measured zero only fills in an ABSENT field",
      {"test_two_rounds_that_changed_only_COMMENTS_arm_the_gate",
       "test_a_prose_only_round_is_UNMEASURED_so_gate_3_keeps_its_population",
-      "test_a_round_that_changed_an_EXECUTABLE_line_still_reads_non_zero"},
+      "test_a_round_that_changed_an_EXECUTABLE_line_still_reads_non_zero",
+      "test_the_gate_still_FIRES_when_both_rounds_measure_zero_and_resolve"},
      the_measured_zero_only_fills_in_an_absent_field),
+    # 🔴 U4 ALSO KILLS FOUR OF ROUND 26's ROWS, AND THAT IS THE POINT OF THE
+    # ROUND. Measuring the DELTA range instead of the block's own range changes
+    # WHICH range is handed to git — so the endpoint that could not be resolved
+    # is no longer the one asked about, and the whole could-not-measure report
+    # moves. A report keyed to a measurement is only as scoped as the
+    # measurement. MEASURED, not predicted.
     ("U4  the reading is taken over the DELTA range",
      {"test_the_measured_range_is_the_blocks_OWN_from_to_and_not_the_delta",
       "test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field",
       "test_a_prose_only_round_is_UNMEASURED_so_gate_3_keeps_its_population",
       "test_a_round_that_changed_an_EXECUTABLE_line_still_reads_non_zero",
-      "test_two_rounds_that_changed_only_COMMENTS_arm_the_gate"},
+      "test_two_rounds_that_changed_only_COMMENTS_arm_the_gate",
+      "test_an_UNRESOLVABLE_range_endpoint_reports_it_IN_THE_BRIEF",
+      "test_an_UNRESOLVABLE_range_endpoint_says_COULD_NOT_MEASURE_on_stderr",
+      "test_the_block_the_operator_PASTES_carries_the_could_not_measure_note",
+      "test_the_gate_still_FIRES_when_both_rounds_measure_zero_and_resolve",
+      "test_the_unverified_payload_strings_are_the_scripts_own"},
      the_reading_is_taken_over_the_DELTA_range),
     ("U5  a measured zero needs a `payload=` field to exist",
      {"test_a_measured_zero_arms_the_gate_for_a_block_with_NO_payload_field"},
@@ -4816,12 +4865,24 @@ ROWS = [
     # this check fires — so disabling the check is exactly the state in which
     # that argument would be false, and it must go red there. The other two are
     # the #687-shape rows, which assert rc 4 for the same reason.
+    # 🔴 ROUND 26 ADDED FIVE MORE, AND THEY ARE NOT NOISE — THEY ARE THE SHAPE
+    # OF THE CONSOLIDATION. This mutation now welds `gate_pair` shut, and that
+    # predicate is the single owner of "which blocks can reach the gate's
+    # arithmetic": the self-range refusal, the malformed-endpoint refusal and
+    # the unverified-payload report all read it. So a mutant that used to
+    # disable one refusal disables three surfaces, and every round-26 test whose
+    # corpus reaches the pair goes red. MEASURED, not predicted.
     ("U8  a self-range in the gate's own pair is accepted",
      {"test_a_SELF_RANGE_in_a_block_the_gate_reads_is_an_INPUT_refusal",
       "test_a_ladder_whose_EVERY_block_is_a_self_range_says_so_on_stderr",
       "test_an_ALL_self_range_ladder_is_ALREADY_refused_by_the_shipped_pair_check",
       "test_the_block_the_operator_PASTES_carries_the_unearned_ledger_note",
-      "test_every_command_a_refusal_prescribes_actually_runs"},
+      "test_every_command_a_refusal_prescribes_actually_runs",
+      "test_a_STRUCTURALLY_MALFORMED_endpoint_is_an_INPUT_refusal",
+      "test_an_UNRESOLVABLE_range_endpoint_reports_it_IN_THE_BRIEF",
+      "test_an_UNRESOLVABLE_range_endpoint_says_COULD_NOT_MEASURE_on_stderr",
+      "test_the_block_the_operator_PASTES_carries_the_could_not_measure_note",
+      "test_the_unverified_payload_strings_are_the_scripts_own"},
      a_self_range_in_the_gates_own_pair_is_accepted),
     ("U9  the file header is matched BEFORE the hunk",
      {"test_the_classifier_reads_a_changed_line_the_way_git_wrote_it"},
