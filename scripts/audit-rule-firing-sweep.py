@@ -389,6 +389,28 @@ RULES: list[dict] = [
     dict(id="pr-description-corrected-publicly", name="a finding about the PR description gets corrected PUBLICLY",
          probe="gets corrected PUBLICLY",
          apply=r"corrected publicly|misstates what the change does"),
+    # --- added 2026-09-28. Both WRITTEN that day, so `fired` is expected to be 0
+    # on the first sweep; UNFIRED means "nobody has violated it yet", not that the
+    # row is broken (blind spot 4). Each `apply` is anchored on the rule's own
+    # DISTINCTIVE artifact — the pathspec's all-or-nothing abort, and the
+    # both-trees repro — because the generic words these are about ("matrix",
+    # "revert", "premise", "issue") saturate the pre-origin corpus and would mark
+    # the row UNRELIABLE and withhold its number (blind spot 3).
+    dict(id="base-tree-setup-can-fail-silently",
+         name="a regression matrix whose SETUP step failed silently scores a meaningless green",
+         probe="SCORES A GREEN THAT MEANS NOTHING",
+         apply=(r"unmatched pathspec"
+                r"|all-or-nothing[^.]{0,40}checkout"
+                r"|aborts the (whole|entire) checkout"
+                r"|diff --stat[^.]{0,60}must be NON-EMPTY"
+                r"|never been reverted")),
+    dict(id="audit-the-premise",
+         name="audit the premise you were handed, not only the diff",
+         probe="AUDIT THE PREMISE YOU WERE HANDED",
+         apply=(r"premise[^.]{0,60}(inverted|wrong in the reassuring)"
+                r"|repro against BOTH trees"
+                r"|reassuring direction"
+                r"|hypothesis with an author")),
 ]
 
 
