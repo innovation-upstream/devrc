@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse(Bash) gate: no clawgate task is CREATED without acceptance criteria.
+"""PreToolUse(Bash) gate: no clawgate/muster task is CREATED without acceptance criteria.
 
 WHY THIS EXISTS
 ---------------
@@ -7,6 +7,18 @@ WHY THIS EXISTS
 task PICKUP ritual in detail and says NOTHING about task AUTHORING. Creating a
 task is one line — `clawgatectl task create --body …` — so the cheapest thing an
 agent can do is post whatever the operator said, unverified and unspecified.
+
+🔴 TWO CLI SPELLINGS, AND THE SECOND ONE IS HERE BEFORE IT EXISTS, ON PURPOSE.
+The tasks+dispatch half of clawgate is being extracted into `muster`
+(`github.com/ZacxDev/muster`), whose CLI binary is `muster` and whose task verbs
+are the same words (`muster task create --body …`). This gate keyed on the
+literal string `clawgatectl` — a PREFILTER on the name and a `basename(argv[0])`
+comparison — so the rename alone would have made it match nothing: every
+criteria-less create ALLOWED, fail-open, with no diagnostic anywhere. The
+widening therefore lands BEFORE the rename rather than with it, so there is
+never a window in which this file is inert. `TASK_CLI_NAMES` is the one place
+both spellings are written down, and every predicate below is derived from it —
+the regex, the basename check and the help exemption cannot drift apart.
 
 That is expensive twice over:
 
@@ -143,13 +155,50 @@ OVERRIDE_INLINE = re.compile(
 FLOW_DEPLOYED = "~/.claude/skills/clawgate/flows/task-authoring.md"
 FLOW_REPO = "devrc/claude/skills/clawgate/flows/task-authoring.md"
 
+# 🔴 EVERY CLI BINARY THAT CAN CREATE A TASK, SPELLED ONCE. `clawgatectl` today;
+# `muster` once the extraction lands (see the module docstring). Every predicate
+# in this file derives from this tuple rather than repeating a name, because a
+# name repeated at N sites is the shape that goes stale at N-1 of them — and the
+# failure direction here is a SILENT ALLOW, which nothing observes.
+#
+# 🔴 Membership is by `os.path.basename(argv[0])`, so `/nix/store/…/bin/muster`
+# counts and a command that merely CONTAINS the word does not.
+TASK_CLI_NAMES = ("clawgatectl", "muster")
+_TASK_CLI_ALT = "|".join(TASK_CLI_NAMES)
+
+# 🔴 EVERY PATH THAT CREATES A TASK OVER HTTP, SPELLED ONCE. `/api/tasks/<id>` is
+# a read and `/api/tasks/<id>/comments` is the write-back ritual — neither is in
+# scope, which is why these are matched as WHOLE paths (see `is_curl_task_create`)
+# rather than as prefixes.
+#
+# 🔴 `/api/v1/tasks` is INSURANCE, not a measurement. muster is a package carve of
+# the same handlers and the extraction plan's repoint table changes only the BASE
+# URL of every producer (`CLAWGATE_API_URL` -> muster's), so `/api/tasks` is the
+# path muster is expected to serve. The versioned spelling costs one alternation
+# and covers the one plausible way that expectation is wrong. If muster mounts its
+# task API anywhere else, THIS TUPLE is what has to grow — and the guard is inert
+# for curl creates until it does.
+CREATE_PATHS = ("/api/tasks", "/api/v1/tasks")
+_CREATE_PATH_ALT = "|".join(re.escape(p) for p in CREATE_PATHS)
+
 # The pure-regex fallback classifier used ONLY on the crash path. It must never
-# raise and must never need a parse.
-CRASH_LOOKS_LIKE_CREATE = re.compile(r"\btask\s+create\b|/api/tasks(?![/\w])")
+# raise and must never need a parse. Derived from CREATE_PATHS so the crash path
+# cannot recognise a smaller set than the normal path does — a crash classifier
+# narrower than the gate it backstops is a silent allow exactly when the gate is
+# already broken.
+CRASH_LOOKS_LIKE_CREATE = re.compile(
+    r"\btask\s+create\b|(?:" + _CREATE_PATH_ALT + r")(?![/\w])")
 
 # The cheap pre-filter. A command line naming neither of these cannot be a task
-# create, and returns before anything is imported or parsed.
-PREFILTER = re.compile(r"clawgatectl|/api/tasks")
+# create, and returns before anything is imported or parsed. It MUST be a superset
+# of everything `evaluate` can deny, so it is built from the same two constants.
+#
+# The cost of the second CLI name is that a command merely MENTIONING `muster` —
+# a commit message about the extraction, a grep for it — now pays one `guard_core`
+# parse instead of one regex. That is exactly what `clawgatectl` has always cost,
+# and the structural checks downstream still refuse it; a prefilter that tried to
+# be clever here would be the thing most likely to go inert.
+PREFILTER = re.compile(_TASK_CLI_ALT + r"|" + _CREATE_PATH_ALT)
 
 # A body file larger than this is not a task body; reading it would only be a way
 # to make a per-Bash-call hook slow. Treated as UNRESOLVED (i.e. blocked), never
@@ -200,12 +249,9 @@ CURL_VALUE_FLAGS = CURL_DATA_FLAGS + CURL_METHOD_FLAGS + (
     "--key", "--proxy", "-x", "--write-out", "-w",
 )
 
-# The ONE path that creates a task. `/api/tasks/<id>` is a read, and
-# `/api/tasks/<id>/comments` is the write-back ritual — neither is in scope.
-CREATE_PATH = "/api/tasks"
-
-# clawgatectl's persistent flags that take a separate value token.
-CLAWGATECTL_VALUE_FLAGS = ("--api-url", "--token", "--env-file")
+# The task CLI's persistent flags that take a separate value token. Identical on
+# both binaries — muster duplicates clawgatectl's CLI scaffolding.
+TASK_CLI_VALUE_FLAGS = ("--api-url", "--token", "--env-file")
 
 
 # --------------------------------------------------------------------------- #
@@ -375,8 +421,8 @@ def _operands(argv, value_flags):
     return out
 
 
-def is_clawgatectl_task_create(argv):
-    """True for a `clawgatectl … task create …` argv.
+def is_task_cli_create(argv):
+    """True for a `<task CLI> … task create …` argv — either spelling.
 
     Keyed on `task` and `create` being ADJACENT OPERANDS rather than on argv[1:3]:
     a global flag can precede the verb (`clawgatectl --env-file /x task create`),
@@ -384,10 +430,14 @@ def is_clawgatectl_task_create(argv):
     list is what distinguishes the verb from a coincidence — and because the
     tokens come from a real lexer, a quoted `"task create"` is ONE token and never
     matches.
+
+    🔴 The binary is matched against TASK_CLI_NAMES BY BASENAME, never by the
+    command line containing the word. `echo 'the muster migration'` is prose;
+    `/nix/store/…/bin/muster task create` is a create.
     """
-    if not argv or os.path.basename(argv[0]) != "clawgatectl":
+    if not argv or os.path.basename(argv[0]) not in TASK_CLI_NAMES:
         return False
-    ops = _operands(argv, CLAWGATECTL_VALUE_FLAGS)
+    ops = _operands(argv, TASK_CLI_VALUE_FLAGS)
     return any(a == "task" and b == "create" for a, b in zip(ops, ops[1:]))
 
 
@@ -412,25 +462,25 @@ def is_help_invocation(argv):
     otherwise the exemption would be reachable by a token that merely looks like
     a flag.
 
-    🔴 Scoped to `clawgatectl` BY NAME. `--help` is cobra's; it is not a curl flag
-    and curl posts the request anyway, so letting this predicate answer for a curl
-    create would hand every curl producer a one-word bypass. Caught by
-    `test_help_does_not_exempt_a_curl_create` — the first version of this function
-    had exactly that hole.
+    🔴 Scoped to TASK_CLI_NAMES BY NAME — both are cobra binaries. `--help` is
+    cobra's; it is not a curl flag and curl posts the request anyway, so letting
+    this predicate answer for a curl create would hand every curl producer a
+    one-word bypass. Caught by `test_help_does_not_exempt_a_curl_create` — the
+    first version of this function had exactly that hole.
     """
-    if not argv or os.path.basename(argv[0]) != "clawgatectl":
+    if not argv or os.path.basename(argv[0]) not in TASK_CLI_NAMES:
         return False
     skip = False
     for tok in argv[1:]:
         if skip:
             skip = False
             continue
-        if tok in CLAWGATECTL_VALUE_FLAGS:
+        if tok in TASK_CLI_VALUE_FLAGS:
             skip = True
             continue
         if tok in HELP_FLAGS:
             return True
-    return _operands(argv, CLAWGATECTL_VALUE_FLAGS)[:1] == ["help"]
+    return _operands(argv, TASK_CLI_VALUE_FLAGS)[:1] == ["help"]
 
 
 def _url_path(token):
@@ -489,7 +539,7 @@ def is_curl_task_create(argv):
     if not argv or os.path.basename(argv[0]) != "curl":
         return False
     method, paths, data = _curl_parts(argv)
-    if CREATE_PATH not in paths:
+    if not any(p in paths for p in CREATE_PATHS):
         return False
     if method is not None:
         return method == "POST"
@@ -690,7 +740,8 @@ _ESCAPES = (
 
 def missing_text():
     return (
-        "This creates a clawgate task whose body has no `## Acceptance criteria` "
+        "This creates a task on the clawgate/muster board whose body has no "
+        "`## Acceptance criteria` "
         "heading.\n\n" + _WHY + "\n\n" + _HOW + "\n\n"
         "The heading must be a level-2 ATX heading -- exactly `## Acceptance "
         "criteria` (case-insensitive, trailing text allowed). `###`, bold text and "
@@ -701,7 +752,8 @@ def missing_text():
 
 def unseeable_text(reason):
     return (
-        "This creates a clawgate task, but this gate CANNOT SEE THE BODY (" +
+        "This creates a task on the clawgate/muster board, but this gate CANNOT "
+        "SEE THE BODY (" +
         reason + "), so it cannot check for `## Acceptance criteria`.\n\n"
         "Blocking rather than passing it through, deliberately: a gate that fails "
         "open on a body it cannot read is walkable by changing the SHAPE of the "
@@ -718,7 +770,7 @@ def unseeable_text(reason):
 def crash_text(exc):
     return (
         "clawgate-task-interview-guard crashed while checking this command (" +
-        str(exc) + "). It looks like a clawgate task create, so it is denied "
+        str(exc) + "). It looks like a clawgate/muster task create, so it is denied "
         "rather than passed through unchecked -- an unchecked create is how a "
         "task ships with no acceptance criteria and comes back "
         "`ready_for_review`.\n\n"
@@ -748,7 +800,7 @@ def evaluate(text, env, guard_core):
     if not PREFILTER.search(text):
         return None
     creates = [argv for argv in guard_core.commands(text)
-               if (is_clawgatectl_task_create(argv) or is_curl_task_create(argv))
+               if (is_task_cli_create(argv) or is_curl_task_create(argv))
                and not is_help_invocation(argv)]
     if not creates:
         return None

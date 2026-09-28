@@ -518,3 +518,80 @@ def test_an_unreadable_root_is_reported_not_silently_zero(tmp_path):
         assert unreadable == [str(locked)], unreadable
     finally:
         os.chmod(locked, 0o755)
+
+
+# --- gate_reads: the banner must speak about the AUDITED root, not this script --
+
+def _auditor():
+    import importlib.machinery
+    import importlib.util
+    from pathlib import Path as _P
+    src = _P(__file__).resolve().parent.parent / "handoff-audit.py"
+    loader = importlib.machinery.SourceFileLoader("_ha_gate_tests", str(src))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def _fake_repo(root, *, gated):
+    """A minimal repo: a `.git` entry, a claudedocs/ doc, and optionally the gate."""
+    (root / ".git").mkdir(parents=True, exist_ok=True)
+    (root / "claudedocs").mkdir(parents=True, exist_ok=True)
+    doc = root / "claudedocs" / "handoff-x.md"
+    doc.write_text("# Handoff: x\n\n## Goal\ng\n", encoding="utf-8")
+    if gated:
+        gate = root / _auditor().BUDGET.GATE_RELPATH
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.write_text("# the gate\n", encoding="utf-8")
+    return doc
+
+
+def test_gate_reads_answers_about_the_AUDITED_root_not_this_script(tmp_path):
+    """🔴 REGRESSION TEST for round 1's F1, which round 2 found UNPINNED — two
+    mutants (`gated = list(audits)` and `gated = []`) survived the whole suite,
+    so the defect could be reintroduced green.
+
+    The original asked whether the gate sits beside `handoff-audit.py`, which is
+    true in every devrc clone, so the banner announced an enforced 65,536 B
+    ceiling over corpora nothing enforces. The question is about the repo the
+    DOC lives in. Cost of that class: civitai/cli#618, 35,517 B evicted against
+    a gate that could not see the repo."""
+    ha = _auditor()
+    ungated = _fake_repo(tmp_path / "ungated", gated=False)
+    gated = _fake_repo(tmp_path / "gated", gated=True)
+    assert ha.gate_reads(gated) is True, "a repo shipping the gate must read as gated"
+    assert ha.gate_reads(ungated) is False, (
+        "a repo with NO gate was reported as gated — this is F1: the predicate is "
+        "answering about the script's own checkout, not the audited root"
+    )
+
+
+def test_gate_reads_fails_toward_the_WEAKER_claim(tmp_path):
+    """A doc in no repo at all must not be reported as gated. We never invent a
+    gate we could not see."""
+    orphan = tmp_path / "loose" / "handoff-x.md"
+    orphan.parent.mkdir(parents=True)
+    orphan.write_text("# Handoff: x\n", encoding="utf-8")
+    assert _auditor().gate_reads(orphan) is False
+
+
+def test_the_banner_arms_follow_the_audited_roots(tmp_path, capsys):
+    """The three arms are different CLAIMS, and the ungated one is load-bearing:
+    telling an author their corpus is enforced when it is not is what cost
+    civitai/cli#618 its evictions. Drives `render` rather than asserting on
+    `gate_reads` alone, so a mutant that keeps the predicate and drops its use
+    (round 2's M6/M7) still dies."""
+    ha = _auditor()
+    ungated = _fake_repo(tmp_path / "u", gated=False)
+    gated = _fake_repo(tmp_path / "g", gated=True)
+
+    ha.render([ha.audit_one(gated)], False, 0, 0)
+    assert "DOES enforce" in capsys.readouterr().out
+
+    ha.render([ha.audit_one(ungated)], False, 0, 0)
+    out = capsys.readouterr().out
+    assert "NO per-document gate reads these docs" in out and "DOES enforce" not in out
+
+    ha.render([ha.audit_one(gated), ha.audit_one(ungated)], False, 0, 0)
+    assert "MIXED" in capsys.readouterr().out

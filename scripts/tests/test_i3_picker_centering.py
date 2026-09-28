@@ -288,7 +288,14 @@ def _launched_class_specs() -> set:
 #: today anyway — `mention-open.py` passes them as ALL-CAPS variables — but the
 #: moment either literal is written into a nix file the scanner would pick it up
 #: and guard 2 would report the repo's own intended geometry as an offence.
-_DELIBERATELY_PLACED = (MO.PICKER_CLASS, MO.REVIEW_CLASS)
+#:
+#: `stt-voice,stt-voice` IS a nix-file literal (the comment in
+#: nix/i3/config.nix names the spawn; the spawn itself lives in
+#: cmd/stt-voice/main.go) — so it is spelled here, and its two-way pin lives in
+#: scripts/tests/test_i3_stt_voice.py::test_the_TUI_class_agrees_with_the_i3_rule:
+#: rename the class and THAT test reddens in both directions, so this exclusion
+#: cannot go stale invisibly.
+_DELIBERATELY_PLACED = (MO.PICKER_CLASS, MO.REVIEW_CLASS, "stt-voice,stt-voice")
 
 
 def _control_windows() -> dict:

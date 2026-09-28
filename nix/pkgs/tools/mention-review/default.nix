@@ -143,6 +143,14 @@ let
     meta = with lib; {
       description = "Single-purpose TUI for reading one GitHub pull request";
       mainProgram = "mention-review";
+      # 🔴 BACKED BY `src/LICENSE`, AND THE SCOPE IS THE POINT. This declared
+      # MIT for months with NO license text anywhere while devrc is a PUBLIC
+      # repo — an assertion of a grant nobody had made. The file sits in
+      # `srcDir`, not at the repo root, so the grant covers exactly what this
+      # derivation ships (the Go module) and NOT the surrounding personal
+      # config; `lib.cleanSource srcDir` carries it into the build, and it
+      # travels with the module if it is ever extracted. Moving or deleting it
+      # makes this line false again.
       license = licenses.mit;
       platforms = platforms.linux;
     };

@@ -113,6 +113,9 @@ NATIVE_BLOCKS = frozenset({
 
 LOCAL_ONLY_BLOCKS = frozenset({
     "i3status-gamemode",     # per-host i3 binding state; the observer has its own
+    "i3status-stt",          # per-host mic/voice-capture state (stt-voice); the
+    #   observer runs its own recorder, so relaying the other host's REC pill
+    #   would be the same category error the gamemode row documents.
     # 🔴 notifs is deliberately NOT relayed. It is the workbench's UNSEEN dunst
     # backlog -- 185 at measurement, Critical, monotonically growing while the
     # operator is away, and unactionable from the other machine: the relayed

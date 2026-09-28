@@ -842,6 +842,7 @@ MUTANTS += [
                         "bias, restored: `rank` then mixes ordered rows with "
                         "rows that were never placed",
      "    picked_ordered = (pinned_above is not None and picked_rank is not None\n"
+     "                      and order_state == ORDER_APPLIED\n"
      "                      and url in ordered_urls)\n",
      "    picked_ordered = True\n",
      "but the row claims it was"),

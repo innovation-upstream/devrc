@@ -201,6 +201,12 @@ def valid_id(value) -> bool:
     Opaque-string discipline: this checks only what could CORRUPT the message,
     never what the id should look like. A `ses_…` token, a uuid and any future
     spelling all pass.
+
+    ⚠ REFUSING IS ALL IT DOES, and a caller whose value is free PROSE rather
+    than an id wants `printable_for_trailer` below first — `append_trailer`
+    returns the message UNCHANGED for a value this refuses, with no diagnostic,
+    which is a silent lost trailer. Widen this predicate and widen that repair in
+    the same commit.
     """
     if not isinstance(value, str):
         return False
@@ -211,6 +217,49 @@ def valid_id(value) -> bool:
     # and can truncate it for downstream readers. Tab is a trailer separator.
     return not any(c in v for c in "\r\n\t\x00") and all(
         ord(c) >= 0x20 or c == " " for c in v)
+
+
+#: One visible mark per character `valid_id` refuses. U+FFFD rather than `?`
+#: because `?` is a character a reason may legitimately contain, so it cannot
+#: tell a reader that something was replaced.
+UNPRINTABLE_MARK = "�"
+
+
+def printable_for_trailer(text: str) -> str:
+    """`text` with every character `valid_id` would refuse REPLACED, for callers
+    whose value is free prose rather than an opaque id.
+
+    🔴 THE REPAIR LIVES BESIDE THE PREDICATE, NOT AT THE CALL SITE. A caller
+    that flattens a value by its own reading of what a trailer accepts is a
+    second copy of `valid_id`, and the copy is the half that goes stale.
+    `claude/RULES.md`: one rule, one place. The relationship is pinned
+    mechanically by `TestThePrintableRepairMirrorsTheRefusal` over every
+    codepoint below 0x11000 — the whole BMP and the first astral plane, not a
+    list of the controls someone thought of — so widening one half without the
+    other goes red rather than silent.
+
+    🔴 AND IT IS NOT `append_trailer`'S JOB. That function REFUSES an
+    unacceptable value on purpose: its callers pass a session id, and silently
+    rewriting an id attributes a commit to a session that does not exist.
+    Repair belongs to the caller that owns a human-authored string and has
+    already promised the reader a trailer.
+
+    🔴 REPLACES RATHER THAN DELETES, BECAUSE DELETING CAN EMPTY THE VALUE.
+    `valid_id("")` is False, so a value that is nothing but controls — `"\\x1b"`
+    is not whitespace, so it survives `.strip()` and every empty-string check
+    upstream — would fail in exactly the silent way this function exists to
+    close. One mark per refused character keeps the result non-empty.
+
+    NOT a validity check, and deliberately not a bound: LENGTH stays the
+    caller's to clip, because only the caller knows how much of its value is
+    worth carrying.
+    """
+    # `valid_id`'s refusal set, read the only way that cannot drift from it: a
+    # single character is acceptable iff it is a space or sits at 0x20 or above.
+    # Every char in that function's explicit "\r\n\t\x00" list is below 0x20, so
+    # this is the same set and not a narrower one.
+    return "".join(
+        c if (ord(c) >= 0x20 or c == " ") else UNPRINTABLE_MARK for c in text)
 
 
 def record(session_id: str, pid: int, root=None, transcript_path=None,

@@ -60,16 +60,30 @@ AIRVPN_API = "https://airvpn.org/api/status/"
 # --------------------------------------------------------------------------- #
 # Pure transform (unit-testable): gluetun airvpn.json -> manifest dict
 # --------------------------------------------------------------------------- #
-def build_manifest(gluetun: dict) -> dict:
+def build_manifest(gluetun: dict, api: dict | None = None) -> dict:
     """Merge gluetun's bundled AirVPN data into the compact switch manifest.
 
     Keeps ONLY WireGuard servers that expose an IPv4 entry IP (the switch needs a
     v4 endpoint). Emits one row per server_name with its country/city + v4 entry
     IP, and hoists the (single, shared) WG pubkey to the top level. Raises
     ValueError on a payload that isn't gluetun-shaped.
+
+    `api` (the airvpn.org/api/status payload, optional) contributes per-server
+    `country_code`. 🔴 IT MUST BE BAKED IN, NOT merged live: the poller's
+    exit-IP leak verdict needs the CONNECTED server's country code and reads
+    ONLY this manifest (no network at poll time). The menu merges live load at
+    runtime and would survive without it, but without a baked country_code the
+    verdict degrades to `unknown` on any server whose exit IP differs from its
+    entry IP (measured on the laptop's America server, 2026-09-21: entry
+    x.x.x.10, exit x.x.x.16 -> pill `US?` instead of `US`).
     """
     if not isinstance(gluetun, dict) or not isinstance(gluetun.get("servers"), list):
         raise ValueError("not a gluetun servers file (missing 'servers' list)")
+    cc_by_name = {}
+    if isinstance(api, dict):
+        for a in api.get("servers", []) or []:
+            if isinstance(a, dict) and a.get("public_name"):
+                cc_by_name[a["public_name"]] = (a.get("country_code") or "").lower()
     rows = []
     pubkeys = set()
     for s in gluetun["servers"]:
@@ -82,9 +96,11 @@ def build_manifest(gluetun: dict) -> dict:
         pk = s.get("wgpubkey")
         if pk:
             pubkeys.add(pk)
+        name = s.get("server_name") or s.get("hostname") or v4
         rows.append({
-            "name": s.get("server_name") or s.get("hostname") or v4,
+            "name": name,
             "country": s.get("country") or "?",
+            "country_code": cc_by_name.get(name) or None,
             "city": s.get("city") or "",
             "endpoint_ip": v4,
         })
@@ -151,8 +167,10 @@ def source_gluetun(explicit=None) -> dict:
     raise SystemExit("could not source gluetun AirVPN data from any source")
 
 
-def sanity_api(manifest: dict) -> None:
-    """Best-effort: confirm the AirVPN API public_names still cover the manifest."""
+def sanity_api(manifest: dict) -> dict | None:
+    """Best-effort: confirm the AirVPN API public_names still cover the manifest.
+
+    Returns the API payload (for build-time country_code baking), or None."""
     try:
         with urllib.request.urlopen(AIRVPN_API, timeout=20) as r:
             api = json.loads(r.read().decode())
@@ -160,8 +178,10 @@ def sanity_api(manifest: dict) -> None:
         covered = sum(1 for s in manifest["servers"] if s["name"] in names)
         sys.stderr.write("AirVPN API: %d/%d manifest servers have live load data\n"
                          % (covered, len(manifest["servers"])))
+        return api
     except Exception as e:  # noqa: BLE001
         sys.stderr.write("AirVPN API sanity fetch skipped: %s\n" % e)
+        return None
 
 
 def main(argv=None) -> int:
@@ -175,8 +195,20 @@ def main(argv=None) -> int:
     manifest = build_manifest(gluetun)
     sys.stderr.write("built manifest: %d WG servers, shared pubkey=%s\n"
                      % (len(manifest["servers"]), manifest["wg_pubkey_shared"]))
+    api = None
     if not args.no_api:
-        sanity_api(manifest)
+        api = sanity_api(manifest)
+    if api:
+        # bake the API's country_code per server (see build_manifest docstring):
+        # the poller's leak verdict reads ONLY this file, at poll time, offline.
+        cc = {a.get("public_name"): (a.get("country_code") or "").lower()
+              for a in api.get("servers", []) if isinstance(a, dict)}
+        got = 0
+        for r in manifest["servers"]:
+            r["country_code"] = cc.get(r["name"]) or None
+            got += 1 if r["country_code"] else 0
+        sys.stderr.write("baked country_code for %d/%d servers\n"
+                         % (got, len(manifest["servers"])))
     if args.dry_run:
         print(json.dumps(manifest, indent=1))
         return 0

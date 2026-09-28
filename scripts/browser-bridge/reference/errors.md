@@ -17,10 +17,16 @@ should strand you.
    error. Fix: ↻ **in the profile you are driving**. A STALE BUILD is a DIFFERENT
    failure — Remove + Load unpacked, not a restart. → `reference/errors.md`
 2. **Empty / half-built / `data.hidden:true` read** → throttled: `wake`, re-read.
+   Slack client-v2's message pane ignores wake's emulation — its one measured
+   escape is `activate --focus`: `flows/app.slack.com.md`, and the wake-vs-
+   activate exception in `reference/spa-wake.md`.
 3. **`null` from `js`/`eval`** → traps 1 then 2; fall back to `text`/`html` before
    concluding the bridge is down. **`unknown_op`** → stale extension (1). Any other
    error string → `reference/errors.md`.
-4. **Never diagnose a site OUTAGE from a browser read** — "broken for real users?"
+4. **Injections (`text`/`js`) refused on EVERY host while messaging ops answer
+   fine** → NOT a stale build, NOT a drop: Brave's per-extension Site access →
+   the section below ("Injections refused on EVERY host").
+5. **Never diagnose a site OUTAGE from a browser read** — "broken for real users?"
    needs server-side evidence (RUM, metrics, pod health, an anonymous `curl`).
 
 (Moved from SKILL.md 2026-08-21 to restore its working headroom: #669 added
@@ -95,6 +101,34 @@ inline in SKILL.md — it is a correctness rail, not a debugging step.)
   browser-agent's op or scheme gate, `~/workspace/devrc/scripts/browser-bridge/reference/agent.md`.
 - `Cannot access a chrome:// URL` (with a `null` result) → `eval`/`js` can't run on
   `chrome://` / `brave://` pages. Not a bridge fault.
+
+## 🔴 Injections refused on EVERY host — Brave's per-extension Site access
+
+Every injection op (`text`/`js`/`eval`, anything needing content-script
+access) on ANY tab answers `Cannot access contents of the page. Extension
+manifest must request permission to access the respective host.` — while the
+messaging ops (`health`/`tabs`/`context`/`ping`/`whoami`) all answer, and
+`health` shows `extension_connected:true` + `extension_stale:false` with a
+current build. It reads exactly like a broken bridge or a broken site; it is
+neither.
+
+- **Discriminator:** messaging ops fine + injections refused on EVERY host =
+  this. (Stale build → `unknown_op`; dropped extension →
+  `extension_connected:false`; page CSP → only `js` returns `null`, and only
+  on that one site.)
+- **Cause (confirmed 2026-09-20, measured on both hosts):** the manifest
+  carries `<all_urls>`, so the block is not the manifest — it is Brave's
+  per-extension **Site access** setting (`Details` → `Site access`), which
+  the browser holds per profile and which can differ between machines
+  running the identical build. The laptop's fix cleared injections there
+  the same day; **the workbench is still blind pending its own fix** —
+  check the host you are on before trusting either half of this sentence.
+- **Recovery (operator, ~30 s, on the host you are driving):**
+  `brave://extensions` → Browser Bridge (command channel) → `Details` →
+  **Site access** → **On all sites**. If still refused: reload ↻ the
+  extension (it may re-prompt the `debugger` permission), then `browser health`
+  → `extension_connected:true`, then probe `text` on a real tab. A fix on
+  one host does NOT carry to the other.
 
 ## CLI exit codes — and the one that is NOT a failure to debug
 

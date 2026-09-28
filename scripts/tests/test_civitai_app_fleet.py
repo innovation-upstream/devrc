@@ -261,6 +261,63 @@ def test_preflight_allows_a_version_above_the_floor(tmp_path):
     assert preflight.run(root, floor="1.0.0")
 
 
+# --- the re-submit path the floor used to make unreachable --------------------
+#
+# `civitai app submit` refuses only at or below the highest APPROVED version and
+# offers `--allow-downgrade`; this script's floor is the highest version ON
+# RECORD and had NO escape, so it refused the one retry the CLI supports. Not
+# hypothetical: `civitai app status` carries two `oauth-probe 0.1.3` rows
+# (approved/failed, then approved/live) stamped with the same source commit.
+
+
+def test_preflight_allow_downgrade_waives_a_same_version_resubmit(tmp_path):
+    """The floor still refuses by default; --allow-downgrade waives THAT check."""
+    root = _tree(tmp_path, manifest_version="1.0.0", package_version="1.0.0")
+    with pytest.raises(preflight.Failure, match="submit floor"):
+        preflight.run(root, floor="1.0.0")
+    passed = preflight.run(root, floor="1.0.0", allow_downgrade=True)
+    assert any("WAIVED" in name for name in passed), passed
+
+
+def test_preflight_allow_downgrade_waives_only_the_floor(tmp_path):
+    """🔴 It is a waiver for ONE check, not a --force. A tree broken in a way the
+    floor has nothing to do with must still be refused with the SAME error —
+    otherwise the flag is a bypass wearing a narrow name. Both other checks are
+    exercised, because a waiver that leaked would most plausibly leak into the
+    check that runs nearest it."""
+    lockstep_broken = _tree(tmp_path, manifest_version="1.0.0", package_version="0.9.0")
+    with pytest.raises(preflight.Failure, match="lockstep"):
+        preflight.run(lockstep_broken, floor="1.0.0", allow_downgrade=True)
+
+    other = tmp_path / "b"
+    other.mkdir()
+    lockfile_wrong = _tree(other, build="pnpm run build",
+                           lockfiles=("package-lock.json",))
+    with pytest.raises(preflight.Failure, match="pnpm-lock.yaml"):
+        preflight.run(lockfile_wrong, floor="0.0.1", allow_downgrade=True)
+
+
+def test_preflight_cli_parses_allow_downgrade_in_either_position(monkeypatch, capsys, tmp_path):
+    """The flag is stripped from argv before the positionals are read, so it
+    works before or after the floor rather than being consumed AS the floor —
+    which is how `preflight.py <dir> --allow-downgrade` would otherwise compare a
+    version against the literal string '--allow-downgrade'."""
+    root = _tree(tmp_path, manifest_version="1.0.0", package_version="1.0.0")
+    for argv in (
+        ["preflight.py", root, "1.0.0", "--allow-downgrade"],
+        ["preflight.py", root, "--allow-downgrade", "1.0.0"],
+    ):
+        monkeypatch.setattr(preflight.sys, "argv", argv)
+        assert preflight.main() == 0, argv
+        assert "WAIVED" in capsys.readouterr().out, argv
+
+    # Control: the SAME invocation without the flag must still FAIL, or the two
+    # assertions above would pass just as well for a preflight that stopped
+    # checking the floor at all.
+    monkeypatch.setattr(preflight.sys, "argv", ["preflight.py", root, "1.0.0"])
+    assert preflight.main() == 1
+
+
 # --- the offline seam itself --------------------------------------------------
 
 

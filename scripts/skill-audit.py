@@ -469,10 +469,10 @@ def reference_integrity(skill_md, text):
     🔴 THE THIRD ROUTING SHAPE: a DIRECTORY routed with a VARIABLE segment.
     Naming every reference file in the body is what keeps a skill honest, but it
     also makes the body grow linearly with the corpus — which is unaffordable for
-    a set that is expected to keep growing (browser's per-site docs). A row
+    a set that is expected to keep growing (a skill's per-host docs). A row
     written with a placeholder segment,
 
-        | `reference/sites/<host>.md` | you are driving a site that has one … |
+        | `flows/<host>.md` | you are driving a site that has flows … |
 
     routes to EVERY member of that directory without naming one, because
     something at RUN TIME resolves the placeholder (for browser, the bridge puts
@@ -481,6 +481,12 @@ def reference_integrity(skill_md, text):
     directory is NOT dead. Recognised structurally — `<dir>/<` in the body, the
     repo's own documented placeholder convention — never by naming a directory
     here. A file under a directory with NO placeholder route is still an orphan.
+
+    ⚠ SCOPE: this walk covers `reference/` ONLY. browser's flow docs moved OUT
+    of reference/ to a sibling `flows/` (devrc convention: flows are procedures,
+    reference is facts), so they are NOT walked here — their registry↔disk
+    ledger in scripts/browser-bridge/tests/test_site_flows.py is what covers
+    that set, and it is stricter than this walk.
     """
     skill_dir = skill_md.parent
     refs = referenced_refs(text, skill_dir)

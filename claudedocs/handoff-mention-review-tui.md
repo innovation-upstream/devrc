@@ -20,289 +20,137 @@ notifications and repo browse are dropped.
   this; Phase 4 (deleting `nvim-octo`) is gated on it by the proposal's own rollback section.
 
 ## State now
-- 🔴 **THE ARC'S CLOSING CONDITION IS MET AND THE ARC IS CLOSED.** The operator used
-  `mention-review` for a real review on a real screen and reported **"done, working"**
-  (2026-09-18). That is the `judgement` line this doc froze at round 1. Everything below is
-  either follow-through on it or a NEW arc.
-- ✅ **RANK 1 IS DONE — but its stated premise was STALE, and that is the finding.** This doc
-  said *"no host has the 735 ms version"* and named store path `28yc4a0np6d5…`. **MEASURED
-  2026-09-19 BEFORE shipping anything: both hosts were ALREADY on
-  `ypqk42cfxv92aydpd9hgic3k75rhs49x-mention-review-0.3.0` with `ReadIntents`=2 against a
-  positive control of 1.** A switch had happened between the doc being written and being read.
-  **A stored deploy reading is a hypothesis about now — re-measure before acting on it.**
-- ✅ **THE SHIP WAS STILL NEEDED, FOR A DIFFERENT REASON THAN THIS DOC GAVE.** Both hosts were
-  behind on real *payload*, not the handoff docs the ranked item implied: **#1777**
-  (`find-session --arc`, 2,154 lines incl. a new `scripts/lib/handoff_arc.py`) plus #1753/#1778.
-  `scripts/ship.sh` rc=**0**; every per-host line read, not the verdict — **no skips**, both
-  hosts fast-forwarded and switched, converged to **`93e5bc1b`**, cross-host agreement on ONE
-  sha. Re-verified by CONTENT on BOTH hosts afterwards: `usage: mention-review`=1 (positive
-  control) / `ReadIntents`=**2**; deployed `find-session/SKILL.md` `--arc`=**7** against a
-  positive control of 9, same skills store path on both.
-- ✅ **RANK 3 IS CLOSED — all eight re-anchored mutation rows KILL.** `--only
-  K48,K49,K50,K54,K66,K67,K82,K92` → **9/9 KILLED, problems: none**, every row
-  `KILLED(attributed)` (killed for its OWN stated reason, not an unrelated error) with its
-  killer tests named. Control pristine **733 passed / 0 failed**; observation floor 366 tests
-  must RUN, met by every row; **P1 positive control KILLED — the battery can observe.**
-  This upgrades the rows from *"apply"* to *"kill"* — the two claims this doc was careful to
-  separate. 🔴 **Restore verified INDEPENDENTLY, not from the battery's own `restore: OK`** —
-  a `git -C <worktree> status --porcelain` after the run returned empty. The self-report is a
-  claim about the instrument; the `git status` is the evidence.
-- **DRIFT-CHECK EXITS rc 17 ON BOTH HOSTS — real, OUTSIDE this arc, and OWNED BY THE DEADMAN.**
-  `homelab-talos/containers/clawgate` is the `srcDir` subtree a `nix/pkgs` package is BUILT
-  FROM, and it is behind `origin/trunk` on workbench AND laptop. No ranked item is minted for
-  it: `drift-check.sh` already reports it every 6 h with an escalation ladder and
-  `notify-failure@` toasts, so a hand-written mirror here would be a second, staler copy of a
-  live check. Recorded as context, not as work.
-  🔴 **AND THE FIRST DRAFT OF THIS BULLET WAS FALSE IN THIS PR'S OWN HEADLINE WAY.** It said
-  the tree is *"DIRTY on both (11 paths workbench, 1 laptop) and those paths are IN the built
-  binary — so a `pull --ff-only` is not a safe blind action."* **MEASURED 2026-09-19, both
-  hosts: the SUBTREE is 0 dirty.** `clawgatectl.nix:131` is
-  `src = cleanSource (/. + srcDir)` with `srcDir = …/containers/clawgate`, so the build reads
-  that subtree ALONE; all 11 workbench paths are untracked and OUTSIDE it (`claudedocs/`,
-  five `__pycache__/`, `go.mod`, `opencode.json`, `tests/`) and the laptop's single path is a
-  `result` build symlink. **I applied the SUBTREE unit to the behind-count and the REPO unit
-  to the dirtiness, in the same sentence** — caught by `/audit-pr` round 0 and re-measured
-  here before accepting. A unit that is right for one half of a claim is not thereby right
-  for the other half.
-- **CARRIED FORWARD — durable decisions a replace would otherwise drop:**
-  - **The three PRs of 2026-09-18, PR → squash sha** (verified by CONTENT on `origin/main`
-    with a positive control, never by ancestry — a squash is never an ancestor):
-    `#1772` → **`2b131bf2`** (Phase 4, `nvim-octo` retired, 4,897 lines deleted) ·
-    `#1773` → **`97c20d06`** (Phase 3 cold open, `1,212 ms → 735 ms`) ·
-    `#1775` → **`66e51d90`** (picker ranking, top-1 `62.6% → 73.0%`, top-3 `→ 96.5%`).
-  - **§12.4 IS ANSWERED, not assumed:** PR-level comments only, **no inline diff-line
-    positioning**. Operator decision 2026-09-15. Nothing in the code computes a diff position.
-  - ✅ **THE 422 ARC IS CLOSED** (#1761 → `1ff1bd6e`). Root cause was in the RENDERER —
-    `apiMessage` read GitHub's top-level `message` and discarded `errors[]`, which is where
-    every validation failure puts its reason. The shipped renderer surfaces `errors[]`, so the
-    next occurrence names its own reason. Diagnosis preserved under Open investigations.
-- **The `forcing: none` ratchet:** this doc's previous list carried 2; this one carries **0** —
-  the one item that would have been `none` was deleted by `/audit-pr` round 0 as a duplicate of
-  a live check, not re-tagged. ⚠ This line read "carries 1" until that deletion; a count in
-  prose goes stale the moment the thing it counts moves, and the fix round is what staled it.
-- **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5** again (nothing
-  resolved). Its positive control confirms the board is reachable and the token accepted, but
-  a wrong session id ALSO answers 200 with an empty array, so this is NOT a clean bill of
-  health: which task, if any, this session belongs to is UNKNOWN.
+- 🔴 **THE ARC IS CLOSED** — the operator used `mention-review` for a real review **on a real
+  screen** and reported **"done, working"** (2026-09-18). ⚠ The condition also says *"beats octo
+  at reading a diff"*, and that carries no comparison. Pre-existing gap.
+- ✅ **CARRIED FORWARD — durable, would otherwise be dropped by the next replace:**
+  `#1793` → `cee56910` (picker promotion, THREE gates narrower than authorised) · `#1781` →
+  `8d0984ba` · `#1772` → `2b131bf2` · `#1773` → `97c20d06` · `#1775` → `66e51d90` · `#1812` →
+  `6ee5ff68` · `#1813` → `7f39fda7` · **`#1828` → `23b898d5`** · **`#1831` → `b84745f2`**.
+  🔴 **`--version` CANNOT distinguish builds** — verify by content with a positive control.
+  **The picker is live with NO switch** — the Alacritty wrapper execs `scripts/mention-open.py`
+  from the WORKING TREE. 🔴 **METHODOLOGY LESSONS GO TO THE CAIRN INDEX, NOT HERE** —
+  `devrc/scripts` + `devrc/tests`, carrying the **fzf contract** (abort is FOUR keys; the bind's
+  ACTION ORDER is load-bearing and a reorder is SILENT; `--nth` excludes the marker from
+  MATCHING but **not** from RANKING) and the two `gh` instrument traps (rev `610596953ba16646`).
+- ✅ **SYMPTOM 1 IS SHIPPED AND VERIFIED** — `#1812` + `#1813`, both hosts, verified by CONTENT
+  (wrapped binary `usage: mention-review` = 1 as positive control, `ReadIntents` = 2).
+  **Operator, 2026-09-20: (D) then (A), with (B) `--no-sort` REFUSED** — and the marker shipped
+  RANK-ONLY, no class column (`a70839af`), because the click-time class of the picked row is
+  `below` 56 vs `plausible` 17, so a class column would have read "the ranker does not trust
+  this" on the WANTED row ~3 times in 4. 🔴 Do not "restore" the class column: it was declined.
+- ✅ **`#1828` MERGED — the MIT claim is backed.** `nix/pkgs/tools/mention-review/src/LICENSE`,
+  scoped to the Go module by operator decision, **not** the repo root: the grant covers what the
+  derivation ships and not the personal config. Verified with a NEGATIVE control — there is no
+  root `LICENSE` on `main`, and GitHub's repo `license` stays `null`, which is correct.
+- ✅ **`#1831` MERGED, SHIPPED AND VERIFIED — the ranges table now refreshes 4-HOURLY.**
+  `OnCalendar = "*-*-* 00/4:00:00"`. `ship.sh` rc=0, both hosts at `b84745f2`, every per-host
+  line read, cross-host agreement asserted. **Verified on BOTH hosts by the unit itself**, not
+  by `list-timers`' NEXT column: `systemctl --user show … -p TimersCalendar` →
+  `OnCalendar=*-*-* 00/4:00:00`, timer `active/waiting`, service exited 0.
+  🔴 **THE PAYOFF IS MEASURED, NOT INFERRED:** `known_ranges.json` recorded
+  `innovation-upstream/devrc` at **1809** when round 0 caught it — while PRs up to `#1831` were
+  open against that repo — and reads **1832 on both hosts** after the switch.
+- 🔴 **`#1829` IS A DRAFT, DELIBERATELY — `/audit-pr` round 0 returned `deletion candidate` and
+  the operator chose "timer first, then re-scope" (2026-09-21).** Its diagnosis holds and was
+  verified independently of the implementer (0 of 6 wrong-repo gaps leak at the ceiling margin;
+  `IMPOSSIBLE` preserved at `max_ref == 0`; Tier A median unchanged at 1.0, mean 3.52 → 3.99;
+  regression matrix **red at `3fa77f49` (40 of 51) → green at HEAD (51/51)**, with 8
+  assertion-shaped failures at base distinct from 22 `AttributeError` / 14 `TypeError`). What
+  it needs is in the PR comment; summarised as rank 1.
+- **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exited **5** again. An unknown
+  session id also answers 200 with an empty array, so this is NOT a clean bill of health.
 
 ## Open investigations — live diagnosis state
 
-### The Go tier has NO CI leg — ~7,000 lines run only when a human types the command
-- as-of: 2026-09-14
-- **Symptom + exact repro:** `gh pr checks 1698 --repo innovation-upstream/devrc` lists
-  `tekton/devrc-pytests`, `tekton/devrc-nodetests`, `tekton/devrc-cairn-client-runs` and
-  **no** `tekton/devrc-gotests`.
-- **Observed (with values):** `gh api /repos/innovation-upstream/devrc/commits/<sha>/statuses
-  --jq '[.[].context]|unique'` returns exactly those three contexts. `flake.nix` DOES define
-  a `gotests` check output and documents honestly that it "may be built by nobody".
-  `scripts/main-status-watch.py` contains no tier names at all.
-- **Ruled out:** that the deadman covers it — `scripts/main-green-check.sh:424` read
-  `for tier in pytests nodetests; do`, Go absent. **FIXED in #1698**, now reads
-  `pytests nodetests gotests`. via: measurement
-- **Ruled out:** that the tier is simply unwired locally — `scripts/gate.sh --tier go`
-  works and the runner is 357 lines, the smallest of the three. via: command
-- **Leading hypothesis:** the Tekton pipeline hardcodes its legs and lives in the infra
-  repo (`devrc-ci-pipeline.yaml`), not in devrc — so no change inside devrc can add the leg.
-- **Next probe:** find `devrc-ci-pipeline.yaml` in the infra repo and add a `gotests` leg
-  mirroring the `nodetests` one. Closes when `gh pr checks` on ANY devrc PR lists
-  `tekton/devrc-gotests`.
+### EVICTED — six CLOSED blocks (2026-09-21, byte ceiling)
+- Every block below had been RETRACTED AS LIVE by its own author and carried a
+  `Next probe: none — closed.`: the two `gotests` CI-leg blocks (located, then
+  resolved), `main` RED from a skill prune that cut text two-way ledgers pin
+  (`#1756` → `61faa675`), the eight re-anchored mutation rows KILLING, ranks 1
+  and 3, and `main` red on `test_opencode_engine` (`#1804` → `7ef01c05`, whose
+  lesson — a stale-looking pin where the PINNED version was the good one — is the
+  one worth remembering). 🔴 Evicted because this update put the doc **216 B over**
+  its 65,536 B ceiling and `test_no_handoff_doc_exceeds_its_budget` fails for
+  EVERYONE, not just this PR. The playbook's own order: evict what has CLOSED
+  first, and raising the number is LAST. History: `git log -p` this file.
+- ⚠ **Carried forward from the replaced status header, because it is a DECISION and
+  not a status:** §12.4 is ANSWERED — PR-level comments only, **no inline diff-line
+  positioning** (operator, 2026-09-15); and the 422 arc is CLOSED (`#1761` →
+  `1ff1bd6e`) — the renderer discarded `errors[]`.
 
-### The `gotests` CI leg — pipeline LOCATED, change not yet made (supersedes the 2026-09-14 block above)
-- as-of: 2026-09-15
-- **Supersedes** the earlier block of the same subject; its "Next probe" said *find the
-  pipeline*. It is found. Everything else in that block still holds.
-- **Symptom + exact repro:** `gh pr checks <any devrc PR>` lists `tekton/devrc-pytests`,
-  `tekton/devrc-nodetests`, `tekton/devrc-cairn-client-runs` and **no** `tekton/devrc-gotests`.
-- **Observed (with values):** the pipeline is `clusters/homelab/apps/tekton-pipelines/triggers/
-  devrc-ci-pipeline.yaml` in **homelab-talos**, alongside `devrc-ci-triggertemplate.yaml`.
-  Confirmed present. The deadman half is now CLOSED on main (`gotests` in the tier loop), so
-  `main` is covered every 4 hours; **PR-time coverage is still zero.** via: command
-- **Ruled out:** that the leg could be added from inside devrc — it cannot; the pipeline is a
-  different repo. via: command
-- 🔴 **Constraint that changes how this is done:** `homelab-talos` is GitOps-reconciled from
-  `trunk`, and its own `CLAUDE.md` declares that **committing to the main branch IS deploying**
-  — the one repo with that exception. A pipeline edit there is a live CI change, not a PR that
-  waits for review.
-- **Next probe:** add a `gotests` leg mirroring the `nodetests` one in
-  `devrc-ci-pipeline.yaml`. **Closes when `gh pr checks` on any devrc PR lists
-  `tekton/devrc-gotests`.**
+### EVICTED — two superseded blocks (2026-09-20, byte ceiling)
+- The 2026-09-14 "Go tier has NO CI leg" block (superseded by the 09-15 block below,
+  which is itself retired by the 09-16 RESOLVED one) and the 2026-09-18 "eight rows
+  APPLY but are not known to KILL" block (retired by the RESOLVED block that records
+  its apply-vs-kill correction). 🔴 Evicted because this doc was 229 B from its
+  ceiling and the playbook says evict what has CLOSED before anything else — the
+  surviving RESOLVED blocks carry both outcomes. History: `git log -p` this file.
 
-### RESOLVED — the `gotests` CI leg (retires the 2026-09-15 block above)
-- as-of: 2026-09-16
-- **Retracted as live.** The leg exists, posts, and passes. Closing condition met exactly as
-  written: `gh pr checks` lists `tekton/devrc-gotests`. Everything below is history.
-- **Observed (with values):** `tekton/devrc-gotests pass — TOTAL: pass=119 fail=0 ran=119
-  (global floor 111)` on the first devrc PR after the merge; `pass=231` on #1723.
-- **Ruled out:** that a fourth sequential leg would blow the gate's 60m budget on day one —
-  the four legs on #1723 all reported green. ⚠ NOT a general claim: measured over 21 retained
-  `devrc-ci-*-gate` TaskRuns, two runs were already at **55.9m and 58.1m** against the 60m cap,
-  with `pytests` alone at 49.1m and 46.0m. Watch this. via: measurement
+### DEMOTED (still OPEN) — no write verb has ever executed against real GitHub
+- as-of: 2026-09-16 · **full block: `claudedocs/refs/mention-review-write-verbs-untested.md`**
+- 🔴 **NOT CLOSED — demoted, not evicted**, to leave this doc usable headroom. All five write
+  verbs (`c`/`a`/`R`/`v`/`m`) are exercised only against fakes; the Go suite runs in a
+  network-less sandbox, which is itself the proof nothing reaches a real host.
+- **Next probe: OPERATOR-ONLY.** Open a throwaway PR in a scratch repo and drive `c` then `m`.
+  🔴 An agent must not press a write key — they act on real GitHub as the operator. This is
+  why the item cannot close on its own.
 
-### 🔴 No write verb has ever executed against real GitHub
-- as-of: 2026-09-16
-- **Symptom + exact repro:** n/a — an untested path in shipped code, not a defect. The five
-  write verbs are exercised only against in-process fakes and `httptest`.
-- **Observed (with values):** the whole Go suite (231 tests) passes inside `nix build`'s
-  **network-less sandbox**, which is itself the proof no test reaches a real host. Four
-  additional locks: `App.runner` is `nil` in pure tests; the one end-to-end test asserts the
-  write ledger is *exactly* `[PostComment … body="ok"]`; `http.DefaultTransport` is replaced in
-  both network-reaching packages by a loopback-only transport; `cmd/*` is exempt with a stated
-  reason. **I verified the transport lock myself** — disarming it yields
-  `the guard let a request to api.github.com THROUGH`.
-- **Ruled out:** that the guard is vacuous — mutated it and watched the negative control fire.
-  ⚠ My FIRST mutant did not compile (orphaned `fmt`), which is not a result; a compiling
-  variant is what produced the kill. via: measurement
-- **Leading hypothesis:** none. `LiveRunner`'s three delegations and `ghapi`'s three endpoints
-  are plain code paths that have simply never run live.
-- **Next probe:** open a throwaway PR in a scratch repo and drive `c` (comment) then `m`
-  (merge) against it. **Operator-only** — an agent must not run a live write verb.
+### EVICTED — the 422 diagnosis block (2026-09-21, byte ceiling)
+- The 2026-09-18 block "The 422's actual cause was never determined". 🔴 Evicted by `/audit-pr`
+  round 0 on `#1820`, which measured it as the doc's last CLOSED-but-retained block (1,168 B)
+  while headroom was 1,294 B. Its conclusion is already carried above: the 422 arc is CLOSED
+  (`#1761` → `1ff1bd6e`, the renderer discarded `errors[]`). Its ruled-outs — a read failure, a
+  merge-method problem, and that the `picks.jsonl` timeline PROVES base-recompute (it does not:
+  two entries prove two OPENS, not two merge presses) — are in `git log -p` on this file.
+- 🔴 **THE ONE LIVE INSTRUCTION IT CARRIED, KEPT because eviction must not delete it:** the cause
+  was never established and the body is unrecoverable, but the shipped renderer now surfaces
+  `errors[]`, so **the next occurrence names its own reason. If it recurs, capture the card
+  verbatim before anything else** — that single string settles it.
 
-### RESOLVED — `main` was RED for hours; a skill PRUNE cut text that two-way ledgers pin
-- as-of: 2026-09-17
-- **Retracted as live.** Fixed by `#1756` → `61faa675`, shipped to both hosts. History below.
-- **Symptom + exact repro:** `nix build .#checks.x86_64-linux.pytests` → 17 failures; a dev-host
-  run of the three handoff suites → 13. Every PR's `pytests` leg red regardless of its diff.
-- **Observed (with values):** `d2844af6` (#1750) pruned `claude/skills/handoff/SKILL.md`
-  27,419 → 19,421 B and removed **all 8 refusal markers** across rules (j) and (k) —
-  `[no via: field]`, `[no forcing: field]`, `[unknown kind`, `[unparsed`, `[fenced]` — which
-  `scripts/lib/handoff_doc.py` still prints. 17 pinned sentences total. Assertion text:
-  *"the module prints '[no via: field]' for rule (k) and claude/skills/handoff/SKILL.md never
-  mentions it — an executor hits an undocumented marker at the moment it is about to push."*
-  via: measurement
-- **Ruled out:** that PR #1748 (the Files tree) caused it — the sandbox tier reproduced all 17
-  on a tree built BEFORE that merge, and the PR touches zero `.md` and nothing outside
-  `internal/ui`. via: measurement
-- **Ruled out:** that it was a TWO-TIER divergence — **this was MY first diagnosis and it was
-  WRONG.** I tracked the one test CI NAMED (`test_every_red_paragraph_is_a_ledger_rule…`),
-  which genuinely passes on the dev host; the other 16 fail in BOTH tiers. A CI summary names
-  ONE failure, never the failure set. via: measurement
-- **Ruled out:** that restoring the text would breach the byte ceiling and force an eviction —
-  I presented that as a fork needing an operator decision BEFORE measuring it. Budget is
-  `MAX_BYTES 21,200 − MIN_HEADROOM 900 = 20,300`; the file was at 19,421, so there were **879
-  bytes** free. There was no fork. via: measurement
-- **Next probe:** none — closed. ⚠ Residual: the fix lands at **20,088 B, 212 bytes of
-  headroom**. The squeeze that caused this is paid down, not resolved.
-
-### 🔴 The 422's actual cause was never determined — the response body is unrecoverable
-- as-of: 2026-09-18
-- **Symptom + exact repro:** operator pressed `m` on devrc#1760 from the laptop and the screen
-  showed only "unprocessable entity". Not reproducible now — the PR is merged.
-- **Observed (with values):** `~/.config/mention-open/picks.jsonl` on the laptop records two
-  OPENS of `innovation-upstream/devrc#1760`, at `2026-09-18T01:56:05Z` and `01:56:50Z`. PR #1758
-  merged at `01:56:30Z` (moving `main`); #1760 merged at `01:58:42Z`. So both opens bracket a
-  base-branch move by 25 s before / 20 s after.
-- **Ruled out:** a read failure — the GraphQL panel query and `GET /pulls/N/files?per_page=100`
-  both succeeded against devrc at the time. via: measurement
-- **Ruled out:** a merge-method problem — devrc enables squash, merge AND rebase
-  (`gh api /repos/.../devrc`), and the laptop has no `~/.config/mention-review/config.json`, so
-  the declared default `squash` was used. via: measurement
-- **Ruled out:** that the timeline PROVES base-recompute — it does not. `picks.jsonl` is a
-  repo-resolution pick log (`scripts/mention-open.py:138`, one line per repo picked); it records
-  no keypress and no write outcome, so two entries prove two OPENS, not two merge presses.
-  via: code
-- 🔴 **NOT established: which verb produced the text.** A failed merge renders as
-  `FAILED — MergePR: ERROR — <detail>` in the NOTICE bar (`internal/ui/write.go:311-313`), not as
-  a card; the GraphQL `Fetch` path is the one that draws a card. The operator's report names the
-  merge, and that is the only evidence for the verb. via: code
-- **Leading hypothesis:** a merge dispatched into GitHub's post-base-move mergeability recompute.
-  Consistent with the timeline; **not** measured, because the 422 body was never captured.
-- **Next probe:** none available retrospectively — the body is gone. The shipped renderer now
-  surfaces `errors[]`, so **the next occurrence names its own reason**. If it recurs, capture the
-  card verbatim before anything else; that single string settles this block.
-
-### The eight re-anchored mutation rows APPLY but are not known to KILL
-- as-of: 2026-09-18
-- **Symptom + exact repro:** n/a — a coverage gap in merged code, not a defect. Changing
-  `PICKER_SH` and the two `emit_click` call sites in `scripts/mention-open.py` moved the text six
-  (later eight) mutation anchors were anchored on, taking each to **0×**.
-- **Observed (with values):** an anchor at 0× scores as **SURVIVED while executing nothing**, so
-  a fully green battery reported coverage it did not have. `test_every_mutation_anchor_occurs_
-  exactly_once_in_its_target` passes at `66e51d90`, which establishes the anchors **apply** to
-  their targets. Rows: K48/49/50/54/66/67/82/92. via: measurement
-- **Ruled out:** that the CI red on `7d83f5fa` was the ~42% noise — the failing test was
-  `test_every_mutation_anchor_occurs_exactly_once_in_its_target[mutation_battery_mentions.py]`
-  and the diff reached it directly. via: measurement
-- **Ruled out:** that narrow test selection would have caught it — the two-file scoped runs
-  could not see it; only the full suite did. via: measurement
-- **Leading hypothesis:** none needed. The rows are re-anchored; whether each still kills is
-  simply unrun. **"An anchor that applies" and "a mutant that kills" are different claims and
-  only the first is established.** Recorded on the PR before merge rather than left implied.
-- **Next probe:** run the battery with `--only K48,K49,K50,K54,K66,K67,K82,K92` (the filter takes
-  a comma list; bare positional ids are **silently ignored** and start a ~90-row sweep). Closes
-  when each row reports KILLED with its own error, or is honestly recorded SKIPPED/`<did-not-run>`.
-
-### RESOLVED — the eight re-anchored mutation rows KILL (retires the 2026-09-18 block of the same subject)
-- as-of: 2026-09-19
-- **Retracted as live.** The 2026-09-18 block "The eight re-anchored mutation rows APPLY but are
-  not known to KILL" is answered exactly as its closing condition was written: *"each row
-  reports KILLED with its own error."* Everything below is history.
-- **Symptom + exact repro:** n/a — a coverage gap in merged code, now measured shut.
-  `PYTHONDONTWRITEBYTECODE=1 nix develop $DEVRC -c python3 scripts/tests/mutation_battery_mentions.py --only K48,K49,K50,K54,K66,K67,K82,K92`
-- **Observed (with values):** `CONTROL (pristine): 733 passed, 0 failed, 0 errors`; observation
-  floor 366 tests must RUN. **`9/9 killed for the stated reason; problems: none`**, every row
-  `KILLED(attributed)`: K48 f=5 · K49 f=5 · K50 f=2 · K54 f=2 · K66 f=3 · K67 f=2 · K82 f=1 ·
-  K92 f=1, and `positive control P1: KILLED — the battery can observe`. `restore: OK —
-  default.nix=8fbc07fbcc71 session-tailer.py=49dea6798c1c mention_scan.py=fc2d0794f2ff
-  mention-open.py=3cb484e55584`. via: measurement
-- **Ruled out:** that the filter silently ran a full sweep — the banner printed
-  `🔴 FILTERED RUN — ['K48'…'K92'] plus the P1 control ONLY. This is evidence about those rows
-  and nothing else.` and the run scored exactly 9 rows. via: measurement
-- **Ruled out:** that a stale bytecode cache let a mutant score without executing — the run set
-  `PYTHONDONTWRITEBYTECODE=1`, and P1 (the known-fatal positive control) was KILLED in the same
-  batch. via: measurement
-- **Next probe:** none — closed.
+### DEMOTED (still OPEN) — why right-aligning the rank marker moves fzf's ranking
+- as-of: 2026-09-20 · **full block: `claudedocs/refs/mention-picker-fzf-alignment.md`**
+- 🔴 **NOT CLOSED — demoted, not evicted** (playbook step 2), because both CLOSED blocks were
+  already evicted and a budget may not be paid with an open investigation.
+- `f"{rank:>3}"` vs `f"{rank:<3}"` changes fzf's order — right moved top-1 on **7 of 20**, left
+  on **0 of 20** (fzf 0.74.4, same width, identical match set); shipped code uses `:<` on that.
+  **Both plausible mechanisms are RULED OUT** and the leading hypothesis is deliberately none.
+- **Next probe:** re-run both alignments over ranks 100–199 (constant digit count).
 
 ## Next steps (ranked)
-1. **Decide symptoms 1 and 3 of the picker — they are YOURS, not an agent's.** (Was rank 2; the
-   two items above it are closed, and **no live `mention-review-tui-*` claim existed** when this
-   was renumbered, so nothing was re-pointed.) The proposal is
-   `claudedocs/proposal-mention-picker-visibility.md`. **(1)** fzf re-sorts by its own score the
-   moment you type, so the ranking is invisible to anyone who types rather than scrolls — the
-   options are making the class/rank visible in the row text, or fzf flags, each with a
-   trade-off. **(3)** the ordered block starts at row 2–3 because clawgate/pane-guess rows are
-   pinned above it; the original rationale is quoted in the doc. Nothing was implemented for
-   either, deliberately. Repo: devrc.
-   forcing: user — both are look-and-feel calls on the operator's own daily tool.
-⚠ **A rank 2 was drafted here and DELETED by `/audit-pr` round 0 — recorded so it is not
-re-minted.** It asked a later session to bring `homelab-talos/containers/clawgate` current
-because `drift-check.sh` reports rc 17. `drift-check.sh` **already** checks that property
-against reality every 6 h, with an escalation ladder and `notify-failure@` toasts, so the item
-was a hand-written mirror of a live deadman — staler than the thing it copied, and tagged
-`forcing: none`, which declares it **not eligible to be worked** while its gate keeps firing.
-🔴 **The test round 0 applied is the one worth keeping: does something else already check this
-against reality?** A ranked item that duplicates a running check is not a work item.
-
+1. **Re-scope `#1829` against the now-4-hourly cadence, then land it.** Repo: devrc.
+   IN FLIGHT: devrc#1829 (DRAFT). Three changes, all from round 0 and all detailed in the PR
+   comment: **(a)** drop `PLAUSIBLE_MARGIN_MAX = 60` for
+   `margin = ceil(min(age_days, REFRESH_INTERVAL_DAYS) * RANGE_GROWTH_PER_DAY)` — the interval
+   is the unit's own period, i.e. observable state rather than a tunable, so the one
+   admittedly-unprincipled constant disappears and headroom under the 74 bound widens from 14 to
+   34; **(b)** add a `margin` or `table_age` key to `order_dims` — as written, `picked_class`
+   silently begins reporting the POST-margin class under the same field name, **destroying the
+   instrument that measured the defect** (nobody could then separate "the ranking improved" from
+   "the classifier was widened"); **(c)** reconcile the four denominators (71 / 100 / 115 / 121)
+   — state whether the 6 `below` from the current-table replay are the SAME six as the 6
+   API-confirmed non-existent. If they are, the decomposition is complete.
+   forcing: regression — the sort key filed real references BELOW, reproduced live at 1809 vs
+   1828; `#1831` shrinks that window but does not close the refresh-broken one.
+2. **Correct ONE SENTENCE in `proposal-mention-picker-visibility.md`** — the `and **not** a
+   stale-table artifact` clause in §(B), a wrong-clock error. 🔴 **Nothing else there is wrong**;
+   see the Gotchas entry before touching anything else in that file. Repo: devrc.
+   forcing: none — the code is fixed either way; this is the prose catching up.
 ## Defects (batched)
-- 🔴 **`mention-review --version` CANNOT distinguish builds.** `version.go` stayed `0.3.0`
-  across #1761 AND #1773 while the binary changed completely. Nix rebuilds on source hash so the
-  STORE PATH moves, but the version string answers nothing — verify by content with a positive
-  control (recipe in How to verify).
-- 🔴 **THIS REPO HAS NO `LICENSE` FILE AND THE DERIVATION CLAIMS MIT.**
-  `nix/pkgs/tools/mention-review/default.nix:146` declares `license = licenses.mit;` with nothing
-  in the tree backing it, and the repo is PUBLIC — which defaults to all-rights-reserved. One of
-  those two statements is false today.
-- 🔴 **181+ agent worktrees are registered in this clone**, oldest 2026-08-13. A stale worktree
-  holds its branch repo-globally. `scripts/worktree-prune` exists; not run — removing that many
-  at once is high blast radius and some belong to other sessions.
-- 🔴 **`scripts/lib/handoff_doc.py`'s pins have only 212 B of headroom** in
-  `claude/skills/handoff/SKILL.md` (20,088 of a 20,300 budget). The next addition needs an
-  eviction in the SAME commit; the durable fix is moving narrative into
-  `claude/skills/handoff/reference/*.md`, which costs 0 until loaded.
-- **Four scanner limits shipped KNOWN**, documented in `detailrouting_test.go`, reported by an
-  audit round and deliberately not fixed: `<ident>.detail(…)` classified as routed rather than
-  `c.detail`; the `len(srcs) < 3` floor against an actual 5; `prFragmentSelections`' `(`-skip
-  taking the first `)`; the transport test's control closing a loopback server then dialling it.
-- `movement_test.go`'s `paging_UP_onto_src` cannot catch a dir-row-moves-the-diff mutant —
-  `src`'s first DIFF-ORDER descendant is the file the cursor was already in. 2 of 3 subtests
-  catch it. Pre-existing.
-- Two guards still claim more than they check: `scripts/tests/test_mention_review.py:122` (claims
-  it pins the tier set; does not check `main-green-check.sh`) and `:361` (claims a slug check;
-  there is none). ⚠ There were THREE — `internal/ui/words.go:179-184` was CLOSED by Phase 2.
-- `internal/ghapi/ghapi_test.go` and `internal/argv/argv_test.go` are not `gofmt`-clean — one
-  hunk each. **CONFIRMED PRE-EXISTING on `main` at `2b131bf2`** by two independent audit rounds.
-- `coldopen_test.go`'s `TestTabCyclesEveryPanelDuringTheSkeleton` seeds `visited` with the
-  starting focus, so `seen[PanelDiff]` proves nothing there. Its unseeded sibling catches the
-  case, so fixing it changes nothing anyone does.
+- 🔴 **THE DEVRC CI GATE COULD NOT RUN, TWICE IN A ROW, ON A ONE-LINE DIFF — and it is a known,
+  UNFIXED issue with an open PR.** `#1831` head `79e0b655` → `devrc-ci-h6w2g` gate
+  `TaskRunTimeout` (statuses stuck `pending` ~60 min); head `d5f8ea99` → `devrc-ci-vc65z`, all
+  four legs `error`: *"NO CAPACITY: <leg> — the gate never started (queued past its deadline).
+  Not a code failure."* 🔴 **MEASURED AT THE TIME: nodes were at 8–37% CPU / 5–33% memory**, so
+  this is NOT congestion — it matches **`#1787`** (*"retract the congestion claim — the gate pod
+  was too big to schedule"*), which is still OPEN. 51 PipelineRuns ran in the preceding ~2 h
+  across all repos (14 devrc: 7 succeeded, 4 failed, 3 cancelled), so the pipeline works; these
+  two runs never got to run. It will keep costing every devrc PR until `#1787` is acted on.
+- ⚠ **`test_custom_tool_copied_into_scratch_project` FLAKED on `main`** —
+  `scripts/browser-bridge/tests/test_browser_agent.py`, 1 failed of 23,828 at `23b898d5`
+  (`devrc-ci-kg7pl`, gate `StepFailed`), and **green one commit later at `ad80c30d`** off a
+  docs-only change that cannot have fixed it. It shells out to opencode, so it is
+  timing/environment sensitive. Not a regression; worth de-flaking.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **"Local git first (~0ms)" is WRONG on the FIRST read, and that framing came from me.**
@@ -726,40 +574,187 @@ against reality?** A ranked item that duplicates a running check is not a work i
   banner it prints (`FILTERED RUN … evidence about those rows and nothing else`) is the thing to
   quote, because it scopes the claim for you.
 
+- 🔴 **THE SESSION'S METHODOLOGY LESSONS ARE IN THE CAIRN INDEX, NOT HERE — this doc is at its
+  byte ceiling and an index entry costs nothing until recalled.** `cairn recall --repo
+  ~/workspace/devrc`, entries **`devrc/scripts`** and **`devrc/tests`**, both dated 2026-09-20.
+  They carry, with values: `ORDER_APPLIED` means a table was READ not that it RANKED (`sorted`
+  is stable, so an uninformative table reproduces alphabetical order); the three gates and the
+  per-`#N` tie measurements; the case-insensitivity fix; **five silent mutation-anchor
+  disarmings in one arc**; a sweep being only a claim about the dimension the fixtures can see;
+  isolating a mutation per conjunct; and the checkpoint-and-restore ownership rule.
+- 🔴 **`/audit-pr` ROUND 0 FOUND A 🔴 IN A DOCS-ONLY PR, AND DELETED A RANKED ITEM.** On `#1781`
+  it caught a sentence applying the **subtree** unit to a behind-count and the **repo** unit to
+  dirtiness in one breath (`cleanSource (/. + srcDir)` reads `containers/clawgate` alone, and
+  that subtree was 0-dirty on both hosts). It also killed a ranked item with the right
+  question: **does something else already check this against reality?**
+- ⚠ **`--emit-claims` REFUSES a `round=0` block, correctly** — round 0 fixes nothing, so an
+  anchorable block would let the next delta attribute the whole change to it. Record round 0's
+  verdict as PROSE; the ladder starts at the round that first FIXES something.
+- **The `#1793` ladder, for anyone weighing whether to run one:** rounds 0–4, findings
+  `1🔴 / 1🔴+6🟡 / 3🟡+3🟢 / 2🟡+2🟢 / 1🟢`, payload `— / 116 / 34 / 29 / 15`, executable
+  `— / 52–66 / ~4 / 0 / 0`. 🔴 **Every round found the PREVIOUS round's PROSE claiming more
+  than its TESTS delivered** — round 2 named it and then did it itself. Stopped by **operator
+  decision** at round 4 on the attribution gate's SUBSTANCE (two consecutive zero-executable
+  rounds) rather than its letter (comments in shipped source are payload under the round-1
+  classification, so no round hit zero). ⚠ An earlier ledger figure of "~35 executable for
+  round 1" **does not re-derive** — it is 66 counting both sides of modified lines, 52 counting
+  additions only.
+- ⚠ **AN ALARM REFUTED BY ITS OWN CONTROL — "6,612 detections vs 0 clicks" on the workbench.**
+  `mention-detected` is emitted by `session-tailer.py` scanning **Claude transcripts**; it is
+  not the operator clicking and was never upstream of a click. The 5.7× detection gap tracks
+  the 7.8× Claude-session gap (452 vs 58). **Two unrelated quantities compared as a funnel.**
+  The operator clicks on the laptop; there is no workbench defect. 🔴 And MEASURE THE HOST THE
+  FEATURE RUNS ON — the ranking reachability was first measured on the workbench, where
+  `picks.jsonl` is absent, so Tier B contributed nothing vs 117 rows on the laptop.
+
+- 🔴 **THE LADDER'S RECURRING FINDING IS A FALSE CLAIM REPLACED BY A DIFFERENTLY FALSE ONE, AND
+  IT HAPPENED FOUR TIMES THIS SESSION — THREE THE SAME SHAPE:** an unmeasured EXCLUSIVITY claim.
+  *"Ctrl-C is the only remaining uncovered ending"* (false — `abort` is four keys, plus `ctrl-d`
+  on an empty query); *"`queried == False` is UNAMBIGUOUSLY an ESC on an untouched picker,
+  nothing else can produce it"* (false — a whitespace-only query, or type-then-delete, produces
+  it); *"its ONLY Ctrl-C sentence"* (false — seven-plus). **Each was written in the commit that
+  retracted the previous one. The reflex to write "nothing else can" is the defect.**
+- 🔴 **A "POSITIVE CONTROL" CAN PASS ON A TIMEOUT.** The Ctrl-C arm of the real-fzf ESC test
+  asserted `out == b""` only; a key that does NOT abort yields the IDENTICAL `(b"", 130)`,
+  differing only in wall time (8.6s vs 0.5s), which nothing checked. A control must assert the
+  child ENDED. Full write-up: cairn `devrc/tests`, 2026-09-21.
+- 🔴 **A MUTATION ANCHOR CAN BE DISARMED BY A ONE-CLAUSE EDIT.** Gating `picked_ordered` on
+  `ORDER_APPLIED` took K88's anchor to 0x, where a row reports SURVIVED while testing nothing.
+  The anchor guard caught it; re-anchoring is NOT enough — RE-RUN the row, because a matching
+  anchor is not the same claim as a killing row.
+- 🔴 **A CLEAN `git merge` LEFT A FUNCTION DEFINED TWICE.** Merging #1812 into #1813 carried both
+  copies of `_counter`; bodies identical, so 491 tests passed while Python silently used the
+  second — dead code reading as live, the semantic conflict a clean merge does not catch.
+- 🔴 **A HUNG PTY TEST PRODUCES ZERO OUTPUT, WHICH THROUGH A PIPE READS AS A SILENT PASS.**
+  `waitpid` before closing the pty ⇒ fzf blocks writing its redraw and never exits; pytest killed
+  at 540s, rc 124, no output, and `| tail` reported `rc=0` (that rc is `tail`'s). I then leaked
+  that process for ~2h and an auditor found it. Redirect, don't pipe; kill by RESOLVED PID after
+  checking `/proc/<pid>/cwd` matches EXACTLY.
+- ⚠ **A ROUND-0 AUDIT CAN BE CONFIDENTLY WRONG ABOUT AUTHORSHIP.** It reported the operator never
+  chose (D), having searched user-authored FREE TEXT and scoped its claim to that prefilter. The
+  decision arrived through the STRUCTURED question tool and is a `[user]` record in the
+  transcript. Refuted publicly on the PR; attribution stays. **Deleting a true attribution on a
+  false finding is the worse error.**
+- ⚠ **§1.4 OF THE PROPOSAL CONTRADICTS THE CLICK TELEMETRY, SO ITS "the ranking is not the weak
+  link" IS IN DOUBT.** It reports *"104 plausible, 5 below"* over 109 picks; the click-time dim
+  says the opposite ratio. They measure different things — §1.4 replays `picks.jsonl` against the
+  table **as it stands now**, the dim is recorded **at click time**, so a repo whose `max_ref`
+  has grown reads `plausible` retrospectively. **Mechanism likely, NOT proven:** no historical
+  table snapshots exist.
+
+- 🔴 **THE PTY READINESS COMMENT IS SCOPED TO ITS CORPUS, AND THE TWO CORPORA DISAGREE — do not
+  "simplify" it back to one number.** `_fzf_interactive_first_row`'s comment now states the
+  prompt-only race rate against the corpus each reading was taken on, because `#1812`'s and
+  `#1813`'s texts contradicted each other on the merged tree. Here `_eponymous_corpus` derives
+  its rows from `picker_rows()` and calls `MO.stamp_picker_markers`, so it CARRIES the rank
+  marker and the rate is **11–12 of 20**; on the pre-`#1813` tree it was a hardcoded marker-free
+  f-string and `/audit-pr` round 2 measured **0 of 80**. The marker's WIDTH is not the variable
+  (12/20 at the shipped 5-byte rank-only width vs 11–12 at the ~16-byte class+rank one); what
+  separates the two readings is the whole change of corpus, and **nothing isolates the marker
+  inside it** — so the comment records that as unknown rather than naming a cause.
+- **`rerere` is enabled in this clone (`rerere.enabled=true`), and this doc already records it
+  replaying a resolution from a different merge.** Disable it **per command**
+  (`git -c rerere.enabled=false merge …`) — NEVER `git config --local`, because worktree config
+  writes the **common** git dir and would change the shared clone for every session. 🔴 This is
+  the ONE lesson from that merge not already covered by `claude/RULES.md`; the others (squash vs
+  ancestry, a clean merge that is not a clean merge, two-way pins, stacked-merge doc checks) are
+  `RULES.md` §Git Workflow and the cairn `devrc/scripts` entry. **They were written out HERE and
+  cut by `/audit-pr` round 0** — 66% of that update's growth, into a doc whose own 🔴 rule 68
+  lines above says methodology goes to cairn. Do not re-add them.
+
+- 🔴 **`below`-DOMINANCE WAS A STALE-TABLE ARTIFACT, NOT A BAD SORT KEY AND NOT ClickUp IDS —
+  and the proposal's rebuttal of staleness is a NON-SEQUITUR.** ⚠ **An earlier draft also
+  called the proposal's finding MISATTRIBUTED; that was MY error** (round 0 on `#1829` caught
+  it) — the proposal never diagnosed the class term as bad, and **exactly one sentence there
+  is wrong**: the staleness clause. I mischaracterised it while charging it with
+  mischaracterisation. The mechanism argument is logical: `CLASS_BELOW`
+  requires `max_ref < N`, so if a mention points at a **real, existing** item then the repo's
+  TRUE max at click time was necessarily ≥ N. Click-time BELOW can therefore ONLY come from
+  (a) a stale `known_ranges.json` or (b) a wrong repo. **Measured: of 100 distinct `(repo, n)`
+  picks, 94 exist and 6 do not** — so (b) is ~6% and the rest of the BELOW mass is (a).
+  - §(B) says *"not a stale-table artifact — refreshed by a daily timer, last run within 5h of
+    the measurement"*. The telemetry `klass` is recorded at **click** time; the table's
+    freshness at **measurement** time cannot speak to it. Right fact, wrong clock.
+  - 🔴 **The proposal states the SAME quantity twice with OPPOSITE answers and never
+    reconciles them:** §1.4 *"104 plausible, 5 below"* vs §(B) *"below 54, plausible 17"*. §1.4
+    RECOMPUTES with a current table (washing staleness out); §(B) reads click-time telemetry
+    (preserving it). An independent replay of 121 picks against today's table gives **115
+    plausible / 6 below**, corroborating §1.4 — so **the two differ by exactly the staleness**,
+    which is the whole finding sitting unnoticed inside one document.
+  - ⚠ **The stale side is an UPPER-BOUNDING ARGUMENT, not an observation.** `picks.jsonl`
+    stores `(t, repo, n)` with no `max_ref`, and no historical table snapshots exist, so the
+    click-time gap distribution is **unrecoverable**. Only the wrong-repo side is measured.
+- **The six wrong-repo gaps are a ONE-SIDED bound, which is what makes the ceiling safe.**
+  Today's gaps are `1810, 183, 171, 135, 79, 74`. `gap = n − max_ref` shrinks monotonically as
+  `max_ref` grows, so **today's 74 is a LOWER bound on the click-time gap** — at click time
+  `max_ref` was smaller and the gap larger. A ceiling of 60 < 74 therefore holds a fortiori,
+  and the implementer's stated worry that "the ceiling depends on 74 being right" is retired.
+- 🔴 **I BRIEFED A ONE-DAY GROWTH FIGURE AS IF IT WERE A RATE, AND IT WAS ~2.5× LOW.** I told
+  the implementer "~14/day" from a single day's observation of one repo. It measured 14 days
+  across the eight busiest repos (34.1 / 23.2 / 11.2 / 10.9 / 10.4 / 8.9 / 4.8 / 0.0 per day)
+  and re-measured the fastest over 31 days at 39.0/day, landing on `RANGE_GROWTH_PER_DAY =
+  40.0`. A margin built on my number would have under-covered by 2.5×. **"One measurement is
+  not a general claim" — committed by the briefer, caught by the implementer.**
+- ⚠ **Two `gh` instrument traps from this work are in cairn, not here** — `devrc/scripts`
+  2026-09-21, rev `610596953ba16646`.
+
+- 🔴 **`below`-DOMINANCE HAD A THIRD MECHANISM NEITHER DOCUMENT NAMED, AND THE CHEAPEST FIX WAS
+  A TIMER PERIOD NOBODY HAD QUESTIONED.** The proposal offered "the class term is wrong" and
+  "clicked `#N` are ClickUp ids"; both are wrong. The class term is sound and the numbers were
+  real GitHub numbers — the TABLE was a day stale. `/audit-pr` round 0 then found the fix
+  underneath the fix: `nix/home.nix` carried `OnCalendar = "*-*-* 07:00:00"` with the comment
+  *"Daily."* and **no argument for daily over anything else**, while the picker's class is
+  `max_ref >= N` — so **the table's AGE is the ranking's error term**. One line beat ~20 payload
+  lines and two constants. **Ask what the period is, before sizing a tolerance against it.**
+- 🔴 **A SIBLING PR's SUCCESS PROVES THE SYSTEM IS UP, NOT THAT YOUR RUN IS FINE — I called a
+  FAILED run "just slow" on exactly that inference.** `#1830` settled green while `#1831` sat
+  `pending`, and I read that as "the pipeline is healthy, so `#1831` is merely slow". The
+  PipelineRun object had read `Tasks Completed: 2 (Failed: 1), Incomplete: 1` the whole time.
+  **The GitHub status is a report; the PipelineRun is the authority** —
+  `kubectl get pipelinerun -n tekton-ci` (🔴 **`tekton-ci`, NOT `tekton-pipelines`** — the wrong
+  namespace returns a confident `No resources found`).
+- 🔴 **POSTING A PR COMMENT THROUGH A SHELL IS A PUBLISH, AND MINE PUBLISHED A HOLE.** A
+  replacement formula written inside backticks in a DOUBLE-QUOTED zsh string was executed as
+  command substitution and vanished: the comment posted as *"in favour of ."* — the one sentence
+  it existed to deliver — with only `command not found: margin` on stderr to say so. **Use
+  `gh ... -F body=@<file>`**, which takes shell quoting out of the path entirely, and re-read
+  the posted body before moving on.
+- 🔴 **THE STALE NUMBER THAT FOOLED ME WAS IN THIS FILE'S OWN `How to verify` BLOCK.** I wrote
+  that the merged tree's suite was "8 above the 640/2 the pre-`#1813` tree gives"; it is
+  **641/2, delta 7**. The 640 came from no measurement at all — I copied it out of this doc,
+  where it had been true of an OLDER tree, and set it beside a freshly measured 648. The general
+  rule was already recorded here; what it missed is that **a stored number sitting in the
+  project's own doc reads as the project's ANSWER rather than as a claim to re-derive.**
+  Re-derive BOTH sides of any delta you quote. (Closed: corrected in `#1820`.)
+- ⚠ **A NEGATIVE CONTROL CAN BE TOO LOOSE TO MEAN ANYTHING.** Verifying `#1831` landed, I
+  grepped `main` for the OLD value `*-*-* 07:00:00` expecting zero hits and got one — from the
+  comment I had just written quoting it. A control that matches PROSE CITING the hazard cannot
+  distinguish it from the hazard. Anchor on the assignment (`^\s*OnCalendar\s*=`), not the
+  string.
+
 ## How to verify
 ```bash
-# 🔴 Is the merged work DEPLOYED? `--version` CANNOT answer this. Follow the WRAPPER;
-#   `bin/mention-review` is a makeWrapper SCRIPT and grepping IT returns 0 on a HEALTHY
-#   deploy. POSITIVE CONTROL FIRST, or the zero is a fact about the instrument.
-B=$(readlink -f "$(command -v mention-review)")
-R=$(grep -oE '/nix/store/[a-z0-9]+-mention-review[^/]*/bin/\.mention-review-wrapped' "$B"|tail -1)
-grep -ac 'usage: mention-review' "$R"   # POSITIVE CONTROL — must be 1
-grep -ac 'ReadIntents' "$R"             # Phase 3 shipped — NON-ZERO; 0 means NOT DEPLOYED
-#   🔴 Read zero-vs-non-zero ONLY. `grep -ac` counts NUL/newline chunks in a stripped
-#   binary, so the exact number is a layout artefact — pinning it would read a healthy
-#   rebuild as a broken deploy. The positive control is what scopes the zero.
+# 🔴 `#1812` landed — by CONTENT, never ancestry (a squash is never an ancestor).
+#   POSITIVE CONTROL FIRST or the emptiness below is a fact about the instrument.
+git -C $DEVRC grep -c 'def ' origin/main -- scripts/mention-open.py        # must be non-zero
+git -C $DEVRC diff 17b6ff96 origin/main -- \
+  scripts/mention-open.py scripts/tests/test_mention_open.py               # must be EMPTY
 
-# Host convergence. 🔴 REDIRECT, never pipe — `| tail` eats the status AND cuts the
-#   per-host block, which is the half you are told to read. Per-run path: a fixed
-#   /tmp name is truncated by every sibling agent on this box.
-D=$(mktemp -t drift.XXXXXX); scripts/drift-check.sh > "$D" 2>&1; echo "rc=$?"
-grep -E '^\[(workbench|laptop)\]' "$D"
+# `#1813`'s CI, per-context on its own head — NEVER `/commits/<sha>/status` (the roll-up maps
+#   `error` onto `failure`, so it reads RED for a merely superseded run).
+H=$(gh pr view 1813 --json headRefOid --jq .headRefOid); echo "${H}"   # expect 8c5fda78…
+gh api "/repos/innovation-upstream/devrc/commits/${H}/statuses" \
+  --jq '.[] | "\(.context)\t\(.state)\t\(.updated_at)"' | sort -u
 
-# The eight mutation rows. 🔴 run_in_background — a 10-min tool cap SIGTERMs this
-#   mid-battery and strands a live mutant. Use a throwaway worktree.
-PYTHONDONTWRITEBYTECODE=1 nix develop $DEVRC -c python3 \
-  scripts/tests/mutation_battery_mentions.py --only K48,K49,K50,K54,K66,K67,K82,K92
-#   expect: CONTROL 733 passed · P1 KILLED · 9/9 killed · problems: none
-#   🔴 Then verify the restore INDEPENDENTLY of the battery's own `restore: OK`, scoped
-#   to the four paths it touches — a bare --porcelain false-fires in a worktree on
-#   .envrc / result / __pycache__:
-git status --porcelain -- nix/pkgs/tools/default.nix scripts/collector/claude/session-tailer.py \
-  scripts/lib/mention_scan.py scripts/mention-open.py   # MUST be empty
+# The suite on the merged tree, scope NAMED so the number reproduces: 648 passed / 2 skipped at
+#   base 6ee5ff68 (collection 650) — ABOVE the 641/2 (collection 643) the pre-#1813 tree gives,
+#   which is the point. 🔴 RE-DERIVE BOTH SIDES; do not copy either forward. The figure that
+#   stood here before was 640/2 and 642 collected, true of an older tree and stale by the time
+#   it was quoted beside a fresh number.
+nix develop $DEVRC -c python3 -m pytest \
+  $DEVRC/scripts/tests/{test_mention_open,test_mention_scan,test_mutation_battery_anchors}.py -q
 
-# The picker's sort key on main (Tier B BELOW distance):
-git -C $DEVRC grep -n 'return (klass, distance' origin/main -- scripts/mention-open.py
-git -C $DEVRC grep -n 'return (klass, -scores' origin/main -- scripts/mention-open.py  # EMPTY
-
-# The Go tier (the leg that gates this code at PR time):
-nix develop $DEVRC -c bash scripts/run-go-tests.sh .   # TOTAL pass>=386, SCOPE: FULL
+# 🔴 The two pinned picker strings must stay IDENTICAL — one hit in EACH file.
+git -C $DEVRC grep -n 'bind="esc:print-query+abort" --nth=2\.\.' -- \
+  scripts/mention-open.py scripts/tests/test_mention_open.py
 ```

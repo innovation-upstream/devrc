@@ -1027,11 +1027,14 @@ is NOT about `activate`.** That badge covers the **`wake`** rig (`open` → `tex
 `wake` → `text`); its cited sequence contains no `activate` call at all. For the
 consent gate:
 
-* **`browser activate --focus` has never been run against a real i3 — by anyone.**
-  Not in this PR (no live reproduction was performed: reproducing the bug means
-  taking the operator's screen), and not in #557, whose own commit message says
-  nothing was checked against a live i3 either. **The escape hatch is the
-  unverified surface.**
+* **First live run against a real i3: 2026-09-21 — one run, one host, one site.**
+  `browser activate --focus` on the laptop's `work` instance ran the raise path
+  (the operator's window was displaced and the recorded restore succeeded) and
+  the pane hydrated within ~3 s of the raise — the same tab that `wake` had
+  left rail-only through every retry. That un-throttled pane is Slack
+  client-v2's real-visibility gate (`flows/app.slack.com.md`); it is evidence
+  the raise path WORKS, not a verification of the gate's full contract — the
+  fake's call-log assertions below remain the systematic cover.
 * The **withheld** path is the half that *was* observed, and it is unverified in a
   much weaker sense: it never enters `i3_foreground` at all, so there is no i3
   interaction to get wrong. That is asserted on the fake's call log
@@ -1040,7 +1043,9 @@ consent gate:
   above — and on the suite, not on a live run.
 
 So: the path this change **closes** is well evidenced; the path it **leaves open for
-a human who types `--focus`** is the one nobody has watched work end to end.
+a human who types `--focus`** has been watched against a real i3 exactly ONCE
+(2026-09-21 — raise, recorded restore, hydration; see the bullet above), which is
+evidence the raise path works, NOT a verification of the gate's full contract.
 
 ### Real false-outage report — a hidden tab that looked like a production outage
 

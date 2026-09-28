@@ -33,6 +33,13 @@ every `open`ed heavy app starts throttled.
   `Object.defineProperty(document,'visibilityState',…)` changes nothing: the
   throttling is browser-enforced and the app's fetch decisions are already made.
   **`wake` is the fix** — not a spoof, and not `activate`.
+  **MEASURED EXCEPTION (2026-09-21): Slack client-v2 gates its message-list
+  render on REAL document visibility, which `wake`'s emulation does not
+  satisfy — `activate --focus` (the one screen steal, record/restore) is the
+  only MEASURED escape there (one tab, one host, one day — not a survey of
+  the surface), measured on a tab `wake` had left rail-only through
+  every retry. The tab-level contract:
+  `~/workspace/devrc/scripts/browser-bridge/flows/app.slack.com.md`.**
 - 🔴 **"Is this page broken for REAL users?" is not a browser question.** Answer it
   from server-side/real-user evidence — RUM, metrics, pod health, an anonymous
   `curl`. Use the browser probe to EXPLAIN a failure telemetry already shows, never

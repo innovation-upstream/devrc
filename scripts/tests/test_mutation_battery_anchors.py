@@ -75,6 +75,31 @@ BATTERIES = (
     # Spans THREE files (resume-state.sh, the ceiling test module, and the
     # shared handoff-name predicate it borrows), so it declares `TARGETS`.
     "mutation_battery_handoff_archive_and_cap.py",
+    # Spans FOUR files (the extractor, its suite's fixture-bearing
+    # prose, the handoff reference doc and /resume's routing row), so
+    # it declares `TARGETS`. Its routing rows mutate PROSE in two
+    # different skills — a section-level mapping would bucket them
+    # together and score one against the other's suite.
+    "mutation_battery_extract_user_msgs.py",
+    # Spans TWO files (`find-session.py` and the extractor), so it declares
+    # `TARGETS`. It has to: round 1 measured that every mutant able to isolate the
+    # SEAM lives in `extract_user_msgs.py`, so a single-file battery scored
+    # `9/9 KILLED` while vouching for the seam guard's widening not at all.
+    # Guards the arc footer naming that extractor — the DETERMINISTIC half of the
+    # routing whose prose half (a "Load when" row) reached 3 of 6 sessions where
+    # the tool itself reached 6 of 6. (This read "1 of 3" — a count stale within
+    # minutes of being taken; re-derived by round 0 of the audit ladder.)
+    "mutation_battery_arc_extractor_footer.py",
+    # Single-target (`scripts/lib/operator_asks.py`), so no `TARGETS`. Committed
+    # because round 1 of devrc#1887 found that the `17 mutants, 17 KILLED` in
+    # that PR's body came from a SCRATCHPAD script — a claim `claude/RULES.md`'s
+    # "re-verify a self-reported mutation result" cannot check from the tree.
+    # 🔴 Its own header carries the warning that matters: eight rows of its
+    # PREDECESSOR were all KILLED while the branches they mutated fired ZERO
+    # times in production, because the upstream producer already removed those
+    # inputs. A kill proves a test watches a branch, never that the branch is
+    # REACHABLE — reachability is the suite's seam class, not this file's.
+    "mutation_battery_operator_asks.py",
 )
 
 # 🔴 PYTHON MUTATION INSTRUMENTS THIS MODULE CANNOT PIN, each with its reason.

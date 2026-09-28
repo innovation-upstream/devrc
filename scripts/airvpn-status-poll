@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""The LAPTOP's host-AirVPN status writer — one source, one cache file.
+
+The workbench's `bar-status-poll` polls eight sources including `airvpn`; the
+laptop runs no poller (no LAN path to the polled endpoints), so the laptop's
+`i3status-airvpn` pill had NO WRITER — its cache was never refreshed and the
+pill could only ever render the stale `?` shape. This wrapper runs that ONE
+source on a 60s user timer and writes `~/.cache/bar-status/airvpn.json`.
+
+🔴 IT REUSES THE POLLER'S OWN CODE, VERBATIM. `bar-status-poll` is loaded by
+explicit path (the standard sibling idiom) and this calls its `run_source` —
+so the fetch, the exit-IP leak verdict, `parse_airvpn`, the `ts` stamp, the
+stale marker, `carry_stuck_forward` and the 0600 atomic write are all THE SAME
+functions the workbench runs, not a second copy that drifts. The only things
+this file owns are the argv and the stderr line.
+
+`run_source` also signals the bar (SIGNALS["airvpn"] = 10 → pkill -RTMIN+10),
+which is what makes the pill refresh within a second of a Connect/Disconnect
+instead of waiting for the next block interval.
+
+Prerequisites (see nix/system/apply-airvpn-laptop.sh, run by the operator):
+  - /etc/wireguard/airvpn.conf exists + the NOPASSWD `airvpn-sudo` helper is
+    installed. WITHOUT them this still runs and writes a correct `up: false`
+    reading (`sudo -n` fails cleanly; `ip link` answers without privileges),
+    so the pill reads "tunnel deliberately off" — never a fake all-clear.
+"""
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import json
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SIBLING = os.path.join(HERE, "bar-status-poll")
+
+
+def load_poller():
+    sys.dont_write_bytecode = True
+    loader = importlib.machinery.SourceFileLoader("_laptop_bar_poll", SIBLING)
+    spec = importlib.util.spec_from_loader("_laptop_bar_poll", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def main() -> int:
+    try:
+        poll = load_poller()
+        payload = poll.run_source("airvpn", poll.fetch_airvpn)
+    except Exception as exc:  # noqa: BLE001 — a status writer must exit 0 loudly-log
+        # The poller's own contract: every failure mode is a VISIBLE pill, so
+        # a crashed wrapper must not take the timer down repeating. Exit 0 —
+        # the cache just ages past MAX_CACHE_AGE_SECS and the pill shows `?`,
+        # which is the honest rendering of "the writer cannot run". Caught
+        # HERE, in main(), not only under __main__: a crash outside __main__
+        # (importlib, a test harness, anything that calls main directly) must
+        # get the same treatment.
+        print("airvpn-status-poll: %s: %s" % (exc.__class__.__name__, exc),
+              file=sys.stderr)
+        return 0
+    # run_source already: wrote the cache (0600, atomic), carried a stuck
+    # forward onto a stale marker, and signalled the bar (SIGRTMIN+10).
+    # The print is for `journalctl --user -u airvpn-status-poll`.
+    print(payload.get("state", "ok"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

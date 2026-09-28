@@ -31,6 +31,51 @@ Read when: wiring clawgate's hooks onto a new machine, or debugging the "Suggest
    `~/.claude/clawgate-hook.log` should show `send ... host=<label> -> <url>`. Takes effect in the
    host's next new Claude session.
 
+## The two Python TASK guards (devrc-managed, not shell hooks)
+
+Neither is a clawgate-repo hook: both live in `devrc/scripts/claude-hooks/`, ship as nix-store
+symlinks via `devrc/nix/home.nix`, and are registered in `~/.claude/settings.json`. Listed here
+because they are the only structural enforcement of the task rituals, and both used to break
+**by name** — see below.
+
+| hook | event | what it enforces |
+|---|---|---|
+| `clawgate-task-interview-guard.py` | `PreToolUse` (Bash) | denies a `task create` whose body has no `## Acceptance criteria` heading. Pure argv analysis, no network. Override: `CLAWGATE_NO_INTERVIEW=1`. |
+| `clawgate-writeback-guard.py` | `PostToolUse` + `Stop` | arms on a read of a specific task id, and at Stop does a LIVE re-read to check a `claude-code` comment landed after the last work event. |
+
+🔴 **Both accept TWO CLI spellings — `clawgatectl` and `muster`.** The tasks+dispatch half of
+clawgate is being extracted into `muster` (`github.com/ZacxDev/muster`), same verbs. Each guard
+keyed on the literal string `clawgatectl`, so the rename alone would have made both match
+nothing — the interview gate allowing every criteria-less create, and the writeback gate reaching
+**no verdict at all**, which is indistinguishable from a session that wrote back correctly. Both
+spellings therefore landed **before** the rename. Each hook derives every predicate from one
+`TASK_CLI_NAMES` tuple; add a third spelling there, not at the call sites.
+
+🔴 **`CLAWGATE_TASK_API_URL` — the second base URL, in the SAME `~/.claude/clawgate.env`.**
+Optional. When set, the writeback guard's live re-read targets it (passed to the CLI as
+`--api-url`, and used by the curl fallback) instead of `CLAWGATE_API_URL`. An optional
+`CLAWGATE_TASKS_HOOK_TOKEN` overrides `CLAWGATE_HOOK_TOKEN` for the same reads.
+
+⚠ **Singular `TASK`, and this line used to say `TASKS`.** The plural was the extraction
+plan's working name; the CLI shipped `envTaskAPIURL = "CLAWGATE_TASK_API_URL"`, the server
+writes the singular into every agent's env file, and so does the host env file. The guard
+spelled the plural, which nothing sets — and an unset first entry is not an error, it falls
+through to `CLAWGATE_API_URL`, so the live re-read went to the permission router, which
+answers `/api/tasks/<id>` with a right-looking 200. The hook no longer spells either name:
+it takes the ordered ledger from `devrc/scripts/lib/clawgate_tasks.py`
+(`TASK_API_URL_VARS`), the same module the bar poller and session-manager read, and its
+suite fails if the two ever disagree.
+
+⚠ **Do NOT repoint `CLAWGATE_API_URL` at muster.** `clawgate-hook.sh` reads it for `/api/send` —
+permission routing, which stays in clawgate. Repointing it breaks the highest-traffic surface on
+the box.
+
+When the task board cannot be reached the writeback guard emits a **non-blocking** `UNVERIFIED`
+notice (never a block — a block would wedge every session that ever read a card, with a remedy
+that runs against the same dead server). The notice names the resolved endpoint and the variable
+it came from, which is how "the board blipped" is told apart from "this guard is pointed at the
+wrong server". Mutation battery: `devrc/scripts/tests/mutants-muster-hook-guards.sh`.
+
 ## Stop hook — "Suggested next step" (0.7.23)
 
 `clawgate-stop-hook.sh` is registered (async) in `hooks.Stop` **alongside an unrelated tmux

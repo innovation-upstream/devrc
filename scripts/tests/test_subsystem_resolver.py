@@ -2145,13 +2145,20 @@ class TestMutationKillMatrix:
         assert mod.resolve_ref("alpha", idx, SCOPE_A).filename == "beta.md"
 
     def test_kills_the_readme_exclusion(self, tmp_path: Path) -> None:
+        # The exclusion is now the consolidated predicate `is_entry_filename`
+        # (upstream refactored the open-coded `if md.name == "README.md":
+        # continue` away), so the mutant kills the README half of the
+        # predicate's one rule — the exact analogue of the old skip-kill, and
+        # a wider kill than the old one, since `entry_files_in` and
+        # `ls-entries` both route through it. `classify_path` is type-only,
+        # so no earlier guard catches the README: the kill is reachable.
         mod = _load_mutant(
             tmp_path,
             "m_readme",
             [
                 (
-                    '            if md.name == "README.md":\n                continue',
-                    "            if False:\n                continue",
+                    'return base.endswith(".md") and base != SCOPE_POLICY_SHEET',
+                    'return base.endswith(".md") and True',
                 )
             ],
         )

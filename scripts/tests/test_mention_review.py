@@ -217,10 +217,13 @@ def test_a_pinned_package_that_vanishes_is_caught(tmp_path):
     """
     mutated = tmp_path / "run-go-tests.sh"
     src = GO_RUNNER.read_text(encoding="utf-8")
-    assert '"internal/udiff|11"' in src, "the PACKAGES table has been reshaped"
+    # The runner's PACKAGES rows are three-part since stt-voice joined as a
+    # second Go module: "<module>|<package>|<floor>". Pin the row by its
+    # unique module+package middle, not the bare package spelling.
+    assert 'nix/pkgs/tools/mention-review/src|internal/udiff|11"' in src, "the PACKAGES table has been reshaped"
     mutated.write_text(
-        src.replace('"internal/udiff|11"',
-                    '"internal/udiff|11"\n  "internal/ghost|1"'),
+        src.replace('nix/pkgs/tools/mention-review/src|internal/udiff|11"',
+                    'nix/pkgs/tools/mention-review/src|internal/udiff|11"\n  "nix/pkgs/tools/mention-review/src|internal/ghost|1"'),
         encoding="utf-8",
     )
     proc = subprocess.run(
@@ -229,7 +232,9 @@ def test_a_pinned_package_that_vanishes_is_caught(tmp_path):
     )
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0, f"a pinned package with no tests passed:\n{out}"
-    assert "pinned package 'internal/ghost' has NO test files" in out, (
+    assert (
+        "pinned package 'internal/ghost' in module 'nix/pkgs/tools/mention-review/src' has NO test files"
+    ) in out, (
         f"the failure did not come from THIS guard — a kill by a different "
         f"arm is green for the wrong reason and stays green with this arm "
         f"deleted.\n{out}"
@@ -243,8 +248,8 @@ def test_an_undiscovered_package_with_tests_is_caught(tmp_path):
     """
     mutated = tmp_path / "run-go-tests.sh"
     src = GO_RUNNER.read_text(encoding="utf-8")
-    assert '  "internal/udiff|11"\n' in src, "the PACKAGES table has been reshaped"
-    mutated.write_text(src.replace('  "internal/udiff|11"\n', ""), encoding="utf-8")
+    assert '  "nix/pkgs/tools/mention-review/src|internal/udiff|11"\n' in src, "the PACKAGES table has been reshaped"
+    mutated.write_text(src.replace('  "nix/pkgs/tools/mention-review/src|internal/udiff|11"\n', ""), encoding="utf-8")
 
     proc = subprocess.run(
         ["bash", str(mutated), "--check-packages", str(ROOT)],

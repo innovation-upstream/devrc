@@ -92,7 +92,7 @@ ROWS=0
 # below, counts the module, and fails with the replacement value. Two instances
 # of a too-low floor silently widening have already been recorded in
 # `mutants-audit-ladder.sh`; this is pinned from the first commit instead.
-MIN_TESTS=28
+MIN_TESTS=34
 failing() {
   local out n f total
   out="$(cd "$ROOT" && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest "$SUITE" \
@@ -410,6 +410,53 @@ run "a second copy of the churn command is re-typed here" \
 
 
 def real_runner(cmd, cwd=None):'
+
+echo
+echo "== the UNEARNED LEDGER (a self-range block: `audited=X..X`) =="
+# 🔴 EACH ROW TARGETS THE NARROWEST EXPRESSION THAT CAN BE WRONG.
+# `claude/RULES.md`: a mutant that removes a guard TOGETHER WITH ITS ENCLOSING
+# CONDITION proves nothing about the guard — it dies for the wrong reason. So
+# the predicate moves, or one comparison moves, and the branch stays.
+
+# The reading itself. With the shared predicate swapped for a `False`, no block
+# is ever recorded as degenerate and both the per-ladder line and the census go.
+run "no block is ever recorded as a self-range" \
+    test_a_self_range_block_is_RECORDED_and_NAMED_in_the_report "$LRC" \
+    '        for b in sorted(ad.self_range_blocks(blocks), key=lambda b: b.round_no)' \
+    '        for b in sorted([], key=lambda b: b.round_no)'
+
+# The mechanism split behind a ZERO positive control. An empty result cannot
+# distinguish two causes, and before this the report had exactly one story.
+run "a zero control is always blamed on absent commits" \
+    test_a_ladder_whose_EVERY_block_is_a_self_range_names_the_RIGHT_cause "$LRC" \
+    '            if L.self_ranges and len(L.self_ranges) == L.blocks_used:' \
+    '            if False:'
+
+# ONE comparison. A ladder with a single broken round then reads as having no
+# valid payload record at all — the direction that makes the loudest sentence
+# in the report unreliable.
+run "a PARTIAL ladder is reported as wholly unearned" \
+    test_a_self_range_block_is_RECORDED_and_NAMED_in_the_report "$LRC" \
+    '            every = len(L.self_ranges) == L.blocks_used if L.blocks_used else False' \
+    '            every = bool(L.self_ranges)'
+
+# The corpus census, scoped the way every OTHER census in this file is scoped.
+# That scope is wrong here: the reading is over BLOCKS and needs no commits, so
+# `L.reason is None` drops exactly the ladders whose control is zero BECAUSE of
+# their self-ranges — #687's shape.
+run "the census is scoped to ladders that PASSED the control" \
+    test_the_unearned_census_DENOMINATOR_includes_REFUSED_ladders "$LRC" \
+    '    unearned = [L for L in ladders if L.self_ranges]' \
+    '    unearned = [L for L in ladders if L.self_ranges and L.control_churn]'
+
+# 🔴 THE SECOND `Ladder` CONSTRUCTION. `main` builds one directly for a PR with
+# no head sha, and that path took the `()` default until this change — the
+# reading is over BLOCKS, so no head and no checkout are needed and there is no
+# state in which an empty answer is the honest one.
+run "the no-head-sha path stops reading its own blocks" \
+    test_a_ladder_with_NO_HEAD_SHA_still_reports_its_self_ranges "$LRC" \
+    '                self_ranges_of(ad, f.get("comments") or []),' \
+    '                (),'
 
 echo
 echo "== controls (must kill NOTHING) =="

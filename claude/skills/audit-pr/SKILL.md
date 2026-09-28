@@ -73,6 +73,21 @@ headRefOid,baseRefName`), then assert **zero** placeholders remain. It is a work
 replacement: the block still lives nowhere durable, so the next session pays the reconstruction
 again.
 
+🔴 **A REBASE RE-POINTS THE ANCHOR, AND NOTHING IN THE TOOLING NOTICES.** A delta round resolves as
+`<the claims block's from>..HEAD`. After a rebase that `from` is no longer an ancestor of HEAD, so
+re-using it silently widens the round from one commit to one commit **plus every upstream commit the
+rebase pulled in** — 23 of them on `civitai/civitai#5018`, 2026-09-22 — and the brief reads as an
+ordinary delta. **This is NOT the `<base>` re-anchor clause further down**: that one is about the
+payload COUNT's base; this is the round's own SCOPE. **Carry the anchor across to its rebased twin** —
+`git range-diff <old-base>..<old-tip> <new-base>..<new-tip>`, confirm every commit maps `=`, read the
+new sha off the matching row, and record the mapping on the PR so the next round is not re-deriving it.
+
+🔴 **`--emit-claims` stamps `<to>` from `headRefOid`, so do not emit until that sha has REFRESHED.**
+The pre-push-head lag itself is already covered under *Merge time* below — the consequence here is
+the tooling one: emit inside that window and the block records the **pre-rebase** sha, while
+`--round <n+1>` refuses to anchor on HEAD at all. The flag warns on stderr; read it. Confirm a push
+landed by reading `git/refs/heads/<branch>`, not the PR.
+
 🔴 **Reconstructing a lost block: derive it from the DIFF, never from a handoff's prose.** Prose says
 why a fix is correct, which is exactly the framing a blind round must not receive — three framed
 audits confirmed a claim that one blind pass refuted. `git diff <from> <to>` yields what was
@@ -112,7 +127,24 @@ deleted is the waste this exists to catch. Work them in order; do not skip ahead
 1. **Question every requirement, and NAME its author.** For each behaviour the diff introduces,
    record the requirement and its **author of record**: Zach (quote the ask), a **prior audit
    round** (`#N round R`), a `RULES.md`/`CLAUDE.md` bullet (quote it), or **unattributed** — which
-   is itself a finding. 🔴 **A requirement whose author is a PRIOR ROUND OF THIS LADDER is the
+   is itself a finding.
+   🔴 **THE ASK IS IN YOUR BRIEF — READ IT BEFORE ATTRIBUTING ANYTHING.** `## THE OPERATOR'S OWN
+   ASKS` carries Zach's own messages **verbatim** — his typed messages and his answers to any
+   question the session asked him, from `Claude-Session-Id:` trailers in this PR's commit bodies,
+   plus his own PR comments. "Quote the ask" used to be unreachable — you are dispatched read-only
+   and never had the transcript — so requirements Zach stated in as many words landed on
+   `unattributed`, and the **deletion candidate that produces is aimed at something he directly
+   asked for**. If a requirement answers an ask in that block, its author is **Zach**: quote it,
+   and do not propose deleting it on the grounds that nobody asked. ⚠ It is his words ONLY — no
+   agent output, and **not the PR description**, which here is usually written by the agent. The
+   block prints the transcript paths for the agent side; read them when a requirement turns on it.
+   🔴 **AN UNREADABLE SOURCE IS NOT AN ABSENCE OF ASKS, AND THE BLOCK SAYS WHICH IT IS.** Trailer
+   coverage is partial by nature — 35 of the 60 newest `main` commits, measured 2026-09-26 — so a
+   source reading `UNKNOWN` is the ORDINARY case. Record those requirements as
+   **`UNATTRIBUTED-UNKNOWN`**, which is *not* `unattributed`, and never raise a deletion candidate
+   whose whole case is that nobody asked for it; say the source was unreadable instead.
+   ⚠ **An ask is not a specification** — questioning it is still this step's job. Question it **as
+   Zach's, out loud**, rather than silently treating it as unowned. 🔴 **A requirement whose author is a PRIOR ROUND OF THIS LADDER is the
    highest-scrutiny class, not the safest.** It arrives carrying a measured incident and a case
    history, so re-opening it reads as ignoring evidence and nobody does — the "requirements from
    smart people are the most dangerous" case exactly. Then make it less dumb: name the requirement
@@ -354,6 +386,19 @@ file type reads every round of those as zero and stops a ladder that is working.
 directions on ordinary names (reference file). A round's fix touches a handful of files — read the list and name each one
 payload or scaffolding. **Ambiguous is not zero**: the gate does not fire, and the ladder continues.
 
+🔴 **The assembler adds ONE mechanical reading beside yours, and it is strictly WEAKER — it never
+classifies payload.** It re-runs your round's own `audited=<from>..<to>` range and asks whether ANY
+changed line, in any file, is executable: not blank, not a line-comment (`#`, `//`, `--`, `;`, by
+file type). Zero there forces zero in the payload, because the payload files are a subset of the
+range — so a measured zero may overrule the count you stated, and a measured non-zero may never
+overrule a `payload=0` you stated. **This does NOT reinstate a file-extension rule**, and the two
+guards that keep it honest are the ones this section demands: a round that touched **only prose
+files is UNMEASURED, never zero** (that is the prose determination's population below), and a range
+carrying **any file type the table does not recognise is UNMEASURED**. Block comments, docstrings
+and prose held in a YAML scalar are counted EXECUTABLE on purpose — over-counting keeps the gate
+silent, which is the fail-open direction — so the reading misses some prose rounds and cannot
+manufacture a zero. The unit you REPORT is unchanged: payload lines, one number, one name.
+
 🔴 **DECIDE ONCE, AT ROUND 1, AND WRITE IT IN THE CLAIMS BLOCK.** A class that can be re-decided
 each round disarms the gate without anyone choosing to — measured on devrc #1132, where a shared
 test library was named scaffolding early and payload later, in a ladder whose summary claimed it
@@ -393,13 +438,69 @@ Stop.** File the remaining scaffolding findings as one follow-up task naming the
 its PR merges or a named reader dismisses it in writing. A round that touches payload never trips
 this.
 
-🔴 **The gate is ENFORCED, and the number comes from YOU.** Post each round's block with
-`--payload N` — the payload lines THAT round's fixes changed, from your own classification of the
-ledger's file list — and the assembler REFUSES the next round (exit 5) when the two most recent
-blocks record `payload=0` for CONSECUTIVE rounds. **It fails OPEN:** a block with no readable
-`payload=` field is not a zero, so an unstated count never stops a ladder, and
-`--override-attribution-gate "<why>"` continues one — with the reason required, and recorded in the
-brief and above the block so it lands on the PR.
+🔴 **The gate is ENFORCED, the number comes from YOU, and a MEASURED zero can overrule it.** Post
+each round's block with `--payload N` — the payload lines THAT round's fixes changed, from your own
+classification of the ledger's file list — and the assembler REFUSES the next round (exit 5) when
+the two most recent blocks BOTH read zero for CONSECUTIVE rounds. A round reads zero when you STATE
+`payload=0`, **and also when the assembler re-runs that round's own `audited=<from>..<to>` range and
+finds NO EXECUTABLE LINE CHANGED** — every changed line blank or a line-comment. That may overrule a
+stated non-zero, because the payload files are a subset of the range, so zero over the range forces
+zero in the payload; the converse never holds, and a measured non-zero never overrules a stated
+`payload=0`. **It fails OPEN in every direction:** an absent or unreadable `payload=` field is not a
+zero, a range touching a file type the classifier does not recognise is UNMEASURED, a round that
+changed ONLY prose files is UNMEASURED — that is the prose determination's population, not this
+gate's — and `--override-attribution-gate "<why>"` continues a ladder, with the reason required, and
+recorded in the brief and above the block so it lands on the PR.
+
+⚠ **The stated count was the ONLY unit for 4.5 days and the target pathology recurred ≥9 times
+inside it.** The gate did exactly what it said — 0 of 99 ladders continued past two consecutive
+`payload=0`, 6 qualifying ladders all stopped, 0 false positives, 0 overrides in 564 invocations —
+while `ZacxDev/naida-ai` #242 rounds 3–6 changed **0 non-comment lines each** and were reported
+53/82/48/48, `civitai/talos-infra` #1590 rounds 2–4 likewise (50/37/31), and devrc #1793 and #1826
+the same shape. Nobody inflated a number: the arithmetic was faithful to a unit that counts a
+comment line inside a payload file, and under that unit every prose round scores non-zero forever.
+#1590's runner wrote it out on the PR — *"the attribution gate **cannot** fire here… I deliberately
+did **not** reclassify to 'executable lines only' to force it"* — which is why the unit is now
+measured by the assembler and not only restated here.
+
+🔴 **`audited=X..X` IS REFUSED (exit 4), and that is NOT the gate's verdict.** A self-range spans
+zero commits, so the round it records changed nothing by construction and a `payload=0` beside it
+was earned by nothing — measured in the wild on `ZacxDev/naida-ai` #233 r5 and
+`civitai/gpu-fleet-infra` #331 r8, both posting `payload=0`. Two consecutive such blocks would have
+fired the gate on two zeros nobody measured. Exit 4 means *your record is broken, fix the comment*;
+exit 5 means *the ladder has left the PR, stop auditing*. Only the pair the gate reads is refused; a
+self-range further back is reported and the run continues.
+
+🔴 **"Reported" now means THREE places, and it used to mean one — stderr, which is neither the brief
+nor the PR.** `ZacxDev/homelab-infra` #687 posted **four** blocks and every one was `audited=X..X`:
+its whole payload record was unearned, across four rounds, on a PR shipping ~1,147 lines, and
+nothing any auditor or reader saw said so. Measured 2026-09-23 over 241 ladders / 25 repos / 3,758
+comments: **9 ladders carry at least one self-range**, 8 of them mixed and #687 wholly unearned. So
+every run now prints `N of this ladder's M block(s) … are NOT evidence` on stderr, in a brief
+section beside THE LEDGER, and above the emitted block so it lands on the PR. **It stays a report:
+no refusal beyond the shipped exit 4.** A wholly-unearned ladder is *already* refused by that check
+at every round ≥ 2 (the newest block is a self-range, and the gate's pair always contains it), and
+below round 2 there is no prior block to refuse over. **If a round's `payload=` is named there, do
+not quote it — say it is unmeasured**, and if a stop is being attributed to one, that stop is
+arithmetic over zero commits.
+
+🔴 **A RANGE THE ASSEMBLER CANNOT READ IS THE OTHER WAY THAT MECHANICAL READING GOES SILENT, AND IT
+SPLITS TWO WAYS.** The reading re-runs `git log -p` over each gate-read round's own
+`audited=<from>..<to>`; an endpoint naming no object makes that exit non-zero, which is UNMEASURED,
+which falls back to your STATED count — the gate quietly reverting to what it did before the unit
+existed. Measured 2026-09-28 over **564 endpoints posted since the unit shipped: 30 (5.3%) name no
+object, across 11 ladders**, and `ZacxDev/cairn` #119's *entire* ladder ran that way.
+**One of the 30 is STRUCTURALLY impossible and is now REFUSED (exit 4)** — `civitai/cli` #727 r0
+posted a 41-character endpoint, and a branch name or a `<placeholder>` is refused for the same
+reason (it resolves *here*, to a commit the round never audited). Same family as `audited=X..X`: fix
+the comment, not the ladder. **The other 29 are well-formed and merely unresolvable in THIS
+checkout, and they still FAIL OPEN** — that is indistinguishable from a force-push, an unfetched
+commit, or the ordinary cross-repo assembly, and refusing it would break every such run. It is
+LOUD instead, on the same three surfaces: `N of the M round(s) the attribution gate reads could NOT
+be measured…` on stderr, in a brief section beside THE LEDGER, and above the emitted block so it
+lands on the PR. **If your report quotes a `payload=` from a round named there, say it is the
+author's classification and nothing checked it** — and to get the measured reading, re-run the
+assembly from a checkout that holds those commits.
 
 ⚠ **It was prose here until 2026-09-17, and prose lost.** MEASURED on `civitai/talos-infra` #1531:
 the condition was met **and stated in writing at the end of round 3** — round 2's ledger reads "zero

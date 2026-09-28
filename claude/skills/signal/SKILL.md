@@ -41,6 +41,12 @@ path's "WHAT THE GATE ACTUALLY IS" box.
 | Tables | `signal.contacts`, `signal.groups`, `signal.messages`, `signal.attachments`, `signal.reactions`, `signal.consumer_health`, `signal.excluded_groups` |
 | Search | `signal.messages.search` — a STORED `to_tsvector('english', body)` generated column with a GIN index |
 
+🔴 **EVERY `kubectl` in this file needs a RESOLVED kubeconfig — `$KC_HOMELAB` is the LAN
+spelling only and times out silently from anywhere else** (measured: 30s on a plain API read,
+over 2 minutes on a `kubectl exec`, in both cases with no error text until the very end). Read
+[Which kubeconfig](#which-kubeconfig--kc_homelab-is-the-lan-spelling-only) before the first
+one, and note that a timeout there is **not** evidence the cluster is down.
+
 ## Commands (`python3 scripts/signal/consumer.py <cmd>`)
 
 | Command | What it does |
@@ -272,9 +278,61 @@ just be prose you scroll past while copying the query. Paste `$MUTED` into any n
 that selects a body. Muting also does **not** stop ingest: the consumer keeps storing that
 group's messages, reactions and attachment bytes — it only stops READS returning them.
 
-Direct SQL (the store is authoritative):
+### Which kubeconfig — `$KC_HOMELAB` is the LAN spelling ONLY
+
+🔴 **`$KC_HOMELAB` points at `192.168.50.94:6443`, a LAN address, and this skill's reads
+FAIL from any host not on that LAN — silently, for 30 seconds, with no error text.**
+Measured 2026-09-25 from a host on `192.168.1.0/24`: `kubectl -n mailbox exec
+mailbox-postgres-0 …` blew a **two-minute** timeout printing only
+`dial tcp 192.168.50.94:6443: i/o timeout`. `$KC_NEBULA`
+(`~/.kube/homelab-nebula.yaml`) reaches the **same cluster** over the nebula overlay and
+worked immediately. The send path below already said "laptop/workbench nebula kubeconfig";
+the read path said `$KC_HOMELAB` — that inconsistency is the bug, and it is now fixed here.
+
+🔴 **A timeout here is NOT evidence the cluster is down.** In the same session Tekton was
+reporting live PipelineRun statuses to GitHub while `$KC_HOMELAB` was unreachable, so
+*"I cannot reach the cluster"* and *"the cluster is broken"* are different claims. Resolve
+the path before diagnosing anything cluster-side. `ip route get 192.168.50.94` returning a
+route via your default gateway (rather than a LAN interface) is the one-command tell.
+
 ```bash
-export KUBECONFIG=$KC_HOMELAB
+# Put this in front of any kubectl in this skill. $KC_NEBULA is tried FIRST because it
+# works from BOTH locations; --request-timeout bounds the dead branch at 5s instead of 30s
+# (measured: 5s vs 30s on an unreachable candidate).
+kc_homelab() {
+  local f
+  for f in "$KC_NEBULA" "$KC_HOMELAB"; do
+    [ -n "$f" ] && [ -r "$f" ] || continue
+    kubectl --kubeconfig "$f" --request-timeout=5s get --raw /readyz >/dev/null 2>&1 || continue
+    printf '%s\n' "$f"; return 0
+  done
+  print -u2 "kc_homelab: no reachable homelab cluster (tried \$KC_NEBULA, \$KC_HOMELAB)"
+  return 1
+}
+```
+
+🔴 **Branch on its EXIT CODE; never `export KUBECONFIG=$(kc_homelab)` bare.** On failure it
+prints nothing to stdout, so that form exports an **empty** `KUBECONFIG` — and an empty
+`KUBECONFIG` is not "no cluster", it is `~/.kube/config`, i.e. whatever that happens to
+point at. devrc leaves `KUBECONFIG` unset on purpose precisely so a bare `kubectl` cannot
+reach a cluster you did not name (`nix/home.nix`), and this is the one line that would
+quietly undo it:
+
+```bash
+KC=$(kc_homelab) || return 1      # or `exit 1` in a script — do NOT continue
+export KUBECONFIG=$KC
+```
+
+Verified both directions, because a resolver that cannot go red is not a resolver:
+**positive** — returns `~/.kube/homelab-nebula.yaml`, rc 0, and that file is the one the
+real query then ran under; **negative** — with `$KC_NEBULA` unset so only the unreachable
+candidate remains, rc **1** and **empty stdout**.
+
+Direct SQL (the store is authoritative). 🔴 **Resolve the kubeconfig, do not hardcode
+`$KC_HOMELAB`** — use `kc_homelab` above:
+```bash
+KC=$(kc_homelab) || return 1        # the resolver above, NOT $KC_HOMELAB
+export KUBECONFIG=$KC
 PSQL='kubectl -n mailbox exec mailbox-postgres-0 -- psql -U mailbox -d mailbox -c'
 MUTED='not exists (select 1 from signal.excluded_groups x
         join signal.groups gx on gx.group_id=x.group_id where gx.id=m.group_id)'
@@ -369,7 +427,7 @@ are DB-only and work off-cluster; only `send` reaches signal-api. So:
 # reconcile a strand from a prior off-cluster attempt (nothing was sent — DNS failed
 # pre-connect; still verify it is absent from the thread first), then re-approve:
 TOK=... ; REF="zach-explicit-<date>-session; executed by claude-code, no clawgate ref"
-K=$KC_NEBULA   # laptop/workbench nebula kubeconfig
+K=$(kc_homelab) || return 1   # resolver from "Which kubeconfig" above; nebula off-LAN, LAN on-LAN
 KUBECONFIG=$K kubectl -n signal exec deploy/signal-consumer -- env SIGNAL_APPROVAL_TOKEN=$TOK \
   python3 /app/scripts/signal/consumer.py reconcile <id> --not-sent --note "off-cluster DNS pre-connect"
 KUBECONFIG=$K kubectl -n signal exec deploy/signal-consumer -- env SIGNAL_APPROVAL_TOKEN=$TOK \

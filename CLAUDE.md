@@ -20,6 +20,84 @@ Portable rules (`git add -A`, `reset --hard`, `stash`, worktree isolation, featu
 base-clone re-sync, stranded docs) are in **`claude/RULES.md` → "Git Workflow"** — read them
 there. Only what's specific to this repo, where a working tree is also a **deploy target**:
 
+- 🔴 **NEVER `commit` / `add` / `checkout` / `switch` / `stash` IN THE PRIMARY CLONE
+  `~/workspace/devrc`. Do every change through a throwaway worktree off `origin/main`.**
+  This clone is shared by concurrent sessions, and its checked-out branch is **not yours** —
+  modelled on `datapacket-talos` CLAUDE.md rule #10, which exists for the same reason.
+  **MEASURED HERE 2026-09-20:** while one session held a feature branch checked out, another
+  session committed its own unrelated work onto **that branch** (`e1ed617d`), dragging
+  `SECRETS.md`, `nix/home.nix`, `scripts/stt` and seven `browser-bridge` renames into a PR
+  about the handoff skill. Nothing errored; `git log` afterwards read exactly as expected,
+  because you are reading the branch you landed on. Found only after the push, and rescued as
+  `origin/rescued-stt-and-browser-flows`.
+  ```bash
+  WT=$(mktemp -d -u /tmp/devrc-XXXX)
+  git -C $DEVRC fetch -q origin main
+  git -C $DEVRC worktree add --detach "$WT" origin/main   # the REMOTE tip, never a local ref
+  cp $DEVRC/.envrc "$WT"/ && direnv allow "$WT"           # NOT tracked here — verified; unlike
+                                                          # datapacket-talos, where copying it
+                                                          # stages a tracked-file DELETION
+                                                          # ⚠ it is `use opencode`, which has NO
+                                                          # pytest — run tests with
+                                                          # `nix develop $DEVRC -c python3 -m pytest`
+  git -C "$WT" switch -c <branch>   # edit · commit · push FROM THE WORKTREE
+  git -C $DEVRC worktree remove --force "$WT"             # ONLY after the push SUCCEEDED
+  ```
+  🔴 **`worktree remove --force` DISCARDS UNCOMMITTED WORK in that tree** — that is the real
+  cost of removing early, so commit or copy aside first. ⚠ **It does NOT orphan a COMMITTED
+  one, and an earlier wording of this rule said it did.** That text was ported from
+  `datapacket-talos`, whose recipe stays on a DETACHED HEAD; the recipe above adds
+  `switch -c`, which writes a real ref in the common git dir. MEASURED 2026-09-20 on git
+  2.55.0, both shapes: with `switch -c` the branch **survives** removal and
+  `git fsck --dangling` prints **nothing** — so an agent recovering a failed push would run
+  the prescribed fsck, see an empty result, and conclude the work was gone while
+  `git branch --list <branch>` still held it. Detached-only is the shape that dangles.
+  🔴 **AND THIS REPO ESCALATES THE HAZARD BEYOND A WRONG-BRANCH COMMIT: a checkout here
+  changes LIVE BEHAVIOUR ON THIS HOST IMMEDIATELY, with no `switch`.** **Every** one of
+  `nix/home.nix`'s `mkOutOfStoreSymlink` targets resolves INTO this working tree — verified
+  2026-09-20, e.g. `readlink -f ~/.claude/skills/browser/SKILL.md` →
+  `scripts/browser-bridge/SKILL.md`. 🔴 **It is NOT just the `browser`/`dl-router` skills:
+  `~/.local/bin/claim-work` → `scripts/claim-work.sh`, i.e. the shared-queue LOCK itself,
+  which FAILS OPEN — so a checkout that moves it makes every concurrent session read "no
+  claim exists".** Also `opencode-dispatch`, `dl-route`, `peer-host`, `cairn-who`,
+  `cairn-validate`, `stt` and the `opencode-dispatch` skill body (renamed from
+  `opencode` 2026-09-25 — the exact product name routed every bare mention into
+  the dispatch skill). `home-manager switch --flake
+  ~/workspace/devrc` likewise builds **whatever is checked out**.
+  Keep this clone on `main`; that is what makes it a safe deploy target.
+  🔴 **`git stash` is banned here for a DIFFERENT reason, and the worktree does NOT fix it:**
+  `refs/stash` lives in the **common** git dir, so every worktree of this clone shares one
+  stack (`claude/RULES.md` → "git stash is repo-GLOBAL"). Copy files aside instead.
+  ⚠ Read-only agents need no worktree; **any file-modifying agent does** (`claude/RULES.md` →
+  "Git Workflow"), and that rule's surfaces — env, submodules, `cp -a`, repo-global config —
+  apply unchanged.
+- 🔴 **Worktree writes are fresh; READS from this clone are not.** `worktree add … origin/main`
+  resolves the remote tip, but `ls`/`grep`/Read against THIS clone see whatever its checkout
+  holds — and between a merge and the next `ship.sh` (or a skipped host) that is behind. So:
+  **absent ≠ missing** — a file not found in this tree may sit on `origin/main`; confirm with
+  `git log origin/main -- <path>` before concluding it doesn't exist (datapacket-talos lost a
+  session to exactly this: a handoff "missing" from a stale clone sat on `origin/trunk`).
+  **Load-bearing doc claims** (a limit, an arming state, a "this is impossible") — read them
+  from the ref: `git show origin/main:<path>`.
+- 🔴 **The read half is AUTOMATED for Claude Code — a dirty `CLAUDE.md` here is probably the
+  hook, not WIP.** A `SessionStart` hook (`scripts/claude-hooks/base-clone-staleness.sh`, wired
+  in the per-host, unmanaged `~/.claude/settings.json`) fetches and `checkout`s `origin/main`'s
+  copy of `CLAUDE.md` into the working tree — for THIS repo that is its whole refresh set (no
+  repo-local `AGENTS.md`; `.claude/` here is untracked scratch). The other always-on surfaces
+  (`claude/`, the nix-deployed skills) are `/nix/store` copies only a `switch`/`ship.sh`
+  updates. The hook never moves HEAD, never overwrites unique local edits (a recoverability
+  test, not a dirtiness test), and batches its checkout so simultaneous session starts don't
+  fight over `.git/index.lock`. So a `CLAUDE.md` dirty-vs-HEAD whose content is byte-identical
+  to `origin/main` is the hook's doing — don't "rescue" it, and don't let it mask files that
+  ARE real WIP. `BASE_CLONE_NO_REFRESH=1` = report-only. Run its suite
+  (`scripts/tests/test_base_clone_staleness.sh`) before changing the hook; the deployed copy is
+  a `home.file` store path, so a hook edit needs a `switch` to go live (verify with
+  `readlink -f`). ⚠ **Claude Code-only wiring — an opencode session gets no automatic refresh**;
+  run `bash ~/.claude/hooks/base-clone-staleness.sh` (prefix `BASE_CLONE_NO_REFRESH=1` to only
+  report) at session start for the same freshness.
+- Push rejected (non-fast-forward)? Rebase **in the worktree**
+  (`git -C "$WT" fetch origin main && git -C "$WT" rebase origin/main`) and push again as a
+  fresh commit — never `commit --amend` after a bad commit has been pushed once.
 - 🔴 **Never commit to `main` in EITHER host checkout** (`~/workspace/devrc`, workbench *or*
   laptop). `ship.sh` converges with `merge --ff-only`, so a diverged host is **skipped and
   left as found** — it then silently stops receiving every future change while still looking
@@ -123,7 +201,7 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
 ## Layout
 - `nix/` — home-manager modules (`programs/zsh`, tmux, nvim, i3, …). `flake.nix` at root.
 - `scripts/` — utility scripts (prefer extending these over re-typing inline bash / heredocs).
-- `claude/` — **global Claude Code config, managed declaratively**: `RULES.md` (+ `RULES-ARCHIVE.md`), `PRINCIPLES.md`, and **every skill under `claude/skills/<name>/SKILL.md`** (+ its `reference/`, which ships too). `nix/home.nix` symlinks these into `~/.claude/`, so both hosts stay in sync. **Edit them HERE + `home-manager switch`/`ship.sh` — NOT `~/.claude/*`** (read-only nix-store symlinks). 🔴 **`claude/commands/` NO LONGER EXISTS** — upstream merged custom commands into skills, so all 17 migrated to `claude/skills/` (a skill still gives you `/<name>`, and now also auto-fires on its description). **opencode commands are auto-generated** from these skills by `scripts/opencode/generate-commands.py` (nix derivation `opencodeCommands` in `nix/home.nix`), deployed to `~/.config/opencode/commands/`. This makes every skill show as `/<name>` in opencode's TUI autocomplete (source="command" with hints, instead of source="skill" with empty hints). Deliberate MUTABLE exceptions: the `browser` + `dl-router` skills (`mkOutOfStoreSymlink` onto `scripts/`, edits apply with no switch) and `~/.claude/CLAUDE.md` (genuinely per-host, unreferenced by `home.nix`). New-host caveat: `home.file.force` does NOT clobber a pre-existing *foreign* `~/.claude/RULES.md` or `skills/*` — `rm` those once before the first switch. Also managed: `~/.claude/hooks/bash-guard.py` (from `scripts/claude-hooks/`; `dropStaleClaudeHooks` displaces a hand-placed regular file, `force` alone cannot).
+- `claude/` — **global Claude Code config, managed declaratively**: `RULES.md` (+ `RULES-ARCHIVE.md`), `PRINCIPLES.md`, and **every skill under `claude/skills/<name>/SKILL.md`** (+ its `reference/`, which ships too). `nix/home.nix` symlinks these into `~/.claude/`, so both hosts stay in sync. **Edit them HERE + `home-manager switch`/`ship.sh` — NOT `~/.claude/*`** (read-only nix-store symlinks). 🔴 **`claude/commands/` NO LONGER EXISTS** — upstream merged custom commands into skills, so all 17 migrated to `claude/skills/` (a skill still gives you `/<name>`, and now also auto-fires on its description). **opencode commands are auto-generated** from these skills by `scripts/opencode/generate-commands.py` (nix derivation `opencodeCommands` in `nix/home.nix`), deployed to `~/.config/opencode/commands/`. This makes every skill show as `/<name>` in opencode's TUI autocomplete (source="command" with hints, instead of source="skill" with empty hints). Deliberate MUTABLE exceptions: the `browser` + `dl-router` + `opencode-dispatch` skills (`mkOutOfStoreSymlink` onto `scripts/`, edits apply with no switch) and `~/.claude/CLAUDE.md` (genuinely per-host, unreferenced by `home.nix`). New-host caveat: `home.file.force` does NOT clobber a pre-existing *foreign* `~/.claude/RULES.md` or `skills/*` — `rm` those once before the first switch. Also managed: `~/.claude/hooks/bash-guard.py` (from `scripts/claude-hooks/`; `dropStaleClaudeHooks` displaces a hand-placed regular file, `force` alone cannot).
 - **`reference/` vs `flows/` inside a skill**: `reference/` holds durable FACTS you verify
   against; `flows/` (sibling dir, same `cp -R` deploy, no nix change needed) holds PROCEDURES you
   execute step by step. 🔴 A `flows/` file does **not** auto-fire the way a skill `description`
@@ -146,7 +224,7 @@ is preserved verbatim in `docs/LAYOUT.md` (not auto-loaded, and stale by design)
 | `scripts/mail-actions/` | `mailbox` | email-automation layer over the self-hosted inbox (**separate from activity telemetry**) |
 | `scripts/check-clickup-addressed/` | `check-clickup-addressed` | did the work on a ClickUp ticket actually happen — reads session transcripts for completion signals (migrated out of datapacket-talos 2026-08-22) |
 | `nix/i3/`, `nix/graphical.nix`, `scripts/bar-status-poll` | `bar` | i3 + i3status-rust bar, count blocks, dunst toasts |
-| `scripts/opencode/` | `opencode` | dispatch a task to the headless opencode agent (`opencode-dispatch`), + its config/agents/guard plugin |
+| `scripts/opencode/` | `opencode-dispatch` | dispatch a task to the headless opencode agent (the `opencode-dispatch` CLI), + its config/agents/guard plugin |
 
 Repo-level facts that are NOT in any skill — they live here on purpose:
 - 🔴 **A NEW file must be `git add`ed or the flake silently omits it from the deploy.** Applies to every managed path: a new skill, a new `reference/*.md` inside one, an extension file, a hook or a test. The switch succeeds and the file simply is not there.
@@ -167,9 +245,9 @@ Repo-level facts that are NOT in any skill — they live here on purpose:
   population was defined by the failure's own cause: the default `LOG_DIR` is a `mktemp -d`, so
   only runs launched OUTSIDE the dev shell land in bare `/tmp` (101/101 there, 0 of 281
   inside). `DEVRC_GATE_NO_REEXEC=1` opts out; `--help` lists every variable it reads.
-- 🔴 **BUILD THE TWO `nix` CHECK DERIVATIONS ONE AT A TIME — a combined invocation produces FALSE FAILURES.** `nix build .#checks.x86_64-linux.pytests .#checks.x86_64-linux.nodetests` builds both concurrently, and the tests that shell out to nested `nix` then contend on the store. MEASURED 2026-08-30 on one tree: the combined call reported **2 failures** — `SQLite database … is busy` evaluating `nix/home.nix`, and `OperationalError('database is locked')` in dl-router — while the SAME tree, same derivations, run **sequentially**, reported **0**. Load-dependent, so earlier combined runs were green and looked fine. **A combined GREEN is trustworthy** (a contended run fails loudly, it does not fake a pass); **a combined RED is not**, until re-checked one at a time. This cost a near-miss report of "PR #1029 broke the gate", against a diff that touched one test file and could not reach either failure. ⚠ Same run also reproduced the documented `| tail` trap: `nix build … | tail` printed `NIXBUILD_RC=0` for a build that had just failed 45 tests — read the runners' own `RESULT:` lines, never the piped exit code.
+- 🔴 **BUILD THE TWO `nix` CHECK DERIVATIONS ONE AT A TIME — a combined invocation produces FALSE FAILURES.** `nix build .#checks.x86_64-linux.pytests .#checks.x86_64-linux.nodetests` builds both concurrently, and the tests that shell out to nested `nix` then contend on the store. MEASURED 2026-08-30 on one tree: the combined call reported **2 failures** — `SQLite database … is busy` evaluating `nix/home.nix`, and `OperationalError('database is locked')` in dl-router — while the SAME tree, same derivations, run **sequentially**, reported **0**. Load-dependent, so earlier combined runs were green and looked fine. **A combined GREEN is trustworthy** (a contended run fails loudly, it does not fake a pass); **a combined RED is not**, until re-checked one at a time. This cost a near-miss report of "PR #1029 broke the gate", against a diff that touched one test file and could not reach either failure. ⚠ Same run also reproduced the documented `| tail` trap: `nix build … | tail` printed `NIXBUILD_RC=0` for a build that had just failed 45 tests — read the runners' own `RESULT:` lines, never the piped exit code. 🔴 **One level worse, measured 2026-09-26: the same shape backgrounded completed "exit code 0" having written a 0-byte log — not even the trailing `echo` landed, so there were no result lines to count at all; a plain file redirect gave 169 KB and a real verdict. `wc -c` the log FIRST and treat a zero-byte log as NO READING, never a quiet success.**
 - 🔴 **For an ITERATION run, use `scripts/scoped-tests.sh` — do NOT run the full gate on every edit.** It maps the git diff to the test files that NAME what you changed and runs only those, through `run-tests.sh --files` — so the ISOLATION guards still apply (7's permitted direction, 8's spool, 9's and 10's git), which is why you use this rather than a bare `pytest`. 🔴 **But three per-target ledgers are SUSPENDED, and the run prints which**: GUARD 3's collected-test floors (a floor describes a whole target, not a slice), GUARD 7's `NOLAUNCH_ACK` REQUIRED direction, and GUARD 2's skip TOTAL. Their per-observation halves — an unacknowledged target reaching a real launcher, an UNPINNED skip — are still enforced. ⚠ **Two of the three are listed under `whole-target expectations SUSPENDED by this SCOPED run`; GUARD 3 is not, because its floor is REPLACED rather than suspended** — a one-test-per-selected-file floor is enforced instead, and it says so on the `TOTAL … (SCOPED floor: N …)` line. Read both places, not just the block. CI's full run is what evaluates them. MEASURED 2026-09-08 at load ~80: a single-subsystem change (`scripts/dl-router/server.py` → 3 files, 59 tests) took **49s wall / 16.8s CPU**, and a one-file change 37s, against the pytest tier's 20.1-min median. ⚠ **The lever is that the box runs dozens of concurrent FULL suites — but do NOT quote a size for the contention effect.** An earlier version of this line said "14.5 min alone → 48.9 min at 6+ overlapping"; that is **RETRACTED**, and re-deriving it is the trap. Bucketing runs by how many others overlapped them is length-biased — a long run overlaps more runs BY CONSTRUCTION — and a null Monte Carlo with zero interaction reproduces the shape, the 14.5-min baseline and ~2.06x of the 3.4x. Contention is real and its mechanism is uncontroversial; that dataset cannot size it. 🔴 **It is NOT a gate and cannot be quoted as one**: it prints `SCOPE: SCOPED`, `gate.sh` exits **91 = PARTIAL** rather than PASS off any run that is not `SCOPE: FULL` (a run printing NO scope line included), and a mapping that selects nothing is **exit 4**, never a quiet 0. 🔴 **`exit 4` now has a SECOND reason, and it is the one you will hit: a diff touching a SHARED SURFACE gets no scoped verdict at all** — `flake.nix`, `flake.lock`, `nix/**`, `scripts/lib/**`, `scripts/testlib/**`, the three runners, any `conftest.py`. Scoping those is not merely incomplete, it is MISLEADING, because the mapper selects the few files that NAME the changed module and drops every target reaching it through an import. MEASURED 2026-09-11 at `018e483b`: a `scripts/testlib/mockbin.py` edit selected **10** files, printed `RESULT: PASS`, and never ran **59 of the 69** files that reference it; `testlib/gitenv.py` selected 2 while spanning **8** targets. The refusal names the offending path and tells you to run `scripts/gate.sh --tier both`. The two reasons share one code because they demand the same action, and the message distinguishes them. It also skips the hook/shell script families, which no `--files` selection can name — and says so in the banner. `--dry-run` prints the mapping without running. ⚠ **What closes the gap is CI, not a local ritual** — the full-suite mandate is deleted (see the merge-gate bullet), so the advisory `tekton/devrc-*` checks are what run everything this skipped. The run prints that gap itself, under `what this run did NOT cover (the gap CI closes)`: the targets that never ran, BY NAME, plus the unrun files inside the targets that did.
-- **To run an ARBITRARY subset by hand, use the flake devShell — it already carries the gate toolchain:** `nix develop ~/workspace/devrc -c python3 -m pytest <paths> -q` (cwd-independent with absolute paths; MEASURED from the repo root and from `/tmp`, pytest 9.1.1). ⚠ That door bypasses GUARDs 7/8/9/10 — `scoped-tests.sh` does not, so prefer it. `gate.sh` still has no per-file filter and `run-tests.sh`'s positional is a repo ROOT, not a test selector. 🔴 **`.envrc` is `use opencode`, so a loaded direnv does NOT put pytest on PATH** — and the worktree recipe in `claude/RULES.md` says to copy `.envrc`, which propagates that env into every worktree. A bare `python3 -m pytest` failing with `No module named pytest` therefore means you are in the opencode shell, never that the suite is unrunnable. This bullet exists because three true observations — no `gate.sh` filter, no `run-tests.sh` selector, direnv has no pytest — were read as "no subset mode exists", and an ad-hoc `nix-shell -p` was built instead of opening the door that was already there.
+- **To run an ARBITRARY subset by hand, use the flake devShell — it already carries the gate toolchain:** `nix develop ~/workspace/devrc -c python3 -m pytest <paths> -q` (cwd-independent with absolute paths; MEASURED from the repo root and from `/tmp`, pytest 9.1.1). ⚠ That door bypasses GUARDs 7/8/9/10 — `scoped-tests.sh` does not, so prefer it. `gate.sh` still has no per-file filter and `run-tests.sh`'s positional is a repo ROOT, not a test selector. 🔴 **`.envrc` is `use opencode`, so a loaded direnv does NOT put pytest on PATH** — and the worktree recipe in `claude/RULES.md` says to copy `.envrc`, which propagates that env into every worktree. ⚠ Untracked here (`.gitignore:48`) is exactly WHY the copy at the top of this file is required — a fresh worktree has no `.envrc` at all; in `civitai-app-starters` it is TRACKED, so `git worktree add` provides it and no copy is needed. 🔴 **But do NOT read `direnv status`'s `Found RC allowed 0` as 'blocked' — 0 means ALLOWED.** Controls on direnv 2.37.1: never-allowed reads `allowed 1`, denied reads `allowed 2`, allowed reads `allowed 0`; devrc reads 0 and `direnv export bash` prints `direnv: loading … / direnv: using opencode`, so it loads fine. Whether it loaded in YOUR shell is a property of the shell, not the repo. 🔴 **And the test is `Loaded RC path` == `Found RC path`, NOT the prefix**: an agent bash has no direnv hook yet INHERITS `DIRENV_DIR`/`DIRENV_WATCHES`, so `direnv status` prints a `Loaded RC path` for whichever repo the parent shell was in — measured: `Loaded …/civitai-app-starters/.envrc` beside `Found …/devrc/.envrc`. Reading the prefix says "loaded" about the wrong repo. The reason pytest is missing is the ENV it loads, never a permission. A bare `python3 -m pytest` failing with `No module named pytest` therefore means you are in the opencode shell, never that the suite is unrunnable. This bullet exists because three true observations — no `gate.sh` filter, no `run-tests.sh` selector, direnv has no pytest — were read as "no subset mode exists", and an ad-hoc `nix-shell -p` was built instead of opening the door that was already there. 🔴 **And `nix-shell -p python3Packages.pytest` is not CI's environment and fails at COLLECTION, not at assertion** — the full `scripts/tests` under it dies with `3 errors during collection` (`No module named 'yaml'` — TWO independent roots, `test_opencode_config.py` and `test_ci_claim_matches_reality.py`, plus `test_opencode_engine.py` which cascades from the first via `import test_opencode_config` and contains no `yaml` reference of its own), which reads as the suite being broken on your branch. Fine for ONE hermetic file, worthless for the suite.
 - **The runners' verdict line carries their exit code** (`RESULT: FAIL (exit=1)`), emitted from one writer behind an EXIT trap, so it survives a pipe and a killed run still says so. Historically the status was destroyed by `… | tail; echo "rc=$?"` — four agents reported `exit 0` over `RESULT: FAIL` on 2026-08-11 — which is why counting `PASSED`/`FAILED` lines used to be mandatory. Still a fine cross-check; no longer the only thing you can trust.
 - 🔴 **NOTHING BLOCKS A MERGE TODAY — `main` is protected in NAME ONLY, and the local full-suite ritual that used to stand in for it is DELETED. CI is advisory; read it.** <!-- merge-gate: other -->
   MEASURED 2026-09-02: `required_status_checks` is **absent from the protection object

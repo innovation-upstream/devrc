@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# stt — transcribe an audio file via the homelab self-hosted ASR endpoint.
+# Works from any nebula mesh host (workbench, laptop); override with env.
+#
+# Usage:
+#   stt FILE [--language XX] [--json]
+#
+# Config (optional, 0600): ~/.config/stt/env
+#   STT_API_URL=http://10.42.0.10:8118   (nebula gateway route to stt-api)
+#   STT_API_TOKEN=...                    (bearer token; from k8s secret stt-api-token)
+set -euo pipefail
+
+ENV_FILE="$HOME/.config/stt/env"
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+
+STT_API_URL="${STT_API_URL:-http://10.42.0.10:8118}"
+STT_API_TOKEN="${STT_API_TOKEN:-}"
+
+file=""
+language=""
+json=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --language) language="$2"; shift 2 ;;
+    --json) json=1; shift ;;
+    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    *) file="$1"; shift ;;
+  esac
+done
+
+if [ -z "$file" ]; then
+  echo "usage: stt FILE [--language XX] [--json]" >&2
+  exit 2
+fi
+if [ ! -f "$file" ]; then
+  echo "stt: no such file: $file" >&2
+  exit 2
+fi
+
+args=(-s -X POST "$STT_API_URL/v1/audio/transcriptions" -F "file=@$file")
+[ -n "$language" ] && args+=(-F "language=$language")
+if [ -n "$STT_API_TOKEN" ]; then
+  args+=(-H "Authorization: Bearer $STT_API_TOKEN")
+fi
+
+resp=$(curl "${args[@]}" || true)
+
+if [ "$json" = "1" ]; then
+  printf '%s\n' "$resp"
+  exit 0
+fi
+
+# Default output: the transcript text (jq if available, else raw)
+if command -v jq >/dev/null 2>&1; then
+  echo "$resp" | jq -r '.text // .detail // .' 2>/dev/null || printf '%s\n' "$resp"
+else
+  printf '%s\n' "$resp"
+fi

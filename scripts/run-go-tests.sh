@@ -137,7 +137,15 @@ fi
 cd "$ROOT" || { echo "run-go-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 
 # --- the pinned module + package table -----------------------------------------
-# "<module dir>|<package import suffix>|<min_tests>".
+#
+# 🔴 TWO MODULES NOW. `stt-voice` joined `mention-review` (both are local-path
+# buildGoModules under nix/pkgs/tools/), so the table is FLAT:
+#
+#   "<module dir>|<package import suffix>|<min_tests>"
+#
+# with the module dir repeated per package. GUARD 2's two-way pin runs PER
+# MODULE (discovery inside each module must equal that module's pinned set),
+# so a whole package going silent in EITHER module is visible.
 #
 # MEASURED 2026-09-14 on the dev host by this runner itself, counting `pass` +
 # `fail` + `skip` records from `go test -json` (so SUBTESTS count, which is why
@@ -160,21 +168,58 @@ cd "$ROOT" || { echo "run-go-tests: cannot cd to ROOT=$ROOT" >&2; exit 2; }
 #   internal/ui            135   + the confirmation ledger, the prompts, the modes,
 #                                  and the frame-fits-the-terminal layout guard
 #
-# ⚠ THE FIRST VERSION OF THIS TABLE CARRIED GUESSED FLOORS — 9/7/10/11/22, typed
-# before anything had been run. `cmd/mention-review` has FIVE tests, so its
-# floor of 9 was unsatisfiable and the tier was red on a green suite. A floor is
-# a function of a MEASUREMENT; these are derived from the numbers above by the
-# same rule the other two runners use: `m - min(50, max(1, m/20))`.
-# Raise one when a package grows. NEVER lower one to get green.
-GO_MODULE="nix/pkgs/tools/mention-review/src"
+# stt-voice measured 2026-09-20 on the dev host (go 1.26.7), first run — by
+# this runner itself, counting `pass`+`fail`+`skip` from `go test -json`:
+#
+#   cmd/stt-voice            7   version single-source, cache paths, dispatch
+#   internal/state          18   transitions both sources, tap window, repair
+#   internal/recorder        6   SIGINT finalize + SIGKILL escalation via shim
+#   internal/asr            10   multipart wire contract, 401/5xx/timeout
+#   internal/history         6   append, trim-at-10, corrupt-line recovery
+#   internal/effects        10   stdin plumbing, i3 success field, no-Return
+#   internal/ui             18   intents, both send spellings, footer ledger
+#
+# ⚠ THE FIRST VERSION OF THE STT-VOICE ROWS BELOW CARRIED GUESSED FLOORS —
+# 5/14/5/9/5/8/16, typed BEFORE the first measurement because they looked
+# "close enough" to the counts above. The same runner measured 7/18/6/10/6/10/
+# 18. The floors below are the measured numbers under the rule, not the
+# guesses; the guesses are recorded here so the next person can see what they
+# cost: nothing, this time, because the check-packages pass caught the gap
+# before any floor could bite — but the guesses were still floors nobody had
+# measured, which is the exact failure mode this header exists to stop.
+#
+# ⚠ THE FIRST VERSION OF THE MENTION-REVIEW FLOORS CARRIED GUESSES — 9/7/10/
+# 11/22, typed before anything had been run. `cmd/mention-review` has FIVE
+# tests, so its floor of 9 was unsatisfiable and the tier was red on a green
+# suite. A floor is a function of a MEASUREMENT; these are derived from the
+# numbers above by the same rule the other two runners use:
+# `m - min(50, max(1, m/20))`. Raise one when a package grows. NEVER lower one
+# to get green.
 PACKAGES=(
-  "cmd/mention-review|4"
-  "internal/argv|27"
-  "internal/cfg|11"
-  "internal/ghapi|37"
-  "internal/udiff|11"
-  "internal/ui|128"
+  "nix/pkgs/tools/mention-review/src|cmd/mention-review|4"
+  "nix/pkgs/tools/mention-review/src|internal/argv|27"
+  "nix/pkgs/tools/mention-review/src|internal/cfg|11"
+  "nix/pkgs/tools/mention-review/src|internal/ghapi|37"
+  "nix/pkgs/tools/mention-review/src|internal/udiff|11"
+  "nix/pkgs/tools/mention-review/src|internal/ui|128"
+  "nix/pkgs/tools/stt-voice/src|cmd/stt-voice|6"
+  "nix/pkgs/tools/stt-voice/src|internal/state|17"
+  "nix/pkgs/tools/stt-voice/src|internal/recorder|5"
+  "nix/pkgs/tools/stt-voice/src|internal/asr|9"
+  "nix/pkgs/tools/stt-voice/src|internal/history|5"
+  "nix/pkgs/tools/stt-voice/src|internal/effects|9"
+  "nix/pkgs/tools/stt-voice/src|internal/ui|17"
 )
+
+# The MODULES set is derived, not spelled: a package row naming a module dir
+# IS the declaration that the module exists, and discovery walks exactly the
+# dirs the table names (so a module that vanishes fails the two-way pin the
+# honest way — every row of it reports "package has NO test files").
+modules=()
+for entry in "${PACKAGES[@]}"; do
+  m="${entry%%|*}"
+  case " ${modules[*]-} " in *" $m "*) ;; *) modules+=("$m") ;; esac
+done
 
 # --- GUARD 2: discovery + the two-way pin --------------------------------------
 # 🔴 FILESYSTEM DISCOVERY, NOT `git ls-files`. The flake check builds from a
@@ -189,28 +234,29 @@ PACKAGES=(
 shopt -s globstar nullglob
 
 discovered=()
-for f in "$GO_MODULE"/**/*_test.go; do
-  d="$(dirname "$f")"
-  rel="${d#"$GO_MODULE"/}"
-  case " ${discovered[*]-} " in *" $rel "*) ;; *) discovered+=("$rel") ;; esac
+for module in "${modules[@]}"; do
+  for f in "$module"/**/*_test.go; do
+    d="$(dirname "$f")"
+    rel="${d#"$module"/}"
+    case " ${discovered[*]-} " in *" $module|$rel "*) ;; *) discovered+=("$module|$rel") ;; esac
+  done
 done
 
 pinned=()
-for entry in "${PACKAGES[@]}"; do pinned+=("${entry%%|*}"); done
+for entry in "${PACKAGES[@]}"; do pinned+=("${entry%|*}"); done
 
 guard_failed=0
 for d in "${discovered[@]-}"; do
-  case " ${pinned[*]} " in
-    *" $d "*) ;;
-    *) echo "run-go-tests: FATAL — package '$d' has tests but is NOT in PACKAGES." >&2
-       echo "  A new package swept in under the global total is a package nobody gave a floor." >&2
-       guard_failed=1 ;;
+  case " ${pinned[*]} " in *" $d "*) ;; *)
+    echo "run-go-tests: FATAL — package '${d#*|}' in module '${d%%|*}' has tests but is NOT in PACKAGES." >&2
+    echo "  A new package swept in under the global total is a package nobody gave a floor." >&2
+    guard_failed=1 ;;
   esac
 done
 for d in "${pinned[@]}"; do
   case " ${discovered[*]-} " in
     *" $d "*) ;;
-    *) echo "run-go-tests: FATAL — pinned package '$d' has NO test files." >&2
+    *) echo "run-go-tests: FATAL — pinned package '${d#*|}' in module '${d%%|*}' has NO test files." >&2
        echo "  The suite vanished, was renamed, or the module moved." >&2
        guard_failed=1 ;;
   esac
@@ -219,7 +265,7 @@ done
 # first loop vacuously, and the second loop's failures would then read as "the
 # packages were deleted" rather than "the glob is wrong".
 if [ "${#discovered[@]}" -eq 0 ]; then
-  echo "run-go-tests: FATAL — discovery found ZERO packages with tests under $GO_MODULE." >&2
+  echo "run-go-tests: FATAL — discovery found ZERO packages with tests under the pinned modules." >&2
   echo "  That is a broken glob or a moved module, not an empty suite." >&2
   guard_failed=1
 fi
@@ -263,14 +309,15 @@ total_skip=0
 failed_pkgs=()
 
 for entry in "${PACKAGES[@]}"; do
-  pkg="${entry%%|*}"
+  module="${entry%%|*}"
+  pkg="$(printf '%s' "${entry#*|}" | cut -d'|' -f1)"
   floor="${entry##*|}"
   json="$(mktemp)"
 
   # 🔴 `-json`, AND THE EXIT CODE IS NOT WHAT IS READ. `go test` exits 0 over a
   # package with no test files; the per-test Action records are what say
   # whether anything ran.
-  ( cd "$GO_MODULE" && go test -json -count=1 "./$pkg" ) > "$json" 2>&1
+  ( cd "$module" && go test -json -count=1 "./$pkg" ) > "$json" 2>&1
   rc=$?
 
   # 🔴 ORDER-INDEPENDENT, AND THIS TOOK TWO MEASURED FAILURES TO GET RIGHT.

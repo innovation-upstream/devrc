@@ -1,9 +1,9 @@
 ---
-name: opencode
-description: Dispatch a task to opencode — the separate headless CLI agent — instead of burning this session's context on it. Use for "dispatch opencode", "call opencode", "run this with opencode", "hand it to flash/mimo/pro", opencode token efficiency. NOT the Agent tool — "dispatch a subagent" means that, not this.
+name: opencode-dispatch
+description: Dispatch a task to opencode — the headless CLI agent — instead of burning this session's context. Use for "dispatch opencode", "call opencode", "run this with opencode", "hand it to flash/mimo/pro", opencode token efficiency. NOT the Agent tool — "dispatch a subagent" means that, not this.
 ---
 
-# opencode dispatch
+# opencode-dispatch
 
 Hand a bounded task to **opencode**, a separate headless agent CLI with its own
 context window. The point is *your* context budget: seven weeks of opencode cost
@@ -157,7 +157,8 @@ gate people learn to click through.
 ## What this is NOT
 
 - **Not a Claude subagent.** "dispatch a subagent to implement X" is the **Agent
-  tool**. Only the literal word *opencode* routes here.
+  tool**. Only a *dispatch opencode* phrasing routes here — bare "opencode"
+  does not.
 - **Not the `browser` skill.** "dispatch a browser agent" is that one.
 - **No auto-retry.** The measured failures are corrective, not transient:
   re-running a known-bad brief is not a fix. Fix the brief, dispatch again.

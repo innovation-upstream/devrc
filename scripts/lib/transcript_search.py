@@ -28,7 +28,6 @@ docstring said it was. These other production files glob `*.jsonl` under their o
     scripts/collector/claude/_shared.py
     scripts/collector/claude/tailer.py
     scripts/session-analysis/extract_genesis.py
-    scripts/session-analysis/extract_user_msgs.py
     scripts/session-analysis/initiative-scan.py
     scripts/session-analysis/recon_cost.py
     scripts/validation/reconcile.py

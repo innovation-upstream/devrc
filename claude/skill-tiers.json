@@ -77,7 +77,7 @@
     },
     "mailbox": { "tier": "A" },
     "obs-read": { "tier": "A" },
-    "opencode": { "tier": "A" },
+    "opencode-dispatch": { "tier": "A" },
     "prune-index": {
       "tier": "B",
       "why": "'prune the analyze-service index' -- named, not described; and the three prune-* siblings spend most of their prose disambiguating each other, which name-only makes moot"

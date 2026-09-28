@@ -230,6 +230,53 @@ loss when Tier A is UNKNOWN for the rows involved. The suite currently bans this
 was no pre-sort; now there is one, so the flag means "our ranking wins" rather than "no
 ranking". **It is a genuine trade and it should be decided on data, not on the old ban.**
 
+🔴 **REFUSED — operator, 2026-09-20, on the data the paragraph above asked for.** The
+trade is not neutral: it is **backwards** for the modal click.
+
+The sort key is `(klass, distance, -score)`, so every `PLAUSIBLE` row sorts ahead of every
+`BELOW` row. Measured over the click telemetry (n=71 picks carrying both dims), the class
+of the row the operator **actually chose** was:
+
+| class of the picked row | picks |
+|---|---|
+| `below` | **54** |
+| `plausible` | 17 |
+
+Stable across eras (52/68 before `#1775`, 2/3 after), and **not** a stale-table artifact —
+`known_ranges.json` is refreshed by a daily timer (394 entries, last run within 5h of the
+measurement). So three times in four, the wanted row is one our own primary sort term ranks
+*behind* every plausible row. **fzf's match score is currently rescuing the operator from
+the class term; `--no-sort` removes the rescue.**
+
+⚠ **Why this was not visible before:** the replayed top-1 figures (`62.6% → 73.0%`) say
+where the correct repo *would* rank. They are not where the operator *clicked*. Derived
+from the same rows (`rank − pinned_above + 1`), the observed landing position is:
+
+| the pick landed on | picks |
+|---|---|
+| our 1st row | 9 (12.7%) |
+| our **2nd** row | **38 (53.5%)** |
+| our 3rd row | 14 |
+| 6th / 49th+ | 6 / 4 |
+
+⚠ **The derivation is checked against this arc's own published figures, and it agrees to
+within one pick rather than exactly** — said precisely because the gap is the kind of thing
+a later reader would otherwise treat as a contradiction. The handoff records the modal pick
+under the replaced key as the **second**-ranked row at **29** against **8** for the first;
+the same derivation over the table today gives **30** against **8**. The log only grows, so
+one further pick landing on the second row between the two readings accounts for it. The
+`pinned_above` correction is what makes the derivation work at all: `rank` is 0-indexed and
+counts the pinned rows, so reading it raw reports the modal pick as "rank 3" and hides that
+it is our *second* universe row.
+
+⚠ **NOT DIAGNOSED, and it should be before anything acts on it:** *why* `below` dominates.
+One untested mechanism is that many clicked `#N` are clawgate or ClickUp ids rather than
+GitHub numbers, so no repository's range is relevant to them and `below` is the honest
+class — in which case the defect is that such clicks are ranked by a range term at all.
+**This is a bigger finding than symptom 1 and it has a cheap mechanical test**: the causal
+replay harness already exists, so re-running it with the class term demoted and reading
+top-1 answers it without an operator judgement.
+
 **(C) Do nothing yet, and read the `queried` rate first.**
 The instrumentation in this PR now records, per click, whether a query was typed. If most
 picks are made with an **empty** query, symptom 1 is rare and A/B are not worth their
@@ -251,33 +298,86 @@ positive control:
 | ENTER, query matched nothing | `<query>\n`, exit **1** | **present** |
 | ESC / Ctrl-C abort | **nothing at all**, 0 bytes, exit 130 | **absent — NOT MEASURED** |
 
-`--print-query` covers the two endings where fzf has a result to print; an abort is not
+🔴 **THE ESC ROW OF THAT TABLE IS OUT OF DATE, AND THE `--bind` SECTION BELOW SUPERSEDES
+IT.** Left in place rather than edited because the paragraph under it is a record of a
+correction, and silently rewriting the table would leave that record describing a table
+that no longer says what it was correcting. **Current contract, measured at fzf 0.74.4:**
+
+| ending | what fzf writes | `queried` |
+|---|---|---|
+| a selection (PICKED) | `<query>\n<row>\n` | **present** |
+| ENTER, query matched nothing | `<query>\n`, exit **1** | **present** |
+| **ESC abort** (since `--bind="esc:print-query+abort"`) | `<query>\n`, exit **0** | **present** |
+| **any other abort** — `ctrl-c`, `ctrl-g`, `ctrl-q`, `ctrl-d` on an empty query | **nothing at all**, 0 bytes, exit 130 | **absent — NOT MEASURED** |
+
+⚠ **`abort` is FOUR keys, not one** — fzf's keymap reads `abort  ctrl-c  ctrl-g  ctrl-q
+esc`. An earlier version of this section, and the code comments it fed, said the residual
+gap was "Ctrl-C alone"; that was an exclusivity claim nobody had measured. Caught by
+`/audit-pr` round 0 on #1812.
+
+`--print-query` covers the endings where fzf has a result to print; a non-ESC abort is not
 one of them. **The first draft of this work asserted that an abort writes the query
 alone, in three code comments and the PR body. It does not.** Corrected, and pinned by
-`test_a_real_ABORT_records_NO_query_verdict_at_all`.
+`test_an_ESC_abort_RECORDS_a_verdict_and_the_OTHER_aborts_do_not`.
 
 Consequences for reading the data:
 
 * The **picked** rate — which is what symptom 1 is actually about — is complete.
-* The **dismissal** arm's `queried` rate covers the Enter-with-no-match ending only. That
-  ending is the most diagnostic dismissal there is ("I typed the repo name and the list
-  went empty" — the exact case `pick()`'s docstring has always named as unanswerable), so
-  it is not a trivial slice; but do **not** read it as "of all dismissals".
+* The **dismissal** arm's `queried` covers the Enter-with-no-match **and ESC** endings.
+  🔴 **It is not a rate over that arm and cannot be made into one**: `pick()` files every
+  dismissal under one `reason`, and ESC and Enter-with-no-match are byte-identical on
+  stdout, so "of ESC dismissals" is not computable. ✅ **The cleanest cell** is
+  `queried == False`, which means an ESC whose query was **empty after stripping**. Count
+  that. ⚠ **This line used to say "only an ESC on an UNTOUCHED picker can produce it", and
+  that is measured FALSE** — a query of two spaces writes `"  \n"` and type-then-delete
+  writes `"\n"`, both of which strip to empty with the picker very much touched. Read it as
+  "nothing typed, or nothing left after typing" — still the population symptom 1 wants,
+  since they did not narrow the list, but not the sentence that was written.
 * Three-valued is what keeps this honest. A `False` default would file every abort under
   "the operator scrolled", which is the population the whole question is measured from —
   wrong in the reassuring direction.
 
-**Option (D)**, if the abort gap matters: `--bind 'esc:print-query+abort'`. **Measured:
+~~**Option (D)**, if the abort gap matters: `--bind 'esc:print-query+abort'`. **Measured:
 it works** — Esc then writes `<query>\n` (Ctrl-C still writes nothing), the picker closes
 exactly as before, and nothing on screen changes. It was **not** taken in this PR because
 it rebinds a key on the live click path, and that is the operator's call. It is one flag,
-reversible, and the pinned-string/metacharacter guards already cover `PICKER_SH`.
+reversible, and the pinned-string/metacharacter guards already cover `PICKER_SH`.~~
 
-**Recommendation: (C) then (A).** (C) because the question is now measurable and was not
-before; (A) because it is additive, reversible, and helps *both* while the operator
-scrolls and after they type. (B) is worth keeping on the table but should not be taken
-before the `queried` rate is known — it trades away the fuzzy narrowing that makes a
-394-row picker usable at all.
+⚠ **SUPERSEDED by the decision immediately below — struck, not deleted.** The paragraph
+above describes (D) as *not taken*; it was taken. This is the third superseded passage in
+this section, and the other two (the §3.1 table, the closing recommendation) were already
+marked — leaving this one unmarked made two adjacent paragraphs read as a flat
+contradiction.
+
+🔴 **DECIDED — operator, 2026-09-20: take (D) now, then (A). (B) is REFUSED on the data
+below.** Shipped as `--bind="esc:print-query+abort"` in `PICKER_SH`. Re-measured at fzf
+**0.74.4** (the note above was taken at 0.74.3) with both flag states side by side and the
+four untouched endings as the probe's own positive control: Esc writes `<query>\n` exit 0,
+an Esc on an untouched picker writes a bare `\n` (so **`False` is now reachable on the
+dismissal arm**, which retires that arm's "True by construction" caveat), and Ctrl-C is
+unchanged at 0 bytes / exit 130.
+
+⚠ **And the claim that Ctrl-C cannot be closed was never measured, and is FALSE.** ⚠ An
+earlier wording of this line said *"this doc's claim"* — **wrong, and checked**: this
+document never said it. ⚠ An earlier wording added "its ONLY Ctrl-C sentence is …",
+which is also false — there are seven-plus, and the one it cited sits inside the Option (D)
+paragraph struck as superseded above. The sentence that was retracted is *"(Ctrl-C still
+writes nothing)"*,
+which is true and is not an impossibility claim. The retracted assertion lived in
+`scripts/mention-open.py` (*"has no `ctrl-c:` binding … handled below the keymap"*). A
+misattributed retraction sends the next reader looking for a sentence nobody wrote.
+`--bind="ctrl-c:print-query+abort"` is accepted at 0.74.4 and makes Ctrl-C write
+`<query>\n` too, verified against a control where the shipping config leaves it at 0 bytes.
+It was **not** taken: the operator approved the Esc bind specifically, and rebinding the
+universal cancel is a separate call. One flag, same shape, whenever the arm should be
+complete.
+
+~~**Recommendation: (C) then (A).**~~ ⚠ **SUPERSEDED — this was the recommendation BEFORE
+the operator decided.** Kept struck rather than deleted so the decision above reads as a
+choice made against a stated alternative, not as the only option anyone offered. The
+operator took **(D) then (A)** and refused (B) on 2026-09-20; see those sections. The
+original reasoning: (C) because the question was now measurable and was not before; (A)
+because it is additive and reversible; (B) not before the `queried` rate is known.
 
 ### Symptom 2 — DECIDED: optimise for top-1. The sort key changed.
 
@@ -446,21 +546,59 @@ WHERE source='tool' AND kind='invocation' AND text='mention-open'
   AND ts > '<the deploy date>'
 ```
 
+### ✅ CLOSED — the rate, measured 2026-09-20
+
+This section's closing condition was *"it is closed when this section carries a measured
+`queried` rate"*. Run verbatim against `ts > '2026-09-19 00:09:29'` (the `#1775` deploy):
+
+| typed | measured | picked_rows |
+|---|---|---|
+| **3** | 3 | 3 |
+
+**3 of 3 post-fix picks were typed**, all on the laptop. Controls, because each of these
+numbers is small enough to be an artifact: *positive* — 92 `mention-open` rows exist
+across all time, so the emitter fires; *negative* — dropping the `outcome='picked'` filter
+returns 4, not 3, so the filter is not inert. The one `dismissed` row carries **no**
+`queried`, exactly as §3.1 predicts for an abort — which is the gap (D) has now closed.
+
+🔴 **n=3 IS A DIRECTION, NOT A RATE, AND THE ARM IS FILLING ~10× SLOWER THAN PROJECTED.**
+This section predicted ~100+ picked rows within a week; the actual is 3 in 29 hours, with
+daily picked volume running 20 → 2 → 1 across 09-18/19/20. That drop is **usage, not a
+dead source** — checked rather than assumed: laptop human-presence telemetry is healthy
+(3,252 rows on 09-19) and `deadman.py` reports `laptop/tool` **ok** (2.0h silent against a
+15.2h budget). Why the operator clicked less was **not** determined.
+
+⚠ **What decided (B) was a different number in the same rows — see the note on (B) above.**
+
+⚠ **The query STRING is deliberately dropped** at `_PICK_QUERIED`, so how many rows a
+typed query leaves is **unmeasurable by design**. If queries usually narrow to one row,
+symptom 1 is harmless whatever the typed rate says. That is the one measurement that would
+settle this, and nothing here can take it.
+
 ⚠ **The two arms fill at very different rates — measured, so the week-later reader does
 not mistake a 10-row sample for an answer.** Over the 6.7 days to 2026-09-18 the sink took
 **85** click rows: **71 picked · 9 auto-open · 5 dismissed**, rising from 3/day to ~21/day.
 
 * **Picked arm** — ~100+ rows within a week of deploying. **This is where the rate lives.**
-* **Dismissal arm** — ~5 per week, and `queried` covers only the Enter-with-no-match subset
-  of those (§3.1). At this rate it needs **roughly two months** before it says anything.
+* **Dismissal arm** — ~5 per week. ⚠ **The rest of this bullet is SUPERSEDED**: it said
+  `queried` covers "only the Enter-with-no-match subset" and so needs *"roughly two months
+  before it says anything"*. Since `--bind="esc:print-query+abort"` an **ESC also records**,
+  which is the common dismissal — so the arm fills far faster than two months, and a reader
+  following the old sentence defers a decision that is already answerable.
 
-🔴 **AND UNDER `reason = 'dismissed'`, `queried` IS NOT A RATE AT ALL — DO NOT AVERAGE IT.**
-There the dim is present only for the Enter-with-no-match ending (an abort writes nothing),
-and on that ending it is `True` **by construction**: the picker always holds rows, so an
-empty query always matches something and always yields a selection — a non-empty query is
-the only way to reach that ending. Averaging it returns ~100% however the operator behaves.
-That is a self-selected sub-population read as a rate, which is **worse than an absent
-number**, because it looks like an answer.
+🔴 **AND UNDER `reason = 'dismissed'`, `queried` IS STILL NOT A RATE — BUT NOT FOR THE
+REASON THIS PARAGRAPH GAVE.** ⚠ **Superseded, kept so the change is visible rather than
+silently rewritten.** It ran: *"the dim is present only for the Enter-with-no-match ending
+(an abort writes nothing), and on that ending it is `True` by construction … averaging it
+returns ~100% however the operator behaves."* The bind refutes the premise — an ESC with an
+empty query records **`False`**, so both values are reachable and the population is no
+longer self-selected.
+
+**What is true now:** it is still not "the dismissal rate", for two reasons that do not
+cancel — every abort key except `esc` (`ctrl-c`, `ctrl-g`, `ctrl-q`, empty-query `ctrl-d`)
+contributes nothing at all, and Enter-with-no-match remains `True` by construction and so
+skews any average upward. Scope by `reason`, and read the `queried == False` cell above
+rather than averaging the arm.
 
 ⚠ **Scoped to the REASON, not to the arm.** That arm emits two outcomes (`dismissed` and
 `no-selection`) across seven reasons, and `unmapped-row` is a counter-example — fzf wrote

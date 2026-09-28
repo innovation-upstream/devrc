@@ -66,10 +66,86 @@ def _load_sibling(path=_SIBLING):
 
 SA = _load_sibling()
 
-# 🔴 BORROWED, NOT RE-DECLARED, AND NOT ENFORCED ANYWHERE.
-# skill-audit reads these from the gate that owns them. A handoff doc has NO gate:
-# nothing in this repo measures one, so these are a REFERENCE the reader may argue
-# with, never a verdict. The target is defensible rather than arbitrary — the
+
+def _load_budget(path=Path(__file__).resolve().parent / "lib" / "handoff_budget.py"):
+    """The ENFORCED per-doc ceiling, read from the module that owns it.
+
+    🔴 Returns None rather than raising — DEFENCE IN DEPTH, and the honest reason
+    is that this import is decoration on a reporting path, not that anyone has
+    been observed running without `lib/`.
+
+    ⚠ An earlier version of this docstring justified the branch by "this tool runs
+    against other repos' corpora, where the module is legitimately absent". Round 0
+    of #1815 checked: `handoff-audit.py` resolves `handoff_budget` from its own
+    `Path(__file__).parent/"lib"`, so that state needs this script present WITHOUT
+    its sibling `lib/`, and a sweep of `~/workspace` found neither file vendored
+    anywhere outside devrc clones. The configuration named did not exist. Keeping a
+    reason that names an impossible state is what stops the next reader deleting a
+    branch that has become genuinely dead — so the reason is stated as what it is.
+    """
+    if not path.is_file():
+        return None
+    loader = importlib.machinery.SourceFileLoader("_handoff_budget", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+BUDGET = _load_budget()
+
+
+def _repo_of(doc):
+    """The nearest ancestor of `doc` holding a `.git` entry, or None.
+
+    A worktree's `.git` is a FILE, not a directory, so this tests existence
+    rather than is_dir() — `gate_enforces_budget` records the same trap from the
+    other side (path-equality against a known root is wrong in a worktree).
+    """
+    try:
+        for d in [doc if doc.is_dir() else doc.parent, *doc.parents]:
+            if (d / ".git").exists():
+                return d
+    except OSError:
+        return None
+    return None
+
+
+def gate_reads(doc):
+    """Does the per-doc byte gate actually READ this document's repo?
+
+    🔴 THE QUESTION IS ABOUT THE AUDITED ROOT, NEVER ABOUT THIS SCRIPT. Asking
+    whether the gate sits next to `handoff-audit.py` answers a question about the
+    script's own checkout, which is TRUE IN EVERY DEVRC CLONE — so the banner
+    announced an enforced ceiling over corpora that nothing enforces, e.g. a run
+    against `homelab-talos/claudedocs`, which ships neither the gate nor
+    `handoff_budget`. Round 1 of #1815, F1. The cost of that class is in
+    `handoff_doc.gate_enforces_budget`: civitai/cli#618, five evictions and
+    35,517 B moved against a gate that could not see the repo.
+
+    Fails toward the WEAKER claim: an unknown repo, or one we cannot read, is
+    reported as ungated. We never invent a gate we could not see.
+    """
+    if BUDGET is None:
+        return False
+    repo = _repo_of(doc)
+    if repo is None:
+        return False
+    try:
+        return (repo / BUDGET.GATE_RELPATH).is_file()
+    except OSError:
+        return False
+
+# 🔴 BORROWED, NOT RE-DECLARED, AND THESE TWO ARE NOT ENFORCED.
+# skill-audit reads these from the gate that owns them, so there is one copy.
+# ⚠ CORRECTED 2026-09-20: this block used to say "A handoff doc has NO gate:
+# nothing in this repo measures one." That was TRUE when written (2026-09-01) and
+# FALSE from 2026-09-13, when #1648 shipped `handoff_budget.MAX_BYTES` and
+# `test_handoff_doc_size.py` — a real per-doc ceiling over
+# `claudedocs/**/handoff-*.md` that goes red on `main` for everyone. The TARGET
+# below is still unenforced and still a reference; the 64 KB ceiling is not, and a
+# reader told "nothing measures this" would have skipped the one gate that bites.
+# These are a REFERENCE the reader may argue with. The target is defensible — the
 # corpus p50 measured 12,159 B on 2026-08-29, i.e. half the corpus already meets
 # it — but every line this tool prints must keep saying it binds nothing.
 TARGET = SA.TARGET
@@ -350,7 +426,14 @@ def status_for(size):
 
 
 def audit_one(doc):
-    text = doc.read_text(errors="replace")
+    """Audit a doc ON DISK. The text half is `audit_text`, which is what a caller
+    holding a not-yet-written merge (`handoff_doc.budget_warning`) needs — the
+    warning is about the document the update WOULD produce, so round-tripping it
+    through a temp file would be both wasteful and a second thing to keep true."""
+    return audit_text(doc.read_text(errors="replace"), doc)
+
+
+def audit_text(text, doc=None):
     lines = text.splitlines(keepends=True)
     heads = SA._headings(lines)
     size = len(text.encode())
@@ -388,7 +471,7 @@ def audit_one(doc):
     net = max(0, gross - RESUME_COST * len(done))
     return {
         "path": doc,
-        "name": doc.name,
+        "name": doc.name if doc is not None else "",
         "size": size,
         "lines": len(lines),
         "status": status_for(size),
@@ -494,10 +577,32 @@ def render(audits, show_all, n_detail, n_sections, out=sys.stdout, per_root=(),
         for u in unreadable:
             p(f"  🔴 UNREADABLE, so its docs are NOT in any number above: {u}")
     p(f"\ntarget {TARGET:,} B   ·   hard cap {HARD:,} B")
-    p("  🔴 NOT ENFORCED. No gate in this repo measures a handoff doc, so every")
-    p("     verdict below is a REFERENCE you may argue with, not a rejection. The")
-    p("     numbers are borrowed from the SKILL.md gate via skill-audit.py rather")
-    p("     than re-declared here, so there is only ever one copy of them.")
+    p("  🔴 THESE TWO NUMBERS ARE NOT ENFORCED — but a HIGHER one is, and it is a")
+    p("     different threshold, so read the verdicts below as a REFERENCE you may")
+    p("     argue with. The numbers are borrowed from the SKILL.md gate via")
+    p("     skill-audit.py rather than re-declared here, so there is one copy.")
+    # 🔴 PER AUDITED ROOT — see `gate_reads`. The three arms are different claims
+    # and the ungated one is the load-bearing arm: telling an author their corpus
+    # is enforced when it is not is what cost civitai/cli#618 its 35,517 B.
+    if BUDGET is not None and audits:
+        gated = [a for a in audits if gate_reads(a["path"])]
+        if len(gated) == len(audits):
+            p(f"  ⚠ BUT `{BUDGET.GATE_RELPATH}` DOES enforce "
+              f"{BUDGET.MAX_BYTES:,} B per doc")
+            p("     (plus a grandfather ledger) over these docs, and it fails on")
+            p("     `main` for everyone. A doc can sit far over the target above and")
+            p("     still pass it — different thresholds, and only that one goes red.")
+        elif not gated:
+            p(f"  ⚠ AND NO per-document gate reads these docs either: their repo")
+            p(f"     ships no `{BUDGET.GATE_RELPATH}`, so NOTHING here can go red.")
+            p("     Treat every verdict below as JUDGEMENT about what the next")
+            p("     session has to read, never as a build to fix.")
+        else:
+            p(f"  ⚠ MIXED: `{BUDGET.GATE_RELPATH}` reads {len(gated)} of "
+              f"{len(audits)} of these docs")
+            p(f"     ({BUDGET.MAX_BYTES:,} B each); for the other "
+              f"{len(audits) - len(gated)} NOTHING can go red. The")
+            p("     per-doc rows below do not distinguish them — check the repo.")
 
     sizes = sorted(a["size"] for a in audits)
     if sizes:

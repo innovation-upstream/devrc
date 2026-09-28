@@ -1,6 +1,6 @@
 {
- "generated": 1783892021,
- "source": "gluetun airvpn.json (bundled) merged with airvpn.org/api at runtime",
+ "generated": 1790043635,
+ "source": "gluetun airvpn.json (bundled) merged with airvpn.org/api at runtime + country_code baked from airvpn.org/api (poller's leak verdict reads only this file)",
  "wg_pubkey_shared": true,
  "wg_pubkey": "PyLCXAQT8KkM4T+dUsOQfn+Ub3pGxfGlxkIApuig+hk=",
  "servers": [
@@ -8,1531 +8,1786 @@
    "name": "Alderamin",
    "country": "Austria",
    "city": "Vienna",
-   "endpoint_ip": "185.9.19.106"
+   "endpoint_ip": "185.9.19.106",
+   "country_code": "at"
   },
   {
    "name": "Beemim",
    "country": "Austria",
    "city": "Vienna",
-   "endpoint_ip": "37.120.155.178"
+   "endpoint_ip": "37.120.155.178",
+   "country_code": "at"
   },
   {
    "name": "Caelum",
    "country": "Austria",
    "city": "Vienna",
-   "endpoint_ip": "217.64.127.194"
+   "endpoint_ip": "217.64.127.194",
+   "country_code": "at"
   },
   {
    "name": "Capricornus",
    "country": "Belgium",
    "city": "Brussels",
-   "endpoint_ip": "194.187.251.90"
+   "endpoint_ip": "194.187.251.90",
+   "country_code": "be"
   },
   {
    "name": "Castor",
    "country": "Belgium",
    "city": "Brussels",
-   "endpoint_ip": "91.207.57.114"
+   "endpoint_ip": "91.207.57.114",
+   "country_code": "be"
   },
   {
    "name": "Columba",
    "country": "Belgium",
    "city": "Brussels",
-   "endpoint_ip": "194.187.251.114"
+   "endpoint_ip": "194.187.251.114",
+   "country_code": "be"
   },
   {
    "name": "Diadema",
    "country": "Belgium",
    "city": "Brussels",
-   "endpoint_ip": "194.187.251.162"
+   "endpoint_ip": "194.187.251.162",
+   "country_code": "be"
   },
   {
    "name": "Mebsuta",
    "country": "Belgium",
    "city": "Brussels",
-   "endpoint_ip": "194.187.251.154"
+   "endpoint_ip": "194.187.251.154",
+   "country_code": "be"
   },
   {
    "name": "Fulu",
    "country": "Brazil",
    "city": "Sao Paulo",
-   "endpoint_ip": "146.70.163.90"
+   "endpoint_ip": "146.70.163.90",
+   "country_code": "br"
   },
   {
    "name": "Apus",
    "country": "Bulgaria",
    "city": "Sofia",
-   "endpoint_ip": "82.102.23.130"
+   "endpoint_ip": "82.102.23.130",
+   "country_code": "bg"
   },
   {
    "name": "Grus",
    "country": "Bulgaria",
    "city": "Sofia",
-   "endpoint_ip": "82.102.23.138"
+   "endpoint_ip": "82.102.23.138",
+   "country_code": "bg"
   },
   {
    "name": "Lacerta",
    "country": "Canada",
    "city": "Montreal",
-   "endpoint_ip": "87.101.92.170"
+   "endpoint_ip": "87.101.92.170",
+   "country_code": "ca"
   },
   {
    "name": "Ross",
    "country": "Canada",
    "city": "Montreal",
-   "endpoint_ip": "139.28.218.234"
+   "endpoint_ip": "139.28.218.234",
+   "country_code": "ca"
   },
   {
    "name": "Agena",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.223.210"
+   "endpoint_ip": "184.75.223.210",
+   "country_code": "ca"
   },
   {
    "name": "Alhena",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "162.219.176.2"
+   "endpoint_ip": "162.219.176.2",
+   "country_code": "ca"
   },
   {
    "name": "Alkurhah",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.221.202"
+   "endpoint_ip": "184.75.221.202",
+   "country_code": "ca"
   },
   {
    "name": "Aludra",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "104.254.90.202"
+   "endpoint_ip": "104.254.90.202",
+   "country_code": "ca"
   },
   {
    "name": "Alwaid",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.221.106"
+   "endpoint_ip": "184.75.221.106",
+   "country_code": "ca"
   },
   {
    "name": "Alya",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.221.170"
+   "endpoint_ip": "184.75.221.170",
+   "country_code": "ca"
   },
   {
    "name": "Angetenar",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.221.162"
+   "endpoint_ip": "184.75.221.162",
+   "country_code": "ca"
   },
   {
    "name": "Arkab",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.221.210"
+   "endpoint_ip": "184.75.221.210",
+   "country_code": "ca"
   },
   {
    "name": "Avior",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.223.234"
+   "endpoint_ip": "184.75.223.234",
+   "country_code": "ca"
   },
   {
    "name": "Castula",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "198.44.157.51"
+   "endpoint_ip": "198.44.157.51",
+   "country_code": "ca"
   },
   {
    "name": "Cephei",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.214.162"
+   "endpoint_ip": "184.75.214.162",
+   "country_code": "ca"
   },
   {
    "name": "Chamukuy",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "198.44.157.131"
+   "endpoint_ip": "198.44.157.131",
+   "country_code": "ca"
   },
   {
    "name": "Chort",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "104.254.90.234"
+   "endpoint_ip": "104.254.90.234",
+   "country_code": "ca"
   },
   {
    "name": "Elgafar",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "198.44.157.59"
+   "endpoint_ip": "198.44.157.59",
+   "country_code": "ca"
   },
   {
    "name": "Enif",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "104.254.90.242"
+   "endpoint_ip": "104.254.90.242",
+   "country_code": "ca"
   },
   {
    "name": "Gorgonea",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "104.254.90.250"
+   "endpoint_ip": "104.254.90.250",
+   "country_code": "ca"
   },
   {
    "name": "Kornephoros",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "198.44.157.11"
+   "endpoint_ip": "198.44.157.11",
+   "country_code": "ca"
   },
   {
    "name": "Lesath",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.221.2"
+   "endpoint_ip": "184.75.221.2",
+   "country_code": "ca"
   },
   {
    "name": "Mintaka",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.223.218"
+   "endpoint_ip": "184.75.223.218",
+   "country_code": "ca"
   },
   {
    "name": "Regulus",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.221.34"
+   "endpoint_ip": "184.75.221.34",
+   "country_code": "ca"
   },
   {
    "name": "Rotanev",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "104.254.90.186"
+   "endpoint_ip": "104.254.90.186",
+   "country_code": "ca"
   },
   {
    "name": "Sadalbari",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.221.178"
+   "endpoint_ip": "184.75.221.178",
+   "country_code": "ca"
   },
   {
    "name": "Saiph",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.223.226"
+   "endpoint_ip": "184.75.223.226",
+   "country_code": "ca"
   },
   {
    "name": "Sargas",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.223.194"
+   "endpoint_ip": "184.75.223.194",
+   "country_code": "ca"
   },
   {
    "name": "Sharatan",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "104.254.90.194"
+   "endpoint_ip": "104.254.90.194",
+   "country_code": "ca"
   },
   {
    "name": "Sualocin",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.221.42"
+   "endpoint_ip": "184.75.221.42",
+   "country_code": "ca"
   },
   {
    "name": "Tegmen",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.208.242"
+   "endpoint_ip": "184.75.208.242",
+   "country_code": "ca"
   },
   {
    "name": "Tejat",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.221.194"
+   "endpoint_ip": "184.75.221.194",
+   "country_code": "ca"
   },
   {
    "name": "Tyl",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.223.202"
+   "endpoint_ip": "184.75.223.202",
+   "country_code": "ca"
   },
   {
    "name": "Ukdah",
    "country": "Canada",
    "city": "Toronto Ontario",
-   "endpoint_ip": "184.75.221.58"
+   "endpoint_ip": "184.75.221.58",
+   "country_code": "ca"
   },
   {
    "name": "Ginan",
    "country": "Canada",
    "city": "Vancouver",
-   "endpoint_ip": "104.193.135.242"
+   "endpoint_ip": "104.193.135.242",
+   "country_code": "ca"
   },
   {
    "name": "Nahn",
    "country": "Canada",
    "city": "Vancouver",
-   "endpoint_ip": "192.30.89.66"
+   "endpoint_ip": "192.30.89.66",
+   "country_code": "ca"
   },
   {
    "name": "Pisces",
    "country": "Canada",
    "city": "Vancouver",
-   "endpoint_ip": "192.30.89.26"
+   "endpoint_ip": "192.30.89.26",
+   "country_code": "ca"
   },
   {
    "name": "Sham",
    "country": "Canada",
    "city": "Vancouver",
-   "endpoint_ip": "192.30.89.74"
+   "endpoint_ip": "192.30.89.74",
+   "country_code": "ca"
   },
   {
    "name": "Telescopium",
    "country": "Canada",
    "city": "Vancouver",
-   "endpoint_ip": "192.30.89.50"
+   "endpoint_ip": "192.30.89.50",
+   "country_code": "ca"
   },
   {
    "name": "Titawin",
    "country": "Canada",
    "city": "Vancouver",
-   "endpoint_ip": "192.30.89.58"
+   "endpoint_ip": "192.30.89.58",
+   "country_code": "ca"
   },
   {
    "name": "Centaurus",
    "country": "Czech Republic",
    "city": "Prague",
-   "endpoint_ip": "185.156.174.114"
+   "endpoint_ip": "185.156.174.114",
+   "country_code": "cz"
   },
   {
    "name": "Markab",
    "country": "Czech Republic",
    "city": "Prague",
-   "endpoint_ip": "185.156.174.26"
+   "endpoint_ip": "185.156.174.26",
+   "country_code": "cz"
   },
   {
    "name": "Turais",
    "country": "Czech Republic",
    "city": "Prague",
-   "endpoint_ip": "185.156.174.154"
+   "endpoint_ip": "185.156.174.154",
+   "country_code": "cz"
   },
   {
    "name": "Alruba",
    "country": "Estonia",
    "city": "Tallinn",
-   "endpoint_ip": "37.77.56.242"
+   "endpoint_ip": "37.77.56.242",
+   "country_code": "ee"
   },
   {
    "name": "Cujam",
    "country": "Germany",
    "city": "Berlin",
-   "endpoint_ip": "37.120.217.242"
+   "endpoint_ip": "37.120.217.242",
+   "country_code": "de"
   },
   {
    "name": "Taiyi",
    "country": "Germany",
    "city": "Berlin",
-   "endpoint_ip": "83.143.245.50"
+   "endpoint_ip": "83.143.245.50",
+   "country_code": "de"
   },
   {
    "name": "Adhara",
    "country": "Germany",
    "city": "Frankfurt",
-   "endpoint_ip": "185.104.184.42"
+   "endpoint_ip": "185.104.184.42",
+   "country_code": "de"
   },
   {
    "name": "Adhil",
    "country": "Germany",
    "city": "Frankfurt",
-   "endpoint_ip": "37.46.199.66"
+   "endpoint_ip": "37.46.199.66",
+   "country_code": "de"
   },
   {
    "name": "Alsephina",
    "country": "Germany",
    "city": "Frankfurt",
-   "endpoint_ip": "141.98.102.186"
+   "endpoint_ip": "141.98.102.186",
+   "country_code": "de"
   },
   {
    "name": "Ashlesha",
    "country": "Germany",
    "city": "Frankfurt",
-   "endpoint_ip": "37.46.199.50"
+   "endpoint_ip": "37.46.199.50",
+   "country_code": "de"
   },
   {
    "name": "Cervantes",
    "country": "Germany",
    "city": "Frankfurt",
-   "endpoint_ip": "185.189.112.26"
+   "endpoint_ip": "185.189.112.26",
+   "country_code": "de"
   },
   {
    "name": "Dubhe",
    "country": "Germany",
    "city": "Frankfurt",
-   "endpoint_ip": "141.98.102.242"
+   "endpoint_ip": "141.98.102.242",
+   "country_code": "de"
   },
   {
    "name": "Errai",
    "country": "Germany",
    "city": "Frankfurt",
-   "endpoint_ip": "185.189.112.10"
+   "endpoint_ip": "185.189.112.10",
+   "country_code": "de"
   },
   {
    "name": "Fuyue",
    "country": "Germany",
    "city": "Frankfurt",
-   "endpoint_ip": "37.46.199.82"
+   "endpoint_ip": "37.46.199.82",
+   "country_code": "de"
   },
   {
    "name": "Menkalinan",
    "country": "Germany",
    "city": "Frankfurt",
-   "endpoint_ip": "141.98.102.226"
+   "endpoint_ip": "141.98.102.226",
+   "country_code": "de"
   },
   {
    "name": "Mirfak",
    "country": "Germany",
    "city": "Frankfurt",
-   "endpoint_ip": "141.98.102.234"
+   "endpoint_ip": "141.98.102.234",
+   "country_code": "de"
   },
   {
    "name": "Mirzam",
    "country": "Germany",
    "city": "Frankfurt",
-   "endpoint_ip": "141.98.102.178"
+   "endpoint_ip": "141.98.102.178",
+   "country_code": "de"
   },
   {
    "name": "Ogma",
    "country": "Germany",
    "city": "Frankfurt",
-   "endpoint_ip": "185.189.112.18"
+   "endpoint_ip": "185.189.112.18",
+   "country_code": "de"
   },
   {
    "name": "Minchir",
    "country": "Ireland",
    "city": "Dublin",
-   "endpoint_ip": "146.70.94.2"
+   "endpoint_ip": "146.70.94.2",
+   "country_code": "ie"
   },
   {
    "name": "Ainalrami",
    "country": "Japan",
    "city": "Tokyo",
-   "endpoint_ip": "45.87.213.82"
+   "endpoint_ip": "45.87.213.82",
+   "country_code": "jp"
   },
   {
    "name": "Albaldah",
    "country": "Japan",
    "city": "Tokyo",
-   "endpoint_ip": "146.70.76.42"
+   "endpoint_ip": "146.70.76.42",
+   "country_code": "jp"
   },
   {
    "name": "Bharani",
    "country": "Japan",
    "city": "Tokyo",
-   "endpoint_ip": "146.70.76.34"
+   "endpoint_ip": "146.70.76.34",
+   "country_code": "jp"
   },
   {
    "name": "Biham",
    "country": "Japan",
    "city": "Tokyo",
-   "endpoint_ip": "37.120.210.210"
+   "endpoint_ip": "37.120.210.210",
+   "country_code": "jp"
   },
   {
    "name": "Fleed",
    "country": "Japan",
    "city": "Tokyo",
-   "endpoint_ip": "217.138.252.122"
+   "endpoint_ip": "217.138.252.122",
+   "country_code": "jp"
   },
   {
    "name": "Iskandar",
    "country": "Japan",
    "city": "Tokyo",
-   "endpoint_ip": "82.102.28.106"
+   "endpoint_ip": "82.102.28.106",
+   "country_code": "jp"
   },
   {
    "name": "Okab",
    "country": "Japan",
    "city": "Tokyo",
-   "endpoint_ip": "37.120.210.218"
+   "endpoint_ip": "37.120.210.218",
+   "country_code": "jp"
   },
   {
    "name": "Taphao",
    "country": "Japan",
    "city": "Tokyo",
-   "endpoint_ip": "193.148.16.210"
+   "endpoint_ip": "193.148.16.210",
+   "country_code": "jp"
   },
   {
    "name": "Felis",
    "country": "Latvia",
    "city": "Riga",
-   "endpoint_ip": "46.183.217.98"
+   "endpoint_ip": "46.183.217.98",
+   "country_code": "lv"
   },
   {
    "name": "Meissa",
    "country": "Latvia",
    "city": "Riga",
-   "endpoint_ip": "109.248.148.242"
+   "endpoint_ip": "109.248.148.242",
+   "country_code": "lv"
   },
   {
    "name": "Phact",
    "country": "Latvia",
    "city": "Riga",
-   "endpoint_ip": "46.183.218.146"
+   "endpoint_ip": "46.183.218.146",
+   "country_code": "lv"
   },
   {
    "name": "Schedir",
    "country": "Latvia",
    "city": "Riga",
-   "endpoint_ip": "84.38.135.2"
+   "endpoint_ip": "84.38.135.2",
+   "country_code": "lv"
   },
   {
    "name": "Alchiba",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.180"
+   "endpoint_ip": "213.152.161.180",
+   "country_code": "nl"
   },
   {
    "name": "Alcyone",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.116"
+   "endpoint_ip": "213.152.161.116",
+   "country_code": "nl"
   },
   {
    "name": "Aljanah",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "134.19.179.170"
+   "endpoint_ip": "134.19.179.170",
+   "country_code": "nl"
   },
   {
    "name": "Alphard",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.187.199"
+   "endpoint_ip": "213.152.187.199",
+   "country_code": "nl"
   },
   {
    "name": "Alphecca",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.187.194"
+   "endpoint_ip": "213.152.187.194",
+   "country_code": "nl"
   },
   {
    "name": "Alpheratz",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "134.19.179.242"
+   "endpoint_ip": "134.19.179.242",
+   "country_code": "nl"
   },
   {
    "name": "Alphirk",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.187.214"
+   "endpoint_ip": "213.152.187.214",
+   "country_code": "nl"
   },
   {
    "name": "Alrai",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.78"
+   "endpoint_ip": "213.152.162.78",
+   "country_code": "nl"
   },
   {
    "name": "Alshat",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.4"
+   "endpoint_ip": "213.152.161.4",
+   "country_code": "nl"
   },
   {
    "name": "Alterf",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.169"
+   "endpoint_ip": "213.152.161.169",
+   "country_code": "nl"
   },
   {
    "name": "Alzirr",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.187.204"
+   "endpoint_ip": "213.152.187.204",
+   "country_code": "nl"
   },
   {
    "name": "Ancha",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.164"
+   "endpoint_ip": "213.152.162.164",
+   "country_code": "nl"
   },
   {
    "name": "Andromeda",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.228"
+   "endpoint_ip": "213.152.161.228",
+   "country_code": "nl"
   },
   {
    "name": "Anser",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.186.18"
+   "endpoint_ip": "213.152.186.18",
+   "country_code": "nl"
   },
   {
    "name": "Asellus",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.187.209"
+   "endpoint_ip": "213.152.187.209",
+   "country_code": "nl"
   },
   {
    "name": "Aspidiske",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "134.19.179.194"
+   "endpoint_ip": "134.19.179.194",
+   "country_code": "nl"
   },
   {
    "name": "Atik",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.9"
+   "endpoint_ip": "213.152.161.9",
+   "country_code": "nl"
   },
   {
    "name": "Canis",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.218"
+   "endpoint_ip": "213.152.161.218",
+   "country_code": "nl"
   },
   {
    "name": "Capella",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "134.19.179.138"
+   "endpoint_ip": "134.19.179.138",
+   "country_code": "nl"
   },
   {
    "name": "Caph",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.169"
+   "endpoint_ip": "213.152.162.169",
+   "country_code": "nl"
   },
   {
    "name": "Celaeno",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.68"
+   "endpoint_ip": "213.152.161.68",
+   "country_code": "nl"
   },
   {
    "name": "Chara",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.187.219"
+   "endpoint_ip": "213.152.187.219",
+   "country_code": "nl"
   },
   {
    "name": "Comae",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.186.162"
+   "endpoint_ip": "213.152.186.162",
+   "country_code": "nl"
   },
   {
    "name": "Crater",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.14"
+   "endpoint_ip": "213.152.162.14",
+   "country_code": "nl"
   },
   {
    "name": "Cygnus",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.243"
+   "endpoint_ip": "213.152.161.243",
+   "country_code": "nl"
   },
   {
    "name": "Dalim",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "134.19.179.210"
+   "endpoint_ip": "134.19.179.210",
+   "country_code": "nl"
   },
   {
    "name": "Diphda",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.164"
+   "endpoint_ip": "213.152.161.164",
+   "country_code": "nl"
   },
   {
    "name": "Edasich",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.210"
+   "endpoint_ip": "213.152.161.210",
+   "country_code": "nl"
   },
   {
    "name": "Elnath",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.186.39"
+   "endpoint_ip": "213.152.186.39",
+   "country_code": "nl"
   },
   {
    "name": "Eltanin",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "134.19.179.146"
+   "endpoint_ip": "134.19.179.146",
+   "country_code": "nl"
   },
   {
    "name": "Garnet",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.73"
+   "endpoint_ip": "213.152.162.73",
+   "country_code": "nl"
   },
   {
    "name": "Gianfar",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.100"
+   "endpoint_ip": "213.152.161.100",
+   "country_code": "nl"
   },
   {
    "name": "Gienah",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.93"
+   "endpoint_ip": "213.152.162.93",
+   "country_code": "nl"
   },
   {
    "name": "Hassaleh",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.39"
+   "endpoint_ip": "213.152.161.39",
+   "country_code": "nl"
   },
   {
    "name": "Horologium",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.4"
+   "endpoint_ip": "213.152.162.4",
+   "country_code": "nl"
   },
   {
    "name": "Hyadum",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.34"
+   "endpoint_ip": "213.152.161.34",
+   "country_code": "nl"
   },
   {
    "name": "Hydrus",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.9"
+   "endpoint_ip": "213.152.162.9",
+   "country_code": "nl"
   },
   {
    "name": "Jabbah",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.186.23"
+   "endpoint_ip": "213.152.186.23",
+   "country_code": "nl"
   },
   {
    "name": "Kajam",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.84"
+   "endpoint_ip": "213.152.161.84",
+   "country_code": "nl"
   },
   {
    "name": "Kocab",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.180"
+   "endpoint_ip": "213.152.162.180",
+   "country_code": "nl"
   },
   {
    "name": "Larawag",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "134.19.179.178"
+   "endpoint_ip": "134.19.179.178",
+   "country_code": "nl"
   },
   {
    "name": "Luhman",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.186.167"
+   "endpoint_ip": "213.152.186.167",
+   "country_code": "nl"
   },
   {
    "name": "Maasym",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.103"
+   "endpoint_ip": "213.152.162.103",
+   "country_code": "nl"
   },
   {
    "name": "Matar",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.187.224"
+   "endpoint_ip": "213.152.187.224",
+   "country_code": "nl"
   },
   {
    "name": "Melnick",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "134.19.179.162"
+   "endpoint_ip": "134.19.179.162",
+   "country_code": "nl"
   },
   {
    "name": "Menkent",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.176.134"
+   "endpoint_ip": "213.152.176.134",
+   "country_code": "nl"
   },
   {
    "name": "Merga",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.29"
+   "endpoint_ip": "213.152.161.29",
+   "country_code": "nl"
   },
   {
    "name": "Mirach",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.68"
+   "endpoint_ip": "213.152.162.68",
+   "country_code": "nl"
   },
   {
    "name": "Miram",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.88"
+   "endpoint_ip": "213.152.162.88",
+   "country_code": "nl"
   },
   {
    "name": "Muhlifain",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "134.19.179.202"
+   "endpoint_ip": "134.19.179.202",
+   "country_code": "nl"
   },
   {
    "name": "Muscida",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.153"
+   "endpoint_ip": "213.152.162.153",
+   "country_code": "nl"
   },
   {
    "name": "Musica",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.248"
+   "endpoint_ip": "213.152.161.248",
+   "country_code": "nl"
   },
   {
    "name": "Nash",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.24"
+   "endpoint_ip": "213.152.161.24",
+   "country_code": "nl"
   },
   {
    "name": "Orion",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.238"
+   "endpoint_ip": "213.152.161.238",
+   "country_code": "nl"
   },
   {
    "name": "Phaet",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.187.229"
+   "endpoint_ip": "213.152.187.229",
+   "country_code": "nl"
   },
   {
    "name": "Piautos",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "134.19.178.166"
+   "endpoint_ip": "134.19.178.166",
+   "country_code": "nl"
   },
   {
    "name": "Piscium",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "134.19.179.130"
+   "endpoint_ip": "134.19.179.130",
+   "country_code": "nl"
   },
   {
    "name": "Pleione",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.148"
+   "endpoint_ip": "213.152.162.148",
+   "country_code": "nl"
   },
   {
    "name": "Pyxis",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.233"
+   "endpoint_ip": "213.152.161.233",
+   "country_code": "nl"
   },
   {
    "name": "Rukbat",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.83"
+   "endpoint_ip": "213.152.162.83",
+   "country_code": "nl"
   },
   {
    "name": "Sadr",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.187.234"
+   "endpoint_ip": "213.152.187.234",
+   "country_code": "nl"
   },
   {
    "name": "Salm",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.19"
+   "endpoint_ip": "213.152.161.19",
+   "country_code": "nl"
   },
   {
    "name": "Scuti",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "134.19.179.154"
+   "endpoint_ip": "134.19.179.154",
+   "country_code": "nl"
   },
   {
    "name": "Sheliak",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.186.34"
+   "endpoint_ip": "213.152.186.34",
+   "country_code": "nl"
   },
   {
    "name": "Situla",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.14"
+   "endpoint_ip": "213.152.161.14",
+   "country_code": "nl"
   },
   {
    "name": "Subra",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.162.98"
+   "endpoint_ip": "213.152.162.98",
+   "country_code": "nl"
   },
   {
    "name": "Suhail",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "134.19.179.186"
+   "endpoint_ip": "134.19.179.186",
+   "country_code": "nl"
   },
   {
    "name": "Talitha",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.137"
+   "endpoint_ip": "213.152.161.137",
+   "country_code": "nl"
   },
   {
    "name": "Tarazed",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.132"
+   "endpoint_ip": "213.152.161.132",
+   "country_code": "nl"
   },
   {
    "name": "Tiaki",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "134.19.179.234"
+   "endpoint_ip": "134.19.179.234",
+   "country_code": "nl"
   },
   {
    "name": "Tianyi",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.186.172"
+   "endpoint_ip": "213.152.186.172",
+   "country_code": "nl"
   },
   {
    "name": "Zibal",
    "country": "Netherlands",
    "city": "Alblasserdam",
-   "endpoint_ip": "213.152.161.148"
+   "endpoint_ip": "213.152.161.148",
+   "country_code": "nl"
   },
   {
    "name": "Taiyangshou",
    "country": "Netherlands",
    "city": "Amsterdam",
-   "endpoint_ip": "94.228.209.178"
+   "endpoint_ip": "94.228.209.178",
+   "country_code": "nl"
   },
   {
    "name": "Vindemiatrix",
    "country": "Netherlands",
    "city": "Amsterdam",
-   "endpoint_ip": "94.228.209.210"
+   "endpoint_ip": "94.228.209.210",
+   "country_code": "nl"
   },
   {
    "name": "Fawaris",
    "country": "New Zealand",
    "city": "Auckland",
-   "endpoint_ip": "103.231.91.58"
+   "endpoint_ip": "103.231.91.58",
+   "country_code": "nz"
   },
   {
    "name": "Mothallah",
    "country": "New Zealand",
    "city": "Auckland",
-   "endpoint_ip": "223.165.69.100"
+   "endpoint_ip": "223.165.69.100",
+   "country_code": "nz"
   },
   {
    "name": "Theemin",
    "country": "New Zealand",
    "city": "Auckland",
-   "endpoint_ip": "202.50.176.4"
+   "endpoint_ip": "202.50.176.4",
+   "country_code": "nz"
   },
   {
    "name": "Tianguan",
    "country": "New Zealand",
    "city": "Auckland",
-   "endpoint_ip": "223.165.69.68"
+   "endpoint_ip": "223.165.69.68",
+   "country_code": "nz"
   },
   {
    "name": "Camelopardalis",
    "country": "Norway",
    "city": "Oslo",
-   "endpoint_ip": "82.102.27.194"
+   "endpoint_ip": "82.102.27.194",
+   "country_code": "no"
   },
   {
    "name": "Cepheus",
    "country": "Norway",
    "city": "Oslo",
-   "endpoint_ip": "82.102.27.170"
+   "endpoint_ip": "82.102.27.170",
+   "country_code": "no"
   },
   {
    "name": "Fomalhaut",
    "country": "Norway",
    "city": "Oslo",
-   "endpoint_ip": "185.206.225.50"
+   "endpoint_ip": "185.206.225.50",
+   "country_code": "no"
   },
   {
    "name": "Gemini",
    "country": "Norway",
    "city": "Oslo",
-   "endpoint_ip": "82.102.27.162"
+   "endpoint_ip": "82.102.27.162",
+   "country_code": "no"
   },
   {
    "name": "Ophiuchus",
    "country": "Norway",
    "city": "Oslo",
-   "endpoint_ip": "185.206.225.58"
+   "endpoint_ip": "185.206.225.58",
+   "country_code": "no"
   },
   {
    "name": "Alamak",
    "country": "Romania",
    "city": "Bucharest",
-   "endpoint_ip": "91.207.102.162"
+   "endpoint_ip": "91.207.102.162",
+   "country_code": null
   },
   {
    "name": "Canes",
    "country": "Romania",
    "city": "Bucharest",
-   "endpoint_ip": "86.105.9.66"
+   "endpoint_ip": "86.105.9.66",
+   "country_code": "ro"
   },
   {
    "name": "Nembus",
    "country": "Romania",
    "city": "Bucharest",
-   "endpoint_ip": "37.46.196.18"
+   "endpoint_ip": "37.46.196.18",
+   "country_code": "ro"
   },
   {
    "name": "Alnitak",
    "country": "Serbia",
    "city": "Belgrade",
-   "endpoint_ip": "152.89.160.130"
+   "endpoint_ip": "152.89.160.130",
+   "country_code": "rs"
   },
   {
    "name": "Marsic",
    "country": "Serbia",
    "city": "Belgrade",
-   "endpoint_ip": "146.70.111.18"
+   "endpoint_ip": "146.70.111.18",
+   "country_code": "rs"
   },
   {
    "name": "Auriga",
    "country": "Singapore",
    "city": "Singapore",
-   "endpoint_ip": "185.200.116.210"
+   "endpoint_ip": "185.200.116.210",
+   "country_code": "sg"
   },
   {
    "name": "Azelfafage",
    "country": "Singapore",
    "city": "Singapore",
-   "endpoint_ip": "146.70.149.66"
+   "endpoint_ip": "146.70.149.66",
+   "country_code": "sg"
   },
   {
    "name": "Circinus",
    "country": "Singapore",
    "city": "Singapore",
-   "endpoint_ip": "185.200.116.202"
+   "endpoint_ip": "185.200.116.202",
+   "country_code": "sg"
   },
   {
    "name": "Delphinus",
    "country": "Singapore",
    "city": "Singapore",
-   "endpoint_ip": "185.200.116.218"
+   "endpoint_ip": "185.200.116.218",
+   "country_code": "sg"
   },
   {
    "name": "Hydra",
    "country": "Singapore",
    "city": "Singapore",
-   "endpoint_ip": "185.200.117.130"
+   "endpoint_ip": "185.200.117.130",
+   "country_code": "sg"
   },
   {
    "name": "Luyten",
    "country": "Singapore",
    "city": "Singapore",
-   "endpoint_ip": "92.119.178.2"
+   "endpoint_ip": "92.119.178.2",
+   "country_code": "sg"
   },
   {
    "name": "Triangulum",
    "country": "Singapore",
    "city": "Singapore",
-   "endpoint_ip": "185.200.116.130"
+   "endpoint_ip": "185.200.116.130",
+   "country_code": "sg"
   },
   {
    "name": "Eridanus",
    "country": "Spain",
    "city": "Barcelona",
-   "endpoint_ip": "185.183.106.2"
+   "endpoint_ip": "185.183.106.2",
+   "country_code": "es"
   },
   {
    "name": "Jishui",
    "country": "Spain",
    "city": "Madrid",
-   "endpoint_ip": "130.195.210.106"
+   "endpoint_ip": "130.195.210.106",
+   "country_code": "es"
   },
   {
    "name": "Mekbuda",
    "country": "Spain",
    "city": "Madrid",
-   "endpoint_ip": "185.93.182.170"
+   "endpoint_ip": "185.93.182.170",
+   "country_code": "es"
   },
   {
    "name": "Taurus",
    "country": "Spain",
    "city": "Madrid",
-   "endpoint_ip": "194.99.104.34"
+   "endpoint_ip": "194.99.104.34",
+   "country_code": "es"
   },
   {
    "name": "Copernicus",
    "country": "Sweden",
    "city": "Stockholm",
-   "endpoint_ip": "79.142.76.243"
+   "endpoint_ip": "79.142.76.243",
+   "country_code": "se"
   },
   {
    "name": "Lupus",
    "country": "Sweden",
    "city": "Stockholm",
-   "endpoint_ip": "128.127.105.183"
+   "endpoint_ip": "128.127.105.183",
+   "country_code": "se"
   },
   {
    "name": "Norma",
    "country": "Sweden",
    "city": "Stockholm",
-   "endpoint_ip": "31.3.152.99"
+   "endpoint_ip": "31.3.152.99",
+   "country_code": "se"
   },
   {
    "name": "Segin",
    "country": "Sweden",
    "city": "Stockholm",
-   "endpoint_ip": "94.185.80.226"
+   "endpoint_ip": "94.185.80.226",
+   "country_code": "se"
   },
   {
    "name": "Albali",
    "country": "Sweden",
    "city": "Uppsala",
-   "endpoint_ip": "62.102.148.149"
+   "endpoint_ip": "62.102.148.149",
+   "country_code": "se"
   },
   {
    "name": "Algorab",
    "country": "Sweden",
    "city": "Uppsala",
-   "endpoint_ip": "62.102.148.147"
+   "endpoint_ip": "62.102.148.147",
+   "country_code": "se"
   },
   {
    "name": "Alrami",
    "country": "Sweden",
    "city": "Uppsala",
-   "endpoint_ip": "62.102.148.145"
+   "endpoint_ip": "62.102.148.145",
+   "country_code": "se"
   },
   {
    "name": "Alula",
    "country": "Sweden",
    "city": "Uppsala",
-   "endpoint_ip": "62.102.148.151"
+   "endpoint_ip": "62.102.148.151",
+   "country_code": "se"
   },
   {
    "name": "Atria",
    "country": "Sweden",
    "city": "Uppsala",
-   "endpoint_ip": "62.102.148.150"
+   "endpoint_ip": "62.102.148.150",
+   "country_code": "se"
   },
   {
    "name": "Azmidiske",
    "country": "Sweden",
    "city": "Uppsala",
-   "endpoint_ip": "62.102.148.141"
+   "endpoint_ip": "62.102.148.141",
+   "country_code": "se"
   },
   {
    "name": "Benetnasch",
    "country": "Sweden",
    "city": "Uppsala",
-   "endpoint_ip": "62.102.148.148"
+   "endpoint_ip": "62.102.148.148",
+   "country_code": "se"
   },
   {
    "name": "Menkab",
    "country": "Sweden",
    "city": "Uppsala",
-   "endpoint_ip": "62.102.148.143"
+   "endpoint_ip": "62.102.148.143",
+   "country_code": "se"
   },
   {
    "name": "Muphrid",
    "country": "Sweden",
    "city": "Uppsala",
-   "endpoint_ip": "62.102.148.146"
+   "endpoint_ip": "62.102.148.146",
+   "country_code": "se"
   },
   {
    "name": "Achernar",
    "country": "Switzerland",
    "city": "Zurich",
-   "endpoint_ip": "185.156.175.170"
+   "endpoint_ip": "185.156.175.170",
+   "country_code": "ch"
   },
   {
    "name": "Achird",
    "country": "Switzerland",
    "city": "Zurich",
-   "endpoint_ip": "185.156.175.34"
+   "endpoint_ip": "185.156.175.34",
+   "country_code": "ch"
   },
   {
    "name": "Athebyne",
    "country": "Switzerland",
    "city": "Zurich",
-   "endpoint_ip": "86.106.84.162"
+   "endpoint_ip": "86.106.84.162",
+   "country_code": "ch"
   },
   {
    "name": "Baiten",
    "country": "Switzerland",
    "city": "Zurich",
-   "endpoint_ip": "185.156.175.50"
+   "endpoint_ip": "185.156.175.50",
+   "country_code": "ch"
   },
   {
    "name": "Dorado",
    "country": "Switzerland",
    "city": "Zurich",
-   "endpoint_ip": "195.206.105.226"
+   "endpoint_ip": "195.206.105.226",
+   "country_code": "ch"
   },
   {
    "name": "Hamal",
    "country": "Switzerland",
    "city": "Zurich",
-   "endpoint_ip": "185.156.175.42"
+   "endpoint_ip": "185.156.175.42",
+   "country_code": "ch"
   },
   {
    "name": "Sirrah",
    "country": "Switzerland",
    "city": "Zurich",
-   "endpoint_ip": "185.156.175.58"
+   "endpoint_ip": "185.156.175.58",
+   "country_code": "ch"
   },
   {
    "name": "Toliman",
    "country": "Switzerland",
    "city": "Zurich",
-   "endpoint_ip": "86.106.84.146"
+   "endpoint_ip": "86.106.84.146",
+   "country_code": "ch"
   },
   {
    "name": "Sulafat",
    "country": "Taiwan",
    "city": "Taipei",
-   "endpoint_ip": "103.230.144.100"
+   "endpoint_ip": "103.230.144.100",
+   "country_code": "tw"
   },
   {
    "name": "Amansinaya",
    "country": "United Kingdom",
    "city": "London",
-   "endpoint_ip": "146.70.179.194"
+   "endpoint_ip": "146.70.179.194",
+   "country_code": "gb"
   },
   {
    "name": "Arber",
    "country": "United Kingdom",
    "city": "London",
-   "endpoint_ip": "141.98.100.146"
+   "endpoint_ip": "141.98.100.146",
+   "country_code": "gb"
   },
   {
    "name": "Baiduri",
    "country": "United Kingdom",
    "city": "London",
-   "endpoint_ip": "81.92.203.130"
+   "endpoint_ip": "81.92.203.130",
+   "country_code": "gb"
   },
   {
    "name": "Bubup",
    "country": "United Kingdom",
    "city": "Manchester",
-   "endpoint_ip": "89.238.167.130"
+   "endpoint_ip": "89.238.167.130",
+   "country_code": "gb"
   },
   {
    "name": "Ceibo",
    "country": "United Kingdom",
    "city": "Manchester",
-   "endpoint_ip": "89.238.167.146"
+   "endpoint_ip": "89.238.167.146",
+   "country_code": "gb"
   },
   {
    "name": "Chaophraya",
    "country": "United Kingdom",
    "city": "Manchester",
-   "endpoint_ip": "89.238.167.162"
+   "endpoint_ip": "89.238.167.162",
+   "country_code": "gb"
   },
   {
    "name": "Hercules",
    "country": "United States",
    "city": "Atlanta Georgia",
-   "endpoint_ip": "64.42.179.58"
+   "endpoint_ip": "64.42.179.58",
+   "country_code": "us"
   },
   {
    "name": "Libra",
    "country": "United States",
    "city": "Atlanta Georgia",
-   "endpoint_ip": "64.42.179.66"
+   "endpoint_ip": "64.42.179.66",
+   "country_code": "us"
   },
   {
    "name": "Musca",
    "country": "United States",
    "city": "Atlanta Georgia",
-   "endpoint_ip": "64.42.179.42"
+   "endpoint_ip": "64.42.179.42",
+   "country_code": "us"
   },
   {
    "name": "Sculptor",
    "country": "United States",
    "city": "Atlanta Georgia",
-   "endpoint_ip": "64.42.179.34"
+   "endpoint_ip": "64.42.179.34",
+   "country_code": "us"
   },
   {
    "name": "Ursa",
    "country": "United States",
    "city": "Atlanta Georgia",
-   "endpoint_ip": "64.42.179.50"
+   "endpoint_ip": "64.42.179.50",
+   "country_code": "us"
   },
   {
    "name": "Fang",
    "country": "United States",
    "city": "Chicago Illinois",
-   "endpoint_ip": "68.235.48.107"
+   "endpoint_ip": "68.235.48.107",
+   "country_code": "us"
   },
   {
    "name": "Kruger",
    "country": "United States",
    "city": "Chicago Illinois",
-   "endpoint_ip": "68.235.35.123"
+   "endpoint_ip": "68.235.35.123",
+   "country_code": "us"
   },
   {
    "name": "Meridiana",
    "country": "United States",
    "city": "Chicago Illinois",
-   "endpoint_ip": "68.235.35.251"
+   "endpoint_ip": "68.235.35.251",
+   "country_code": "us"
   },
   {
    "name": "Praecipua",
    "country": "United States",
    "city": "Chicago Illinois",
-   "endpoint_ip": "68.235.52.67"
+   "endpoint_ip": "68.235.52.67",
+   "country_code": "us"
   },
   {
    "name": "Sadalsuud",
    "country": "United States",
    "city": "Chicago Illinois",
-   "endpoint_ip": "68.235.35.179"
+   "endpoint_ip": "68.235.35.179",
+   "country_code": "us"
   },
   {
    "name": "Sneden",
    "country": "United States",
    "city": "Chicago Illinois",
-   "endpoint_ip": "68.235.52.35"
+   "endpoint_ip": "68.235.52.35",
+   "country_code": "us"
   },
   {
    "name": "Superba",
    "country": "United States",
    "city": "Chicago Illinois",
-   "endpoint_ip": "208.77.22.211"
+   "endpoint_ip": "208.77.22.211",
+   "country_code": "us"
   },
   {
    "name": "Chamaeleon",
    "country": "United States",
    "city": "Dallas Texas",
-   "endpoint_ip": "204.8.98.10"
+   "endpoint_ip": "204.8.98.10",
+   "country_code": "us"
   },
   {
    "name": "Equuleus",
    "country": "United States",
    "city": "Dallas Texas",
-   "endpoint_ip": "204.8.98.20"
+   "endpoint_ip": "204.8.98.20",
+   "country_code": "us"
   },
   {
    "name": "Helvetios",
    "country": "United States",
    "city": "Dallas Texas",
-   "endpoint_ip": "204.8.98.30"
+   "endpoint_ip": "204.8.98.30",
+   "country_code": "us"
   },
   {
    "name": "Leo",
    "country": "United States",
    "city": "Dallas Texas",
-   "endpoint_ip": "204.8.98.40"
+   "endpoint_ip": "204.8.98.40",
+   "country_code": "us"
   },
   {
    "name": "Mensa",
    "country": "United States",
    "city": "Dallas Texas",
-   "endpoint_ip": "204.8.98.50"
+   "endpoint_ip": "204.8.98.50",
+   "country_code": "us"
   },
   {
    "name": "Pegasus",
    "country": "United States",
    "city": "Dallas Texas",
-   "endpoint_ip": "204.8.98.60"
+   "endpoint_ip": "204.8.98.60",
+   "country_code": "us"
   },
   {
    "name": "Ran",
    "country": "United States",
    "city": "Dallas Texas",
-   "endpoint_ip": "204.8.98.70"
+   "endpoint_ip": "204.8.98.70",
+   "country_code": "us"
   },
   {
    "name": "Scutum",
    "country": "United States",
    "city": "Dallas Texas",
-   "endpoint_ip": "204.8.98.80"
+   "endpoint_ip": "204.8.98.80",
+   "country_code": "us"
   },
   {
    "name": "Volans",
    "country": "United States",
    "city": "Dallas Texas",
-   "endpoint_ip": "204.8.98.90"
+   "endpoint_ip": "204.8.98.90",
+   "country_code": "us"
   },
   {
    "name": "Vulpecula",
    "country": "United States",
    "city": "Dallas Texas",
-   "endpoint_ip": "204.8.98.100"
+   "endpoint_ip": "204.8.98.100",
+   "country_code": "us"
   },
   {
    "name": "Sadachbia",
    "country": "United States",
    "city": "Denver Colorado",
-   "endpoint_ip": "198.54.128.123"
+   "endpoint_ip": "198.54.128.123",
+   "country_code": "us"
   },
   {
    "name": "Torcular",
    "country": "United States",
    "city": "Denver Colorado",
-   "endpoint_ip": "198.54.128.115"
+   "endpoint_ip": "198.54.128.115",
+   "country_code": "us"
   },
   {
    "name": "Aquila",
    "country": "United States",
    "city": "Fremont California",
-   "endpoint_ip": "23.130.104.129"
+   "endpoint_ip": "23.130.104.129",
+   "country_code": "us"
   },
   {
    "name": "Maia",
    "country": "United States",
    "city": "Los Angeles",
-   "endpoint_ip": "198.54.129.51"
+   "endpoint_ip": "198.54.129.51",
+   "country_code": "us"
   },
   {
    "name": "Revati",
    "country": "United States",
    "city": "Los Angeles",
-   "endpoint_ip": "198.54.129.123"
+   "endpoint_ip": "198.54.129.123",
+   "country_code": "us"
   },
   {
    "name": "Sarin",
    "country": "United States",
    "city": "Los Angeles",
-   "endpoint_ip": "198.54.129.59"
+   "endpoint_ip": "198.54.129.59",
+   "country_code": "us"
   },
   {
    "name": "Xamidimura",
    "country": "United States",
    "city": "Los Angeles",
-   "endpoint_ip": "198.54.129.43"
+   "endpoint_ip": "198.54.129.43",
+   "country_code": "us"
   },
   {
    "name": "Aladfar",
    "country": "United States",
    "city": "Miami",
-   "endpoint_ip": "193.37.252.50"
+   "endpoint_ip": "193.37.252.50",
+   "country_code": "us"
   },
   {
    "name": "Ascella",
    "country": "United States",
    "city": "Miami",
-   "endpoint_ip": "193.37.252.66"
+   "endpoint_ip": "193.37.252.66",
+   "country_code": "us"
   },
   {
    "name": "Chertan",
    "country": "United States",
    "city": "Miami",
-   "endpoint_ip": "193.37.252.162"
+   "endpoint_ip": "193.37.252.162",
+   "country_code": "us"
   },
   {
    "name": "Dziban",
    "country": "United States",
    "city": "Miami",
-   "endpoint_ip": "45.92.16.130"
+   "endpoint_ip": "45.92.16.130",
+   "country_code": "us"
   },
   {
    "name": "Elkurud",
    "country": "United States",
    "city": "Miami",
-   "endpoint_ip": "193.37.252.114"
+   "endpoint_ip": "193.37.252.114",
+   "country_code": "us"
   },
   {
    "name": "Giausar",
    "country": "United States",
    "city": "Miami",
-   "endpoint_ip": "193.37.252.98"
+   "endpoint_ip": "193.37.252.98",
+   "country_code": "us"
   },
   {
    "name": "Meleph",
    "country": "United States",
    "city": "Miami",
-   "endpoint_ip": "91.219.214.130"
+   "endpoint_ip": "91.219.214.130",
+   "country_code": "us"
   },
   {
    "name": "Muliphein",
    "country": "United States",
    "city": "New York City",
-   "endpoint_ip": "198.44.136.235"
+   "endpoint_ip": "198.44.136.235",
+   "country_code": "us"
   },
   {
    "name": "Paikauhale",
    "country": "United States",
    "city": "New York City",
-   "endpoint_ip": "198.44.136.251"
+   "endpoint_ip": "198.44.136.251",
+   "country_code": "us"
   },
   {
    "name": "Sadalmelik",
    "country": "United States",
    "city": "New York City",
-   "endpoint_ip": "198.44.159.3"
+   "endpoint_ip": "198.44.159.3",
+   "country_code": "us"
   },
   {
    "name": "Terebellum",
    "country": "United States",
    "city": "New York City",
-   "endpoint_ip": "198.44.136.27"
+   "endpoint_ip": "198.44.136.27",
+   "country_code": "us"
   },
   {
    "name": "Unukalhai",
    "country": "United States",
    "city": "New York City",
-   "endpoint_ip": "198.44.136.243"
+   "endpoint_ip": "198.44.136.243",
+   "country_code": "us"
   },
   {
    "name": "Unurgunite",
    "country": "United States",
    "city": "New York City",
-   "endpoint_ip": "198.44.159.11"
+   "endpoint_ip": "198.44.159.11",
+   "country_code": "us"
   },
   {
    "name": "Guniibuu",
    "country": "United States",
    "city": "Phoenix Arizona",
-   "endpoint_ip": "198.44.133.67"
+   "endpoint_ip": "198.44.133.67",
+   "country_code": "us"
   },
   {
    "name": "Khambalia",
    "country": "United States",
    "city": "Phoenix Arizona",
-   "endpoint_ip": "198.44.133.83"
+   "endpoint_ip": "198.44.133.83",
+   "country_code": "us"
   },
   {
    "name": "Sheratan",
    "country": "United States",
    "city": "Phoenix Arizona",
-   "endpoint_ip": "198.44.133.75"
+   "endpoint_ip": "198.44.133.75",
+   "country_code": "us"
   },
   {
    "name": "Polis",
    "country": "United States",
    "city": "Raleigh North Carolina",
-   "endpoint_ip": "198.54.130.27"
+   "endpoint_ip": "198.54.130.27",
+   "country_code": "us"
   },
   {
    "name": "Bunda",
    "country": "United States",
    "city": "San Jose California",
-   "endpoint_ip": "198.54.134.251"
+   "endpoint_ip": "198.54.134.251",
+   "country_code": "us"
   },
   {
    "name": "Imai",
    "country": "United States",
    "city": "San Jose California",
-   "endpoint_ip": "198.44.134.3"
+   "endpoint_ip": "198.44.134.3",
+   "country_code": "us"
   }
  ]
 }

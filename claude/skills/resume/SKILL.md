@@ -11,7 +11,7 @@ Goal: rebuild context fast and **verify it's still true** before acting (a hando
 
 Topic argument (optional): `$ARGUMENTS`.
 
-**Reference topics** — deployed at `~/.claude/skills/resume/reference/`, source `~/workspace/devrc/claude/skills/resume/reference/`:
+**Reference topics** — deployed at `~/.claude/skills/<skill>/reference/`, source `~/workspace/devrc/claude/skills/<skill>/reference/`. Most are `/resume`'s own; the file column names the owning skill:
 
 | Load when | File |
 |---|---|
@@ -21,6 +21,7 @@ Topic argument (optional): `$ARGUMENTS`.
 | `handoff_search` in depth — proving `--exclude-slug` landed, and its exit-code vocabulary | `~/.claude/skills/resume/reference/handoff-search.md` |
 | Reading what `cairn recall` printed — every flag, the index badges, the featured pick, `MALFORMED`, its exit codes | `~/.claude/skills/resume/reference/cairn-recall.md` |
 | The shared-queue lock in depth — ownership scope, legacy refs, why a check alone cannot protect the first mover | `~/.claude/skills/resume/reference/report-and-claim.md` |
+| You need what the OPERATOR actually typed across this arc — their words, not the doc's summary of them. `extract_user_msgs.py --arc/--session/--ids-file`, its exit codes, and why a 0 cannot mean "empty arc" | `~/.claude/skills/handoff/reference/user-messages.md` |
 
 ## Steps
 

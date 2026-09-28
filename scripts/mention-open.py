@@ -456,17 +456,139 @@ def openable(span: dict) -> list[dict]:
     return [c for c in span.get("candidates", []) if c.get("url")]
 
 
+# The marker every picker row carries: ONE whitespace-free field, the row's
+# rank in the ordering. Padding never changes the field COUNT, which is what
+# `--nth` indexes. Three digits covers a 394-row universe with room to grow.
+#
+# 🔴 THE WIDTH IS NOT COSMETIC. fzf's positional tiebreaks score against
+# offsets in the ORIGINAL line, so field 1's WIDTH reaches the ranking even
+# though `--nth=2..` keeps its TEXT out of the haystack. MEASURED at 0.74.4:
+# two rows whose field-2.. text is BYTE-IDENTICAL and whose field-1 widths
+# differ (`1` padded to 3 vs `1000` padded to 6) come back in the OPPOSITE
+# order under `--tiebreak=end --nth=2..`, and in input order once the widths
+# are equalised. So a uniform width is load-bearing, and this constant going
+# too small — letting some ranks overflow it — is a correctness bug, not a
+# cosmetic one. `test_the_rank_marker_WIDTH_is_uniform_past_the_universe_size`
+# is the guard.
+PICKER_MARKER_RANK_W = 3
+# 🔴 LEFT-ALIGNED, AND MEASURED BETTER — BUT THE MECHANISM IS NOT ESTABLISHED,
+# AND SAYING SO IS DELIBERATE. MEASURED at fzf 0.74.4 over a 120-row synthetic
+# corpus, 20 queries: right-aligned, top-1 changed on 7; left-aligned, on 0
+# (tail order 13 vs 1). Keep `:<`.
+#
+# ⚠ AN EARLIER VERSION OF THIS COMMENT EXPLAINED IT AND THE EXPLANATION WAS
+# FALSE. It said right-alignment's leading blanks shift what `--nth=2..`
+# selects, so "the rank lands back INSIDE the haystack for narrow ranks".
+# MEASURED against that claim directly: a query matching ONLY the marker digits
+# returns ZERO rows under BOTH alignments with `--nth=2..` (positive control:
+# 1 row with the flag dropped). The marker is never matchable either way.
+#
+# 🔴 AND THE WIDTH EFFECT ABOVE DOES NOT EXPLAIN IT EITHER: `:<3` and `:>3`
+# produce the SAME width, so the offsets are unchanged between the two
+# alignments. The direction is reproducible and the choice rests on it; WHY
+# right-alignment moves the ranking at constant width is UNKNOWN. Recorded as
+# unknown rather than given a second plausible mechanism — the first one read
+# just as well and was wrong, and a reason invented under pressure to supply
+# one is a hypothesis wearing a comment's clothes.
+PICKER_MARKER_UNRANKED = "-"
+# 🔴 A DIFFERENT TOKEN FOR "NOBODY STAMPED THIS ROW", AND THE DIFFERENCE IS THE
+# POINT. `picker_rows` falls back when a candidate carries no `marker` at all,
+# which cannot happen through `stamp_picker_markers` — it means an assembly arm
+# contributed a row after the stamp, i.e. a BUG. Rendering that as `-` would
+# spell a defect the same way as a legitimately unranked row, so the one state
+# nobody can see is the one that looks normal. This keeps the click working
+# (never raise on the click path) and makes the failure legible.
+PICKER_MARKER_UNSTAMPED = "?"
+
+
+def picker_marker(rank: str) -> str:
+    """The marker field, padded for alignment. One writer, so the width used to
+    BUILD a row and the width the guards assert on cannot drift apart.
+
+    ⚠ NOTHING STRIPS BY WIDTH, and an earlier version of this line said
+    something did: `row_to_url` matches the URL SUFFIX and the tests split
+    on whitespace, so no consumer depends on this width to find the row.
+    What it IS load-bearing for is fzf's positional scoring — see
+    `PICKER_MARKER_RANK_W`."""
+    return f"{rank:<{PICKER_MARKER_RANK_W}}"
+
+
+def picker_markers(candidates: list[dict],
+                   ordered_urls: set[str] | None) -> list[str]:
+    """One marker per candidate — where the ordering put that row.
+
+    🔴 THE RANK IS COUNTED OFF `ordered_urls`, NOT `rank - pinned_above`, AND
+    THAT IS NOT A STYLE CHOICE. This module already records that the
+    subtraction INVERTS for the promoted row: a promoted row sits at position 0
+    with `rank < pinned_above`, so the arithmetic makes the genuinely-ordered
+    row look pinned and the demoted guess look ordered. Counting ordered rows in
+    display order gives the promoted row rank 1 — which is what it is, since it
+    is the ordering's own top row — and cannot go negative.
+
+    A row the ordering did not place gets `-`: no number, because it has no
+    rank. Inventing one is the failure `ordered_urls` exists to prevent.
+
+    🔴 RANK ONLY — THE CLASS WAS DROPPED, AND BY THE OPERATOR RATHER THAN FOR
+    TIDINESS. Option (A) offered *"its Tier A class **and/or** its rank"*;
+    shipping both was the implementer's reading, and `/audit-pr` round 0 on
+    #1813 logged the class field as an UNATTRIBUTED requirement. The measurement
+    that decided it: over every recorded pick, the class of the row the operator
+    actually chose is `below` **56** times against `plausible` **17** — so a
+    class column would read "the ranker does not trust this row" on the WANTED
+    row roughly three times in four, while the picker header already says the
+    same thing and already survives a typed query. The class term is itself the
+    thing the proposal flags as undiagnosed, so putting it permanently on screen
+    would teach a vocabulary that may be about to change. Rank is the half
+    symptom 1 actually names: it is what fzf's own score overwrites the moment
+    the operator types.
+    """
+    markers = []
+    rank = 0
+    for c in candidates:
+        if not ordered_urls or c["url"] not in ordered_urls:
+            markers.append(picker_marker(PICKER_MARKER_UNRANKED))
+            continue
+        rank += 1
+        markers.append(picker_marker(str(rank)))
+    return markers
+
+
+def stamp_picker_markers(candidates: list[dict],
+                         ordered_urls: set[str] | None) -> None:
+    """Write `c["marker"]` on every candidate, in place. ONE writer.
+
+    The single choke point between assembling the rows and showing them, so no
+    arm of the assembly can contribute rows that carry no marker.
+    """
+    for c, marker in zip(candidates,
+                         picker_markers(candidates, ordered_urls)):
+        c["marker"] = marker
+
+
 def picker_rows(candidates: list[dict]) -> list[str]:
-    """One `TAB`-free display row per candidate: `<platform> <id> — <url>`.
+    """One `TAB`-free display row per candidate:
+    `<rank>  <platform> <id> — <url>`.
 
     The URL is IN the row on purpose: the whole point of the picker is that the
     operator can see which of two plausible references they are about to open,
     and the platform name alone does not tell them that.
+
+    🔴 EVERY ROW CARRIES A MARKER, AND A MISSING `c["marker"]` IS NOT "NO
+    MARKER" — it falls back to the unranked one. `PICKER_SH` passes `--nth=2..`
+    so the marker is EXCLUDED FROM MATCHING, and that flag indexes FIELDS: a row
+    with no marker would have its `<platform> <id>` eaten by the offset and
+    match on the URL alone. The fallback is what stops a future arm of the
+    assembly reintroducing that by contributing an unstamped candidate.
+
+    ⚠ The marker is a PREFIX because `row_to_url` matches on the URL SUFFIX and
+    says so — decoration on the left cannot open the wrong row.
     """
+    unstamped = picker_marker(PICKER_MARKER_UNSTAMPED)
     rows = []
     for c in candidates:
         label = PLATFORM_LABEL.get(c["platform"], c["platform"])
-        rows.append(f"{label} {c['id']} — {c['url']}")
+        rows.append(f"{c.get('marker') or unstamped}  "
+                    f"{label} {c['id']} — {c['url']}")
     return rows
 
 
@@ -1468,29 +1590,74 @@ def click_dims(repo: str = "", platform: str = "",
     query text is dropped where it is read — see `_PICK_QUERIED`; three-valued,
     so an unmeasured picker omits it rather than claiming the operator scrolled.
 
-    🔴 WHICH CLICKS ACTUALLY CARRY IT, MEASURED RATHER THAN CLAIMED — AND IT IS
-    NARROWER THAN THE FIRST DRAFT OF THIS PARAGRAPH SAID. fzf writes the query
-    line only on the two endings where it has a result to print (see
-    `PICKER_SH`):
-      * PICKED                      -> present. This is the dominant case and
+    🔴 WHICH CLICKS ACTUALLY CARRY IT, MEASURED RATHER THAN CLAIMED — AND THE
+    ESC BIND WIDENED THIS, SO A READER OF THE OLD TABLE WILL UNDER-COUNT. fzf
+    writes the query line on every ending except one (see `PICKER_SH`):
+      * PICKED                       -> present. This is the dominant case and
         the one symptom 1 is about.
       * dismissed by ENTER, NO MATCH -> present, and it is the most diagnostic
         dismissal there is.
-      * dismissed by ESC / Ctrl-C    -> **ABSENT**. fzf writes nothing at all on
-        an abort, so the dim is NOT MEASURED, not `False`.
+      * dismissed by ESC             -> present SINCE 2026-09-20, via
+        `--bind="esc:print-query+abort"`. It wrote nothing before that.
+      * dismissed by Ctrl-C, Ctrl-G, Ctrl-Q, or Ctrl-D on an EMPTY query
+                                     -> **ABSENT**. Still zero bytes, so the dim
+        is NOT MEASURED, not `False`.
     So "a dismissal after typing is distinguishable from one after scrolling" is
-    TRUE of the Enter ending and FALSE of the abort ending. The three-valued
-    design is what keeps that honest instead of filing every abort under
-    "scrolled".
+    now TRUE of ESC and of Enter-with-no-match, and FALSE of every other abort.
+    The three-valued design is what keeps that honest instead of filing them
+    under "scrolled".
 
-    🔴 AND WHERE `reason == "dismissed"`, `queried` IS NOT A RATE — DO NOT
-    AVERAGE IT. Under that reason the dim is present only for the
-    Enter-with-no-match ending (an abort writes nothing), and there it is `True`
-    BY CONSTRUCTION: the picker always holds rows, so an EMPTY query always
-    matches something and always yields a selection — a non-empty query is the
-    only way to reach Enter-with-no-match at all. Averaging it therefore returns
-    ~100% however the operator behaves: a self-selected sub-population read as a
-    rate, which is worse than an absent number because it looks like an answer.
+    🔴 THAT LIST WAS "Ctrl-C" ALONE UNTIL /audit-pr ROUND 0, AND THE ERROR IS
+    WORTH KEEPING RATHER THAN QUIETLY WIDENING. fzf binds `abort` to FOUR keys
+    — its own keymap reads `abort  ctrl-c  ctrl-g  ctrl-q  esc` — and `ctrl-d`
+    aborts too when the query is empty. MEASURED at 0.74.4 with the two ESC
+    rows as the positive control: with the bind, `esc` writes `<query>\n` rc 0
+    while `ctrl-c`, `ctrl-g`, `ctrl-q` and empty-query `ctrl-d` each write ZERO
+    BYTES at rc 130. Naming one key and calling it "the only" remaining gap was
+    an EXCLUSIVITY claim that was never measured — the same error this file
+    congratulates itself on catching one screen above.
+
+    🔴 AND THE ESC BIND CHANGED WHAT `reason == "dismissed"` MEANS — THE OLD
+    "NOT A RATE, TRUE BY CONSTRUCTION" ARGUMENT NO LONGER HOLDS, AND DELETING IT
+    WITHOUT SAYING SO WOULD HIDE THE CHANGE. It ran: under that reason the dim
+    was present only for Enter-with-no-match, where it is `True` BY CONSTRUCTION
+    (the picker always holds rows, so an EMPTY query always matches something
+    and yields a selection — only a non-empty query reaches that ending), so
+    averaging returned ~100% however the operator behaved.
+    That was right, and the bind refutes its premise: an ESC with an EMPTY query
+    writes a bare `\n` and records **`False`**, so both values are now reachable
+    under `dismissed` and the population is no longer self-selected.
+    🔴 IT IS STILL NOT "THE DISMISSAL RATE", for two reasons that do not cancel:
+    every abort key EXCEPT `esc` contributes nothing at all, and
+    Enter-with-no-match remains `True` by construction, so it SKEWS any average
+    upward by however often it happens.
+
+    🔴 AND THE REMEDY THIS PARAGRAPH FIRST GAVE — "scope by `reason`, `no-match`
+    belongs in its own bucket, read the rest as 'of ESC dismissals'" — IS NOT
+    IMPLEMENTABLE AGAINST WHAT IS EMITTED, so it is recorded as retracted rather
+    than quietly replaced. There is no `no-match` reason: the eight values are
+    `selected`/`dismissed`/`timeout`/`never-shown`/`fzf-missing`/`spawn-failed`/
+    `unmapped-row`/`unattributed`, and `pick()` files EVERY `PICKED_DISMISSED`
+    outcome under `dismissed` — ESC, Ctrl-C and Enter-with-no-match alike. Those
+    last two are BYTE-IDENTICAL on stdout (see `PICKER_SH`), so no dim
+    distinguishes them and "of ESC dismissals" cannot be computed at all.
+
+    ✅ THE CLEANEST CELL, which is what to use instead: under `dismissed`,
+    `queried == False` means an ESC whose query was EMPTY AFTER STRIPPING.
+    Enter-with-no-match cannot reach it (it requires a query that matched
+    nothing, and the picker always holds rows, so an empty query always
+    matches), and every other abort key writes no dim at all.
+
+    🔴 IT IS NOT "AN UNTOUCHED PICKER", AND THIS PARAGRAPH SAID SO FOR ONE
+    COMMIT — THE SAME COMMIT THAT RETRACTED THE PREVIOUS UNMEASURED
+    EXCLUSIVITY CLAIM. It read "UNAMBIGUOUSLY an ESC on an untouched picker,
+    nothing else can produce it". MEASURED at 0.74.4: a query of `"  "` writes
+    `"  \n"`, and typing then deleting writes `"\n"` — `bool(...strip())` is
+    `False` for both, so the operator DID touch the picker. The right reading
+    is "ESC with nothing typed, or nothing left after typing" — which is still
+    the population symptom 1 wants (they did not narrow the list), just not the
+    sentence that was written. **Third instance of this shape in one arc: the
+    reflex to write "nothing else can" is the defect, not any one claim.**
 
     ⚠ SCOPED TO THE REASON, NOT TO THE ARM — AND AN EARLIER DRAFT SAID "THE
     DISMISSAL ARM", WHICH IS WIDER THAN THE TRUTH. That arm emits TWO outcomes
@@ -2373,44 +2540,111 @@ PICKER_LINES = 22
 # reach a sink. A length, a prefix or a hash would each be a weaker version of
 # the same leak; a bool answers the question completely.
 #
-# 🔴 THE OUTPUT CONTRACT, MEASURED AGAINST fzf 0.74.3 RATHER THAN ASSUMED — AND
-# THE ASSUMPTION WAS WRONG. Driven through a pty, three samples per ending:
-#   * a SELECTION        -> `<query>\n<row>\n`   (2 lines; the query may be empty)
+# 🔴 THE OUTPUT CONTRACT, MEASURED AGAINST fzf 0.74.4 RATHER THAN ASSUMED — AND
+# THE ASSUMPTION WAS WRONG. Driven through a pty, both flag states per ending:
+#   * a SELECTION        -> `<query>\n<row>\n`   (2 lines, exit 0; query may be "")
 #   * ENTER, NO MATCH    -> `<query>\n`          (1 line, exit 1)
-#   * ESC / Ctrl-C ABORT -> **NOTHING AT ALL**   (0 bytes, exit 130)
-# ⚠ THIS TABLE HAS BEEN WRONG TWICE, IN THE SAME FOUR PLACES. Draft 1 said an
-# abort "writes the query ALONE" — it writes nothing. Draft 2 then asserted
-# `exit 0` for the NO-MATCH row, which was never measured (the probe that
-# corrected the abort row captured its BYTES and not its status); fzf returns
-# **1** when it has no selection, and 0 only when it does. Re-measured, two
-# samples per ending. Nothing branches on the status — `run_picker` reads only
-# `proc.poll() is not None`, and alacritty masks the child's code anyway (see
-# `PICKED_NEVER_SHOWN`) — so this is provenance, which is exactly why it has to
-# be right: it is the corrected claim that replaced a wrong one.
+#   * ESC ABORT          -> `<query>\n`          (1 line, exit 0)  <- the bind
+#   * ANY OTHER ABORT    -> **NOTHING AT ALL**   (0 bytes, exit 130)
+#     (`ctrl-c`, `ctrl-g`, `ctrl-q`; and `ctrl-d` on an EMPTY query)
+# ⚠ THIS TABLE HAS BEEN WRONG TWICE, IN THE SAME FOUR PLACES, AND THAT HISTORY
+# IS WHY IT CARRIES ITS fzf VERSION. Draft 1 said an abort "writes the query
+# ALONE" — without the bind it writes nothing. Draft 2 then asserted `exit 0`
+# for the NO-MATCH row, which was never measured (the probe that corrected the
+# abort row captured its BYTES and not its status); fzf returns **1** when it
+# has no selection, and 0 only when it does. Nothing branches on the status —
+# `run_picker` reads only `proc.poll() is not None`, and alacritty masks the
+# child's code anyway (see `PICKED_NEVER_SHOWN`) — so this is provenance, which
+# is exactly why it has to be right: it is the corrected claim that replaced a
+# wrong one. Re-measured at **0.74.4** when the bind was added, both states side
+# by side, with the four unchanged rows as the probe's own positive control: a
+# probe that sent the query and its terminator in ONE write raced fzf's filter
+# and reported a no-match query as a SELECTION of the first unfiltered row.
 #
-# `--print-query` covers the two exits where fzf has a result to print, and
-# an abort is not one of them. Nothing downstream breaks (0 bytes is what the
-# pre-change loop already saw on a dismissal), but the CAPABILITY is narrower
-# than it was written to be: see `click_dims`' `queried` paragraph for exactly
-# which clicks carry the dim.
+# 🔴 ESC AND ENTER-WITH-NO-MATCH ARE NOW BYTE-IDENTICAL ON STDOUT (`<query>\n`),
+# and nothing here tells them apart — only the exit status differs, which this
+# module never reads. That is deliberate and costs nothing: both endings mean
+# "no row was chosen", both record the same `queried` verdict, and `run_picker`
+# returns "" for each. Do not add a status read to separate them without a
+# reason that needs separating.
+#
+# 🔴 THE RESIDUAL GAP IS EVERY ABORT KEY EXCEPT `esc` — NOT "Ctrl-C", AND NOT
+# "ABORTS". fzf's keymap binds `abort` to `ctrl-c ctrl-g ctrl-q esc`, and
+# `ctrl-d` aborts as well on an EMPTY query. Each of the four still writes zero
+# bytes, so such a click carries NO `queried` dim at all — see `click_dims`'
+# `queried` paragraph. Read the dismissal arm as "ESC and Enter-no-match",
+# never as "every dismissal".
+#
+# 🔴 THIS COMMENT HAS NOW BEEN WRONG ABOUT THIS TWICE, IN OPPOSITE DIRECTIONS,
+# AND BOTH DRAFTS ARE KEPT SO NOBODY DERIVES A THIRD.
+#   Draft 1: "fzf has no `ctrl-c:` binding, the key is handled below the
+#            keymap" — never measured, and FALSE.
+#   Draft 2: "the residual gap is Ctrl-C ALONE" — measured for Ctrl-C, but the
+#            word ALONE was an EXCLUSIVITY claim nobody measured, and it is
+#            false for ctrl-g, ctrl-q and empty-query ctrl-d. Caught by
+#            /audit-pr round 0.
+# MEASURED at 0.74.4, both flag states, with the two ESC rows as the positive
+# control: `esc` + bind -> `<query>\n` rc 0; `ctrl-c`/`ctrl-g`/`ctrl-q`/empty
+# `ctrl-d` -> 0 bytes rc 130 either way.
+#
+# 🔴 THE ACTION ORDER INSIDE THE BIND IS LOAD-BEARING, AND A REORDER IS SILENT.
+# MEASURED at 0.74.4: `--bind="esc:abort+print-query"` is ACCEPTED by fzf — no
+# parse error, no warning — and writes **0 bytes at rc 130**, i.e. exactly the
+# pre-change behaviour. `abort` terminates, so anything after it never runs.
+# THREE guards catch it — measured by mutating the bind, not counted by eye;
+# an earlier wording said TWO and understated its own round's coverage (the
+# whole-string `EXPECTED_PICKER_SH` pin,
+# and `_ESC_PRINTS_QUERY` keying on the substring `esc:print-query`, which a
+# reorder breaks), but neither was CHOSEN for that. Do not "simplify"
+# `_ESC_PRINTS_QUERY` to test for `"print-query"` alone: that would pass on the
+# reordered bind while production silently wrote nothing.
+#
+# ⚠ AND THE GAP IS CLOSABLE FOR ALL OF THEM: `--bind="ctrl-c:print-query+abort"`
+# is accepted and works (measured), and the same form takes ctrl-g/ctrl-q. It is
+# NOT taken here because the operator chose the Esc bind specifically; rebinding
+# the universal cancel is a separate call for them, not a detail to fold in.
+# 🔴 If that is ever revisited, bind ALL of them or state which you left — the
+# defect above was naming a subset and calling it the whole.
 #
 # ⚠ SO THE READ LOOP WAITS FOR TWO LINES AND TAKES THE SECOND AS THE ROW. Taking
 # the first — which is what the pre-change loop did — would open whatever the
 # operator typed, or nothing. The one-line and zero-line endings both fall
 # through to the `proc.poll()` arm, exactly as a dismissal always did.
 #
-# ⚠ `--bind 'esc:print-query+abort'` WOULD close the abort gap — MEASURED, it
-# makes Esc write `<query>\n` (Ctrl-C still writes nothing). It is NOT taken
-# here: it rebinds a key on the operator's live click path, and that is their
-# call. It is written up as an option in
-# `claudedocs/proposal-mention-picker-visibility.md`.
+# 🔴 `--bind="esc:print-query+abort"` IS AN OPERATOR DECISION, TAKEN 2026-09-20,
+# and it REBINDS A KEY ON THE LIVE CLICK PATH — that is the whole of its cost.
+# Esc still closes the picker and still opens nothing; it now writes the query
+# on the way out. It was held back when `--print-query` landed precisely because
+# it is the operator's call to make, and they made it: the abort-shaped hole was
+# the reason the dismissal arm's rate could not be read. Rationale and the
+# options it was chosen over: `claudedocs/proposal-mention-picker-visibility.md`.
 #
-# ⚠ NOTHING ON SCREEN MOVES. `--print-query` is a stdout contract; the prompt,
-# the pointer, the colours, the header and the match ORDER are untouched. The
-# picker UX decision the operator still owns is a separate question — see
+# ⚠ NOTHING ON SCREEN MOVES — MEASURED, not assumed. `--print-query` and the
+# bind are both stdout contracts; the prompt, the pointer, the colours, the
+# header and the match ORDER are untouched. The picker UX decision the operator
+# still owns is a separate question — see
 # `claudedocs/proposal-mention-picker-visibility.md`.
+# 🔴 `--nth=2..` IS WHAT MAKES THE ROW MARKER FREE. Every row is
+# `<rank>  <platform> <id> — <url>` (see `picker_rows`), and a leading token is
+# FUZZY-MATCHABLE: without this flag the rank DIGITS are part of the haystack,
+# and a picker whose subjects are numbered (`#1804`) gets digit queries often.
+# MEASURED at 0.74.4 over a synthetic 120-row corpus and 25 queries, marker
+# present in both arms, the only difference being this flag:
+#   * WITHOUT `--nth`: match set differs on 3 of 25, top-1 moves on 4 of 25.
+#   * WITH `--nth=2..`: match set IDENTICAL 25/25, top-1 and top-3 unchanged
+#     25/25, and the whole ranking byte-identical on 24 of 25.
+# 🔴 THE CONTROL HAD TO BE REBUILT TO SEE THAT, AND THE FIRST ONE WAS INERT.
+# With word-only queries the digit marker changes NOTHING even without `--nth`
+# (0 of 20), so the first sweep's "identical" arm was agreeing with a control
+# that could not fire. Adding digit queries (`1`, `12`, `7`, `100`, `42`) is
+# what made the flag's benefit observable. A sweep is only a claim about the
+# dimension its fixtures can vary.
+# ⚠ NOT byte-identical in every case: the TAIL order moves on 1 of 25. The
+# claim is "the rows that match, and the head of the order, are untouched" —
+# NOT "fzf behaves exactly as before".
 PICKER_SH = (
     'fzf -i --tiebreak=end --layout=reverse --info=inline --print-query '
+    '--bind="esc:print-query+abort" --nth=2.. '
     '--prompt="mention > " --pointer=">" --color=16 '
     '--header-lines="$3" <"$1" >"$2"'
 )
@@ -2733,17 +2967,30 @@ def run_picker(payload: str, header_lines: int) -> tuple[str, str]:
         # row — `row_to_url` maps that to nothing, every pick becomes
         # `unmapped-row`, and the picker opens nothing at all.
         #
-        # ⚠ THE SHORT ENDINGS ARE UNCHANGED, AND THERE ARE TWO OF THEM. ENTER
-        # WITH NO MATCH writes one line (the query); an ESC/Ctrl-C ABORT writes
-        # ZERO BYTES — measured, see `PICKER_SH`. Neither reaches the second
-        # newline, so both fall through to the `proc.poll()` arm below exactly as
-        # a dismissal always did, and `row` comes out "" either way.
+        # ⚠ THE SHORT ENDINGS ARE UNCHANGED, AND THERE ARE THREE KINDS OF THEM.
+        # ENTER WITH NO MATCH and an ESC ABORT each write one line (the query);
+        # EVERY OTHER ABORT — `ctrl-c`, `ctrl-g`, `ctrl-q`, and `ctrl-d` on an
+        # empty query — writes ZERO BYTES (measured, see `PICKER_SH`). None
+        # reaches the second newline, so all of them fall through to the
+        # `proc.poll()` arm below exactly as a dismissal always did, and `row`
+        # comes out "" either way.
         #
-        # 🔴 THE CONSEQUENCE IS A REAL LIMIT, NOT A DETAIL: an ABORT carries no
-        # query line, so `queried` stays NOT MEASURED there. What the flag does
-        # buy on this arm is the ENTER-WITH-NO-MATCH ending — "I typed the repo
-        # name and the list went empty", which is the exact case `pick()`'s
-        # docstring has always named as indistinguishable from a change of mind.
+        # 🔴 NO CODE CHANGED HERE WHEN THE ESC BIND LANDED, AND THAT IS A
+        # PROPERTY WORTH KNOWING RATHER THAN A COINCIDENCE. A one-line ending
+        # arrives as `["<query>", ""]` after the split below — which already
+        # satisfies the `> PICKER_QUERY_LINE + 1` terminator check, so the
+        # verdict records — while `row` reads index 1 and comes out "", so the
+        # click still opens nothing. The parser was total over the endings
+        # before the flag existed; the bind moved an ending from the zero-line
+        # column to the one-line column and the loop did not notice.
+        #
+        # 🔴 THE RESIDUAL LIMIT IS EVERY ABORT KEY EXCEPT `esc` — `ctrl-c`,
+        # `ctrl-g`, `ctrl-q` and empty-query `ctrl-d` carry no query line, so
+        # `queried` stays NOT MEASURED for each. What the bind bought on this
+        # arm is the ESC ending, which is the common one; what `--print-query`
+        # already bought is ENTER-WITH-NO-MATCH — "I typed the repo name and the
+        # list went empty", the exact case `pick()`'s docstring has always named
+        # as indistinguishable from a change of mind.
         out = b""
         outcome = PICKED_DISMISSED
         while out.count(b"\n") < PICKER_OUT_LINES:
@@ -2793,6 +3040,14 @@ def run_picker(payload: str, header_lines: int) -> tuple[str, str]:
 def pick(candidates: list[dict], mesg: str = "") -> str:
     """Ask fzf which candidate to open. Returns the chosen URL, or "" if the
     operator dismissed the picker (which must open NOTHING).
+
+    ⚠ THE ROW MARKER RIDES ON THE CANDIDATE, NOT ON A PARAMETER HERE, AND THAT
+    IS DELIBERATE. `stamp_picker_markers` writes `c["marker"]` at the single
+    choke point above this call. Threading it as an argument instead would put
+    it in a signature that a dozen tests stub with their own lambdas — the
+    marker would then be a thing every caller and every stub has to know about,
+    and the one that forgets gets rows whose fields are off by two while
+    `--nth=2..` silently matches the wrong ones.
 
     🔴 `mesg` IS WHERE THE DIAGNOSIS GOES, AND IT STAYS THERE. "I typed
     `kubectl-neat` and the list went empty" and "I changed my mind" both arrive
@@ -4118,6 +4373,30 @@ def main(argv: list[str] | None = None) -> int:
     # scrolled.
     set_pick_reason(PICK_REASON_UNATTRIBUTED)
     set_pick_queried(None)
+    # 🔴 THE RANKER'S OPINION, ON THE ROW, WHERE A TYPED QUERY CANNOT HIDE IT.
+    # The pre-computed order reaches fzf as INPUT ORDER only, so the first
+    # keystroke hands ordering to fzf's own score and the ranking becomes
+    # invisible to anyone who types rather than scrolls — symptom 1. The marker
+    # is in the row text, so it survives narrowing; `--nth=2..` keeps it out of
+    # the haystack (see `PICKER_SH`).
+    # 🔴 GATED ON `ORDER_APPLIED`, AND WITHOUT THIS THE MARKER LIES ON EVERY
+    # DEGRADED CLICK. `_ordered_universe` returns the universe UNTOUCHED when
+    # the table is stale or absent, but every arm still fills `ordered_urls`
+    # with the whole appended block — so an ungated stamp numbers rows 1..N
+    # that the ordering never placed, one line under a header that says
+    # "rows unordered". MEASURED on the shipped code: with a stale table, the
+    # repository with ZERO references — which cannot contain the clicked
+    # number — was marked rank 1, rendering identically to a run where the
+    # ordering had actually worked.
+    #
+    # ⚠ `no-table` is not exotic: it fires on every picker until the generator
+    # has run once, and FOREVER on a host where `gh` is absent or logged out.
+    # The promotion is already gated on this same state; the marker inherited
+    # neither that gate nor the note's wording. Passing `None` makes every row
+    # read `-`, which is what `picker_markers`' own docstring promises for a
+    # row the ordering did not place.
+    stamp_picker_markers(
+        candidates, ordered_urls if order_state == ORDER_APPLIED else None)
     url = pick(candidates, mesg=mesg)
     reason = last_pick_reason()
     queried = last_pick_queried()
@@ -4143,10 +4422,16 @@ def main(argv: list[str] | None = None) -> int:
         # see `click_dims`. This comment used to say it "MATTERS MOST" here,
         # which oversold it, and then said "this arm", which is WIDER than the
         # truth: the arm also emits `no-selection` over seven reasons, and
-        # `unmapped-row` carries a MEASURED `queried` that can be `False`. Under
-        # `dismissed` specifically, an abort writes nothing so the dim appears
-        # only for Enter-with-no-match, where it is `True` by construction —
-        # diagnostic per row, meaningless averaged. The RATE is the picked arm's.
+        # `unmapped-row` carries a MEASURED `queried` that can be `False`.
+        #
+        # 🔴 AND IT USED TO FINISH "an abort writes nothing so the dim appears
+        # only for Enter-with-no-match, where it is `True` by construction" —
+        # RETIRED by `--bind="esc:print-query+abort"`. An ESC now writes the
+        # query line, and an ESC on an untouched picker writes a bare newline,
+        # so `False` IS reachable here. That retirement was written into
+        # `click_dims` and NOT here, in the same commit: one rule, two places,
+        # and the second went stale immediately. The live statement is
+        # `click_dims`' — read it there rather than re-deriving it here.
         emit_click(CLICK_DISMISSED if reason == PICK_REASON_DISMISSED
                    else CLICK_NO_SELECTION,
                    picker_shown=picker_was_shown(reason),
@@ -4198,7 +4483,22 @@ def main(argv: list[str] | None = None) -> int:
     # `ordered=True` — both INVERTED, in the one dim that says whether the
     # ordering placed the row. `ordered_urls` is what the ordering actually
     # returned, so it answers without reading a position at all.
+    # 🔴 GATED ON `ORDER_APPLIED` FOR THE SAME REASON THE ROW MARKER IS, AND
+    # THIS SURFACE WAS LEFT BEHIND WHEN THAT ONE WAS FIXED. `ordered_urls` is
+    # filled unconditionally by every arm, but `_ordered_universe` returns the
+    # universe UNTOUCHED on a stale or absent table — so without this gate a
+    # degraded click emitted `ordered=True` while the header said "rows
+    # unordered" and the row marker said `-`. Three surfaces, one fact, and the
+    # telemetry was the one still asserting the retracted reading.
+    #
+    # ⚠ THAT IS NOT COSMETIC, BECAUSE THIS DIM IS THE HEADLINE FILTER. The
+    # paragraph in `click_dims` tells a consumer measuring the ordering to
+    # filter `ordered = true`; ungated, that filter ADMITS clicks where no
+    # ordering ran, biasing "did the ordering work" toward "no" with rows it
+    # never touched. Gating here keeps that instruction true as written rather
+    # than making every consumer remember a second condition.
     picked_ordered = (pinned_above is not None and picked_rank is not None
+                      and order_state == ORDER_APPLIED
                       and url in ordered_urls)
     # ...and the class is reported only for a row the ordering actually placed.
     # It used to be emitted whenever the ordering RAN, which made a pinned pane

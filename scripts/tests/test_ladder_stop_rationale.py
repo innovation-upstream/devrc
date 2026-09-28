@@ -856,3 +856,151 @@ def test_facts_file_mode_consults_no_gh(lsr, tmp_path):
     assert "stated-criterion" in text
     assert "#1157 rationale: WRITTEN" in text
     assert "no `gh` was consulted" in text
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE UNEARNED LEDGER — a SECOND AXIS, and the taxonomy must stay FROZEN.
+# --------------------------------------------------------------------------- #
+# A block whose `audited=X..X` spans zero commits records a round that changed
+# nothing by construction, so its `payload=` was measured over nothing. Measured
+# 2026-09-23 over 241 ladders / 25 repos: NINE carry at least one, and
+# `ZacxDev/homelab-infra` #687 carries FOUR — every block it posted.
+#
+# This census lives HERE rather than only in `ladder-range-coverage.py` because
+# this is the tool that runs off comments alone: the sibling needs a local
+# checkout per repo, so it cannot produce a corpus number at all.
+
+
+def _self_block(round_no, sha, payload=None):
+    """A degenerate block: both ends of `audited=` name ONE commit."""
+    head = f"round={round_no}"
+    if payload is not None:
+        head += f" payload={payload}"
+    return (f"```audit-claims {head} audited={sha}..{sha}\n"
+            f"1. round {round_no} claims one thing\n```\n")
+
+
+def test_a_carrier_with_a_self_range_block_is_ANNOTATED_and_COUNTED(lsr, ad):
+    """🔴 REGRESSION for the #687 shape, in the census that can see every repo.
+
+    Red at `c4490f07`: `Carrier` had no `self_range_rounds` field at all, so a
+    ladder whose every block recorded a zero-commit range was rendered
+    identically to a healthy one.
+    """
+    rows = [
+        lsr.classify_carrier(ad, _facts(687, [
+            _self_block(1, "1111aaaa", 0),
+            _self_block(2, "2222bbbb", 7),
+            "## Round 3 — no findings. The ladder ends here.\n"
+            + _self_block(3, "3333cccc", 0),
+        ])),
+        lsr.classify_carrier(ad, _facts(700, [
+            _block(2) + "\n## Round 2 — no findings.\n",
+        ])),
+    ]
+    # 🔴 THE RENDERED CENSUS FIRST, THE FIELD SECOND — a test that touches
+    # `self_range_rounds` before asserting on the output fails at the base with
+    # `AttributeError: 'Carrier' object has no attribute 'self_range_rounds'`,
+    # which is a claim about a symbol and not about behaviour.
+    rendered = lsr.render([("r", rows)], [])
+    assert "UNEARNED LEDGER: round(s) 1, 2, 3" in rendered, rendered
+    assert rows[0].self_range_rounds == (1, 2, 3), (
+        f"the self-range rounds were not recorded: {rows[0].self_range_rounds}"
+    )
+    assert rows[1].self_range_rounds == (), (
+        "a healthy carrier was recorded as carrying a self-range: "
+        f"{rows[1].self_range_rounds}"
+    )
+    assert "UNEARNED LEDGERS — a SECOND AXIS" in rendered, rendered
+    assert "DENOMINATOR = 2 carrier(s) examined" in rendered, rendered
+    assert "1 carrier(s) carry at least one" in rendered, rendered
+
+
+def test_the_unearned_census_does_NOT_mint_a_sixth_stop_class(lsr, ad):
+    """🔴 THE TAXONOMY IS FROZEN, and this is the half that keeps it that way.
+
+    A carrier's `label` must be decided by the prose alone. Minting an
+    `unearned-ledger` class would partition the stop rate by a property that is
+    not a stop rationale — the same error the module docstring rejects
+    `merged-anyway` for — and would make a ladder's class depend on which defect
+    you noticed first.
+    """
+    # 🔴 THE PROSE IS CHOSEN SO THE CLASS IS NOT `unstated`. Two carriers that
+    # both land in the DEFAULT class would agree for free, and the assertion
+    # below would hold with the classifier deleted.
+    prose = "## Audit round 3 — **CLEAN. The ladder ends here.**\n"
+    healthy = lsr.classify_carrier(
+        ad, _facts(1, [_block(3) + prose]))
+    broken = lsr.classify_carrier(
+        ad, _facts(2, [_self_block(3, "3333cccc", 0) + prose]))
+    # 🔴 ASSERTED BEFORE THE FIELD BELOW, for the same reason: this half is a
+    # claim about the CLASSIFIER, which exists at the base, so it must be
+    # readable there.
+    assert healthy.label == broken.label == lsr.CLEAN, (
+        f"a self-range moved the STOP class: {healthy.label!r} vs "
+        f"{broken.label!r}"
+    )
+    assert set(lsr.CLASSES) == {lsr.GATE, lsr.CLEAN, lsr.OPERATOR,
+                                lsr.STATED, lsr.UNSTATED}, (
+        f"the frozen taxonomy grew or shrank: {lsr.CLASSES}"
+    )
+    assert broken.self_range_rounds == (3,)
+
+
+def test_the_gate_CROSS_TAB_is_the_finding_and_is_counted(lsr, ad):
+    """🔴 A LADDER STOPPED ON THE GATE WHOSE BLOCKS SPAN ZERO COMMITS.
+
+    That stop is arithmetic over nothing — the exact false stop
+    `audit-dispatch.py`'s REFUSAL 3b prevents going forward, seen after the
+    fact. Measured 2026-09-23: 2 of the 9 unearned ladders are classified
+    `attribution-gate`.
+    """
+    gated = lsr.classify_carrier(ad, _facts(4652, [
+        _self_block(3, "3333cccc", 0)
+        + "\n## Round 3 — the ladder stopped on the payload-attribution gate, "
+          "not on a clean round.\n",
+    ]))
+    assert gated.label == lsr.GATE, (
+        f"the fixture does not reach the gate class ({gated.label}); the "
+        "cross-tab below would then be vacuous"
+    )
+    rendered = lsr.render([("r", [gated])], [])
+    assert "1 of those are classified `attribution-gate`" in rendered, rendered
+    assert "#4652" in rendered
+
+
+def test_a_corpus_with_NO_self_range_says_so_rather_than_going_silent(lsr, ad):
+    """🔴 THE SILENT-ZERO CONTROL, and it is why the section always prints.
+
+    A section that simply vanishes on a clean corpus is indistinguishable from
+    one wired to nothing: the reader cannot tell "0 unearned" from "this census
+    did not run". So the header, the denominator and an explicit zero print
+    either way — and only the 🔴 rows are conditional.
+    """
+    rows = [lsr.classify_carrier(
+        ad, _facts(1, [_block(3) + "## Round 3 — no findings.\n"]))]
+    rendered = lsr.render([("r", rows)], [])
+    assert "UNEARNED LEDGERS — a SECOND AXIS" in rendered
+    assert "0 carriers carry a self-range block in this run" in rendered
+    assert "UNEARNED LEDGER: round(s)" not in rendered
+    assert "A FLOOR, for the same reason" in rendered
+
+
+def test_the_unearned_census_SURVIVES_a_zero_stop_rate_denominator(lsr, ad):
+    """🔴 A CORPUS OF ENTIRELY OPEN PRs HAS NO STOP RATE AND MAY STILL BE BROKEN.
+
+    `render` returns early when nothing is terminated. The census is appended
+    at BOTH exits precisely so that early return cannot swallow it — the defect
+    on a live PR is the one still worth fixing, and scoping this reading to the
+    rate's denominator would hide exactly those.
+    """
+    rows = [lsr.classify_carrier(
+        ad, _facts(331, [_self_block(8, "8888eeee", 0)], state="OPEN"))]
+    rendered = lsr.render([("r", rows)], [])
+    assert "NOTHING TO RATE" in rendered, (
+        "the fixture does not reach the zero-denominator early return, so this "
+        f"test asserts nothing about it:\n{rendered}"
+    )
+    assert "UNEARNED LEDGERS — a SECOND AXIS" in rendered, rendered
+    assert "UNEARNED LEDGER: round(s) 8" in rendered, rendered
+    assert "DENOMINATOR = 1 carrier(s) examined, INCLUDING" in rendered

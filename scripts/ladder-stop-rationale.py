@@ -380,10 +380,30 @@ NOT_TERMINATED, NO_TERMINAL_ROUND = "not-terminated", "no-terminal-round"
 CLASSES = (GATE, CLEAN, OPERATOR, STATED, UNSTATED)
 EXCLUDED = (NOT_TERMINATED, NO_TERMINAL_ROUND)
 
+# 🔴 `self_range_rounds` IS NOT A SIXTH STOP CLASS, AND THE TAXONOMY ABOVE STAYS
+# FROZEN. It answers a DIFFERENT question, on a different axis: the five classes
+# say WHY the record says the ladder stopped; this says whether that record's
+# payload arithmetic was measured over anything. Minting a `unearned-ledger`
+# class would partition the rate by a property that is not a stop rationale —
+# the same error the docstring rejects `merged-anyway` for — and would make a
+# ladder's class depend on which defect you noticed first.
+#
+# It is carried HERE, in the prose census, because this is the tool that runs
+# across every repo off comments alone: `ladder-range-coverage.py` needs a local
+# checkout per repo, so it cannot produce a corpus number. And the cross-tab is
+# the finding — a ladder classified `attribution-gate` whose blocks are
+# self-ranges stopped on arithmetic over zero commits.
+#
+# 🔴 MEASURED 2026-09-23 over 241 ladders / 25 repos / 3,758 comments: NINE
+# carry at least one. `ZacxDev/homelab-infra` #687 carries FOUR — all of them.
 Carrier = namedtuple(
     "Carrier",
     "pr state rounds terminal_round terminal_index terminal_from_prose "
-    "terminal_recovered label spans rationale rationale_span reason",
+    "terminal_recovered label spans rationale rationale_span reason "
+    "self_range_rounds",
+    # Defaulted so every positional construction that predates the field keeps
+    # working. `()` is the honest default: no self-range found.
+    defaults=((),),
 )
 
 
@@ -547,6 +567,17 @@ def classify_carrier(ad, facts):
     state = (facts.get("state") or "").upper()
     bodies = facts.get("comments") or []
 
+    # 🔴 THE STRUCTURAL READING, THROUGH THE SHARED PREDICATE. `self_range_blocks`
+    # is `audit_dispatch`'s, and so is the `same_commit` inside it — an 8-char
+    # `audited=` abbreviation must compare equal to a 40-char sha, and a local
+    # `==` here would be a second dialect of the one rule this file imports
+    # rather than re-types. Computed for EVERY carrier, including the excluded
+    # ones: a block's range is broken whether or not the PR is still open.
+    blocks, _malformed = ad.parse_claims_blocks(bodies)
+    self_rounds = tuple(sorted(
+        {b.round_no for b in ad.self_range_blocks(blocks)}
+    ))
+
     reported, prose_only, recovered = [], [], []
     for i, body in enumerate(bodies):
         rs, po, rec = rounds_in_comment(ad, body)
@@ -569,7 +600,7 @@ def classify_carrier(ad, facts):
             "round's summary to read"
         )
         return Carrier(pr, state, [], None, None, False, False,
-                       NO_TERMINAL_ROUND, [], False, [], why)
+                       NO_TERMINAL_ROUND, [], False, [], why, self_rounds)
 
     all_rounds = sorted({r for _i, rs in reported for r in rs})
     terminal = all_rounds[-1]
@@ -582,16 +613,80 @@ def classify_carrier(ad, facts):
                        from_recovered, NOT_TERMINATED, [], False, [],
                        "the PR is OPEN, so this ladder has not stopped — asking "
                        "why it stopped is a category error and calling it "
-                       "`unstated` would invent a stop that has not happened")
+                       "`unstated` would invent a stop that has not happened",
+                       self_rounds)
 
     label, spans, rationale, r_spans = classify_text(bodies[idx], terminal)
     return Carrier(pr, state, all_rounds, terminal, idx, from_prose,
-                   from_recovered, label, spans, rationale, r_spans, None)
+                   from_recovered, label, spans, rationale, r_spans, None,
+                   self_rounds)
 
 
 # --------------------------------------------------------------------------- #
 # Rendering
 # --------------------------------------------------------------------------- #
+
+def _unearned_census(per_repo):
+    """The UNEARNED-LEDGER section, as lines. Appended at BOTH of `render`'s
+    exits — the ordinary one and the zero-denominator early return.
+
+    🔴 IT MUST SURVIVE A ZERO DENOMINATOR. `render` returns early when no
+    carrier is terminated (every PR still OPEN), and this reading does not
+    consult the stop at all — so leaving it inline meant a corpus of open PRs
+    with broken block ranges printed nothing. One writer, two callers.
+    """
+    out = []
+    # 🔴 THE UNEARNED-LEDGER CENSUS — A SECOND AXIS, NOT A SIXTH CLASS. See the
+    # note on `Carrier.self_range_rounds`: the five classes say why the record
+    # SAYS the ladder stopped; this says whether that record's payload
+    # arithmetic was measured over anything at all. Printed as its own section,
+    # with its own denominator, so neither number contaminates the other.
+    #
+    # 🔴 THE DENOMINATOR IS EVERY CARRIER, INCLUDING THE TWO EXCLUDED CLASSES.
+    # A block's range is broken whether or not the PR is open and whether or not
+    # any comment names a round — this reading never consults the stop at all,
+    # so scoping it to the rate's denominator would hide a defect on a live PR,
+    # which is the one still worth fixing.
+    unearned = [c for _repo, cs in per_repo for c in cs if c.self_range_rounds]
+    everything = [c for _repo, cs in per_repo for c in cs]
+    out.append("")
+    out.append("### UNEARNED LEDGERS — a SECOND AXIS, not a sixth stop class")
+    out.append("A block whose `audited=X..X` spans ZERO commits records a round "
+               "that changed nothing BY")
+    out.append("CONSTRUCTION, so the `payload=` beside it was measured over "
+               "nothing. That is a fact about")
+    out.append("the RECORD, not about why the ladder stopped — the taxonomy "
+               "above stays frozen.")
+    out.append(f"DENOMINATOR = {len(everything)} carrier(s) examined, INCLUDING "
+               "not-terminated and")
+    out.append("  no-terminal-round: this reading never consults the stop.")
+    if not unearned:
+        out.append("  0 carriers carry a self-range block in this run.")
+    else:
+        out.append(f"  🔴 {len(unearned)} carrier(s) carry at least one:")
+        for c in unearned:
+            out.append(f"     #{c.pr:<6} {c.label:<18} round(s) "
+                       + ", ".join(str(r) for r in c.self_range_rounds))
+        # 🔴 THE CROSS-TAB IS THE FINDING. A ladder classified `attribution-gate`
+        # whose blocks are self-ranges stopped on arithmetic over zero commits —
+        # the exact false stop `audit-dispatch.py`'s REFUSAL 3b exists to
+        # prevent, seen after the fact. Counted rather than described, because a
+        # sentence beside a number it is not computed from is what this whole
+        # file's sibling was rewritten for.
+        gated = [c for c in unearned if c.label == GATE]
+        if gated:
+            out.append(f"  🔴 {len(gated)} of those are classified `{GATE}` — "
+                       "the ladder was stopped on payload")
+            out.append("     arithmetic over a range spanning zero commits. "
+                       "Re-read those stops before")
+            out.append("     quoting them: "
+                       + ", ".join(f"#{c.pr}" for c in gated))
+    out.append("⚠ A FLOOR, for the same reason every count above is: a "
+               "self-range is only visible where")
+    out.append("  the block PARSED, and a block posted as a REVIEW comment is "
+               "invisible here.")
+    return out
+
 
 def render(per_repo, notes):
     """per_repo: [(repo, [Carrier, …]), …]."""
@@ -636,6 +731,9 @@ def render(per_repo, notes):
             head = (f"  #{c.pr:<6} {c.state:<7} terminal round "
                     f"{c.terminal_round if c.terminal_round is not None else '?':<3}"
                     f" {c.label}")
+            if c.self_range_rounds:
+                head += ("  [UNEARNED LEDGER: round(s) "
+                         + ", ".join(str(r) for r in c.self_range_rounds) + "]")
             if c.label in EXCLUDED:
                 out.append(head)
                 out.append(f"       — {c.reason}")
@@ -679,6 +777,10 @@ def render(per_repo, notes):
         out.append("🔴 NOTHING TO RATE — the denominator is 0, so no percentage "
                    "is printed. A rate over")
         out.append("   nothing is not a rate.")
+        # 🔴 THE SECOND AXIS STILL PRINTS. A corpus of entirely OPEN carriers has
+        # no stop rate and may still have broken block ranges, and that defect is
+        # the one still worth fixing.
+        out.extend(_unearned_census(per_repo))
         return "\n".join(out)
 
     stated_mech = denom - totals[UNSTATED]
@@ -750,7 +852,10 @@ def render(per_repo, notes):
     out.append("🔴 SPANS ARE VERBATIM PR TEXT and four of these repos are "
                "client-owned. Do not paste a")
     out.append("  client-repo span into devrc, which is PUBLIC.")
+
+    out.extend(_unearned_census(per_repo))
     return "\n".join(out)
+
 
 
 # --------------------------------------------------------------------------- #

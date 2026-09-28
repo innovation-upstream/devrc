@@ -48,7 +48,8 @@ link IS populated; they are tested, not observed in the wild. Nothing here shoul
 be tightened on the strength of a live zero.
 
 This module is PURE: no network, no clock of its own (`now` is injected), no
-filesystem beyond `read_clawgate_env`. Everything is unit-tested in
+filesystem beyond `_read_env_file` (reached by `read_clawgate_env`,
+`read_clawgate_task_env` and `task_base_url`). Everything is unit-tested in
 scripts/tests/test_clawgate_tasks.py, and the consolidation itself is pinned by
 scripts/tests/test_clawgate_predicate_single_source.py, which fails if a second
 copy of the state set reappears anywhere in the repo.
@@ -529,14 +530,37 @@ def _detail(count, open_rows, review_rows, stuck_rows):
 # --------------------------------------------------------------------------- #
 # Credentials (the only I/O in this module)
 # --------------------------------------------------------------------------- #
-def read_clawgate_env(path=None):
-    """`(base_url, token)` from ~/.claude/clawgate.env, read at CALL TIME.
+#: 🔴 THERE ARE TWO BASE URLS AND THEY ARE NOT SPARE SPELLINGS OF EACH OTHER.
+#: The task/board service was extracted out of the permission router, so the two
+#: run as two processes on two base URLs:
+#:
+#:   router side  — /api/attention, /api/tmux/*, /api/transcripts/*, /api/send
+#:   task side    — /api/tasks*,    /api/agents*, /agent/task*
+#:
+#: Repointing `CLAWGATE_API_URL` at the task service would be the obvious
+#: one-line "fix" and it would 404 the router group, which includes permission
+#: routing — the highest-traffic surface on the box. So the task service gets its
+#: OWN key in the SAME file, exactly as the CLI models it (clawgatectl's
+#: `envTaskAPIURL`/`baseURLFor`): the two names must not drift apart.
+#:
+#: ⚠ ORDER IS THE CONTRACT, not decoration. The specific key wins and
+#: `CLAWGATE_API_URL` is the FALLBACK, so a host that has not been told about the
+#: split resolves to exactly what it resolves to today — introducing this moves
+#: no request's destination. Swapping these two entries silently un-splits the
+#: services again; `test_the_task_url_ledger_is_ordered_specific_first` pins it.
+TASK_API_URL_VARS = ("CLAWGATE_TASK_API_URL", "CLAWGATE_API_URL")
 
-    🔴 The token is returned and nothing else. It is never logged, never put in
-    a URL or in argv, and never formatted into an exception here — a KeyError
-    names the missing VARIABLE, not its value. Callers keep their own failure
-    policy: the poller lets this raise (-> a `stale` marker), agent-ops swallows
-    it (-> no enrichment).
+#: The router side reads ONE key. Declared beside its twin so the two ledgers are
+#: read together and neither can quietly grow the other's name.
+ROUTER_API_URL_VARS = ("CLAWGATE_API_URL",)
+
+
+def _read_env_file(path=None):
+    """Parse `KEY=VALUE` out of the env file. The ONLY I/O in this module.
+
+    🔴 Private on purpose: the parsed mapping holds every credential in the file,
+    so it never leaves this module. Callers get the two derived strings they
+    asked for and nothing else.
     """
     path = os.path.expanduser(path or CLAWGATE_ENV_PATH)
     env = {}
@@ -547,10 +571,135 @@ def read_clawgate_env(path=None):
                 continue
             k, v = line.split("=", 1)
             env[k.strip()] = v.strip()
-    base = (env.get("CLAWGATE_API_URL") or DEFAULT_API_URL).rstrip("/")
+    return env
+
+
+def _base_from(env, names):
+    """First non-empty value among `names`, else the default. ONE implementation.
+
+    🔴 This is the whole precedence rule, spelled once. Open-coding it at a call
+    site is how this class of bug regenerates at N sites — and at N-1 of them in
+    the same direction. An empty value counts as unset (matching the shell's
+    `${A:-$B}`), so `CLAWGATE_TASK_API_URL=` falls through rather than resolving
+    to a bare path.
+    """
+    for name in names:
+        value = env.get(name)
+        if value:
+            return value.rstrip("/")
+    return DEFAULT_API_URL.rstrip("/")
+
+
+def _token(env):
+    """The hook token, or a KeyError naming the VARIABLE and not its value."""
     if "CLAWGATE_HOOK_TOKEN" not in env:
         raise KeyError("CLAWGATE_HOOK_TOKEN")
-    return base, env["CLAWGATE_HOOK_TOKEN"]
+    return env["CLAWGATE_HOOK_TOKEN"]
+
+
+def read_clawgate_env(path=None):
+    """`(router_base_url, token)` from ~/.claude/clawgate.env, read at CALL TIME.
+
+    🔴 ROUTER SIDE ONLY — /api/attention, /api/tmux/*, /api/transcripts/*,
+    /api/send. A task-side path built on this base reaches the wrong service.
+    Use `read_clawgate_task_env` for /api/tasks*, /api/agents* and /agent/task*.
+
+    🔴 The token is returned and nothing else. It is never logged, never put in
+    a URL or in argv, and never formatted into an exception here — a KeyError
+    names the missing VARIABLE, not its value. Callers keep their own failure
+    policy: the poller lets this raise (-> a `stale` marker), agent-ops swallows
+    it (-> no enrichment).
+    """
+    env = _read_env_file(path)
+    base = _base_from(env, ROUTER_API_URL_VARS)
+    return base, _token(env)
+
+
+def read_clawgate_task_env(path=None):
+    """`(task_base_url, token)` from ~/.claude/clawgate.env, read at CALL TIME.
+
+    🔴 TASK SIDE — /api/tasks*, /api/agents*, /agent/task*. Same file, same
+    token, same call-time read as `read_clawgate_env`; the ONLY difference is
+    which base URL comes back, and `TASK_API_URL_VARS` is the one place that
+    decides. `CLAWGATE_TASK_API_URL` unset resolves to whatever
+    `CLAWGATE_API_URL` resolves to, so this is safe on a host that never heard of
+    the split.
+    """
+    env = _read_env_file(path)
+    base = _base_from(env, TASK_API_URL_VARS)
+    return base, _token(env)
+
+
+def _read_env_file_or_empty(path=None):
+    """`_read_env_file`, but a missing/unreadable file is `{}` rather than a raise.
+
+    🔴 THE ONLY DIFFERENCE FROM `_read_env_file`, and it is deliberate.
+    `read_clawgate_env` / `read_clawgate_task_env` must also produce a TOKEN, and
+    "no file" genuinely defeats that — so they keep the raising read. A caller
+    that wants only a base URL has a defined answer without the file
+    (`DEFAULT_API_URL`), so for that caller an absent file is a STATE, not an
+    error.
+
+    `OSError` covers the whole family this can hit — the file is absent
+    (`FileNotFoundError`), the `.claude` directory is absent (`NotADirectory`/
+    `FileNotFoundError`), or it exists and is unreadable (`PermissionError`).
+    A MALFORMED file is deliberately NOT swallowed here: `_read_env_file` skips
+    lines without `=` rather than raising, so a garbled file yields the keys it
+    could parse and the precedence handles the rest.
+    """
+    try:
+        return _read_env_file(path)
+    except OSError:
+        return {}
+
+
+def task_base_url(env=None, path=None) -> str:
+    """The task-side base URL: the env FILE, with the PROCESS ENVIRONMENT on top.
+
+    🔴 SAME LEDGER, TWO LAYERS. `read_clawgate_task_env` answers the same
+    question, but it also returns the hook token and raises when the file has
+    none — so it cannot serve a caller that wants the base URL alone, or one
+    running where the file is absent. Rather than open-code the precedence at
+    such a call site (the N-sites regrowth `_base_from`'s docstring warns
+    about), this composes the SAME `TASK_API_URL_VARS` ledger, the SAME
+    `_base_from` precedence and the SAME `DEFAULT_API_URL` over a two-layer
+    mapping:
+
+        1. `CLAWGATE_TASK_API_URL` from the process environment
+        2. `CLAWGATE_TASK_API_URL` from ~/.claude/clawgate.env
+        3. `CLAWGATE_API_URL`      from the process environment
+        4. `CLAWGATE_API_URL`      from ~/.claude/clawgate.env
+        5. `DEFAULT_API_URL`
+
+    🔴 WHY THE FILE IS THE BASE LAYER AND NOT AN AFTERTHOUGHT. It is the layer
+    that actually carries the answer. The env file on the operator's host holds
+    both keys today; the surfaces this serves are started by hand or by a unit
+    that sets no `CLAWGATE_*` at all, so a resolver reading only `os.environ`
+    resolves to the default and silently posts at the permission router — the
+    exact defect this is here to close. `os.environ` stays an OVERRIDE because
+    a one-off `CLAWGATE_TASK_API_URL=… cmd` must still win over the file.
+
+    🔴 AND THE LAYERS ARE MERGED BEFORE THE LEDGER IS APPLIED, not after. A
+    process environment that wins WHOLESALE would let a bare `CLAWGATE_API_URL`
+    exported in a shell beat the file's `CLAWGATE_TASK_API_URL` and silently
+    un-split the two services again — the specific key must outrank the general
+    one across both layers, which is what one `_base_from` over the merged
+    mapping gives.
+
+    An EMPTY process value does not mask the file: empty means unset
+    everywhere (`_base_from`'s `${A:-$B}` rule), so `CLAWGATE_TASK_API_URL= cmd`
+    falls through to the file rather than erasing it.
+
+    `env` is any mapping and `path` any env-file path, so a test can drive both
+    layers without touching the process environment or the real file — and MUST
+    pass `path`, or it asserts against whatever the host happens to have.
+    """
+    merged = _read_env_file_or_empty(path)
+    # 🔴 `merged` holds every credential in the file (see `_read_env_file`). It
+    # is local and only the derived string leaves this function.
+    process = os.environ if env is None else env
+    merged.update({k: v for k, v in process.items() if v})
+    return _base_from(merged, TASK_API_URL_VARS)
 
 
 def tasks_url(base: str) -> str:

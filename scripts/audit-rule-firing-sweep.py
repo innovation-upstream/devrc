@@ -169,6 +169,26 @@ RULES: list[dict] = [
          apply=(r"--claims-file\b|<the PR's head sha>"
                 r"|zero placeholders|placeholders? remain"
                 r"|headRefOid,baseRefName")),
+    # --- added for #1850's two rules. Both WRITTEN 2026-09-22, so `fired` is
+    # expected to be 0 on the first sweep; UNFIRED means "nobody has violated it
+    # yet", not that the row is broken (blind spot 4). Each `apply` is anchored on
+    # the rule's own DISTINCTIVE artifact — `range-diff` as the remedy, `headRefOid`
+    # as the stamped field — because the generic words these two are about
+    # ("rebase", "anchor", "emit", "refresh") saturate the pre-origin corpus and
+    # would mark the row UNRELIABLE and withhold its number (blind spot 3).
+    dict(id="rebase-reanchors-round-scope",
+         name="a rebase re-points the delta round's anchor and silently widens its SCOPE",
+         probe="A REBASE RE-POINTS THE ANCHOR",
+         apply=(r"range-diff\b"
+                r"|re-?point\w*[^.]{0,40}anchor"
+                r"|anchor[^.]{0,60}rebased twin"
+                r"|no longer an ancestor of HEAD")),
+    dict(id="emit-after-head-refreshes",
+         name="do not emit the claims block until headRefOid has refreshed",
+         probe="so do not emit until that sha has REFRESHED",
+         apply=(r"headRefOid\b[^.]{0,60}(stamp|refresh)"
+                r"|pre-rebase sha\b"
+                r"|git/refs/heads/")),
     dict(id="reconstruct-from-diff", name="reconstruct a lost claims block from the DIFF, not a handoff's prose",
          probe="derive it from the DIFF, never from a handoff's prose",
          apply=(r"derive it from the DIFF|reconstruct\w*[^.]{0,60}from the diff"
@@ -278,6 +298,51 @@ RULES: list[dict] = [
     dict(id="payload-not-extension", name="the unit is THIS PR's payload, never a file extension",
          probe="never a file extension",
          apply=r"never a file extension|ambiguous is not zero"),
+    # 🔴 THE MEASURED READING — three rows, because each is a separate
+    # instruction a round can be checked against, and each probe is chosen to
+    # sit WHOLLY ON ONE LINE of the skill. That is not cosmetic: paragraphs are
+    # split on blank lines and matched with the newlines still in them, so a
+    # probe straddling a wrap silently stops matching. This ledger's previous
+    # coverage of the enforcement paragraph was exactly that — an accidental
+    # match on `base-is-current-tip`'s "not a zero", broken by a reflow and
+    # found only because the reverse-direction test went red.
+    dict(id="measured-executable-zero",
+         name="a MEASURED zero — no executable line changed — overrules a stated count",
+         probe="a MEASURED zero can overrule it",
+         apply=(r"measured 0 executable|no executable line|executable lines? "
+                r"changed|measured zero")),
+    dict(id="measured-reading-is-weaker",
+         name="the mechanical reading is STRICTLY WEAKER and never classifies payload",
+         probe="it is strictly WEAKER — it never",
+         apply=(r"strictly weaker|never classifies payload|prose[- ]only round|"
+                r"unmeasured")),
+    dict(id="self-range-refused",
+         name="`audited=X..X` is an INPUT refusal (4), never the gate's verdict (5)",
+         probe="IS REFUSED (exit 4), and that is NOT the gate's verdict",
+         apply=(r"self[- ]range|audited=(\w+)\.\.\1\b|spans zero commits|"
+                r"earned by nothing")),
+    # 🔴 THE UNEARNED-LEDGER REPORT. Distinct from `self-range-refused` one row
+    # up, and deliberately so: that rule is about the gate's PAIR and exits 4,
+    # this one is about the rest of the ladder's HISTORY and exits nothing. The
+    # firing signal is a runner declining to quote a `payload=` it was told is
+    # unmeasured — which is what #687 needed and nobody did.
+    dict(id="unearned-ledger-not-evidence",
+         name="a `payload=` from a self-range round is UNMEASURED — do not quote it",
+         probe='"Reported" now means THREE places',
+         apply=(r"unearned ledger|measured over zero commits|"
+                r"are not evidence|arithmetic over zero commits")),
+    # 🔴 THE UNREADABLE-RANGE REPORT. Distinct from `unearned-ledger-not-evidence`
+    # one row up, and the distinction is the CAUSE: that rule is about a range
+    # spanning zero commits (`X..X`), this one about a range nothing could READ —
+    # an endpoint naming no object. Measured 2026-09-28: 30 of 564 endpoints,
+    # 11 ladders, `ZacxDev/cairn` #119 wholly. Same firing signal as its
+    # neighbour — a runner declining to quote a `payload=` nothing checked —
+    # which is why it is a rule and not an exemption.
+    dict(id="unreadable-range-not-verified",
+         name="a `payload=` from a round the gate could not MEASURE is unverified — say so",
+         probe="A RANGE THE ASSEMBLER CANNOT READ",
+         apply=(r"payload not verified|could not be measured|"
+                r"not a commit name|names no object|author's classification")),
     dict(id="decide-once-revert-test", name="decide payload/scaffolding ONCE at round 1 — the REVERT TEST",
          probe="REVERT TEST", apply=r"revert test"),
     dict(id="one-number-one-name", name="ONE NUMBER, ONE NAME",

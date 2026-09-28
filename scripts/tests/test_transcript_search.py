@@ -810,8 +810,21 @@ JSONL_GLOB_SITES = {
             "IS a subagent and its own transcript is where a rule gets applied"),
     ("scripts/session-analysis/extract_genesis.py", "ENUMERATING"):
         (1, "session-analysis one-shot: wants EVERY jsonl including subagents"),
-    ("scripts/session-analysis/extract_user_msgs.py", "ENUMERATING"):
-        (1, "session-analysis one-shot: wants EVERY jsonl including subagents"),
+    # 🔴 REMOVED 2026-09-25 with the walk it described, and its REASON was FALSE
+    # the whole time it stood here. `extract_user_msgs.py` open-coded exactly the
+    # two rules `is_corpus_member` owns — skip a `subagents` dir, skip a `wf_`
+    # prefix — so "wants EVERY jsonl including subagents" described the opposite
+    # of what it did: MEASURED, of 5,681 transcripts whose parent dir IS
+    # `subagents` it included 0, and had never included one. It was also the
+    # NARROWER copy, testing only `path.parent.name` where `is_corpus_member`
+    # tests every parent part. That tool now calls `iter_transcripts` and holds
+    # no glob. This ledger is pinned BOTH ways, so leaving the entry here would
+    # have failed the gate as a stale reason — which is how the sibling
+    # `search-tool-nudge.py` entry above was caught.
+    #
+    # ⚠ `extract_genesis.py` above carries the SAME sentence and it was NOT
+    # audited as part of that change — do not read its survival here as evidence
+    # the claim holds for it.
     ("scripts/session-analysis/initiative-scan.py", "ENUMERATING"):
         (1, "initiative scan: its unit is a cwd/branch, not a rankable session"),
     ("scripts/session-analysis/recon_cost.py", "ENUMERATING"):

@@ -93,6 +93,20 @@ MENU_TEST_MIRRORED_ENDPOINTS = 2
 # audit's M7 mutant survived. If the same value is legitimately used in five
 # files, it gets five entries — the noise IS the point: each one is a place a
 # reviewer agreed the value is harmless.
+# 🔴 REPEAT-OFFENDER SITE, NAMED HERE ON PURPOSE — do NOT delete this comment as dead
+# text. `claudedocs/handoff-laptop-airvpn-tunnel.md` has leaked routable addresses of ours
+# TWICE: devrc#1853 scrubbed one, and the next commit to that file (a6e98a3d, a direct
+# main commit) put the SAME value back plus two more; fixed by devrc#1861. Both leaks
+# reddened `main` on this gate.
+#
+# The line exists because `scripts/scoped-tests.sh` maps a changed file to its tests by
+# grepping the test universe for the CHANGED PATH AS A STRING. That doc used to appear in
+# this module as an ALLOWLIST key; deleting the key — which the second leg of this gate
+# REQUIRES once the literal leaves the doc — also silently unmapped the doc, so an author
+# appending to it would get `UNMAPPED — no test file names these` and never run this gate
+# locally. Naming the path in a comment restores the mapping without pre-approving any
+# value, which an ALLOWLIST entry would. Applies to any repeat-offender path whose only
+# tie to this module was a pin that has since been correctly deleted.
 ALLOWLIST = {
     # Cloudflare / Google / Quad9 public resolvers — global services, not endpoints
     # of ours. `8.8.8.8` is additionally the UDP-connect trick that picks the

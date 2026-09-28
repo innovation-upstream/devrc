@@ -481,7 +481,7 @@ def test_pointer_integrity_reports_both_directions_with_a_denominator(dirty_stor
 @pytest.mark.parametrize("token", [
     "scripts/x/{a.sh,b.sh}",      # a brace SET written as one token
     "/dp-build-deploy",           # a single-segment absolute: a route, not a file
-    "reference/sites/<host>.md",  # a documented placeholder segment
+    "flows/<host>.md",            # a documented placeholder segment
     "kube-system/coredns",        # namespace/pod
     "https://example.invalid/a/b.md",
 ])

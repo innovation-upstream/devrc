@@ -1079,11 +1079,13 @@ here and is why the headline reports `AMBIGUOUS` rather than picking a handler.
   `14696 B` **without** it — already divergent in both directions. **"The write path works"
   and "the bullet survives" are two different claims, and the second is false until criterion
   9.** Put anything you want kept in the LOCAL store as well.
-- 🔴 **`load_tokens` runs ONCE, at startup — there is NO SIGHUP reload.** A secret edit is
-  inert until the pod is replaced, and with `Recreate` at `replicas: 1` a malformed row is
-  `exit 78`: the store stays **DOWN**, it does not fall back to the old file. Replace the pod
-  with `kubectl delete pod`, not `rollout restart` — the latter costs two rollouts here
-  (homelab-talos `CLAUDE.md`), i.e. two hard read outages for one intended restart.
+- 🔴 ~~**`load_tokens` runs ONCE, at startup — there is NO SIGHUP reload.**~~ **RETRACTED
+  2026-09-22 — TRUE OF THE PYTHON SERVER, FALSE OF THE LIVE GO ONE**, which prints
+  `reload=SIGHUP` and re-reads on HUP with no pod replacement and no outage. The instruction
+  to replace the pod is DELETED rather than corrected here; the procedure is in the `cairn`
+  skill's `reference/operator-surface.md`. Still true, and only of a RESTART: a malformed row
+  is `exit 78` and with `Recreate` at `replicas: 1` the store stays **DOWN** — which is why a
+  bad row is far more dangerous at restart than at reload.
 - 🔴 **Pre-flight the candidate token file against the DEPLOYED `server.py`, not `main`.**
   Extract it from the pod (`kubectl exec … tar czf - -C /app scripts`), confirm the sha
   matches the pod's own copy, then run `load_tokens` over the exact candidate bytes. Five
@@ -1194,11 +1196,10 @@ child and a child directory named `*.md` all exit **0**; only the start point yi
   9 OPEN markers, so a zero would not have been a detector wired to nothing).
 
 **Operational facts established tonight:**
-- 🔴 **`load_tokens` runs ONCE at startup — there is no SIGHUP reload.** A secret edit is inert
-  until the pod is replaced, and with `Recreate` at `replicas: 1` a malformed row is `exit 78`:
-  the store stays **DOWN**, it does not fall back. Replace the pod with `kubectl delete pod`,
-  **not** `rollout restart` — the latter costs two rollouts here (homelab-infra `CLAUDE.md`),
-  i.e. two hard read outages for one intended restart.
+- 🔴 ~~**`load_tokens` runs ONCE at startup — there is no SIGHUP reload.**~~ **RETRACTED
+  2026-09-22**: that was the Python server. The live Go server reloads on `SIGHUP`, so a secret
+  edit needs no pod replacement. Still true of a RESTART only: a malformed row is `exit 78` and
+  the store stays **DOWN**.
 - 🔴 **Pre-flight a token file against the DEPLOYED `server.py`, not `main`.** Extract it from
   the pod (`kubectl exec … tar czf - -C /app scripts`), confirm the sha matches the pod's own
   copy, then run `load_tokens` over the exact candidate bytes. Five negative controls each go

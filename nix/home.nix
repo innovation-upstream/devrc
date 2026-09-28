@@ -535,9 +535,9 @@ in
           # was REMOVED 2026-09-03 along with the other 9 live-config tests: they
           # re-broke on every snippet edit. NOTHING enforces this coupling now —
           # if attribution matters for a term, check it by hand.
-          { trigger = ":dacq"; replace = "do light recon and ask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "clarifying" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
-          { trigger = ":acq"; replace = "ask clarifying questions"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
-          { trigger = ":alo"; replace = "anything left outstanding from this arc? are all the objectives i specified directly and via the handoff fully addressed?"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
+          { trigger = ":dacq"; replace = "do light recon and ask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
+          { trigger = ":acq"; replace = "ask clarifying questions then proceed"; label = "ask clarifying questions"; search_terms = ["ask" "clarifying" "questions"]; }
+          { trigger = ":alo"; replace = "anything left outstanding from this arc? Find all sessions associated with this handoff and check my messages then determine if all addressed shipped and closed out"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated, and if any related clawgate tasks are addresssed and up-to-date"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
           { trigger = ":kickoff"; replace = "give the kickoff message for next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
           { trigger = ":par"; replace = "proceed as recommended"; label = "Proceed as recommended"; search_terms = ["proceed" ]; }
@@ -1510,22 +1510,24 @@ in
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/browser-bridge/SKILL.md";
   home.file.".claude/skills/browser/browser".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/browser-bridge/browser";
-  # `opencode` skill — the SAME deliberate exception as `browser`/`dl-router`
-  # above, for the same reason: its source of truth is the opencode subsystem in
-  # THIS repo (scripts/opencode/), not devrc/claude/skills/, and the CLI reads
-  # scripts/opencode/opencode.jsonc + scripts/opencode/lib/ + scripts/claude-hooks/
-  # relative to its own resolved __file__. A store copy would resolve those into
-  # /nix/store and read a FROZEN permission block — so preflight would answer
-  # from whatever config was current at the last switch, which is exactly the
-  # stale-artifact failure mode CLAUDE.md warns about. Out-of-store keeps the
-  # resolver and the config it resolves against as one live tree.
+  # `opencode-dispatch` skill — the SAME deliberate exception as
+  # `browser`/`dl-router` above, for the same reason: its source of truth is the
+  # opencode subsystem in THIS repo (scripts/opencode/), not devrc/claude/skills/,
+  # and the CLI reads scripts/opencode/opencode.jsonc + scripts/opencode/lib/ +
+  # scripts/claude-hooks/ relative to its own resolved __file__. A store copy
+  # would resolve those into /nix/store and read a FROZEN permission block — so
+  # preflight would answer from whatever config was current at the last switch,
+  # which is exactly the stale-artifact failure mode CLAUDE.md warns about.
+  # Out-of-store keeps the resolver and the config it resolves against as one
+  # live tree. (Renamed 2026-09-25 from `opencode`: the exact product name made
+  # every bare mention of "opencode" route into the dispatch skill.)
   #
   # 🔴 Only these two paths are symlinked; `lib/` is NOT deployed and must not
   # be. The CLI reaches it through the repo checkout via `__file__`, which is
   # the same way `dl-route` reaches its siblings.
-  home.file.".claude/skills/opencode/SKILL.md".source =
+  home.file.".claude/skills/opencode-dispatch/SKILL.md".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/opencode/SKILL.md";
-  home.file.".claude/skills/opencode/opencode-dispatch".source =
+  home.file.".claude/skills/opencode-dispatch/opencode-dispatch".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/opencode/opencode-dispatch";
   # …and on PATH, like dl-route, so the skill body's commands are copy-pasteable.
   home.file.".local/bin/opencode-dispatch".source =
@@ -1890,6 +1892,21 @@ in
   home.file.".claude/hooks/clawgate-writeback-guard.py" = {
     source = ../scripts/claude-hooks/clawgate-writeback-guard.py;
   };
+  # 🔴 clawgate_tasks.py MUST land next to it, for exactly the reason session_trailer
+  # and agent_ledger do: a home-manager STORE COPY cannot reach scripts/lib/ through
+  # `__file__`, and Python puts the SCRIPT's own directory on sys.path. The hook takes
+  # the task-API base-URL ledger (`TASK_API_URL_VARS`) from this module instead of
+  # spelling it — it used to spell a variable name NOTHING SET, which resolved by
+  # fallback to the permission-router base and read verdicts off the wrong service,
+  # silently, because that service answers the same routes with a 200.
+  #
+  # The SAME source file `scripts/bar-status-poll` and `scripts/session-manager` load
+  # out of the checkout — one implementation, three carriers, never three copies of the
+  # ledger. Deploying the hook without this file is a green switch and a hook that
+  # reaches NO VERDICT (the #452 shape), so both must be `git add`ed.
+  home.file.".claude/hooks/clawgate_tasks.py" = {
+    source = ../scripts/lib/clawgate_tasks.py;
+  };
   # 🔴 THE HANDOFF WRITE GUARD — the write-back guard's counterpart on the OTHER
   # record. That one makes a clawgate pickup report back to the board; this one makes
   # a session that RESUMED a handoff doc write one before it stops.
@@ -2057,9 +2074,15 @@ in
   # then.
   #
   # Its regression suite is `scripts/tests/test_base_clone_staleness.sh`, run by
-  # `scripts/run-tests.sh` as a SHELL_TESTS target (24 assertions / 8 cases,
-  # offline synthetic fixtures). Every case there is a defect that actually
-  # shipped; run it before changing this script.
+  # `scripts/run-tests.sh` as a SHELL_TESTS target (offline synthetic fixtures).
+  # Every case there is a defect that actually shipped; run it before changing this
+  # script.
+  #
+  # ⚠️ This comment used to carry a count ("24 assertions / 8 cases") and it was
+  # already wrong by the time anyone read it — the suite was at 48. A stale count
+  # makes the next reader distrust a working suite, so the number is deliberately
+  # gone; the suite prints its own, and its header says the same thing for the same
+  # reason. Run it rather than quoting it.
   home.file.".claude/hooks/base-clone-staleness.sh" = {
     source = ../scripts/claude-hooks/base-clone-staleness.sh;
     executable = true;
@@ -2209,6 +2232,13 @@ in
   # ~/.config/opencode/ existing.
   home.file.".config/opencode/guard_core.py".source = ../scripts/claude-hooks/guard_core.py;
 
+  # 🔴 base-clone-staleness.sh — the SessionStart freshness script, deployed here
+  # so opencode's base-clone-freshness plugin can run it. The SAME source file
+  # that backs ~/.claude/hooks/base-clone-staleness.sh is deployed here too,
+  # exactly like guard_core.py: one implementation, two harnesses.
+  home.file.".config/opencode/base-clone-staleness.sh".source =
+    ../scripts/claude-hooks/base-clone-staleness.sh;
+
   # Activity telemetry plugin — emits session/prompt/tool-call events into
   # activity.events via ~/.config/activity-collector/emit.
   #
@@ -2270,6 +2300,14 @@ in
   # the switch succeeds with the variable simply never set.
   home.file.".config/opencode/plugin/session-env.js".source =
     ../scripts/opencode/plugin/session-env.js;
+
+  # 🔴 Base-clone freshness plugin — refreshes the primary clone's context files
+  # (the Claude Code hook's sibling for opencode). It fires in `shell.env` once
+  # per session, non-blocking, and runs base-clone-staleness.sh deployed above.
+  # Same deployment constraints: directly in `plugin/`, `.js` only, non-recursive
+  # glob, and NEVER also in `plugins/` (plural).
+  home.file.".config/opencode/plugin/base-clone-freshness.js".source =
+    ../scripts/opencode/plugin/base-clone-freshness.js;
 
   # `shell.env` plugin — the only supported seam for putting environment into
   # opencode's bash tool (there is no `env` config key; setting one is silently
@@ -3099,6 +3137,14 @@ in
   # modules from its own resolved path.
   home.file.".local/bin/dl-route".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/dl-router/dl-route";
+
+  # stt — send an audio file to the self-hosted ASR endpoint on the homelab
+  # cluster (Cohere transcribe, ns `stt`). Reaches it over the nebula mesh via
+  # the gateway's nginx route (10.42.0.10:8118), so the same URL works from
+  # workbench AND laptop. Token lives in ~/.config/stt/env (0600, manual — see
+  # SECRETS.md; source of truth: k8s secret `stt-api-token` in ns `stt`).
+  home.file.".local/bin/stt".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/stt";
 
   # Laptop-only SOCKS5 tunnel to the homelab kube API via the workbench. The
   # homelab API server (192.168.50.94:6443) is LAN-only and the laptop is
@@ -4858,16 +4904,32 @@ in
     };
   };
 
-  # Daily. RandomizedDelaySec keeps it off the 04:00/05:00 cluster the other
-  # units sit on; Persistent catches up a single missed run after a reboot,
-  # which matters on the laptop — a host that is closed at the boundary would
-  # otherwise skip a day silently, and the only symptom is an age.
+  # 🔴 EVERY 4 HOURS, AND THE PERIOD IS A CORRECTNESS PARAMETER — NOT A COST ONE.
+  # This was `*-*-* 07:00:00` (daily) with no argument for daily over anything
+  # else, and `/audit-pr` round 0 on #1829 measured what that costs: the picker
+  # classes a repo's row `BELOW` when the clicked number exceeds the table's
+  # recorded max, so the table's AGE is the ranking's error term. Measured on a
+  # live 395-row table, the fastest repo gains ~34 references/day, so a daily
+  # table misfiles roughly a day's worth of fresh PRs; at 4-hourly the worst
+  # drift is ~5.7, which is ~13x under the smallest MEASURED wrong-repo gap (74)
+  # — i.e. the margin between "stale" and "genuinely the wrong repo" stops being
+  # a judgement call. Caught in the act: a 0.75-day-old table recorded devrc at
+  # 1809 while PR #1829 was open against it.
+  #
+  # Cost is not the constraint: ~400 repos is ~8 batched GraphQL requests at
+  # ~2.2s (measured in `regen-known-repos.py`), so a run is ~20s and six runs a
+  # day is a rounding error against the API budget.
+  #
+  # RandomizedDelaySec still keeps it off the 04:00/05:00 cluster the other
+  # units sit on. Persistent catches up a single missed run after a reboot,
+  # which matters on the laptop — a host closed across a boundary would
+  # otherwise skip silently, and the only symptom is an age.
   systemd.user.timers.mention-known-repos-refresh = {
     Unit = {
-      Description = "Daily timer for the mention-open repo mapping refresh";
+      Description = "4-hourly timer for the mention-open repo mapping refresh";
     };
     Timer = {
-      OnCalendar = "*-*-* 07:00:00";
+      OnCalendar = "*-*-* 00/4:00:00";
       Persistent = true;
       RandomizedDelaySec = 900;
     };

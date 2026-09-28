@@ -238,6 +238,10 @@ EXIT CODES
  10  unevidenced     — rule (k): an elimination names no way it was eliminated
  11  undefined-done  — rule (m): the arc names no closing condition
  12  rank-growth     — rule (n): the queue's `forcing: none` half grew
+ 13  leak-refused    — rule (o): the repo's own leak scanner would not vouch for
+     the delta, or could not be run at all; the write is rolled back
+ 14  size-ratchet    — rule (p): the doc is already over its byte ceiling and
+     this update would make it BIGGER
 """
 
 from __future__ import annotations
@@ -371,6 +375,90 @@ operator or a red gate can add as many ranks as they like. What is ratcheted is
 the SELF-GENERATED half, which the 75-day arc study found growing 2–6 items a
 round and reaching 54–84 in the worst arcs while under a third of the items
 carried any forcing function at all.
+"""
+
+EXIT_LEAK_REFUSED = 13
+"""Rule (o). The repo's OWN leak scanner would not vouch for the delta.
+
+🔴 WHY THIS IS CODE RATHER THAN A SENTENCE. This module commits AND pushes in
+ONE call under `--confirm --push`, so there is no window in which a human can
+scan between the two. Four `denied-identifier` leak events have landed on
+handoff deltas and ONE of them reached `main` of a PUBLIC repository. The
+standing remedy had been written as a SENTENCE in the handoff document three
+times, in three wordings, and no code ran it. Prose an agent can read and then
+not follow is what this module exists to replace — the same argument the eight
+rules above are made of.
+
+🔴 ONE CLASS, TWO CAUSES, and both print `status=leak-refused` because the
+verdict is the GATE's, not the scanner's: the scanner REFUSED the delta, or it
+could not be run and therefore never read it. Nothing is written on either arm —
+the doc is rolled back to the bytes this process found.
+
+🔴 ZERO IS THE ONLY PASS, AND THAT IS THE NON-OBVIOUS HALF OF IT. Any non-zero
+exit refuses; there is no `== 1` comparison here and there must not be one.
+`tests/leakscan.py` exits **2** for "could not vouch" — one of its OWN controls
+misbehaved — and its docstring says in as many words that 2 is not a clean
+result. A reader who has not been told that is exactly the reader who narrows
+the comparison to the code a scanner "normally" uses.
+
+🔴 ONE OPERATOR OPT-IN, `--leak-pre-existing-approved`, FOR THE ALREADY-RED
+TREE. The gate refuses on any non-zero exit and does NOT try to work out whether
+this delta caused it — see `leak_gate` for why that attribution was a guess. The
+target tree can be red for something this call did not cause, and the honest
+answer to that is an operator who read the output and said so, recorded on the
+run. It does not cover the arm where the scanner could not be RUN: there is no
+verdict to have read.
+"""
+
+EXIT_SIZE_RATCHET = 14
+"""Rule (p). The doc is ALREADY over its ceiling and this update GROWS it.
+
+🔴 NOT A SECOND CEILING, AND READING IT AS ONE GETS THE DESIGN BACKWARDS. A doc
+UNDER its allowance is untouched by this rule however much it adds — that
+population is `budget_warning`'s, and it still only warns. What is ratcheted is
+the doc already past the line: it may be updated, it may shrink, it may not
+GROW. Same idiom as rule (n) and as the repo's byte gates — the number may fall
+freely and may not rise.
+
+🔴 WHY A REFUSAL WHERE `budget_warning` DELIBERATELY REFUSES NOTHING. That
+warning has been printed on every over-budget write since #1648 and the
+mechanism it names went on regardless: MEASURED on one arc, a document a prune
+had landed UNDER the ceiling more than DOUBLED inside a week, the growth landing
+in `Gotchas`. 🔴 THE BYTES AND THE `git cat-file -s` COMMANDS THAT RE-MEASURE
+THEM LIVE IN ONE PLACE — `claude/skills/handoff/reference/write-gate.md` §I — and
+are NOT restated here, because the restated copies are what went wrong: the first
+pair written down reproduced at no revision of the measured file. ⚠ AND NO
+`Gotchas` RATIO IS QUOTED, HERE OR THERE. This sentence carried "62% of it";
+round 1 of #1871's audit re-measured it and it reproduces on neither reading of
+the source row, so §I now declines to publish one rather than pick.
+
+The growth is STRUCTURAL rather than careless: the bucket rules forbid durable
+content in a REPLACE section, so the correct remedy for a finding is "move it to
+`Gotchas`", which APPENDS. That section has an entry rule and no exit rule; it is
+monotonic by construction, and a warning is not a counterweight to a
+construction. A prose prune discipline was tried IN the document and the section
+regrew within seven days of being read.
+
+🔴 THE OVERRIDE IS NOT A CONVENIENCE, IT IS WHAT MAKES THE REFUSAL SAFE.
+`/handoff`'s write path is the ONLY step that records a session — see
+`evictable_note`, which may not even RAISE in this path — and
+`~/.claude/hooks/handoff-write-guard.py` blocks Stop until a handoff is written.
+A refusal with no escape could therefore cost a session its record, which is
+strictly worse than an oversized doc (`handoff_budget`'s own header measures
+that trade: 22 of 253 sessions never recorded, ZERO of them because a gate
+correctly declined). `--override-size-ratchet "<why>"` always clears it, the
+reason is REQUIRED, and it is recorded on the run AND on the commit. 🔴 AND IT IS
+NOT OPERATOR-ONLY, UNLIKE `--leak-pre-existing-approved`: `SIZE_RATCHET_WHO_MAY`
+is the one place that says who may pull it and what the reason then owes.
+
+⚠ AND IT REACHES A DOC'S FIRST WRITE, WHICH IS NOT THE CASE THE RULE IS NAMED
+FOR. `before` is 0 for a new doc, so a first write larger than the ceiling is a
+positive delta over the line and is refused. That is the stated predicate
+(merged over the ceiling AND net delta positive) rather than an oversight: rule
+(n) grandfathers round 1 because it compares a COUNT across rounds and a new doc
+has no previous round to have grown since, while this rule compares BYTES
+against a fixed ceiling, which a new doc can be over on its first day. The
+override is the escape, and it says why on the commit.
 """
 
 
@@ -2796,7 +2884,11 @@ BUDGET_NEAR_BYTES = 4_096
 # whatever checkout it ships in — the base clone, a worktree, any future clone.
 # Hence the predicate below is DERIVED from that fact rather than hardcoding a
 # path: a repo is gated iff it ships the gate.
-BUDGET_GATE_RELPATH = "scripts/tests/test_handoff_doc_size.py"
+#: Re-exported, NOT re-declared: `handoff_budget` owns it beside the ceiling it
+#: gates, because `handoff-audit.py` must ask the same question of a DIFFERENT
+#: root and two copies are how the two tools come to disagree. Name kept so every
+#: existing reference (and its tests) keeps working.
+BUDGET_GATE_RELPATH = handoff_budget.GATE_RELPATH
 
 
 def gate_enforces_budget(repo: Path) -> bool:
@@ -2822,6 +2914,271 @@ def gate_enforces_budget(repo: Path) -> bool:
         return False
 
 
+#: Where each `audit_text` bucket keeps its (start, end) LINE RANGE. The four
+#: buckets have different tuple shapes and there is no positional rule that
+#: covers all of them — `retracted` is `(s, e, b)`, `resolved`/`dated` are
+#: `(title, s, e, b)`, `done` is `(rank, s, e, b, is_done)`, so "the last three"
+#: works for every bucket except `done`, whose last element is a bool. Enumerated
+#: rather than derived, and pinned two-way by a test that re-derives each bucket's
+#: own byte count from the range these indices select.
+AUDIT_SPAN_INDEX = {
+    "resolved": (1, 2),
+    "done": (1, 2),
+}
+
+#: Sibling auditor. Loaded LAZILY and DEFENSIVELY — see `evictable_note`.
+_AUDITOR = Path(__file__).resolve().parent.parent / "handoff-audit.py"
+
+
+def evictable_note(merged_text: str, over_by: int) -> str:
+    """What has CLOSED in THIS doc, in bytes, or "".
+
+    🔴 IT REPORTS NUMBERS AND GIVES NO ADVICE — that is the design, not an
+    omission. `test_handoff_doc_size.py` owns the eviction ladder: the steps,
+    the MOVE-not-delete rule, and the prohibition on deleting a gotcha or a
+    ruled-out theory. An earlier version copied that advice into this output and
+    then spent four audit rounds keeping the copy consistent with the original —
+    including a tension the playbook itself carries (retracted reasoning is
+    demotable AND gotchas stay). MEASURED across those rounds: 7 of 10 findings
+    were caused by the advice surface, 3 by the numbers. One rule, one place;
+    this function supplies only what nothing else did — how much of THIS
+    document has already closed.
+
+    🔴 WHY THIS EXISTS. The ladder in `test_handoff_doc_size.py` ranks EVICT WHAT
+    HAS CLOSED first and calls it "usually the whole answer" — but it says that
+    to every author about every document, and nothing told them how much "here"
+    holds for the doc in front of them. MEASURED 2026-09-20 corpus-wide: 468,110 B
+    (14.1%) is already evictable — 284,262 B of resolved investigations alone —
+    while 28 docs sit over the hard cap. The detection was never the gap.
+
+    🔴 IT REUSES `handoff-audit.py`'S DETECTORS AND KEEPS NO COPY. A second
+    implementation of "is this investigation resolved" is how the two answers
+    drift, and that auditor's own comments record the corrections its matchers
+    have already absorbed (a `retracted` bucket over-counted by 30% until bullets
+    crossing a heading were clipped). One rule, one place.
+
+    🔴 NEVER RAISES — this runs inside the WRITE PATH. An exception here would take
+    down `/handoff`'s only landing step and cost a session its record, to decorate
+    a warning. That reason alone carries the guard. Any failure ⇒ "" and the
+    warning prints exactly as it did before.
+
+    ⚠ An earlier draft added "another repo using this module has no such file,
+    which is the ordinary case". Round 0 of #1815 checked and found neither
+    `handoff_doc.py` nor `handoff-audit.py` vendored anywhere outside devrc
+    clones, so that clause named a configuration nobody has. Removed rather than
+    replaced with a better-sounding one: the write-path argument is sufficient,
+    and reaching for a second justification is how a wrong one gets written.
+    """
+    if not _AUDITOR.is_file():
+        return ""
+    try:
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("_handoff_audit",
+                                                      str(_AUDITOR))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        a = mod.audit_text(merged_text)
+        # 🔴 ONLY THE TWO COUNTED BUCKETS. `retracted` and `dated` are the
+        # playbook's step 2, and reporting them here is what this function used
+        # to do — see the header for why that whole surface is gone.
+        rows = [
+            ("resolved investigations", a["resolved_b"], len(a["resolved"]), "block"),
+            ("completed ranked items", a["done_b"], len(a["done"]), "item"),
+        ]
+        rows = [r for r in rows if r[1] > 0]
+        if not rows:
+            return ""
+        out = ["  Evictable in THIS doc, measured:"]
+        for label, b, n, unit in rows:
+            out.append(f"    {label:<24}{b:>9,} B  ({n} {unit}{'' if n == 1 else 's'})")
+
+        # 🔴 UNION, NOT SUM — `audit_text`'s `gross` adds the four buckets without
+        # unioning their line ranges, and one block can land in two of them (an
+        # H3 matching both RESOLVED_HEAD and WORK_STATUS). Measured: 7 of 851
+        # handoff docs under ~/workspace overlap, worst overstatement 42.6%. That
+        # is tolerable in a REPORT and not here, because this line promises
+        # "CLEARS the N B you are over by" — an author who evicts everything named
+        # and is still red got the one outcome worse than saying nothing.
+        # Round 1 of #1815, F5. `audit_text`'s own `gross` is left alone: it is a
+        # report number with its own tests, and this is the consumer that makes a
+        # promise out of it.
+        # 🔴 THE BUCKETS DO NOT SHARE A TUPLE SHAPE, and assuming they did was a
+        # defect in the FIRST draft of this union: `retracted` is a 3-tuple
+        # `(start, end, bytes)` while `resolved`/`dated` are `(title, start, end,
+        # bytes)` and `done` is `(rank, start, end, bytes, is_done)`. Blindly
+        # indexing [1],[2] read `retracted`'s END and BYTES as a line range, and
+        # because this whole body is wrapped in a `except (Exception, SystemExit)`
+        # the resulting IndexError would have DELETED THE NOTE SILENTLY rather
+        # than failing loudly. Caught by a control that re-derived each bucket's
+        # byte count from its own range. Indices are explicit and pinned by
+        # `test_the_union_indices_match_each_buckets_tuple_shape`.
+        # 🔴 A TRUE INTERVAL UNION, AND THE THIRD ATTEMPT AT THIS NUMBER. The
+        # history is kept because each wrong version looked right:
+        #   round 1 (F5) added a union over all four buckets — correct, because
+        #     `resolved` and `dated` can hold the SAME block.
+        #   round 2 narrowed the COUNTED set to step 1 = {resolved, done}, which
+        #     left the union guarding a pair that (then) never overlapped.
+        #   round 3 DELETED the union on the claim that those two are
+        #     "structurally disjoint — `resolved` is blocks under
+        #     `## Open investigations`, `done` is items under `## Next steps`".
+        # 🔴 THAT CLAIM IS FALSE, and round 4 produced the counterexample.
+        # `NEXT_STEPS` and `INVESTIGATIONS` are two REGEXES tested with `if` /
+        # `if` over the SAME heading list (`handoff-audit.py`), not two headings —
+        # so ONE H2 can match both. `## Open investigations / next steps` does
+        # exactly that and exists in this corpus
+        # (`claudedocs/archive/handoff-browser-bridge-gates-and-deploys-2026-08-02.md`).
+        # A resolved `### ` block holding a done ranked item is then booked in
+        # BOTH step-1 buckets, and summing them promised 1,746 B out of a 1,048 B
+        # document — round 1's F5 outcome verbatim: evict everything named and
+        # still be red. Reproduced, and pinned by
+        # `test_a_heading_matching_BOTH_step1_detectors_is_not_double_counted`.
+        # ⚠ The re-add trigger is NOT "a new bucket joins step 1" (round 3's
+        # wording); it is a DOCUMENT putting investigations and ranked items under
+        # one heading, which needs no code change at all.
+        lines = merged_text.splitlines(keepends=True)
+        spans = sorted((x[AUDIT_SPAN_INDEX[k][0]], x[AUDIT_SPAN_INDEX[k][1]])
+                       for k in ("resolved", "done") for x in a[k])
+        merged_spans: list[list[int]] = []
+        for s_, e_ in spans:
+            if merged_spans and s_ <= merged_spans[-1][1]:
+                merged_spans[-1][1] = max(merged_spans[-1][1], e_)
+            else:
+                merged_spans.append([s_, e_])
+        counted_b = sum(len("".join(lines[s_:e_]).encode()) for s_, e_ in merged_spans)
+        net = max(0, counted_b - mod.RESUME_COST * len(a["done"]))
+        # 🔴 NET, and the shortfall is stated rather than implied. Quoting a gross
+        # number that does not actually clear the overage sends an author cutting
+        # and leaves them still red — the one outcome worse than saying nothing.
+        # 🔴 SCOPED TO THE `over_by > 0` CALLERS, which since #1826 means the
+        # GATED over-budget arm alone. EVERY OTHER caller passes `over_by=0`
+        # deliberately, takes the `else` branch, and states no relation to any
+        # overage.
+        # ⚠ NO COUNT HERE, AND THE MISSING NUMBER IS THE FIX. This said "the
+        # two `over_by=0` callers" and rule (p) made it THREE in the PR that
+        # added it — a bare count is wrong from the moment a caller lands, and
+        # wrong silently, because nothing reads a comment's arithmetic. The
+        # sites are enumerated instead, and `git grep -n
+        # 'evictable_note(merged_text'` is what re-derives the list:
+        #   * `budget_warning`'s UNGATED over-budget arm — a CHOICE: no gate
+        #     will go red there, so "still red" cannot happen, and that arm's
+        #     own comment explains why it declines to assert a deficit against
+        #     a ceiling nothing enforces;
+        #   * `budget_warning`'s NEAR arm — there is no overage to relate to;
+        #   * `size_ratchet_report`, rule (p) — the zero withholds the WRONG
+        #     threshold rather than an unenforced one, for the reason stated at
+        #     that call site: clearing the refusal needs a net delta of 0, not a
+        #     cleared overage.
+        # ⚠ The UNGATED arm's zero has a real COST, recorded at that arm:
+        # 12 of the 13 docs that arm newly reaches have `net < over_by`, and
+        # it is the reader who must subtract. Round 1 of #1826 found this
+        # comment asserting, unscoped, a rule that its newest caller breaks.
+        # 🔴 NO POINTER TO THE PLAYBOOK OR THE LADDER ON THESE LINES, and their
+        # removal is what let this note reach the UNGATED arms at all. Both were
+        # decoration on a number — "steps 2-4 of the playbook cover the rest" on
+        # the shortfall case, "before you need the ladder at all" on the zero
+        # case — and both named a remediation ladder that lives in a test only
+        # devrc ships. In a repo without it they are the civitai/cli#618 failure
+        # in miniature: an authoritative-sounding step nobody's gate requires.
+        # In a repo WITH it they were a second copy of what the over-budget arm
+        # already prints in full, three lines above. One rule, one place: the
+        # ladder belongs to `test_handoff_doc_size.py`, this note to the numbers.
+        if net >= over_by > 0:
+            out.append(f"    → {net:,} B net, which CLEARS the {over_by:,} B you are over by.")
+        elif over_by > 0:
+            out.append(f"    → {net:,} B net, which does NOT clear the {over_by:,} B "
+                       f"you are over by.")
+        else:
+            out.append(f"    → {net:,} B net already closed in this document.")
+        # 🔴 CONDITIONAL, and the unconditional version was a real defect (round 0,
+        # F4): it explained a charge that had not been applied, on a note whose
+        # whole argument is that a line printing every time is a line nobody
+        # reads. `net` is only charged for completed RANKS, so the sentence
+        # belongs only when that row is present.
+        if any(label == "completed ranked items" for label, *_ in rows):
+            out.append("    Net of 200 B per evicted rank: the NUMBER must stay (it is "
+                       "half a claim-work slug).")
+        # Reported, never promised: step 2 is a MOVE to `refs/` that must leave a
+        # pointer, so these bytes are not recovered at face value — and the
+        # playbook keeps gotchas in the doc. Counting them toward "CLEARS" is the
+        # defect this split fixes; naming them is still useful.
+        return "\n".join(out)
+    except (Exception, SystemExit):
+        # 🔴 `SystemExit` IS NOT AN `Exception` — it derives from BaseException,
+        # and `handoff-audit.py`'s own `_load_sibling()` raises exactly that, at
+        # MODULE level, when `scripts/skill-audit.py` is missing. So a bare
+        # `except Exception` left the one import failure this function is most
+        # likely to meet uncaught, on the WRITE PATH, where it kills the write
+        # `budget_warning` is only decorating. Round 1 of #1815, F3.
+        # KeyboardInterrupt is deliberately NOT caught: a human interrupting the
+        # write must still interrupt it.
+        return ""
+
+
+class BudgetPosition(typing.NamedTuple):
+    """Where a merged handoff doc sits against its byte allowance. PURE.
+
+    🔴 ONE COMPUTATION, TWO CONSUMERS, AND THAT IS THE WHOLE REASON IT IS A
+    FUNCTION RATHER THAN FIVE LINES IN EACH. `budget_warning` PRINTS "over by
+    N B (+D B this update)"; rule (p) REFUSES on those same two numbers. A
+    second derivation is how a warning and a refusal come to disagree about one
+    document — `claude/RULES.md`'s one-rule-one-place, in the shape where the
+    disagreement is invisible because each site is individually correct.
+
+    🔴 `is_handoff_doc` IS PART OF THE ANSWER RATHER THAN A CALLER'S CHECK, for
+    the same reason: "which paths does the budget govern?" is one predicate, and
+    a second spelling of it is what would let the ratchet bind a path the
+    warning is silent about.
+    """
+
+    is_handoff_doc: bool
+    after: int
+    before: int
+    delta: int
+    allowance: int
+    grandfathered: bool
+
+    @property
+    def over_by(self) -> int:
+        """Bytes past the allowance. NEGATIVE when there is room — callers that
+        print it all guard on `after > allowance` first."""
+        return self.after - self.allowance
+
+
+def budget_position(relpath: str, merged_text: str, base_text: str) -> BudgetPosition:
+    """Size the merge against `handoff_budget`'s ledger. PURE, and NO gate.
+
+    🔴 THE NUMBERS COME FROM `handoff_budget` AND ARE NOT COPIED HERE. That
+    module owns `MAX_BYTES` and `GRANDFATHERED` precisely because a second
+    reader appeared; a literal in this file would be a third.
+
+    🔴 AND THE KEY LOOKUP IS `handoff_budget.lookup`, NOT A `.get`. A ledger entry
+    for a document in ANOTHER repository is keyed by `digest_key(relpath)` because
+    devrc is public; `lookup` tries the plaintext key and then the digest, and it
+    is the ONE place that rule is spelled. A bare `.get(relpath)` here would
+    resolve devrc's own documents and answer "no entry" for every foreign one —
+    i.e. hand them the bare ceiling and refuse the next update to a document that
+    was grandfathered on purpose. `claude/RULES.md`: one rule, one place.
+
+    🔴 ONE LOOKUP, TWO FIELDS. `allowance` and `grandfathered` are derived from a
+    single `lookup` result rather than from two calls, so they cannot disagree
+    about whether the document has an entry at all.
+    """
+    is_doc = relpath.startswith("claudedocs/") and "/handoff-" in "/" + relpath
+    after = len(merged_text.encode("utf-8"))
+    before = len(base_text.encode("utf-8"))
+    hit = handoff_budget.lookup(relpath, handoff_budget.GRANDFATHERED)
+    return BudgetPosition(
+        is_handoff_doc=is_doc,
+        after=after,
+        before=before,
+        delta=after - before,
+        allowance=handoff_budget.MAX_BYTES if hit is None else hit,
+        grandfathered=hit is not None,
+    )
+
+
 def budget_warning(relpath: str, merged_text: str, base_text: str, *,
                    gated: bool) -> str:
     """A one-block warning, or "" when there is nothing worth saying.
@@ -2832,14 +3189,17 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
     🔴 `gated` IS REQUIRED AND HAS NO DEFAULT, deliberately. A default is how the
     false claim survived: every caller got the devrc answer whether or not it was
     writing to devrc. Pass `gate_enforces_budget(repo)`.
+
+    ⚠ IT STILL REFUSES NOTHING, and that sentence is now narrower than it reads.
+    Rule (p) (`size_ratchet_report`) DOES refuse, on a subset of this function's
+    over-budget population, and fires BEFORE this is called — so an over-budget
+    block printed by this function is one rule (p) let through.
     """
-    if not relpath.startswith("claudedocs/") or "/handoff-" not in "/" + relpath:
+    pos = budget_position(relpath, merged_text, base_text)
+    if not pos.is_handoff_doc:
         return ""
-    after = len(merged_text.encode("utf-8"))
-    before = len(base_text.encode("utf-8"))
-    allowance = handoff_budget.GRANDFATHERED.get(relpath, handoff_budget.MAX_BYTES)
-    grandfathered = relpath in handoff_budget.GRANDFATHERED
-    delta = after - before
+    after, delta = pos.after, pos.delta
+    allowance, grandfathered = pos.allowance, pos.grandfathered
     sign = "+" if delta >= 0 else ""
 
     if after > allowance and not gated:
@@ -2849,8 +3209,34 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
         # word "RED". Outside devrc that ladder has no authority: it cites a
         # playbook in a test the repo does not ship. The SIZE still transfers
         # (measured across the other repos' corpora), so the number stays.
+        #
+        # 🔴 THE NOTE PRINTS HERE, BY THE OPERATOR'S REVERSAL — but with
+        # `over_by=0`, so that THE NOTE names no threshold. Scope that claim
+        # to the NOTE and nothing wider: the head line in this arm's own
+        # `return` states the overage outright (`over by {N} B`), deliberately and
+        # unchanged, and `test_EVERY_branch_that_names_the_gate_is_repo_aware`
+        # pins it (`assert "over by 1 B" in ungated_over`). An earlier
+        # wording of THIS comment said the arm names no threshold, which that
+        # test falsifies — round 1 of #1826. (No line number here: this
+        # ladder has now produced three non-reproducing counts, so the test
+        # is named and nothing else is claimed about where it sits.)
+        # What `over_by=0` buys is that the note does not ADD a second,
+        # louder deficit ("does NOT clear the N B you are over by") on top of
+        # it: that is the civitai/cli#618 pressure shape with the
+        # prescription removed and the false-consequence framing kept.
+        # ⚠ `gate_enforces_budget` above and the paragraph above DISAGREE
+        # about which half of #618 did the damage, and #618's own body
+        # settles neither. This arm assumes the worse case.
+        # ⚠ CONSEQUENCE, STATED BECAUSE IT IS A REAL COST: with `0` the note
+        # reports what has closed without relating it to the overage, and on
+        # the corpus this change was justified by, 12 of the 13 docs that now
+        # print a note have `net < over_by`. The reader must subtract the two
+        # numbers themselves. See the NET comment above `evictable_note`'s
+        # three-way branch, which is scoped to the `over_by > 0` callers for
+        # exactly this reason.
         which = ("its grandfathered allowance" if grandfathered
                  else "the handoff-document ceiling")
+        note = evictable_note(merged_text, 0)
         return "\n".join([
             f"⚠ SIZE ONLY, NO GATE: {after:,} B against {which} of "
             f"{allowance:,} B, over by {after - allowance:,} B "
@@ -2859,11 +3245,15 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
             "only the tree it lives in — nothing will go red and nothing is "
             "inherited by anyone. Treat it as JUDGEMENT about what the next "
             "session has to read, not as a build to fix.",
+            *([note] if note else []),
         ])
 
     if after > allowance:
         which = ("its grandfathered allowance" if grandfathered
                  else "the handoff-document ceiling")
+        # Computed ONCE: `evictable_note` execs the auditor module, so calling it
+        # twice to test-then-use would pay that twice on the write path.
+        note = evictable_note(merged_text, after - allowance)
         return "\n".join([
             f"🔴 THIS UPDATE PUTS THE DOC OVER ITS SIZE BUDGET: {after:,} B "
             f"against {which} of {allowance:,} B, over by {after - allowance:,} B "
@@ -2874,6 +3264,7 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
             "number is LAST: evict what has CLOSED (usually the whole answer), then "
             "demote dated evidence to `claudedocs/refs/<topic>.md` leaving a pointer, "
             "then split by initiative.",
+            *([note] if note else []),
             "  🔴 Do NOT satisfy it by deleting an open investigation, a gotcha or a "
             "ruled-out theory — those are the sections whose whole value is that a "
             "future session does not repeat the work.",
@@ -2900,10 +3291,344 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
                 "red `main`." if gated else
                 "no gate enforces it here, so this is a note about readability, "
                 "not a deadline.")
-        return (f"⚠ Size: {after:,} B of {allowance:,} B "
+        head = (f"⚠ Size: {after:,} B of {allowance:,} B "
                 f"({sign}{delta:,} B this update) — {headroom:,} B left. The next "
                 f"update or two will go over; {tail}")
+        # 🔴 UNCONDITIONAL, by the operator's reversal. Already `over_by=0`
+        # here, so THE NOTE has always named no threshold — which is why it
+        # needed no change when the ungated OVER arm was corrected to match
+        # it. ⚠ Scoped to the note: this arm's own head line does state one
+        # (`{after} B of {allowance} B … {headroom} B left`), and an earlier
+        # wording of this comment claimed the arm rendered "numbers without a
+        # threshold" outright, which that line falsifies — round 1 of #1826.
+        # The gated/ungated split survives where it is still about a gate:
+        # `tail` just above, and the GRANDFATHERED arm ABOVE this one.
+        # ⚠ NO PROHIBITION HERE. One was added in round 4 and is removed by the
+        # /the-algorithm pass: the eviction ladder — including "do NOT satisfy
+        # this by deleting an open investigation, a gotcha or a ruled-out
+        # theory" — belongs to `test_handoff_doc_size.py`, which the over-budget
+        # arm already cites. Restating it here is the second copy that made this
+        # advice wrong four times; this arm carried none before the note existed.
+        note = evictable_note(merged_text, 0)
+        return f"{head}\n{note}" if note else head
     return ""
+
+
+# --- rule (p): a doc already over its ceiling may not GROW --------------------
+#
+# 🔴 THE MECHANISM THIS RULE INTERRUPTS, and it is the SAME SHAPE as rule (n)'s
+# self-extending rank queue one level down: a section with an ENTRY RULE AND NO
+# EXIT RULE. `Gotchas` and `Open investigations` APPEND by design, the bucket
+# rules forbid durable content anywhere else, so "move it to `Gotchas`" is the
+# CORRECT remedy for every finding and the section is monotonic by construction.
+# MEASURED on one arc: a prune landed the doc under the ceiling and it more than
+# DOUBLED inside a week, the growth landing in `Gotchas`. The figures, and the two
+# commands that re-measure them, are owned by
+# `claude/skills/handoff/reference/write-gate.md` §I — one place, never restated.
+# ⚠ THE `Gotchas` RATIO IS NOT AMONG THEM. This line carried "62% of the file"
+# while claiming to restate nothing; #1871 round 1 re-measured it and §I now
+# publishes no ratio at all, so quoting one here would make this the only source.
+#
+# 🔴 SO THE RATCHET IS ON GROWTH, NOT ON SIZE. A doc under its allowance is not
+# this rule's population at all — `budget_warning` keeps that one, and keeps
+# only warning about it. Over the line, the delta must be <= 0. That is
+# escapable by doing the intended work rather than only by overriding, which is
+# what keeps it off `claude/RULES.md`'s permanently-red list.
+#
+# 🔴 WHAT IT DELIBERATELY DOES NOT DO: it does not check WHERE the bytes came
+# from or where they went. A net-zero delta that deleted a gotcha to pay for a
+# new one satisfies it, and nothing here can tell that from an eviction. The
+# refusal says so in its own words, because a ratchet whose cheapest escape is
+# deletion has made things worse than it found them — `test_handoff_doc_size.py`
+# owns that playbook and this rule is only the pressure that sends people to it.
+#
+# ⚠ AND IT IS NOT GATED ON `gate_enforces_budget`. Unlike the RED-gate claim in
+# `budget_warning`, this refusal asserts nothing about anyone's CI: it is this
+# tool's own verdict, taken here, true in any repo. A repo that ships no
+# `test_handoff_doc_size.py` is exactly where nothing else would ever notice.
+SIZE_RATCHET_FLAG = "--override-size-ratchet"
+
+#: 🔴 WHO MAY PULL RULE (p)'S OVERRIDE, AS ONE STRING. The sites that carry THIS
+#: text, ENUMERATED in full — because the set was written down FOUR times across
+#: three files and every one of them was short by the SAME member: this comment
+#: listed four, the pinning test's docstring said "OVER FOUR SITES" and merged the
+#: override note into `--help`'s bullet, its failure message said "all four
+#: sites", and `write-gate.md` §I enumerated a DIFFERENT four. None of them named
+#: `size_ratchet_override_note`:
+#:
+#:   * `size_ratchet_report` — the refusal;
+#:   * `size_ratchet_override_note` — the block above the diff. THE MEMBER ALL
+#:     FOUR COUNTS DROPPED;
+#:   * `build_parser` — `--help`;
+#:   * `claude/skills/handoff/SKILL.md` step 5;
+#:   * `claude/skills/handoff/reference/write-gate.md` §I.
+#:
+#: `test_the_SKILL_and_the_TOOL_agree_on_WHO_may_pull_the_ratchet_override` owns
+#: the machine-readable version of that list (its `sites` dict) and pins the whole
+#: normalised sentence in every member. It is the thing that FAILS; this list is a
+#: claim, so read it there if the two ever disagree.
+#:
+#: 🔴 IT IS DELIBERATELY NOT THE LEAK GATE'S RULE, AND THE DIFFERENCE IS THE
+#: POINT. `--leak-pre-existing-approved` is the OPERATOR's call and the skill
+#: tells the executor to stop; this flag is not. Operator decision: the agent may
+#: pull it, and what is required instead is that the reason SAY so, because an
+#: overridden round that reads afterwards like an approved one is the failure
+#: this flag's reason exists to prevent. A guard on words is walkable by
+#: rewording, which is why the four sites share one string rather than four
+#: paraphrases that "agree".
+#:
+#: ⚠ AND THE CODE USED TO CLASSIFY IT THE OTHER WAY — the refusal announced it as
+#: an operator opt-in, `size_ratchet_override_note`'s docstring and its printed
+#: block both said OPERATOR, and the `--help` said nothing about who at all. That
+#: was wrong in the direction that matters: an agent reading it would either not
+#: pull a flag it is allowed to pull, or pull it and record nothing about
+#: approval. ⚠ The old wording is DESCRIBED rather than QUOTED, for the reason
+#: `size_ratchet_override_note`'s docstring gives about restating a string in this
+#: file: rule (n)'s refusal still carries it, and a second verbatim copy here
+#: would widen any `sed` that isolates that one.
+SIZE_RATCHET_WHO_MAY = (
+    "the AGENT may pull it; the reason MUST say whether an operator approved it"
+)
+
+#: The commit trailer that makes an overridden run readable off the ARTEFACT.
+#: Same argument as `LEAK_TRAILER_KEY`, which it deliberately mirrors: stdout
+#: survives only as long as a transcript `scripts/transcript-push.sh` ships as a
+#: bounded TAIL, so an override early in a long session is unrecoverable from
+#: it. `git log` is forever.
+SIZE_RATCHET_TRAILER_KEY = "Size-Ratchet-Override"
+
+#: How much of the operator's reason reaches the commit trailer.
+#:
+#: 🔴 A CLIP, BECAUSE THE APPENDER FAILS SILENTLY RATHER THAN LOUDLY.
+#: `session_trailer.valid_id` rejects a value over 256 chars or carrying a
+#: newline, and `append_trailer` then returns the message UNCHANGED — so a long
+#: or multi-line reason would leave the run claiming a durable record that does
+#: not exist. The value is clipped here so the trailer always lands.
+#:
+#: ⚠ AND STDOUT IS NOT THE BACKUP THIS COMMENT USED TO CALL IT. It said "the
+#: FULL reason is on stdout", which is false past 240 characters:
+#: `size_ratchet_override_note` clips its own echo to `SIZE_RATCHET_ECHO_MAX`, so
+#: a 631-char reason reaches NEITHER channel whole.
+#:
+#: 🔴 THE RELATION BETWEEN THE TWO CHANNELS HAS TWO DIMENSIONS, AND THIS COMMENT
+#: HAS NOW BEEN WRONG ABOUT IT THREE TIMES. It last said stdout carrying strictly
+#: more "is the whole of the relation", which was false in the worse direction:
+#: the two also differed in REPAIR. Only the trailer ran
+#: `session_trailer.printable_for_trailer`, so a reason carrying `\x1b` reached
+#: stdout RAW — measured on this tree before the fix: the echo line held a
+#: literal `\x1b` and `\x01` while the commit held `�`. Both dimensions, as
+#: they stand:
+#:
+#:   WIDTH  — differs, deliberately. 240 on stdout, 200 on the trailer.
+#:   REPAIR — IDENTICAL, since #1871 round 2. Both channels go through
+#:            `_printable_clipped`, which is the one place clip-then-repair is
+#:            expressed.
+#:
+#: Pinned by `test_the_two_CHANNELS_clip_the_reason_at_DIFFERENT_widths` (width)
+#: and `test_a_reason_carrying_a_CONTROL_character_is_REPAIRED_ON_STDOUT_TOO`
+#: (repair, and that the two agree). A comment is a claim too, and this is the
+#: claim that has needed correcting every round.
+#:
+#: ⚠ THE CLIP IS ONLY TWO THIRDS OF THAT GUARANTEE, AND THE MISSING THIRD WAS
+#: MEASURED FALSE RATHER THAN SUSPECTED. `_clip` collapses PYTHON whitespace,
+#: which is a strict subset of what `valid_id` refuses: a reason carrying a
+#: non-whitespace C0 control — `\x1b` out of pasted coloured terminal output,
+#: `\x01` — passed the clip untouched, failed `valid_id`, and the commit got NO
+#: trailer while stdout and `write-gate.md` had both already promised one.
+#: MEASURED at `f4b98ce7`: `"urgent\x1bfix"` clipped to 10 chars, `valid_id`
+#: False, trailer absent, no diagnostic. The long and multi-line cases this
+#: comment was written about DID land, which is why the hole survived.
+SIZE_RATCHET_REASON_MAX = 200
+
+#: How much of the reason reaches the STDOUT echo. Wider than the trailer's clip
+#: on purpose — stdout is not bounded by `session_trailer.valid_id` — and NAMED
+#: rather than left as a literal in `size_ratchet_override_note` so the comment
+#: above can state the width relation against something a reader can grep.
+#:
+#: 🔴 IT IS NOT A SECOND SPELLING OF THE REPAIR. The two channels differ in this
+#: number and in NOTHING else; both reach `_printable_clipped`. That was not true
+#: before #1871 round 2 and the comment above records what it cost.
+SIZE_RATCHET_ECHO_MAX = 240
+
+
+def _printable_clipped(reason: str, limit: int) -> str:
+    """`reason` whitespace-collapsed, clipped to `limit`, then REPAIRED.
+
+    🔴 THE ONE PLACE CLIP-THEN-REPAIR IS EXPRESSED, for both channels. It exists
+    because there were two: `_ratchet_trailer_value` repaired and
+    `size_ratchet_override_note` did not, so a reason carrying `\\x1b[2K` could
+    visually rewrite the `Reason given:` line and the `DELIBERATE OVERRIDE` block
+    ON THE ONE CHANNEL A HUMAN READS BEFORE APPROVING, while the commit recorded
+    the truth. `claude/RULES.md`: one rule, one place — and here the second copy
+    was not a stale duplicate but an ABSENCE, which is the shape a duplicated
+    predicate takes when one site simply never got the rule.
+
+    🔴 CLIP FIRST, REPAIR SECOND. See `_ratchet_trailer_value`, which owns that
+    ordering's measurement; the ordering is expressed HERE so both callers get it.
+    """
+    return session_trailer.printable_for_trailer(_clip(reason, limit))
+
+
+def _ratchet_trailer_value(reason: str) -> str:
+    """`reason`, repaired and clipped to something a trailer can carry.
+
+    🔴 THE POST-CONDITION IS THE POINT, NOT THE TWO STEPS:
+    `session_trailer.valid_id` accepts the result for EVERY `str` input that is
+    not whitespace-only, and `_ratchet_trailer_value` is the only place that
+    promise is made. Pinned by
+    `test_every_ratchet_reason_reaches_a_value_the_APPENDER_ACCEPTS`, which
+    asserts the relationship rather than either step's spelling.
+
+    🔴 CLIP FIRST, REPAIR SECOND, AND THE OTHER ORDER WAS MEASURED WRONG WHILE
+    WRITING THIS FIX rather than reasoned about. `_clip` collapses whitespace,
+    and a tab or a newline is whitespace a reason may legitimately carry —
+    `"line one\\nline two"` has always reached the commit as `line one line
+    two`. Repairing first turns those into replacement marks BEFORE `_clip` can
+    see them as whitespace, so it fixes the control-character hole by breaking
+    the multi-line case the clip was originally written for. Repair is
+    length-preserving (one mark per refused character), so running it after the
+    clip cannot push the value back over `SIZE_RATCHET_REASON_MAX`.
+    """
+    return _printable_clipped(reason, SIZE_RATCHET_REASON_MAX)
+
+
+def size_ratchet_report(relpath: str, merged_text: str, base_text: str) -> str:
+    """Rule (p)'s refusal, or "" when this update may land.
+
+    🔴 NEVER RAISES, AND THAT IS A CONTRACT RATHER THAN CAUTION — the identical
+    one `evictable_note` carries, for the identical reason. This runs in the
+    WRITE PATH, which is the only step that records a session; an exception here
+    would take `/handoff`'s landing step down to decorate a refusal. Any failure
+    of this function's OWN code therefore degrades to "no ratchet" — the
+    behaviour before this rule existed — rather than to a crash.
+
+    🔴 THE PREDICATE IS `after > allowance AND delta > 0`, both from
+    `budget_position`, so it cannot disagree with the warning that prints the
+    same two numbers three lines later.
+    """
+    try:
+        pos = budget_position(relpath, merged_text, base_text)
+        if not pos.is_handoff_doc or pos.over_by <= 0 or pos.delta <= 0:
+            return ""
+        which = ("its grandfathered allowance" if pos.grandfathered
+                 else "the handoff-document ceiling")
+        # 🔴 `over_by=0` ON PURPOSE, AND IT IS NOT THE SAME CHOICE THE UNGATED
+        # WARNING MAKES. There the zero withholds a threshold nothing enforces;
+        # here it withholds the WRONG threshold. Clearing this refusal does not
+        # require clearing the overage — it requires a net delta of 0 — so a
+        # note reading "does NOT clear the N B you are over by" would send an
+        # author cutting toward a number this rule never asked for. The number
+        # that clears it is `delta`, and the remedy lines below state it.
+        # `evictable_note`'s buckets are NOT widened for this caller (#1821):
+        # its three-way branch is reused exactly as it stands.
+        note = evictable_note(merged_text, 0)
+        return "\n".join([
+            "status=size-ratchet",
+            "NOTHING WRITTEN — not the doc, not a commit, not a ref.",
+            f"  This document is ALREADY over its size budget and this update "
+            f"makes it BIGGER: {pos.after:,} B against {which} of "
+            f"{pos.allowance:,} B, over by {pos.over_by:,} B "
+            f"(+{pos.delta:,} B this update).",
+            *([note] if note else []),
+            "  An over-budget doc may still be UPDATED — it may not GROW. Land "
+            f"the same round with a net delta of 0 or less, i.e. free up "
+            f"{pos.delta:,} B:",
+            "    1. shrink a REPLACE section in THIS delta. `State now`, `Next "
+            "steps` and `How to verify` are rewritten wholesale, so what they "
+            "no longer need to say costs nothing to drop.",
+            "    2. or MOVE what has closed out of the document first, in its "
+            "own commit, to the arc's archive file — then re-run this update "
+            "unchanged. `Gotchas` and `Open investigations` APPEND here, so "
+            "this tool cannot shrink them for you.",
+            "  🔴 Do NOT satisfy this by DELETING an open investigation, a "
+            "gotcha or a ruled-out theory. Eviction means MOVE, leaving a "
+            "pointer: those sections exist so a future session does not repeat "
+            "work already done, and nothing in this rule can tell a deletion "
+            "from an eviction — the arithmetic is identical.",
+            f'  Overrides: {SIZE_RATCHET_FLAG} "<why>" — '
+            f"{SIZE_RATCHET_WHO_MAY}. The reason is REQUIRED and is recorded on "
+            f"the run AND stamped `{SIZE_RATCHET_TRAILER_KEY}:` on the commit, "
+            f"so an overridden round does not read afterwards as a clean one.",
+        ])
+    except (Exception, SystemExit):
+        # 🔴 `SystemExit` IS NOT AN `Exception` — `evictable_note` above execs a
+        # sibling module that raises exactly that at module level when one of
+        # ITS siblings is missing, so a bare `except Exception` would leave the
+        # likeliest failure uncaught, on the write path. KeyboardInterrupt is
+        # deliberately NOT caught: a human interrupting the write must still
+        # interrupt it. Same reasoning, same words, as `evictable_note`'s own
+        # handler — see there.
+        return ""
+
+
+def size_ratchet_override_note(
+    relpath: str, merged_text: str, base_text: str, reason: str
+) -> str:
+    """Rule (p) fired and the CALLER cleared it. WRITTEN. Never raises.
+
+    🔴 AN OVERRIDDEN RUN MUST NOT READ LIKE A RUN THAT WAS NEVER OVER THE LINE,
+    which is the whole reason the flag takes a reason at all. Same shape as
+    `leak_approved_note`, and the same two channels: this note is what makes the
+    decision readable AT THE MOMENT it is taken, the commit trailer is what
+    makes it readable off the artefact afterwards. Neither is the other's
+    backup.
+
+    🔴 AND THE ECHO IS REPAIRED, NOT RAW, BECAUSE THIS IS THE CHANNEL A HUMAN
+    READS BEFORE APPROVING. It used to be `_clip(reason, 240)` with no
+    `printable_for_trailer`, so a reason carrying `\\x1b[2K` — one paste of
+    coloured terminal output away — could erase and rewrite the `Reason given:`
+    line and the `DELIBERATE OVERRIDE` block on screen, while the commit trailer
+    recorded the truth. That is the worse direction of the two: the durable record
+    was intact and the surface the decision is taken on was forgeable. Both
+    channels now go through `_printable_clipped` and differ only in width; the
+    relation, both dimensions of it, is stated at `SIZE_RATCHET_REASON_MAX`.
+
+    ⚠ NOT "THE OPERATOR" — that word stood here and in the block below, and it
+    was a claim about WHO, not about the mechanism. `SIZE_RATCHET_WHO_MAY` owns
+    that claim now, and `leak_approved_note`, which this is shaped after, is the
+    one that really is operator-only. The two flags differ on exactly this point.
+
+    🔴 SILENT WHEN THE RATCHET WOULD NOT HAVE FIRED, AND `main()` IS THE ONE
+    PLACE THAT DECIDES IT. A flag that prints a block on every run it is passed
+    on is a flag people learn to pass by reflex and a block nobody reads —
+    `declared_forcing_none_report`'s stated reason. `main()` calls this only when
+    `size_ratchet_report` returned non-empty, and that non-emptiness IS the
+    predicate; there is deliberately no copy of it here.
+
+    🔴 THERE USED TO BE, AND IT WAS DELETED RATHER THAN KEPT AS A BELT-AND-BRACES
+    CHECK. The line that stood here restated `size_ratchet_report`'s three-way
+    guard verbatim — `claude/RULES.md`'s duplicated predicate, one rule at two
+    sites. Its stated justification was "so a DIRECT caller cannot announce an
+    override of a rule that never fired", and the caller it protected against
+    does not exist: `main()` is the only production call; the one direct call in
+    the suite monkeypatches `budget_position` to raise, so it lands in the
+    handler below without ever reaching the predicate; and no test can bind a
+    branch nothing takes. A guard no caller reaches reads as coverage and
+    provides none.
+
+    🔴 IT IS DESCRIBED ABOVE RATHER THAN QUOTED, AND THAT IS LOAD-BEARING. The
+    mutation rows for `size_ratchet_report`'s copy are UNRANGED `sed`
+    expressions now that this one is gone, so a verbatim restatement anywhere in
+    this file — a docstring included — gives each of them a SECOND match and
+    makes the mutation wider than the expression it claims to isolate.
+    `scripts/tests/mutants-handoff-cap.sh`, rule (p) block.
+    """
+    try:
+        pos = budget_position(relpath, merged_text, base_text)
+        return "\n".join([
+            f"🔴 SIZE RATCHET OVERRIDDEN by {SIZE_RATCHET_FLAG} — this document "
+            f"is {pos.after:,} B against an allowance of {pos.allowance:,} B, "
+            f"over by {pos.over_by:,} B, and this update adds "
+            f"{pos.delta:,} B more.",
+            f"  Reason given: "
+            f"{_printable_clipped(reason, SIZE_RATCHET_ECHO_MAX)}",
+            f"  This is a DELIBERATE OVERRIDE, not a clean result, and it is "
+            f"stamped `{SIZE_RATCHET_TRAILER_KEY}:` on the commit — "
+            f"{SIZE_RATCHET_WHO_MAY}. Nothing here checked the reason; what was "
+            f"cleared is the delta below.",
+        ])
+    except (Exception, SystemExit):
+        return ""
 
 
 def _clip(text: str, limit: int) -> str:
@@ -3544,15 +4269,51 @@ COMMIT_LANDED_NOTE = (
 )
 
 
+def restore_doc_bytes(doc: Path, original: bytes | None) -> bool:
+    """Put `doc` back to `original`, `None` meaning "it did not exist". True if
+    that worked.
+
+    🔴 THE `None`-MEANS-UNLINK CONVENTION IS WHY THIS IS A NAMED FUNCTION. A
+    copy that wrote `b""` instead of unlinking would leave behind a file the run
+    created, which is exactly the "a failure writes nothing" property this
+    module is built on. ⚠ It has ONE caller again — `_undo_write`, after a
+    commit that never happened. It had two while `leak_gate` un-wrote the doc to
+    take a baseline scan; that scan is gone. Kept named rather than inlined
+    because the convention, not the call count, is the thing worth stating once.
+
+    Non-raising for `_undo_write`'s reason: it runs on error paths, where a
+    rollback that threw would replace the caller's diagnosis with its own.
+    """
+    try:
+        if original is None:
+            doc.unlink(missing_ok=True)
+        else:
+            doc.write_bytes(original)
+    except OSError:
+        return False
+    return True
+
+
 def _undo_write(
-    repo: Path, doc: Path, relpath: str, original: bytes | None
+    repo: Path, doc: Path, relpath: str, original: bytes | None, staged: bool
 ) -> str:
-    """Undo the doc write + `git add` after a commit that never happened.
+    """Undo the doc write, and the `git add` IF THIS RUN MADE ONE.
 
     🔴 PATH-LIMITED, exactly like the commit it is undoing. A blanket
     `git reset` would unstage a co-worker's staged files as a side effect of OUR
     failure — trading one shared-checkout defect for a worse one. `git restore
     --staged -- <path>` touches only the index entry for that path.
+
+    🔴 AND PATH-LIMITED IS NOT ENOUGH: `staged` IS REQUIRED BECAUSE THE INDEX
+    ENTRY FOR *OUR OWN PATH* CAN BE SOMEONE ELSE'S. This function had ONE caller
+    — the failed-commit arm, where the tool really had `git add`ed — and rule (o)
+    gave it a second on a path where nothing was ever staged. It still ran
+    `restore --staged`. MEASURED with another session's staged edit to the same
+    doc present beforehand: staged before `[<relpath>]` → rc 13 → staged after
+    `[]`, while the run printed "nothing from this run is left staged or
+    written" — true as written, and concealing a change that was not from this
+    run. The parameter is REQUIRED rather than defaulted so a third caller has to
+    answer the question instead of inheriting an answer.
 
     Best-effort and non-raising: this runs on an error path, and a rollback that
     threw would replace the caller's real diagnosis with its own. Whatever it
@@ -3560,24 +4321,20 @@ def _undo_write(
     would be the same defect one level down.
     """
     left: list[str] = []
-    try:
-        # Unstage first: if restoring the bytes fails we still want the index
-        # clean, because a staged path is the half that another session's
-        # `git commit` picks up.
-        git(repo, "restore", "--staged", "--", relpath)
-    except (GitError, OSError):
-        # `git restore` predates nothing we support, but a very old git or a
-        # path git no longer knows about can still refuse.
+    if staged:
         try:
-            git(repo, "reset", "--quiet", "HEAD", "--", relpath)
+            # Unstage first: if restoring the bytes fails we still want the index
+            # clean, because a staged path is the half that another session's
+            # `git commit` picks up.
+            git(repo, "restore", "--staged", "--", relpath)
         except (GitError, OSError):
-            left.append(f"still STAGED: {relpath}")
-    try:
-        if original is None:
-            doc.unlink(missing_ok=True)
-        else:
-            doc.write_bytes(original)
-    except OSError:
+            # `git restore` predates nothing we support, but a very old git or a
+            # path git no longer knows about can still refuse.
+            try:
+                git(repo, "reset", "--quiet", "HEAD", "--", relpath)
+            except (GitError, OSError):
+                left.append(f"still STAGED: {relpath}")
+    if not restore_doc_bytes(doc, original):
         left.append(f"still MODIFIED: {relpath}")
     if left:
         # 🔴 EMIT ADVICE ONLY FOR THE HALF THAT ACTUALLY FAILED. The two halves
@@ -3603,17 +4360,36 @@ def _undo_write(
             # so move any explanation into the message body above instead.
             fixes.append(f"    git -C {repo} restore --staged -- {relpath}")
         if any(s.startswith("still MODIFIED") for s in left):
-            fixes.append(
-                f"    # the doc did not exist before this run — delete it:\n"
-                f"    rm -f -- {doc}"
-                if original is None
-                else
-                "    # its previous content is the bytes this process read, and "
-                "they are\n    # not necessarily in git. Run the unstage line "
-                "above FIRST — until you do,\n    # the index still holds THIS "
-                "run's merged text, so `git restore -- <path>`\n    # would "
-                "restore that and look like it worked. Only after unstaging,\n"                "    # and only if the doc was clean at HEAD, is it safe."
-            )
+            if original is None:
+                fixes.append(
+                    f"    # the doc did not exist before this run — delete it:\n"
+                    f"    rm -f -- {doc}"
+                )
+            elif staged:
+                fixes.append(
+                    "    # its previous content is the bytes this process read, "
+                    "and they are\n    # not necessarily in git. Run the unstage "
+                    "line above FIRST — until you do,\n    # the index still "
+                    "holds THIS run's merged text, so `git restore -- <path>`\n"
+                    "    # would restore that and look like it worked. Only "
+                    "after unstaging,\n    # and only if the doc was clean at "
+                    "HEAD, is it safe."
+                )
+            else:
+                # 🔴 THE SAME ADVICE IS WRONG WHEN THIS RUN STAGED NOTHING.
+                # There is no unstage line above to run first, and the index
+                # entry — if there is one — is SOMEONE ELSE'S. Telling the
+                # operator to `git restore` here would restore another session's
+                # staged edit over the bytes this process read, and look like it
+                # worked. The advice printed on a degraded path must not be the
+                # thing that loses the work.
+                fixes.append(
+                    "    # its previous content is the bytes this process read, "
+                    "and they are\n    # not necessarily in git. This run staged "
+                    "NOTHING, so do not\n    # `git restore -- <path>`: that "
+                    "takes the INDEX's copy, which may be\n    # another "
+                    "session's staged edit. Restore the bytes by hand."
+                )
         return (
             "\n🔴 ROLLBACK INCOMPLETE — the commit did not happen, but this tree "
             "was left changed: " + "; ".join(left) + "\n"
@@ -3622,16 +4398,481 @@ def _undo_write(
             "commit.\n" + "\n".join(fixes)
         )
     # 🔴 Deliberately NOT "byte-identical": two measured exceptions. If the doc
-    # was STAGED-modified before the run, `restore --staged` resets its index
-    # entry to HEAD rather than to that staged content; and a `claudedocs/`
-    # directory this run created is not removed. Both are harmless, and neither
-    # is what the sentence would be claiming. A comment is a claim — say the
-    # thing that is true, which is the thing the caller actually needs.
+    # was STAGED-modified before the run AND this run staged it too,
+    # `restore --staged` resets its index entry to HEAD rather than to that
+    # staged content; and a `claudedocs/` directory this run created is not
+    # removed. Both are harmless, and neither is what the sentence would be
+    # claiming. A comment is a claim — say the thing that is true, which is the
+    # thing the caller actually needs.
+    #
+    # 🔴 AND THE SENTENCE SPLITS ON `staged` FOR THE SAME REASON THE CODE DOES.
+    # "restored and unstaged … nothing from this run is left staged" was printed
+    # on a run that staged nothing — literally true, and it read as a report that
+    # the index had been cleaned, which is how a silent unstage of ANOTHER
+    # session's entry went unnoticed. Claim only the half that happened.
+    if staged:
+        return (
+            "\n(rolled back: the doc was restored and unstaged, so nothing from "
+            "this run is left staged or written — re-running is safe and will "
+            "not append the update twice.)"
+        )
     return (
-        "\n(rolled back: the doc was restored and unstaged, so nothing from this "
-        "run is left staged or written — re-running is safe and will not append "
-        "the update twice.)"
+        "\n(rolled back: the doc was restored to the bytes this run found. This "
+        "run staged nothing, so the index was not touched — any staged change to "
+        "this path is someone else's and is still there. Re-running is safe and "
+        "will not append the update twice.)"
     )
+
+
+# --- rule (o): the repo's OWN leak scanner reads the delta before the commit --
+#
+# 🔴 THE TARGET REPO'S SCANNER, NEVER A SCANNER THIS TOOL SHIPS. This module
+# writes handoff docs into many repositories, and what counts as sensitive is a
+# property of the repository, not of the tool: one repo's denied-identifier set
+# is another repo's ordinary vocabulary. So the gate RESOLVES a scanner out of
+# the repo the doc lives in, and a repo that has none PASSES. Refusing there
+# would make the tool unusable in most repos and would be the permanently-red
+# gate `claude/RULES.md` says trains everyone to route around.
+#
+# 🔴 THE CLOSED SET IS A LOOKUP, NOT A SEARCH, and it is now ONE path. A glob
+# for `*leak*` would pick up a fixture, a README or another tool's helper and
+# then run it as this repo's gate — and the hazard is not only a glob's. The set
+# declared three paths; MEASURED across 175 checkouts, `scripts/leakscan.py` and
+# a ROOT `leakscan.py` existed in ZERO of them, so they bought no repository any
+# coverage, while a root-level `leakscan.py` is exactly where a FIXTURE or an
+# EXAMPLE sits — a smaller version of the thing the paragraph above rejects a
+# glob for. The survivor is `.py` by construction, which is why the scanner is
+# launched with `sys.executable`. Adding a candidate is adding a program this
+# tool will EXECUTE in someone else's repository; measure that it exists first.
+LEAKSCAN_CANDIDATES = ("tests/leakscan.py",)
+
+#: Wall-clock ceiling on one scan. A scanner that hangs must not hang a handoff
+#: — and it must not PASS one either: a timeout raises `ScannerUnusable`, which
+#: is a refusal.
+#:
+#: ⚠ 300 IS UNATTRIBUTED — nobody derived it, and this line says so rather than
+#: inventing a derivation. The only measurement beside it is the ~2.0s the real
+#: scanner takes on the tree this was built against. It is kept because a
+#: generous ceiling fails in the safe, loud direction (on a hang, not on a slow
+#: machine), which is a reason to keep the number, not a reason it is the right
+#: one.
+LEAKSCAN_TIMEOUT_SECONDS = 300
+
+#: How many of the scanner's own lines a refusal prints before eliding. Same
+#: reasoning as `DROPPED_SHOWN_MAX`: the block is an aid to recognising what to
+#: fix, not an inventory, and the elision line carries the command that shows
+#: the rest.
+LEAKSCAN_SHOWN_MAX = 20
+
+#: 🔴 THE OPERATOR OPT-IN FOR AN ALREADY-RED TREE, and it is rule (n)'s shape
+#: rather than a second spelling of the same idea: a deliberately long
+#: `--…-approved` flag held in a constant, declared `store_true`, and named by
+#: the refusal it overrides. `claude/RULES.md`: one rule, one place — two
+#: override conventions in one parser is how the next one gets invented too.
+LEAK_PRE_EXISTING_FLAG = "--leak-pre-existing-approved"
+
+
+#: 🔴 THE TRAILER KEY THAT MAKES AN APPROVED-THROUGH RUN READABLE FROM THE
+#: ARTIFACT, and it exists because stdout is not a durable record. The decision
+#: used to live only in the run's own output: a pushed handoff approved past a
+#: refusing scanner was indistinguishable in `git log` from one the scanner
+#: vouched for. The transcript is not the answer either — `transcript-push.sh`
+#: ships only a bounded TAIL, so an approval early in a long session is gone.
+LEAK_TRAILER_KEY = "Leak-Gate-Approved"
+
+
+class ScanRun(typing.NamedTuple):
+    """One scanner invocation: its exit code and each stream it printed.
+
+    🔴 THE STREAMS ARE KEPT APART, AND A CONCATENATION IS WHAT THIS REPLACED.
+    `stdout + stderr` was display-only and looked harmless — but the refusal
+    shows a TAIL, and stderr sat last, so any scanner writing more than
+    `LEAKSCAN_SHOWN_MAX` warning lines to stderr pushed every line of stdout out
+    of it. MEASURED in cairn's own shape (finding and `REFUSING` on stdout, 25
+    `COULD NOT READ …` warnings on stderr, which its scanner really does emit):
+    the tail contained NEITHER the finding NOR the verdict. A repo with 20+
+    unreadable files therefore produced a refusal the operator could not act on,
+    which is the failure this gate's design explicitly rejects.
+
+    Still nothing PARSES either stream — `claude/RULES.md`: parsing a tool's
+    output makes its FORMAT a dependency you did not pin, and this gate has to
+    work against a scanner it has never seen. Keeping them apart is about which
+    lines survive an elision, not about reading them.
+    """
+
+    code: int
+    stdout: str
+    stderr: str
+
+
+class ScannerUnusable(RuntimeError):
+    """The scanner could not be RUN, so it never read the delta at all.
+
+    Distinct from "the scanner refused": a refusal is an answer. This is the
+    absence of one, and it is still a refusal on THIS gate — a gate that cannot
+    read is not a pass. Kept separate from `GitError` so `main`'s `status=failed`
+    handler cannot swallow it and report a git problem.
+
+    🔴 IT COVERS EXACTLY TWO MECHANISMS — an `OSError` raising the process, and
+    a timeout — AND THAT IS A CEILING, NOT AN OVERSIGHT. Every IN-PROCESS
+    failure (`ImportError`, `SyntaxError`, a missing dependency, an interpreter
+    that cannot run the file) reaches this gate as a non-zero EXIT CODE, which
+    is indistinguishable from "I ran and found something". Telling those apart
+    would mean parsing the scanner's output. So the classification has NO
+    reliable form, and every arm that turns on it — the opt-in's scope, the
+    flag's help text, `write-gate.md` §H — says that rather than implying a
+    completeness it cannot deliver.
+    """
+
+
+class ScannerLookup(typing.NamedTuple):
+    """What the closed-set lookup found at the ONE declared relative path.
+
+    🔴 THREE FIELDS RATHER THAN `Path | None`, BECAUSE `is_file()` ANSWERS A
+    NARROWER QUESTION THAN THE ONE THE ABSENCE NOTE GOES ON TO STATE. `is_file()`
+    is False for three different worlds and only one of them is "this repository
+    has no scanner": it is also False for a DIRECTORY at that path and for a
+    DANGLING SYMLINK. Both were MEASURED to print `NO SCANNER FOUND … looked for
+    tests/leakscan.py` — a false statement — and to let the delta land unscanned.
+
+    `path` non-None ⇒ a regular file we can run. `unusable` non-empty ⇒ something
+    IS there and cannot be run, which is the `ScannerUnusable` arm reached
+    without spawning anything. Both empty ⇒ a genuine absence.
+    """
+
+    path: Path | None
+    rel: str
+    unusable: str
+
+
+def find_leak_scanner(repo: Path) -> ScannerLookup:
+    """The target repo's own leak scanner, and what is at that path if not one.
+
+    🔴 `exists()` FOLLOWS THE LINK, so it is False for a dangling symlink too —
+    which makes `is_symlink()` the only question that separates "nothing here"
+    from "a link to nothing". A gate that branched on `exists()` alone would
+    still call a broken symlink an absence, and a broken symlink is the
+    realistic one: it is what a tree move leaves behind.
+    """
+    for rel in LEAKSCAN_CANDIDATES:
+        candidate = repo / rel
+        if candidate.is_file():
+            return ScannerLookup(candidate, rel, "")
+        if candidate.is_symlink() and not candidate.exists():
+            return ScannerLookup(
+                None, rel, "it is a symlink whose target does not exist")
+        if candidate.exists():
+            return ScannerLookup(None, rel, "it is not a regular file")
+    return ScannerLookup(None, "", "")
+
+
+def run_leak_scanner(scanner: Path, repo: Path) -> ScanRun:
+    """Run `scanner` over `repo` as it stands. Raises `ScannerUnusable`.
+
+    No arguments are passed. A repo-local scanner's argument surface is its own
+    business — `tests/leakscan.py` takes `--self-test`/`--quiet` and neither is
+    ours to choose — and an unrecognised flag would make argparse exit 2, which
+    this gate reads as a refusal. The bare invocation is the one every candidate
+    is guaranteed to understand.
+
+    🔴 `errors="replace"`, AND A STRICT DECODER WAS A WRITE-LEAKING DEFECT. This
+    gate runs whatever the target repository ships and captures BOTH its streams,
+    so the bytes decoded here are not under this tool's control. MEASURED: a
+    scanner emitting one latin-1 byte raised `UnicodeDecodeError` — a `ValueError`
+    — which escaped this function, `leak_gate` AND `main`'s
+    `except (GitError, OSError)`, ending the run at rc 1 (a code the exit model
+    does not define) with a bare traceback and THE UNVOUCHED DOC STILL WRITTEN.
+    That breaks the invariant the write block is built on: `status=failed` reads
+    as "nothing happened", so it must BE that.
+
+    ⚠ REACHABILITY IS STATED HONESTLY RATHER THAN CLAIMED: no scanner was found
+    in the wild that does this, and cairn's own reads with `errors="replace"`.
+    The undecodable line still reaches the operator, with U+FFFD where the byte
+    was — a mangled line they can act on beats a traceback they cannot.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(scanner)],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=LEAKSCAN_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise ScannerUnusable(
+            f"it did not finish within {LEAKSCAN_TIMEOUT_SECONDS}s"
+        ) from None
+    except OSError as exc:
+        raise ScannerUnusable(f"it could not be started: {exc}") from None
+    return ScanRun(proc.returncode, proc.stdout, proc.stderr)
+
+
+class LeakVerdict(typing.NamedTuple):
+    """`refusal` is stderr and means NOTHING may be written; `notes` is stdout
+    on a run that proceeds. Exactly one of those two is non-empty.
+
+    `trailer` is the DURABLE half and is non-empty on exactly one arm: an
+    approved-through run. It is the trailer VALUE, not the line —
+    `commit_message` owns the key and the formatting, so there is one appender.
+    """
+
+    refusal: str
+    notes: str
+    trailer: str = ""
+
+
+def leak_absent_note(repo: Path) -> str:
+    """🔴 A PASS BY ABSENCE IS NOT A CLEAN RESULT, AND IT SAYS SO.
+
+    Most repositories have no scanner, so this is the ordinary line. It exists
+    because `claude/RULES.md`'s reassuring-zero rule applies to a gate that
+    silently did not run exactly as much as to one wired to nothing: a run that
+    printed nothing here would be indistinguishable from a scanned, clean delta.
+    """
+    return (
+        f"leakscan: NO SCANNER FOUND in {repo} — looked for "
+        + ", ".join(LEAKSCAN_CANDIDATES)
+        + ".\n  This delta was NOT scanned for sensitive content. That is a PASS "
+        "BY ABSENCE, not a clean result."
+    )
+
+
+def leak_clean_note(rel: str, relpath: str) -> str:
+    return (
+        f"leakscan: {rel} exited 0 with this delta "
+        f"written into {relpath} — the repo's OWN gate vouches for it."
+    )
+
+
+def _rerun_hint(rel: str, repo: Path) -> str:
+    return f"{sys.executable} {rel}   # from {repo}"
+
+
+def _scanner_tail(run: ScanRun) -> tuple[list[str], int]:
+    """The last `LEAKSCAN_SHOWN_MAX` lines of EACH stream, and how many dropped.
+
+    🔴 PER-STREAM, AND A PER-RUN TAIL IS WHAT THIS REPLACED. The earlier version
+    tailed `stdout + stderr` as one string under a docstring claiming "every
+    scanner here ends with its verdict" — a claim about the SCANNER that the
+    concatenation made false about the TEXT: stderr sat last, so 20 warning
+    lines on stderr evicted the whole of stdout. Tailing each stream separately
+    is what makes the verdict survive a noisy one, and it is why the streams are
+    kept apart on `ScanRun` at all.
+
+    ⚠ THE CLAIM THIS DOCSTRING NOW MAKES IS THE WEAKER, TRUE ONE: the tail of a
+    stream is where a scanner that ends with a verdict puts it. Nothing here
+    knows which stream any given scanner uses, which is exactly why both are
+    shown rather than one being chosen.
+
+    Each stream gets its own header line naming how much of it survived, so a
+    reader can tell an elision from a silent stream. Both headers and lines come
+    back in one list — the callers indent it and print it, and neither parses it.
+    """
+    shown: list[str] = []
+    elided = 0
+    for label, text in (("stdout", run.stdout), ("stderr", run.stderr)):
+        lines = text.splitlines()
+        if not lines:
+            continue
+        tail = lines[-LEAKSCAN_SHOWN_MAX:]
+        elided += len(lines) - len(tail)
+        shown.append(
+            f"--- {label}: last {len(tail)} of {len(lines)} line(s) ---")
+        shown.extend(tail)
+    return shown, elided
+
+
+def leak_refusal_report(
+    rel: str, repo: Path, relpath: str, run: ScanRun
+) -> str:
+    """The scanner would not vouch for the tree with this delta in it.
+
+    🔴 THE SCANNER'S OWN LINES ARE REPRODUCED, and the trade is deliberate: a
+    refusal that does not say which line and which rule is one the operator
+    cannot act on.
+
+    ⚠ THE JUSTIFICATION FOR THAT TRADE IS NARROWER THAN IT WAS WRITTEN, and the
+    two halves it overclaimed are worth knowing before widening what is printed.
+    (1) The flagged text is NOT necessarily the operator's own about-to-be-
+    committed content: the scanner reads the whole TREE, so a finding can come
+    from an untracked, unrelated file this handoff never displayed and was never
+    going to commit. (2) The transcript is not a private channel either —
+    `scripts/transcript-push.sh` exports a bounded tail of every transcript, to
+    a self-hosted authenticated store rather than a public one. So the honest
+    statement of the trade is: this moves flagged text from the repository into
+    a session transcript that is itself exported, in exchange for a refusal the
+    operator can act on — and it stops the COMMIT, which is the public one.
+
+    🔴 IT CLAIMS THE SCANNER REFUSED, NOT THAT THIS DELTA CAUSED IT. The gate
+    makes no attribution, so the message offers BOTH remedies and does not
+    pretend to know which one applies: fix the scratch file, or — if the tree
+    was already red — say so explicitly with the flag.
+    """
+    shown, elided = _scanner_tail(run)
+    return (
+        f"status=leak-refused scanner={rel} exit={run.code}\n"
+        f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+        f"  {rel} exits {run.code} on this tree with the delta written into "
+        f"{relpath}, so the repo's OWN gate will not vouch for what was about "
+        f"to be committed and pushed.\n"
+        f"  🔴 ZERO IS THE ONLY PASS. A scanner that exits 2 is saying `could "
+        f"not vouch` — a control of its own misbehaved — which is not a clean "
+        f"result either. A non-zero exit can ALSO mean the scanner failed "
+        f"before it read anything (a bad import, a syntax error): the exit code "
+        f"cannot tell those apart, so read the lines below rather than the "
+        f"number.\n"
+        f"  What it printed (last {LEAKSCAN_SHOWN_MAX} line(s) of each "
+        f"stream):\n"
+        + "".join(f"    {line}\n" for line in shown)
+        + (
+            f"    … and {elided} earlier line(s) — see them all with:\n"
+            f"      {_rerun_hint(rel, repo)}\n"
+            if elided
+            else ""
+        )
+        + f"  Fix the SCRATCH FILE (--update), not {relpath}, and re-run: the "
+        f"doc was rolled back to the bytes this run found, so nothing has to be "
+        f"undone first.\n"
+        f"  🔴 IF THIS TREE WAS ALREADY RED for something this handoff did not "
+        f"cause, that is an OPERATOR DECISION and not a guess this tool may "
+        f"make for you: read the lines above, then re-run with "
+        f"{LEAK_PRE_EXISTING_FLAG}, which records on the run AND in the commit "
+        f"that it was approved through. A handoff delta is the exact path four "
+        f"leak events took, one of them onto a PUBLIC repository's mainline."
+    )
+
+
+def leak_approved_note(
+    rel: str, repo: Path, relpath: str, run: ScanRun
+) -> str:
+    """The scanner refused and the OPERATOR approved it through. WRITTEN.
+
+    🔴 AN APPROVED-THROUGH RUN MUST NOT READ LIKE A CLEAN ONE, and that is the
+    whole reason this is a flag rather than an attribution heuristic. Both end
+    `status=written`; only this one carries the flag's own name, the scanner's
+    exit code and its output.
+
+    ⚠ AND THIS NOTE IS NOT THE DURABLE HALF. stdout survives only as long as the
+    transcript, which `transcript-push.sh` ships as a bounded TAIL — so an
+    approval early in a long session is unrecoverable from it. The COMMIT
+    TRAILER (`LEAK_TRAILER_KEY`) is what makes the decision readable off the
+    artifact itself; this note is what makes it readable at the moment it is
+    taken. Two readers, two channels, and neither is the other's backup.
+    """
+    shown, elided = _scanner_tail(run)
+    return (
+        f"🔴 LEAK GATE APPROVED THROUGH by {LEAK_PRE_EXISTING_FLAG} — {rel} "
+        f"exited {run.code} with this delta written into {relpath}, and the "
+        f"write went ahead anyway.\n"
+        f"  This is an OPERATOR DECISION, not a clean result: the repo's own "
+        f"gate refused, and the flag asserts a human read that refusal and "
+        f"judged it PRE-EXISTING in this tree rather than caused by this "
+        f"delta.\n"
+        f"  ⚠ NOTHING HERE CHECKED THAT. The gate does not compare scans, so "
+        f"what was approved is everything below, whatever produced it.\n"
+        f"  🔴 AND THE SCANNER MAY NEVER HAVE SCANNED. A non-zero exit is all "
+        f"this gate sees, and a scanner that died on an import, a syntax error "
+        f"or a missing dependency exits non-zero without reading one byte of "
+        f"the tree — indistinguishable here from a finding. Read the lines "
+        f"below before trusting that anything was examined.\n"
+        f"  What {rel} printed (last {LEAKSCAN_SHOWN_MAX} line(s) of each "
+        f"stream"
+        + (f"; {elided} earlier line(s) elided" if elided else "")
+        + "):\n"
+        + "".join(f"    {line}\n" for line in shown)
+        + f"  Full output: {_rerun_hint(rel, repo)}"
+    )
+
+
+def leak_unscannable_report(
+    rel: str, repo: Path, relpath: str, reason: str
+) -> str:
+    """The scanner could not be run, so it never read the delta.
+
+    ⚠ NAMED FOR WHAT IT COVERS, WHICH IS LESS THAN THE NAME SUGGESTS: the two
+    mechanisms `ScannerUnusable` can see (a spawn failure, a timeout) plus the
+    two `find_leak_scanner` can see without spawning anything (a directory, a
+    dangling symlink). An in-process failure is NOT here — it exits non-zero and
+    is classified a refusal, which the operator opt-in can clear. See
+    `ScannerUnusable`.
+    """
+    return (
+        f"status=leak-refused scanner={rel}\n"
+        f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+        f"  {rel} IS PRESENT, so this repository declares a leak gate — but "
+        f"this run could not get a verdict out of it: {reason}.\n"
+        f"  🔴 A GATE THAT CANNOT READ IS NOT A PASS. `could not vouch` and "
+        f"`clean` are different answers, and only one of them lets a delta onto "
+        f"a shared branch — and `{LEAK_PRE_EXISTING_FLAG}` does not reach this "
+        f"arm: there is no verdict for anyone to have read and approved.\n"
+        f"  The delta was rolled back. Fix the scanner — it is the same gate "
+        f"this repo's CI runs — then re-run:\n"
+        f"      {_rerun_hint(rel, repo)}"
+    )
+
+
+def leak_gate(
+    repo: Path, relpath: str, lookup: ScannerLookup, approved: bool
+) -> LeakVerdict:
+    """Rule (o). Run the repo's own scanner over the tree with the delta already
+    written into it, and refuse unless it exits 0. This gate does not touch the
+    file — the CALLER owns both the write and the rollback.
+
+    🔴 FLAT REFUSE ON ANY NON-ZERO EXIT, AND NO ATTRIBUTION. That is a DECISION,
+    not a simplification, and the shape it replaced is why. A whole-tree scanner
+    cannot be asked about one file — `tests/leakscan.py` takes no paths at all,
+    it enumerates the repo from its own location — so "did THIS delta cause it?"
+    can only be a comparison between two scans, and that comparison is a guess:
+    a concurrent writer in a shared checkout, a scanner whose rule set grew
+    between the runs, or a new finding whose line is byte-identical to one the
+    scan was already printing each make it the WRONG guess. The previous shape
+    took that guess and, when it could not decide, printed a banner and
+    committed AND pushed anyway. Never ship a delta while the scanner refuses.
+
+    🔴 THE ALREADY-RED TREE IS AN OPERATOR DECISION, WHICH IS WHAT KEEPS THIS
+    OFF THE PERMANENTLY-RED LIST. A target tree can be red for something this
+    call did not cause; with no way past, the gate would be unclearable and
+    `claude/RULES.md` says such a gate trains everyone to route around it.
+    `--leak-pre-existing-approved` is that way past — explicit, recorded in the
+    run's own output by `leak_approved_note` AND stamped on the commit by
+    `LEAK_TRAILER_KEY`, so an approved-through run is distinguishable afterwards
+    from a clean one both at the moment it is taken and from the artifact.
+
+    ⚠ THE OPT-IN'S SCOPE IS NARROWER THAN "ANYTHING THAT WENT WRONG", AND SAYING
+    SO IS THE POINT. It does not cover the arms that produced NO verdict — a
+    hang, a spawn failure, or a declared path that is not a runnable file — for
+    the obvious reason that there is nothing for an operator to have read and
+    approved. It DOES cover an in-process failure (a bad import, a syntax error,
+    a missing dependency), because such a scanner exits non-zero and that is
+    indistinguishable here from a finding. That is not a gap this code can close:
+    the classification has no reliable form without parsing output this gate has
+    to work without. What closes it instead is telling the operator —
+    `leak_approved_note` says the scanner may never have scanned, and the help
+    text and `write-gate.md` §H say the same thing rather than the opposite.
+    """
+    if lookup.unusable:
+        return LeakVerdict(
+            leak_unscannable_report(
+                lookup.rel, repo, relpath, lookup.unusable), ""
+        )
+    if lookup.path is None:
+        return LeakVerdict("", leak_absent_note(repo))
+    try:
+        run = run_leak_scanner(lookup.path, repo)
+    except ScannerUnusable as exc:
+        return LeakVerdict(
+            leak_unscannable_report(lookup.rel, repo, relpath, str(exc)), ""
+        )
+    if run.code == 0:
+        return LeakVerdict("", leak_clean_note(lookup.rel, relpath))
+    if approved:
+        return LeakVerdict(
+            "",
+            leak_approved_note(lookup.rel, repo, relpath, run),
+            f"{lookup.rel} exit={run.code}",
+        )
+    return LeakVerdict(leak_refusal_report(lookup.rel, repo, relpath, run), "")
 
 
 def uncommitted_paths(repo: Path) -> list[str]:
@@ -3822,6 +5063,44 @@ def build_parser() -> argparse.ArgumentParser:
         "for an audit finding is a `## Defects (batched)` entry, not a new rank.",
     )
     p.add_argument(
+        LEAK_PRE_EXISTING_FLAG,
+        action="store_true",
+        help="override the status=leak-refused refusal: proceed even though the "
+        "TARGET repo's own leak scanner exits non-zero, asserting that a human "
+        "read its output and judged the finding PRE-EXISTING in that tree rather "
+        "than caused by this delta. AN OPERATOR'S CALL, NOT AN AGENT'S. The run "
+        "records it on stdout AND stamps `Leak-Gate-Approved: <scanner> "
+        "exit=<n>` on the commit, so it does not read afterwards as a clean "
+        "scan. SCOPE: it clears any NON-ZERO EXIT, which includes a scanner that "
+        "died on a bad import or a syntax error and read nothing — the exit code "
+        "cannot tell that from a finding, so read the output, not the number. It "
+        "does NOT reach the arms that produced no exit code at all: a hang, a "
+        "failure to start the process, or a declared scanner path that is not a "
+        "runnable file.",
+    )
+    # 🔴 THE ESCAPE HATCH FOR RULE (p), AND ITS REASON IS NOT OPTIONAL. The
+    # write path is the only step that records a session, so this refusal must
+    # always be clearable — and an override with no stated reason records
+    # nothing while still suppressing the refusal, which is the unfalsifiable
+    # shape `--override-attribution-gate` is refused for in `audit-dispatch.py`.
+    # An empty value is therefore a USAGE refusal (exit 2), never
+    # EXIT_SIZE_RATCHET: that number is the RULE's verdict about a document, and
+    # returning it from argument validation would tell a caller its doc grew
+    # when the truth is that a flag was empty.
+    p.add_argument(
+        SIZE_RATCHET_FLAG,
+        metavar="REASON",
+        dest="size_ratchet_override",
+        help="override the status=size-ratchet refusal: land this update even "
+        "though the doc is already over its byte ceiling and this delta makes "
+        f"it bigger. Unlike {LEAK_PRE_EXISTING_FLAG}, {SIZE_RATCHET_WHO_MAY}. "
+        "REASON is REQUIRED — it is printed above the diff and "
+        f"stamped `{SIZE_RATCHET_TRAILER_KEY}: <why>` on the commit, so the "
+        "round does not read afterwards as one that was never over the line. "
+        "The ordinary fix is a net delta of 0 or less; the refusal spells out "
+        "both ways to get one.",
+    )
+    p.add_argument(
         "--push",
         action="store_true",
         help="also push the commit. Requires --confirm; this is the half the gate exists for.",
@@ -3866,8 +5145,13 @@ def resolve_session_id(env: typing.Mapping[str, str] | None = None) -> str:
         return ""
 
 
-def commit_message(subject: str, session_id: str | None = None) -> str:
-    """`subject`, carrying exactly one `Claude-Session-Id:` trailer when known.
+def commit_message(
+    subject: str, session_id: str | None = None, leak_trailer: str = "",
+    ratchet_trailer: str = "",
+) -> str:
+    """`subject`, carrying exactly one `Claude-Session-Id:` trailer when known,
+    a `Leak-Gate-Approved:` trailer when rule (o) was approved through, and a
+    `Size-Ratchet-Override:` trailer when rule (p) was.
 
     🔴 THE TRAILER IS WHAT MAKES A HANDOFF DOC'S ARC RECONSTRUCTIBLE — it is the
     WRITER half `scripts/lib/handoff_arc.py` reads, and the half that includes
@@ -3887,11 +5171,38 @@ def commit_message(subject: str, session_id: str | None = None) -> str:
 
     The clones this function exists FOR are the ones with no hook: this arc's own
     originating commit is unstamped for exactly that reason.
+
+    🔴 `leak_trailer` IS THE ONLY DURABLE RECORD THAT RULE (o) WAS APPROVED
+    THROUGH. `/handoff` is driven by an AGENT, not by a human at a terminal, so
+    `--leak-pre-existing-approved` is a flag an agent can reach on its own — for
+    a gate whose stated stake is a public repository. The escape is kept (an
+    unclearable gate is the permanently-red one everyone routes around) and the
+    RECORDING side is closed instead: an approved-through push is visible in
+    `git log` forever, whereas the run's stdout survives only in a transcript
+    `scripts/transcript-push.sh` ships as a bounded TAIL. It carries the scanner
+    and its exit code so the decision can be re-taken rather than merely noticed.
+
+    🔴 SAME APPENDER, SECOND KEY — NOT A SECOND APPENDER.
+    `session_trailer.append_trailer` already composes with the
+    `prepare-commit-msg` hook and is idempotent per key, so passing `key=` is
+    what makes two writers coexist in one message. `claude/RULES.md`: one rule,
+    one place. Its own validity check is opaque-string discipline — it rejects
+    only what would forge or truncate a trailer line — so a value like
+    `tests/leakscan.py exit=2` passes without anyone teaching it a new shape.
     """
     sid = resolve_session_id() if session_id is None else session_id
-    if not sid:
-        return subject
-    return session_trailer.append_trailer(subject, sid)
+    message = subject if not sid else session_trailer.append_trailer(subject, sid)
+    if leak_trailer:
+        message = session_trailer.append_trailer(
+            message, leak_trailer, key=LEAK_TRAILER_KEY)
+    # 🔴 SAME APPENDER, THIRD KEY. Rule (p)'s override is the second operator
+    # decision this tool can be asked to take on its own authority, and it gets
+    # the same durable record as rule (o)'s for the same reason: the run's
+    # stdout survives only in a transcript shipped as a bounded TAIL.
+    if ratchet_trailer:
+        message = session_trailer.append_trailer(
+            message, ratchet_trailer, key=SIZE_RATCHET_TRAILER_KEY)
+    return message
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3905,6 +5216,29 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "--push requires --confirm: the push is the half the gate exists "
             "for, so it never happens without the confirmed write.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    # 🔴 AN OVERRIDE WITH NO REASON IS THE THING RULE (p) EXISTS TO STOP. The
+    # flag would still SUPPRESS the refusal — `""` is not falsy to an
+    # `is not None` presence test and is falsy to an `if` — so whichever way the
+    # branch that consumes it were spelled, one reading silently lands an
+    # over-budget growth with the record blank. Refused BEFORE anything is read,
+    # so it fires identically in a repo where the rule could never fire, and
+    # refused with EXIT_USAGE rather than EXIT_SIZE_RATCHET: this is a complaint
+    # about an ARGUMENT, not a verdict about a document.
+    if args.size_ratchet_override is not None and not args.size_ratchet_override.strip():
+        print(
+            f"{SIZE_RATCHET_FLAG} was given an EMPTY reason "
+            f"({args.size_ratchet_override!r}).\n"
+            f"  The reason is the whole point of the flag: it is printed above "
+            f"the diff and stamped `{SIZE_RATCHET_TRAILER_KEY}:` on the commit, "
+            f"so the next reader can see that this round grew a document "
+            f"already over its ceiling, and why. An empty one records nothing "
+            f"while still suppressing the refusal.\n"
+            f"  Pass what you would have written in the doc: "
+            f'`{SIZE_RATCHET_FLAG} "the incident writeup has to land tonight; '
+            f'the prune is ranked first for the next round"`.',
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -4311,6 +5645,33 @@ def main(argv: list[str] | None = None) -> int:
         print(undefined_done, file=sys.stderr)
         return EXIT_UNDEFINED_DONE
 
+    # ---- rule (p): a doc already over its ceiling may not GROW --------------
+    # 🔴 ABOVE `budget_warning` AND NOT BESIDE IT, for the reason the comment
+    # below already gives about the other refusals: that warning asserts "this
+    # is a WARNING, not a refusal" and names a gate that "WILL GO RED on
+    # `main`", and both are false of a run whose stderr says NOTHING WRITTEN.
+    # The two read the SAME two numbers out of `budget_position`, so there is no
+    # window in which they can disagree about the document — only about what to
+    # do, which is the difference this rule adds.
+    #
+    # 🔴 ONE PREDICATE DECIDES ALL THREE CONSEQUENCES — the refusal, the
+    # disclosure note and the commit trailer — and it is the non-emptiness of
+    # `ratchet`. Asking "is this doc over and growing?" a second time at the
+    # note and a third time at the trailer is the duplicated-predicate shape
+    # `claude/RULES.md` says ends up wrong at N-1 sites; here it would let a
+    # commit carry an override stamp for a rule that never fired.
+    ratchet = size_ratchet_report(relpath, merged_text, base_text)
+    if ratchet and not args.size_ratchet_override:
+        print(ratchet, file=sys.stderr)
+        return EXIT_SIZE_RATCHET
+    ratchet_override = (
+        size_ratchet_override_note(
+            relpath, merged_text, base_text, args.size_ratchet_override
+        )
+        if ratchet and args.size_ratchet_override
+        else ""
+    )
+
     # 🔴 #1648's size-budget warning, MOVED BELOW THE REFUSALS (audit F4). It
     # still sits above the diff, which is where its own tests pin it and where it
     # belongs — it is a fact about the text a human is about to approve. What it
@@ -4325,6 +5686,11 @@ def main(argv: list[str] | None = None) -> int:
                                  gated=gate_enforces_budget(repo))
     if budget_note:
         print(budget_note)
+    # Rule (p)'s disclosure, immediately under the size block it is about: the
+    # two are one story, and a reader who sees the bytes has to see in the same
+    # breath that a refusal on them was cleared by hand.
+    if ratchet_override:
+        print(ratchet_override)
     warning = dropped_durable_report(report.dropped)
     if warning:
         print(warning)
@@ -4501,16 +5867,55 @@ def main(argv: list[str] | None = None) -> int:
     # `status=failed` reads as "nothing happened"; it must therefore BE that.
     original: bytes | None = doc.read_bytes() if doc.exists() else None
     committed = False
+    # 🔴 THIS RUN'S OWN STAGING, TRACKED RATHER THAN ASSUMED. `_undo_write` used
+    # to unstage unconditionally, which on the rule (o) path reset an index entry
+    # this run never wrote — in a shared checkout, someone else's. The flag flips
+    # on the line AFTER `git add` returns, so an `add` that itself failed leaves
+    # it False.
+    staged = False
+    # 🔴 RESOLVED BEFORE THE WRITE so a repo with no scanner costs nothing but a
+    # `Path.is_file()`, and so the refusal below cannot be a surprise about where
+    # the scanner was expected to be.
+    lookup = find_leak_scanner(repo)
     try:
         doc.parent.mkdir(parents=True, exist_ok=True)
         doc.write_text(merged_text, encoding="utf-8")
+        # ---- rule (o): the repo's own leak scanner reads the delta ----------
+        # 🔴 AFTER THE WRITE AND BEFORE THE `git add`, because the scanner reads
+        # the WORKING TREE — `tests/leakscan.py` enumerates `--cached --others`
+        # and then reads the bytes on disk, so the delta is only visible to it
+        # once it is written. Staging first would add nothing and would leave a
+        # staged path behind on the refusal, which is the shape
+        # `TestBlockedCommitLeavesNoTrace` exists for.
+        verdict = leak_gate(
+            repo, relpath, lookup, args.leak_pre_existing_approved
+        )
+        if verdict.refusal:
+            print(
+                f"{verdict.refusal}"
+                f"{_undo_write(repo, doc, relpath, original, staged)}",
+                file=sys.stderr,
+            )
+            return EXIT_LEAK_REFUSED
+        print(verdict.notes)
         git(repo, "add", "--", relpath)
+        staged = True
         subject = f"docs(handoff): {args.advanced.strip().splitlines()[0]}"[:100]
-        # 🔴 THE TRUNCATION IS ON THE SUBJECT, AND THE TRAILER IS ADDED AFTER IT.
-        # `[:100]` bounds the summary line; applying it to the whole message
-        # would have cut the trailer off exactly when the summary was longest,
+        # 🔴 THE TRUNCATION IS ON THE SUBJECT, AND THE TRAILERS ARE ADDED AFTER
+        # IT. `[:100]` bounds the summary line; applying it to the whole message
+        # would have cut a trailer off exactly when the summary was longest,
         # i.e. silently and on the busiest commits.
-        message = commit_message(subject)
+        message = commit_message(
+            subject,
+            leak_trailer=verdict.trailer,
+            # 🔴 KEYED ON THE NOTE, NOT ON THE FLAG. A reason passed on a run
+            # rule (p) never refused would otherwise stamp a commit with an
+            # override of nothing — see the ONE-PREDICATE comment at the rule.
+            ratchet_trailer=(
+                _ratchet_trailer_value(args.size_ratchet_override)
+                if ratchet_override else ""
+            ),
+        )
         # Path-limited on purpose: exactly one commit, carrying exactly the
         # diff that was shown, even if the caller had other work staged.
         git(repo, "commit", "-m", message, "--", relpath)
@@ -4522,7 +5927,7 @@ def main(argv: list[str] | None = None) -> int:
         # would DISCARD a committed change — the opposite of the fix.
         note = (
             COMMIT_LANDED_NOTE if committed
-            else _undo_write(repo, doc, relpath, original)
+            else _undo_write(repo, doc, relpath, original, staged)
         )
         print(f"status=failed\n{exc}{note}", file=sys.stderr)
         return EXIT_FAIL

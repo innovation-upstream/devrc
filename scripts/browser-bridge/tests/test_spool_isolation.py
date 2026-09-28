@@ -9,7 +9,7 @@ directory ran unisolated, appending to `<ACTIVITY_SPOOL_DIR>/current.log`, which
 the activity collector ships to the production ClickHouse `activity.events`.
 
 🔴 MEASURED, because the count that first circulated was wrong and inflated.
-Running each module alone at `origin/main`: `test_site_notes.py` wrote **17**
+Running each module alone at `origin/main`: `test_site_flows.py` wrote **17**
 rows per run, `test_server.py` 0-1 (the teardown race), and the other seven **0**
 — unisolated but LATENT, since they never reach an emit. Exactly one sibling was
 leaking, not five. The five came from grepping for files that touch `server`,

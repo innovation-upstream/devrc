@@ -920,7 +920,7 @@ Every line below is VERBATIM from `/handoff` step 5.
 
    🔴 **`This replace DROPS N line(s) that look DURABLE` — a WARNING, never a refusal.** Durable content under a REPLACE heading (usually `State now`) is deleted on the next update, and in a long diff a stale-status `-` line looks exactly like a measured-finding one. It classifies the deletions **above** the diff with base line numbers. Move that line under an APPEND heading, or carry it forward. 🔴 **A FLOOR: a silent run is NOT evidence that nothing durable was dropped** — read the diff anyway.
 
-   🔴 **Six refusals. All write NOTHING, each prints its own fix, and re-running after fixing your scratch file is safe.** `status=undefined-done` (11) — rule (m): a NEW doc whose `## Goal` carries no `closing-condition:`, or an update that DELETES the one the doc had; the refusal names which of six causes (wrong section, empty, unknown kind, fenced, unparsed, absent) and prints that cause's own fix. `status=rank-growth` (12) — rule (n): this update carries MORE `forcing: none` ranks than the doc does. Batch it under `## Defects (batched)`, or tag it with an external kind, or close one — `--rank-growth-approved` is the operator opt-in. `status=dated-topic` (7) — dated slug ⇒ per-session doc; **no flag bypasses it**, re-run without the date. `status=new-doc` (7) — no doc for this topic, others exist (listed), and none on the mainline (else ⇒ `stale-base`); if one IS this effort re-run with ITS topic — 🔴 `--new-effort` asserts genuine newness, **not a way past the list**. `status=unforced` (8) — a ranked item names no forcing function or an unrecognised kind. `status=unevidenced` (10) — a `Ruled out:` bullet names no `via: <kind>`. Rows read `[no via: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell as `via: <kind>` · `[fenced]` unfence YOURS, never promote a quote. 📖 write-gate §D. 🔴 **Read each row's marker — only one means "add a field"**: `[no forcing: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell it as `forcing: <kind>` · `[fenced]` **yours ⇒ unfence it; a QUOTE ⇒ tag the item, do NOT promote it** 📖 write-gate §C. ⚠ `forcing: none` and `via: assumed` are ACCEPTED, print an **advisory** above the diff; the write proceeds.
+   🔴 **Seven refusals. All write NOTHING, each prints its own fix, and re-running after fixing your scratch file is safe.** `status=leak-refused` (13) — rule (o): the TARGET repo's own leak scanner would not vouch for the delta, or could not be run at all. **ANY non-zero exit refuses**; it names the scanner and its exit code and reproduces the scanner's OWN lines (the last 20 of EACH stream); the doc is rolled back, and the index is not touched because this run staged nothing. 🔴 **Nothing attributed the refusal to your delta** — fix the SCRATCH file, or, if the tree was ALREADY red for something this handoff did not cause, read those lines and re-run with `--leak-pre-existing-approved`. 🔴 **That flag is the OPERATOR's call, not the agent's**; it is recorded on the run AND stamped `Leak-Gate-Approved: <scanner> exit=<n>` on the commit, it CLEARS an in-process scanner failure (a bad import exits non-zero too — read the output, not the number), and it does NOT reach a hang, a launch failure, or a declared scanner path that is not a runnable file. 📖 write-gate §H. `status=undefined-done` (11) — rule (m): a NEW doc whose `## Goal` carries no `closing-condition:`, or an update that DELETES the one the doc had; the refusal names which of six causes (wrong section, empty, unknown kind, fenced, unparsed, absent) and prints that cause's own fix. `status=rank-growth` (12) — rule (n): this update carries MORE `forcing: none` ranks than the doc does. Batch it under `## Defects (batched)`, or tag it with an external kind, or close one — `--rank-growth-approved` is the operator opt-in. `status=dated-topic` (7) — dated slug ⇒ per-session doc; **no flag bypasses it**, re-run without the date. `status=new-doc` (7) — no doc for this topic, others exist (listed), and none on the mainline (else ⇒ `stale-base`); if one IS this effort re-run with ITS topic — 🔴 `--new-effort` asserts genuine newness, **not a way past the list**. `status=unforced` (8) — a ranked item names no forcing function or an unrecognised kind. `status=unevidenced` (10) — a `Ruled out:` bullet names no `via: <kind>`. Rows read `[no via: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell as `via: <kind>` · `[fenced]` unfence YOURS, never promote a quote. 📖 write-gate §D. 🔴 **Read each row's marker — only one means "add a field"**: `[no forcing: field]` add one, INDENTED · `[unknown kind]` pick from the list · `[unparsed …]` re-spell it as `forcing: <kind>` · `[fenced]` **yours ⇒ unfence it; a QUOTE ⇒ tag the item, do NOT promote it** 📖 write-gate §C. ⚠ `forcing: none` and `via: assumed` are ACCEPTED, print an **advisory** above the diff; the write proceeds.
 
    🔴 **Exit 3 usually means nothing was written — but READ THE MESSAGE, because one arm of it committed.** Usually the rollback unlinks a NEW doc, so the handoff exists only in your scratch file. **The exception announces itself**: when the commit landed and a later step failed, the run says so and tells you not to re-run — re-running appends your findings twice. 🔴 **So `status=failed` is not by itself "nothing happened", and exit 3 is not a reliable tell** — a bad `--repo` or an unreadable `--update` exits 3 with no `status=` line at all, and `push-failed` uses exit 3 too. **Keep the scratch file until you have seen a commit sha**, name its path if step 5 never lands, and delete it once the commit exists.
 
@@ -931,3 +931,455 @@ Every line below is VERBATIM from `/handoff` step 5.
    - **`status=push-failed`** — the pre-check passed and the push still failed (the remote can move in between; that race cannot be designed away). 🔴 **The COMMIT EXISTS** — true of this and of the one `failed` arm above, and of nothing else here. The message names it and hands over preserve→verify→`reset --keep` **in that order**. Do not leave it — an un-pushed commit on a shared branch is invisible until `ship.sh` skips that host.
 
    🔴 **`--confirm` WITHOUT `--push` leaves a real commit in this checkout only — and it says so.** `status=written commit=<sha> branch=<b>` is followed by `NOT PUSHED` plus the exact command: a `git push` on a feature branch, or the preserve-on-a-topic-branch route on a shared one (several repos forbid committing to theirs). A **SUCCESS, not a refusal** — exit 0 — but push it or open a PR **in this session**: an un-pushed handoff is one only you can read. 🔴 **Do NOT retry by re-running with `--push`**: the doc already carries the update, so a second run exits 5 `no-change` or **appends your findings twice**.
+
+## §H — rule (o): the TARGET repo's own leak scanner reads the delta (2026-09-22)
+
+### Why this is code and not a sentence
+
+`handoff_doc.py` **commits AND pushes in one call** under `--confirm --push`, so
+there is no window in which a human can scan between the two. Four
+`denied-identifier` leak events have landed on handoff deltas and **one reached
+`main` of a PUBLIC repository**. The standing remedy had been written as a
+SENTENCE in the handoff document three times, in three wordings, and **no code
+ran it**: `grep -c leakscan` over `scripts/lib/handoff_doc.py` was `0`, and `0`
+across all seven files of this skill, against a positive control (`handoff`)
+matching 7/7.
+
+### The scanner is the TARGET repo's, and a repo with none PASSES
+
+What counts as sensitive is a property of the repository, not of this tool: one
+repo's denied-identifier set is another's ordinary vocabulary. So the gate
+resolves a scanner out of `--repo`, from a **closed set of ONE declared relative
+path** — `<target-repo>/tests/leakscan.py` — a lookup, never a glob, because a
+glob finds a fixture or a README and then runs it as your repo's gate.
+
+🔴 **THE SET DECLARED THREE AND NOW DECLARES ONE, AND THAT IS A MEASUREMENT.**
+Across 175 checkouts, a `scripts/`-level scanner and a ROOT-level one existed in
+**zero** of them: they bought no repository any coverage. The root entry also
+carried a smaller version of the hazard the no-glob rule is about — a
+root-level scanner file is exactly where a *fixture* or an *example* sits, and
+this tool EXECUTES whatever it resolves, in someone else's repo, and attributes
+the exit code to your delta. Adding a candidate is adding a program this tool
+will run; measure that it exists first.
+
+⚠ THE `<target-repo>/` PREFIX IS LOAD-BEARING PROSE, NOT DECORATION, and a gate
+in this repository is what taught it — **the reason outlives the list that
+provoked it**, which is why this paragraph survives the deletion of the two
+candidates it was originally about. Written bare, a `<dir>/leakscan.py` token
+reads as a path *here*; this repo has no such file, so `test_no_new_dead_paths`
+failed with `a doc claims a file that does not exist`. It was right twice over:
+it caught a real ambiguity, and the sentence it caught is the one whose entire
+point is that the scanner belongs to the OTHER repo. `doc-path-ignore.list`
+offers a silent exemption and says to prefer fixing the doc; this is why.
+
+🔴 AND THE FIRST DRAFT OF THIS VERY PARAGRAPH FAILED THE SAME GATE, by spelling
+the bare token in order to explain it. Describe the shape, never instantiate it
+— an example that IS the thing it forbids is the thing it forbids.
+
+A repo with no scanner **passes**, and says so: `NO SCANNER FOUND … PASS BY
+ABSENCE, not a clean result`. Refusing there would make the tool unusable in
+most repos and would be the permanently-red gate everyone learns to click
+through.
+
+🔴 **AND "NO SCANNER" IS A NARROWER QUESTION THAN `is_file()` ANSWERS.** That
+predicate is False for three different worlds and only one of them is an
+absence: it is also False for a **directory** at the declared path and for a
+**dangling symlink**. Both were MEASURED to print `NO SCANNER FOUND` — a false
+statement — and to let a delta carrying a denied identifier land unscanned. Both
+are reachable without anyone doing anything odd: a sparse or partial checkout
+that never materialises the scanner's directory, a scanner inside a **submodule**
+(`git worktree add` populates none — and this document's own `status=behind`
+advice tells you to write from a throwaway worktree), or a broken symlink after
+a tree move. So the lookup now branches: a regular file is a scanner, a genuine
+absence passes by absence, and **anything else present at that path is a
+REFUSAL** — the same arm as a hang, and the opt-in does not reach it either.
+
+⚠ `exists()` is not the discriminator, because it FOLLOWS the link and is False
+for a dangling symlink too. `is_symlink()` is the only question that separates
+"nothing here" from "a link to nothing".
+
+### 🔴 Zero is the only pass — and exit 2 is the half a reader will re-narrow
+
+**Any non-zero exit refuses.** There is no `== 1` comparison in the gate and
+there must not be one. cairn's `tests/leakscan.py` exits **2** for "could not
+vouch": one of its OWN controls misbehaved, and its docstring says in as many
+words that 2 is not a clean result. Under a flat refuse that falls out by
+construction and there is nothing left to test — which is exactly why the claim
+is written here instead. A reader who has not been told it is the reader who
+narrows the check to the code a scanner "normally" uses.
+
+A scanner that cannot be **RUN** at all (a hang, a launch failure) is also a
+refusal: `run_leak_scanner` raises, and a gate that cannot read is not a pass.
+The operator opt-in below does **not** reach that arm — there is no verdict for
+anyone to have read and approved, and approving an absence is the reassuring
+zero this whole gate exists to refuse to print.
+
+🔴 **"COULD NOT BE RUN" IS A SMALLER SET THAN IT SOUNDS, AND THE OPT-IN'S SCOPE
+IS DECLARED RATHER THAN IMPLIED.** Exactly four things reach the no-verdict arm:
+an `OSError` raising the process, a timeout, and the two present-but-unrunnable
+paths above. Every **in-process** failure — an `ImportError`, a `SyntaxError`, a
+missing dependency, an interpreter that will not run the file — starts fine and
+then exits non-zero, which is **indistinguishable from "I ran and found
+something"**. MEASURED with a scanner whose whole body was a bad import: without
+the flag rc 13; **with** the flag rc 0, `status=written`, and `🔴 LEAK GATE
+APPROVED THROUGH` printed for a gate that never read one byte.
+
+⚠ **THE FLAG THEREFORE CLEARS IT, AND THAT IS STATED RATHER THAN FIXED.** A
+scanner's exit code genuinely cannot separate those two cases in every instance,
+and the only thing that could — parsing the scanner's output — is a dependency on
+a format this gate has to work without, against scanners it has never seen. **So
+the classification has no reliable form; what is closed instead is the reporting.**
+The approved-through note now says on screen that the scanner **may never have
+scanned**, with its own output (a traceback, if that is what happened) under it,
+and the flag's `--help` states the scope in the same words. An earlier version of
+that help said the flag "Does NOT apply when the scanner could not be RUN at all",
+which read as covering every way a scanner fails to run and covered two.
+
+🔴 **A non-zero exit is therefore not self-describing: read the OUTPUT, not the
+number.**
+
+### The gate does NOT attribute the refusal to your delta, and that is the decision
+
+A whole-tree scanner cannot be asked about one file — `tests/leakscan.py` takes
+**no paths**, it enumerates the repo from its own location. So any "was it THIS
+delta?" answer can only be a comparison between two scans, one with the delta
+and one without. **That comparison is a guess**, and three things make it the
+wrong guess: a concurrent writer in a shared checkout, a scanner whose rule set
+grew between the runs, and a new finding whose line is byte-identical to one the
+scan was already printing.
+
+🔴 **An earlier shape took that guess and, when it could not decide, printed
+`LEAK GATE COULD NOT ATTRIBUTE — and this write was NOT blocked` and then
+committed AND pushed anyway.** That arm existed only because an earlier
+requirement forbade any bypass flag: with no escape hatch, the gate had to guess
+or become unclearable on an already-red tree. The requirement is gone; the guess
+went with it. **The gate never ships a delta while the scanner is refusing.**
+
+### The already-red tree is an OPERATOR decision: `--leak-pre-existing-approved`
+
+A target tree can be red for something your call did not cause. With no way
+past, this would be the permanently-red gate `claude/RULES.md` says trains
+everyone to route around — so there is one, and it is a **decision, not a
+guess**: read the scanner's lines in the refusal, and if the finding is
+pre-existing, re-run with `--leak-pre-existing-approved`.
+
+It is rule (n)'s `--rank-growth-approved` shape reused rather than a second
+spelling of the same idea: a deliberately long `--…-approved` flag, `store_true`,
+held in a module constant and named by the refusal it overrides.
+
+🔴 **IT IS THE OPERATOR'S CALL, NOT THE AGENT'S, AND THAT IS A DESIGN PROPERTY
+RATHER THAN A PREFERENCE.** `/handoff` is driven by an agent, so this escape is
+a flag an agent can reach on its own — for a gate whose stated stake is a public
+repository, and in a PR whose own premise is that prose agents can ignore failed
+four times. The operator's decision (2026-09-23) was to **keep naming the flag in
+the refusal** — an unclearable gate is the permanently-red one everyone routes
+around — and to close the gap on the **recording** side instead. The skill body
+states the imperative: report the refusal and STOP.
+
+🔴 **The flag is RECORDED IN TWO PLACES, AND THEY ARE NOT EACH OTHER'S BACKUP.**
+
+- **On the run.** `LEAK GATE APPROVED THROUGH by --leak-pre-existing-approved`,
+  the scanner's exit code and its own output, above the same `status=written` a
+  clean run ends with. ⚠ The note says in its own words that **nothing checked
+  the "pre-existing" claim**, and that **the scanner may never have scanned at
+  all** — what was approved is everything it printed, whatever produced it.
+- **On the COMMIT**, as a `Leak-Gate-Approved: <scanner> exit=<n>` trailer. This
+  is the durable half. stdout survives only in a session transcript, and
+  `scripts/transcript-push.sh` exports a bounded **tail** — so an approval early
+  in a long session is unrecoverable from it, while a pushed commit carries the
+  decision in `git log` forever. A **clean** run and a **no-scanner** run are not
+  stamped: the absence is what makes the presence readable.
+
+⚠ The trailer reuses `session_trailer.append_trailer` with a second key rather
+than a second appender, so it composes with the `prepare-commit-msg` hook and
+with `Claude-Session-Id:` exactly as that one does. One rule, one place.
+
+### 🔴 The rollback unstages only what THIS run staged
+
+The scan runs **after the write and before the `git add`**, because the scanner
+reads the working tree. So on the leak path **nothing was ever staged** — and
+the rollback helper, written for the failed-COMMIT arm where the tool really had
+`git add`ed, still ran `git restore --staged -- <path>` unconditionally. MEASURED
+with another session's staged edit to the same doc present beforehand: staged
+before `[<the doc>]` → rc 13 → staged after `[]`. Silently unstaged, while the
+run printed *"nothing from this run is left staged or written"* — **true as
+written**, and concealing a change that was not from this run.
+
+The helper now takes whether this run staged anything, as a required argument so
+the next caller has to answer it rather than inherit an answer; and the line it
+prints splits the same way, claiming only the half that happened. A path-limited
+`restore --staged` is not enough on its own: the index entry for **our own path**
+can be someone else's.
+
+### 🔴 What the refusal SHOWS, and the two ways it stopped showing it
+
+**The scanner's own lines are reproduced.** A refusal that does not say which
+line and which rule is one the operator cannot act on, so the trade is
+deliberate. ⚠ **Its justification is narrower than it was first written**, and
+both halves matter before anyone widens what is printed:
+
+- the flagged text is **not necessarily the operator's own about-to-be-committed
+  content**. The scanner reads the whole TREE, so a finding can come from an
+  untracked, unrelated file this handoff never displayed and was never going to
+  commit. Measured.
+- **the transcript is not a private channel either**: `scripts/transcript-push.sh`
+  exports a bounded tail of every transcript. Self-hosted and authenticated, so
+  this is a comment-accuracy point rather than a leak — but "the transcript is
+  not where it becomes public" was a claim about a channel this repo actively
+  exports, and it is now stated as what it is.
+
+The honest statement of the trade: this moves flagged text out of the repository
+and into a session transcript that is itself exported, in exchange for a refusal
+the operator can act on — and it stops the **commit**, which is the public one.
+
+🔴 **BOTH STREAMS ARE TAILED, SEPARATELY, AND A CONCATENATED TAIL IS WHAT THAT
+REPLACED.** The refusal shows the last `LEAKSCAN_SHOWN_MAX` lines. When stdout
+and stderr were concatenated with stderr last, a scanner writing that many
+warning lines to stderr pushed **every line of stdout out of the tail**. MEASURED
+in cairn's own shape — finding and `REFUSING` on stdout, 25 `COULD NOT READ …`
+warnings on stderr, which its scanner really does emit: the refusal contained
+**neither the finding nor the verdict**, only broken-symlink warnings. A
+repository with 20+ unreadable files therefore produced a refusal nobody could
+act on. ⚠ The docstring that justified the tail claimed "every scanner here ends
+with its verdict" — a claim about the SCANNER that the concatenation made false
+about the TEXT. Each stream now gets its own labelled tail, and neither is
+dropped: the `could not read` warnings are what explain an INCOMPLETE scan.
+
+🔴 **THE OUTPUT IS DECODED WITH `errors="replace"`, AND A STRICT DECODER WAS A
+WRITE-LEAKING DEFECT.** This gate runs whatever the target repo ships and captures
+both its streams, so the bytes are not under this tool's control. A scanner
+emitting one latin-1 byte raised `UnicodeDecodeError` — a `ValueError` — which
+escaped the gate *and* `main`'s `except (GitError, OSError)`: the run ended at rc
+1, a code the exit model does not define, with a bare traceback and **the
+unvouched doc still written**. ⚠ Reachability stated honestly: no scanner was
+found in the wild that does this, and cairn's own reads with `errors="replace"`.
+The claim that holds is the narrow one — this gate does not choose the bytes it
+decodes, and a mangled line the operator can act on beats a traceback.
+
+### 🔴 What this gate structurally CANNOT see
+
+- **Anything sensitive already in the target tree that the delta did not
+  change** — now a REFUSAL rather than a blind spot, but the gate still cannot
+  tell you it was pre-existing. Only you can, and the flag is how you say so.
+- **The DIFF THE TOOL ALREADY PRINTED.** The gate stops the COMMIT; by the time
+  it runs, the unified diff — including whatever the scanner is about to refuse
+  — is already in the transcript. Moving the scan earlier would mean writing the
+  doc on the proposal run, whose whole contract is that it writes nothing. So
+  the gate bounds what gets *published*, not what gets *displayed*.
+- **A concurrent writer.** In a shared checkout another session's edit landing
+  before the scan is refused alongside yours — a LOUD false refusal with the
+  scanner's own lines on screen, which is the safe direction and the case the
+  flag exists for.
+
+### The timeout is 300 s, and that number is unattributed
+
+Nobody derived it. The only measurement beside it is the ~2.0 s the real scanner
+takes on the tree this was built against. It is kept because a generous ceiling
+fails in the safe, loud direction — on a hang rather than on a slow machine —
+which is a reason to keep the number, not a reason it is the right one. Said
+here rather than dressed up as a derivation.
+
+## §I — rule (p): a doc already over its ceiling may not GROW (2026-09-25)
+
+### What it refuses
+
+`status=size-ratchet`, exit **14**, nothing written. The predicate is two facts about
+the MERGED document, both read out of one `budget_position()` call:
+
+* the merge is **over its allowance** (`handoff_budget.MAX_BYTES`, or the doc's
+  `GRANDFATHERED` entry when it has one); **and**
+* the **net byte delta is positive** — the merge is bigger than the document it
+  replaces.
+
+A doc **under** its allowance is not this rule's population at all, however much the
+update adds: that one stays `budget_warning`'s, and that function still refuses
+nothing. Over the line, the delta must be `<= 0`.
+
+### Why a refusal, where the warning deliberately refuses nothing
+
+The warning has printed on every over-budget write since #1648 and the mechanism it
+names went on regardless. MEASURED on one arc:
+
+| | at the prune (`3c4a1c6`) | at the next peak (`219d58e`) | |
+|---|---:|---:|---|
+| whole doc | 64,097 B | 139,371 B | x2.17 |
+| `Gotchas` | 45,984 B / 89 bullets | 83,618 B / 147 bullets | +58 |
+
+🔴 **THIS TABLE IS THE SINGLE SOURCE OF TRUTH FOR THE WHOLE-DOCUMENT ROW.**
+`scripts/lib/handoff_doc.py` and `scripts/tests/test_handoff_doc.py` point here
+instead of restating the literals — the same ruling `scripts/tests/test_handoff_doc_size.py`
+makes about the ceiling it owns, applied one arc down, and applied because restating
+them is exactly how they went wrong. **Re-measure rather than believe them.** Two
+commands, run inside the measured repo (`<cairn>`, whose doc this was):
+
+```bash
+git cat-file -s 3c4a1c6:claudedocs/handoff-<arc>.md   # 64097
+git cat-file -s 219d58e:claudedocs/handoff-<arc>.md   # 139371
+```
+
+⚠ **`<arc>` IS A PLACEHOLDER AND THE DOCUMENT IS NOT NAMED HERE, WHICH IS A REAL COST
+STATED RATHER THAN HIDDEN.** devrc is a PUBLIC repository and that document is not in it;
+`scripts/lib/handoff_budget.py` keys every such entry by a digest of its path for the same
+reason, and its `digest_key` comment states what that does and does not buy. So these two
+commands are re-runnable only by someone who already knows which arc it was — the two
+revisions and the two byte counts are what identify it, and the branch that measured it is
+where the name is.
+
+⚠ **THE FIRST PAIR WRITTEN HERE WAS WRONG, AND ONLY THE WHOLE-DOCUMENT ROW HAS BEEN
+RE-MEASURED.** It read 63,433 B → 134,563 B, x2.1. Neither figure reproduces at **any**
+revision of that file: all 107 of them were sized, and the corrected 64,097 hits two of
+them while 63,433 and 134,563 hit none — so the scan is an instrument with a positive
+control, not a guess. The `Gotchas` row above was **not** re-derived by that scan and is
+neither confirmed nor retracted here; do not quote it as measured alongside the row that
+was.
+
+🔴 **The conclusion is unchanged, which is why this is a correction and not a
+retraction.** The prune **worked** — 64,097 B is under the 65,536 B ceiling — and the
+document then more than DOUBLED: 75,274 B of growth over the 6.1 days between those
+two commits (2026-09-18 → 2026-09-25), roughly **12 KB a day**; every other section
+combined would have fitted under the ceiling on its own.
+
+⚠ **NO `Gotchas` RATIO IS QUOTED IN THAT SENTENCE, AND THE OMISSION IS THE POINT.** It
+used to end "with `Gotchas` at 62% of the file" — a figure out of the row the paragraph
+above declares NOT re-derived, offered inside the sentence that presents the conclusion
+as measured, which is the exact thing that paragraph tells you not to do. Re-measured,
+it reproduces neither the ratio implied by the table's own bytes nor the one an
+independent span extraction gives, and the two disagree with each other; no replacement
+figure is written here because a second unverified one is the same defect. Re-derive it
+in the measured repo if a ratio is what you need. The conclusion does not rest on one:
+a prune that worked, undone inside a week, is the whole of it.
+
+🔴 **The growth is STRUCTURAL, not careless.** The bucket rules forbid durable content
+in a REPLACE section, so the correct remedy for a finding is "move it to `Gotchas`" —
+which APPENDS. That section has an entry rule and **no exit rule**; it is monotonic by
+construction, and a warning is not a counterweight to a construction. One PR did
+exactly that twice in one day, correctly by the bucket rule and harmfully by the size
+rule, and two blind audit rounds missed the tension because each was scoped to one
+axis.
+
+### What was ruled out before building, so nobody re-derives it
+
+* **Detection was never the gap.** `evictable_note()` already reports what has closed
+  per-document. Corpus-wide: 468,110 B (14.1%) already evictable — 284,262 B of
+  resolved investigations alone — while 28 docs sat over the hard cap.
+* **The advice surface stays deleted.** #1821 removed it from `evictable_note()` after
+  7 of 10 audit findings across four rounds came from it. This rule reuses that
+  function's three-way branch exactly as it stands and widens nothing.
+* **A prose rule was tried and did not hold.** The motivating document already carried
+  a written prune discipline; it was read, and the section regrew within seven days.
+* **A TTL / staleness stamp was designed and rejected before building.** A check that
+  reddens because a stamp aged goes red on a day nobody changed anything, and
+  `claude/RULES.md` calls a permanently-red gate worse than none.
+
+### How you clear it
+
+Two ways, and the first is usually the right one:
+
+1. **Shrink a REPLACE section in the same delta.** `State now`, `Next steps` and
+   `How to verify` are rewritten wholesale, so what they no longer need to say costs
+   nothing to drop.
+2. **Move what has closed out of the document first**, in its own commit, to the arc's
+   archive file — then re-run the update unchanged. `Gotchas` and `Open investigations`
+   APPEND through this tool, so it cannot shrink them for you.
+
+🔴 **REMEDY 2's DESTINATION IS ITSELF A GOVERNED DOCUMENT, AND BOTH HALVES OF THAT
+MATTER.** A `claudedocs/handoff-<arc>-archive.md` sink matches `is_handoff_doc` like any
+other doc — MEASURED on `<cairn>/claudedocs/handoff-<arc>-archive.md` (the same arc as the
+table above, and unnamed for the same reason),
+which returns `True` and is 138,791 B, i.e. **73,255 B over the 65,536 B ceiling** and now
+carries a `GRANDFATHERED` entry of its own. So the remedy points at a file that is in
+rule (p)'s population.
+
+🔴 **THAT IS A LIVE SIZE OF A MONOTONIC SINK, SO RE-MEASURE IT RATHER THAN QUOTING IT.**
+Both figures above go stale the next time that document is appended to, and the section
+40 lines up already insists on a command beside any literal — it was written without one,
+which is the same defect one paragraph over. The ceiling is not measured here at all; it
+is `handoff_budget.MAX_BYTES`, owned by `scripts/tests/test_handoff_doc_size.py`.
+
+```bash
+stat -c %s <cairn>/claudedocs/handoff-<arc>-archive.md   # 138791 when written
+python3 -c 'import sys; sys.path.insert(0, "scripts/lib"); import handoff_budget as b; print(b.MAX_BYTES)'
+```
+
+⚠ The `<cairn>/` prefix is not decoration: `test_doc_path_rot.py` reads a bare
+`claudedocs/…` written about another repo as local rot and calls it a dead path, and
+`<repo>/…` is that gate's own one-token convention for exactly this case. 🔴 **But it
+is NOT what keeps the line above invisible, and an earlier draft said it was.** That
+gate opts a token out on `META` — any of `<>{}*?[]$()|!=%@,"'\…` anywhere in it
+(rule 3) — so the `<arc>` placeholder ALONE already exempts this token. Driven
+through the gate's own `_is_path_claim` at four points: as written → not a claim;
+prefix deleted, `<arc>` kept → still not a claim; prefix kept, `<arc>` resolved →
+still not a claim; **both** resolved → a claim, and reported dead. So either
+placeholder suffices independently, and the prefix is the right convention to keep
+for the day the arc is spelled out — not the mechanism operating here.
+
+⚠ **IT IS STILL NOT REFUSED IN PRACTICE, AND THAT IS THE PRECISE CLAIM.** Remedy 2's
+write is **out of band**: `handoff_doc.py` writes exactly one path per run,
+`claudedocs/handoff-<topic>.md` for the `--topic` it was given, so an archive move made
+with `git mv` / an editor / a plain commit never reaches this rule at all. What WOULD
+reach it is routing the archive write through this tool — `--topic <arc>-archive` names
+that same file — and on an over-ceiling sink that run needs
+`--override-size-ratchet "<why>"` like any other growth. 🔴 **Do NOT close the gap by
+narrowing `is_handoff_doc` to exempt archives**: `test_handoff_doc_size.py` says in its
+own words that exempting the archive would make "move it to the archive" the way to dodge
+the cap. The ruling taken instead was to grandfather the sink, which ratchets it from
+where it is.
+
+🔴 **Eviction means MOVE, leaving a pointer.** Nothing in this rule can tell a deletion
+from an eviction — the arithmetic is identical — so the refusal says so in its own
+words. A ratchet whose cheapest escape is deleting a gotcha or a ruled-out theory has
+made things worse than it found them.
+
+### The override, and why it is not a convenience
+
+🔴 **WHO MAY PULL IT: the AGENT may pull it; the reason MUST say whether an operator
+approved it.** That is an operator ruling and it is deliberately **not**
+`--leak-pre-existing-approved`'s rule, which is the operator's call and where the skill
+tells the executor to stop.
+
+The sentence is one string — `handoff_doc.SIZE_RATCHET_WHO_MAY` — carried verbatim by
+**the refusal, the override block above the diff, `--help`, `SKILL.md` step 5, and this
+line**, and pinned in every one of them as a whole normalised string, so a reword in one
+place cannot quietly disagree with the others. ⚠ **This list said "all four" and named a
+different four**, omitting the override block — the same member the tool's own comment,
+the pinning test's docstring and that test's failure message were each dropping too, so
+the set was written down four times and was short in all four.
+`test_the_SKILL_and_the_TOOL_agree_on_WHO_may_pull_the_ratchet_override`'s `sites` dict
+is the ledger that actually fails; this is prose, so enumerate rather than count and read
+it there if the two disagree.
+
+`--override-size-ratchet "<why>"`. The reason is **required**; an empty one is refused
+at argument-validation time with **exit 2**, not 14 — an empty flag is a complaint
+about an ARGUMENT, and returning the rule's own verdict code would tell a caller its
+document grew when the truth is that a flag was blank.
+
+🔴 **The escape is what makes the refusal safe.** `/handoff`'s write path is the only
+step that records a session, and `handoff-write-guard.py` blocks Stop until a handoff
+is written; a refusal with no escape could cost a session its record, which
+`handoff_budget.py`'s own header measures as the worse trade (22 of 253 sessions never
+recorded, ZERO of them because a gate correctly declined). For the same reason
+`size_ratchet_report()` **never raises** — any failure of its own code degrades to "no
+ratchet", never to a crash in the landing step.
+
+An overridden run is recorded **twice, in two channels, neither a backup for the
+other**: a block above the diff at the moment the decision is taken, and
+`Size-Ratchet-Override: <why>` on the commit, which is what survives a transcript
+shipped as a bounded tail. The reason is whitespace-collapsed and clipped for the
+trailer, because `session_trailer.valid_id()` rejects a value over 256 chars or
+carrying a newline and `append_trailer` then returns the message **unchanged** — a
+silent failure that would leave the run claiming a durable record that does not exist.
+
+### What it does NOT do
+
+* It is **not gated on `gate_enforces_budget()`**. Unlike the RED-gate claim in
+  `budget_warning`, this refusal asserts nothing about anyone's CI — it is this tool's
+  own verdict, true in any repo, and a repo shipping no `test_handoff_doc_size.py` is
+  exactly where nothing else would ever notice.
+* It **does not check where the bytes came from or went**. A net-zero delta that
+  deleted a gotcha to pay for a new one satisfies it.
+* It **reaches a doc's first write**, which is not the case it is named for. `before`
+  is 0 for a new doc, so a first write over the ceiling is refused. That is the stated
+  predicate rather than an oversight: rule (n) grandfathers round 1 because it compares
+  a COUNT across rounds and a new doc has no previous round to have grown since, while
+  this rule compares BYTES against a fixed ceiling a new doc can be over on day one.
+* It **prunes no document**. This is the mechanism only.

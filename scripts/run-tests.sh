@@ -2234,7 +2234,24 @@ TARGET_FLOORS=(
   # with the gate still green. 525 is copied verbatim from the gate's own
   # message — this run's count through the documented rule, never
   # arithmetic done by hand here.
-  "scripts/session-analysis/tests|525"
+  #
+  # 2026-09-25, the arc-scoped extractor (#1870): 525 -> 752 collected, +227 in
+  # scripts/session-analysis/tests/test_extract_user_msgs.py. That is past the
+  # DRIFT CEILING, not below the floor — `drift = max(floor/4, 60)` = 131, so
+  # the ceiling was 525+131 = 656 and 752 cleared it. The gate's own function on
+  # this run's own count: `_suggested_floor 752` = 752 - min(50, max(1, 37)) = 715.
+  #
+  # 🔴 THIS IS THE SECOND HALF OF WHAT `tekton/devrc-pytests` WAS RED ON, and the
+  # first half hid it. The check reported `FAILED … passed=24177 skipped=5
+  # failed=0` — identical BEFORE and AFTER the skip-ledger fix, because the
+  # description carries only the test counts and a GUARD failure moves none of
+  # them. TWO guards were red at once; fixing one changed the output not at all,
+  # which reads exactly like "the fix did nothing" and invites reverting it. It
+  # did not do nothing: the skip pin was necessary too (CI runs `-n 8`, so the
+  # xdist pin is inapplicable there and the third battery's skip left observed=5
+  # against 4 applicable pins). When a red's description is byte-identical
+  # across a fix, suspect a SECOND guard rather than a failed fix.
+  "scripts/session-analysis/tests|715"
   "scripts/session-analysis/session_insight/tests|55"
   # 129 -> 116 on 2026-09-07: the initiative TAGGER was removed with the
   # initiatives board, taking test_routing_tag.py (7), the routing half of
@@ -2544,7 +2561,46 @@ TARGET_FLOORS=(
   # ZERO new skips, so EXPECTED_SKIPS is untouched. Read from the AUTHORITATIVE gate:
   #   PASS  scripts/claude-hooks/tests/test_clawgate_writeback_guard.py  (collected=296 passed=296 skipped=0 floor=266)
   #   _suggested_floor 296 = 296 - min(50, max(1, 296/20 = 14)) = 296 - 14 = 282.
-  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|282"
+  #
+  # 2026-09-21, the `muster` widening (Phase 0 step 1 of the clawgate->muster
+  # extraction): 334 -> 374 collected, +40.
+  #
+  # 🔴 THE DELTA WAS RE-MEASURED AND IT MOVED — this line first read "296 -> 374,
+  # +75", taken from the 2026-08-20 entry ABOVE rather than from the tree. That
+  # number was 13 months of other people's growth out of date. Measured by checking
+  # the base-ref test file out and counting it (334), and CHECKED against the gate's
+  # own total: +40 here plus +48 on the interview target is +88, and the gate went
+  # 23828 -> 23916 = +88 on the nose, so nothing else in the suite moved. Read a
+  # recorded count on these lines as history, never as the base you are adding to.
+  # The FLOOR was never wrong (it is measured from the new count, not the delta).
+  #
+  # The +40 exist because both arming patterns
+  # in this hook spelled `clawgatectl` literally, so the rename alone would have
+  # left `tracked_ids` empty and the Stop path reaching NO VERDICT — silent, which
+  # is also what a correctly-written-back session looks like. RED at 23b898d5: 20
+  # of the new cases, incl. the whole-path `test_THE_SILENT_NO_VERDICT_CASE_*`
+  # (measured `reader.calls == []` there — the live read was never attempted).
+  # The rest are the other direction: the bare-word over-match controls (13
+  # commands that must NOT arm a hook that can BLOCK), the compatibility cases for
+  # an env file that has never heard of muster, and the CLI-name SEAM ledger.
+  # ZERO new skips, so EXPECTED_SKIPS is untouched.
+  # +3 of those arrived in review: a Pyright row on `except subprocess.TimeoutExpired`
+  # (a lazily-bound module global) was a FALSE POSITIVE — `_read_task` calls `_sp()`
+  # before either `try` — but it exposed that NEITHER timeout handler had ever been
+  # executed by any test: the only timeout tests assert the NUMBERS handed to `run`.
+  # Three cases now drive a REAL hang through a REAL `subprocess.run(timeout=...)`
+  # and assert the exception TYPE, so an unbound global would surface as the
+  # AttributeError the review predicted rather than as a notice. RED at 23b898d5 in
+  # the trivial sense (the functions did not exist); the claim they pin is new, not
+  # a rename.
+  #   _suggested_floor 374 = 374 - min(50, max(1, 374/20 = 18)) = 374 - 18 = 356.
+  # ⚠ MEASURED BY `pytest <this file> --collect-only -q`, NOT by the nix gate, and
+  # the difference is stated rather than glossed: this is a per-FILE target with
+  # zero skips, so the gate runs exactly this file and its count cannot be moved by
+  # another branch's tests — which is the one case where the two measurements are
+  # the same number. If this line conflicts with a sibling branch, re-run the gate
+  # on the MERGED tree and copy what it prints; do NOT reconcile by hand.
+  "scripts/claude-hooks/tests/test_clawgate_writeback_guard.py|356"
   # 2026-08-20, the clawgate task INTERVIEW gate arrives as a NEW target: 300
   # collected. Large because the non-matches are the load-bearing half of a hook
   # that DENIES — 30 commands that must not trigger, 5 producer launchers, 15
@@ -2559,7 +2615,25 @@ TARGET_FLOORS=(
   #   _suggested_floor 300 = 300 - min(50, max(1, 300/20 = 15)) = 300 - 15 = 285.
   # ZERO new skips, so EXPECTED_SKIPS is untouched. If this line conflicts with a
   # sibling branch, re-run the gate on the MERGED tree and copy what it prints.
-  "scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py|285"
+  #
+  # 2026-09-21, the same `muster` widening on this gate: 313 -> 361 collected, +48.
+  # (First recorded as "300 -> 361" off the stale 2026-08-20 count above; re-measured
+  # against the base-ref file and cross-checked against the gate's own total — see the
+  # writeback entry.) This
+  # hook breaks by NAME only — `PREFILTER`, `basename(argv[0])`, `CREATE_PATHS` —
+  # and the failure is a silent ALLOW of every criteria-less create. RED at
+  # 23b898d5: 41 of the new cases. The `clawgatectl` twin of every parametrized row
+  # is green on both sides and is the regression half; the 12 bare-word rows and the
+  # 5 versioned-path near-misses are the over-match half; and the PREFILTER seam
+  # guard takes its positive control from the CLASSIFIERS rather than from
+  # `evaluate`, which consults the same prefilter and would make it circular.
+  # 21-row mutation battery, PYTHONDONTWRITEBYTECODE=1, 21/21 as expected, incl.
+  # both positive controls and two comment-only SURVIVES controls:
+  # `scripts/tests/mutants-muster-hook-guards.sh`. ZERO new skips.
+  #   _suggested_floor 361 = 361 - min(50, max(1, 361/20 = 18)) = 361 - 18 = 343.
+  # ⚠ Same measurement caveat as the line above: `--collect-only` on this per-FILE
+  # target, not the nix gate. Re-run the gate on the MERGED tree if this conflicts.
+  "scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py|343"
   # 2026-08-25, the gh-issue closing-condition gate arrives as a NEW target: 251
   # collected, 0 skipped, measured on this branch. Gate's own rule applied to the
   # gate's own count:
@@ -3905,6 +3979,39 @@ EXPECTED_SKIPS=(
   # here — that accounting cost is the mechanism, not an oversight.
   "scripts/tests|mutation_battery_handoff_archive_and_cap[.]py has no multi-site row"
   "scripts/tests|mutation_battery_investigation_rename[.]py has no multi-site row"
+  # The THIRD single-site battery, added with `mutation_battery_extract_user_msgs.py`
+  # (#1870). Paying the accounting cost the comment above says is the mechanism.
+  # 🔴 THIS IS WHAT `tekton/devrc-pytests` WAS RED ON, and the shape is worth
+  # keeping: the check reported `FAILED … passed=24177 skipped=5 failed=0` — a
+  # verdict contradicting its own counts, because an UNPINNED SKIP is a GUARD 2
+  # failure and not a test failure. Two audit rounds read that red, could not
+  # attribute it, and correctly declined to blame the diff; it was the diff, via
+  # a guard that fails with zero failing tests. If you land a battery with no
+  # multi-site row and CI goes red with `failed=0`, look here first.
+  "scripts/tests|mutation_battery_extract_user_msgs[.]py has no multi-site row"
+  # The FOURTH, added with `mutation_battery_arc_extractor_footer.py` — the arc
+  # footer that names that same extractor. 🔴 THE COMMENT ABOVE PAID OFF EXACTLY AS
+  # WRITTEN: a local `scoped-tests.sh` run went `RESULT: FAIL (exit=1)` over
+  # `passed=364 skipped=4 failed=0`, and its "look here first" is what attributed
+  # it in one read instead of another two rounds. The accounting cost is the
+  # mechanism — a battery added to `BATTERIES` without a line here is a silently
+  # collapsed skip group, so land both in the SAME commit.
+  "scripts/tests|mutation_battery_arc_extractor_footer[.]py has no multi-site row"
+  # The FIFTH, added with `mutation_battery_operator_asks.py` (#1887 — round 0's
+  # attribution block). 🔴 AND THE "LOOK HERE FIRST" ABOVE PAID OFF A SECOND TIME,
+  # ON THE SAME SHAPE, WITH ONE EXTRA TWIST WORTH RECORDING: the check read
+  # `FAILED … collected=24348 passed=24341 skipped=7 failed=0` while `main` read
+  # `collected=24297 passed=24291 skipped=6 failed=0` and SUCCESS. **The whole
+  # signal was the skip count, 6 -> 7** — the verdict contradicted its own
+  # `failed=0`, exactly as predicted, and diffing the two descriptions attributed
+  # it in one read.
+  # ⚠ WHY IT TOOK FOUR AUDIT ROUNDS TO GET HERE ANYWAY: every local run on that
+  # branch was `python3 -m pytest <paths>`, which bypasses this guard entirely
+  # (`CLAUDE.md` says so in as many words), and nobody ran `gh pr checks` until
+  # round 3. A guard that only the guarded runner can fire is invisible to a
+  # subset run, and "999 tests green" was true of a selection that could not
+  # contain it. Land the battery and this line in the SAME commit.
+  "scripts/tests|mutation_battery_operator_asks[.]py has no multi-site row"
 )
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
 # carried two regression pins against the LIVE datapacket-talos skill corpus, a
@@ -4760,9 +4867,15 @@ done
 # `test_base_clone_staleness.sh` is here from birth rather than being found
 # ungated later, which is the only difference between it and the two above. It
 # covers `scripts/claude-hooks/base-clone-staleness.sh`, a SessionStart hook that
-# WRITES to a clone's working tree (`git checkout <upstream> -- CLAUDE.md
-# .claude/skills/`), so an unrun suite here is an unguarded write path, not just
-# an unmeasured helper. Hermetic: its fixtures are local bare repos under a
+# WRITES to a clone's working tree (`git checkout <upstream> -- <paths>`, and a
+# bounded `rm -f`/`rmdir` for upstream deletions), so an unrun suite here is an
+# unguarded write path, not just an unmeasured helper.
+#
+# ⚠️ That parenthesis used to enumerate the paths -- `CLAUDE.md .claude/skills/` --
+# and was already stale when `AGENTS.md` joined the array, before the two `.claude/`
+# wiring entries did. The hook's own `REFRESH_PATHS` is the one list; read it there.
+#
+# Hermetic: its fixtures are local bare repos under a
 # mktemp dir — no network, no real remote, and every commit carries its identity
 # via `git -c user.email=…`, so it needs nothing from the operator's gitconfig
 # and stays inside GUARD 10's isolation.

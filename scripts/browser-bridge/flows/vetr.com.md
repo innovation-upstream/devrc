@@ -1,12 +1,13 @@
 # vetr.com — two lanes, the auth seed, and the modal that eats every click
 
-**Load this when:** a result envelope named this file in `site_notes` · you are
+**Load this when:** a result envelope named this file in `site_flows` · you are
 about to drive or read `app.vetr.com` / `api.vetr.com` / `admin.vetr.com` · you
 are pointing the bridge at the LOCAL hermetic E2E stack (`127.0.0.1:5174`) ·
 an authed vetr read looks logged-OUT · a vetr page renders but every click is
 swallowed · you are about to conclude vetr is broken from a browser read.
 
-Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md`.
+Core: `~/workspace/devrc/scripts/browser-bridge/SKILL.md` (`reference/…` paths
+below resolve from that bridge dir).
 Mechanism files stay authoritative for mechanism: throttling and `wake` →
 `reference/spa-wake.md`; hit-testing → `reference/css-hit-test.md`; iframes and
 OOPIFs → `reference/frames-cdp.md`; proving a read is the live authenticated
@@ -39,7 +40,7 @@ bridge has NO such guard.** Nothing stops you. So:
 `localhost` resolve to **nothing**. Lane A — the lane where you are actually
 allowed to click — is therefore the lane that will **never** hand you these notes.
 Load this file deliberately when you bring the stack up, and brief it into any
-`browser agent` yourself (the agent never sees `site_notes` at all).
+`browser agent` yourself (the agent never sees `site_flows` at all).
 
 🔴 **Lane B never `click`s a money or write control.** "Just checking the button
 works" on prod is a charge. If a question needs a click, bring up Lane A.

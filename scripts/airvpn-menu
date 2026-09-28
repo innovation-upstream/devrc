@@ -471,9 +471,14 @@ def notify(summary, body=""):
 
 def refresh_bar():
     """Force the airvpn block to re-render (signal 10) + kick the poller so the
-    cache reflects the new tunnel state promptly."""
+    cache reflects the new tunnel state promptly. Both poller unit names are
+    tried: `bar-status-poll` (the workbench's eight-source poller) and
+    `airvpn-status-poll` (the laptop's single-source writer) — a unit that
+    does not exist on this host simply fails and is suppressed, so the same
+    menu runs on both hosts and refreshes whichever writer it has."""
     for argv in (["pkill", "-RTMIN+10", "i3status-rs"],
-                 ["systemctl", "--user", "start", "bar-status-poll.service"]):
+                 ["systemctl", "--user", "start", "bar-status-poll.service"],
+                 ["systemctl", "--user", "start", "airvpn-status-poll.service"]):
         try:
             subprocess.run(argv, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=5)

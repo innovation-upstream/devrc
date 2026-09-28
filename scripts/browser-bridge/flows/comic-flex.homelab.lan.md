@@ -1,10 +1,11 @@
 # comic-flex.homelab.lan — the LAN lane of comic-flex
 
-**Load this when:** a result envelope named this file in `site_notes` · you are
+**Load this when:** a result envelope named this file in `site_flows` · you are
 driving the comic-flex PWA over the LAN · a `js`/`eval` came back `null` here.
 
 🔴 **The flows, selectors and traps live in one place:
-`reference/sites/comics.zacx.dev.md`. Read that.** This host is the same app on
+`~/workspace/devrc/scripts/browser-bridge/flows/comics.zacx.dev.md`. Read
+that.** This host is the same app on
 the same image; only the two facts below differ, and both change what a pass means.
 
 1. 🔴 **No Authelia.** Plain `http://comic-flex.homelab.lan` is open on the LAN —

@@ -26,6 +26,11 @@ import {
   isStale,
   stalenessLabel,
 } from "./lib/timefmt.js";
+import {
+  WARN_PCT,
+  toneColor,
+  toneForRecord,
+} from "./lib/severity.js";
 
 export const ALARM_NAME = "cu-reprobe";
 export const REPROBE_PERIOD_MIN = 15;
@@ -33,7 +38,10 @@ export const REPROBE_PERIOD_MIN = 15;
 // the same tab within seconds; only one of them may trigger a probe.
 export const PROBE_MIN_INTERVAL_MS = 30 * 1000;
 export const TOAST_DEDUP_MS = 30 * 60 * 1000;
-export const ALERT_THRESHOLD_PCT = 80;
+// The toast threshold IS the shared warn band -- one number, not two that a
+// test asserts are equal. A test can only catch a drift that has already been
+// written; this cannot drift.
+export const ALERT_THRESHOLD_PCT = WARN_PCT;
 
 const CLAUDE_AI_HOST = "claude.ai";
 const CLAUDE_AI_MATCH = ["https://claude.ai/*"];
@@ -212,17 +220,7 @@ export function summaryToastText(record, now) {
 
 // --- badge ------------------------------------------------------------------- //
 
-const SEVERITY_COLORS = {
-  critical: "#d93025",
-  high: "#d93025",
-  elevated: "#f9ab00",
-  medium: "#f9ab00",
-  low: "#31a73c",
-  none: "#31a73c",
-};
-const COLOR_OK = "#31a73c";
-const COLOR_UNKNOWN = "#f9ab00";
-const COLOR_STALE = "#80868b";
+const COLOR_STALE = toneColor("stale");
 
 export function formatBadgePct(p) {
   if (p === null || p === undefined) return "?";
@@ -231,15 +229,15 @@ export function formatBadgePct(p) {
   return String(n);
 }
 
-export function severityColor(severity) {
-  if (typeof severity !== "string" || !severity) return COLOR_OK;
-  return SEVERITY_COLORS[severity] || COLOR_UNKNOWN;
-}
-
 /**
  * Badge for the ACTIVE account's session %: {text, color, title}, or null to
- * clear. Color follows severity; gray wins when the record is stale (>6h or
- * 401/403'd) -- a gray badge is the honest "this number is old" signal.
+ * clear. Gray wins when the record is stale (>6h or 401/403'd) -- a gray badge
+ * is the honest "this number is old" signal.
+ *
+ * Colour comes from lib/severity.js, the SAME predicate the in-page widget
+ * uses, so the toolbar and the page cannot disagree about one record. They did
+ * before: the badge read the API's severity string and the widget banded the
+ * percentages.
  */
 export function badgeFor(accounts, lastActiveOrg, now) {
   const rec = accounts && lastActiveOrg ? accounts[lastActiveOrg] : null;
@@ -247,7 +245,7 @@ export function badgeFor(accounts, lastActiveOrg, now) {
     return { text: "", color: COLOR_STALE, title: "Claude Usage Tracker — no active account yet" };
   }
   const stale = isStale(rec.asOf, now) || rec.staleSince !== null;
-  const color = stale ? COLOR_STALE : severityColor(rec.severity);
+  const color = toneColor(toneForRecord(rec, now, isStale));
   const s = pct(rec.session && rec.session.utilization);
   const text = stale && s === null ? "" : formatBadgePct(s);
   const asOfLine = stalenessLabel(rec.asOf, now);
@@ -280,6 +278,46 @@ async function notify(title, message) {
  * and (deduped) toasts. A 401/403 marks accounts stale SILENTLY -- never a
  * toast, which is what would turn a logged-out week into notification spam.
  */
+/**
+ * 🔴 REPORTS ARE SERIALIZED, AND THAT IS LOAD-BEARING, NOT TIDINESS.
+ *
+ * `handleReport` is a read-modify-write over chrome.storage: it `await
+ * readState()`s, decides which toasts are not within their dedup window, then
+ * `await writeState()`s the updated `lastToast`. Two reports in flight at once
+ * both read the OLD `lastToast`, both conclude nothing has been toasted, and
+ * both fire — so the operator gets the same notification twice.
+ *
+ * That is not hypothetical and it is the DEFAULT path, not a rare interleave.
+ * ONE page load produces TWO reports by design: content_probe.js auto-runs at
+ * `document_idle`, and independently `onTabUpdated` fires at status
+ * "complete" and asks the probe to run again. `PROBE_MIN_INTERVAL_MS` gates
+ * the worker's ASK; it does not gate the content script's auto-run, and
+ * nothing gated these two handlers against each other because `onMessage`
+ * fires them with `void handleReport(...)` — fire-and-forget, no ordering.
+ *
+ * REPORTED BY THE OPERATOR: two identical system notifications on opening
+ * claude.ai. Reproduced in node: the same two reports awaited SEQUENTIALLY
+ * produce 1 notification, and run CONCURRENTLY produce 2.
+ *
+ * The toasts are the visible half. The same window silently loses ACCOUNT
+ * writes: both invocations build `accounts` from their own snapshot, so the
+ * second write erases anything the first added — including a history sample.
+ *
+ * In-memory chain, deliberately: MV3 tears this worker down after ~30s idle,
+ * which resets it. That is correct — reports from different wakes cannot
+ * overlap — and the chain never needs persisting.
+ */
+let reportQueue = Promise.resolve();
+
+export function enqueueReport(msg) {
+  // The `.catch` goes INSIDE the chain: without it one rejecting report would
+  // poison `reportQueue` and every later report would be dropped silently.
+  reportQueue = reportQueue.then(
+    () => handleReport(msg).catch(() => ({ ok: false, error: "handler-threw" })),
+  );
+  return reportQueue;
+}
+
 export async function handleReport(msg) {
   if (!isObj(msg) || msg.type !== "cu:usage-report") {
     return { ok: false, error: "bad-message" };
@@ -342,7 +380,23 @@ export async function handleReport(msg) {
   // an account SWITCH gets its own kind so it always reads as news.
   const activeUuid = typeof msg.activeUuid === "string" ? msg.activeUuid : null;
   const activeRec = activeUuid ? accounts[activeUuid] : null;
-  if (activeRec && activeRec.staleSince === null) {
+
+  // 🔴 AN ALERT ALREADY SAID THIS, MORE URGENTLY. The summary is the ambient
+  // "here is where you are" toast; a threshold/locked/credits alert for the
+  // SAME account carries the same numbers with a reason attached. Firing both
+  // means crossing 80% hands the operator two notifications at once —
+  // "Claude usage — session threshold" immediately followed by the account
+  // summary — which is what he reported, and it needs no concurrency at all:
+  // one report, one handler, two toasts.
+  //
+  // This is the same suppression the `switch` kind already performs below by
+  // recording the `summary` key alongside its own; it simply was never
+  // applied to the alert path. The alert wins because it is strictly more
+  // informative, and the summary's dedup slot is consumed (see newLastToast)
+  // so the next report inside the window does not deliver it late.
+  const alertedActive = fired.some((f) => f.orgUuid === activeUuid);
+
+  if (activeRec && activeRec.staleSince === null && !alertedActive) {
     const switched = detectSwitch(lastActiveOrg, activeUuid);
     const kind = switched ? "switch" : "summary";
     if (!withinDedup(lastToast, activeUuid, kind, now)) {
@@ -365,6 +419,12 @@ export async function handleReport(msg) {
     // A switch toast IS the account summary in content: record both kinds,
     // so a page-open right after a switch cannot re-toast the same thing.
     if (alert.kind === "switch") newLastToast[toastKey(orgUuid, "summary")] = now;
+    // Same reasoning for every OTHER alert kind: it has just delivered the
+    // account's numbers, so it consumes the summary's dedup slot. Without
+    // this the summary is not suppressed but merely DELAYED — the next
+    // report inside the window would deliver it, which reads as a stray
+    // duplicate arriving minutes after the alert.
+    else newLastToast[toastKey(orgUuid, "summary")] = now;
   }
 
   if (activeUuid) lastActiveOrg = activeUuid;
@@ -421,7 +481,8 @@ export async function probeExistingTabs() {
  */
 export function onMessage(msg, sender, sendResponse) {
   if (isObj(msg) && msg.type === "cu:usage-report") {
-    void handleReport(msg).catch(() => {});
+    // enqueueReport, never handleReport directly — see the comment above it.
+    void enqueueReport(msg);
     sendResponse({ ok: true });
     return false;
   }

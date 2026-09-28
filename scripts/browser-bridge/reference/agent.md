@@ -117,13 +117,13 @@ is not a correctness check. The real protections are (a) the deterministic
 auto-`wake` below, and (b) escalation being cheap — taking over from the agent costs
 ~200 tokens, which is why agent-first wins even at a low success rate.
 
-## 🔴 The agent never sees `site_notes` — brief those flows in yourself
+## 🔴 The agent never sees `site_flows` — brief those flows in yourself
 
-`server.py` puts `site_notes` on the **envelope root**; the typed tool's
+`server.py` puts `site_flows` on the **envelope root**; the typed tool's
 `summarizeResult` reads `envelope.data`. Measured across every op the agent can
 reach: **none forwards it.** So on a registered host the agent runs without that
 site's operating notes — the sign-in, account-switch, picker and wizard flows, and
-the reads that lie there. That is exactly the failure `SKILL.md`'s sites row calls
+the reads that lie there. That is exactly the failure `SKILL.md`'s FLOWS rule calls
 "how a one-click flow gets reported to the operator as a blocker".
 
 It stays dropped on purpose: the value is a repo-relative **path**, and the agent
@@ -131,15 +131,15 @@ def denies every built-in tool including `read` (`opencode/browser-agent.md`:
 `"*": deny` / `browser: allow`). Forwarding it would hand the model a filename it
 cannot open, on every op of every run.
 
-**How to tell a host is site-noted — BEFORE you dispatch.** You cannot get it from
+**How to tell a host HAS flows — BEFORE you dispatch.** You cannot get it from
 `SKILL.md` (a test forbids it from naming individual sites, so it does not grow as
 sites are added). Two ways, both cheap:
 
 ```bash
 # the registry itself — the authoritative list, one file
-cat ~/workspace/devrc/scripts/browser-bridge/reference/sites/_index.json
+cat ~/workspace/devrc/scripts/browser-bridge/flows/_index.json
 
-# or drive it yourself and read `.result.site_notes` off the SECOND envelope.
+# or drive it yourself and read `.result.site_flows` off the SECOND envelope.
 # 🔴 TWO commands, and the FIRST one's answer is a decoy — see below.
 browser --instance <key> open && browser --instance <key> nav <url>
 ```
@@ -153,28 +153,28 @@ browser --instance <key> open && browser --instance <key> nav <url>
   you will sometimes skip, and skipping this one navigates the operator's live tab
   out from under them. `open` is idempotent by reuse (it returns your existing
   tabId, `reused: true`, and navigates nothing), so running it always is free.
-* 🔴 **`open`'s OWN envelope may carry a `site_notes` — for the WRONG host.
-  Discard it.** `_annotate_site_notes` is not gated on the op, and `open`'s reuse
+* 🔴 **`open`'s OWN envelope may carry a `site_flows` — for the WRONG host.
+  Discard it.** `_annotate_site_flows` is not gated on the op, and `open`'s reuse
   branch returns your existing tab's REAL url, so if that tab sits on a registered
   host the first command annotates for THAT site. Grep the combined output of the
-  two commands and you can find exactly one `site_notes` pointing at a site that is
+  two commands and you can find exactly one `site_flows` pointing at a site that is
   not your target — the false positive described below, manufactured by the check
   itself. Read the SECOND envelope, or run the two commands separately.
-* **Read `site_notes` off the `nav` result, NOT a following `context`.** `nav`
+* **Read `site_flows` off the `nav` result, NOT a following `context`.** `nav`
   returns `url: cmd.url` — the url you ASKED for — and the server derives the
-  annotated host from that (`_domain_from_result` → `_annotate_site_notes`), so the
+  annotated host from that (`_domain_from_result` → `_annotate_site_flows`), so the
   answer is deterministic. `context` reports `tab.url`, the **committed** url, which
   is still the OLD host until the new document commits: on a slow DNS/TLS/redirect
   it answers for the previous page. Both stale directions are wrong and neither is
   loud — an unregistered previous host says "not registered" (→ you dispatch blind,
-  the failure this section exists to prevent) and a registered one says "site-noted"
-  for a site that is not your target (→ you go read the wrong flows).
+  the failure this section exists to prevent) and a registered one says the site is
+  flow-noted for a host that is not your target (→ you go read the wrong flows).
 
 Matching is host-suffix on **label boundaries**, longest key wins: a key matches
 that host and any subdomain of it, never `notexample.test` and never
 `example.test.evil.invalid`.
 
-**If it is site-noted, you have three options** — in order of preference:
+**If the host is flow-noted, you have three options** — in order of preference:
 
 1. **Drive it yourself.** The flows are multi-step and stateful; that is what the
    notes are for.

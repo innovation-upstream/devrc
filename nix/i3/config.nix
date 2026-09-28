@@ -331,6 +331,12 @@ for_window [class="float" instance="mention-open"] floating enable, move positio
 # bindings, and this file is the only i3 config in the repo — so there is no prior
 # art here to argue from.
 for_window [class="float" instance="mention-review"] floating enable, resize set ${reviewSizePpt}, move position center
+# The transcript TUI: a bubbletea program in an alacritty spawned with
+# `--class stt-voice,stt-voice` (spawnTUI in cmd/stt-voice/main.go — the class
+# is ONE value spelled in TWO files, pinned by test_i3_stt_voice.py). i3 only
+# floats + centres; alacritty sizes itself via -o window.dimensions (the
+# picker/mention-review precedent: one geometry decision, one place).
+for_window [class="stt-voice"] floating enable, move position center
 # 🔴 `(?i)` IS LOAD-BEARING, not decoration. i3 criteria are PCRE and
 # CASE-SENSITIVE by default (the userguide's "case-insensitive" examples are
 # showing you how to opt IN with `(?i)`), and `class` matches the SECOND field
@@ -345,6 +351,29 @@ ${rigControlFloat}
 
 # Terminal
 bindsym $mod+Return exec [ ! "$I3CONFIG_DEFAULT_TERMINAL" = "" ] && $I3CONFIG_DEFAULT_TERMINAL || i3-sensible-terminal
+
+# Hold-to-talk voice input (stt-voice): press = start recording, release =
+# stop + transcribe + open the transcript TUI. The bar pill's left-click
+# (sttBlock in nix/graphical.nix → scripts/i3status-stt) is the SECOND
+# trigger source; both funnel into the Go tool's one state machine.
+#
+# 🔴 THE PAIR IS THE FEATURE. `--release` is what makes it hold-to-talk: the
+# stop command is a no-op while nothing is recording, so a stray release
+# cannot invent a transcript. Both commands are fire-and-forget from i3's
+# perspective (start blocks for the length of the recording as its own
+# supervisor process — that is by design; i3 exec does not wait).
+#
+# 🔴 NO Esc BINDING HERE, DELIBERATELY. The cancel path exists
+# (`stt-voice cancel`, documented in the tool's header) but a GLOBAL Escape
+# grab would swallow Esc from every focused application — the exact class of
+# mistake game mode's design avoids (a grab means the app NEVER sees the
+# key), and i3 has no conditional grabs to scope it with (test_i3_game_mode.py
+# documents why: bindsym takes no criteria). The second Esc path the spec
+# names is the TUI's own Esc key, inside the transcript window only.
+#
+# The TUI floats centered via the for_window rule below (class="stt-voice").
+bindsym $mod+equal exec --no-startup-id stt-voice start
+bindsym --release $mod+equal exec --no-startup-id stt-voice stop
 
 # Kill focused window
 bindsym $mod+Shift+q kill
@@ -390,7 +419,6 @@ bindsym $mod+f fullscreen toggle
 # tabbed moved off $mod+w (was) so Alt+w passes through to tmux scratch11 (Wheat)
 bindsym $mod+Shift+t layout tabbed
 bindsym $mod+e layout toggle split
-bindsym $mod+equal exec --no-startup-id ~/workspace/devrc/scripts/i3-grid
 
 # Floating
 bindsym $mod+Shift+space floating toggle
