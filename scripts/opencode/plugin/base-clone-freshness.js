@@ -66,10 +66,21 @@ export const BaseCloneFreshnessPlugin = async () => ({
       // guard_core.py: $HOME/.config/opencode/base-clone-staleness.sh.
       const script = join(homedir(), ".config", "opencode", "base-clone-staleness.sh");
 
+      // 🔴 Pass the SESSION's cwd through. The staleness script resolves its
+      // target repo from ITS OWN cwd (`git rev-parse --show-toplevel`), so a
+      // child spawned without `cwd` would inspect the directory opencode was
+      // LAUNCHED from — not the repo this session is working in. `shell.env`
+      // delivers the bash tool's per-call cwd as `input.cwd`; undefined falls
+      // back to the inherited cwd.
+      const dir = input && typeof input.cwd === "string" && input.cwd !== ""
+        ? input.cwd
+        : undefined;
+
       // 🔴 Fire-and-forget: spawn + unref, never awaited. This sits in the bash
       // tool's pre-spawn critical path and must never run synchronously here.
       // Use `bash` explicitly so it works regardless of the executable bit.
       const child = spawn("bash", [script], {
+        cwd: dir,
         detached: true,
         stdio: "ignore",
         timeout: 60000,

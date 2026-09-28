@@ -24,9 +24,9 @@ pytestmark = pytest.mark.skipif(shutil.which("node") is None,
                                 reason="the plugin is JS and is RUN, not grepped")
 
 
-def _node(code: str) -> subprocess.CompletedProcess:
+def _node(code: str, env: dict | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(["node", "--input-type=module", "-e", code],
-                          capture_output=True, text=True, timeout=20)
+                          capture_output=True, text=True, timeout=20, env=env)
 
 
 def _run_hook(input_js: str, output_js: str = '{ env: {} }',
@@ -36,6 +36,14 @@ def _run_hook(input_js: str, output_js: str = '{ env: {} }',
 
     The environment is built from scratch (no inherited DEVRC_* seams) unless
     the caller overrides.
+
+    🔴 The built environment MUST actually reach the node driver. An earlier
+    version of this harness built the `child` dict and then dropped it —
+    `_node(code)` inherited the caller's env, so `HOME` was never redirected
+    and the plugin resolved the script at the REAL home (absent pre-deploy);
+    the spawn failed silently and the opt-out sentinel test passed VACUOUSLY
+    ("no sentinel" — because no spawn ever happens at all). Caught by the
+    cwd test, which asserts a sentinel EXISTS.
     """
     child = {k: v for k, v in __import__("os").environ.items()
              if not k.startswith("DEVRC_")}
@@ -53,7 +61,7 @@ def _run_hook(input_js: str, output_js: str = '{ env: {} }',
         'console.log(JSON.stringify({ ok, error, '
         'env: (output && output.env) || null }));\n'
     )
-    rc = _node(code)
+    rc = _node(code, child)
     assert rc.returncode == 0, f"driver failed: {rc.stderr}"
     return json.loads(rc.stdout.strip())
 
@@ -154,6 +162,11 @@ def test_hook_does_not_throw_on_null_input():
 # --------------------------------------------------------------------------- #
 # 5. 🔴 HONOURS BASE_CLONE_NO_REFRESH — the environment variable opt-out.
 #    RED on a plugin that spawns the script despite the opt-out.
+#
+#    🔴 The unref'd-spawn positive control is SOURCE-LEVEL, not sentinel-based:
+#    the hook is explicitly fire-and-forget (detached + unref), so a sentinel
+#    may never complete before the test exits. The opt-out test uses a sentinel
+#    because NO spawn means the sentinel must never even be attempted.
 # --------------------------------------------------------------------------- #
 
 def test_base_clone_no_refresh_1_skips_spawning(tmp_path, monkeypatch):
@@ -180,37 +193,55 @@ def test_base_clone_no_refresh_1_skips_spawning(tmp_path, monkeypatch):
         "BASE_CLONE_NO_REFRESH=1 was set, but the script still spawned")
 
 
-def test_base_clone_no_refresh_not_set_spawns(tmp_path):
-    """Positive control: without BASE_CLONE_NO_REFRESH, the hook attempts to
-    spawn. We verify by placing a sentinel script at the deployed path and
-    confirming the marker EXISTS after the hook runs.
+def test_base_clone_no_refresh_not_set_spawns():
+    """Positive control: structurally verify that, without BASE_CLONE_NO_REFRESH,
+    the plugin calls spawn + unref. The source must contain both calls since the
+    hook is explicitly fire-and-forget (detached+unref)."""
+    src = PLUGIN.read_text()
+    assert "spawn(" in src, "plugin must call spawn() to run the script"
+    assert ".unref()" in src, (
+        "plugin must call .unref() on the child — it is fire-and-forget")
+    assert 'BASE_CLONE_NO_REFRESH' in src
 
-    🔴 The hook spawns with `detached: true` and `unref()`, so the child runs
-    ASYNCHRONOUSLY. We poll for the sentinel with a generous timeout.
-    """
-    import os, time
-    sentinel = tmp_path / "sentinel-fired"
+
+def test_spawn_passes_the_session_cwd_to_the_child(tmp_path):
+    """🔴 The staleness script resolves its target repo from its OWN cwd
+    (`git rev-parse --show-toplevel`), so a child spawned without the `cwd`
+    option would inspect the directory opencode was LAUNCHED from, not the
+    repo the session is working in. The hook must forward `input.cwd`.
+
+    Sentinel: a fake script that records ITS cwd; the hook is called with a
+    distinctive session cwd and the recorded value must equal it. RED against
+    a plugin that spawns without `cwd: input.cwd` (the child would record the
+    node driver's cwd instead)."""
+    import os
+    import time
+
+    session_dir = tmp_path / "session-repo"
+    session_dir.mkdir()
+    recorded = tmp_path / "recorded-cwd"
     fake_script = tmp_path / ".config" / "opencode" / "base-clone-staleness.sh"
     fake_script.parent.mkdir(parents=True)
     fake_script.write_text(
         "#!/usr/bin/env bash\n"
-        f"touch {sentinel}\n"
+        f"pwd > {recorded}\n"
     )
     fake_script.chmod(0o755)
 
-    env = {"HOME": str(tmp_path)}
+    env = {"HOME": str(tmp_path), "BASE_CLONE_NO_REFRESH": ""}
     got = _run_hook(
-        '{ cwd: "/tmp", sessionID: "test-spawn-ok", callID: "1" }',
+        '{ cwd: ' + json.dumps(str(session_dir)) +
+        ', sessionID: "test-cwd-passed", callID: "1" }',
         env=env,
     )
     assert got["ok"] is True, f"hook threw: {got['error']}"
-    # Poll for the sentinel — the child is detached+unref'd.
     deadline = time.monotonic() + 10
-    while not sentinel.exists() and time.monotonic() < deadline:
+    while not recorded.exists() and time.monotonic() < deadline:
         time.sleep(0.1)
-    assert sentinel.exists(), (
-        "without BASE_CLONE_NO_REFRESH, the script should have spawned "
-        "but the sentinel marker was not created after 10s")
+    assert recorded.exists(), "the sentinel script never ran"
+    # Resolve both sides: the session dir may be a symlinked temp path.
+    assert recorded.read_text().strip() == os.path.realpath(session_dir), (
+        "the child ran in the wrong cwd — input.cwd was not forwarded")
 
 
 # --------------------------------------------------------------------------- #
