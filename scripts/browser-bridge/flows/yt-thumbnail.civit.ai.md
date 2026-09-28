@@ -57,15 +57,28 @@ REAL generation**, and a real generation is blocked twice over:
    the user consents**, so a submit 403s while the manifest and the runtime both
    look correct. Clicking that button is an **account consent action** — an
    operator decision, never an agent's.
-2. **The spend gate.** `pm-generate` is a billing control. A `--frame` click is
-   dispatched synthetically (`trusted:false`) and **does nothing** on it. Do not
-   report that as a defect and 🔴 **do not "fix" it by dropping `--frame`** —
-   that silently upgrades the event to `trusted:true`. See `civit.ai.md` for why
-   the old "the spend path rejects untrusted events" explanation is RETRACTED and
-   what actually gates spend.
+2. 🔴 **The spend gate is LIVE, not a wall — a `--frame` click DOES drive it and
+   DOES spend real Buzz.** Measured 2026-09-28 on 0.1.3: a framed `click` on
+   `[data-testid=pm-generate]` submitted two workflows, debited **6 Buzz** from
+   the Blue account and returned two real images. An earlier draft of this file
+   said a synthetic in-frame click does nothing on a billing control; that is
+   **retracted**. Never fire one to find out whether it works.
+
+   The trap that produced the false claim: `pm-generate` is `disabled` until the
+   prompt is non-empty, **and the prompt field's placeholder reads exactly like
+   a filled-in value** (`a serene mountain lake at golden hour, highly
+   detailed`). Clicking the disabled button reports `ok: true` and changes
+   nothing — indistinguishable from a swallowed untrusted event. **`type` into
+   the prompt first, then read `.disabled`.** Never infer a trust boundary from
+   a dead click.
+
+   Still true: do not "fix" a dead click by dropping `--frame`. A top-frame
+   click arrives `trusted:true`, which is a genuine trust upgrade regardless.
 
 So: **a full-flow capture of this block costs the operator's Buzz and their
-consent.** Say that up front rather than discovering it at the picker.
+consent** — about **3 Buzz per image per format** on the default SDXL
+checkpoint (6 for two formats at quantity 1; FLUX is ~33). Say that up front and
+get a go-ahead, rather than discovering it after the debit.
 
 ## States
 
