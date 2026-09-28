@@ -9797,3 +9797,119 @@ class TestTheRefusingExitCodesAreASPANNotALiteral:
                        update=clean_update(tmp_path))
         assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
         assert f"exited {code}" in res.stdout, res.stdout
+
+
+# --- rule (o): the leak opt-in's MEMORY ------------------------------------
+#
+# 🔴 THESE EXIST BECAUSE THE OPT-IN'S FOURTH USE PUBLISHED A LEAK. Measured on
+# one arc: four consecutive handoff commits carried `Leak-Gate-Approved:`.
+# Scanning each committed tree afterwards, the first three were CLEAN — what
+# they approved through was genuinely not in what they committed, which is what
+# the flag is for — and the fourth committed three `denied-identifier` findings
+# to `main` of a PUBLIC repository. From inside, the fourth run was
+# indistinguishable from the three honest ones.
+#
+# ⚠ THIS IS NOT THE ATTRIBUTION `leak_gate` REJECTS. That rejection is about
+# "did THIS delta cause the findings", which needs two scans and is a guess.
+# The streak is an exact fact already in the repository, read with one
+# `git log`, and it answers a different question: how long has this been going
+# on.
+
+
+def _commit_doc(work: Path, body: str, message: str) -> None:
+    """One more commit touching the handoff doc, with `message` verbatim."""
+    (work / "claudedocs" / "handoff-sample-topic.md").write_text(
+        body, encoding="utf-8"
+    )
+    _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=work)
+    _sh("git", "commit", "-q", "-m", message, cwd=work)
+
+
+APPROVED_MSG = (
+    "docs(handoff): a write that took the opt-in\n\n"
+    f"{hd.LEAK_TRAILER_KEY}: tests/leakscan.py exit=1\n"
+)
+CLEAN_MSG = "docs(handoff): a write the scanner vouched for\n"
+
+
+def test_the_streak_counts_an_unbroken_run_and_stops_at_the_first_clean_one(
+    repo: Path,
+) -> None:
+    rel = "claudedocs/handoff-sample-topic.md"
+    # seed (clean) → approved → approved → approved
+    for i in range(3):
+        _commit_doc(repo, f"{BASE_DOC}\n<!-- {i} -->\n", APPROVED_MSG)
+    assert hd.consecutive_leak_approvals(repo, rel) == 3
+
+    # A clean write BREAKS the run — the next approval is the first again.
+    _commit_doc(repo, f"{BASE_DOC}\n<!-- clean -->\n", CLEAN_MSG)
+    assert hd.consecutive_leak_approvals(repo, rel) == 0, (
+        "a write the scanner vouched for must reset the streak; a count that "
+        "kept rising would say 'this has been going on' about a run that ended"
+    )
+
+
+def test_the_streak_ignores_approvals_on_OTHER_files(repo: Path) -> None:
+    """The walk is scoped to the doc's own path, so another document's habit
+    cannot inflate this one's number — the count has to be about the artifact
+    the operator is being warned over."""
+    rel = "claudedocs/handoff-sample-topic.md"
+    other = repo / "claudedocs" / "handoff-other-topic.md"
+    for i in range(3):
+        other.write_text(f"other {i}\n", encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-other-topic.md", cwd=repo)
+        _sh("git", "commit", "-q", "-m", APPROVED_MSG, cwd=repo)
+    assert hd.consecutive_leak_approvals(repo, rel) == 0
+
+
+def test_the_streak_does_not_count_a_commit_that_merely_MENTIONS_the_trailer(
+    repo: Path,
+) -> None:
+    """🔴 THE ANCHOR IS THE START OF A LINE, AND THIS IS WHY. This repository's
+    own commits discuss `Leak-Gate-Approved` in prose — including the one that
+    adds this test. A substring check would count them and report a streak
+    nobody took."""
+    rel = "claudedocs/handoff-sample-topic.md"
+    _commit_doc(
+        repo,
+        f"{BASE_DOC}\n<!-- prose -->\n",
+        "docs: explain what a `Leak-Gate-Approved:` trailer means\n\n"
+        "The text mentions Leak-Gate-Approved: but does not carry one.\n",
+    )
+    assert hd.consecutive_leak_approvals(repo, rel) == 0
+
+
+def test_the_streak_is_UNKNOWN_rather_than_zero_when_git_cannot_answer(
+    tmp_path: Path,
+) -> None:
+    """⚠ A FAILED COMMAND IS NOT A ZERO. Reporting 0 here would be the
+    reassuring-zero defect this number exists to fight: it would tell the
+    operator 'this is the first time' in exactly the case nothing was read."""
+    not_a_repo = tmp_path / "bare-dir"
+    not_a_repo.mkdir()
+    assert (
+        hd.consecutive_leak_approvals(not_a_repo, "anything.md") is None
+    )
+
+
+def test_the_approval_banner_CARRIES_the_streak(repo: Path) -> None:
+    """🔴 THE REGRESSION CASE. The banner was already loud — it said in as many
+    words that nothing had been checked — and four sessions read it and
+    proceeded. What it could not say is that they were the fourth. This asserts
+    the number reaches the text the operator actually reads; the unit tests
+    above are about the count, and a correct count nobody is shown is the
+    defect, not the fix."""
+    rel = "claudedocs/handoff-sample-topic.md"
+    for i in range(3):
+        _commit_doc(repo, f"{BASE_DOC}\n<!-- {i} -->\n", APPROVED_MSG)
+
+    note = hd.leak_approved_note(
+        "tests/leakscan.py",
+        repo,
+        rel,
+        hd.ScanRun(1, "a finding\n", ""),
+    )
+    assert "NUMBER 4 IN A ROW" in note, (
+        "the operator taking the opt-in a fourth time is shown the same banner "
+        f"as the first time. Got:\n{note}"
+    )
