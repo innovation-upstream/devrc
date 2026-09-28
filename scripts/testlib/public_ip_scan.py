@@ -60,12 +60,42 @@ author. Documented so nobody mistakes "green" for "there is no address here":
   * IPv6 with a **`%zone` suffix**.
   * the value in a **FILENAME** rather than file CONTENT — `scan_file` never
     inspects `path.name`.
+  * an address whose every hextet is DECIMAL, written inside a Python subscript
+    (`x[1234::5678]`) — see the slice carve-out below. That shape is the price of
+    the carve-out and it is DRIVEN, not merely asserted, by
+    `test_no_public_ips.py::test_the_slice_carveout_is_blind_to_a_decimal_only_
+    subscript`. Change one and you are told about the other.
 
 🔴 IPv6 FALSE POSITIVE, MEASURED. A naive IPv6 regex matches `DB::` inside
 `Code: 209. DB::Exception: …` — and `ipaddress.ip_address("DB::")` parses fine
 and reports `is_global`. Four such lines exist in this repo (ClickHouse error
 strings). A reportable IPv6 literal must therefore carry at least
 `MIN_IPV6_HEXTETS` non-empty hextets; `DB::` has one.
+
+🔴 SECOND IPv6 FALSE POSITIVE, MEASURED — and the hextet floor does NOT catch it.
+Ordinary Python extended-slice syntax IS a compressed IPv6 literal: in the `nix
+build` sandbox tier a line reading `zip(parts[1::2], parts[2::2])` was reported as
+TWO committed public addresses, because each subscript parses as an address, is
+`is_global`, and carries two hextets. `MIN_IPV6_HEXTETS` cannot reach them —
+raising the floor to three would stop reporting genuine two-hextet addresses
+everywhere, which is a hole, not a fix. At the time this was found NO tracked
+`.py` file in the repo used `[N::M]` slicing, so the gate had been green by luck;
+the next extended slice anyone wrote would have reddened `main`.
+
+`is_subscript_slice()` is the carve-out, and it is deliberately NOT "ignore
+anything inside brackets" — that would be a way to commit a real address. It
+requires all three of: bracket ENCLOSURE, SUBSCRIPT position (the `[` follows an
+identifier / `)` / `]` / a closing quote, so a list display or a bracketed URL
+host is untouched), and the token having Python slice ARITY AND DIGITS (at most
+`_MAX_SLICE_COMPONENTS` colon-separated parts, each empty or DECIMAL). A real
+address in a subscript keeps being reported on any one of those failing, which is
+what the negative controls in `test_no_public_ips.py` pin.
+
+⚠ Illustrations here are `2001:db8::` (a DOC_NETWORKS address, so not reportable)
+or written INSIDE a subscript — spelling a bare routable literal in this file
+would make it match its own scan, the trap noted at IPV6_RE point 2. That also
+makes this docstring a reachability signal: the `parts[1::2]` above is only clean
+because the carve-out runs, and `test_this_guards_own_sources_are_clean` reads it.
 """
 from __future__ import annotations
 
@@ -115,6 +145,28 @@ IPV6_RE = re.compile(
 #: an address at all. See the DB:: note in the module docstring.
 MIN_IPV6_HEXTETS = 2
 
+#: Characters that may precede a `[` which OPENS A SUBSCRIPT: an identifier, a
+#: closing paren/bracket, or a string literal's closing quote (`parts[…]`,
+#: `f()[…]`, `x[0][…]`, `"abc"[…]`). A `[` preceded by ANYTHING else — a space,
+#: `=`, `/`, `:`, or start-of-line — opens a list/array display or brackets a
+#: host, and that is exactly where a real address is legitimately written
+#: (`lighthouse: [2001:db8::1]`, `https://[2001:db8::1]:443/`). Keeping those two
+#: cases apart is what stops the carve-out becoming a place to hide an address.
+SUBSCRIPTABLE_CHARS = frozenset("0123456789"
+                                "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                "abcdefghijklmnopqrstuvwxyz"
+                                "_)]'\"")
+
+#: Python slice arity: `start:stop:step` is THREE colon-separated components, so
+#: at most two colons. An 8-hextet address whose every hextet happens to be
+#: decimal (no `a`-`f` anywhere) is all-digits like a slice but cannot BE one —
+#: this bound is the only thing that still reports it, and a negative control in
+#: `test_no_public_ips.py` drives exactly that token. (Described, not quoted: it
+#: is routable, so spelling it here would make this file match its own scan.)
+_MAX_SLICE_COMPONENTS = 3
+
+_DECIMAL_RE = re.compile(r"[0-9]+")
+
 #: Ranges reserved for documentation. `ipaddress` reports TEST-NET-2/3 as
 #: non-global already, but TEST-NET-1 (192.0.2.0/24) and 2001:db8::/32 vary by
 #: Python version, so they are named explicitly rather than assumed.
@@ -160,12 +212,50 @@ def _hextets(token: str) -> int:
     return len([h for h in token.split(":") if h])
 
 
+def is_subscript_slice(line: str, start: int, end: int) -> bool:
+    """True when `line[start:end]` is a Python subscript slice, not an address.
+
+    MEASURED false positive, and the reason this exists: `zip(parts[1::2],
+    parts[2::2])` reported two routable public addresses. See the module
+    docstring.
+
+    🔴 THREE conditions, ALL required, because any one of them alone is a hole:
+
+      1. **enclosure** — the token is exactly what sits between `[` and `]`;
+      2. **subscript position** — the `[` follows something SUBSCRIPTABLE
+         (`SUBSCRIPTABLE_CHARS`). This is what leaves `lighthouse: [2001:db8::1]`
+         and `https://[2001:db8::1]:443/` reportable: those brackets follow a
+         space and a `/`, so they are a list display and a URL host, not a
+         subscript;
+      3. **slice shape** — at most `_MAX_SLICE_COMPONENTS` colon-separated
+         components, each empty or DECIMAL. A hextet containing any of `a`-`f`
+         (`x[2001:db8::1]`) is an address in a subscript and stays reportable, and
+         so is an all-decimal run too long to be a slice.
+
+    Evaluated per-line and per-match, so it costs nothing on the IPv4 pass: a
+    dotted quad is one component and never all-decimal, so (3) rejects it.
+    """
+    token = line[start:end]
+    if start == 0 or line[start - 1] != "[":
+        return False
+    if end >= len(line) or line[end] != "]":
+        return False
+    if start < 2 or line[start - 2] not in SUBSCRIPTABLE_CHARS:
+        return False
+    components = token.split(":")
+    if len(components) > _MAX_SLICE_COMPONENTS:
+        return False
+    return all(_DECIMAL_RE.fullmatch(c) for c in components if c)
+
+
 def find_in_line(line: str) -> list[str]:
     """Every reportable literal in `line`, left to right, deduped in order."""
     out: list[str] = []
     for rx in (IPV4_RE, IPV6_RE):
         for m in rx.finditer(line):
             tok = m.group(0)
+            if is_subscript_slice(line, m.start(), m.end()):
+                continue
             if is_reportable(tok) and tok not in out:
                 out.append(tok)
     return out

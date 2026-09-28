@@ -443,6 +443,150 @@ def test_db_colon_colon_is_not_an_address():
     assert S.is_reportable(planted_ipv6()), "the hextet floor is too strict"
 
 
+# --- the Python-slice carve-out ------------------------------------------------
+# 🔴 THE SECOND MEASURED false positive in this family, and the hextet floor above
+# does NOT catch it: a Python extended slice is a compressed IPv6 literal. The
+# sandbox tier reported ONE line — `for raw_name, body in zip(parts[1::2],
+# parts[2::2]):`, in a mutation script under `scripts/tests/` — as TWO separate
+# committed public addresses, naming each subscript's contents as the literal.
+# (Described, not transcribed: the two tokens it printed are routable, so quoting
+# the report VERBATIM here would make this file match its own scan. The verbatim
+# output is in the PR that added this carve-out.)
+#
+# Each subscript parses as an address, is is_global, and carries TWO hextets, clearing
+# the floor. It was NOT fixed by allowlisting that file: at the time, no tracked
+# `.py` file in the repo used `[N::M]` slicing at all, so this gate was green by
+# luck and would have reddened `main` for the next author who wrote a slice. A
+# path pin would have hidden the class and left them broken.
+#
+# The rule is `public_ip_scan.is_subscript_slice` — enclosure AND subscript
+# position AND slice shape, all three. The tests below are split so that each
+# condition has a case that fails if it is dropped.
+#
+# ⚠ Every routable literal here is ASSEMBLED at run time, never spelled: a bare
+# one would be a finding in this file (see `SELF`).
+
+def decimal_hextet_ipv6() -> str:
+    """A routable address whose every hextet is DECIMAL, with SLICE arity.
+
+    This is the sharp fixture: three colon-separated components, all digits — so
+    the ONLY thing separating it from `x[1::2]` is where the bracket sits. Used in
+    both directions below.
+    """
+    return ":".join(("1234", "", "5678"))
+
+
+def decimal_hextet_ipv6_full() -> str:
+    """Routable, all-decimal hextets, and EIGHT components — too many to be a
+    slice. Only the arity bound keeps this reportable."""
+    return ":".join(("1234", "5", "6", "7", "8", "9", "10", "11"))
+
+
+def hex_hextet_short_ipv6() -> str:
+    """Routable, and SLICE ARITY (three components) — but a hextet carries `a`-`f`.
+
+    🔴 This fixture is what makes the DIGITS half of the slice-shape rule
+    reachable. Without it, dropping that half survived a fully green run (measured
+    during this change's mutation sweep): every other negative-control fixture was
+    rejected by the arity bound or by bracket position instead, so the digits check
+    never decided anything. It is the shortest shape a reportable address can take
+    while still having a slice's arity — which is exactly the collision this
+    carve-out has to get right.
+    """
+    return ":".join(("2a01", "", "1"))
+
+
+def test_python_extended_slices_are_not_addresses():
+    """POSITIVE CONTROL for the carve-out: the measured line, plus the other
+    plausible slice spellings. Each must yield NOTHING.
+
+    ⚠ `x[::2]` is ALSO below the hextet floor, so it would pass even with this
+    carve-out deleted — the load-bearing cases are the ones with two hextets.
+    """
+    reported = {line: S.find_in_line(line) for line in (
+        "for raw_name, body in zip(parts[1::2], parts[2::2]):",
+        "names, bodies = parts[1::2], parts[2::2]",
+        "evens = x[::2]",
+        "every_third = a[10::3]",
+        "tail = fn()[1::2]",
+        'stride = "abcdef"[1::2]',
+        "inner = grid[0][1::2]",
+    )}
+    assert all(v == [] for v in reported.values()), (
+        "ordinary Python extended slices are being reported as committed public "
+        f"IPs — the subscript-slice carve-out is not working: {reported}")
+
+
+def test_negative_control_a_real_address_in_a_subscript_is_still_reported():
+    """🔴 THE HOLE CONTROL. "Ignore anything inside brackets" would be a way to
+    commit a real address; this fails if the carve-out ever becomes that.
+
+    Four shapes, one per condition of the rule — each fixture chosen so that it is
+    rejected by ONE condition and would sail past the others:
+      * hex hextets WITH slice arity — only the DIGITS half rejects it;
+      * all-decimal hextets but too many components — only the ARITY half does;
+      * a long hex address in a subscript — the ordinary case, both halves;
+      * a bracketed host that is NOT a subscript (list display, URL) — rejected by
+        the SUBSCRIPT-POSITION condition, and this is the only case that catches a
+        carve-out keyed on brackets alone.
+    """
+    hexish, decimal = planted_ipv6(), decimal_hextet_ipv6()
+    wide, hexshort = decimal_hextet_ipv6_full(), hex_hextet_short_ipv6()
+    for ip in (hexish, decimal, wide, hexshort):
+        assert S.is_reportable(ip), f"fixture {ip} is not reportable — stale fixture"
+
+    missed = [line for line, want in (
+        (f"hosts[{hexshort}]", hexshort),          # slice ARITY, hex hextets
+        (f"hosts[{hexish}]", hexish),              # subscript, long hex address
+        (f"cfg['a'][{hexish}]", hexish),           # nested subscript
+        (f"hosts[{wide}]", wide),                  # subscript arity, all decimal
+        (f"lighthouse: [{decimal}]", decimal),     # list display, NOT a subscript
+        (f"url = https://[{decimal}]:443/x", decimal),   # URL host
+        (f"peers = [{decimal}, {hexish}]", decimal),     # list element
+        # the IPv4 pass runs through the same carve-out: a dotted quad is ONE
+        # component and is never all-decimal, so slice shape rejects it.
+        (f"hosts[{planted_ipv4()}]", planted_ipv4()),
+    ) if want not in S.find_in_line(line)]
+    assert not missed, (
+        "a routable public IP inside (or looking like) a subscript went "
+        f"UNREPORTED — the slice carve-out has become a hole: {missed}")
+
+
+def test_the_slice_carveout_is_blind_to_a_decimal_only_subscript():
+    """⚠ DOCUMENTED BLIND SPOT, driven rather than asserted in prose.
+
+    An address whose every hextet is decimal AND which has slice arity is
+    genuinely indistinguishable from a slice — `x[1234::5678]` is valid Python
+    either way, and no lexical rule can separate them. The carve-out therefore
+    misses it, and the module docstring says so.
+
+    This test exists so the two cannot drift: narrow the rule and it goes red,
+    telling you to delete this test and that docstring bullet in the same commit.
+    The same value in NON-subscript position is still reported — the test above
+    pins that, which is what bounds the cost of this miss.
+    """
+    ip = decimal_hextet_ipv6()
+    assert S.is_reportable(ip)
+    assert S.find_in_line(f"x[{ip}]") == [], (
+        "the decimal-only subscript is now REPORTED — good news: delete this "
+        "test and the matching blind-spot bullet in public_ip_scan's docstring")
+
+
+def test_the_carveout_requires_bracket_enclosure():
+    """The ENCLOSURE condition, on its own. A slice-shaped token that is not
+    exactly what sits between `[` and `]` is an address, not a slice."""
+    ip = decimal_hextet_ipv6()
+    reported = [line for line in (
+        f"host = {ip}",                  # bare
+        f"x[{ip}",                       # unclosed
+        f"d['{ip}']",                    # a QUOTED dict key, not a slice
+        f"x[ {ip}]",                     # space before: the `[` is not adjacent
+        f"x[{ip} ]",                     # space after: the `]` is not adjacent
+    ) if S.find_in_line(line) != [ip]]
+    assert not reported, (
+        f"{ip} was treated as a slice without being bracket-enclosed: {reported}")
+
+
 def test_this_guards_own_sources_are_clean():
     """The self-match trap: a scan whose values appear in its own source reports
     itself. Both files must come back with nothing beyond the pinned values this
