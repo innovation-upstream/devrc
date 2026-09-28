@@ -35,6 +35,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -181,9 +182,10 @@ def test_the_anchor_ledger_matches_what_operator_asks_emits_today(r0, oa, tmp_pa
     seen, unmatched = set(), []
     for text in probes.values():
         asks, sources, _found = r0.block_regions(text)
-        for lines, where in ((asks, "asks"),
-                             (r0.session_source_lines(oa.SOURCE_SESSION,
-                                                      sources), "sources")):
+        # mirrors `check_pins`: EVERY source line, not just session ones —
+        # the narrower version made three anchors unreachable here and would
+        # have masked the GROWS widening F4 asked for.
+        for lines, where in ((asks, "asks"), (sources, "sources")):
             _roles, ids, bad = r0.match_anchors(lines, where)
             seen |= ids
             unmatched += bad
@@ -295,6 +297,127 @@ def test_an_unreadable_renderer_is_a_pin_FAILURE_not_a_pass(
     code, _out = run(r0, ["--corpus", str(tmp_path), "--cut-iso", CUT_ISO])
     assert code == r0.EXIT_PIN
     assert "does not exist" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# 1a. THE DELIVERY FORM — REGRESSION guards for `#1901 round 1`'s 🔴
+# --------------------------------------------------------------------------- #
+def cat_n(text: str, start: int = 1) -> str:
+    """`text` as a Read tool_result renders it: `<spaces><n>\\t<line>`.
+
+    Not hypothetical: `audit-dispatch.py`'s output is redirected to a scratchpad
+    `.md` and the dispatch prompt tells the auditor to READ it, so a brief reaches
+    the auditor in this form — both of the coordinator's dispatches this session
+    delivered it that way.
+    """
+    return "".join(f"{i + start:6d}\t{line}\n"
+                   for i, line in enumerate(text.splitlines()))
+
+
+def test_a_brief_delivered_as_a_LINE_NUMBERED_read_is_still_found(
+        r0, oa, tmp_path):
+    """🔴 REGRESSION for round 1's 🔴, POSITIVE pole. The bare `^` anchor round 0
+    added cannot match a `cat -n` tool_result, so 13 of 20 post-cut reports were
+    scored `out` with the reason "no asks block in this session (a pre-fix
+    report)" — affirmatively FALSE — the control row was contaminated with
+    sessions that DID receive a block, and `post_in` was deflated with the floor
+    unreachable by the DOMINANT delivery path."""
+    numbered = cat_n(brief(r0, oa, "answered", tmp_path), start=111)
+    assert "\t## THE OPERATOR'S OWN ASKS" in numbered   # really numbered
+    assert not numbered.startswith("## ")
+    assert r0.ANCHOR_BLOCK_RE.search(numbered), "the block must still be found"
+    asks, sources, found = r0.block_regions(numbered)
+    assert found, "the Sources block must be located under a line number"
+    assert asks, "the ask headings must survive the line numbers"
+    assert sources, (
+        "the source lines must survive: unstripped, the indent test fails on the "
+        "FIRST line and the block reads as having no sources at all")
+    disp, why = r0.disposition_of([numbered], oa.SOURCE_SESSION)
+    assert disp == "in", f"got {disp!r} ({why})"
+
+
+def test_the_numbered_sources_region_STOPS_where_the_unnumbered_one_does(
+        r0, oa, tmp_path):
+    """🔴 EARNED BY A SURVIVING MUTANT: `strip_lineno(raw)` → `raw` survived the
+    whole suite. `cat -n` right-pads its numbers with SPACES, so an unstripped
+    numbered line passes the two-space indent test by accident — the region never
+    ends, and everything after the Sources block (the `**Ledger:**` line, the
+    UNKNOWN directive, the publish warning, the agent-side paths) is collected as
+    a "source line". Nothing classified differently, so no test noticed; the pin
+    would have gone rc 5 on a numbered probe.
+
+    This asserts the REGION, not the classification: the numbered block must
+    yield exactly the source lines the unnumbered one does."""
+    plain = brief(r0, oa, "every-source", tmp_path)
+    numbered = cat_n(plain, start=40)
+    _a1, src_plain, _f1 = r0.block_regions(plain)
+    _a2, src_numbered, _f2 = r0.block_regions(numbered)
+    assert src_plain, "the fixture must have source lines at all"
+    assert len(src_numbered) == len(src_plain), (
+        f"the numbered region collected {len(src_numbered)} lines against "
+        f"{len(src_plain)}: {src_numbered[len(src_plain):]}")
+    assert src_numbered == src_plain, "and the same lines, line numbers removed"
+    for line in src_numbered:
+        assert "**Ledger:**" not in line, (
+            "the region must END at the Ledger line, as it does unnumbered")
+        assert not r0._LINENO_RE.match(line), "each line keeps its number"
+
+
+def test_a_LINE_NUMBERED_source_read_is_still_NOT_a_block(r0, oa, tmp_path):
+    """🔴 REGRESSION, NEGATIVE pole of the same widening: tolerating a line number
+    must not re-admit the false-positive class line-anchoring was added for.
+    `operator_asks.py`'s own source carries both anchors, and under `cat -n` the
+    number lands in front of `HEADING = "## THE OPERATOR…`."""
+    numbered = cat_n(OPERATOR_ASKS.read_text())
+    assert r0.ANCHOR_BLOCK in numbered, "the fixture must carry the substring"
+    assert not r0.ANCHOR_BLOCK_RE.search(numbered), (
+        "a numbered SOURCE READ must not match the block anchor")
+    assert not r0._BLOCKLIKE_BLOCK_RE.search(numbered), (
+        "…nor the wider safety-net pattern, or every source read becomes UNKNOWN")
+    corpus = corpus_with(tmp_path, {
+        f"{PROJECT}/s1.jsonl": [tool_result(numbered, ts=POST_TS),
+                                assistant(ledger(), ts=POST_TS)]})
+    reports, _f = r0.walk(corpus, oa.SOURCE_SESSION)
+    assert [r.disposition for r in reports] == ["out"]
+
+
+def test_EVERY_line_anchored_matcher_survives_the_numbered_form(r0, oa, tmp_path):
+    """🔴 WIDEST READING of round 1's finding: fixing one matcher while a sibling
+    stays blind MOVES the defect. Every `^`-anchored pattern the module defines is
+    swept here against one numbered render."""
+    numbered = cat_n(brief(r0, oa, "every-source", tmp_path), start=7)
+    anchored = {name: obj for name, obj in vars(r0).items()
+                if isinstance(obj, re.Pattern) and obj.pattern.startswith("^")}
+    assert {"ANCHOR_BLOCK_RE", "ANCHOR_SOURCES_RE", "ASK_HEADING_RE",
+            "_BLOCKLIKE_BLOCK_RE"} <= set(anchored), sorted(anchored)
+    unmatched = sorted(name for name, rx in anchored.items()
+                       if name != "_LINENO_RE" and not rx.search(numbered))
+    assert unmatched == [], (
+        f"these line-anchored patterns cannot see the numbered form: {unmatched}")
+    # `_LINENO_RE` is the one pattern that must match the NUMBERING itself
+    assert r0._LINENO_RE.search(numbered.splitlines()[0])
+    assert r0.disposition_of([numbered], oa.SOURCE_SESSION)[0] == "in"
+
+
+def test_a_block_in_a_form_I_cannot_parse_is_UNKNOWN_not_a_pre_fix_report(
+        r0, oa, tmp_path):
+    """🔴 REGRESSION-shaped: the reason "no asks block in this session (a pre-fix
+    report)" asserts TWO things — no block, and pre-fix — and it was false for 13
+    reports. Any block-like text the matcher cannot locate must route to UNKNOWN
+    (my blindness). The fixture is a blockquoted delivery: a form the matcher
+    does not parse and never claimed to."""
+    quoted = "\n".join("> " + l for l in
+                       brief(r0, oa, "answered", tmp_path).splitlines())
+    assert not r0.ANCHOR_BLOCK_RE.search(quoted)
+    assert r0._BLOCKLIKE_BLOCK_RE.search(quoted)
+    corpus = corpus_with(tmp_path, {
+        f"{PROJECT}/s1.jsonl": [user_text(quoted, ts=POST_TS),
+                                assistant(ledger(), ts=POST_TS)]})
+    reports, _f = r0.walk(corpus, oa.SOURCE_SESSION)
+    assert [r.disposition for r in reports] == ["UNKNOWN"]
+    assert "not in a form this instrument can locate" in reports[0].why
+    assert "pre-fix" in reports[0].why, (
+        "the reason must say explicitly that this is NOT a pre-fix report")
 
 
 # --------------------------------------------------------------------------- #
@@ -519,10 +642,43 @@ def test_the_floor_counts_DISTINCT_SESSIONS_not_ledger_lines(r0, oa, tmp_path):
     sessions.update(_in_population_sessions(r0, oa, tmp_path, 9, per_session=2))
     code, text, b = rates(r0, oa, corpus_with(tmp_path, sessions))
     assert r0.stats(b["post_in"])["n"] == 18, "the fixture must emit 18 reports"
-    assert len({r.session for r in b["post_in"]}) == 9
+    assert len({r.session_id for r in b["post_in"]}) == 9
     assert code == r0.EXIT_NOT_MEASURABLE, text
-    assert "NOT MEASURABLE (n=9 distinct session(s) / 18 report(s)" in text
+    assert "NOT MEASURABLE (n=9 distinct session(s) / 9 transcript file(s) / 18 report(s)" in text
     assert "the floor counts SESSIONS" in text
+
+
+def test_the_floor_counts_REAL_SESSIONS_not_transcript_FILES(r0, oa, tmp_path):
+    """🔴 REGRESSION for `#1901 round 1`'s F2. A round-0 report is written by an
+    auditor SUBAGENT, whose transcript is `<project>/<sid>/subagents/agent-*.jsonl`
+    — a different FILE from the parent's, and several auditors of one session are
+    several files again. MEASURED on this host: 6,692 files against 1,563 distinct
+    session ids. Counting files was the same label-wider-than-the-unit defect the
+    `MIN_SESSIONS` rename closed, one level up.
+
+    The fixture is ONE session with three in-population files — the parent plus
+    two auditor subagents, at the real depth — and it must still refuse."""
+    sid = "b5e21e7f-0000-0000-0000-000000000000"
+    block = brief(r0, oa, "answered", tmp_path)
+    sessions = {f"{PROJECT}/pre{i}.jsonl": [assistant(ledger(4, 3), ts=PRE_TS)]
+                for i in range(12)}
+    sessions[f"{PROJECT}/{sid}.jsonl"] = [
+        user_text(block, ts=POST_TS), assistant(ledger(5, 1), ts=POST_TS)]
+    for n in ("a1", "a2"):
+        sessions[f"{PROJECT}/{sid}/subagents/agent-{n}.jsonl"] = [
+            user_text(block, ts=POST_TS), assistant(ledger(5, 1), ts=POST_TS)]
+    code, text, b = rates(r0, oa, corpus_with(tmp_path, sessions))
+    assert r0.stats(b["post_in"])["files"] == 3, "the fixture must span 3 files"
+    assert r0.stats(b["post_in"])["sessions"] == 1, (
+        "three files of ONE session are one observation: "
+        f"{sorted({r.session_id for r in b['post_in']})}")
+    assert code == r0.EXIT_NOT_MEASURABLE, text
+    assert "n=1 distinct session(s) / 3 transcript file(s) / 3 report(s)" in text
+    # …and the derivation itself, at both corpus depths
+    root = corpus_with(tmp_path, sessions)
+    assert r0._session_id_of(root / f"{PROJECT}/{sid}.jsonl", root) == sid
+    assert r0._session_id_of(
+        root / f"{PROJECT}/{sid}/subagents/agent-a1.jsonl", root) == sid
 
 
 def test_at_MIN_SESSIONS_a_verdict_prints(r0, oa, tmp_path):
@@ -534,8 +690,33 @@ def test_at_MIN_SESSIONS_a_verdict_prints(r0, oa, tmp_path):
     code, text, _b = rates(r0, oa, corpus_with(tmp_path, sessions))
     assert code == r0.EXIT_OK, text
     assert "VERDICT: post-cut in-population is LOWER on both statistics" in text
-    assert "n=10 distinct session(s) / 10 report(s)" in text
+    assert "n=10 distinct session(s) / 10 transcript file(s) / 10 report(s)" in text
     assert "not a causal claim" in text
+
+
+def test_an_UNDEFINED_share_refuses_instead_of_being_read_as_zero(
+        r0, oa, tmp_path):
+    """🔴 REGRESSION for `#1901 round 1`'s F3. `stats()` returns None for the
+    share whenever a bucket's summed `requirements` is 0 — reachable whenever a
+    round 0 legitimately reports zero requirements — and `(x or 0)` turned that
+    into a FABRICATED delta inside the one line the closing condition is read
+    from: `LOWER on both statistics (… share — vs 0.750, Δ-0.750)`. The mean was
+    guarded twice; the share was not guarded at all."""
+    sessions = {f"{PROJECT}/pre{i}.jsonl": [assistant(ledger(4, 3), ts=PRE_TS)]
+                for i in range(12)}
+    # ten in-population sessions, every one reporting ZERO requirements
+    for i in range(10):
+        sessions[f"{PROJECT}/in{i}.jsonl"] = [
+            user_text(brief(r0, oa, "answered", tmp_path), ts=POST_TS),
+            assistant(ledger(0, 0), ts=POST_TS)]
+    code, text, b = rates(r0, oa, corpus_with(tmp_path, sessions))
+    assert r0.stats(b["post_in"])["requirements"] == 0
+    assert r0.stats(b["post_in"])["unattributed_share"] is None
+    assert code == r0.EXIT_NOT_MEASURABLE, text
+    assert "SHARE is UNDEFINED" in text and "no denominator" in text
+    assert "on both statistics" not in text, (
+        "the verdict must not claim two statistics moved when one does not exist")
+    assert "Δ-0." not in text and "Δ+0." not in text, "no fabricated delta"
 
 
 def test_an_empty_PRE_bucket_is_also_NOT_MEASURABLE(r0, oa, tmp_path):
@@ -572,14 +753,29 @@ def test_the_CONTEMPORANEOUS_control_row_is_printed_beside_the_comparator(
     assert code == r0.EXIT_OK, text
 
 
-def test_the_structurally_zero_PRE_in_population_row_says_so(r0, oa, tmp_path):
-    """invariant: that row cannot be non-zero (no asks block existed pre-cut), so
-    beside three live rows an unlabelled 0 reads as a measurement."""
-    corpus = corpus_with(tmp_path, {
+def test_the_PRE_in_population_note_describes_WHICHEVER_case_HOLDS(
+        r0, oa, tmp_path):
+    """🔴 REGRESSION for a claim of MY OWN that the next measurement refuted. That
+    row was labelled `[struct. 0]` with "cannot be non-zero: no asks block existed
+    pre-cut", and the very next real run printed **2** there: the feature's own
+    development session rendered real asks blocks from its BRANCH before the
+    squash landed. A static label the same run contradicts is the "a comment is a
+    claim too" defect, so the note is computed — and BOTH cases are asserted here,
+    because a one-pole test is how the false label survived."""
+    empty = corpus_with(tmp_path / "a", {
         f"{PROJECT}/s1.jsonl": [assistant(ledger(4, 3), ts=PRE_TS)]})
-    _code, text = run(r0, ["--corpus", str(corpus), "--cut-iso", CUT_ISO])
-    assert "PRE-cut in-population [struct. 0]" in text
-    assert "cannot be non-zero" in text
+    _c, text = run(r0, ["--corpus", str(empty), "--cut-iso", CUT_ISO])
+    assert "0 as expected" in text
+    assert "cannot be non-zero" not in text, "that claim is refuted; do not print it"
+
+    with_pre_in = corpus_with(tmp_path / "b", {
+        f"{PROJECT}/s1.jsonl": [
+            user_text(brief(r0, oa, "answered", tmp_path), ts=PRE_TS),
+            assistant(ledger(4, 3), ts=PRE_TS)]})
+    _c, text2 = run(r0, ["--corpus", str(with_pre_in), "--cut-iso", CUT_ISO])
+    assert "NON-ZERO (1 report(s) in 1 session(s))" in text2
+    assert "pre-merge development use" in text2
+    assert "not the comparator" in text2
 
 
 def test_every_post_cut_report_prints_the_REASON_it_was_classified(
@@ -868,6 +1064,49 @@ def test_the_deleted_flags_are_really_gone(r0, tmp_path):
         assert code == r0.EXIT_USAGE, (
             f"{flag} must be an argparse error (exit {r0.EXIT_USAGE}), got "
             f"{code} — a silently-accepted dead flag is worse than none")
+
+
+def test_an_unreadable_corpus_exits_4_AS_THE_LEGEND_SAYS(r0, tmp_path):
+    """🔴 REGRESSION for `#1901 round 1`'s F5, and a check the number-only test
+    below structurally CANNOT do: the legend said an unreadable corpus path was
+    rc 2 while `walk` refuses with rc 4. This asserts the documented CLAIM by
+    running it, so the description is pinned and not just the digit."""
+    code, _text = run(r0, ["--corpus", str(tmp_path / "absent"),
+                           "--cut-iso", CUT_ISO])
+    assert code == r0.EXIT_NOTHING_WALKED, f"got {code}"
+    legend = (r0.__doc__ or "").split("Exit codes:", 1)[1]
+    line = f"{r0.EXIT_NOTHING_WALKED} nothing walked"
+    assert line in legend, (
+        f"the legend must describe rc {r0.EXIT_NOTHING_WALKED} as what it does; "
+        f"it reads: {legend[:220]!r}")
+    assert "corpus path" in legend.split(line, 1)[1][:160]
+
+
+def test_the_pin_reach_the_ANCHORS_header_CLAIMS_is_the_reach_it_HAS(
+        r0, oa, tmp_path):
+    """🔴 REGRESSION for `#1901 round 1`'s F4: that header claimed two things the
+    implementation did not do, both measured INERT (rc 4, not rc 5). Both are
+    asserted here as behaviour rather than prose.
+
+    (a) a NEW ask source must reach a probe — the probes are derived from
+        `oa.SOURCE_ORDER`, not from two hand-named constants;
+    (b) GROWS must cover EVERY source line, not just session-transcript ones.
+    """
+    probes = r0.renderer_probes(oa, tmp_path / "nope")
+    # (a) every declared source appears as a heading in the `every-source` probe
+    asks, sources, _f = r0.block_regions(probes["every-source"])
+    assert len(asks) == len(oa.SOURCE_ORDER) >= 2, (asks, oa.SOURCE_ORDER)
+    for src in oa.SOURCE_ORDER:
+        assert any(f"### from the {src}" in a for a in asks), src
+    # (b) a PR-comment source line is covered, so an UNCOVERED one would GROW
+    pr_lines = [l for l in sources if oa.SOURCE_PR_COMMENT + ":" in l]
+    assert pr_lines, "the probe must emit PR-comment source lines"
+    _roles, ids, bad = r0.match_anchors(pr_lines, "sources")
+    assert bad == [] and ids, (bad, ids)
+    # …and an invented source line really does trip GROWS
+    _r, _i, invented = r0.match_anchors(
+        ["  a new source: 3 thing(s) considered"], "sources")
+    assert invented, "an uncovered source line must be reported as unmatched"
 
 
 def test_every_exit_code_constant_is_documented_in_the_docstring(r0):

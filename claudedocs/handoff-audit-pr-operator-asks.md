@@ -39,9 +39,16 @@ operator asked for, so that branch was unreachable and his stated requirements l
   - **Reproducible pre-cut baseline, method named:** assistant-authored text blocks ONLY, one
     round-0 ledger line = one report, corpus `~/.claude/projects` on **this host**, cut =
     `31033cdb`'s **committer date** (`%cI` — when the squash LANDED on `main`, not when its
-    author wrote it; the run prints which clock it read). Measured 2026-09-27: **493 ledger
-    lines / 474 sessions / 7 projects, mean 3.365 unattributed per report, share 0.331.**
-    Re-derivable by re-running the command — that is the point of it being a command.
+    author wrote it; the run prints which clock it read). Measured 2026-09-28: **493 ledger
+    lines in 236 REAL SESSIONS (474 transcript files) across 7 projects, mean 3.365
+    unattributed per report, share 0.331.** Re-derivable by re-running the command — that is
+    the point of it being a command.
+    - ⚠ **`474` was published here as a session count and it is a FILE count** — wrong by
+      ~2× as a number of observations. A round-0 report is written by an auditor SUBAGENT
+      whose transcript is `<project>/<sid>/subagents/agent-*.jsonl`: a different file from the
+      parent's, and several auditors of one session are several files again (6,692 files on
+      this host against 1,563 distinct session ids). `#1901 round 1` found it; the run now
+      prints `sess` and `files` side by side, and the FLOOR counts sessions.
     - ⚠ **The clock is load-bearing and the coincidence here is not a property of the tool.**
       `31033cdb`'s author and committer dates are identical to the second, so this baseline
       reads the same either way — which is why reading the wrong one was invisible. Over the
@@ -53,14 +60,26 @@ operator asked for, so that branch was unreachable and his stated requirements l
     neither yields it: assistant-authored blocks give the 493 above; counting every record of
     any role gives **1,977 / 707 / 8**. Kept here so nobody re-derives it as if it were the
     baseline. A number quoted without its method has no defined left-hand side.
-  - **Today's real answer is `VERDICT: NOT MEASURABLE (n=1 distinct session(s) / 2
-    report(s); floor 10)`** — the tool refuses to compare below ten sessions on purpose, so it
-    cannot be used to justify re-tuning the feature. Post-cut at 2026-09-28T03:41Z: **20
-    reports / 19 sessions**, of which in-population **2 reports from 1 session**,
-    out-of-population 17, UNKNOWN 1. (It read 16 reports ninety minutes earlier — the post
-    bucket GROWS with every audit, which is defect 2 in miniature, so re-run rather than
-    quoting this line.) The number the condition reads is the **in-population distinct-session
-    count**, never the bucket's size — measured on `#1901`'s own round 0, two ledger lines
+  - **Today's real answer is `VERDICT: NOT MEASURABLE (n=1 distinct session(s) / 2 transcript
+    file(s) / 3 report(s); floor 10)`** — the tool refuses to compare below ten sessions on
+    purpose, so it cannot be used to justify re-tuning the feature. Fresh run, 2026-09-28T05:0xZ,
+    every figure from that one run:
+    | bucket | reports | sess | files | mean/report | share |
+    |---|---|---|---|---|---|
+    | PRE-cut (all) | 493 | 236 | 474 | 3.365 | 0.331 |
+    | PRE-cut in-population | 2 | 1 | 1 | 5.500 | 0.423 |
+    | POST-cut (all) | 22 | 15 | 21 | 4.318 | 0.289 |
+    | POST-cut out-of-population **[control]** | 18 | 14 | 18 | 3.278 | 0.241 |
+    | POST-cut in-population | 3 | 1 | 2 | 4.667 | 0.389 |
+    Post-cut reasons: 16 × the session source was consulted and could not be read · 3 × an
+    ask arrived · 2 × no asks block at all · 1 UNKNOWN. (These GROW with every audit —
+    defect 2 in miniature — so re-run rather than quoting this table.)
+  - ⚠ **PRE-cut in-population is NOT structurally zero, and a label here said it was.** The
+    feature's own development session rendered real asks blocks from its BRANCH before the
+    squash landed: 2 reports / 1 session. The run's note now describes whichever case holds;
+    it is not the comparator either way.
+  - The number the condition reads is the **in-population distinct-SESSION count**, never the
+    bucket's size and never a file count — measured on `#1901`'s own round 0, two ledger lines
     came from ONE session, so a report-counting floor let one verbose audit supply 20% of it.
 
 ## State now
@@ -213,6 +232,30 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
    forcing: none
 
 ## Defects (batched)
+- 🔴 **THE CLASSIFIER WAS BLIND TO THE DOMINANT DELIVERY PATH — a brief the auditor READS.**
+  `audit-dispatch.py`'s output is redirected to a scratchpad `.md` and the dispatch prompt says
+  to read it, so the block arrives as a `cat -n` tool_result with every line prefixed
+  `<spaces><n>\t`. A `^`-anchored matcher (added in round 0 to stop a source READ of
+  `operator_asks.py` counting as a received block) cannot match that. MEASURED by **`#1901
+  round 1`** (blind) and reproduced: **13 of 20** post-cut reports were scored `out` with the
+  reason *"no asks block in this session (a pre-fix report)"* while their numbered copy
+  demonstrably carried `**Sources read:**`. Three consequences, all of them the instrument
+  lying in the reader's favour: the printed reason was affirmatively FALSE; the contemporaneous
+  control row was contaminated with sessions that DID receive a block; and `post_in` was
+  deflated with the floor unreachable by the path that actually delivers. Fixed by an OPTIONAL
+  line-number prefix, applied to **every** line-anchored matcher (a fix to one while a sibling
+  stayed blind would move the defect, not remove it), with both poles pinned — a numbered real
+  render matches, a numbered source read still does not. After the fix the same corpus reads
+  **2** "no asks block" instead of 14, and 16 correctly as "consulted and could not be read".
+  ⚠ Two claims of the round-0 fix were REFUTED in the process and are retracted rather than
+  patched: that "every one of the other 39 [substring matches] is a source read or a discussion
+  of this feature" (round 1 found ≥11 real renders in that residual), and that the PRE-cut
+  in-population row "cannot be non-zero". A guard-comment that reads as coverage is what stops
+  the next reader looking. Also fixed in the same round: an undefined `unattributed` share was
+  read as 0 and printed a **fabricated** delta inside the verdict line
+  (`share — vs 0.750, Δ-0.750`); the `ANCHORS` header claimed two reaches the pin did not have
+  (both measured INERT — rc 4, not rc 5 — now implemented); and the exit-code legend described
+  an unreadable corpus as rc 2 where the code refuses with rc 4.
 - 🔴 **THE INHERITED POPULATION DEFINITION BOUGHT THE WRONG FACT, and it was measurably
   unsafe.** `#1887`'s closing condition said "PRs whose commits carry a `Claude-Session-Id:`
   trailer", and `round0-attribution-rate.py` implemented that literally by reading
@@ -256,9 +299,12 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
 # 0. THE CLOSING CONDITION ITSELF — the rate, both buckets, and the refusal
 python3 $DEVRC/scripts/round0-attribution-rate.py        # exit 6 = NOT MEASURABLE (n<10)
 # reads ~/.claude/projects on THIS host only; no `gh`, no network. Expect today:
-# PRE-cut 493 reports / 474 sessions / mean 3.365 · POST-cut in-population 1 session · exit 6.
-# Read the DISPOSITIONS reasons block: every post-cut report says why it landed where it did,
-# and `NAMED BY` (selection) must never be counted as the words having arrived.
+# PRE-cut 493 reports / 236 sessions / 474 files / mean 3.365 · POST-cut in-population
+# 1 session · exit 6.  `sess` is the observation count; `files` is not (subagents).
+# Read the DISPOSITIONS reasons block: every post-cut report says why it landed where it did.
+# 🔴 Two reasons that must stay RARE, and both were bugs when they were common:
+#    "no asks block in this session (a pre-fix report)" over a block delivered as a Read, and
+#    `NAMED BY` (selection) counted as the operator's words having arrived.
 # Its guards (incl. the two-way pin against scripts/lib/operator_asks.py):
 nix develop $DEVRC -c python3 -m pytest \
   $DEVRC/scripts/tests/test_round0_attribution_rate.py -q
