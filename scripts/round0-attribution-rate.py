@@ -4,8 +4,6 @@
     scripts/round0-attribution-rate.py                      # full corpus, default cut
     scripts/round0-attribution-rate.py --since-sha 31033cdb
     scripts/round0-attribution-rate.py --cut-iso 2026-09-27T05:49:10Z   # no git at all
-    scripts/round0-attribution-rate.py --samples 5          # per-report SHAPES, opt-in
-    scripts/round0-attribution-rate.py --json out.json
 
 WHY THIS EXISTS
 ---------------
@@ -56,36 +54,72 @@ instrument reading its own input back.
 
 THE IN-POPULATION TEST IS LOCAL AND STRUCTURAL — NO `gh`, NO NETWORK
 --------------------------------------------------------------------
-A report belongs to the population the closing condition is about iff its own
-session's brief carried the asks block AND that block's SESSION-TRANSCRIPT
-source ANSWERED. The discriminator is the asks block's own emitted text, found
-in the same transcript (the brief arrives injected, which is exactly why the
-provenance rule above applies to the REPORT and not to this test). Verbatim
-shape of the OUT case, from a real brief (cairn #134, 2026-09-27T06:16Z):
+🔴 THE POPULATION IS "THE OPERATOR'S WORDS ACTUALLY REACHED THE AUDITOR" — NOT
+"THE PR'S COMMITS CARRY A TRAILER". That second reading was inherited verbatim
+from `#1887`'s closing condition and it is the WRONG FACT, which `#1901 round 0`
+proved by measurement rather than argument. `render()` emits
+`session transcript: N session(s) NAMED BY <Claude-Session-Id:> trailers`
+whenever trailers named a session — guarded by `if session_ids:` alone — and
+emits `! session transcript: UNKNOWN — …` beside it when nothing could be read
+off those sessions. A rule that reads the first line as "answered" therefore
+scores a report whose own block says
 
-    ## THE OPERATOR'S OWN ASKS — attribution input for step 1
-    ! session transcript: UNKNOWN — none of this PR's 1 commit(s) carries a
-      `Claude-Session-Id:` trailer — coverage is partial by nature …
-    **Ledger:** operator asks: 0 (0 B)
+    🔴 **NO OPERATOR ASK COULD BE READ FOR THIS PR.**
+
+as IN-population: zero asks reached that auditor, and it lands in the very
+bucket the closing condition's left-hand side is computed over.
+`operator_asks.py`'s own comment warns about this equivocation in terms —
+"NAMED BY", not "resolved", because *named by a trailer* and *readable on this
+host* are separate facts.
+
+So the roles are separated, and only one of them is evidence of READING:
+
+    selected       `session transcript: N session(s) NAMED BY …`
+                   trailers SELECTED sessions. Says nothing about whether their
+                   words arrived.
+    answered       `### from the session transcript`
+                   `_render_asks` emits this heading only when at least one Ask
+                   whose source IS the session transcript was rendered into the
+                   brief — i.e. the operator's words are IN the auditor's hands.
+                   This is the only line that proves reading.
+    unmeasured     `! session transcript: UNKNOWN — …`  a source consulted that
+                   did not answer.
+    informational  `session transcript: dropped N record(s) — …`  the classifier
+                   dropped records; says nothing either way.
 
 🔴 THREE DISPOSITIONS, NEVER TWO:
 
-    in-population      the asks block is present and its session-transcript
-                       source ANSWERED (sessions were named by trailers).
-    out-of-population  the asks block is present and says no commit carries a
-                       trailer — or there is no asks block at all, i.e. a
-                       pre-fix report.
-    UNKNOWN            an asks block is present but its Sources block could not
-                       be parsed, or carries no session-transcript line at all.
+    in-population      an asks block rendered at least one ask FROM A SESSION
+                       TRANSCRIPT. The words arrived.
+    out-of-population  a READING that the words did not arrive: the source was
+                       consulted and did not answer (`unmeasured`); or sessions
+                       were named and nothing from them was rendered
+                       (`selected` with no `answered`); or the only asks came
+                       from another source (a PR comment); or there is no asks
+                       block at all, i.e. a pre-fix report.
+    UNKNOWN            THIS INSTRUMENT could not read the block — no Sources
+                       block, or a Sources block with no session-transcript line
+                       at all.
 
-🔴 UNKNOWN IS NEVER FOLDED INTO EITHER OTHER BUCKET AND NEVER INTO THE RATE'S
-DENOMINATOR. A reassuring zero and an unreadable source are different findings;
-folding them makes an instrument that cannot report its own blindness.
+🔴 WHY `named-but-unreadable` IS `out` AND NOT `UNKNOWN`, decided deliberately.
+UNKNOWN here means MY blindness, not the auditor's. A block that says its
+session source did not answer is a successful READING of a real outcome: those
+words did not reach that auditor, so the report is not a member of a population
+defined by their arrival. `audit-dispatch.py` records that a missing transcript
+is the ORDINARY case — the operator runs two hosts — so routing it to UNKNOWN
+would put most of the corpus in a bucket that reports nothing and would make the
+instrument's own blindness the modal answer. ⚠ This does NOT weaken the
+handoff's rule that "a source that could not be read is not an absence of asks":
+that rule governs what the AUDITOR must do (never raise a deletion candidate on
+the grounds that nobody asked). It is about the auditor's inference; this is
+about population membership. Two different claims, and conflating them is how
+the first version of this file scored the negative case as `in`.
 
 ⚠ A session that dispatched SEVERAL audits carries several asks blocks, and a
 ledger line cannot be tied to one of them by text alone. Precedence is
-`answered` > `unmeasured` > `unparseable`, i.e. one answered block makes the
-session's reports in-population. That is a stated choice, not a measurement.
+`answered` > any reading of non-arrival > `UNKNOWN`, i.e. one block whose asks
+arrived makes that session's reports in-population. That is a stated choice, not
+a measurement.
 
 WHY THE RENDERER'S STRINGS ARE PINNED TWO-WAY
 ---------------------------------------------
@@ -99,6 +133,19 @@ pinned TWO-WAY by `scripts/tests/test_round0_attribution_rate.py` — failing wh
 the emitted set GROWS as well as when it shrinks. `claude/RULES.md`: a guard on
 WORDS is walkable by REWORDING, so each anchor is the narrowest stable fragment
 that can carry its meaning and names the spelling it depends on.
+
+🔴 AND THE PIN IS BEHAVIOURAL AT BOTH POLES, not just structural. A ledger of
+strings cannot catch a wrong PRECEDENCE — the first version of this file had
+every anchor correct and still scored the negative case as in-population — so
+`check_pins` classifies two LIVE renders on every run and refuses unless the
+NEGATIVE pole (sessions named, nothing readable, zero asks) comes out `out` and
+the POSITIVE pole (an ask rendered from a session transcript) comes out `in`.
+The role set that can produce `in` is its own one-line ledger
+(`IN_POPULATION_ROLES`), so re-admitting `selected` there is a visible edit that
+fails a test rather than a quiet change of meaning. A NEW ask SOURCE added to
+`operator_asks` also fails the pin, because every `### from the …` heading a live
+render emits must match an anchor — nobody gets to decide by accident whether a
+new source counts as the words arriving.
 
 BLIND SPOTS, each at the width it actually holds
 ------------------------------------------------
@@ -121,6 +168,10 @@ BLIND SPOTS, each at the width it actually holds
 6. **A report's in-population test is a property of its SESSION**, not of the
    PR. A session that dispatched one answered audit and one unanswered one has
    all of its reports counted in-population (see the precedence note above).
+   ⚠ And the floor counts DISTINCT SESSIONS for the same reason: one verbose
+   round 0 emitting two ledger lines is two reports and ONE observation. Measured
+   on `#1901`'s own round 0 — its two in-population reports came from a single
+   session, i.e. 20% of a ten-report floor from one audit.
 7. **A PRE-CUT block written under an OLDER SPELLING reads as UNKNOWN, on
    purpose.** MEASURED on this host: two blocks from the `#1887` development
    session (2026-09-26) say `N session(s) resolved from `Claude-Session-Id:`
@@ -131,10 +182,20 @@ BLIND SPOTS, each at the width it actually holds
    this design refuses. It costs nothing the closing condition needs — the
    comparator is POST-cut in-population against PRE-cut ALL.
 8. **The in-population test is a property of the BRIEF, never of the PR's
-   commits.** It reads what the asks block SAID about its sources; it does not
-   check GitHub, so a PR whose trailers exist but whose transcript was pruned is
-   out-of-population here even though the condition's prose ("PRs whose commits
-   carry a `Claude-Session-Id:` trailer") would include it.
+   commits — and the ERROR DIRECTION IS EXCLUSION, which is now true of the code
+   and was not.** It reads what the asks block emitted; it never asks GitHub. So
+   a PR whose commits DO carry trailers but whose transcript could not be read on
+   the host that ran the audit is **out-of-population** here, while the prose the
+   condition inherited from `#1887` ("PRs whose commits carry a
+   `Claude-Session-Id:` trailer") would count it in. That is the intended
+   direction: the population is the words ARRIVING, and a report whose asks block
+   says they did not arrive is not evidence about the feature working.
+   ⚠ **This bullet previously claimed exactly that behaviour while the code did
+   the opposite** — the trailers-exist-but-unreadable case emitted `NAMED BY`,
+   scored `answered`, and landed IN-population, so the described direction was
+   unreachable. `#1901 round 0` found it. A doc naming the safe direction over
+   code taking the unsafe one is worse than silence: it stops the next reader
+   looking.
 
 SELF-CHECKS — no verdict prints unless both pass
 ------------------------------------------------
@@ -150,11 +211,15 @@ SELF-CHECKS — no verdict prints unless both pass
   carried its old literal and it had been refusing to print for longer than
   anyone had noticed.
 
-🔴 THIS REPO IS PUBLIC AND THE CORPUS IS TRANSCRIPTS. Default output is counts,
-rates and ledger-line SHAPES — no message bodies, no prompts, no quoted
-transcript prose. `--samples` is opt-in, capped, and prints only
-project/date/numbers/disposition per report; even that is per-session metadata
-about the operator's work, so **its output must never be committed or posted**.
+🔴 THIS REPO IS PUBLIC AND THE CORPUS IS TRANSCRIPTS. Output is counts, rates and
+ledger-line SHAPES only — no message bodies, no prompts, no quoted transcript
+prose, and no transcript paths. ⚠ There is deliberately NO sample-quoting flag:
+the first version carried `--samples`, whose own docstring had to say its output
+must never be committed or posted. A flag whose only product comes with a
+handling prohibition, and which nothing in the tree consumed, is one the deletion
+pass removes rather than documents (`#1901 round 0`). The same pass removed
+`--json`, which had zero consumers: the bucketing is a pure function
+(`bucket_reports`) that tests call directly, which is a better seam than a file.
 
 Env:
   ROUND0_RATE_CORPUS        corpus root (default `~/.claude/projects`)
@@ -167,10 +232,11 @@ Env:
 Exit codes: 0 a verdict printed · 2 bad invocation (an unresolvable `--since-sha`
 or an unreadable corpus path) · 3 a self-control failed · 4 nothing walked, or no
 assistant-authored ledger line anywhere · 5 the pinned renderer strings disagree
-with `operator_asks.py` · 6 NOT MEASURABLE. 🔴 6 has TWO reasons and the message
-says which: the post-cut in-population count is below `MIN_REPORTS`, or the
-pre-cut bucket is empty so the comparison has no left-hand side. They share one
-code because they demand the same action — collect more reports, change nothing.
+with `operator_asks.py`, or a live render's POLE classifies wrongly · 6 NOT
+MEASURABLE. 🔴 6 has TWO reasons and the message says which: the post-cut
+in-population SESSION count is below `MIN_SESSIONS`, or the pre-cut bucket is
+empty so the comparison has no left-hand side. They share one code because they
+demand the same action — collect more observations, change nothing.
 """
 from __future__ import annotations
 
@@ -203,19 +269,14 @@ LIB = REPO / "scripts" / "lib"
 if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
 
-# 🔴 IMPORTED SOFTLY — its absence must not be a traceback — BUT THE FALLBACK IS
-# NOT SILENT: `_project_of` names the derivation it used, because the fallback is
-# a NARROWER rule than the shared one and a reader must not mistake the two. The
-# only thing taken from here is "which project does this transcript belong to",
-# which this script must not re-derive: `path.parent.name` is literally
-# `subagents` for a nested transcript.
-try:  # noqa: E402
-    import transcript_search
-except ImportError as _e:  # pragma: no cover - exercised via the fallback path
-    transcript_search = None
-    _TRANSCRIPT_SEARCH_IMPORT_ERROR = str(_e)
-else:
-    _TRANSCRIPT_SEARCH_IMPORT_ERROR = ""
+# A HARD import. ⚠ The first version wrapped this in `try/except ImportError`
+# with a narrower fallback rule "for a partial deploy or a `cp -a` of one file" —
+# deleted by `#1901 round 0`, because no mechanism produces that state: nothing in
+# `nix/` deploys this script (`git grep round0-attribution -- nix/` is empty), it
+# is run by absolute path from inside the repo, so `scripts/lib` is always beside
+# it. The branch was `# pragma: no cover` by its own admission, i.e. a second,
+# untested classification rule guarding against nothing.
+import transcript_search  # noqa: E402
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -234,11 +295,18 @@ DEFAULT_SINCE_SHA = "31033cdb"
 
 #: 🔴 THE REFUSAL FLOOR, AND IT ENCODES A STANDING OPERATOR INSTRUCTION — *do
 #: not re-tune the feature off n<10* (`handoff-audit-pr-operator-asks.md`, NEXT
-#: #1). Below this many post-cut in-population reports the run prints its
+#: #1). Below this many post-cut in-population SESSIONS the run prints its
 #: numbers and then refuses to compare, so the instrument cannot be used to
-#: justify a change the data cannot support. Today the real answer is n=0, and a
-#: run must say NOT MEASURABLE rather than "improved".
-MIN_REPORTS = 10
+#: justify a change the data cannot support.
+#:
+#: 🔴 DISTINCT SESSIONS, NOT REPORTS — renamed from `MIN_REPORTS` because a name
+#: that says "reports" while the honest unit is observations is the same
+#: label-wider-than-implementation defect this file exists to avoid. MEASURED on
+#: `#1901`'s own round 0: it produced two in-population reports and BOTH came
+#: from one session, so a report-counting floor let one verbose audit supply 20%
+#: of it. The VERDICT line prints both numbers so nobody reads n=10 as ten
+#: independent observations.
+MIN_SESSIONS = 10
 
 #: The round-0 ledger line the `/audit-pr` skill tells the auditor to emit
 #: (`round 0 · requirements: N (unattributed: U)`). Only the two numbers are
@@ -281,27 +349,70 @@ SOURCE_LINE_INDENT = "  "
 ANCHOR_BLOCK_RE = re.compile("^" + re.escape(ANCHOR_BLOCK), re.M)
 ANCHOR_SOURCES_RE = re.compile("^" + re.escape(ANCHOR_SOURCES), re.M)
 
-#: Every session-transcript source line `render()` can emit, by the fragment
-#: that identifies it. `role` is what the line means for the in-population test.
-#: 🔴 TWO-WAY: a line shape `render()` gains and this does not cover is a
+#: The per-source ask headings `_render_asks` emits, at column 0, ABOVE the
+#: Sources block. These are the only lines that prove asks were READ.
+ASK_HEADING_RE = re.compile(r"^### from the .*$", re.M)
+
+#: Every line of a live asks block this instrument reads, by the fragment that
+#: identifies it, with the ROLE it carries for the in-population test.
+#:
+#: `where` says which region of the block the line lives in:
+#:   `asks`    the rendered asks themselves (a `### from the <source>` heading)
+#:   `sources` an indented line under `**Sources read:**`
+#:
+#: 🔴 TWO-WAY: a line shape `render()` gains that this does not cover is a
 #: failure (GROWS), and an anchor that matches nothing a live render emits is a
-#: failure (SHRINKS).
+#: failure (SHRINKS). `text` is matched against DECODED transcript text, so a
+#: non-ASCII character is safe here.
+#:
+#: 🔴 `selected` IS NOT `answered`, AND THAT DISTINCTION IS THE WHOLE FIX. The
+#: first version gave `session(s) NAMED BY` the `answered` role, so a block
+#: saying "NO OPERATOR ASK COULD BE READ FOR THIS PR" — which emits that line
+#: whenever trailers named a session, beside `! … UNKNOWN` — scored
+#: in-population. Trailers naming a session is SELECTION; it is not evidence that
+#: a single word arrived. Found by `#1901 round 0`.
 ANCHORS = (
-    dict(id="answered", role="answered", text="session(s) NAMED BY",
+    dict(id="asks-read-session", where="asks", role="answered",
+         text="### from the session transcript",
+         spelling="`_render_asks`'s `### from the {source}` heading, with "
+                  "`operator_asks.SOURCE_SESSION`. Emitted ONLY when at least "
+                  "one Ask whose source is the session transcript was rendered, "
+                  "which is exactly 'the operator's words reached the auditor'. "
+                  "Depends on the `### from the ` prefix and on that source "
+                  "label; both are read back out of a live render by the pin."),
+    dict(id="asks-read-pr-comment", where="asks", role="other-source",
+         text="### from the PR comment",
+         spelling="the same heading for `operator_asks.SOURCE_PR_COMMENT`. In "
+                  "the ledger so that ADDING A SOURCE to `operator_asks` fails "
+                  "the GROWS direction instead of silently deciding, by "
+                  "accident, whether that source counts as the words arriving. "
+                  "PR-comment asks do NOT make a report in-population — the "
+                  "route the fix shipped is the session transcript, and that "
+                  "arc's own open investigation records agent-posted comments "
+                  "being misattributed to the operator."),
+    dict(id="selected", where="sources", role="selected",
+         text="session(s) NAMED BY",
          spelling="`render()`'s trailer line — 'N session(s) NAMED BY "
-                  "`Claude-Session-Id:` trailers'. The word NAMED BY was itself "
-                  "a round-1 correction of 'resolved', so it is the load-bearing "
-                  "half and the count/label tail is not matched."),
-    dict(id="unmeasured", role="unmeasured", text=": UNKNOWN — ",
+                  "`Claude-Session-Id:` trailers'. NAMED BY was itself a round-1 "
+                  "correction of 'resolved' for this exact reason, so the words "
+                  "are load-bearing and the count/label tail is not matched."),
+    dict(id="unmeasured", where="sources", role="unmeasured",
+         text=": UNKNOWN — ",
          spelling="`render()`'s `! {source}: UNKNOWN — {reason}` line for an "
                   "`Unmeasured` source. The em-dash separator is part of it; the "
                   "reason text is not matched at all."),
-    dict(id="dropped", role="informational", text=": dropped ",
+    dict(id="dropped", where="sources", role="informational",
+         text=": dropped ",
          spelling="`render()`'s `{source}: dropped N record(s) — {reason}` line. "
-                  "INFORMATIONAL: records were dropped by the classifier, which "
-                  "says nothing about whether the source answered — it is in the "
-                  "ledger so the GROWS direction stays meaningful."),
+                  "INFORMATIONAL: the classifier dropped records, which says "
+                  "nothing either way — in the ledger so GROWS stays meaningful."),
 )
+
+#: 🔴 THE ONE-LINE LEDGER OF WHAT MAKES A REPORT IN-POPULATION. A tuple rather
+#: than a condition buried in `disposition_of`, so re-admitting `selected` is a
+#: visible edit that fails `test_only_the_answered_role_can_make_a_report_in_population`
+#: rather than a quiet change of what the closing condition measures.
+IN_POPULATION_ROLES = ("answered",)
 
 #: 🔴 COMPUTED FROM A SEED, NEVER WRITTEN DOWN. The corpus is
 #: `~/.claude/projects/**/*.jsonl`, so a sentinel spelled as a literal poisons
@@ -345,7 +456,7 @@ def fail(code: int, msg: str, err=None) -> NoReturn:
 def parse_ts(raw: str):
     """ISO-8601 -> aware datetime, or None.
 
-    🔴 NOT a string compare. Transcript stamps end in `Z` while `git log %aI`
+    🔴 NOT a string compare. Transcript stamps end in `Z` while `git log %cI`
     carries a numeric offset, so comparing the two as strings is lexicographic
     nonsense and would mis-bucket every report near the cut.
     """
@@ -400,12 +511,28 @@ def load_operator_asks():
     return mod
 
 
-def renderer_probes(oa, projects_root) -> dict:
-    """Name -> a live `render()` output, one per source-line shape it can emit.
+#: The two probes whose CLASSIFICATION is asserted on every run, and the
+#: disposition each must produce. 🔴 THIS IS THE GUARD A STRING LEDGER CANNOT BE:
+#: every anchor was already correct when the negative pole scored `in`, because
+#: what was wrong was the PRECEDENCE. Both poles are live `render()` output.
+BEHAVIOURAL_POLES = (
+    # Sessions NAMED BY trailers, nothing readable, zero asks — the real shape of
+    # `#1901`'s finding, and the one that must NOT be in-population.
+    ("named-but-unreadable", "out"),
+    # An ask actually rendered from a session transcript — the shape a live
+    # `audit-dispatch.py 1901 --round 0` emits (`### from the session transcript`
+    # above `**Sources read:**`, `1 session(s) NAMED BY`, no `!` on that source).
+    ("answered", "in"),
+)
 
-    The matrix, not one happy case: each entry is chosen to make ONE
-    session-transcript line shape appear, so the two-way pin can require that
-    every emitted shape is covered and every anchor is reachable.
+
+def renderer_probes(oa, projects_root) -> dict:
+    """Name -> a live `render()` output, one per block shape this reads.
+
+    The matrix, not one happy case: each entry makes ONE line shape appear, so
+    the two-way pin can require that every emitted shape is covered and every
+    anchor is reachable — and two of them are classified end-to-end
+    (`BEHAVIOURAL_POLES`).
 
     `projects_root` is pointed at a directory that does not exist on purpose —
     `agent_side_reference` globs it, and the probe must not walk the real
@@ -413,47 +540,59 @@ def renderer_probes(oa, projects_root) -> dict:
     """
     sid = "a" * 8
     ask = oa.Ask(source=oa.SOURCE_SESSION, text="an ask", session_id=sid)
+    comment_ask = oa.Ask(source=oa.SOURCE_PR_COMMENT, text="an ask", who="someone")
     unmeasured = oa.Unmeasured(
         source=oa.SOURCE_SESSION,
-        reason="none of this PR's commits carries a trailer")
+        reason="those session ids resolved to no readable transcript on this host")
     kw = dict(projects_root=projects_root)
     return {
-        # sessions were named by trailers -> the source ANSWERED
+        # an ask FROM a session transcript was rendered -> the words arrived
         "answered": oa.render([ask], session_ids=(sid,), comments_examined=0, **kw),
-        # consulted and did not answer -> the OUT case, verbatim shape
+        # 🔴 THE NEGATIVE POLE: trailers named a session AND nothing could be read.
+        # `render()` emits BOTH the NAMED BY line and the `! … UNKNOWN` line here.
+        "named-but-unreadable": oa.render([], session_ids=(sid,),
+                                         unmeasured=(unmeasured,),
+                                         comments_examined=0, **kw),
+        # consulted and did not answer, with no trailers at all
         "unmeasured": oa.render([], unmeasured=(unmeasured,),
                                 comments_examined=0, **kw),
         # the classifier dropped records -> an INFORMATIONAL session line
         "dropped": oa.render([ask], session_ids=(sid,),
                              dropped={"a reason": 3}, comments_examined=0, **kw),
+        # asks arrived, but from the OTHER source
+        "pr-comment-only": oa.render([comment_ask], comments_examined=1, **kw),
         # no source consulted at all -> a block with no session line
         "no-source": oa.render([], **kw),
     }
 
 
-def sources_block_lines(text: str) -> list[str]:
-    """The source lines of the FIRST asks block in `text`, or [].
+def block_regions(text: str) -> tuple[list[str], list[str], bool]:
+    """-> (ask-heading lines, source lines, a Sources block was found).
 
-    Structural, not positional: from `ANCHOR_SOURCES` take every following
-    indented line, stopping at the first non-empty line that is NOT indented
-    (in a real render that is the `**Ledger:**` line). Returns [] when the block
-    is present but its Sources marker is not — which the caller reports as
-    UNKNOWN rather than as an absence of sources.
+    Two regions of the FIRST asks block in `text`, split at `**Sources read:**`:
+    the ask headings ABOVE it (which prove reading) and the indented source lines
+    BELOW it (which describe what was consulted). Structural, not positional.
+
+    The third value distinguishes "no Sources block at all" — which is THIS
+    instrument failing to read the block — from "a Sources block with nothing in
+    it about the session transcript". Those are different findings and the first
+    version could not tell them apart.
     """
     head = ANCHOR_BLOCK_RE.search(text)
     if not head:
-        return []
+        return [], [], False
     mark = ANCHOR_SOURCES_RE.search(text, head.start())
     if not mark:
-        return []
-    out: list[str] = []
+        return ASK_HEADING_RE.findall(text[head.start():]), [], False
+    asks = ASK_HEADING_RE.findall(text[head.start():mark.start()])
+    sources: list[str] = []
     for line in text[mark.start():].splitlines()[1:]:
         if not line.strip():
             continue
         if not line.startswith(SOURCE_LINE_INDENT):
-            break
-        out.append(line)
-    return out
+            break                       # in a real render, the `**Ledger:**` line
+        sources.append(line)
+    return asks, sources, True
 
 
 def session_source_lines(session_label: str, lines) -> list[str]:
@@ -462,18 +601,21 @@ def session_source_lines(session_label: str, lines) -> list[str]:
     return [l for l in lines if needle in l]
 
 
-def match_anchors(lines) -> tuple[set, set, list]:
+def match_anchors(lines, where: str) -> tuple[set, set, list]:
     """-> (roles matched, anchor ids matched, lines matching NO anchor).
 
-    The unmatched list is the GROWS half of the two-way pin (a session-source
-    line shape the ledger does not cover); the matched ids are the SHRINKS half
-    (an anchor nothing emits any more).
+    `where` selects the region's anchors (`asks` or `sources`), so a heading
+    cannot be scored by a source-line anchor or the reverse.
+
+    The unmatched list is the GROWS half of the two-way pin (a line shape the
+    ledger does not cover); the matched ids are the SHRINKS half (an anchor
+    nothing emits any more).
     """
     roles: set = set()
     ids: set = set()
     unmatched: list[str] = []
     for line in lines:
-        hit = [a for a in ANCHORS if a["text"] in line]
+        hit = [a for a in ANCHORS if a["where"] == where and a["text"] in line]
         if not hit:
             unmatched.append(line)
             continue
@@ -481,6 +623,20 @@ def match_anchors(lines) -> tuple[set, set, list]:
             roles.add(a["role"])
             ids.add(a["id"])
     return roles, ids, unmatched
+
+
+def roles_of_block(text: str, session_label: str) -> tuple[set, bool, list]:
+    """-> (roles this block carries, sources-block-found, lines matching nothing).
+
+    One place where a block's text becomes roles, shared by `disposition_of` and
+    by the pin — so the pin's behavioural poles exercise the SAME path the corpus
+    walk does, not a parallel re-implementation of it.
+    """
+    asks, sources, found = block_regions(text)
+    ask_roles, _ask_ids, ask_bad = match_anchors(asks, "asks")
+    src_roles, _src_ids, src_bad = match_anchors(
+        session_source_lines(session_label, sources), "sources")
+    return ask_roles | src_roles, found, ask_bad + src_bad
 
 
 def check_pins(oa, probes) -> None:
@@ -511,11 +667,12 @@ def check_pins(oa, probes) -> None:
             fail(EXIT_PIN, f"the {name!r} render carries no line-initial "
                            f"{ANCHOR_SOURCES!r} — the Sources block cannot be "
                            "located")
-        lines = session_source_lines(oa.SOURCE_SESSION,
-                                     sources_block_lines(text))
-        _roles, ids, bad = match_anchors(lines)
-        seen_ids |= ids
-        unmatched += bad
+        asks, sources, _found = block_regions(text)
+        ask_roles, ask_ids, ask_bad = match_anchors(asks, "asks")
+        _src_roles, src_ids, src_bad = match_anchors(
+            session_source_lines(oa.SOURCE_SESSION, sources), "sources")
+        seen_ids |= ask_ids | src_ids
+        unmatched += ask_bad + src_bad
     missing = sorted({a["id"] for a in ANCHORS} - seen_ids)
     # 🔴 BOTH HALVES IN ONE REFUSAL, and that is not cosmetic: a REWORD trips
     # both at once — the old spelling matches nothing (SHRINKS) and the new line
@@ -542,6 +699,31 @@ def check_pins(oa, probes) -> None:
                      "in the same commit that reworded the renderer.")
     fail(EXIT_PIN, "the pinned renderer strings disagree with operator_asks.py. "
                    + "  ".join(parts))
+
+
+def check_behavioural_poles(oa, probes) -> None:
+    """Refuse (exit 5) unless BOTH poles still classify the way they must.
+
+    🔴 THE GUARD A STRING LEDGER CANNOT BE, and the reason this function exists
+    separately: when `#1901 round 0` found the negative case scoring
+    in-population, every anchor in the ledger was CORRECT — the defect was the
+    precedence between them. A structural pin cannot see that. So two live
+    `render()` outputs are classified end to end, through the same
+    `disposition_of` the corpus walk uses, and a disagreement refuses the run.
+    """
+    if not set(IN_POPULATION_ROLES) <= {a["role"] for a in ANCHORS}:
+        fail(EXIT_PIN,
+             f"IN_POPULATION_ROLES {IN_POPULATION_ROLES} names a role no anchor "
+             "carries, so nothing could ever be in-population")
+    for name, expected in BEHAVIOURAL_POLES:
+        got, why = disposition_of([probes[name]], oa.SOURCE_SESSION)
+        if got != expected:
+            fail(EXIT_PIN,
+                 f"the {name!r} pole of a LIVE render classifies as {got!r}, "
+                 f"expected {expected!r} ({why}). This is the precedence defect "
+                 "`#1901 round 0` found: `session(s) NAMED BY` is SELECTION, "
+                 "never evidence that the operator's words arrived, so a block "
+                 "saying no ask could be read must not be in-population.")
 
 
 # --------------------------------------------------------------------------- #
@@ -620,31 +802,51 @@ def disposition_of(texts, session_label: str) -> tuple[str, str]:
 
     `texts` is every block's text — the brief arrives INJECTED, so the
     provenance rule that defines a report deliberately does not apply here.
+
+    🔴 THE ORDER OF THESE BRANCHES IS THE FIX FOR `#1901 round 0`'s 🔴, and each
+    one names what it READ rather than what it assumed. Only `answered` — an
+    `### from the session transcript` heading, i.e. an ask actually rendered from
+    a transcript — makes a report in-population. `selected` (`session(s) NAMED
+    BY`) is evidence that trailers picked a session, and `render()` emits it
+    beside `! … UNKNOWN` in exactly the case where nothing could be read; scoring
+    it as `answered` put reports whose own block says "NO OPERATOR ASK COULD BE
+    READ FOR THIS PR" into the closing condition's left-hand side.
+
+    Every non-arrival branch returns `out` rather than UNKNOWN because each is a
+    successful READING of non-arrival. UNKNOWN is reserved for THIS instrument's
+    blindness — see the module docstring for why that boundary is drawn there and
+    why it does not weaken the handoff's "an unreadable source is not an absence
+    of asks" rule (that rule is about the AUDITOR's inference, not membership).
     """
     roles: set = set()
-    unparseable = 0
+    no_sources_block = 0
     blocks = 0
     for txt in texts:
         if not ANCHOR_BLOCK_RE.search(txt):
             continue
         blocks += 1
-        lines = session_source_lines(session_label, sources_block_lines(txt))
-        if not lines:
-            unparseable += 1
-            continue
-        got, _ids, _bad = match_anchors(lines)
+        got, found, _bad = roles_of_block(txt, session_label)
         roles |= got
+        if not found:
+            no_sources_block += 1
     if not blocks:
         return "out", "no asks block in this session (a pre-fix report)"
-    if "answered" in roles:
-        return "in", "the asks block's session-transcript source answered"
+    if set(IN_POPULATION_ROLES) & roles:
+        return "in", ("an ask from a session transcript was rendered into the "
+                      "brief — the operator's words reached the auditor")
     if "unmeasured" in roles:
-        return "out", ("the asks block says the session-transcript source could "
-                       "not be read")
+        return "out", ("the asks block says its session-transcript source was "
+                       "consulted and could not be read, so no ask arrived")
+    if "selected" in roles:
+        return "out", ("trailers NAMED a session but no ask from it was "
+                       "rendered — selection is not arrival")
+    if "other-source" in roles:
+        return "out", ("the only asks came from another source (a PR comment), "
+                       "not from a session transcript")
     return "UNKNOWN", (
-        f"an asks block is present but its Sources block could not be parsed "
-        f"({unparseable} of {blocks}) or names no session-transcript source — "
-        "that is unreadable, NOT a zero")
+        "an asks block is present but this instrument could not read it: "
+        f"{no_sources_block} of {blocks} carry no Sources block, and none names "
+        "a session-transcript source — unreadable HERE, which is not a zero")
 
 
 @dataclass
@@ -762,21 +964,40 @@ def resolve_cut(sha: str, repo: Path) -> str:
     return out.stdout.strip()
 
 
-def render_report(cut_iso, cut_src, corpus, facts, buckets, undated,
-                  samples, args_samples) -> tuple[str, int]:
+def bucket_reports(reports, cut) -> dict:
+    """Split reports into the buckets the report prints. A PURE function.
+
+    The seam tests use instead of a `--json` file: `#1901 round 0`'s deletion
+    pass removed that flag (zero consumers), and a function returning lists is a
+    better seam than a file anyway — it cannot be stale and needs no IO.
+
+    🔴 UNKNOWN is in NO denominator, in either bucket, and `undated` is in
+    neither bucket at all.
+    """
+    undated = [r for r in reports if r.dt is None]
+    dated = [r for r in reports if r.dt is not None]
+    pre = [r for r in dated if r.dt < cut]
+    post = [r for r in dated if r.dt >= cut]
+    return dict(
+        pre=pre, post=post, undated=undated,
+        pre_in=[r for r in pre if r.disposition == "in"],
+        post_in=[r for r in post if r.disposition == "in"],
+        # F3's contemporaneous control: same skill revisions, models and repos as
+        # `post_in`, differing only in whether the asks arrived.
+        post_out=[r for r in post if r.disposition == "out"],
+        post_unknown=[r for r in post if r.disposition == "UNKNOWN"],
+    )
+
+
+def render_report(cut_iso, cut_src, corpus, facts, b) -> tuple[str, int]:
     """The whole report, and the exit code it implies."""
     o: list[str] = []
-    pre, pre_in, post, post_in, post_unknown = buckets
+    pre, pre_in = b["pre"], b["pre_in"]
+    post, post_in, post_out = b["post"], b["post_in"], b["post_out"]
+    post_unknown, undated = b["post_unknown"], b["undated"]
     o.append("round0-attribution-rate — run "
              f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}")
     o.append(f"corpus {corpus}   files walked {facts.files}")
-    if transcript_search is None:
-        # Never silent: the fallback project rule is NARROWER than the shared
-        # one, so a reader must know which was used.
-        o.append("⚠ `scripts/lib/transcript_search` could not be imported "
-                 f"({_TRANSCRIPT_SEARCH_IMPORT_ERROR}) — the project of each "
-                 "transcript came from this script's own fallback rule, not "
-                 "from the shared one")
     o.append(f"cut {cut_iso}   ({cut_src})")
     o.append("unit: ONE round-0 ledger line in ONE assistant-authored text "
              "block. Injected copies (skill body, brief) are NOT reports: "
@@ -784,7 +1005,7 @@ def render_report(cut_iso, cut_src, corpus, facts, buckets, undated,
              "and excluded.")
 
     o.append("\nCONTROLS")
-    pos = len(pre) + len(post) + undated["n"]
+    pos = len(pre) + len(post) + len(undated)
     o.append(f"  POSITIVE (assistant-authored ledger lines anywhere): {pos}"
              f"   {'ok' if pos else 'FAILED'}")
     o.append(f"  NEGATIVE (computed sentinel, must be 0):             "
@@ -797,45 +1018,62 @@ def render_report(cut_iso, cut_src, corpus, facts, buckets, undated,
 
     o.append("\nRATES — a RATE, never a count. A corpus-wide count only grows; "
              "see the docstring's defect 2.")
-    o.append(f"{'bucket':34} {'reports':>7} {'sess':>5} {'reqs':>6} "
+    o.append(f"{'bucket':38} {'reports':>7} {'sess':>5} {'reqs':>6} "
              f"{'unattr':>7} {'mean/report':>11} {'share':>7}")
-    for label, rows in (("PRE-cut (all)", pre),
-                        ("PRE-cut in-population", pre_in),
-                        ("POST-cut (all)", post),
-                        ("POST-cut in-population", post_in)):
+    rows_to_print = [
+        ("PRE-cut (all)", pre, ""),
+        # 🔴 LABELLED STRUCTURALLY ZERO, not left to read as a measurement: no
+        # asks block existed before the cut, so this row CANNOT be non-zero
+        # except through blind spot 7's older spelling, which routes to UNKNOWN.
+        # Beside three live rows an unlabelled 0 here reads as a finding.
+        ("PRE-cut in-population [struct. 0]", pre_in, ""),
+        ("POST-cut (all)", post, ""),
+        # F3's control, printed BESIDE the comparator: same skill revisions,
+        # models and repo mix as `post_in`, differing only in whether the asks
+        # arrived. The PRE-cut baseline is an UNSELECTED population; this one is
+        # contemporaneous, so the two together bound the selection effect.
+        ("POST-cut out-of-population [control]", post_out, ""),
+        ("POST-cut in-population", post_in, ""),
+    ]
+    for label, rows, _ in rows_to_print:
         s = stats(rows)
-        o.append(f"{label:34} {s['n']:7d} {s['sessions']:5d} "
+        o.append(f"{label:38} {s['n']:7d} {s['sessions']:5d} "
                  f"{s['requirements']:6d} {s['unattributed']:7d} "
                  f"{_fmt(s['mean_unattributed']):>11} "
                  f"{_fmt(s['unattributed_share']):>7}")
+    o.append("  [struct. 0] cannot be non-zero: no asks block existed pre-cut. "
+             "[control] is the CONTEMPORANEOUS comparison — same skill "
+             "revisions, models and repos as the in-population row, differing "
+             "only in whether the operator's words arrived. The PRE-cut "
+             "baseline is an unselected population; read both.")
     o.append(f"projects represented: PRE={len({r.project for r in pre})}  "
              f"POST={len({r.project for r in post})}")
-    o.append(f"\nDISPOSITIONS (of every report, both buckets): "
+    o.append("\nDISPOSITIONS (of every report, both buckets): "
              + "  ".join(f"{k}={v}" for k, v in
                          sorted(facts.dispositions.items())))
+    reasons = collections.Counter(r.why for r in post)
+    for why, n_why in reasons.most_common():
+        # The classification is auditable from the output: every post-cut report
+        # says WHY it landed where it did, in the words `disposition_of` used.
+        o.append(f"  post-cut · {n_why:4d} × {why}")
     o.append(f"  UNKNOWN post-cut: {len(post_unknown)} — 🔴 NOT folded into "
              "in-population or out-of-population, and NOT in any denominator "
              "above. An unreadable source is a different finding from a zero.")
-    o.append(f"  undated (no `timestamp`): {undated['n']} — reported, folded "
+    o.append(f"  undated (no `timestamp`): {len(undated)} — reported, folded "
              "into NOTHING, so neither bucket claims them.")
 
-    if args_samples:
-        o.append("\nSAMPLES (shapes only — no transcript prose; do NOT commit "
-                 "or post this section)")
-        for label, rows in samples:
-            for r in rows:
-                o.append(f"  [{label}] {r.project} {r.ts[:19]} "
-                         f"requirements={r.requirements} "
-                         f"unattributed={r.unattributed} {r.disposition}")
-
     o.append("\nVERDICT")
-    n = len(post_in)
-    if n < MIN_REPORTS:
-        o.append(f"  VERDICT: NOT MEASURABLE (n={n} < {MIN_REPORTS})")
+    n_sessions = len({r.session for r in post_in})
+    n_reports = len(post_in)
+    unit = (f"n={n_sessions} distinct session(s) / {n_reports} report(s) "
+            "— the floor counts SESSIONS, because one verbose round 0 emits "
+            "several ledger lines and is still ONE observation")
+    if n_sessions < MIN_SESSIONS:
+        o.append(f"  VERDICT: NOT MEASURABLE ({unit}; floor {MIN_SESSIONS})")
         o.append("  The post-cut in-population bucket is too small to compare. "
                  "🔴 This is a standing operator instruction, not a formatting "
                  "choice: do NOT re-tune the feature off n<"
-                 f"{MIN_REPORTS}. Numbers above are printed so the population "
+                 f"{MIN_SESSIONS}. Numbers above are printed so the population "
                  "can be watched grow; they are not a result.")
         return "\n".join(o), EXIT_NOT_MEASURABLE
     base = stats(pre)
@@ -845,7 +1083,7 @@ def render_report(cut_iso, cut_src, corpus, facts, buckets, undated,
         return "\n".join(o), EXIT_NOT_MEASURABLE
     now = stats(post_in)
     if now["mean_unattributed"] is None:
-        # Unreachable while the MIN_REPORTS refusal above stands — which is
+        # Unreachable while the MIN_SESSIONS refusal above stands — which is
         # exactly why it is here: a mutation sweep that removed that refusal
         # killed this path with a `TypeError`, i.e. the guard's absence was
         # reported as a crash rather than as a refusal. A comparison with no
@@ -866,7 +1104,14 @@ def render_report(cut_iso, cut_src, corpus, facts, buckets, undated,
              f"(mean/report {_fmt(now['mean_unattributed'])} vs "
              f"{_fmt(base['mean_unattributed'])}, Δ{d_mean:+.3f}; share "
              f"{_fmt(now['unattributed_share'])} vs "
-             f"{_fmt(base['unattributed_share'])}, Δ{d_share:+.3f}), n={n}")
+             f"{_fmt(base['unattributed_share'])}, Δ{d_share:+.3f}), {unit}")
+    ctrl = stats(post_out)
+    o.append("  CONTROL (contemporaneous): POST-cut out-of-population "
+             f"mean/report {_fmt(ctrl['mean_unattributed'])}, share "
+             f"{_fmt(ctrl['unattributed_share'])} over {ctrl['n']} report(s) in "
+             f"{ctrl['sessions']} session(s). 🔴 Read the verdict against THIS "
+             "as well as against the PRE-cut baseline: a difference that also "
+             "appears here is not the asks block.")
     o.append("  ⚠ A comparison of two UNCONTROLLED populations (blind spot 4), "
              "not a causal claim about the asks block. The remaining half of "
              "the closing condition — that no report raises a deletion "
@@ -885,17 +1130,18 @@ def main(argv=None, out_stream=sys.stdout) -> int:
                     help="use this instant as the cut and consult no git at all")
     ap.add_argument("--repo", default=str(REPO),
                     help="repo to resolve --since-sha in")
-    ap.add_argument("--samples", type=int, default=0,
-                    help="print up to N report SHAPES per bucket (no prose). "
-                         "Per-session metadata: never commit or post it.")
-    ap.add_argument("--json", dest="json_out", help="also write the rows as JSON")
     args = ap.parse_args(argv)
 
     oa = load_operator_asks()
     corpus = corpus_root(args.corpus)
     # The probe root must not exist: `render()` globs it, and the pin must not
     # depend on — or walk — the real corpus.
-    check_pins(oa, renderer_probes(oa, corpus / "_r0rate_probe_no_such_dir"))
+    probes = renderer_probes(oa, corpus / "_r0rate_probe_no_such_dir")
+    check_pins(oa, probes)
+    # 🔴 AND the behavioural poles, on every run: the strings can all be right
+    # while the PRECEDENCE between them is wrong, which is exactly the defect
+    # `#1901 round 0` found.
+    check_behavioural_poles(oa, probes)
 
     if args.cut_iso:
         cut_iso, cut_src = args.cut_iso, "--cut-iso, no git consulted"
@@ -911,34 +1157,9 @@ def main(argv=None, out_stream=sys.stdout) -> int:
         fail(EXIT_USAGE, f"cannot parse the cut {cut_iso!r} as ISO-8601")
 
     reports, facts = walk(corpus, oa.SOURCE_SESSION)
-
-    undated = dict(n=len([r for r in reports if r.dt is None]))
-    dated = [r for r in reports if r.dt is not None]
-    pre = [r for r in dated if r.dt < cut]
-    post = [r for r in dated if r.dt >= cut]
-    # 🔴 UNKNOWN is excluded from every denominator, in BOTH buckets.
-    pre_in = [r for r in pre if r.disposition == "in"]
-    post_in = [r for r in post if r.disposition == "in"]
-    post_unknown = [r for r in post if r.disposition == "UNKNOWN"]
-    samples = [(lbl, rows[:args.samples]) for lbl, rows in
-               (("pre", pre), ("post", post))] if args.samples else []
-
     text, code = render_report(cut_iso, cut_src, corpus, facts,
-                               (pre, pre_in, post, post_in, post_unknown),
-                               undated, samples, args.samples)
+                               bucket_reports(reports, cut))
     print(text, file=out_stream)
-    if args.json_out:
-        Path(args.json_out).write_text(json.dumps(dict(
-            run=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            corpus=str(corpus), cut=cut_iso, cut_source=cut_src,
-            files=facts.files, injected_ledger_lines=facts.injected_ledger_lines,
-            undated=undated["n"], min_reports=MIN_REPORTS,
-            dispositions=dict(facts.dispositions),
-            buckets={k: stats(v) for k, v in
-                     (("pre", pre), ("pre_in", pre_in), ("post", post),
-                      ("post_in", post_in))},
-            post_unknown=len(post_unknown), exit=code), indent=2))
-        print(f"\nwrote {args.json_out}", file=out_stream)
     return code
 
 
@@ -952,18 +1173,11 @@ def _project_of(path: Path, corpus: Path) -> str:
     segment under the root, which is the project for both depths, and it is the
     ONE place that rule lives.
 
-    ⚠ The fallback is the same rule re-spelled, for a tree with no
-    `scripts/lib` beside it (a partial deploy, a `cp -a` of one file). It is
-    reached only when the module-level import failed, and `main()` prints that
-    it was used — a narrower rule applied silently would be the worse failure.
+    ⚠ There is no fallback re-spelling of that rule any more: `#1901 round 0`'s
+    deletion pass removed it (see the import at the top for why the state it
+    guarded has no producing mechanism).
     """
-    if transcript_search is not None:
-        return transcript_search.project_dir_of(path, root=corpus)
-    try:
-        rel = path.relative_to(corpus)
-    except ValueError:                                      # pragma: no cover
-        return "?"
-    return rel.parts[0] if len(rel.parts) > 1 else ""
+    return transcript_search.project_dir_of(path, root=corpus)
 
 
 if __name__ == "__main__":

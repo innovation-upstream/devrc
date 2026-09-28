@@ -19,10 +19,23 @@ operator asked for, so that branch was unreachable and his stated requirements l
 - **closing-condition:** `check` — `python3 $DEVRC/scripts/round0-attribution-rate.py` reports
   the post-cut **in-population RATE** (mean `unattributed` per round-0 report, and
   `unattributed` as a share of `requirements`) as LOWER than the pre-cut rate, at
-  n ≥ `MIN_REPORTS` (10) **and** no report raises a deletion candidate against a requirement
-  the asks block quotes. **Judgement over named evidence:** the operator reads that count.
+  n ≥ `MIN_SESSIONS` (10 **distinct sessions**, not ledger lines) **and** no report raises a
+  deletion candidate against a requirement the asks block quotes.
+  **Judgement over named evidence:** the operator reads that count.
+  - 🔴 **IN-POPULATION MEANS "THE OPERATOR'S WORDS ACTUALLY REACHED THE AUDITOR"** — an ask
+    RENDERED from a session transcript (`### from the session transcript` in the brief). It
+    does **NOT** mean "the PR's commits carry a `Claude-Session-Id:` trailer", which is the
+    definition this condition inherited from `#1887` and is the **wrong fact**: `render()`
+    prints `N session(s) NAMED BY … trailers` whenever trailers NAMED a session — including
+    when nothing could be read off them — so the inherited reading counted reports whose own
+    block says *NO OPERATOR ASK COULD BE READ FOR THIS PR*. Found by **`#1901 round 0`**,
+    reproduced, and fixed; see Defects.
   - 🔴 **The left-hand side is a RATE, not a count** — see Defects for why the original
     absolute count could never be met.
+  - **Read the CONTEMPORANEOUS control beside it.** The run prints POST-cut
+    out-of-population — same skill revisions, models and repos, differing only in whether the
+    asks arrived — because the comparator is otherwise a SELECTED post population against an
+    UNSELECTED pre one. A difference that also appears in the control is not the asks block.
   - **Reproducible pre-cut baseline, method named:** assistant-authored text blocks ONLY, one
     round-0 ledger line = one report, corpus `~/.claude/projects` on **this host**, cut =
     `31033cdb`'s **committer date** (`%cI` — when the squash LANDED on `main`, not when its
@@ -40,12 +53,15 @@ operator asked for, so that branch was unreachable and his stated requirements l
     neither yields it: assistant-authored blocks give the 493 above; counting every record of
     any role gives **1,977 / 707 / 8**. Kept here so nobody re-derives it as if it were the
     baseline. A number quoted without its method has no defined left-hand side.
-  - **Today's real answer is `VERDICT: NOT MEASURABLE (n=0 < 10)`** — and the tool refuses to
-    compare below n=10 on purpose, so it cannot be used to justify re-tuning the feature.
-    Post-cut at 2026-09-28T02:45Z: **17 reports, 0 in-population, 1 UNKNOWN** (it read 16 an
-    hour earlier — the post bucket GROWS with every audit, which is defect 2 in miniature, so
-    re-run rather than quoting this line). The number the condition reads is the
-    **in-population n**, not the bucket's size.
+  - **Today's real answer is `VERDICT: NOT MEASURABLE (n=1 distinct session(s) / 2
+    report(s); floor 10)`** — the tool refuses to compare below ten sessions on purpose, so it
+    cannot be used to justify re-tuning the feature. Post-cut at 2026-09-28T03:41Z: **20
+    reports / 19 sessions**, of which in-population **2 reports from 1 session**,
+    out-of-population 17, UNKNOWN 1. (It read 16 reports ninety minutes earlier — the post
+    bucket GROWS with every audit, which is defect 2 in miniature, so re-run rather than
+    quoting this line.) The number the condition reads is the **in-population distinct-session
+    count**, never the bucket's size — measured on `#1901`'s own round 0, two ledger lines
+    came from ONE session, so a report-counting floor let one verbose audit supply 20% of it.
 
 ## State now
 - 🔴 **SHIPPED AND VERIFIED.** `#1887` squash-merged as **`31033cdb`** (2026-09-27T05:49:10Z),
@@ -181,7 +197,15 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
    FIRST; if the share is small, record "won't fix" rather than building a marker check.
    Repo `devrc`, `scripts/lib/operator_asks.py`.
    forcing: none
-3. **Consider whether `extract_user_msgs.py --include-answers` should become the default.**
+3. **Consolidate the corpus walk with `audit-rule-firing-sweep.py`** — HYGIENE, not a live
+   bug, and measured as such by `#1901 round 0`: the two walks' only behavioural divergence is
+   that the sweep credits an `Agent`/`Task` `tool_result` as signal, and that fires **0 times**
+   (0 ledger-line occurrences in any such block), while the injected/assistant split sums to
+   the rate tool's own total exactly. So the risk of leaving them separate is duplication, not
+   disagreement. Both keep their own walk on purpose (the shared `iter_transcripts` excludes
+   `subagents/`, where auditor transcripts live) and both carry a `JSONL_GLOB_SITES` row.
+   forcing: none
+4. **Consider whether `extract_user_msgs.py --include-answers` should become the default.**
    It is off so no shipped consumer moved, but the `find-session --arc` footer arguably wants
    the operator's answers too. Blocked on `handoff-arc-user-messages.md` NEXT #2 — that arc
    is mid-measurement against the current contract and flipping the default would invalidate
@@ -189,6 +213,26 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
    forcing: none
 
 ## Defects (batched)
+- 🔴 **THE INHERITED POPULATION DEFINITION BOUGHT THE WRONG FACT, and it was measurably
+  unsafe.** `#1887`'s closing condition said "PRs whose commits carry a `Claude-Session-Id:`
+  trailer", and `round0-attribution-rate.py` implemented that literally by reading
+  `render()`'s `N session(s) NAMED BY … trailers` line as evidence the asks had been read.
+  That line is guarded by `if session_ids:` alone and is emitted BESIDE
+  `! session transcript: UNKNOWN — …` in the common case where the trailers name a session
+  whose transcript is not on this host — which `audit-dispatch.py` records as the ORDINARY
+  case, because the operator runs two hosts. So a report whose own block says *NO OPERATOR ASK
+  COULD BE READ FOR THIS PR* scored IN-population and entered the closing condition's
+  left-hand side; on the live corpus 3 of 20 post-cut reports were in exactly that state.
+  Found by **`#1901 round 0`** (blind), reproduced by the coordinator. Fixed structurally
+  rather than by flipping a precedence: *named by a trailer* is now the `selected` role
+  (SELECTION), `answered` comes only from a rendered `### from the session transcript`
+  heading, `IN_POPULATION_ROLES` is a one-line ledger, and **both poles of a live `render()`
+  are classified on every run** (exit 5) because every anchor string was already correct when
+  the defect shipped. The population is now *the operator's words actually reached the
+  auditor*. ⚠ The script's own blind-spot 8 had asserted the SAFE direction ("trailers exist
+  but the transcript was pruned is out-of-population") while the code took the unsafe one —
+  that sentence was unreachable, and a doc naming the safe direction over unsafe code is worse
+  than silence.
 - 🔴 **The original closing condition was an ABSOLUTE CORPUS-WIDE COUNT, so it could only
   GROW.** It compared a post-ship `unattributed:` count against a pre-ship count over the same
   cumulative corpus: every pre-fix report stays in that corpus forever and each new one adds to
@@ -212,7 +256,9 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
 # 0. THE CLOSING CONDITION ITSELF — the rate, both buckets, and the refusal
 python3 $DEVRC/scripts/round0-attribution-rate.py        # exit 6 = NOT MEASURABLE (n<10)
 # reads ~/.claude/projects on THIS host only; no `gh`, no network. Expect today:
-# PRE-cut 493 reports / 474 sessions / mean 3.365 · POST-cut in-population n=0 · exit 6.
+# PRE-cut 493 reports / 474 sessions / mean 3.365 · POST-cut in-population 1 session · exit 6.
+# Read the DISPOSITIONS reasons block: every post-cut report says why it landed where it did,
+# and `NAMED BY` (selection) must never be counted as the words having arrived.
 # Its guards (incl. the two-way pin against scripts/lib/operator_asks.py):
 nix develop $DEVRC -c python3 -m pytest \
   $DEVRC/scripts/tests/test_round0_attribution_rate.py -q

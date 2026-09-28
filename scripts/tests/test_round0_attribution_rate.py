@@ -8,12 +8,21 @@ after. Calling them regression coverage would be a false claim about what has
 been observed to fail (`claude/RULES.md` → "vacuous-guards"), so each such name
 says `invariant`.
 
-THE ONE EXCEPTION, and it is the important one: the two-way renderer pin
-(`ANCHORS` against `scripts/lib/operator_asks.py`) is watched go RED against a
-REWORDED and against a WIDENED copy of that module — a real red→green pair, run
-as part of the suite rather than claimed in prose. It is the guard that matters
-most, because a one-sided matcher would silently reclassify every report as
-out-of-population and print a clean, wrong NOT MEASURABLE.
+THE EXCEPTIONS, and they are the guards that matter:
+
+  * the two-way renderer pin (`ANCHORS` against `scripts/lib/operator_asks.py`)
+    is watched go RED against a REWORDED and against a WIDENED copy of that
+    module — a real red→green pair run as part of the suite, not claimed in
+    prose. A one-sided matcher would silently reclassify every report as
+    out-of-population and print a clean, wrong NOT MEASURABLE.
+  * 🔴 the PRECEDENCE guards are REGRESSION tests for a defect `#1901 round 0`
+    found and the coordinator reproduced: `session(s) NAMED BY` was scored as
+    `answered`, so a block whose own text says **NO OPERATOR ASK COULD BE READ
+    FOR THIS PR** classified as in-population and entered the closing
+    condition's left-hand side. The tests named `…named_but_unreadable…` and
+    `…only_the_answered_role…` are that bug's guards, and they are BEHAVIOURAL
+    against live `render()` output at both poles, because every anchor string
+    was already correct when the defect shipped.
 
 🔴 EVERY FIXTURE IS SYNTHETIC. devrc is PUBLIC and the corpus under measurement
 is the operator's transcripts, so no record here is copied from one: the briefs
@@ -146,25 +155,18 @@ def run(r0, argv) -> tuple[int, str]:
     return code, buf.getvalue()
 
 
-def rates(r0, corpus, tmp_path, extra=()) -> tuple[int, str, dict]:
-    """Run over `corpus` and return (code, stdout, the JSON bucket report).
+def rates(r0, oa, corpus, extra=()) -> tuple[int, str, dict]:
+    """Run over `corpus`, and ALSO return the buckets as DATA.
 
-    🔴 THE REPORT'S EXISTENCE IS ASSERTED HERE, never returned as `None`. A
-    `None` payload would turn every caller's `payload["buckets"]…` arithmetic
-    into a `TypeError` far from the cause — and a caller that checked only
-    truthiness would sail past a run that produced no report at all, which is
-    the vacuous-pass shape. A missing file is this helper's own failure, with the
-    run's output attached.
+    ⚠ The buckets come from `bucket_reports` — the same pure function `main()`
+    uses — and not from a `--json` file: that flag had zero consumers and `#1901
+    round 0`'s deletion pass removed it. A function's return value is a better
+    seam than a file: it cannot go stale and needs no IO. `stats()` then lets a
+    test assert ARITHMETIC rather than a label.
     """
-    out = tmp_path / "rates.json"
-    code, text = run(r0, ["--corpus", str(corpus), "--cut-iso", CUT_ISO,
-                          "--json", str(out), *extra])
-    assert out.exists(), (
-        f"the run wrote no --json report (exit {code}), so there are no buckets "
-        f"to assert on. Its output was:\n{text}")
-    payload = json.loads(out.read_text())
-    assert isinstance(payload, dict) and "buckets" in payload, payload
-    return code, text, payload
+    code, text = run(r0, ["--corpus", str(corpus), "--cut-iso", CUT_ISO, *extra])
+    reports, _facts = r0.walk(Path(corpus), oa.SOURCE_SESSION)
+    return code, text, r0.bucket_reports(reports, r0.parse_ts(CUT_ISO))
 
 
 # --------------------------------------------------------------------------- #
@@ -178,14 +180,16 @@ def test_the_anchor_ledger_matches_what_operator_asks_emits_today(r0, oa, tmp_pa
 
     seen, unmatched = set(), []
     for text in probes.values():
-        lines = r0.session_source_lines(oa.SOURCE_SESSION,
-                                        r0.sources_block_lines(text))
-        _roles, ids, bad = r0.match_anchors(lines)
-        seen |= ids
-        unmatched += bad
+        asks, sources, _found = r0.block_regions(text)
+        for lines, where in ((asks, "asks"),
+                             (r0.session_source_lines(oa.SOURCE_SESSION,
+                                                      sources), "sources")):
+            _roles, ids, bad = r0.match_anchors(lines, where)
+            seen |= ids
+            unmatched += bad
     assert unmatched == [], (
-        "operator_asks.render() emits a session-transcript source line the "
-        f"ANCHORS ledger does not cover (GROWS): {unmatched}")
+        "operator_asks.render() emits a line the ANCHORS ledger does not cover "
+        f"(GROWS): {unmatched}")
     assert seen == {a["id"] for a in r0.ANCHORS}, (
         "an anchor matches nothing a live render emits (SHRINKS): "
         f"{sorted({a['id'] for a in r0.ANCHORS} - seen)}")
@@ -206,12 +210,9 @@ def _reworded_copy(tmp_path, old, new, name="operator_asks.py"):
     return copy
 
 
-def test_the_pin_goes_RED_when_the_renderer_REWORDS_its_answered_line(
+def test_the_pin_goes_RED_when_the_renderer_REWORDS_its_selection_line(
         r0, tmp_path, monkeypatch, capsys):
-    """RED half, SHRINKS direction. This is the failure the whole instrument
-    turns on: reword that line and every report classifies out-of-population,
-    the denominator empties, and the run prints a clean NOT MEASURABLE that is
-    indistinguishable from today's honest answer."""
+    """RED half, SHRINKS direction, on the `selected` anchor."""
     copy = _reworded_copy(tmp_path, "session(s) NAMED BY",
                           "session(s) IDENTIFIED VIA")
     monkeypatch.setenv(r0.OPERATOR_ASKS_ENV, str(copy))
@@ -220,8 +221,22 @@ def test_the_pin_goes_RED_when_the_renderer_REWORDS_its_answered_line(
     assert code == r0.EXIT_PIN, f"expected exit {r0.EXIT_PIN}, got {code}"
     # A reword trips BOTH halves at once, and the refusal must say so — the old
     # spelling matches nothing AND the new line is covered by nothing.
-    assert "SHRINKS" in err and "answered" in err, err
+    assert "SHRINKS" in err and "selected" in err, err
     assert "GROWS" in err and "signature of a REWORD" in err, err
+
+
+def test_the_pin_goes_RED_when_the_renderer_REWORDS_its_ASK_HEADING(
+        r0, tmp_path, monkeypatch, capsys):
+    """RED half on the anchor that now carries `answered` — the ONLY line that
+    proves the operator's words arrived. If this one silently stops matching the
+    denominator empties and the run prints a clean, wrong NOT MEASURABLE."""
+    copy = _reworded_copy(tmp_path, 'f"### from the {source}"',
+                          'f"### sourced from {source}"')
+    monkeypatch.setenv(r0.OPERATOR_ASKS_ENV, str(copy))
+    code, _out = run(r0, ["--corpus", str(tmp_path), "--cut-iso", CUT_ISO])
+    err = capsys.readouterr().err
+    assert code == r0.EXIT_PIN, f"expected exit {r0.EXIT_PIN}, got {code}"
+    assert "SHRINKS" in err and "asks-read-session" in err, err
 
 
 def test_the_pin_goes_RED_when_the_renderer_GAINS_an_uncovered_source_line(
@@ -248,14 +263,14 @@ def test_the_pin_goes_RED_when_THIS_modules_own_ledger_is_mutated(
         r0, oa, tmp_path, monkeypatch, capsys):
     """RED half, mutating the LEDGER rather than the renderer — the same
     disagreement from the other side."""
-    mutant = tuple(dict(a, text="session(s) LISTED BY") if a["id"] == "answered"
+    mutant = tuple(dict(a, text="session(s) LISTED BY") if a["id"] == "selected"
                    else a for a in r0.ANCHORS)
     monkeypatch.setattr(r0, "ANCHORS", mutant)
     with pytest.raises(SystemExit) as exc:
         r0.check_pins(oa, r0.renderer_probes(oa, tmp_path / "nope"))
     assert exc.value.code == r0.EXIT_PIN
     err = capsys.readouterr().err
-    assert "SHRINKS" in err and "answered" in err, err
+    assert "SHRINKS" in err and "selected" in err, err
     assert "GROWS" in err, err
 
 
@@ -283,11 +298,96 @@ def test_an_unreadable_renderer_is_a_pin_FAILURE_not_a_pass(
 
 
 # --------------------------------------------------------------------------- #
+# 1b. PRECEDENCE — the REGRESSION guards for `#1901 round 0`'s 🔴
+# --------------------------------------------------------------------------- #
+def test_a_block_that_NAMED_a_session_but_could_read_NOTHING_is_NOT_in_population(
+        r0, oa, tmp_path):
+    """🔴 REGRESSION, not an invariant guard. `#1901 round 0` found this and the
+    coordinator reproduced it: when trailers name a session AND nothing can be
+    read, `render()` emits `session transcript: N session(s) NAMED BY …`
+    (guarded by `if session_ids:` alone) BESIDE `! session transcript: UNKNOWN`,
+    and the block's own text says **NO OPERATOR ASK COULD BE READ FOR THIS PR**.
+    Scoring the first line as `answered` put that report in `post_in` — the
+    closing condition's entire left-hand side, and what the floor counts.
+
+    The fixture is LIVE `render()` output for exactly that input, not a
+    hand-written approximation of it."""
+    block = brief(r0, oa, "named-but-unreadable", tmp_path)
+    # the fixture must really carry BOTH lines, or it cannot see this defect
+    assert "session(s) NAMED BY" in block and ": UNKNOWN — " in block, block[:400]
+    assert "NO OPERATOR ASK COULD BE READ" in block
+    roles, _found, _bad = r0.roles_of_block(block, oa.SOURCE_SESSION)
+    assert roles >= {"selected", "unmeasured"}
+    assert "answered" not in roles, (
+        "NAMED BY is SELECTION — trailers picking a session — and must never "
+        f"carry the role that means the words arrived: {sorted(roles)}")
+    disp, why = r0.disposition_of([block], oa.SOURCE_SESSION)
+    assert disp == "out", f"got {disp!r} ({why})"
+    assert "could not be read" in why
+
+
+def test_only_the_answered_role_can_make_a_report_in_population(r0):
+    """🔴 REGRESSION: the one-line ledger that replaced the precedence bug.
+    Re-admitting `selected` here is what the defect WAS, so it must be a visible
+    edit that fails a test rather than a quiet change of meaning."""
+    assert r0.IN_POPULATION_ROLES == ("answered",)
+    assert "selected" not in r0.IN_POPULATION_ROLES
+    # …and the role really is carried by the ask-heading anchor, not by a source
+    # line: an `answered` role attached to a `sources` anchor would reintroduce
+    # the bug with the ledger still reading correctly.
+    carriers = [a for a in r0.ANCHORS if a["role"] == "answered"]
+    assert [a["id"] for a in carriers] == ["asks-read-session"]
+    assert carriers[0]["where"] == "asks"
+
+
+def test_the_run_REFUSES_when_a_live_pole_classifies_wrongly(
+        r0, oa, tmp_path, monkeypatch, capsys):
+    """🔴 REGRESSION: the behavioural half of the pin, watched RED. Every anchor
+    string was CORRECT when the defect shipped — the precedence between them was
+    wrong — so a structural ledger cannot catch this class and the run classifies
+    both poles of live `render()` output on every invocation."""
+    monkeypatch.setattr(r0, "IN_POPULATION_ROLES", ("answered", "selected"))
+    with pytest.raises(SystemExit) as exc:
+        r0.check_behavioural_poles(
+            oa, r0.renderer_probes(oa, tmp_path / "nope"))
+    assert exc.value.code == r0.EXIT_PIN
+    err = capsys.readouterr().err
+    assert "'named-but-unreadable' pole" in err, err
+    assert "classifies as 'in'" in err and "expected 'out'" in err, err
+
+
+def test_both_live_poles_classify_correctly_today(r0, oa, tmp_path):
+    """GREEN half of that pair, over the SAME code path the corpus walk uses."""
+    probes = r0.renderer_probes(oa, tmp_path / "nope")
+    r0.check_behavioural_poles(oa, probes)          # must not raise
+    for name, expected in r0.BEHAVIOURAL_POLES:
+        got, why = r0.disposition_of([probes[name]], oa.SOURCE_SESSION)
+        assert got == expected, f"{name}: {got!r} ({why})"
+    assert dict(r0.BEHAVIOURAL_POLES) == {"named-but-unreadable": "out",
+                                          "answered": "in"}
+
+
+def test_asks_that_arrived_only_from_a_PR_COMMENT_are_out_of_population(
+        r0, oa, tmp_path):
+    """invariant: the population is the SESSION-TRANSCRIPT route the fix shipped.
+    A PR comment is a different, weaker route — that arc's own open
+    investigation records agent-posted comments being attributed to the operator
+    — so it is `out` with a named reason, never `in` and never UNKNOWN."""
+    block = brief(r0, oa, "pr-comment-only", tmp_path)
+    assert "### from the PR comment" in block
+    assert "### from the session transcript" not in block
+    disp, why = r0.disposition_of([block], oa.SOURCE_SESSION)
+    assert disp == "out", f"got {disp!r} ({why})"
+    assert "another source" in why
+
+
+# --------------------------------------------------------------------------- #
 # 2. THE THREE DISPOSITIONS
 # --------------------------------------------------------------------------- #
 def test_a_session_whose_asks_block_ANSWERED_is_in_population(
         r0, oa, tmp_path):
-    """invariant: the in-population test is the asks block's own emitted text."""
+    """invariant: in-population is an ask RENDERED from a session transcript —
+    the `### from the session transcript` heading `_render_asks` emits."""
     corpus = corpus_with(tmp_path, {
         f"{PROJECT}/s1.jsonl": [
             user_text(brief(r0, oa, "answered", tmp_path), ts=POST_TS),
@@ -361,71 +461,145 @@ def test_UNKNOWN_is_excluded_from_the_rates_DENOMINATOR(r0, oa, tmp_path):
     sessions[f"{PROJECT}/pre.jsonl"] = [assistant(ledger(4, 3), ts=PRE_TS)]
     corpus = corpus_with(tmp_path, sessions)
 
-    code, text, payload = rates(r0, corpus, tmp_path)
-    post_in = payload["buckets"]["post_in"]
+    code, text, b = rates(r0, oa, corpus)
+    post_in = r0.stats(b["post_in"])
     assert post_in["n"] == 10
     assert post_in["requirements"] == 50 and post_in["unattributed"] == 10, (
         "the three UNKNOWN reports (9/7 each) leaked into the denominator: "
         f"{post_in}")
-    assert payload["post_unknown"] == 3
+    assert len(b["post_unknown"]) == 3
     # …and the POST-cut ALL row does not silently absorb them either.
-    assert payload["buckets"]["post"]["n"] == 13
+    assert r0.stats(b["post"])["n"] == 13
     assert code == r0.EXIT_OK, text
 
 
 # --------------------------------------------------------------------------- #
-# 3. THE MIN_REPORTS REFUSAL
+# 3. THE FLOOR — MIN_SESSIONS, in DISTINCT SESSIONS
 # --------------------------------------------------------------------------- #
-def test_MIN_REPORTS_is_ten_and_that_is_a_standing_instruction(r0):
+def test_MIN_SESSIONS_is_ten_and_that_is_a_standing_instruction(r0):
     """invariant: a VALUE pin, so lowering the floor is a visible edit rather
     than a quiet retune. `handoff-audit-pr-operator-asks.md` NEXT #1: do not
     re-tune the feature off n<10."""
-    assert r0.MIN_REPORTS == 10
+    assert r0.MIN_SESSIONS == 10
+
+
+def _in_population_sessions(r0, oa, tmp_path, n, per_session=1) -> dict:
+    """`n` sessions, each with `per_session` in-population reports."""
+    sessions = {}
+    for i in range(n):
+        sessions[f"{PROJECT}/in{i}.jsonl"] = (
+            [user_text(brief(r0, oa, "answered", tmp_path), ts=POST_TS)]
+            + [assistant(ledger(5, 1), ts=POST_TS) for _ in range(per_session)])
+    return sessions
 
 
 @pytest.mark.parametrize("n_in", [0, 9])
-def test_below_MIN_REPORTS_it_prints_NOT_MEASURABLE_and_exits_6(
+def test_below_MIN_SESSIONS_it_prints_NOT_MEASURABLE_and_exits_6(
         r0, oa, tmp_path, n_in):
     """invariant: the refusal. n=0 is today's real answer on this host."""
     sessions = {f"{PROJECT}/pre{i}.jsonl": [assistant(ledger(4, 3), ts=PRE_TS)]
                 for i in range(12)}
-    for i in range(n_in):
-        sessions[f"{PROJECT}/in{i}.jsonl"] = [
-            user_text(brief(r0, oa, "answered", tmp_path), ts=POST_TS),
-            assistant(ledger(5, 1), ts=POST_TS)]
-    code, text, payload = rates(r0, corpus_with(tmp_path, sessions), tmp_path)
+    sessions.update(_in_population_sessions(r0, oa, tmp_path, n_in))
+    code, text, b = rates(r0, oa, corpus_with(tmp_path, sessions))
     assert code == r0.EXIT_NOT_MEASURABLE, text
-    assert f"NOT MEASURABLE (n={n_in} < 10)" in text
+    assert f"NOT MEASURABLE (n={n_in} distinct session(s)" in text
     assert "do NOT re-tune the feature" in text
-    assert payload["buckets"]["post_in"]["n"] == n_in
+    assert r0.stats(b["post_in"])["n"] == n_in
 
 
-def test_at_MIN_REPORTS_a_verdict_prints(r0, oa, tmp_path):
-    """invariant: the floor is a floor and not a wall — at n=10 the comparison
-    runs and the verdict names both statistics."""
+def test_the_floor_counts_DISTINCT_SESSIONS_not_ledger_lines(r0, oa, tmp_path):
+    """🔴 REGRESSION-shaped, from the auditor's own run: it reported
+    `POST-cut in-population n=2` and BOTH reports came from ONE session, so one
+    verbose round 0 supplied 20% of a ten-REPORT floor. Nine sessions each
+    emitting two ledger lines is 18 reports and NINE observations — it must still
+    refuse, and the line must name both numbers so nobody reads n=10 as ten
+    independent observations."""
     sessions = {f"{PROJECT}/pre{i}.jsonl": [assistant(ledger(4, 3), ts=PRE_TS)]
                 for i in range(12)}
-    for i in range(10):
-        sessions[f"{PROJECT}/in{i}.jsonl"] = [
-            user_text(brief(r0, oa, "answered", tmp_path), ts=POST_TS),
-            assistant(ledger(5, 1), ts=POST_TS)]
-    code, text, _p = rates(r0, corpus_with(tmp_path, sessions), tmp_path)
+    sessions.update(_in_population_sessions(r0, oa, tmp_path, 9, per_session=2))
+    code, text, b = rates(r0, oa, corpus_with(tmp_path, sessions))
+    assert r0.stats(b["post_in"])["n"] == 18, "the fixture must emit 18 reports"
+    assert len({r.session for r in b["post_in"]}) == 9
+    assert code == r0.EXIT_NOT_MEASURABLE, text
+    assert "NOT MEASURABLE (n=9 distinct session(s) / 18 report(s)" in text
+    assert "the floor counts SESSIONS" in text
+
+
+def test_at_MIN_SESSIONS_a_verdict_prints(r0, oa, tmp_path):
+    """invariant: the floor is a floor and not a wall — at ten sessions the
+    comparison runs and the verdict names both statistics and the unit."""
+    sessions = {f"{PROJECT}/pre{i}.jsonl": [assistant(ledger(4, 3), ts=PRE_TS)]
+                for i in range(12)}
+    sessions.update(_in_population_sessions(r0, oa, tmp_path, 10))
+    code, text, _b = rates(r0, oa, corpus_with(tmp_path, sessions))
     assert code == r0.EXIT_OK, text
     assert "VERDICT: post-cut in-population is LOWER on both statistics" in text
+    assert "n=10 distinct session(s) / 10 report(s)" in text
     assert "not a causal claim" in text
 
 
 def test_an_empty_PRE_bucket_is_also_NOT_MEASURABLE(r0, oa, tmp_path):
     """invariant: exit 6's SECOND reason — a comparison with no left-hand side.
     Documented as sharing the code because it demands the same action."""
-    sessions = {}
-    for i in range(10):
-        sessions[f"{PROJECT}/in{i}.jsonl"] = [
-            user_text(brief(r0, oa, "answered", tmp_path), ts=POST_TS),
-            assistant(ledger(5, 1), ts=POST_TS)]
-    code, text, _p = rates(r0, corpus_with(tmp_path, sessions), tmp_path)
+    sessions = _in_population_sessions(r0, oa, tmp_path, 10)
+    code, text, _b = rates(r0, oa, corpus_with(tmp_path, sessions))
     assert code == r0.EXIT_NOT_MEASURABLE, text
     assert "pre-cut bucket is empty" in text
+
+
+# --------------------------------------------------------------------------- #
+# 3b. WHAT THE REPORT MUST SAY ABOUT ITS OWN ROWS
+# --------------------------------------------------------------------------- #
+def test_the_CONTEMPORANEOUS_control_row_is_printed_beside_the_comparator(
+        r0, oa, tmp_path):
+    """invariant: the comparator is a SELECTED post population against an
+    UNSELECTED pre one. POST-cut out-of-population holds skill revision, model
+    and repo mix roughly constant and differs only in whether the asks arrived,
+    so it is computed by the same walk and must be printed, not discarded."""
+    sessions = {f"{PROJECT}/pre{i}.jsonl": [assistant(ledger(4, 3), ts=PRE_TS)]
+                for i in range(12)}
+    sessions.update(_in_population_sessions(r0, oa, tmp_path, 10))
+    for i in range(4):                      # contemporaneous, asks NOT arrived
+        sessions[f"{PROJECT}/out{i}.jsonl"] = [
+            user_text(brief(r0, oa, "named-but-unreadable", tmp_path),
+                      ts=POST_TS),
+            assistant(ledger(8, 6), ts=POST_TS)]
+    code, text, b = rates(r0, oa, corpus_with(tmp_path, sessions))
+    assert r0.stats(b["post_out"])["n"] == 4
+    assert "POST-cut out-of-population [control]" in text
+    assert "CONTROL (contemporaneous)" in text
+    assert "is not the asks block" in text
+    assert code == r0.EXIT_OK, text
+
+
+def test_the_structurally_zero_PRE_in_population_row_says_so(r0, oa, tmp_path):
+    """invariant: that row cannot be non-zero (no asks block existed pre-cut), so
+    beside three live rows an unlabelled 0 reads as a measurement."""
+    corpus = corpus_with(tmp_path, {
+        f"{PROJECT}/s1.jsonl": [assistant(ledger(4, 3), ts=PRE_TS)]})
+    _code, text = run(r0, ["--corpus", str(corpus), "--cut-iso", CUT_ISO])
+    assert "PRE-cut in-population [struct. 0]" in text
+    assert "cannot be non-zero" in text
+
+
+def test_every_post_cut_report_prints_the_REASON_it_was_classified(
+        r0, oa, tmp_path):
+    """invariant: the classification is auditable from the output — the same
+    `why` strings `disposition_of` returns, with counts."""
+    sessions = {
+        f"{PROJECT}/a.jsonl": [
+            user_text(brief(r0, oa, "answered", tmp_path), ts=POST_TS),
+            assistant(ledger(5, 1), ts=POST_TS)],
+        f"{PROJECT}/b.jsonl": [
+            user_text(brief(r0, oa, "named-but-unreadable", tmp_path),
+                      ts=POST_TS),
+            assistant(ledger(5, 1), ts=POST_TS)],
+    }
+    _code, text = run(r0, ["--corpus", str(corpus_with(tmp_path, sessions)),
+                           "--cut-iso", CUT_ISO])
+    assert "post-cut ·" in text
+    assert "the operator's words reached the auditor" in text
+    assert "could not be read, so no ask arrived" in text
 
 
 # --------------------------------------------------------------------------- #
@@ -500,11 +674,11 @@ def test_a_record_with_no_timestamp_is_undated_and_folded_into_nothing(
     corpus = corpus_with(tmp_path, {
         f"{PROJECT}/s1.jsonl": [undated],
         f"{PROJECT}/s2.jsonl": [assistant(ledger(4, 3), ts=PRE_TS)]})
-    code, text, payload = rates(r0, corpus, tmp_path)
-    assert payload["undated"] == 1
-    assert payload["buckets"]["pre"]["n"] == 1
-    assert payload["buckets"]["post"]["n"] == 0
-    assert payload["buckets"]["pre"]["unattributed"] == 3, (
+    code, text, b = rates(r0, oa, corpus)
+    assert len(b["undated"]) == 1
+    assert r0.stats(b["pre"])["n"] == 1
+    assert r0.stats(b["post"])["n"] == 0
+    assert r0.stats(b["pre"])["unattributed"] == 3, (
         "the undated report's 6 leaked into the PRE bucket")
     assert "undated (no `timestamp`): 1" in text
     assert code == r0.EXIT_NOT_MEASURABLE
@@ -601,12 +775,12 @@ def test_the_cut_is_a_PARAMETER_and_moves_the_buckets(r0, oa, tmp_path):
     points, and one measurement is not a general claim."""
     corpus = corpus_with(tmp_path, {
         f"{PROJECT}/s1.jsonl": [assistant(ledger(4, 3), ts=POST_TS)]})
-    out = tmp_path / "a.json"
-    run(r0, ["--corpus", str(corpus), "--cut-iso", CUT_ISO, "--json", str(out)])
-    assert json.loads(out.read_text())["buckets"]["post"]["n"] == 1
-    run(r0, ["--corpus", str(corpus), "--cut-iso", "2026-09-28T00:00:00Z",
-             "--json", str(out)])
-    assert json.loads(out.read_text())["buckets"]["post"]["n"] == 0
+    reports, _f = r0.walk(corpus, oa.SOURCE_SESSION)
+    before = r0.bucket_reports(reports, r0.parse_ts(CUT_ISO))
+    after = r0.bucket_reports(reports, r0.parse_ts("2026-09-28T00:00:00Z"))
+    assert r0.stats(before["post"])["n"] == 1
+    assert r0.stats(after["post"])["n"] == 0
+    assert r0.stats(after["pre"])["n"] == 1, "it moved buckets, not vanished"
 
 
 # --------------------------------------------------------------------------- #
@@ -665,20 +839,35 @@ def test_default_output_carries_no_transcript_prose(r0, oa, tmp_path):
     assert secret not in text
 
 
-def test_samples_is_opt_in_and_prints_shapes_only(r0, oa, tmp_path):
-    """invariant: `--samples` may print numbers and a project, never prose or a
-    transcript path."""
+def test_no_transcript_PATH_is_ever_printed(r0, oa, tmp_path):
+    """invariant: a transcript path names a session and a project directory; it
+    is per-session metadata about the operator's work and this repo is PUBLIC.
+    ⚠ `--samples` — the flag that used to print shapes under a prohibition on
+    committing them — was DELETED by `#1901 round 0`'s deletion pass (no
+    consumers), so there is no surface left that could carry one.
+    """
     corpus = corpus_with(tmp_path, {
         f"{PROJECT}/s1.jsonl": [assistant(ledger(4, 3), ts=PRE_TS)]})
-    _c, plain = run(r0, ["--corpus", str(corpus), "--cut-iso", CUT_ISO])
-    assert "SAMPLES" not in plain
-    _c, sampled = run(r0, ["--corpus", str(corpus), "--cut-iso", CUT_ISO,
-                           "--samples", "3"])
-    assert "SAMPLES" in sampled
-    assert "requirements=4 unattributed=3" in sampled
-    assert str(corpus) not in sampled.split("SAMPLES", 1)[1], (
-        "a transcript path is per-session metadata; the samples block must not "
-        "carry one")
+    _c, text = run(r0, ["--corpus", str(corpus), "--cut-iso", CUT_ISO])
+    assert "s1.jsonl" not in text
+    assert "SAMPLES" not in text
+    # the corpus ROOT is printed on purpose (it says what was walked); a
+    # per-session path under it is not.
+    assert f"{PROJECT}/s1" not in text
+
+
+def test_the_deleted_flags_are_really_gone(r0, tmp_path):
+    """invariant: `--samples` and `--json` were removed, not hidden. argparse
+    must REJECT them, so a caller (or a stale recipe) fails loudly instead of
+    silently getting a different report."""
+    corpus = corpus_with(tmp_path, {
+        f"{PROJECT}/s1.jsonl": [assistant(ledger(4, 3), ts=PRE_TS)]})
+    for flag, value in (("--samples", "3"), ("--json", str(tmp_path / "x.json"))):
+        code, _text = run(
+            r0, ["--corpus", str(corpus), "--cut-iso", CUT_ISO, flag, value])
+        assert code == r0.EXIT_USAGE, (
+            f"{flag} must be an argparse error (exit {r0.EXIT_USAGE}), got "
+            f"{code} — a silently-accepted dead flag is worse than none")
 
 
 def test_every_exit_code_constant_is_documented_in_the_docstring(r0):
