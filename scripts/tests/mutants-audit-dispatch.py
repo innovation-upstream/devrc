@@ -4902,9 +4902,16 @@ ROWS = [
     # report's entire reason to exist, because every ladder the report is for
     # would be refused instead of reported. The mixed-shape row asserts rc 0 and
     # a rendered brief, so it goes red there.
+    # 🔴 ROUND 26 GAVE IT A THIRD, AND IT IS THE SAME SCOPE CLAIM ONE REFUSAL
+    # OVER. Widening `gate_pair` to the whole corpus makes a MALFORMED endpoint
+    # in a round the gate never reads reach REFUSAL 3c as well, so the
+    # bystander-is-not-refused guard goes red there. Two refusals, one
+    # predicate, one mutation — which is precisely the reach the consolidation
+    # was for. MEASURED, not predicted.
     ("U13 the self-range refusal covers the WHOLE corpus",
      {"test_a_SELF_RANGE_the_gate_does_NOT_read_is_reported_and_not_refused",
-      "test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF"},
+      "test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF",
+      "test_a_MALFORMED_endpoint_the_gate_does_NOT_read_is_not_refused"},
      the_self_range_refusal_covers_the_WHOLE_corpus),
     ("U14 `*` becomes a comment prefix",
      {"test_the_classifier_reads_a_changed_line_the_way_git_wrote_it"},
