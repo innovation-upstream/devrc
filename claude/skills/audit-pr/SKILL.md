@@ -198,7 +198,8 @@ nothing at all is reportable — say what you examined to get there.
 **Post the deletion candidates as a MACHINE-READABLE block as well** — `--round 0`'s OUTPUT
 section emits the skeleton and states the contract; a later round answers it with
 `--emit-claims --dispositions "D1=kept:<why>,D2=deleted"`. Evidence for why:
-`reference/round-ladder-evidence.md` → "round 0's deletion pass had no reader".
+`~/.claude/skills/audit-pr/reference/round-ladder-evidence.md` → "round 0's deletion pass had
+no reader".
 
 ## THE CHECKLIST — the nine axes (runs AFTER round 0)
 
