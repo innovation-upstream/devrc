@@ -16,12 +16,26 @@ ask)**" — but the auditor is dispatched read-only with a diff and had no way t
 operator asked for, so that branch was unreachable and his stated requirements landed on
 `unattributed`, which the section treats as a finding. Give round 0 his own words.
 
-- **closing-condition:** `check` — over round-0 reports recorded after `31033cdb`, on PRs
-  whose commits carry a `Claude-Session-Id:` trailer, the ledger's `unattributed:` count is
-  lower than the pre-ship baseline **and** no report raises a deletion candidate against a
-  requirement the asks block quotes. Baseline measured 2026-09-26: **1,649 round-0 ledger
-  lines across 728 sessions in 7 repos, most common line `requirements: 7 (unattributed: 2)`.**
-  **Judgement over named evidence:** the operator reads that count.
+- **closing-condition:** `check` — `python3 $DEVRC/scripts/round0-attribution-rate.py` reports
+  the post-cut **in-population RATE** (mean `unattributed` per round-0 report, and
+  `unattributed` as a share of `requirements`) as LOWER than the pre-cut rate, at
+  n ≥ `MIN_REPORTS` (10) **and** no report raises a deletion candidate against a requirement
+  the asks block quotes. **Judgement over named evidence:** the operator reads that count.
+  - 🔴 **The left-hand side is a RATE, not a count** — see Defects for why the original
+    absolute count could never be met.
+  - **Reproducible pre-cut baseline, method named:** assistant-authored text blocks ONLY, one
+    round-0 ledger line = one report, corpus `~/.claude/projects` on **this host**, cut =
+    `31033cdb`'s author date. Measured 2026-09-27: **493 ledger lines / 474 sessions / 7
+    projects, mean 3.365 unattributed per report, share 0.331.** Re-derivable by re-running
+    the command — that is the point of it being a command.
+  - ⚠ **The doc's earlier `1,649 / 728 / 7` figure is NOT reproducible by this method and is
+    SUPERSEDED as a comparator.** Two defensible methods over the same corpus disagree and
+    neither yields it: assistant-authored blocks give the 493 above; counting every record of
+    any role gives **1,977 / 707 / 8**. Kept here so nobody re-derives it as if it were the
+    baseline. A number quoted without its method has no defined left-hand side.
+  - **Today's real answer is `VERDICT: NOT MEASURABLE (n=0 < 10)`** (post-cut: 16 reports, 0
+    in-population, 1 UNKNOWN) — and the tool refuses to compare below n=10 on purpose, so it
+    cannot be used to justify re-tuning the feature.
 
 ## State now
 - 🔴 **SHIPPED AND VERIFIED.** `#1887` squash-merged as **`31033cdb`** (2026-09-27T05:49:10Z),
@@ -147,11 +161,11 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
   operator-attributed comment BYTES carrying that footer is the size of the problem.
 
 ## Next steps (ranked)
-1. **Read the closing-condition count.** Over round-0 reports recorded after `31033cdb` on
-   PRs whose commits carry a session trailer, compare `unattributed:` against the 2026-09-26
-   baseline (1,649 ledger lines / 728 sessions / most common `requirements: 7 (unattributed:
-   2)`), and check no report raises a deletion candidate against a requirement the asks block
-   quotes. 🔴 Do not re-tune the feature off n<10.
+1. **Re-run the closing-condition RATE** — `python3 $DEVRC/scripts/round0-attribution-rate.py`
+   (not a hand count; the 2026-09-26 `1,649` figure is superseded, see closing-condition). It
+   refuses below n=10 and exits 6 today. Then read the judgement half yourself: no report may
+   raise a deletion candidate against a requirement the asks block quotes. 🔴 Do not re-tune
+   the feature off n<10.
    forcing: none
 2. **Decide the agent-posted-comment question** (open block above) — run its Next probe
    FIRST; if the share is small, record "won't fix" rather than building a marker check.
@@ -165,6 +179,17 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
    forcing: none
 
 ## Defects (batched)
+- 🔴 **The original closing condition was an ABSOLUTE CORPUS-WIDE COUNT, so it could only
+  GROW.** It compared a post-ship `unattributed:` count against a pre-ship count over the same
+  cumulative corpus: every pre-fix report stays in that corpus forever and each new one adds to
+  it, so the left-hand side increases monotonically and "lower than the baseline" was
+  unfalsifiable in the direction it wanted. Measured while fixing it: the whole-corpus count
+  moved 493 → 509 in one day with no change to the feature. Closed by making the statistic a
+  RATE over each bucket's own reports — `scripts/round0-attribution-rate.py`.
+- 🔴 **And its baseline was not reproducible** — the `1,649 / 728 / 7` figure cannot be
+  re-derived by either of the two defensible methods over the same corpus (493/474/7
+  assistant-authored, 1,977/707/8 all-roles). The instrument now STATES its method in its own
+  output, so the next reader compares like with like.
 - ⚠ **The `#1887` squash subject on `main` says "round 0 reads the operator's own asks"** and
   the PR went on to four audit rounds that rewrote most of it. Not editable without rewriting
   a shared `main`, so it stands; the commit BODY and four PR comments carry the corrections.
@@ -174,6 +199,13 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
 
 ## How to verify
 ```bash
+# 0. THE CLOSING CONDITION ITSELF — the rate, both buckets, and the refusal
+python3 $DEVRC/scripts/round0-attribution-rate.py        # exit 6 = NOT MEASURABLE (n<10)
+# reads ~/.claude/projects on THIS host only; no `gh`, no network. Expect today:
+# PRE-cut 493 reports / 474 sessions / mean 3.365 · POST-cut in-population n=0 · exit 6.
+# Its guards (incl. the two-way pin against scripts/lib/operator_asks.py):
+nix develop $DEVRC -c python3 -m pytest \
+  $DEVRC/scripts/tests/test_round0_attribution_rate.py -q
 # 1. the asks block renders on a real PR, from the DEPLOYED skill
 python3 $DEVRC/scripts/audit-dispatch.py 1887 --repo innovation-upstream/devrc --round 0 \
   | awk '/THE OPERATOR.S OWN ASKS/,/^\*\*Ledger/'     # expect asks + a Sources read block
