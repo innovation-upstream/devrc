@@ -136,12 +136,15 @@ the emitted set GROWS as well as when it shrinks. `claude/RULES.md`: a guard on
 WORDS is walkable by REWORDING, so each anchor is the narrowest stable fragment
 that can carry its meaning and names the spelling it depends on.
 
-🔴 AND THE PIN IS BEHAVIOURAL AT BOTH POLES, not just structural. A ledger of
+🔴 AND THE PIN IS BEHAVIOURAL AT EVERY POLE, not just structural. A ledger of
 strings cannot catch a wrong PRECEDENCE — the first version of this file had
 every anchor correct and still scored the negative case as in-population — so
-`check_pins` classifies two LIVE renders on every run and refuses unless the
-NEGATIVE pole (sessions named, nothing readable, zero asks) comes out `out` and
-the POSITIVE pole (an ask rendered from a session transcript) comes out `in`.
+`check_behavioural_poles` classifies EVERY pole in `BEHAVIOURAL_POLES` on each
+run — five today, one per branch of the `BRANCHES` precedence ledger — and refuses
+unless each comes out as its ledger says, AND unless every branch is the one that
+DECIDES some pole. ⚠ The count is not fixed: read `BEHAVIOURAL_POLES`, never a
+number in prose. This paragraph said "two" after the set had grown to four, which
+is the same count-in-prose defect `WalkFacts` below records.
 The role set that can produce `in` is its own one-line ledger
 (`IN_POPULATION_ROLES`), so re-admitting `selected` there is a visible edit that
 fails a test rather than a quiet change of meaning. A NEW ask SOURCE added to
@@ -180,20 +183,31 @@ BLIND SPOTS, each at the width it actually holds
    🔴 **TWO DIFFERENT RATIOS, AND AN EARLIER VERSION OF THIS BULLET CONFLATED
    THEM INTO ONE "~2x".** They are not the same measurement:
      * the CORPUS ratio — every transcript on this host — is **~6.9x**
-       (re-derived 2026-09-28 with `_session_id_of` itself: 6,718 files / 974
-       sessions, 5,744 files under `subagents/`);
+       (`_session_id_of` over the whole corpus, 2026-09-28T17:05Z: 6,739 files /
+       973 sessions, 5,766 under `subagents/`);
      * the PRE-BUCKET ratio — files that carry a round-0 report — is **~2.0x**
        (474 files / 236 sessions), because a file with no report is not counted.
-   Both drift with the corpus, so read them as a shape and a date. What does NOT
-   drift is the mechanism, and it is the thing worth remembering: a "first path
-   segment" derivation that does not strip `.jsonl` counts a session with both a
-   top-level transcript and a `subagents/` directory TWICE. Measured here: naive
-   1,571 = 974 top-level + 597 nested, overlap 597, union 974. That is exactly how
-   a wrong `1,563` entered this file, and
+   🔴 EVERY FIGURE IN THAT FIRST BULLET DRIFTS AND IS STAMPED FOR THAT REASON —
+   treat it exactly like the tables in the handoff marked "re-run, never quote".
+   Four measurements across three days gave 6,717/973, 6,736/973, 6,739/973 — and
+   a `974` this file published once that has not reproduced since. Read the
+   method and the stamp, or re-run it; do not carry the literal.
+   ⚠ AND AN INVARIANT THIS BULLET ASSERTED IS FALSIFIED, removed rather than
+   repaired: it said "session ids cannot fall while files rise" as the reason the
+   wrong figure was caught. A pruned transcript falsifies it outright, and the
+   measurements above show sessions flat while files rose by 22. The sound claim
+   is the NARROWER one — the same method cannot give both 1,563 and 973 — and
+   that is what caught it.
+   What does NOT drift is the mechanism, and it is the thing worth remembering: a
+   "first path segment" derivation that does not strip `.jsonl` counts a session
+   with both a top-level transcript and a `subagents/` directory TWICE (measured
+   at the same instant: naive 1,570 against 973). That is exactly how a wrong
+   `1,563` entered this file, and
    `test_the_naive_session_derivation_double_counts_and_ours_does_not` pins the
-   mechanism against a fixture so a future wrong number fails instead of reading
-   fine. 🔴 Re-derive with the code's own function; do not trust a figure here
-   that a reader cannot reproduce — this arc has now shipped three of those.
+   MECHANISM against a fixture — the durable artifact here — so a future wrong
+   number fails instead of reading fine. 🔴 Re-derive with the code's own
+   function; do not trust a figure here that a reader cannot reproduce — this arc
+   has shipped three of those.
    ⚠ Within a file, a session that dispatched one answered audit and one
    unanswered one has all of its reports counted in-population (the precedence
    note above), and one verbose round 0 emitting two ledger lines is two reports
@@ -520,7 +534,7 @@ ANCHORS = (
     # widened GROWS was still blind on one axis — the asks side is derived from
     # `SOURCE_ORDER`, but the sources side is a hand-enumerated kwarg list. A
     # probe now passes `comment_skips`, and
-    # `test_every_render_kwarg_is_exercised_by_a_probe` makes the axis DERIVABLE:
+    # `test_every_render_KWARG_is_exercised_by_a_probe` makes the axis DERIVABLE:
     # a new keyword on `render()` fails the suite until a probe drives it.
     dict(id="comment-skipped", where="sources", role="informational-other",
          text=" skipped — ",
@@ -535,11 +549,61 @@ ANCHORS = (
                   "and no asks."),
 )
 
-#: 🔴 THE ONE-LINE LEDGER OF WHAT MAKES A REPORT IN-POPULATION. A tuple rather
-#: than a condition buried in `disposition_of`, so re-admitting `selected` is a
-#: visible edit that fails `test_only_the_answered_role_can_make_a_report_in_population`
-#: rather than a quiet change of what the closing condition measures.
-IN_POPULATION_ROLES = ("answered",)
+#: 🔴 THE LEDGER OF WHAT MAKES A REPORT IN-POPULATION, DERIVED from `BRANCHES`
+#: below rather than spelled twice. It was a hand-written tuple until `#1901
+#: round 3` turned the precedence into data: two constants saying the same thing
+#: is the one-rule-two-places hazard, and the version that is not consulted by
+#: `disposition_of` is the one that goes quietly stale. Re-admitting `selected`
+#: here is now impossible without editing `BRANCHES`, which
+#: `test_only_the_answered_role_can_make_a_report_in_population` pins.
+
+#: 🔴 THE PRECEDENCE, AS DATA IN ONE ORDERED LEDGER — not as an `if`/`elif` chain,
+#: and the change is what makes the branches TESTABLE rather than merely present.
+#: `#1901 round 3` found the `selected` branch STILL unguarded after round 2's fix:
+#: two mutants (deleting it, and `and False` with the string left in place) both
+#: survived a green 58-test suite, and the guard written to prevent exactly that
+#: reported it as covered. It missed because it compared the union of roles
+#: PRESENT in each pole against the branch list, while `unmeasured` precedes
+#: `selected` — so no pole ever EXECUTED the selected branch. That is the
+#: unreachable-guard shape: a mutation test passes when an earlier check always
+#: wins.
+#:
+#: As a ledger, three things follow mechanically: the order IS the precedence and
+#: is visible; `deciding_role` returns the branch actually TAKEN, so a test can
+#: assert the branch rather than the roles; and a branch cannot be re-spelled out
+#: of a regex-derived list, because nothing derives it from source text any more.
+BRANCHES: dict = {
+    "answered": ("in", "an ask from a session transcript was rendered into the "
+                       "brief — the operator's words reached the auditor"),
+    "unmeasured": ("out", "the asks block says its session-transcript source was "
+                          "consulted and could not be read, so no ask arrived"),
+    "selected": ("out", "trailers NAMED a session but no ask from it was "
+                        "rendered — selection is not arrival"),
+    "other-source": ("out", "the only asks came from another source (a PR "
+                            "comment), not from a session transcript"),
+    "none-consulted": ("out", "the asks block says no source was consulted at "
+                              "all — a fact about that assembly, and no ask "
+                              "arrived either way"),
+}
+
+
+#: Derived — see the comment above `BRANCHES`.
+IN_POPULATION_ROLES = tuple(r for r, (disp, _why) in BRANCHES.items()
+                            if disp == "in")
+
+
+def deciding_role(roles):
+    """The FIRST branch of `BRANCHES` these roles satisfy, or None.
+
+    One definition of the precedence, read by `disposition_of` AND by the tests —
+    so a test can assert which branch DECIDED a disposition instead of which
+    roles happened to be present. Round 3's finding is precisely that those two
+    are different, and that only the first one is coverage.
+    """
+    for role in BRANCHES:
+        if role in roles:
+            return role
+    return None
 
 #: 🔴 COMPUTED FROM A SEED, NEVER WRITTEN DOWN. The corpus is
 #: `~/.claude/projects/**/*.jsonl`, so a sentinel spelled as a literal poisons
@@ -638,7 +702,8 @@ def load_operator_asks():
     return mod
 
 
-#: The two probes whose CLASSIFICATION is asserted on every run, and the
+#: The probes whose CLASSIFICATION is asserted on every run — one per branch of
+#: `BRANCHES`, and read from here rather than counted in prose — with the
 #: disposition each must produce. 🔴 THIS IS THE GUARD A STRING LEDGER CANNOT BE:
 #: every anchor was already correct when the negative pole scored `in`, because
 #: what was wrong was the PRECEDENCE. Both poles are live `render()` output.
@@ -656,6 +721,13 @@ BEHAVIOURAL_POLES = (
     # having written a test — which is the gap that let them live.
     ("no-source", "out"),
     ("pr-comment-only", "out"),
+    # 🔴 ADDED AFTER `#1901 round 3`, which found the `selected` branch STILL
+    # unguarded — two mutants survived — because every existing pole that CARRIES
+    # `selected` also carries `unmeasured`, which precedes it, so no pole ever
+    # executed that branch. The probe below is the selected-ONLY shape: trailers
+    # named a session, the transcript WAS readable (hence no `Unmeasured`), and no
+    # ask matched. `roles == {"selected"}` exactly.
+    ("selected-only", "out"),
 )
 
 
@@ -664,8 +736,8 @@ def renderer_probes(oa, projects_root) -> dict:
 
     The matrix, not one happy case: each entry makes ONE line shape appear, so
     the two-way pin can require that every emitted shape is covered and every
-    anchor is reachable — and two of them are classified end-to-end
-    (`BEHAVIOURAL_POLES`).
+    anchor is reachable — and the `BEHAVIOURAL_POLES` subset is classified
+    end-to-end, one probe per `BRANCHES` entry.
 
     `projects_root` is pointed at a directory that does not exist on purpose —
     `agent_side_reference` globs it, and the probe must not walk the real
@@ -700,6 +772,13 @@ def renderer_probes(oa, projects_root) -> dict:
         "named-but-unreadable": oa.render([], session_ids=(sid,),
                                          unmeasured=(unmeasured,),
                                          comments_examined=0, **kw),
+        # 🔴 SELECTED-ONLY: trailers named a session, the transcript WAS readable
+        # (so there is no `Unmeasured`), and no ask matched. The only shape whose
+        # deciding branch is `selected` — every other probe carrying that role
+        # also carries `unmeasured`, which precedes it, which is why two mutants
+        # against that branch survived until `#1901 round 3`.
+        "selected-only": oa.render([], session_ids=(sid,), comments_examined=0,
+                                   **kw),
         # consulted and did not answer, with no trailers at all
         "unmeasured": oa.render([], unmeasured=(unmeasured,),
                                 comments_examined=0, **kw),
@@ -707,8 +786,11 @@ def renderer_probes(oa, projects_root) -> dict:
         "dropped": oa.render([ask], session_ids=(sid,),
                              dropped={"a reason": 3}, comments_examined=0, **kw),
         # asks arrived, but from the OTHER source — and this probe also drives
-        # `comment_skips` and `dropped`, the two kwargs whose source lines had no
-        # probe at all until `#1901 round 2` (see `comment-skipped`).
+        # `comment_skips`, whose source line had NO probe until `#1901 round 2`
+        # (see `comment-skipped`), and `dropped` — which already had one in the
+        # `dropped` probe, so it is driven here for locality, not for coverage.
+        # ⚠ An earlier wording called them "the two kwargs whose source lines had
+        # no probe at all", which was false for `dropped`.
         "pr-comment-only": oa.render(
             [comment_ask], comments_examined=1,
             comment_skips={"written by someone else": 2},
@@ -825,7 +907,8 @@ def roles_of_block(text: str, session_label: str) -> tuple[set, bool, list]:
 def check_pins(oa, probes) -> None:
     """Refuse (exit 5) unless the anchors still describe what `render()` emits.
 
-    Both directions, on every run:
+    Both DIRECTIONS (shrinks/grows) on every run — this is the STRUCTURAL half;
+    `check_behavioural_poles` is the behavioural one:
       SHRINKS  an anchor that matches nothing a live render emits — the shape
                this instrument is blind to after a reword, and the one that
                silently empties the denominator.
@@ -900,19 +983,29 @@ def check_pins(oa, probes) -> None:
 
 
 def check_behavioural_poles(oa, probes) -> None:
-    """Refuse (exit 5) unless BOTH poles still classify the way they must.
+    """Refuse (exit 5) unless EVERY pole still classifies the way it must, AND
+    every branch of `BRANCHES` is the one that DECIDES some pole.
 
     🔴 THE GUARD A STRING LEDGER CANNOT BE, and the reason this function exists
     separately: when `#1901 round 0` found the negative case scoring
     in-population, every anchor in the ledger was CORRECT — the defect was the
-    precedence between them. A structural pin cannot see that. So two live
-    `render()` outputs are classified end to end, through the same
-    `disposition_of` the corpus walk uses, and a disagreement refuses the run.
+    precedence between them. A structural pin cannot see that. So live `render()`
+    outputs are classified end to end, through the same `disposition_of` the
+    corpus walk uses, and a disagreement refuses the run.
+
+    🔴 AND THE SECOND HALF IS `#1901 round 3`'s FINDING: it is not enough that a
+    branch's ROLE appears somewhere among the poles. `selected` appeared — and no
+    pole ever EXECUTED that branch, because `unmeasured` precedes it in every
+    probe carrying both, so two mutants against it survived a green suite. The
+    reachability check below asks which branch `deciding_role` actually TAKES, and
+    refuses if any branch is decided by none of the poles. A branch no input can
+    reach is not guarded by anything.
     """
     if not set(IN_POPULATION_ROLES) <= {a["role"] for a in ANCHORS}:
         fail(EXIT_PIN,
              f"IN_POPULATION_ROLES {IN_POPULATION_ROLES} names a role no anchor "
              "carries, so nothing could ever be in-population")
+    decided: dict = {}
     for name, expected in BEHAVIOURAL_POLES:
         got, why = disposition_of([probes[name]], oa.SOURCE_SESSION)
         if got != expected:
@@ -922,6 +1015,17 @@ def check_behavioural_poles(oa, probes) -> None:
                  "`#1901 round 0` found: `session(s) NAMED BY` is SELECTION, "
                  "never evidence that the operator's words arrived, so a block "
                  "saying no ask could be read must not be in-population.")
+        role = deciding_role(roles_of_block(probes[name], oa.SOURCE_SESSION)[0])
+        if role is not None:
+            decided.setdefault(role, name)
+    unreached = [r for r in BRANCHES if r not in decided]
+    if unreached:
+        fail(EXIT_PIN,
+             "no pole's disposition is DECIDED by these branch(es), so nothing "
+             f"exercises them and a mutation of them would survive: {unreached}. "
+             "Add a pole whose roles reach the branch — not one that merely "
+             "CARRIES the role, since an earlier branch may win (`#1901 round 3`)."
+             f" Branches decided today: {decided}")
 
 
 # --------------------------------------------------------------------------- #
@@ -1047,8 +1151,13 @@ def disposition_of(texts, session_label: str) -> tuple[str, str]:
             # ✗, matched by NEITHER pattern.
             # MEASURED 2026-09-28 rather than assumed, because the first version of
             # this note asserted an impact of zero that was NOT what the corpus
-            # said: 15 texts carry the heading behind a `<n>:` prefix and 16 files
-            # hold one; **2** of those files also emit a round-0 ledger line, and
+            # said. RE-MEASURED 2026-09-28T17:05Z, because the first numbers I
+            # wrote were arithmetically impossible (16 files holding 15 texts —
+            # files cannot exceed texts): **15 texts in 14 files** carry the
+            # heading behind a `<n>:` prefix and are matched by neither pattern
+            # (17 in 16 before the anchored-match exclusion, which is the pair I
+            # had mixed them with). **2** of those files also emit a round-0
+            # ledger line, and
             # in BOTH the file ALSO carries an anchored block, so the disposition
             # is decided by that block and no report changes. Impact today is zero
             # by that path, not by the absence of the shape. Left unwidened
@@ -1070,21 +1179,10 @@ def disposition_of(texts, session_label: str) -> tuple[str, str]:
                 "form this instrument can locate (a transformed delivery?) — "
                 "that is MY blindness, not a pre-fix report")
         return "out", "no asks block in this session (a pre-fix report)"
-    if set(IN_POPULATION_ROLES) & roles:
-        return "in", ("an ask from a session transcript was rendered into the "
-                      "brief — the operator's words reached the auditor")
-    if "unmeasured" in roles:
-        return "out", ("the asks block says its session-transcript source was "
-                       "consulted and could not be read, so no ask arrived")
-    if "selected" in roles:
-        return "out", ("trailers NAMED a session but no ask from it was "
-                       "rendered — selection is not arrival")
-    if "other-source" in roles:
-        return "out", ("the only asks came from another source (a PR comment), "
-                       "not from a session transcript")
-    if "none-consulted" in roles:
-        return "out", ("the asks block says no source was consulted at all — a "
-                       "fact about that assembly, and no ask arrived either way")
+    role = deciding_role(roles)
+    if role is not None:
+        disp, why = BRANCHES[role]
+        return disp, why
     return "UNKNOWN", (
         "an asks block is present but this instrument could not read it: "
         f"{no_sources_block} of {blocks} carry no Sources block, and none names "

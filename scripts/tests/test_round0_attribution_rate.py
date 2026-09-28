@@ -21,7 +21,7 @@ THE EXCEPTIONS, and they are the guards that matter:
     FOR THIS PR** classified as in-population and entered the closing
     condition's left-hand side. The tests named `…named_but_unreadable…` and
     `…only_the_answered_role…` are that bug's guards, and they are BEHAVIOURAL
-    against live `render()` output at both poles, because every anchor string
+    against live `render()` output at every pole, because every anchor string
     was already correct when the defect shipped.
 
 🔴 EVERY FIXTURE IS SYNTHETIC. devrc is PUBLIC and the corpus under measurement
@@ -470,14 +470,23 @@ def test_the_run_REFUSES_when_a_live_pole_classifies_wrongly(
     """🔴 REGRESSION: the behavioural half of the pin, watched RED. Every anchor
     string was CORRECT when the defect shipped — the precedence between them was
     wrong — so a structural ledger cannot catch this class and the run classifies
-    both poles of live `render()` output on every invocation."""
-    monkeypatch.setattr(r0, "IN_POPULATION_ROLES", ("answered", "selected"))
+    every pole of live `render()` output on every invocation — five today, one
+    per `BRANCHES` entry; read the ledger, not a number."""
+    # 🔴 mutate `BRANCHES`, which is now the ONE source of the precedence —
+    # `IN_POPULATION_ROLES` is derived from it, so patching that alone would no
+    # longer change classification and this test would pass vacuously.
+    mutant = dict(r0.BRANCHES)
+    mutant["selected"] = ("in", mutant["selected"][1])
+    monkeypatch.setattr(r0, "BRANCHES", mutant)
     with pytest.raises(SystemExit) as exc:
         r0.check_behavioural_poles(
             oa, r0.renderer_probes(oa, tmp_path / "nope"))
     assert exc.value.code == r0.EXIT_PIN
     err = capsys.readouterr().err
-    assert "'named-but-unreadable' pole" in err, err
+    # the `selected-only` pole is reached FIRST under this mutation — which is the
+    # point of adding it: `named-but-unreadable` still resolves via `unmeasured`,
+    # so it cannot see a `selected` precedence bug at all.
+    assert "'selected-only' pole" in err, err
     assert "classifies as 'in'" in err and "expected 'out'" in err, err
 
 
@@ -491,21 +500,60 @@ def test_every_live_pole_classifies_correctly_today(r0, oa, tmp_path):
     assert dict(r0.BEHAVIOURAL_POLES) == {"named-but-unreadable": "out",
                                           "answered": "in",
                                           "no-source": "out",
-                                          "pr-comment-only": "out"}, (
+                                          "pr-comment-only": "out",
+                                          "selected-only": "out"}, (
         "the pole set is a LEDGER: a disposition branch with no pole gets no "
         "RUNTIME check, which is how two mutants survived a green suite")
     assert {n for n, _ in r0.BEHAVIOURAL_POLES} <= set(probes), (
         "a pole naming no probe would make the whole check vacuous")
-    # 🔴 and every branch of `disposition_of` that can return `out`/`in` must have
-    # a pole — derived, so a new branch fails here until it gets one
-    body = inspect.getsource(r0.disposition_of)
-    branch_roles = set(re.findall(r'"(\w[\w-]*)" in roles', body))
-    covered = set()
+    # 🔴 EVERY BRANCH MUST BE THE ONE THAT *DECIDES* SOME POLE — not merely have
+    # its role present somewhere among them. `#1901 round 3`: `selected` was
+    # present in a pole and still unexercised, because `unmeasured` precedes it,
+    # so two mutants against that branch survived. Derived from `BRANCHES`
+    # (data), so a branch cannot be re-spelled out of a regex either.
+    decided = {}
     for name, _exp in r0.BEHAVIOURAL_POLES:
-        covered |= r0.roles_of_block(probes[name], oa.SOURCE_SESSION)[0]
-    assert branch_roles <= covered | set(r0.IN_POPULATION_ROLES), (
-        "these disposition branches have no behavioural pole exercising them: "
-        f"{sorted(branch_roles - covered - set(r0.IN_POPULATION_ROLES))}")
+        role = r0.deciding_role(
+            r0.roles_of_block(probes[name], oa.SOURCE_SESSION)[0])
+        if role is not None:
+            decided.setdefault(role, name)
+    assert set(r0.BRANCHES) == set(decided), (
+        "these branches DECIDE no pole, so nothing exercises them and a mutation "
+        f"of them would survive: {sorted(set(r0.BRANCHES) - set(decided))}")
+    assert decided["selected"] == "selected-only", decided
+
+
+def test_a_block_that_NAMED_a_session_and_read_it_but_matched_NO_ask_is_out(
+        r0, oa, tmp_path):
+    """🔴 REGRESSION for `#1901 round 3`'s F1 — the `selected` branch, STILL
+    unguarded after round 2: two mutants survived a green 58-test suite (deleting
+    the branch, and `and False` with its string left in place).
+
+    The shape no earlier probe emitted: trailers NAMED a session, the transcript
+    WAS readable (so `render()` emits no `Unmeasured`), and no ask matched. Roles
+    are `{"selected"}` EXACTLY — which is why every other probe missed it: they
+    all carry `unmeasured` too, and that branch PRECEDES this one, so no pole ever
+    executed it. A role being present is not a branch being reached."""
+    block = brief(r0, oa, "selected-only", tmp_path)
+    assert "session(s) NAMED BY" in block
+    assert ": UNKNOWN — " not in block, (
+        "the fixture must carry NO unmeasured source, or an earlier branch wins "
+        "and this test cannot see the `selected` branch at all")
+    roles, _found, _bad = r0.roles_of_block(block, oa.SOURCE_SESSION)
+    assert roles == {"selected"}, sorted(roles)
+    assert r0.deciding_role(roles) == "selected"
+    disp, why = r0.disposition_of([block], oa.SOURCE_SESSION)
+    assert disp == "out", f"got {disp!r} ({why})"
+    assert "selection is not arrival" in why
+    # end to end: it must land in the CONTROL row, not vanish into UNKNOWN
+    corpus = corpus_with(tmp_path, {
+        f"{PROJECT}/s1.jsonl": [user_text(block, ts=POST_TS),
+                                assistant(ledger(7, 5), ts=POST_TS)]})
+    _code, _text, b = rates(r0, oa, corpus)
+    assert r0.stats(b["post_out"])["n"] == 1
+    assert r0.stats(b["post_unknown"])["n"] == 0, (
+        "deleting this branch sends the observation to UNKNOWN, which is in NO "
+        "denominator — the report then never sees it")
 
 
 def test_a_block_that_says_NO_SOURCE_WAS_CONSULTED_is_out_not_UNKNOWN(
@@ -548,7 +596,9 @@ def test_a_block_that_says_NO_SOURCE_WAS_CONSULTED_is_out_not_UNKNOWN(
                                 assistant(ledger(6, 4), ts=POST_TS)]})
     _code, _text, b = rates(r0, oa, corpus)
     assert r0.stats(b["post_out"])["n"] == 1
-    assert r0.stats(b["post_unknown"] if "post_unknown" in b else [])["n"] == 0
+    # direct key access, NOT `if "post_unknown" in b else []`: a renamed key
+    # would silently become an empty list and pass (`#1901 round 3` F8).
+    assert r0.stats(b["post_unknown"])["n"] == 0
 
 
 def test_a_SESSION_scoped_anchor_is_not_read_off_another_sources_line(
@@ -645,14 +695,16 @@ def test_every_ANCHOR_and_ROLE_is_NAMED_by_this_module(r0):
         assert f'scope="{scope}"' in src or f'"{scope}"' in src, (
             f"the {scope!r} anchor scope is named nowhere, so a mutant deleting "
             "it would survive — which is how two did")
-    # every `disposition_of` branch must be named too: derive the role each one
-    # tests from the function's own source
-    body = inspect.getsource(r0.disposition_of)
-    branch_roles = sorted(set(re.findall(r'"(\w[\w-]*)" in roles', body)))
-    assert len(branch_roles) >= 3, branch_roles
-    unnamed = [r for r in branch_roles if r not in src]
+    # every BRANCH must be named too — derived from the `BRANCHES` ledger, which
+    # replaced an `if`/`elif` chain precisely so this cannot be walked by
+    # re-spelling a condition (`if roles & {"x"}:` fell out of the old regex).
+    assert len(r0.BRANCHES) >= 5, r0.BRANCHES
+    unnamed = [r for r in r0.BRANCHES if r not in src]
     assert unnamed == [], (
         f"these disposition branches are named in no test: {unnamed}")
+    # …and the ledger's ORDER is the precedence, so it is asserted, not assumed
+    assert list(r0.BRANCHES)[:3] == ["answered", "unmeasured", "selected"], (
+        f"the precedence order changed: {list(r0.BRANCHES)}")
 
 
 def test_asks_that_arrived_only_from_a_PR_COMMENT_are_out_of_population(
@@ -813,6 +865,31 @@ def test_the_floor_counts_DISTINCT_SESSIONS_not_ledger_lines(r0, oa, tmp_path):
     assert "the floor counts SESSIONS" in text
 
 
+def test_the_printed_files_per_session_ratio_is_not_INVERTED(r0, oa, tmp_path):
+    """🔴 REGRESSION for `#1901 round 3`'s F8: inverting the printed ratio to
+    `sessions/files` SURVIVED the suite, and would print a plausible `PRE=0.50x`
+    into the report the handoff doc quotes. The ratio is ≥ 1 by construction (a
+    session owns at least one file) and must equal files ÷ sessions."""
+    sid = "b5e21e7f-0000-0000-0000-000000000000"
+    block = brief(r0, oa, "answered", tmp_path)
+    sessions = {f"{PROJECT}/pre.jsonl": [assistant(ledger(4, 3), ts=PRE_TS)]}
+    sessions[f"{PROJECT}/{sid}.jsonl"] = [
+        user_text(block, ts=POST_TS), assistant(ledger(5, 1), ts=POST_TS)]
+    for n in ("a1", "a2", "a3"):
+        sessions[f"{PROJECT}/{sid}/subagents/agent-{n}.jsonl"] = [
+            user_text(block, ts=POST_TS), assistant(ledger(5, 1), ts=POST_TS)]
+    _code, text, b = rates(r0, oa, corpus_with(tmp_path, sessions))
+    s = r0.stats(b["post"])
+    assert (s["files"], s["sessions"]) == (4, 1), s
+    # 4 files / 1 session = 4.00x; the inversion prints 0.25x
+    assert "POST=4.00x" in text, text
+    assert "POST=0.25x" not in text
+    ratios = re.findall(r"(?:PRE|POST)=([\d.]+)x", text)
+    assert ratios, text
+    assert all(float(r) >= 1.0 for r in ratios), (
+        f"files/sess cannot be < 1 — a session owns at least one file: {ratios}")
+
+
 def test_the_floor_counts_REAL_SESSIONS_not_transcript_FILES(r0, oa, tmp_path):
     """🔴 REGRESSION for `#1901 round 1`'s F2. A round-0 report is written by an
     auditor SUBAGENT, whose transcript is `<project>/<sid>/subagents/agent-*.jsonl`
@@ -856,11 +933,12 @@ def test_the_naive_session_derivation_double_counts_and_ours_does_not(
     first path segment WITHOUT stripping `.jsonl`, which counts a session holding
     both a top-level transcript and a `subagents/` directory TWICE.
 
-    Re-derived on this host 2026-09-28 with `_session_id_of` itself: 6,718 files /
-    974 sessions (~6.9x), where the naive derivation gives 1,571 = 974 top-level +
-    597 nested with all 597 overlapping. Corpus numbers DRIFT, so what is pinned
-    here is the mechanism against a fixture — a future wrong number then FAILS
-    instead of reading fine."""
+    Measured with `_session_id_of` at 2026-09-28T17:05Z: 6,739 files / 973 sessions
+    (~6.9x), where the naive derivation gives 1,570 — the difference being sessions
+    that hold BOTH a top-level transcript and a `subagents/` dir. ⚠ Those corpus
+    numbers DRIFT (four runs over three days: 6,717/973, 6,736/973, 6,739/973, and
+    a published 974 that never reproduced), which is exactly why what is pinned
+    here is the MECHANISM against a fixture rather than any census."""
     root = tmp_path / "corpus"
     files = [
         root / PROJECT / "s-top-only.jsonl",

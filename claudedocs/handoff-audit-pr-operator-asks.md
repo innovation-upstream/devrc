@@ -51,13 +51,17 @@ operator asked for, so that branch was unreachable and his stated requirements l
       the per-bucket ratio, and the FLOOR counts sessions.
     - 🔴 **TWO DIFFERENT RATIOS — do not quote one for the other.** The **2.01×** above is the
       PRE-BUCKET figure (files that carry a report). The **CORPUS** figure is **~6.9×**,
-      re-derived 2026-09-28 with the script's own `_session_id_of`: **6,718 files / 974
-      sessions**, 5,744 files under `subagents/`. ⚠ A `1,563 distinct session ids` figure
+      measured with the script's own `_session_id_of` at **2026-09-28T17:05Z**: **6,739 files
+      / 973 sessions**, 5,766 under `subagents/`. ⚠ A `1,563 distinct session ids` figure
       circulated in this arc and is **WITHDRAWN**: it came from taking the first path segment
       *without stripping `.jsonl`*, which counts a session holding both a top-level transcript
-      and a `subagents/` dir twice — measured, naive 1,571 = 974 top-level + 597 nested with
-      all 597 overlapping. Session ids cannot fall while files rise, which is how it was caught.
-      Both figures drift; the MECHANISM does not, and
+      and a `subagents/` dir twice — measured at the same instant, naive **1,570** against 973.
+      ⚠ **An earlier version of this bullet said "session ids cannot fall while files rise" as
+      the reason it was caught. That invariant is FALSIFIED** — a pruned transcript breaks it,
+      and four runs over three days gave 6,717/973, 6,736/973, 6,739/973 with sessions flat
+      while files rose. The sound claim is the narrower one: **the same method cannot give both
+      1,563 and 973.** 🔴 Every corpus figure here drifts and is stamped for that reason —
+      treat it like the tables marked "re-run, never quote". The MECHANISM does not drift, and
       `test_the_naive_session_derivation_double_counts_and_ours_does_not` pins it so a wrong
       number fails rather than reads fine. **Third irreproducible figure in this arc — derive
       it with the code, or do not write it.**
@@ -259,7 +263,9 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
   line-number prefix, applied to **every** line-anchored matcher (a fix to one while a sibling
   stayed blind would move the defect, not remove it), with both poles pinned — a numbered real
   render matches, a numbered source read still does not. After the fix the corpus reads
-  **2** "no asks block" and **16** "consulted and could not be read".
+  **2** "no asks block" and **16** "consulted and could not be read" — both stamped
+  2026-09-28T04:57Z, and both drifting (at 17:0xZ the same corpus read 2 and 22). 🔴 Re-run;
+  this paragraph is about not quoting drifting counts and must not become an instance of it.
   ⚠ **An "instead of 14" comparison appeared here and is WITHDRAWN as unverifiable.** The
   pre-fix figure round 1 reported is **13 of 20**; a later sentence said the same corpus read
   "2 instead of 14", and both cannot be one corpus's pre-fix count — the post bucket itself grew
@@ -305,8 +311,9 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
   moved 493 → 509 in one day with no change to the feature. Closed by making the statistic a
   RATE over each bucket's own reports — `scripts/round0-attribution-rate.py`.
 - 🔴 **And its baseline was not reproducible** — the `1,649 / 728 / 7` figure cannot be
-  re-derived by either of the two defensible methods over the same corpus (493/474/7
-  assistant-authored, 1,977/707/8 all-roles). The instrument now STATES its method in its own
+  re-derived by either of the two defensible methods over the same corpus (493 reports in
+  **236 sessions** / 474 FILES / 7 projects assistant-authored — note the middle number of the
+  original triple was a FILE count, the arc's headline error; 1,977/707/8 all-roles). The instrument now STATES its method in its own
   output, so the next reader compares like with like.
 - ⚠ **The `#1887` squash subject on `main` says "round 0 reads the operator's own asks"** and
   the PR went on to four audit rounds that rewrote most of it. Not editable without rewriting
