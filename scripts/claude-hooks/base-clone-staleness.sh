@@ -6,10 +6,11 @@
 # clone is never written to and silently falls behind. That is harmless for
 # WRITES -- `git worktree add <path> origin/<branch>` resolves the remote-tracking
 # ref, so a clone 700 commits behind still produces a current worktree -- but it
-# is dangerous for READS: CLAUDE.md, AGENTS.md and .claude/skills/** load into the
-# agent's context FROM THE WORKING TREE, so a stale clone serves stale,
-# authoritative-looking instructions with nothing to indicate it. REFRESH_PATHS is
-# the one list; do not restate it anywhere else.
+# is dangerous for READS: the instruction files and the repo-local agent wiring load
+# into the agent's context FROM THE WORKING TREE -- and the wiring EXECUTES -- so a
+# stale clone serves stale, authoritative-looking instructions with nothing to
+# indicate it. REFRESH_PATHS is the one list; do not restate it anywhere else -- this
+# sentence used to enumerate it, and went stale the first time the array grew.
 #
 # What it does NOT do: move HEAD. `merge --ff-only` would need a clean tree and
 # would move the branch; refreshing specific paths needs neither and cannot
@@ -38,12 +39,51 @@ set -uo pipefail
 # no output -- measured on a repo with no AGENTS.md), and this hook must not care
 # which convention a repo uses.
 #
+# 🔴 `.claude/settings.json` and `.claude/hooks` are here because an agent-context
+# file that EXECUTES is strictly worse to serve stale than one that is merely read:
+# a repo-local hook that silently fails to fire is indistinguishable from one that
+# allows, so there is no symptom at all. The array had `.claude/skills` and neither
+# of these, so a stale clone refreshed the skills beside them and left the wiring
+# alone. Live instance rather than hypothetical: a repo in this fleet tracks
+# `.claude/settings.json` plus `.claude/hooks/*.py` as a write guard's wiring.
+#
 # Spelling is load-bearing -- see the rmdir climb below. A TOP-LEVEL FILE entry
 # (CLAUDE.md, AGENTS.md) is the safe shape: `dirname` yields `.`, so the climb's
 # own `[ "$d" != "." ]` condition stops it before the first rmdir and the entry is
 # never consulted as a bound. A NESTED entry must be spelled the way `dirname`
 # yields it (`.claude/skills`, not `.claude/skills/`).
-REFRESH_PATHS=(CLAUDE.md AGENTS.md .claude/skills)
+REFRESH_PATHS=(CLAUDE.md AGENTS.md .claude/settings.json .claude/hooks .claude/skills)
+
+# The rmdir climb's bounds: every REFRESH_PATHS entry, PLUS each entry's parent
+# directory. DERIVED, never hand-listed -- a second array maintained by hand is the
+# same one-rule-two-places defect the report's scope sentence was fixed for.
+#
+# 🔴 A NESTED FILE entry needs this and a DIRECTORY entry does not, which is exactly
+# why the array alone is not a sufficient bound. `dirname .claude/settings.json` ->
+# `.claude`, which is no REFRESH_PATHS entry, so an exact-compare bound over the
+# array alone lets the climb rmdir `.claude` ITSELF once that file is pruned and
+# nothing else tracked remains under it. MEASURED on a fixture whose `.claude/` held
+# only `settings.json`: with the array as the only bound, `.claude` was REMOVED --
+# the exact escape case 9e exists for, re-introduced one level down by a file entry.
+# A DIRECTORY entry is its own bound (`dirname .claude/hooks/x.py` ->
+# `.claude/hooks`, an exact member), so the `.claude/skills` precedent genuinely
+# does cover `.claude/hooks` and covers `.claude/settings.json` not at all.
+#
+# The parents make both shapes safe WITHOUT widening what is synced: `.claude` is a
+# climb bound, NOT a refresh path -- nothing under it is fetched or pruned for being
+# a bound, and the report's scope sentence still derives from REFRESH_PATHS. Adding
+# `.claude` as a directory ENTRY would also bound the climb, and was rejected: it
+# would put every tracked file under `.claude/` -- present and future, including
+# whatever a repo keeps there that is not agent context -- inside a destructive
+# prune, to fix a climb.
+CLIMB_BOUNDS=("${REFRESH_PATHS[@]}")
+for _e in "${REFRESH_PATHS[@]}"; do
+  _p="$(dirname "$_e")"
+  case "$_p" in .|/) continue ;; esac
+  _dup=no
+  for _b in "${CLIMB_BOUNDS[@]}"; do [ "$_b" = "$_p" ] && _dup=yes && break; done
+  [ "$_dup" = no ] && CLIMB_BOUNDS+=("$_p")
+done
 
 # Guard the VALUE, not just the cd: an empty ROOT sails past `cd "$ROOT" || exit`
 # on bash <= 5.2, where `cd ""` is a no-op returning 0.
@@ -246,21 +286,25 @@ for p in "${to_prune[@]:-}"; do
     # destroy content -- an untracked sibling (build cache, local scratch) both
     # survives and stops the climb.
     #
-    # 🔴 Bounded at the REFRESH_PATHS roots by EXACT string compare, so a future
-    # entry must be spelled the way `dirname` yields it -- `.claude/skills`, not
-    # `.claude/skills/`. A future entry that is a NESTED FILE (`docs/AGENTS.md`)
-    # would bound at the file and leave its parent directory climbable; the current
-    # three-entry list has no such case -- CLAUDE.md and AGENTS.md are TOP-LEVEL
-    # files, for which `dirname` yields `.` and the `while` condition below ends the
-    # climb before any rmdir runs, so those two are never consulted as bounds at
-    # all. Unbounded it walked past its own scope:
-    # on a repo whose only skill was deleted upstream it removed `.claude/skills`
-    # AND `.claude` -- empty and harmless, but `.claude` is not a path this hook is
-    # allowed to touch, and anything probing `[ -d .claude ]` would see it vanish.
+    # 🔴 Bounded at CLIMB_BOUNDS by EXACT string compare, so a future entry must be
+    # spelled the way `dirname` yields it -- `.claude/skills`, not `.claude/skills/`.
+    # Unbounded it walked past its own scope: on a repo whose only skill was deleted
+    # upstream it removed `.claude/skills` AND `.claude` -- empty and harmless, but
+    # `.claude` is not a path this hook is allowed to touch, and anything probing
+    # `[ -d .claude ]` would see it vanish.
+    #
+    # CLIMB_BOUNDS is REFRESH_PATHS plus each entry's PARENT, and the parents are what
+    # make a NESTED FILE entry (`.claude/settings.json`, and the `docs/AGENTS.md` this
+    # comment used to name as a future hazard) safe: bounding at the array alone bounds
+    # at the FILE and leaves its parent climbable. That escape is MEASURED, not
+    # reasoned about, and the definition beside REFRESH_PATHS carries the measurement.
+    # A TOP-LEVEL file entry (CLAUDE.md, AGENTS.md) is never consulted as a bound at
+    # all: `dirname` yields `.`, and the `while` condition below ends the climb before
+    # any rmdir runs.
     d="$(dirname "$p")"
     while [ "$d" != "." ] && [ "$d" != "/" ]; do
       _bounded=no
-      for _r in "${REFRESH_PATHS[@]}"; do
+      for _r in "${CLIMB_BOUNDS[@]}"; do
         [ "$d" = "$_r" ] && _bounded=yes && break
       done
       [ "$_bounded" = yes ] && break
