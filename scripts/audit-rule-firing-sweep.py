@@ -331,6 +331,18 @@ RULES: list[dict] = [
          probe='"Reported" now means THREE places',
          apply=(r"unearned ledger|measured over zero commits|"
                 r"are not evidence|arithmetic over zero commits")),
+    # 🔴 THE UNREADABLE-RANGE REPORT. Distinct from `unearned-ledger-not-evidence`
+    # one row up, and the distinction is the CAUSE: that rule is about a range
+    # spanning zero commits (`X..X`), this one about a range nothing could READ —
+    # an endpoint naming no object. Measured 2026-09-28: 30 of 564 endpoints,
+    # 11 ladders, `ZacxDev/cairn` #119 wholly. Same firing signal as its
+    # neighbour — a runner declining to quote a `payload=` nothing checked —
+    # which is why it is a rule and not an exemption.
+    dict(id="unreadable-range-not-verified",
+         name="a `payload=` from a round the gate could not MEASURE is unverified — say so",
+         probe="A RANGE THE ASSEMBLER CANNOT READ",
+         apply=(r"payload not verified|could not be measured|"
+                r"not a commit name|names no object|author's classification")),
     dict(id="decide-once-revert-test", name="decide payload/scaffolding ONCE at round 1 — the REVERT TEST",
          probe="REVERT TEST", apply=r"revert test"),
     dict(id="one-number-one-name", name="ONE NUMBER, ONE NAME",

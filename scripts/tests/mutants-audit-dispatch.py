@@ -84,6 +84,30 @@ TESTLIB_RELS = (
     "scripts/testlib/__init__.py",
     "scripts/testlib/hermetic_git.py",
 )
+# 🔴 A FIFTH INPUT, AND THE BATTERY COULD NOT RUN AT ALL WITHOUT IT. The script
+# does `sys.path.insert(… / "lib")` and imports `operator_asks` inside a
+# `try/except ImportError` that sets it to None — a deliberate soft failure, and
+# therefore an INVISIBLE one: in a sandbox without `scripts/lib/` the import
+# quietly failed and EIGHT round-0 tests exercising the real reader went red on
+# the UNMUTATED copy, which this harness correctly refuses to measure against.
+#
+# MEASURED 2026-09-28 at `21303569`: `🔴 the UNMUTATED tree is already failing`,
+# naming all eight — so the whole battery had been unrunnable since
+# `31033cdb` (#1887) added that import without extending this list. A guard that
+# cannot run is not a guard, and the failure mode was a refusal rather than a
+# green, which is the right direction and still not evidence of anything.
+#
+# The set is the CLOSED transitive dependency of `operator_asks`:
+# `handoff_arc` -> `session_trailer`, plus `transcript_search`; none of the four
+# imports anything else outside the stdlib. Adding a lib import to
+# `audit-dispatch.py` — or to any of these — means adding it here too, and the
+# tell is exactly the refusal above.
+LIB_RELS = (
+    "scripts/lib/operator_asks.py",
+    "scripts/lib/handoff_arc.py",
+    "scripts/lib/session_trailer.py",
+    "scripts/lib/transcript_search.py",
+)
 # 🔴 A FOURTH INPUT, for the same reason as `HARNESS_REL` above: the suite now
 # carries a SEAM test that reads `claude/skills/audit-pr/SKILL.md` — the other
 # owner of the attribution gate's mechanism — so a sandbox without it fails the
@@ -243,7 +267,15 @@ SKILL_RELS = (
 # clean-stderr control). ⚠ `197 + 2` happens to give 199 here too — the agreement
 # is a coincidence, not a method, and the paragraph above records the round where
 # that arithmetic would have been one too high.
-MIN_TESTS = 199
+# 🔴 RAISED AGAIN 2026-09-28, 199 -> 220, at m = 231 — COUNTED the same way, from
+# a `--collect-only` on the module (`231 tests collected`) through the same
+# formula, `231 - min(50, max(1, 231 // 20))` = 231 - 11 = 220. Twenty-two node
+# ids were added by `fix/unresolvable-range-endpoint` (nine functions, one of
+# them parametrized fourteen ways). The number is the formula's output on a
+# counted m, NOT 199 + 22 — which is 221, one too high, and would have refused
+# every run. That is the arithmetic the paragraphs above record going wrong four
+# times, and it goes wrong again here if you add instead of counting.
+MIN_TESTS = 220
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -3081,6 +3113,177 @@ def the_unearned_heading_is_reworded(t):
     )
 
 
+# 🔴 THE UNVERIFIED-PAYLOAD REPORT AND ITS REFUSAL (UV-series).
+#
+# A round the gate READ but could not MEASURE fell back to the operator's stated
+# count in silence — 30 of 564 endpoints posted since the executable-line unit
+# shipped, 11 ladders, and on `ZacxDev/cairn` #119 every round. These rows
+# mutate the reading, the flag it is keyed to, each of its three surfaces, and
+# both boundaries of the refusal its structurally-impossible sibling gets.
+#
+# 🔴 EACH TARGETS THE NARROWEST EXPRESSION THAT CAN BE WRONG, for the reason the
+# UL-series banner states: a mutant that removes a guard TOGETHER WITH its
+# enclosing condition dies for the wrong reason. UV4 moves one predicate, UV6
+# and UV7 move one comparison each, UV10 swaps one field.
+#
+# 🔴 UV4 IS THE ROW THAT ISOLATES THE SCOPE DECISION, and it is the one whose
+# killer is a SILENCE control rather than a report test. Every unmeasured state
+# falls back to the stated count, but only a FAILED COMMAND means the range
+# could not be read; firing on the rest puts a COULD NOT MEASURE on healthy
+# ladders, which nothing that asserts the report's PRESENCE can see.
+
+
+def the_report_is_keyed_to_every_unmeasured_cause(t):
+    """UV4 — `command_failed` becomes "unmeasured for any reason at all".
+
+    An empty diff over a resolvable range, a prose-only round and an
+    unclassifiable path then all report COULD NOT MEASURE. One predicate, inside
+    the loop that already ran.
+    """
+    return _swap(
+        t,
+        "        if churn is not None and churn.command_failed:",
+        "        if churn is not None and churn.reason is not None:",
+    )
+
+
+def the_flag_is_never_set_by_a_failed_command(t):
+    """UV9 — the rc != 0 branch stops marking itself as a failed command.
+
+    Upstream of all three surfaces, so it isolates the FLAG from the reports:
+    every renderer survives intact and the whole feature goes silent, which is
+    the shipped defect exactly.
+    """
+    return _swap(
+        t,
+        "            f\"{rc}: {(err or out).strip() or 'no output'}\",\n"
+        "            command_failed=True,\n",
+        "            f\"{rc}: {(err or out).strip() or 'no output'}\",\n",
+    )
+
+
+def the_brief_never_reports_an_unverified_payload(t):
+    """UV1 — the brief section is suppressed. The auditor's surface, gone."""
+    return _swap(
+        t,
+        '    un = facts.unverified\n    if un is None or not un.rounds:\n'
+        '        return ""\n',
+        '    un = facts.unverified\n    if True:\n        return ""\n',
+    )
+
+
+def stderr_never_reports_an_unverified_payload(t):
+    """UV2 — the operator's terminal loses it. The only surface #1859 had."""
+    return _swap(
+        t,
+        "    unverified = unverified_payload(blocks, args.round_no, exec_churn)\n"
+        "    if unverified.rounds:",
+        "    unverified = unverified_payload(blocks, args.round_no, exec_churn)\n"
+        "    if False:",
+    )
+
+
+def the_pasted_block_drops_the_unverified_note(t):
+    """UV3 — reported to the brief and NOT to the PR.
+
+    The next round's reader meets the comment, never the terminal or the brief.
+    """
+    return _swap(
+        t,
+        "    if facts.unverified is not None and facts.unverified.rounds:\n"
+        "        lines.append(\n",
+        "    if False:\n        lines.append(\n",
+    )
+
+
+def the_refusal_reads_the_whole_ladder_not_the_gates_pair(t):
+    """UV5 — the malformed-endpoint refusal stops being pair-scoped.
+
+    A broken endpoint anywhere in the ladder's HISTORY then refuses every run —
+    the permanently-red gate `claude/RULES.md` forbids, over a comment the
+    operator may not own.
+    """
+    return _swap(
+        t,
+        "    for b in gate_pair(blocks, round_no):\n"
+        '        for label, token in (("`<from>`", b.audited_from),',
+        "    for b in blocks:\n"
+        '        for label, token in (("`<from>`", b.audited_from),',
+    )
+
+
+def a_full_40_char_sha_is_refused(t):
+    """UV6 — the upper bound becomes `>=`, so a real full sha is refused.
+
+    The direction no test asserting the refusal FIRES can see: 59 of the 356
+    measured endpoints are exactly 40 characters, so this is a refusal on the
+    corpus as it is actually written. Its killer is an ACCEPTED row.
+    """
+    return _swap(t, "    if len(token) > 40:", "    if len(token) >= 40:")
+
+
+def a_non_hex_endpoint_is_accepted(t):
+    """UV7 — the hex check stops running.
+
+    A branch name or an unsubstituted `<placeholder>` then passes as an object
+    name; a branch RESOLVES here, to a commit the round never audited.
+    """
+    return _swap(
+        t,
+        "    if not SHA_TOKEN_RE.match(token):",
+        "    if False and not SHA_TOKEN_RE.match(token):",
+    )
+
+
+def the_unverified_heading_is_reworded(t):
+    """UV8 — the shipped heading drifts from the literal the suite pins.
+
+    The reachability control for that pin: a reworded heading must be caught by
+    the two-way check and not only by the tests that grep for it, or the three
+    regression rows would go red with the wrong diagnosis.
+    """
+    return _swap(
+        t,
+        '    "## 🔴 COULD NOT MEASURE A ROUND THE ATTRIBUTION GATE READ"\n',
+        '    "## 🔴 A NOTE ON THIS LADDER\'S RANGES"\n',
+    )
+
+
+def the_numerator_becomes_the_denominator(t):
+    """UV10 — `N of M` reports M of M, so one broken round reads as all of them.
+
+    One field, inside the sentence that already prints. The flattering direction
+    is the other one, and this is the direction that makes the count useless
+    without making it absent.
+    """
+    return _swap(
+        t,
+        '        f"{len(un.rounds)} of the {un.read} round(s) the attribution '
+        'gate "',
+        '        f"{un.read} of the {un.read} round(s) the attribution gate "',
+    )
+
+
+def the_input_refusal_speaks_the_gates_verdict(t):
+    """UV11 — REFUSAL 3c returns 5, the attribution gate's own number.
+
+    PR #1768 separated them: 5 says "the ladder has left the PR, stop auditing",
+    4 says "fix what you typed". A caller handed 5 for a mistyped sha ends a
+    ladder on a typo. Targeted through the UNIQUE tail that follows it, so the
+    other `return 4` sites are untouched.
+    """
+    return _swap(
+        t,
+        "        if not args.emit_claims:\n            return 4\n"
+        "        brief_refused = 4\n\n"
+        "    if degenerate and brief_refused is None:",
+        "        if not args.emit_claims:\n"
+        "            return ATTRIBUTION_STOP_RC\n"
+        "        brief_refused = ATTRIBUTION_STOP_RC\n\n"
+        "    if degenerate and brief_refused is None:",
+    )
+
+
 # (label, expected killer set, mutation)
 ROWS = [
     ("D1  delete clause read-only",
@@ -4462,6 +4665,49 @@ ROWS = [
     ("UL6 the shipped heading drifts from the pinned literal",
      {"test_a_ladder_with_SOME_self_ranges_reports_them_IN_THE_BRIEF", "test_the_unearned_ledger_strings_are_the_scripts_own"},
      the_unearned_heading_is_reworded),
+    # 🔴 THE UNVERIFIED-PAYLOAD ROWS. See the UV-series banner above the
+    # mutation functions. Every killer set below was MEASURED by running this
+    # battery, not predicted — the previous round on this file recorded four
+    # EXTRA-KILLERs a bounded guess would have missed.
+    ("UV1 the BRIEF never reports an unverified payload",
+     {"test_an_UNRESOLVABLE_range_endpoint_reports_it_IN_THE_BRIEF"},
+     the_brief_never_reports_an_unverified_payload),
+    ("UV2 stderr never reports an unverified payload",
+     {"test_an_UNRESOLVABLE_range_endpoint_says_COULD_NOT_MEASURE_on_stderr",
+      "test_the_unverified_payload_strings_are_the_scripts_own"},
+     stderr_never_reports_an_unverified_payload),
+    ("UV3 the PASTED block drops the could-not-measure note",
+     {"test_the_block_the_operator_PASTES_carries_the_could_not_measure_note"},
+     the_pasted_block_drops_the_unverified_note),
+    ("UV4 the report fires on EVERY unmeasured cause",
+     {"test_a_ladder_whose_ranges_all_RESOLVE_reports_NOTHING_anywhere"},
+     the_report_is_keyed_to_every_unmeasured_cause),
+    ("UV5 the malformed refusal reads the whole ladder",
+     {"test_a_MALFORMED_endpoint_the_gate_does_NOT_read_is_not_refused"},
+     the_refusal_reads_the_whole_ladder_not_the_gates_pair),
+    ("UV6 a full 40-char sha is refused (`>` -> `>=`)",
+     {"test_malformed_endpoint_reason_refuses_only_impossible_tokens"},
+     a_full_40_char_sha_is_refused),
+    ("UV7 a non-hex endpoint is accepted as a commit name",
+     {"test_malformed_endpoint_reason_refuses_only_impossible_tokens"},
+     a_non_hex_endpoint_is_accepted),
+    ("UV8 the could-not-measure heading drifts from its literal",
+     {"test_an_UNRESOLVABLE_range_endpoint_reports_it_IN_THE_BRIEF",
+      "test_the_unverified_payload_strings_are_the_scripts_own"},
+     the_unverified_heading_is_reworded),
+    ("UV9 a FAILED command stops marking itself as one",
+     {"test_an_UNRESOLVABLE_range_endpoint_says_COULD_NOT_MEASURE_on_stderr",
+      "test_an_UNRESOLVABLE_range_endpoint_reports_it_IN_THE_BRIEF",
+      "test_the_block_the_operator_PASTES_carries_the_could_not_measure_note",
+      "test_the_unverified_payload_strings_are_the_scripts_own"},
+     the_flag_is_never_set_by_a_failed_command),
+    ("UV10 the report's numerator becomes its denominator",
+     {"test_an_UNRESOLVABLE_range_endpoint_says_COULD_NOT_MEASURE_on_stderr",
+      "test_an_UNRESOLVABLE_range_endpoint_reports_it_IN_THE_BRIEF"},
+     the_numerator_becomes_the_denominator),
+    ("UV11 the INPUT refusal returns the gate's verdict",
+     {"test_a_STRUCTURALLY_MALFORMED_endpoint_is_an_INPUT_refusal"},
+     the_input_refusal_speaks_the_gates_verdict),
     ("G2  ONE zero round ends the ladder (`and` -> `or`)",
      {"test_the_gate_needs_two_CONSECUTIVE_zero_rounds_and_nothing_less"},
      gate_fires_on_one_zero_round),
@@ -4762,6 +5008,12 @@ def main() -> int:
         # floor check below catches it, and this comment is where to look.
         (root / "scripts" / "testlib").mkdir(parents=True, exist_ok=True)
         for rel in TESTLIB_RELS:
+            shutil.copy(REPO / rel, root / rel)
+        # The script's own `sys.path.insert(… / "lib")` target. See `LIB_RELS`:
+        # its import is soft, so a missing module here surfaces as eight round-0
+        # tests red on the UNMUTATED copy, not as an import error.
+        (root / "scripts" / "lib").mkdir(parents=True, exist_ok=True)
+        for rel in LIB_RELS:
             shutil.copy(REPO / rel, root / rel)
         for rel in SKILL_RELS:
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
