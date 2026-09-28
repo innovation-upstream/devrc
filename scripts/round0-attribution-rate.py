@@ -726,8 +726,33 @@ def _fmt(v, nd=3) -> str:
     return "—" if v is None else f"{v:.{nd}f}"
 
 
+#: 🔴 THE COMMITTER DATE (`%cI`), NEVER THE AUTHOR DATE — AND THAT IS A FIXED
+#: DEFECT, NOT A PREFERENCE. The condition this instrument serves is "reports
+#: recorded AFTER `31033cdb`", i.e. after the change LANDED on `main`. For a
+#: GitHub squash merge those are two different facts: the squash carries the PR
+#: author's own date as `%aI` while `%cI` is the moment GitHub created the
+#: commit on `main`. Reading `%aI` therefore classifies every report written in
+#: that window as POST-cut while the fix was not yet on `main` and not yet
+#: deployed — contaminating the post-cut bucket with PRE-fix reports, which is
+#: precisely the misattribution this instrument exists to measure.
+#:
+#: MEASURED AT TWO POINTS on `origin/main`, because one is not a general claim:
+#:   `31033cdb`  author == committer to the second (2026-09-27T00:49:10-05:00),
+#:               so today's numbers do NOT move — which is exactly why the bug
+#:               was invisible.
+#:   `daa6fd65`  author 2026-08-22T13:20:35-05:00, committer 14:03:11-05:00 —
+#:               **+2,556 s (42.6 min)** apart. Over the 1,200 newest `main`
+#:               commits, 10 diverge and that is the widest.
+#: `--since-sha` takes ANY sha, so the coincidence at one commit is not a
+#: property of the tool.
+CUT_CLOCK = "%cI"
+CUT_CLOCK_LABEL = "committer date — the moment a GitHub squash landed on main"
+
+
 def resolve_cut(sha: str, repo: Path) -> str:
-    out = subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%aI", sha],
+    """The cut instant for `sha`, read off `CUT_CLOCK`."""
+    out = subprocess.run(["git", "-C", str(repo), "log", "-1",
+                          f"--format={CUT_CLOCK}", sha],
                          capture_output=True, text=True)
     if out.returncode != 0 or not out.stdout.strip():
         fail(EXIT_USAGE,
@@ -876,7 +901,11 @@ def main(argv=None, out_stream=sys.stdout) -> int:
         cut_iso, cut_src = args.cut_iso, "--cut-iso, no git consulted"
     else:
         cut_iso = resolve_cut(args.since_sha, Path(args.repo))
-        cut_src = f"author date of {args.since_sha} in {args.repo}"
+        # The label NAMES THE CLOCK. A cut printed without saying which of a
+        # commit's two dates it read is the same defect one level out: the
+        # reader cannot tell whether the boundary is "authored" or "landed".
+        cut_src = (f"{CUT_CLOCK} of {args.since_sha} in {args.repo} — "
+                   f"{CUT_CLOCK_LABEL}")
     cut = parse_ts(cut_iso)
     if cut is None:
         fail(EXIT_USAGE, f"cannot parse the cut {cut_iso!r} as ISO-8601")

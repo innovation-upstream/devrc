@@ -25,17 +25,27 @@ operator asked for, so that branch was unreachable and his stated requirements l
     absolute count could never be met.
   - **Reproducible pre-cut baseline, method named:** assistant-authored text blocks ONLY, one
     round-0 ledger line = one report, corpus `~/.claude/projects` on **this host**, cut =
-    `31033cdb`'s author date. Measured 2026-09-27: **493 ledger lines / 474 sessions / 7
-    projects, mean 3.365 unattributed per report, share 0.331.** Re-derivable by re-running
-    the command — that is the point of it being a command.
+    `31033cdb`'s **committer date** (`%cI` — when the squash LANDED on `main`, not when its
+    author wrote it; the run prints which clock it read). Measured 2026-09-27: **493 ledger
+    lines / 474 sessions / 7 projects, mean 3.365 unattributed per report, share 0.331.**
+    Re-derivable by re-running the command — that is the point of it being a command.
+    - ⚠ **The clock is load-bearing and the coincidence here is not a property of the tool.**
+      `31033cdb`'s author and committer dates are identical to the second, so this baseline
+      reads the same either way — which is why reading the wrong one was invisible. Over the
+      1,200 newest `main` commits, 10 diverge, the widest by **42.6 min** (`daa6fd65`:
+      author 13:20:35, committer 14:03:11). The author date would put reports written in
+      that window in the POST bucket while the fix was not yet on `main` or deployed.
   - ⚠ **The doc's earlier `1,649 / 728 / 7` figure is NOT reproducible by this method and is
     SUPERSEDED as a comparator.** Two defensible methods over the same corpus disagree and
     neither yields it: assistant-authored blocks give the 493 above; counting every record of
     any role gives **1,977 / 707 / 8**. Kept here so nobody re-derives it as if it were the
     baseline. A number quoted without its method has no defined left-hand side.
-  - **Today's real answer is `VERDICT: NOT MEASURABLE (n=0 < 10)`** (post-cut: 16 reports, 0
-    in-population, 1 UNKNOWN) — and the tool refuses to compare below n=10 on purpose, so it
-    cannot be used to justify re-tuning the feature.
+  - **Today's real answer is `VERDICT: NOT MEASURABLE (n=0 < 10)`** — and the tool refuses to
+    compare below n=10 on purpose, so it cannot be used to justify re-tuning the feature.
+    Post-cut at 2026-09-28T02:45Z: **17 reports, 0 in-population, 1 UNKNOWN** (it read 16 an
+    hour earlier — the post bucket GROWS with every audit, which is defect 2 in miniature, so
+    re-run rather than quoting this line). The number the condition reads is the
+    **in-population n**, not the bucket's size.
 
 ## State now
 - 🔴 **SHIPPED AND VERIFIED.** `#1887` squash-merged as **`31033cdb`** (2026-09-27T05:49:10Z),

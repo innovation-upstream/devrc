@@ -26,6 +26,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -35,10 +36,17 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "round0-attribution-rate.py"
 OPERATOR_ASKS = REPO_ROOT / "scripts" / "lib" / "operator_asks.py"
 
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from testlib import hermetic_git  # noqa: E402  the ONE hermetic git env
+
 PROJECT = "-home-zach-workspace-a-repo"
 PRE_TS = "2026-09-20T10:00:00.000Z"          # before the cut used below
 POST_TS = "2026-09-27T12:00:00.000Z"         # after it
-CUT_ISO = "2026-09-27T00:49:10-05:00"        # `31033cdb`'s author date
+#: `31033cdb`'s LANDING instant. Its author and committer dates are identical to
+#: the second, so this constant reads the same under either clock — which is
+#: exactly why the wrong-clock defect was invisible here. See
+#: `test_the_cut_is_read_off_the_COMMITTER_date_not_the_author_date`.
+CUT_ISO = "2026-09-27T00:49:10-05:00"
 
 
 def _load(path, name):
@@ -500,6 +508,91 @@ def test_a_record_with_no_timestamp_is_undated_and_folded_into_nothing(
         "the undated report's 6 leaked into the PRE bucket")
     assert "undated (no `timestamp`): 1" in text
     assert code == r0.EXIT_NOT_MEASURABLE
+
+
+#: The widest real author/committer divergence over the 1,200 newest
+#: `origin/main` commits (`daa6fd65`: +2,556 s = 42.6 min; 10 of 1,200 diverge at
+#: all). Used as the fixture's two dates so a test can tell the clocks apart.
+FIXTURE_AUTHOR_DATE = "2026-08-22T13:20:35-05:00"
+FIXTURE_COMMITTER_DATE = "2026-08-22T14:03:11-05:00"
+
+
+def _repo_with_diverging_clocks(r0, tmp_path):
+    """A one-commit git repo whose author and committer dates DIFFER.
+
+    🔴 A FIXTURE REPO, NEVER THIS CHECKOUT. The `nix build` sandbox tier copies
+    the tree with NO `.git` (`CLAUDE.md`), so any test resolving a sha in
+    `REPO_ROOT` is red there while passing on the dev host — the two-tier blind
+    spot. Built through `testlib.hermetic_git` so git's auto-maintenance cannot
+    race the fixture.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = hermetic_git.hermetic_git_env(
+        GIT_AUTHOR_DATE=FIXTURE_AUTHOR_DATE,
+        GIT_COMMITTER_DATE=FIXTURE_COMMITTER_DATE,
+        GIT_AUTHOR_NAME="a", GIT_AUTHOR_EMAIL="a@example.invalid",
+        GIT_COMMITTER_NAME="a", GIT_COMMITTER_EMAIL="a@example.invalid")
+
+    def git(*args):
+        out = subprocess.run(["git", "-C", str(repo), *args], env=env,
+                             capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr
+        return out.stdout.strip()
+
+    git("init", "-q", "-b", "main")
+    (repo / "f").write_text("x\n")
+    git("add", "f")
+    git("commit", "-q", "-m", "a squash whose two clocks disagree")
+    sha = git("rev-parse", "HEAD")
+    # CONTROL: the fixture must really carry two different instants, or a test
+    # using it cannot tell the clocks apart and would pass under the defect.
+    got_a, got_c = git("log", "-1", "--format=%aI\t%cI").split("\t")
+    assert r0.parse_ts(got_a) != r0.parse_ts(got_c), (
+        "the fixture's two clocks coincide, so it cannot distinguish %aI from "
+        f"%cI: {got_a} vs {got_c}")
+    return repo, sha, FIXTURE_AUTHOR_DATE, FIXTURE_COMMITTER_DATE
+
+
+def test_the_cut_is_read_off_the_COMMITTER_date_not_the_author_date(
+        r0, tmp_path):
+    """invariant, and the guard for a REAL defect this replaced: the condition
+    is "reports recorded AFTER `31033cdb`" — i.e. after the change LANDED. For a
+    GitHub squash the author date is the PR author's own and can precede the
+    merge, so reading `%aI` classifies reports written in that window as
+    POST-cut while the fix was not yet on `main` — contaminating the post-cut
+    bucket with PRE-fix reports, the exact misattribution this tool measures.
+
+    The fixture's two dates are ~42 min apart on purpose: that is the WIDEST
+    real divergence over the 1,200 newest `origin/main` commits (`daa6fd65`,
+    +2,556 s; 10 of 1,200 diverge at all). A fixture whose dates coincided would
+    pass under either clock — which is how the defect survived, since
+    `31033cdb`'s own two dates are identical to the second.
+    """
+    repo, sha, author, committer = _repo_with_diverging_clocks(r0, tmp_path)
+    cut = r0.resolve_cut(sha, repo)
+    assert r0.parse_ts(cut) == r0.parse_ts(committer), (
+        "the cut must be the COMMITTER date (when the change LANDED), not the "
+        f"author date: got {cut}, committer {committer}, author {author}")
+    assert r0.parse_ts(cut) != r0.parse_ts(author)
+    assert r0.CUT_CLOCK == "%cI"
+    assert "committer" in r0.CUT_CLOCK_LABEL
+
+
+def test_the_run_NAMES_the_clock_its_cut_came_from(r0, oa, tmp_path):
+    """invariant: a cut printed without saying which of a commit's two dates it
+    read leaves the reader unable to tell "authored" from "landed"."""
+    repo, sha, author, committer = _repo_with_diverging_clocks(r0, tmp_path)
+    corpus = corpus_with(tmp_path, {
+        f"{PROJECT}/s1.jsonl": [assistant(ledger(4, 3), ts=PRE_TS)]})
+    _code, text = run(r0, ["--corpus", str(corpus), "--since-sha", sha,
+                           "--repo", str(repo)])
+    assert "%cI" in text and "committer date" in text
+    # …and the cut it printed is the LANDING instant, not the authored one.
+    assert committer[:19] in text and author[:19] not in text
+    # and the hermetic door says plainly that no git was consulted at all
+    _code, hermetic = run(r0, ["--corpus", str(corpus), "--cut-iso", CUT_ISO])
+    assert "no git consulted" in hermetic
 
 
 def test_the_cut_is_a_PARAMETER_and_moves_the_buckets(r0, oa, tmp_path):
