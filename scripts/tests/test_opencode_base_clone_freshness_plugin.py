@@ -15,6 +15,12 @@ from pathlib import Path
 
 import pytest
 
+# `scripts/` is on `sys.path` for every test in this directory (see conftest.py),
+# so this needs no per-file insert. `mockbin.write_exec` OWNS the shebang — a call
+# site writing its own is what `test_runtime_shebangs.py` refuses, and it refused
+# this file.
+from testlib import mockbin
+
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "scripts" / "opencode" / "plugin" / "base-clone-freshness.js"
 STALENESS_SH = ROOT / "scripts" / "claude-hooks" / "base-clone-staleness.sh"
@@ -177,11 +183,7 @@ def test_base_clone_no_refresh_1_skips_spawning(tmp_path):
     sentinel = tmp_path / "sentinel-fired"
     fake_script = tmp_path / ".config" / "opencode" / "base-clone-staleness.sh"
     fake_script.parent.mkdir(parents=True)
-    fake_script.write_text(
-        "#!/usr/bin/env bash\n"
-        f"touch {sentinel}\n"
-    )
-    fake_script.chmod(0o755)
+    mockbin.write_exec(fake_script, f"touch {sentinel}\n")
 
     env = {"HOME": str(tmp_path), "BASE_CLONE_NO_REFRESH": "1"}
     got = _run_hook(
@@ -231,11 +233,7 @@ def test_spawn_passes_the_session_cwd_to_the_child(tmp_path):
     recorded = tmp_path / "recorded-cwd"
     fake_script = tmp_path / ".config" / "opencode" / "base-clone-staleness.sh"
     fake_script.parent.mkdir(parents=True)
-    fake_script.write_text(
-        "#!/usr/bin/env bash\n"
-        f"pwd > {recorded}\n"
-    )
-    fake_script.chmod(0o755)
+    mockbin.write_exec(fake_script, f"pwd > {recorded}\n")
 
     env = {"HOME": str(tmp_path), "BASE_CLONE_NO_REFRESH": ""}
     got = _run_hook(
