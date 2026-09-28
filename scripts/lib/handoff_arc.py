@@ -339,6 +339,55 @@ def _git(repo: str, args: Sequence[str],
 _LOG_FORMAT = "%H%x1f%aI%x1f%s%x1f%B"
 
 
+#: Probes for the ref that carries a doc's PUSHED history, in order. The first
+#: is the branch's own upstream; the second covers a DETACHED HEAD, where
+#: `@{upstream}` has nothing to resolve — which is the normal state of the
+#: throwaway worktrees the handoff flow itself commits from.
+_UPSTREAM_PROBES: tuple[tuple[str, ...], ...] = (
+    ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"),
+    ("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"),
+)
+
+
+def doc_commit_revs(repo: str,
+                    run: Callable[..., subprocess.CompletedProcess] | None = None,
+                    ) -> tuple[tuple[str, ...], str | None]:
+    """The revisions to walk for a doc's history, plus a coverage note.
+
+    🔴 `git log -- <path>` WITH NO REVISION WALKS `HEAD`, SO A STALE LOCAL BRANCH
+    HIDES THE ENTIRE ARC — and it does so silently, as an empty result that reads
+    exactly like a doc nobody has committed to. This is not an edge case: the
+    handoff flow commits from a THROWAWAY WORKTREE and pushes `HEAD:<branch>`, so
+    the local branch of the primary clone never advances. Measured 2026-09-28 in
+    `datapacket-talos`, local `trunk` 250+ commits behind `origin/trunk`:
+    `git log --follow -- claudedocs/handoff-app-blocks-digital-goods.md` returned
+    **0** commits for a doc with **3**, which reported an arc of 1 session as
+    complete and dropped the ORIGINATING session — the one writer the reader half
+    structurally cannot see (it never resumed the doc it created).
+
+    So walk `HEAD` **and** the upstream. The union can only ADD writers, never
+    remove one, and `git` dedupes a commit reachable from both.
+
+    🔴 Returns a note when NO upstream resolved, because then this is back to
+    walking `HEAD` alone and the caller must be able to say so. An empty note is
+    not a promise of completeness — a ref this clone has never fetched is still
+    invisible.
+    """
+    revs: list[str] = ["HEAD"]
+    for probe in _UPSTREAM_PROBES:
+        try:
+            out = _git(repo, list(probe), run=run).strip()
+        except GitUnavailable:
+            continue                 # no upstream / no origin/HEAD — try the next
+        if out and out not in revs:
+            revs.append(out)
+            return tuple(revs), None
+    return tuple(revs), (
+        "no upstream ref resolved, so the WRITER half walked `HEAD` alone — a "
+        "commit pushed from a worktree but absent from this clone's checked-out "
+        "branch is NOT in this chain")
+
+
 def doc_commits(repo: str, relpath: str,
                 run: Callable[..., subprocess.CompletedProcess] | None = None,
                 ) -> tuple[ArcCommit, ...]:
@@ -346,21 +395,45 @@ def doc_commits(repo: str, relpath: str,
 
     `--follow` so a doc that was renamed (the `claudedocs/archive/` move renamed
     35 of them) does not truncate its own arc at the rename.
+
+    🔴 ONE `git log` PER REV, MERGED HERE — deliberately not one call listing
+    both. `--follow` is documented to take a single starting revision; passing
+    two happens to work on git 2.55 (measured) but its path-rewriting is
+    undefined across versions, and `--follow` is the half that keeps a renamed
+    doc's arc intact. Two defined calls beat one convenient undefined one.
     """
-    out = _git(repo, ["log", "-z", f"--format={_LOG_FORMAT}", "--follow",
-                      "--", relpath], run=run)
-    commits: list[ArcCommit] = []
-    for record in out.split("\0"):
-        if not record.strip():
-            continue
-        parts = record.split("\x1f", 3)
-        if len(parts) < 4:
-            continue
-        sha, date, subject, body = parts
-        commits.append(ArcCommit(sha=sha.strip(), date=date.strip(),
-                                 subject=subject.strip(),
-                                 session_ids=trailer_ids(body)))
-    return tuple(commits)
+    revs, _note = doc_commit_revs(repo, run=run)
+    by_sha: dict[str, ArcCommit] = {}
+    for rev in revs:
+        out = _git(repo, ["log", "-z", f"--format={_LOG_FORMAT}", "--follow",
+                          rev, "--", relpath], run=run)
+        for record in out.split("\0"):
+            if not record.strip():
+                continue
+            parts = record.split("\x1f", 3)
+            if len(parts) < 4:
+                continue
+            sha, date, subject, body = parts
+            sha = sha.strip()
+            if sha in by_sha:
+                continue
+            by_sha[sha] = ArcCommit(sha=sha, date=date.strip(),
+                                    subject=subject.strip(),
+                                    session_ids=trailer_ids(body))
+    # 🔴 INSERTION ORDER, AND DELIBERATELY NOT A DATE SORT. Each `git log` emits
+    # newest-first already, so concatenating the walks in rev order preserves
+    # git's own ordering — and `HEAD` comes first precisely because a commit on
+    # `HEAD` but not upstream is an UNPUSHED one, i.e. newer than anything the
+    # upstream carries.
+    #
+    # Sorting on `%aI` was the first implementation here and it was WRONG: the
+    # format is second-resolution, so commits made inside one second tie and the
+    # tie-break (sha) is arbitrary rather than chronological. The fixture
+    # reproduced it immediately — all of its commits share a second — but real
+    # history does this too, and the damage is silent: `writer_members` reads
+    # `commits[-1]` as the ORIGINATING commit, so an inverted tie relabels who
+    # started an arc. `dict` preserves insertion order, so this needs no sort.
+    return tuple(by_sha.values())
 
 
 def writer_members(commits: Sequence[ArcCommit], repo: str = "") -> list[ArcMember]:
@@ -474,6 +547,16 @@ def resolve_arc(repo: str, relpath: str,
             f"git could not answer for {basename}: {exc} — the WRITER half of "
             f"this arc was NOT measured, which is not the same as empty")
         commits = ()
+    else:
+        # 🔴 Only meaningful when the walk RAN. On `GitUnavailable` above the
+        # writer half is already reported unmeasured, and adding a narrower note
+        # about which refs it used would imply it got that far.
+        try:
+            _revs, rev_note = doc_commit_revs(repo, run=run)
+        except GitUnavailable:
+            rev_note = None
+        if rev_note:
+            report.unmeasured_notes.append(rev_note)
     report.total_commits = len(commits)
     report.unstamped_commits = sum(1 for c in commits if not c.stamped)
     writers = writer_members(commits, repo=report.repo)
