@@ -83,9 +83,8 @@ $DEVRC/scripts/cairn-ops/read.sh search 'clawgate' --scope homelab-talos --if-av
 ```
 Past sessions' MEASUREMENTS — `RECALL, NOT LIVE OBSERVATION`, verify before acting. Also search
 `clawgatectl` · `e2e` · `task api` · `deploy`: what a READER types, not the file you stand in.
-🔴 **`--if-available` is not decoration** — it is what makes an absent client a SKIP at rc 0
-instead of a refusal, which for a best-effort preflight is the whole point. The script owns the
-no-sync rule and the client guard; `prior-work-recall.md` keeps only what is clawgate-specific.
+🔴 **`--if-available` makes an absent client a SKIP at rc 0** — the default is a refusal, which
+is right for a mandated check and wrong for a preflight. `prior-work-recall.md`
 
 ## status
 ```bash
