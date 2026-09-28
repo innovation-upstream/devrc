@@ -419,18 +419,32 @@ class TestTheWireConstants:
 
         Pinned on the COMMAND, because nothing else could: the REMEDY test only
         requires the substring `cairn sync`, which `&&` satisfies.
+
+        ⚠ RE-MATCHED 2026-09-27 (clawgate cg#665). Step 1's sync is now
+        `$DEVRC/scripts/cairn-ops/health.sh sync`, a wrapper that passes the client's
+        code through UNTRANSLATED — so `cairn sync`'s exit 4 still arrives here and the
+        `;` is load-bearing for exactly the reason below. The PROPERTY is unchanged;
+        only the spelling of the sync moved, so the line is now located by the sync
+        DOOR rather than by the bare verb. 🔴 The old matcher keyed on the literal
+        `cairn sync`, so after the migration it selected ZERO lines and the test went
+        red on `len(step) == 1` — which is the guard working: a matcher that stops
+        matching must fail, never silently pass over an empty selection.
         """
         doc = (ROOT / "claude/skills/analyze-service/SKILL.md").read_text(encoding="utf-8")
+        sync_door = "scripts/cairn-ops/health.sh sync"
         step = [
             ln for ln in doc.splitlines()
-            if rs.REMEDY in ln and "service_recon.py" in ln
+            if sync_door in ln and "service_recon.py" in ln
         ]
-        assert len(step) == 1, f"expected one step-1 command line, found {step}"
+        assert len(step) == 1, (
+            f"expected one step-1 command line naming `{sync_door}` and "
+            f"`service_recon.py`, found {step}"
+        )
         assert "&&" not in step[0], (
             f"step 1 chains the sync with `&&`: {step[0]!r}. A failed sync then "
             f"suppresses the entire recon. Use `;`."
         )
-        assert f"{rs.REMEDY};" in step[0], (
+        assert f"{sync_door};" in step[0], (
             f"step 1 must separate the two commands with `;`: {step[0]!r}"
         )
         # …and the promise the separator has to keep is still there to keep.
@@ -1717,17 +1731,49 @@ class TestTheAuditorStaysPermissiveOnAnExplicitStore:
         assert rs.REMEDY not in err
 
     def test_the_prescribed_skill_commands_all_name_a_store(self) -> None:
-        """The premise of this whole class, pinned rather than recalled. If
-        `prune-index` ever stops passing `--store`, the permissive arm above
-        stops describing the prescribed path and the refusal starts reaching
-        it — and nothing else would say so."""
+        """The premise of this whole class, pinned rather than recalled. If the
+        prescribed path ever stops passing `--store`, the permissive arm above stops
+        describing it and the refusal starts reaching it — and nothing else would
+        say so.
+
+        ⚠ RE-POINTED 2026-09-27 (clawgate cg#665). `prune-index` now prescribes
+        `$DEVRC/scripts/cairn-ops/hygiene.sh audit --scope <scope>`, which resolves
+        the store PER INSTANCE and passes it to the auditor EXPLICITLY — so the
+        property holds and its evidence moved out of the skill and into the script.
+        The old form of this test walked the skill's fences for `subsystem-audit.py`
+        and found **zero** after the migration; that is the guard working, since an
+        empty selection failed the positive control instead of passing an all-pass
+        loop over nothing.
+
+        🔴 BOTH HALVES ARE ASSERTED, because either alone is walkable: a skill that
+        prescribes the door while the door invokes the auditor bare, or a door that
+        passes `--store` while the skill has gone back to calling the auditor
+        directly. The door's BEHAVIOUR (that the resolved store is the instance's,
+        not the host's) is covered by `test_cairn_ops.py::TestEachScriptCanObserve`.
+        """
         doc = (ROOT / "claude/skills/prune-index/SKILL.md").read_text(encoding="utf-8")
-        calls = _fenced_command_lines(doc, "subsystem-audit.py")
-        # POSITIVE CONTROL: the fence walk really found commands, so an
-        # all-pass loop below is not a loop over nothing.
-        assert len(calls) >= 4, calls
-        for line in calls:
+
+        # (a) the SKILL prescribes the door — and any auditor line it still fences
+        #     itself must carry `--store`.
+        door = _fenced_command_lines(doc, "cairn-ops/hygiene.sh audit")
+        # POSITIVE CONTROL: the fence walk really found commands, so the loops below
+        # are not loops over nothing.
+        assert len(door) >= 2, door
+        for line in door:
+            assert "--scope" in line, f"prune-index invokes the audit door unscoped: {line!r}"
+        for line in _fenced_command_lines(doc, "subsystem-audit.py"):
             assert "--store" in line, f"prune-index now invokes the auditor bare: {line!r}"
+
+        # (b) the DOOR passes an explicit store to the auditor.
+        hygiene = (ROOT / "scripts/cairn-ops/hygiene.sh").read_text(encoding="utf-8")
+        execs = [
+            " ".join(ln.split()) for ln in hygiene.splitlines()
+            if "subsystem-audit.py" in ln and not ln.lstrip().startswith("#")
+        ]
+        assert len(execs) == 1, f"expected exactly one auditor invocation, found {execs}"
+        assert '--store "$store"' in execs[0], (
+            f"the audit door invokes the auditor without an explicit store: {execs[0]!r}"
+        )
 
 
 class TestTheAuditCarriesTheSnapshotItMeasured:
