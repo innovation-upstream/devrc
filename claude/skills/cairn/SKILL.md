@@ -68,6 +68,32 @@ and the writer it runs is devrc-only and deliberately absent from that repo.
 ⚠ Exit codes differ too: the writer exits **3** on a malformed entry, the packaged
 client **5** (`EXIT_CORRUPT`; `3` is `EXIT_UNREACHABLE_NO_CACHE` for the client).
 
+🔴 **THAT COMMAND IS INSTANCE-BLIND, AND ITS FAILURE IS A ZERO THAT LOOKS CLEAN.**
+`cairn-validate` defaults its store root to `~/.cache/subsystem-store` — the
+**personal** instance. A scope that lives on another instance has its cache
+somewhere else (`~/.cache/subsystem-store-civitai`), so the mandated form walks a
+directory that does not contain the entry and reports **`NOTHING WAS CHECKED`**.
+It says outright that this is not a clean bill of health, which is the only
+reason it is catchable at all — but a caller following the command as written,
+on the very write it was mandated for, gets it. Measured 2026-09-27 creating
+`jev-ui-demo/jev-composition-engine` on the `civitai` instance: the write
+succeeded, `cairn recall --repo` showed the entry, and the post-write check
+walked an empty directory.
+
+**So pass the store root whenever the scope is not on the default instance** —
+`cairn routes` prints which instance a scope resolves to, and `cairn doctor`'s
+`reader-resolution` check prints that instance's cache path:
+
+```
+cairn sync && cairn-validate --store ~/.cache/subsystem-store-<instance> --scope <scope>
+```
+
+⚠ The underlying tool takes `--repo` too, and `--repo` is what routes correctly
+everywhere else (`cairn recall --repo` reached the right instance in the same
+session). It is **not** known whether `cairn-validate --repo` resolves the
+instance's cache — that was not measured, so do not substitute it for `--store`
+on the strength of this note.
+
 🔴 **`cairn-who` is a separate command, not a `cairn` subcommand.** It is about a
 **task**, not a store entry: it touches no store and never syncs, takes none of
 the `--scope`/`--repo`/`--no-sync` flags, and has its own longer `--timeout`
