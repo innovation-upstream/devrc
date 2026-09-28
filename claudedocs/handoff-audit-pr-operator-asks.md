@@ -43,12 +43,24 @@ operator asked for, so that branch was unreachable and his stated requirements l
     lines in 236 REAL SESSIONS (474 transcript files) across 7 projects, mean 3.365
     unattributed per report, share 0.331.** Re-derivable by re-running the command — that is
     the point of it being a command.
-    - ⚠ **`474` was published here as a session count and it is a FILE count** — wrong by
-      ~2× as a number of observations. A round-0 report is written by an auditor SUBAGENT
-      whose transcript is `<project>/<sid>/subagents/agent-*.jsonl`: a different file from the
-      parent's, and several auditors of one session are several files again (6,692 files on
-      this host against 1,563 distinct session ids). `#1901 round 1` found it; the run now
-      prints `sess` and `files` side by side, and the FLOOR counts sessions.
+    - ⚠ **`474` was published here as a session count and it is a FILE count** — **2.01×**
+      the number of observations (474 files / 236 sessions). A round-0 report is written by an
+      auditor SUBAGENT whose transcript is `<project>/<sid>/subagents/agent-*.jsonl`: a
+      different file from the parent's, and several auditors of one session are several files
+      again. `#1901 round 1` found it; the run now prints `sess` and `files` side by side plus
+      the per-bucket ratio, and the FLOOR counts sessions.
+    - 🔴 **TWO DIFFERENT RATIOS — do not quote one for the other.** The **2.01×** above is the
+      PRE-BUCKET figure (files that carry a report). The **CORPUS** figure is **~6.9×**,
+      re-derived 2026-09-28 with the script's own `_session_id_of`: **6,718 files / 974
+      sessions**, 5,744 files under `subagents/`. ⚠ A `1,563 distinct session ids` figure
+      circulated in this arc and is **WITHDRAWN**: it came from taking the first path segment
+      *without stripping `.jsonl`*, which counts a session holding both a top-level transcript
+      and a `subagents/` dir twice — measured, naive 1,571 = 974 top-level + 597 nested with
+      all 597 overlapping. Session ids cannot fall while files rise, which is how it was caught.
+      Both figures drift; the MECHANISM does not, and
+      `test_the_naive_session_derivation_double_counts_and_ours_does_not` pins it so a wrong
+      number fails rather than reads fine. **Third irreproducible figure in this arc — derive
+      it with the code, or do not write it.**
     - ⚠ **The clock is load-bearing and the coincidence here is not a property of the tool.**
       `31033cdb`'s author and committer dates are identical to the second, so this baseline
       reads the same either way — which is why reading the wrong one was invisible. Over the
@@ -62,18 +74,19 @@ operator asked for, so that branch was unreachable and his stated requirements l
     baseline. A number quoted without its method has no defined left-hand side.
   - **Today's real answer is `VERDICT: NOT MEASURABLE (n=1 distinct session(s) / 2 transcript
     file(s) / 3 report(s); floor 10)`** — the tool refuses to compare below ten sessions on
-    purpose, so it cannot be used to justify re-tuning the feature. Fresh run, 2026-09-28T05:0xZ,
-    every figure from that one run:
+    purpose, so it cannot be used to justify re-tuning the feature. Fresh run, 2026-09-28T06:0xZ,
+    every figure from that ONE run (files/sess: PRE 2.01×, POST 1.42×):
     | bucket | reports | sess | files | mean/report | share |
     |---|---|---|---|---|---|
     | PRE-cut (all) | 493 | 236 | 474 | 3.365 | 0.331 |
     | PRE-cut in-population | 2 | 1 | 1 | 5.500 | 0.423 |
-    | POST-cut (all) | 22 | 15 | 21 | 4.318 | 0.289 |
-    | POST-cut out-of-population **[control]** | 18 | 14 | 18 | 3.278 | 0.241 |
+    | POST-cut (all) | 28 | 19 | 27 | 3.857 | 0.268 |
+    | POST-cut out-of-population **[control]** | 23 | 18 | 23 | 3.043 | 0.232 |
     | POST-cut in-population | 3 | 1 | 2 | 4.667 | 0.389 |
-    Post-cut reasons: 16 × the session source was consulted and could not be read · 3 × an
-    ask arrived · 2 × no asks block at all · 1 UNKNOWN. (These GROW with every audit —
-    defect 2 in miniature — so re-run rather than quoting this table.)
+    Post-cut reasons: 21 × the session source was consulted and could not be read · 3 × an
+    ask arrived · 2 × UNKNOWN · 2 × no asks block at all. 🔴 **These GROW with every audit** —
+    the post bucket went 20 → 22 → 28 across three runs of this one arc, which is defect 2 in
+    miniature: **re-run, never quote this table.**
   - ⚠ **PRE-cut in-population is NOT structurally zero, and a label here said it was.** The
     feature's own development session rendered real asks blocks from its BRANCH before the
     squash landed: 2 reports / 1 session. The run's note now describes whichever case holds;
@@ -245,8 +258,16 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
   deflated with the floor unreachable by the path that actually delivers. Fixed by an OPTIONAL
   line-number prefix, applied to **every** line-anchored matcher (a fix to one while a sibling
   stayed blind would move the defect, not remove it), with both poles pinned — a numbered real
-  render matches, a numbered source read still does not. After the fix the same corpus reads
-  **2** "no asks block" instead of 14, and 16 correctly as "consulted and could not be read".
+  render matches, a numbered source read still does not. After the fix the corpus reads
+  **2** "no asks block" and **16** "consulted and could not be read".
+  ⚠ **An "instead of 14" comparison appeared here and is WITHDRAWN as unverifiable.** The
+  pre-fix figure round 1 reported is **13 of 20**; a later sentence said the same corpus read
+  "2 instead of 14", and both cannot be one corpus's pre-fix count — the post bucket itself grew
+  20 → 22 between the two measurements. Re-deriving it needs the pre-fix code against a corpus
+  that has since changed, so neither number is recoverable now. **13 of 20** is what round 1
+  measured and is the only figure kept; the delta is stated as the post-fix counts, not as a
+  difference. Picking whichever read better is exactly how this arc's irreproducible numbers got
+  in.
   ⚠ Two claims of the round-0 fix were REFUTED in the process and are retracted rather than
   patched: that "every one of the other 39 [substring matches] is a source read or a discussion
   of this feature" (round 1 found ≥11 real renders in that residual), and that the PRE-cut

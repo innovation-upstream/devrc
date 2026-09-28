@@ -14,7 +14,9 @@ the fix for both — the doc's `closing-condition` now names this command.
 **Defect 1 — the baseline was not reproducible.** The doc quoted *1,649 round-0
 ledger lines across 728 sessions in 7 repos*. Two defensible methods over the
 same corpus (`~/.claude/projects/**/*.jsonl`) disagree, and NEITHER produces it:
-counting only ASSISTANT-authored text blocks gives 493 lines / 474 sessions / 7
+counting only ASSISTANT-authored text blocks gives 493 lines in 236 sessions
+(474 transcript FILES — see blind spot 6; an earlier version of this sentence
+called the file count a session count, which is the same defect one level up) / 7
 projects (re-measured 508 / 488 / 8 hours later the same day, the corpus being
 live), counting every record of any role gives 1,977 / 707 / 8. A number quoted
 without its method has no defined left-hand side, so this script STATES its
@@ -166,17 +168,32 @@ BLIND SPOTS, each at the width it actually holds
    its ledger twice is two reports; a round 0 that omits the ledger line is
    none. The line is the only machine-readable handle the skill emits.
 6. **THE UNIT OF CLASSIFICATION IS THE TRANSCRIPT FILE; THE UNIT OF THE FLOOR IS
-   THE REAL SESSION.** Those are different, they differ by ~2x here, and saying
-   so is the fix for a sentence that used to call the first one "the session".
-   A report and the brief it was written against coexist in ONE file, so that is
-   what `disposition_of` reads — which means one audit CAN score `in` in the
-   auditor subagent's transcript and `out` in the parent's, and neither reading
-   is wrong about its own file. The floor instead counts distinct session ids
-   derived from the path (`_session_id_of`), because a round-0 report is written
-   by a subagent whose transcript is `<project>/<sid>/subagents/agent-*.jsonl`
-   and several auditors of one session are several files again: MEASURED on this
-   host, 6,692 files against 1,563 distinct session ids (5,724 files under
-   `subagents/`), and the PRE bucket is 474 FILES but far fewer sessions.
+   THE REAL SESSION.** Saying so is the fix for a sentence that used to call the
+   first one "the session". A report and the brief it was written against coexist
+   in ONE file, so that is what `disposition_of` reads — which means one audit CAN
+   score `in` in the auditor subagent's transcript and `out` in the parent's, and
+   neither reading is wrong about its own file. The floor instead counts distinct
+   session ids derived from the path (`_session_id_of`), because a round-0 report
+   is written by a subagent whose transcript is
+   `<project>/<sid>/subagents/agent-*.jsonl` and several auditors of one session
+   are several files again.
+   🔴 **TWO DIFFERENT RATIOS, AND AN EARLIER VERSION OF THIS BULLET CONFLATED
+   THEM INTO ONE "~2x".** They are not the same measurement:
+     * the CORPUS ratio — every transcript on this host — is **~6.9x**
+       (re-derived 2026-09-28 with `_session_id_of` itself: 6,718 files / 974
+       sessions, 5,744 files under `subagents/`);
+     * the PRE-BUCKET ratio — files that carry a round-0 report — is **~2.0x**
+       (474 files / 236 sessions), because a file with no report is not counted.
+   Both drift with the corpus, so read them as a shape and a date. What does NOT
+   drift is the mechanism, and it is the thing worth remembering: a "first path
+   segment" derivation that does not strip `.jsonl` counts a session with both a
+   top-level transcript and a `subagents/` directory TWICE. Measured here: naive
+   1,571 = 974 top-level + 597 nested, overlap 597, union 974. That is exactly how
+   a wrong `1,563` entered this file, and
+   `test_the_naive_session_derivation_double_counts_and_ours_does_not` pins the
+   mechanism against a fixture so a future wrong number fails instead of reading
+   fine. 🔴 Re-derive with the code's own function; do not trust a figure here
+   that a reader cannot reproduce — this arc has now shipped three of those.
    ⚠ Within a file, a session that dispatched one answered audit and one
    unanswered one has all of its reports counted in-population (the precedence
    note above), and one verbose round 0 emitting two ledger lines is two reports
@@ -499,6 +516,17 @@ ANCHORS = (
     # non-arrival. `scope="block"` because it is about the whole assembly rather
     # than about one source, and the classifier therefore reads it even though it
     # is not a session-transcript line.
+    # 🔴 FOUND BY `#1901 round 2`: `render()` emits this and NO probe did, so the
+    # widened GROWS was still blind on one axis — the asks side is derived from
+    # `SOURCE_ORDER`, but the sources side is a hand-enumerated kwarg list. A
+    # probe now passes `comment_skips`, and
+    # `test_every_render_kwarg_is_exercised_by_a_probe` makes the axis DERIVABLE:
+    # a new keyword on `render()` fails the suite until a probe drives it.
+    dict(id="comment-skipped", where="sources", role="informational-other",
+         text=" skipped — ",
+         spelling="`render()`'s `{PR comment}: N skipped — {why}` line, emitted "
+                  "for each reason a comment was not counted as the operator's. "
+                  "`audit-dispatch.py` passes `comment_skips`, so it is live."),
     dict(id="no-source-consulted", where="sources", role="none-consulted",
          scope="block", text="no source was consulted at all",
          spelling="`render()`'s `! no source was consulted at all — that is a "
@@ -622,6 +650,12 @@ BEHAVIOURAL_POLES = (
     # `audit-dispatch.py 1901 --round 0` emits (`### from the session transcript`
     # above `**Sources read:**`, `1 session(s) NAMED BY`, no `!` on that source).
     ("answered", "in"),
+    # 🔴 ADDED AFTER `#1901 round 2`: these two branches had NO runtime check, and
+    # two mutants against the first of them survived a fully green suite. A pole
+    # is verified on EVERY invocation, so the check does not depend on anyone
+    # having written a test — which is the gap that let them live.
+    ("no-source", "out"),
+    ("pr-comment-only", "out"),
 )
 
 
@@ -672,8 +706,13 @@ def renderer_probes(oa, projects_root) -> dict:
         # the classifier dropped records -> an INFORMATIONAL session line
         "dropped": oa.render([ask], session_ids=(sid,),
                              dropped={"a reason": 3}, comments_examined=0, **kw),
-        # asks arrived, but from the OTHER source
-        "pr-comment-only": oa.render([comment_ask], comments_examined=1, **kw),
+        # asks arrived, but from the OTHER source — and this probe also drives
+        # `comment_skips` and `dropped`, the two kwargs whose source lines had no
+        # probe at all until `#1901 round 2` (see `comment-skipped`).
+        "pr-comment-only": oa.render(
+            [comment_ask], comments_examined=1,
+            comment_skips={"written by someone else": 2},
+            dropped={"a reason": 1}, **kw),
         # no source consulted at all -> a block with no session line
         "no-source": oa.render([], **kw),
     }
@@ -757,11 +796,19 @@ def match_anchors(lines, where: str, scopes=None) -> tuple[set, set, list]:
 
 
 def roles_of_block(text: str, session_label: str) -> tuple[set, bool, list]:
-    """-> (roles this block carries, sources-block-found, lines matching nothing).
+    """-> (roles this block carries, sources-block-found, unmatched lines).
 
     One place where a block's text becomes roles, shared by `disposition_of` and
     by the pin — so the pin's behavioural poles exercise the SAME path the corpus
     walk does, not a parallel re-implementation of it.
+
+    ⚠ THE UNMATCHED LIST IS NARROWER THAN ITS NAME, and saying so is the point:
+    it carries unmatched ASK headings and unmatched SESSION-TRANSCRIPT source
+    lines only. A source line of ANOTHER source that no anchor covers is not
+    reported here, because classification reads session-scoped anchors off session
+    lines plus the block-scoped ones. `check_pins` is the wide reader
+    (`scopes=None`, every source line) and is where GROWS is enforced; this return
+    value is not a GROWS signal. (`#1901 round 2` noted the mismatch.)
     """
     asks, sources, found = block_regions(text)
     ask_roles, _ask_ids, ask_bad = match_anchors(asks, "asks")
@@ -782,8 +829,13 @@ def check_pins(oa, probes) -> None:
       SHRINKS  an anchor that matches nothing a live render emits — the shape
                this instrument is blind to after a reword, and the one that
                silently empties the denominator.
-      GROWS    a session-source line the ledger does not cover — a new shape
-               whose meaning for the in-population test nobody has decided.
+      GROWS    ANY line of a rendered block the ledger does not cover — an ask
+               heading OR a source line of ANY source, not only the
+               session-transcript ones — i.e. a new shape whose meaning for the
+               in-population test nobody has decided. ⚠ This sentence said
+               "a session-source line" after the check had already been widened,
+               which is the wording that invites the next maintainer to restore
+               the filter; `#1901 round 2` found it.
     """
     if not oa.HEADING.startswith(ANCHOR_BLOCK):
         fail(EXIT_PIN,
@@ -830,9 +882,15 @@ def check_pins(oa, probes) -> None:
             f"exists: {', '.join(missing)}")
     if unmatched:
         parts.append(
-            "GROWS — render() emits session-transcript source line(s) no anchor "
-            "covers, so this instrument does not know what they mean for the "
-            f"in-population test: {unmatched[:3]}")
+            # 🔴 "LINE(S) OF A RENDERED BLOCK", not "session-transcript source
+            # line(s)". `#1901 round 2` triggered this refusal live and it named
+            # a class the offending item did not belong to — the item was
+            # `['### from the an invented source']`, an ASK HEADING — so a
+            # maintainer debugging it looks in the wrong place.
+            "GROWS — render() emits line(s) of the asks block that no anchor "
+            "covers (an ask heading, or a source line of any source), so this "
+            "instrument does not know what they mean for the in-population "
+            f"test: {unmatched[:3]}")
     if missing and unmatched:
         parts.append("BOTH halves failed together, which is the signature of a "
                      "REWORD rather than of a new source line: update ANCHORS "
@@ -880,11 +938,11 @@ class Report:
     #: 🔴 THE REAL SESSION, which is NOT the file. A round-0 report is written by
     #: an auditor SUBAGENT, whose transcript is `<project>/<sid>/subagents/
     #: agent-*.jsonl` — a different file from the parent's, and several auditor
-    #: subagents of one session are several files again. MEASURED by `#1901 round
-    #: 1`: 6,692 transcript files on this host against 1,563 distinct session
-    #: ids, 5,724 of the files under `subagents/`; the PRE bucket was 474 FILES
-    #: but 236 real sessions, so a file-counting floor was satisfiable by about
-    #: half the observations it claimed. This is the unit the FLOOR counts.
+    #: subagents of one session are several files again. The PRE bucket was 474
+    #: FILES but 236 real sessions (~2.0x), so a file-counting floor was
+    #: satisfiable by about half the observations it claimed; corpus-wide the ratio
+    #: is ~6.9x. Both numbers drift — blind spot 6 carries them with their date and
+    #: the derivation that produces them. This is the unit the FLOOR counts.
     session_id: str = ""
     disposition: str = ""
     why: str = ""
@@ -978,11 +1036,25 @@ def disposition_of(texts, session_label: str) -> tuple[str, str]:
             # 🔴 THE SAFETY NET FOR A DELIVERY FORM I CANNOT PARSE, and it exists
             # because the bare `^` anchor missed the `cat -n` form and reported
             # "no asks block (a pre-fix report)" — an affirmatively FALSE reason
-            # — for 13 of 20 post-cut reports. A block-like text that the
-            # anchored matcher cannot locate is THIS instrument's blindness, so
-            # it routes to UNKNOWN. Any future transformation of the block
-            # (indented, fenced, re-wrapped) lands there instead of quietly
-            # inflating `out`.
+            # — for 13 of 20 post-cut reports. A block-like text the anchored
+            # matcher cannot locate is THIS instrument's blindness, so it routes
+            # to UNKNOWN rather than quietly inflating `out`.
+            #
+            # ⚠ ITS REACH IS EXACTLY ITS PATTERN, and an earlier version of this
+            # comment said "any future transformation", which is wider than the
+            # code. VERIFIED shape by shape: column-0 ✓, `cat -n` (`<n>\t`) ✓,
+            # indented ✓, markdown-quoted (`> `) ✓ — and `grep -n`'s `<n>:` form
+            # ✗, matched by NEITHER pattern.
+            # MEASURED 2026-09-28 rather than assumed, because the first version of
+            # this note asserted an impact of zero that was NOT what the corpus
+            # said: 15 texts carry the heading behind a `<n>:` prefix and 16 files
+            # hold one; **2** of those files also emit a round-0 ledger line, and
+            # in BOTH the file ALSO carries an anchored block, so the disposition
+            # is decided by that block and no report changes. Impact today is zero
+            # by that path, not by the absence of the shape. Left unwidened
+            # deliberately — a colon-delimited prefix would admit
+            # `HEADING: "## …"`-shaped prose — and named here so the next reader
+            # knows it is a KNOWN gap rather than a covered one.
             if _BLOCKLIKE_BLOCK_RE.search(txt):
                 block_like += 1
             continue
@@ -1023,9 +1095,11 @@ def disposition_of(texts, session_label: str) -> tuple[str, str]:
 class WalkFacts:
     """What the walk saw, beside the reports themselves.
 
-    A dataclass rather than a dict because two of these fields are COUNTS and
-    one is a Counter: a `dict(...)` of mixed value types type-checks as a union
-    and every `+= 1` on it is unverifiable.
+    A dataclass rather than a dict because the COUNT fields and the Counter have
+    different types: a `dict(...)` of mixed value types type-checks as a union
+    and every `+= 1` on it is unverifiable. (This said "two of these fields are
+    COUNTS" while there were three — a count in prose is a claim, so it is now
+    a description that cannot go stale.)
     """
     files: int = 0
     #: Ledger lines seen in an INJECTED block — the skill body or the brief
@@ -1090,9 +1164,10 @@ def stats(rows) -> dict:
     return dict(n=n, requirements=req, unattributed=un,
                 mean_unattributed=(un / n) if n else None,
                 unattributed_share=(un / req) if req else None,
-                # BOTH, because they differ by ~2x and only one is an
-                # observation count: `files` is what a naive count gives,
-                # `sessions` is the real unit (see `Report.session_id`).
+                # BOTH, because they DIFFER and only one is an observation count:
+                # `files` is what a naive count gives, `sessions` is the real unit
+                # (see `Report.session_id`). The ratio is a property of the rows,
+                # so it is printed per bucket rather than asserted here.
                 files=len({r.file for r in rows}),
                 sessions=len({r.session_id for r in rows}))
 
@@ -1225,9 +1300,16 @@ def render_report(cut_iso, cut_src, corpus, facts, b) -> tuple[str, int]:
                  f"{s['requirements']:6d} {s['unattributed']:7d} "
                  f"{_fmt(s['mean_unattributed']):>11} "
                  f"{_fmt(s['unattributed_share']):>7}")
-    o.append("  `sess` is the REAL session count (several auditor subagents of "
-             "one session are several FILES — the two differ by ~2x here, and "
-             "only `sess` is an observation count).")
+    # 🔴 THE RATIO IS COMPUTED FROM THE ROWS, not asserted from memory: an
+    # earlier line said "~2x here" while conflating the PRE-bucket ratio with the
+    # corpus-wide one (~6.9x), and a prose ratio is a number nobody re-derives.
+    o.append("  `sess` is the REAL session count and the only observation count "
+             "— several auditor subagents of one session are several FILES. "
+             "files/sess by bucket: "
+             + "  ".join(
+                 f"{lbl}={(stats(rows)['files'] / stats(rows)['sessions']):.2f}x"
+                 for lbl, rows in (("PRE", pre), ("POST", post))
+                 if stats(rows)["sessions"]))
     o.append(f"  PRE-cut in-population: {pre_in_note}.")
     o.append("  [control] is the CONTEMPORANEOUS comparison — same skill "
              "revisions, models and repos as the in-population row, differing "
@@ -1398,12 +1480,18 @@ def _session_id_of(path: Path, corpus: Path) -> str:
         <corpus>/<project>/<sid>.jsonl                       the session itself
         <corpus>/<project>/<sid>/subagents/agent-<x>.jsonl   its subagents
 
-    A round-0 report is written BY an auditor subagent, so it lives in the
-    second shape — a different file from the parent's, and several auditors of
-    one session are several files again. MEASURED by `#1901 round 1` on this
-    host: 6,692 files against 1,563 distinct session ids, 5,724 files under
-    `subagents/`. Both shapes carry the session id in the SAME path segment, so
-    this is the first segment under the project.
+    A round-0 report is written BY an auditor subagent, so it lives in the second
+    shape — a different file from the parent's, and several auditors of one
+    session are several files again (corpus-wide ~6.9x; blind spot 6 carries the
+    figures with their date).
+
+    🔴 STRIPPING `.jsonl` IS THE LOAD-BEARING LINE, not tidiness. Both shapes
+    carry the session id in the SAME path segment, but in the first it carries the
+    extension — so a derivation that takes the segment RAW counts a session with
+    both a top-level transcript and a `subagents/` directory TWICE. That is not
+    hypothetical: it is how a wrong corpus-session figure reached this file and
+    three other places. `test_the_naive_session_derivation_double_counts_and_ours_does_not`
+    pins the mechanism.
 
     ⚠ Falls back to the file's own stem for a shape neither branch describes,
     which over-counts sessions rather than merging two real ones — the safe

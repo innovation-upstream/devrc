@@ -33,6 +33,7 @@ tree for captured text; nothing in this file is derived from a real session.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import io
 import json
 import re
@@ -360,7 +361,8 @@ def test_the_numbered_sources_region_STOPS_where_the_unnumbered_one_does(
     for line in src_numbered:
         assert "**Ledger:**" not in line, (
             "the region must END at the Ledger line, as it does unnumbered")
-        assert not r0._LINENO_RE.match(line), "each line keeps its number"
+        assert not r0._LINENO_RE.match(line), (
+            "each line must have its number REMOVED — the message here used to\n             say the opposite of what the assertion requires (`#1901 round 2`)")
 
 
 def test_a_LINE_NUMBERED_source_read_is_still_NOT_a_block(r0, oa, tmp_path):
@@ -479,7 +481,7 @@ def test_the_run_REFUSES_when_a_live_pole_classifies_wrongly(
     assert "classifies as 'in'" in err and "expected 'out'" in err, err
 
 
-def test_both_live_poles_classify_correctly_today(r0, oa, tmp_path):
+def test_every_live_pole_classifies_correctly_today(r0, oa, tmp_path):
     """GREEN half of that pair, over the SAME code path the corpus walk uses."""
     probes = r0.renderer_probes(oa, tmp_path / "nope")
     r0.check_behavioural_poles(oa, probes)          # must not raise
@@ -487,7 +489,170 @@ def test_both_live_poles_classify_correctly_today(r0, oa, tmp_path):
         got, why = r0.disposition_of([probes[name]], oa.SOURCE_SESSION)
         assert got == expected, f"{name}: {got!r} ({why})"
     assert dict(r0.BEHAVIOURAL_POLES) == {"named-but-unreadable": "out",
-                                          "answered": "in"}
+                                          "answered": "in",
+                                          "no-source": "out",
+                                          "pr-comment-only": "out"}, (
+        "the pole set is a LEDGER: a disposition branch with no pole gets no "
+        "RUNTIME check, which is how two mutants survived a green suite")
+    assert {n for n, _ in r0.BEHAVIOURAL_POLES} <= set(probes), (
+        "a pole naming no probe would make the whole check vacuous")
+    # 🔴 and every branch of `disposition_of` that can return `out`/`in` must have
+    # a pole — derived, so a new branch fails here until it gets one
+    body = inspect.getsource(r0.disposition_of)
+    branch_roles = set(re.findall(r'"(\w[\w-]*)" in roles', body))
+    covered = set()
+    for name, _exp in r0.BEHAVIOURAL_POLES:
+        covered |= r0.roles_of_block(probes[name], oa.SOURCE_SESSION)[0]
+    assert branch_roles <= covered | set(r0.IN_POPULATION_ROLES), (
+        "these disposition branches have no behavioural pole exercising them: "
+        f"{sorted(branch_roles - covered - set(r0.IN_POPULATION_ROLES))}")
+
+
+def test_a_block_that_says_NO_SOURCE_WAS_CONSULTED_is_out_not_UNKNOWN(
+        r0, oa, tmp_path):
+    """🔴 REGRESSION for TWO mutants that survived a fully green 52-test suite
+    (`#1901 round 2`): disabling the `none-consulted` branch, and deleting
+    `scope="block"` from its anchor. Either one turns a block that plainly says
+    nothing was consulted into UNKNOWN — excluded from every denominator, so it
+    VANISHES from the contemporaneous control row instead of counting as a
+    reading of non-arrival.
+
+    Neither was caught because `check_pins` passes `scopes=None` (so the anchor id
+    still counts as "seen"), `no-source` is not a behavioural pole, and the module
+    named none of the three strings."""
+    block = brief(r0, oa, "no-source", tmp_path)
+    assert "no source was consulted at all" in block
+    # the anchor must be BLOCK-scoped: this line names no source, so a
+    # session-filtered read cannot see it
+    anchor = [a for a in r0.ANCHORS if a["id"] == "no-source-consulted"]
+    assert len(anchor) == 1, anchor
+    # `.get`, not `[...]`: a mutant that DELETES the key must fail with this
+    # assertion's own message rather than a `KeyError` from the test itself —
+    # a guard dying for the wrong reason tells the next reader nothing.
+    assert anchor[0].get("scope") == "block", (
+        "this line names no source, so only a BLOCK-scoped anchor can see it; "
+        f"deleting the scope makes the block UNKNOWN: {anchor[0]}")
+    assert anchor[0]["role"] == "none-consulted"
+    assert r0.session_source_lines(oa.SOURCE_SESSION,
+                                   r0.block_regions(block)[1]) == [], (
+        "the fixture only tests the block scope while this line is NOT a "
+        "session-transcript line — which is the whole reason the scope exists")
+    roles, _found, _bad = r0.roles_of_block(block, oa.SOURCE_SESSION)
+    assert roles == {"none-consulted"}, sorted(roles)
+    disp, why = r0.disposition_of([block], oa.SOURCE_SESSION)
+    assert disp == "out", f"got {disp!r} ({why})"
+    assert "no source was consulted at all" in why
+    # …and end to end, so it lands in the CONTROL row rather than vanishing
+    corpus = corpus_with(tmp_path, {
+        f"{PROJECT}/s1.jsonl": [user_text(block, ts=POST_TS),
+                                assistant(ledger(6, 4), ts=POST_TS)]})
+    _code, _text, b = rates(r0, oa, corpus)
+    assert r0.stats(b["post_out"])["n"] == 1
+    assert r0.stats(b["post_unknown"] if "post_unknown" in b else [])["n"] == 0
+
+
+def test_a_SESSION_scoped_anchor_is_not_read_off_another_sources_line(
+        r0, oa, tmp_path):
+    """🔴 The other half of the `scope` mechanism, and a real hazard rather than
+    symmetry: `: UNKNOWN — ` is `scope="session"` precisely so that
+    `! PR comment: UNKNOWN — …` — which `render()` emits whenever comments were
+    consulted — cannot be read as "the session transcript was unreadable". If that
+    anchor were block-scoped, every PR with an unreadable COMMENT source would
+    report non-arrival of the operator's typed words."""
+    unmeasured_comment = oa.Unmeasured(source=oa.SOURCE_PR_COMMENT,
+                                       reason="the comment API did not answer")
+    sid = "a" * 8
+    ask = oa.Ask(source=oa.SOURCE_SESSION, text="an ask", session_id=sid)
+    block = oa.render([ask], session_ids=(sid,), unmeasured=(unmeasured_comment,),
+                      comments_examined=0, projects_root=tmp_path / "nope")
+    sources = r0.block_regions(block)[1]
+    assert any(": UNKNOWN — " in l and oa.SOURCE_PR_COMMENT in l
+               for l in sources), "the fixture must carry a PR-comment UNKNOWN"
+    assert not any(": UNKNOWN — " in l and oa.SOURCE_SESSION + ":" in l
+                   for l in sources), "…and NO session-transcript UNKNOWN"
+    roles, _f, _b = r0.roles_of_block(block, oa.SOURCE_SESSION)
+    assert "unmeasured" not in roles, (
+        "a PR-comment UNKNOWN must not mark the SESSION source unreadable: "
+        f"{sorted(roles)}")
+    assert r0.disposition_of([block], oa.SOURCE_SESSION)[0] == "in"
+    # the scope really is what makes that true
+    anchor = [a for a in r0.ANCHORS if a["id"] == "unmeasured"][0]
+    assert anchor.get("scope", r0._DEFAULT_SCOPE) == "session"
+
+
+def test_every_anchor_is_MATCHED_by_a_live_probe_line_and_carries_its_role(
+        r0, oa, tmp_path):
+    """🔴 The per-anchor half of the coverage ledger, and it EXERCISES rather than
+    names: every anchor must match at least one line some live `render()` emits,
+    in its own region, and a role that must not reach classification must not.
+
+    This is what was missing when two of round 2's mutants survived a green suite
+    — the ledger below only checks that a NAME appears, while this drives each
+    anchor through real renderer output."""
+    probes = r0.renderer_probes(oa, tmp_path / "nope")
+    hits = {a["id"]: [] for a in r0.ANCHORS}
+    for text in probes.values():
+        asks, sources, _f = r0.block_regions(text)
+        for region, lines in (("asks", asks), ("sources", sources)):
+            for line in lines:
+                for a in r0.ANCHORS:
+                    if a["where"] == region and a["text"] in line:
+                        hits[a["id"]].append(line)
+    unmatched = sorted(i for i, got in hits.items() if not got)
+    assert unmatched == [], (
+        "these anchors match nothing any probe emits, so nothing exercises them: "
+        f"{unmatched}")
+
+    # the informational anchors are EXACTLY the ones that cannot classify
+    informational = {a["id"] for a in r0.ANCHORS
+                     if a["role"] in ("informational", "informational-other")}
+    assert informational == {"dropped", "comments-examined",
+                             "review-comment-caveat", "comment-skipped"}, \
+        sorted(informational)
+    body = inspect.getsource(r0.disposition_of)
+    for a in r0.ANCHORS:
+        if a["id"] in informational:
+            assert f'"{a["role"]}" in roles' not in body, (
+                f"{a['id']} is informational but its role branches: {a['role']}")
+    # `asks-read-pr-comment` IS a branch (`other-source`) and is deliberately NOT
+    # in-population — the route the fix shipped is the session transcript
+    pr = [a for a in r0.ANCHORS if a["id"] == "asks-read-pr-comment"][0]
+    assert pr["role"] == "other-source"
+    assert pr["role"] not in r0.IN_POPULATION_ROLES
+
+
+def test_every_ANCHOR_and_ROLE_is_NAMED_by_this_module(r0):
+    """🔴 THE DERIVABLE COVERAGE LEDGER, and it is the fix for the CAUSE rather
+    than for the two instances. Both survivors of round 2's sweep were additions
+    made in the SAME round as the sweep, so a hand-maintained mutant list could
+    not see them. This test derives the guard surface from the module itself and
+    requires each element to be NAMED in this file, so a new anchor, scope or
+    disposition role fails the suite until something asserts on it.
+
+    ⚠ Naming is weaker than exercising, and that is stated rather than implied:
+    this catches "nobody wrote a guard at all", not "the guard is weak". It is
+    cheap, mechanical, and it is exactly the hole that let two mutants live."""
+    src = Path(__file__).read_text()
+    missing_ids = [a["id"] for a in r0.ANCHORS if a["id"] not in src]
+    assert missing_ids == [], (
+        f"these anchors are named nowhere in this test module: {missing_ids}")
+    roles = {a["role"] for a in r0.ANCHORS}
+    missing_roles = sorted(r for r in roles if f'"{r}"' not in src)
+    assert missing_roles == [], (
+        f"these anchor ROLES are asserted on nowhere: {missing_roles}")
+    scoped = sorted({a.get("scope", r0._DEFAULT_SCOPE) for a in r0.ANCHORS})
+    for scope in scoped:
+        assert f'scope="{scope}"' in src or f'"{scope}"' in src, (
+            f"the {scope!r} anchor scope is named nowhere, so a mutant deleting "
+            "it would survive — which is how two did")
+    # every `disposition_of` branch must be named too: derive the role each one
+    # tests from the function's own source
+    body = inspect.getsource(r0.disposition_of)
+    branch_roles = sorted(set(re.findall(r'"(\w[\w-]*)" in roles', body)))
+    assert len(branch_roles) >= 3, branch_roles
+    unnamed = [r for r in branch_roles if r not in src]
+    assert unnamed == [], (
+        f"these disposition branches are named in no test: {unnamed}")
 
 
 def test_asks_that_arrived_only_from_a_PR_COMMENT_are_out_of_population(
@@ -652,9 +817,12 @@ def test_the_floor_counts_REAL_SESSIONS_not_transcript_FILES(r0, oa, tmp_path):
     """🔴 REGRESSION for `#1901 round 1`'s F2. A round-0 report is written by an
     auditor SUBAGENT, whose transcript is `<project>/<sid>/subagents/agent-*.jsonl`
     — a different FILE from the parent's, and several auditors of one session are
-    several files again. MEASURED on this host: 6,692 files against 1,563 distinct
-    session ids. Counting files was the same label-wider-than-the-unit defect the
-    `MIN_SESSIONS` rename closed, one level up.
+    several files again (corpus-wide ~6.9x, re-derived 2026-09-28 with
+    `_session_id_of` itself; the figure first published here was produced by a
+    naive derivation and is pinned as a MECHANISM by
+    `test_the_naive_session_derivation_double_counts_and_ours_does_not`). Counting
+    files was the same label-wider-than-the-unit defect the `MIN_SESSIONS` rename
+    closed, one level up.
 
     The fixture is ONE session with three in-population files — the parent plus
     two auditor subagents, at the real depth — and it must still refuse."""
@@ -679,6 +847,45 @@ def test_the_floor_counts_REAL_SESSIONS_not_transcript_FILES(r0, oa, tmp_path):
     assert r0._session_id_of(root / f"{PROJECT}/{sid}.jsonl", root) == sid
     assert r0._session_id_of(
         root / f"{PROJECT}/{sid}/subagents/agent-a1.jsonl", root) == sid
+
+
+def test_the_naive_session_derivation_double_counts_and_ours_does_not(
+        r0, tmp_path):
+    """🔴 REGRESSION for a wrong FIGURE, pinning the MECHANISM rather than a
+    census. A corpus-session count published in this arc came from taking the
+    first path segment WITHOUT stripping `.jsonl`, which counts a session holding
+    both a top-level transcript and a `subagents/` directory TWICE.
+
+    Re-derived on this host 2026-09-28 with `_session_id_of` itself: 6,718 files /
+    974 sessions (~6.9x), where the naive derivation gives 1,571 = 974 top-level +
+    597 nested with all 597 overlapping. Corpus numbers DRIFT, so what is pinned
+    here is the mechanism against a fixture — a future wrong number then FAILS
+    instead of reading fine."""
+    root = tmp_path / "corpus"
+    files = [
+        root / PROJECT / "s-top-only.jsonl",
+        root / PROJECT / "s-both.jsonl",
+        root / PROJECT / "s-both/subagents/agent-a.jsonl",
+        root / PROJECT / "s-both/subagents/agent-b.jsonl",
+        root / PROJECT / "s-nested-only/subagents/agent-c.jsonl",
+    ]
+    for f in files:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("{}\n")
+
+    ours = {r0._session_id_of(f, root) for f in files}
+    assert ours == {"s-top-only", "s-both", "s-nested-only"}, sorted(ours)
+    assert len(ours) == 3 and len(files) == 5
+
+    # the DEFECT, spelled out: the same walk WITHOUT the `.jsonl` strip
+    naive = {f.relative_to(root).parts[1] for f in files}
+    assert naive == {"s-top-only.jsonl", "s-both.jsonl", "s-both",
+                     "s-nested-only"}, sorted(naive)
+    assert len(naive) == 4 > len(ours), (
+        "the naive derivation must OVER-count — that over-count is what produced "
+        "the wrong published figure, and this asserts it exists to be avoided")
+    assert "s-both.jsonl" in naive and "s-both" in naive, (
+        "…and the double-counted session is exactly the one with BOTH shapes")
 
 
 def test_at_MIN_SESSIONS_a_verdict_prints(r0, oa, tmp_path):
@@ -1080,6 +1287,41 @@ def test_an_unreadable_corpus_exits_4_AS_THE_LEGEND_SAYS(r0, tmp_path):
         f"the legend must describe rc {r0.EXIT_NOTHING_WALKED} as what it does; "
         f"it reads: {legend[:220]!r}")
     assert "corpus path" in legend.split(line, 1)[1][:160]
+
+
+def test_every_render_KWARG_is_exercised_by_a_probe(r0, oa, tmp_path):
+    """🔴 REGRESSION for `#1901 round 2`'s 🟡-4, and it makes the SOURCES axis
+    derivable instead of hand-enumerated. `render()` emits
+    `{PR comment}: N skipped — {why}` from its `comment_skips` keyword, no probe
+    drove that keyword, so the widened GROWS never saw the shape — F4's claim that
+    GROWS matches EVERY source line was true only of shapes the probe matrix
+    happened to emit.
+
+    The asks side is derived from `SOURCE_ORDER`; this is the sources side: every
+    parameter of `render()` that can add a line must be driven by some probe, so a
+    NEW keyword fails the suite until a probe drives it."""
+    params = [p for p in inspect.signature(oa.render).parameters
+              if p not in ("asks", "projects_root")]
+    assert set(params) == {"unmeasured", "session_ids", "comment_skips",
+                           "comments_examined", "dropped"}, params
+    probes = r0.renderer_probes(oa, tmp_path / "nope")
+    # each keyword's own line shape must appear in at least one probe's output
+    marker = {"unmeasured": ": UNKNOWN — ",
+              "session_ids": "session(s) NAMED BY",
+              "comment_skips": " skipped — ",
+              "comments_examined": "comment(s) examined",
+              "dropped": ": dropped "}
+    assert set(marker) == set(params), (
+        "a keyword gained or lost a marker — decide what line it emits and "
+        f"whether an anchor covers it: {sorted(set(params) ^ set(marker))}")
+    for kw, needle in marker.items():
+        assert any(needle in text for text in probes.values()), (
+            f"no probe drives `{kw}`, so the pin is blind to the line it emits")
+    # …and every one of those lines is covered by an anchor (the GROWS claim)
+    for text in probes.values():
+        _asks, sources, _f = r0.block_regions(text)
+        _roles, _ids, bad = r0.match_anchors(sources, "sources")
+        assert bad == [], f"uncovered source line(s): {bad}"
 
 
 def test_the_pin_reach_the_ANCHORS_header_CLAIMS_is_the_reach_it_HAS(
