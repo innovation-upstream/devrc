@@ -13093,7 +13093,16 @@ def test_the_block_the_operator_PASTES_carries_the_could_not_measure_note():
         f"the note is not indented outside the fence: {note[0]!r}"
     )
     assert "```audit-claims" not in note[0]
-    assert out.index(note[0]) < out.index("```audit-claims"), (
+    # 🔴 `rindex`, NOT `index`, AND THE BATTERY IS WHY. This run is rc 0, so
+    # stdout carries the BRIEF as well as the block — unlike the unearned-ledger
+    # sibling above, whose corpus returns 4 and withholds the brief. `index`
+    # therefore finds whichever `audit-claims` fence appears FIRST in the whole
+    # document, which need not be the emitted one: mutant `C2` (claims read from
+    # the whole comment) renders a claims line carrying that literal into the
+    # brief, and this test fired as an EXTRA-KILLER on a mutation it does not
+    # guard. The emitted block is printed last, so its opener is the LAST such
+    # fence, and that is the one this assertion is about.
+    assert out.rindex(note[0]) < out.rindex("```audit-claims"), (
         "the could-not-measure note was emitted INSIDE the pasted block, where "
         f"`_items_from_body` folds it into a claim:\n{out}"
     )
@@ -13113,9 +13122,14 @@ def test_a_STRUCTURALLY_MALFORMED_endpoint_is_an_INPUT_refusal():
     what you typed". A caller handed 5 for a mistyped sha would end a ladder on
     a typo.
     """
+    # 🔴 `PAYLOAD_NONZERO_B` (113) AND NOT `..._A` (41), DELIBERATELY. The token
+    # below is 41 characters, and the refusal says so; a fixture whose posted
+    # count is ALSO 41 could not distinguish a message printing the LENGTH from
+    # one printing the COUNT. `claude/RULES.md`: pick fixture values pairwise
+    # distinct, and distinct from any constant the assertion names.
     corpus = [
         payload_block(3, PAYLOAD_NONZERO_C, "6666aaaa", "7777bbbb"),
-        payload_block(4, PAYLOAD_NONZERO_A, "7777bbbb", "d4d4d4d4" + "0" * 33),
+        payload_block(4, PAYLOAD_NONZERO_B, "7777bbbb", "d4d4d4d4" + "0" * 33),
     ]
     rc, out, err = run_main(["900", "--round", "5"], comments=corpus)
     assert rc == 4, (

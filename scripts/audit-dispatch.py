@@ -1648,6 +1648,15 @@ def gate_relevant_malformed_endpoints(blocks, round_no):
 # #95, `civitai/cli` #718 #727, `ZacxDev/homelab-infra` #907 and one more. On
 # #119 that is every round, so its whole ladder ran the gate inert.
 #
+# 🔴 THE PROVENANCE OF THOSE FIGURES, BECAUSE THEY ARE TWO DIFFERENT
+# MEASUREMENTS AND ONLY ONE IS THIS CHANGE'S. `564 / 30 / 11` is the operator's
+# corpus study. What THIS change re-derived independently is narrower and is the
+# part the code above is shaped by: a 356-endpoint sweep of six repositories,
+# every endpoint hex, of length 7, 8, 9, 40 or — exactly once — 41; and five of
+# the eleven ladders driven through this script end to end (#474, #119, #727,
+# `civitai/cli` #718, `ZacxDev/homelab-infra` #907), with two healthy devrc
+# ladders as the silence control. The wider count is cited, not re-run.
+#
 # 🔴 IT IS A REPORT AND NOT A REFUSAL, deliberately, and the operator's own
 # measurement is why: `audit-dispatch.py --repo civitai/talos-infra 1623 --round
 # 4` returns rc 0 from a devrc checkout and rc 5 from a talos-infra one. The
