@@ -59,11 +59,36 @@ run 'hoist-prune-above-optout' KILLED \
   's|if \[ "${BASE_CLONE_NO_REFRESH:-0}" = "1" \]; then|if false; then|'
 run 'break-recoverability-scan' KILLED \
   's|rev-list -n 100|rev-list -n 0|'
-# 🔴 The REFRESH_PATHS regression, mechanised: this mutant IS the pre-change hook's
-# path list, so a KILLED verdict here is the red half of case 10's red->green matrix
-# re-derived on demand instead of quoted from a commit message.
+# 🔴 REACHABILITY PROOF for case 7b, which is otherwise the only case in the suite
+# with no mutant of its own. This makes the batch retry unconditionally "succeed", so
+# the report claims a refresh it did not perform -- the one lie this hook must never
+# tell, and INVISIBLE to every other case, because outside lock contention the
+# checkout genuinely succeeds and the mutant changes nothing observable. Expect the
+# kills to come from 7b's two report assertions and from nowhere else.
+run 'claim-refresh-without-writing' KILLED \
+  's#^     || git -C "$ROOT" checkout "$UP" -- "${approved\[@\]}" >/dev/null 2>&1; then$#     || true; then#'
+# 🔴 The REFRESH_PATHS regressions, mechanised: each mutant IS a previous state of
+# the path list, so a KILLED verdict here is the red half of that entry's red->green
+# matrix re-derived on demand instead of quoted from a commit message.
+#
+# ⚠️ Two rows rather than one, because the arrays are not nested states of one list and
+# a single mutant cannot attribute both. Restoring the OLDEST array is also the only
+# way to re-derive case 10's red half now that later entries exist.
 run 'drop-agents-md-entry'     KILLED \
-  's|^REFRESH_PATHS=(CLAUDE.md AGENTS.md .claude/skills)$|REFRESH_PATHS=(CLAUDE.md .claude/skills)|'
+  's|^REFRESH_PATHS=(CLAUDE.md AGENTS.md .claude/settings.json .claude/hooks .claude/skills)$|REFRESH_PATHS=(CLAUDE.md .claude/skills)|'
+run 'drop-claude-wiring-entries' KILLED \
+  's|^REFRESH_PATHS=(CLAUDE.md AGENTS.md .claude/settings.json .claude/hooks .claude/skills)$|REFRESH_PATHS=(CLAUDE.md AGENTS.md .claude/skills)|'
+# 🔴 ISOLATE THE MUTATION, and the isolation is the whole point of this row. The two
+# above take the array back, so the climb has nothing new to bound and this guard is
+# never REACHED by them -- it would survive both while doing nothing. This mutant
+# leaves the array widened and removes ONLY the derived parent, which is the naive
+# nested-file entry: `dirname .claude/settings.json` -> `.claude`, in no array entry,
+# so the climb rmdirs `.claude` itself. Measured: exactly ONE assertion in the whole
+# suite fails (case 11c's `.claude SURVIVES`), which is what makes that assertion a
+# killing guard for the bound rather than an invariant guard about a hook that pruned
+# nothing.
+run 'drop-derived-climb-bound' KILLED \
+  's#\[ "$_dup" = no \] \&\& CLIMB_BOUNDS+=("$_p")#:#'
 
 printf '\n== unreachable-by-construction backstops (SURVIVES is EXPECTED, not a gap) ==\n'
 printf '   `hash-object` fatals on a directory so one never reaches the prune, and\n'
