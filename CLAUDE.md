@@ -71,6 +71,33 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   ⚠ Read-only agents need no worktree; **any file-modifying agent does** (`claude/RULES.md` →
   "Git Workflow"), and that rule's surfaces — env, submodules, `cp -a`, repo-global config —
   apply unchanged.
+- 🔴 **Worktree writes are fresh; READS from this clone are not.** `worktree add … origin/main`
+  resolves the remote tip, but `ls`/`grep`/Read against THIS clone see whatever its checkout
+  holds — and between a merge and the next `ship.sh` (or a skipped host) that is behind. So:
+  **absent ≠ missing** — a file not found in this tree may sit on `origin/main`; confirm with
+  `git log origin/main -- <path>` before concluding it doesn't exist (datapacket-talos lost a
+  session to exactly this: a handoff "missing" from a stale clone sat on `origin/trunk`).
+  **Load-bearing doc claims** (a limit, an arming state, a "this is impossible") — read them
+  from the ref: `git show origin/main:<path>`.
+- 🔴 **The read half is AUTOMATED for Claude Code — a dirty `CLAUDE.md` here is probably the
+  hook, not WIP.** A `SessionStart` hook (`scripts/claude-hooks/base-clone-staleness.sh`, wired
+  in the per-host, unmanaged `~/.claude/settings.json`) fetches and `checkout`s `origin/main`'s
+  copy of `CLAUDE.md` into the working tree — for THIS repo that is its whole refresh set (no
+  repo-local `AGENTS.md`; `.claude/` here is untracked scratch). The other always-on surfaces
+  (`claude/`, the nix-deployed skills) are `/nix/store` copies only a `switch`/`ship.sh`
+  updates. The hook never moves HEAD, never overwrites unique local edits (a recoverability
+  test, not a dirtiness test), and batches its checkout so simultaneous session starts don't
+  fight over `.git/index.lock`. So a `CLAUDE.md` dirty-vs-HEAD whose content is byte-identical
+  to `origin/main` is the hook's doing — don't "rescue" it, and don't let it mask files that
+  ARE real WIP. `BASE_CLONE_NO_REFRESH=1` = report-only. Run its suite
+  (`scripts/tests/test_base_clone_staleness.sh`) before changing the hook; the deployed copy is
+  a `home.file` store path, so a hook edit needs a `switch` to go live (verify with
+  `readlink -f`). ⚠ **Claude Code-only wiring — an opencode session gets no automatic refresh**;
+  run `bash ~/.claude/hooks/base-clone-staleness.sh` (prefix `BASE_CLONE_NO_REFRESH=1` to only
+  report) at session start for the same freshness.
+- Push rejected (non-fast-forward)? Rebase **in the worktree**
+  (`git -C "$WT" fetch origin main && git -C "$WT" rebase origin/main`) and push again as a
+  fresh commit — never `commit --amend` after a bad commit has been pushed once.
 - 🔴 **Never commit to `main` in EITHER host checkout** (`~/workspace/devrc`, workbench *or*
   laptop). `ship.sh` converges with `merge --ff-only`, so a diverged host is **skipped and
   left as found** — it then silently stops receiving every future change while still looking
