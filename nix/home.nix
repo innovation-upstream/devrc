@@ -2232,6 +2232,13 @@ in
   # ~/.config/opencode/ existing.
   home.file.".config/opencode/guard_core.py".source = ../scripts/claude-hooks/guard_core.py;
 
+  # 🔴 base-clone-staleness.sh — the SessionStart freshness script, deployed here
+  # so opencode's base-clone-freshness plugin can run it. The SAME source file
+  # that backs ~/.claude/hooks/base-clone-staleness.sh is deployed here too,
+  # exactly like guard_core.py: one implementation, two harnesses.
+  home.file.".config/opencode/base-clone-staleness.sh".source =
+    ../scripts/claude-hooks/base-clone-staleness.sh;
+
   # Activity telemetry plugin — emits session/prompt/tool-call events into
   # activity.events via ~/.config/activity-collector/emit.
   #
@@ -2293,6 +2300,14 @@ in
   # the switch succeeds with the variable simply never set.
   home.file.".config/opencode/plugin/session-env.js".source =
     ../scripts/opencode/plugin/session-env.js;
+
+  # 🔴 Base-clone freshness plugin — refreshes the primary clone's context files
+  # (the Claude Code hook's sibling for opencode). It fires in `shell.env` once
+  # per session, non-blocking, and runs base-clone-staleness.sh deployed above.
+  # Same deployment constraints: directly in `plugin/`, `.js` only, non-recursive
+  # glob, and NEVER also in `plugins/` (plural).
+  home.file.".config/opencode/plugin/base-clone-freshness.js".source =
+    ../scripts/opencode/plugin/base-clone-freshness.js;
 
   # `shell.env` plugin — the only supported seam for putting environment into
   # opencode's bash tool (there is no `env` config key; setting one is silently
