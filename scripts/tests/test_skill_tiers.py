@@ -83,14 +83,14 @@ MIN_SKILLS = 30
 # 36-entry total quoted in a 37-entry tree, and one contradicted the number the
 # same change reported to its reviewer.
 # --------------------------------------------------------------------------- #
-MEASURED_ENTRIES = 36
+MEASURED_ENTRIES = 39
 MEASURED_TIER_A_ENTRIES = 23
-MEASURED_TIER_A_CHARS = 7_485
+MEASURED_TIER_A_CHARS = 7_205
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 7_670
+MEASURED_UNDER_LEDGER_CHARS = 7_433
 # ...and what the same 36 entries would cost with every skill tier A. The
 # difference is what the ledger buys: 3,316 chars.
-MEASURED_ALL_TIER_A_CHARS = 10_986
+MEASURED_ALL_TIER_A_CHARS = 10_993
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
@@ -126,6 +126,31 @@ MEASURED_ALL_TIER_A_CHARS = 10_986
 # 2026-09-26 `civitai-app-fleet` cut above, the block is 7,485 across 23
 # entries and the ceiling stays 7,617: headroom is 132. The mean tier-A entry
 # is 7,485 / 23 = 325.4.
+#
+# 🔴 2026-09-27: THREE SKILLS ADDED AT ONCE — `cairn-read`, `cairn-write`,
+# `cairn-hygiene`, the thin routers over `scripts/cairn-ops/` (clawgate cg#665).
+# All three are tier **B**: each is a DOOR reached by name or by an A-tier owner's
+# pointer (`cairn`, `subsystem-index`, `prune-index`), so no symptom routes to one.
+# They therefore add nothing to this tier-A block — but they DID break the
+# LISTING-TOTAL ratchet in `test_skill_descriptions.py`, which sums every entry
+# regardless of the ledger and had 0 headroom. Paid per that gate's own playbook
+# step 1, never by raising either ceiling: the three new descriptions were cut to
+# the verbs they own plus one disambiguation clause (−766 against a first draft
+# that restated their mechanism), and mechanism/feature enumerations came out of
+# `auditloop`, `bar` and `session-manager` (−385). No trigger phrase and no
+# disambiguation clause was touched in any of them; each cut string is quoted in
+# the commit. The three cuts are all tier A, which is why THIS block fell 7,485 ->
+# 7,205 across 23 entries while the entry count rose 36 -> 39. The mean tier-A
+# entry is 7,205 / 23 = 313.3.
+# 🔴 SO THE CEILING IS LOWERED 7,617 -> 7,205, HEADROOM BACK TO 0 — and it was
+# `test_control_the_tier_a_ratchet_can_go_red` that DEMANDED it, not a preference.
+# Leaving it at 7,617 was tried first, on the reasoning that the 412 of headroom was
+# "the residue of paying a different gate" and banking it here would misattribute the
+# eviction. That control refuses the argument outright: 412 is more than one average
+# 313-char entry, so the ceiling would absorb a whole new tier-A skill unnoticed,
+# which is the one thing this ratchet exists to prevent. The reasoning was not wrong
+# about the provenance and was wrong about what to do with it — recorded so nobody
+# re-derives it. Attribution belongs in this comment; the number belongs at 0.
 #
 # The 254 chars of headroom this paragraph used to assert were consumed by the
 # RAISE in #1391 (7,242/7,496 -> 7,639/7,639), not by the re-base below; an
@@ -226,7 +251,7 @@ MEASURED_ALL_TIER_A_CHARS = 10_986
 # the one this raise was taken for. Headroom is pinned back to 0, so the next
 # addition of any size reds this gate — and if a third raise is proposed, the
 # right answer is almost certainly a demotion instead.
-TIER_A_CEILING_CHARS = 7_617
+TIER_A_CEILING_CHARS = 7_205
 
 # 🔴 Skills that must NEVER be tier B, pinned as a RELATIONSHIP rather than left
 # to review. Each one fires from a SYMPTOM Zach describes rather than from its own

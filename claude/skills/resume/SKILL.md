@@ -65,7 +65,7 @@ Topic argument (optional): `$ARGUMENTS`.
 4. **Surface what past sessions already recorded — TWO recall surfaces, BOTH UNCONDITIONAL. Run both now, before the report:**
 
    ```bash
-   cairn recall --repo "<path>"
+   $DEVRC/scripts/cairn-ops/read.sh recall --repo "<path>"
    python3 ~/workspace/devrc/scripts/lib/handoff_search.py --offline --query "<this handoff's topic, in plain words>" --limit 3 --exclude-slug "<the handoff: basename from step 2>"
    ```
 
@@ -77,7 +77,7 @@ Topic argument (optional): `$ARGUMENTS`.
 
    **Keep `--offline`** — it answers from git refs with **no database**. Every response carries a recall banner and the literal `indexed_docs=N indexed_sections=M`: a hit is a **POINTER TO VERIFY**, never a current reading. 🔴 **A zero is not automatically an answer** — the tool names which zero it got and exits non-zero for the four that are not readings: **3** broken index · **4** empty scope (your filter selected no rows) · **6** unmeasurable corpus · **7** the repos resolved and derived zero handoff docs. 🔴 A fifth non-zero is not a zero at all — rc **2**, usage: the `--exclude-slug` value named NO slug, so the search never ran; fix the value and re-run. Only `NO MATCH` at rc **0** means the corpus was asked and is silent. **Non-blocking:** on any non-zero, print the stderr line, say retrieval was unavailable, and carry on with the item. 📖 `~/.claude/skills/resume/reference/handoff-search.md`.
 
-   **The rest of this step is about `cairn recall`, the first command.** It is the **read half** of the store `/analyze-service` and `/handoff` write to — the terse pointer sheet that *outlives the handoff doc you just read*. It drives `subsystem_recall`, syncing the cache first so the answer is dateable; run the module bare (`subsystem_recall.py`) against an unstamped store and it refuses instead, which `cairn sync` fixes.
+   **The rest of this step is about `read.sh recall`, the first command.** 🔴 **It is `scripts/cairn-ops/read.sh`, not a bare `cairn recall`, and the difference is a REFUSAL you want here**: with no `--scope` and no resolvable repo the client answers with an EMPTY report, which reads as "nothing recorded" — the wrapper refuses at rc **20** instead, so a resume cannot mistake "I could not work out what to look at" for "the index is silent". Every flag below is passed through untouched. It is the **read half** of the store `/analyze-service` and `/handoff` write to — the terse pointer sheet that *outlives the handoff doc you just read*. It drives `subsystem_recall`, syncing the cache first so the answer is dateable; run the module bare (`subsystem_recall.py`) against an unstamped store and it refuses instead, which `cairn sync` fixes.
 
    🔴 **`--repo` takes a PATH, not a repo name.** A bare name is resolved against your **cwd**, so `--repo datapacket-talos` becomes `$PWD/datapacket-talos` and the run **exits 2** naming the mistake. Pass an absolute path, one of the pre-exported handles (`$DEVRC`, `$HOMELAB`, `$DATAPACKET`, `$CIVITAI`), or **`--scope <name>`**, which names the store directory directly and skips git derivation entirely. ⚠ Re-measured 2026-09-17: this used to be an uncaught **exit 3** with a raw `git ... cannot change to` traceback and no remedy; the sidecar's account of that incident is history, not current behaviour.
 

@@ -129,7 +129,7 @@ Otherwise read `status=` and act on that case:
 
   🔴 **If your bullet proposes work that has NOT been done, it must start `OPEN:`; if you are closing one that has, rewrite that bullet as `RESOLVED <sha>:` in the SAME TURN.** 🔴 That is **two writes now, and the order is load-bearing**: the rewrite is a `cairn put` and goes FIRST, then the new bullet's `cairn append`. Reversed, your own append moves the entry out from under the put's `If-Match` and it 412s against you. The marker goes after the date (`- 2026-08-15: OPEN: …`). Measured: one entry's proposed remedy landed **two minutes** after the entry was written, and the entry then served it as outstanding for **22 days**. Nobody was careless — this step runs mid-session, so the writer is gone by the time the work finishes and the store had no way to say "still open". 🔴 **A proposed remedy with no marker is the default failure, not an edge case** — it reads exactly like a current one forever. 📖 §5.
 
-  🔴 **CHECK THE MARKER AFTER YOU WRITE IT — nothing validates one at WRITE time.** The server hashes the incoming text and compares it against the entry's EXISTING bullets for duplicate detection (`append_bullet`); nothing inspects the INCOMING marker, so one that fails to parse is accepted silently. It fails in the hiding direction: the bullet reads perfectly as prose, so a near-miss looks like a successful close to whoever wrote it. 🔴 **The post-write check is `cairn sync && cairn-validate --scope <scope>` — the ONLY surface that both runs after the write AND quotes the offending bullet with a remedy. The `cairn sync` is load-bearing**: `cairn append` writes to the pod and does NOT touch the local cache, and `cairn-validate` reads that cache permissively, so without it you get a clean parse of the PRE-WRITE bytes — the silent pass this bullet exists to prevent. Measured 2026-09-16: `cairn recall --list` shows the `🔴 N NEAR-MISS` badge but carries NO remedy text and quotes no bullet, and **`cairn recall --ref <entry>` shows no badge at all**; the per-entry `OPEN:` block runs on the resolve pass, i.e. BEFORE the append. 🔴 **The tool's remedy text is necessary but NOT sufficient, so keep this rule here:** the token between the marker and the colon must be **7-40 hex characters, or absent**, and **the colon must follow it with NO space** (`_JOURNAL_OPENNESS`) — put any reference AFTER the colon. `RESOLVED PR#505:` is upper-case, unemphasised, unparenthesised and colon-terminated — it satisfies every property that message states — and still parses to `(None, None)`; so does `RESOLVED abc1234 :`. 🔴 **When NO commit implements the closure** (a hand-run database change, an operator console action) **write a bare `RESOLVED:`; do NOT reach for a nearby sha.** `resolved_by` exists so a reader can `git cat-file -e` the closure, and `scripts/subsystem-audit.py` does exactly that — an adjacent-but-unrelated sha passes, recording a VERIFIED closure pointing at a commit that implements nothing, and is marked `EVICTABLE`. A bare `RESOLVED:` reports as `⚠ N UNVERIFIABLE`, which the tool calls **"Not a defect — closing is the point"**. ⚠ Give it a pointer or `subsystem-audit.py` returns `NO_HOME`: a **backticked PATH** is what reliably counts. 🔴 A PR/issue ref must clear TWO independent conditions, and satisfying only the first still yields the `NO_HOME` you were avoiding: `_PR_REF` matches solely when the ref is preceded by start-of-line, whitespace, `(` or `[` — so a BACKTICKED `#N` is invisible to it — **and** its owner segment must contain a `/`. Measured through `classify_targets`: `#1736` and `owner/repo#1736` resolve; **`devrc#1736` does NOT**, despite being unbackticked. Write it bare as `#N` or `owner/repo#N`.
+  🔴 **CHECK THE MARKER AFTER YOU WRITE IT — nothing validates one at WRITE time.** The server hashes the incoming text and compares it against the entry's EXISTING bullets for duplicate detection (`append_bullet`); nothing inspects the INCOMING marker, so one that fails to parse is accepted silently. It fails in the hiding direction: the bullet reads perfectly as prose, so a near-miss looks like a successful close to whoever wrote it. 🔴 **The post-write check is `$DEVRC/scripts/cairn-ops/hygiene.sh validate --scope <scope>` — the ONLY surface that both runs after the write AND quotes the offending bullet with a remedy.** It syncs first, which is load-bearing rather than tidy: `append` writes to the pod and does NOT touch the local cache, and the checker reads that cache permissively, so an unsynced run cleanly parses the PRE-WRITE bytes — the silent pass this bullet exists to prevent. The script owns that ordering, which is why it is no longer two commands you have to chain in the right order. Measured 2026-09-16: `cairn recall --list` shows the `🔴 N NEAR-MISS` badge but carries NO remedy text and quotes no bullet, and **`cairn recall --ref <entry>` shows no badge at all**; the per-entry `OPEN:` block runs on the resolve pass, i.e. BEFORE the append. 🔴 **The tool's remedy text is necessary but NOT sufficient, so keep this rule here:** the token between the marker and the colon must be **7-40 hex characters, or absent**, and **the colon must follow it with NO space** (`_JOURNAL_OPENNESS`) — put any reference AFTER the colon. `RESOLVED PR#505:` is upper-case, unemphasised, unparenthesised and colon-terminated — it satisfies every property that message states — and still parses to `(None, None)`; so does `RESOLVED abc1234 :`. 🔴 **When NO commit implements the closure** (a hand-run database change, an operator console action) **write a bare `RESOLVED:`; do NOT reach for a nearby sha.** `resolved_by` exists so a reader can `git cat-file -e` the closure, and `scripts/subsystem-audit.py` does exactly that — an adjacent-but-unrelated sha passes, recording a VERIFIED closure pointing at a commit that implements nothing, and is marked `EVICTABLE`. A bare `RESOLVED:` reports as `⚠ N UNVERIFIABLE`, which the tool calls **"Not a defect — closing is the point"**. ⚠ Give it a pointer or `subsystem-audit.py` returns `NO_HOME`: a **backticked PATH** is what reliably counts. 🔴 A PR/issue ref must clear TWO independent conditions, and satisfying only the first still yields the `NO_HOME` you were avoiding: `_PR_REF` matches solely when the ref is preceded by start-of-line, whitespace, `(` or `[` — so a BACKTICKED `#N` is invisible to it — **and** its owner segment must contain a `/`. Measured through `classify_targets`: `#1736` and `owner/repo#1736` resolve; **`devrc#1736` does NOT**, despite being unbackticked. Write it bare as `#N` or `owner/repo#N`.
 
   🔴 **Before appending, act on the `OPEN:` block the tool prints for that entry.** It lists, as SEPARATE populations that never overlap: every declared-open bullet with its age (`oldest unverified for N days`); every bullet that **tried to write a marker and missed the grammar**, which declares nothing — fix the line (⚠ the TOOL's own output claims such bullets show no badge; that is wrong — measured 2026-09-16, `cairn recall --list` DOES raise a `🔴 N NEAR-MISS` badge. Two sites, differently worded, so grepping one misses the other: `subsystem_touch.py` "and no badge will show" and "show no badge"); and every bullet that merely *looks* like an open action, which is **AT LEAST this many**, a two-phrasing floor with unknown recall, never a count. Re-check each against the repo *now*: you are the next writer, and the next write is the only moment anyone is looking. Closing one is a one-line edit and is worth more than the bullet you came to add.
 
@@ -161,26 +161,31 @@ Otherwise read `status=` and act on that case:
 🔴 **After writing an entry — new file or appended bullet — validate it in the SAME turn:**
 
 ```
-cairn sync && cairn-validate --scope <scope>     # after ANY write: append, put OR create
-cairn-validate --validate <a-file-on-disk>       # a scratch file BEFORE you send it
+$DEVRC/scripts/cairn-ops/hygiene.sh validate --scope <scope>   # after ANY write: append, put OR create
 ```
 
-🔴 **`cairn-validate` IS NOT `cairn validate`** — two binaries, one of which runs these
-checks. `cairn-validate` launches this writer. After a host's `home-manager switch`,
-`~/.local/bin/cairn` is the pinned OSS package, whose `validate` runs the READER's resolver:
-measured 2026-09-17 on scope `devrc`, both at the locked rev, it writes **55 B to stdout**
-— one summary line counting how many of the scope's entries parse and how many are
-malformed, plus a 76 B state banner on stderr — and exits 0, where this writer prints
-**6,677 B of stdout** with all three blocks below. Both "green"; only one says what was
-lost. ⚠ **An earlier form of this paragraph said 0 B / 5,766 B, and that is now STALE** —
-the 0 was true before the pinned rev added an unconditional summary line to `cmd_validate`,
-precisely so a clean scope would stop being byte-identical to a validate that parsed
-nothing. The discriminator is WHAT each reports, not whether either is silent; do not
-re-derive the 0. ⚠ Exit codes differ too —
-writer **3** on a malformed entry, packaged client **5** (`EXIT_CORRUPT`; its `3` is
-`EXIT_UNREACHABLE_NO_CACHE`).
+🔴 **ONE COMMAND, AND IT REFUSES THE ZERO THAT THIS STEP USED TO RECORD AS A PASS.** The
+sync, the choice between the two same-sounding binaries, and the per-instance store
+resolution are all the script's now — it prints its own exit codes (`--help`), and the one
+that matters here is **22, NOTHING WAS CHECKED**. Measured on this host 2026-09-27 with two
+instances configured: the bare check on a scope that lives on the non-default instance
+printed `NOTHING WAS CHECKED — no entry files were found` and exited **0**, so a run that
+branched on the exit code recorded a pass over an empty directory; the same check through
+this script reported `4 of 4 entry file(s) parse`. 🔴 **There is one read-through cache PER
+CONFIGURED INSTANCE — not one directory** (devrc PR #1872 measured the split), and no tool
+that defaults to a path can see a scope on another instance.
 
-🔴 **There is now ONE post-write check, and it is the first line — every write lands on the pod, so the pod's copy is the only thing worth validating.** The local mirror is read-only and does not move, so validating a path under `~/.claude/analyze-service-index/` after a write parses the *pre-write* bytes and reports a clean entry that is not the one you wrote. ⚠ **The second line is no longer a post-write check and must not be used as one.** It used to be the branch for a brand-new entry, on the reasoning that *"it exists only locally and the pod has never seen it"* — that reasoning died with `cairn create` (2026-09-03), which makes the pod see it first. What the second line is still good for is parse-checking a **scratch** file before sending it, which turns a 422 from the store into a local answer.
+⚠ **For a SCRATCH file before you send it, the check is still `cairn-validate --validate
+<path>`** — a local answer instead of a 422 from the store. It is deliberately not a
+post-write check: that reading died with `cairn create` (2026-09-03), which makes the pod
+see a new entry first.
+
+📖 **Why the two same-sounding binaries differ, with the measurement:**
+`~/.claude/skills/cairn/SKILL.md`. In one line — `cairn validate` runs the READER's
+resolver and `cairn-validate` launches this WRITER, both exit 0 on a clean scope, and only
+the writer's output says what was LOST (`entry shape:`, `marker reachability:`, `dropped
+lines:`). Their exit codes also disagree: writer **3** on a malformed entry, packaged client
+**5**.
 
 🔴 **READ THE `entry shape:` BLOCK, NOT ONLY THE EXIT CODE.** It is advisory and deliberately does **not** move the verdict — an entry whose spine is broken still parses, still loads, and still exits 0 — so branching on the exit code alone is how it goes unread. It reports the two headings a COUNT depends on (`## Pointers`, `## Nuance / work-history`) as ABSENT, RENAMED, DUPLICATED or present-and-EMPTY, and names what you wrote instead. `## What it is` is deliberately not among them — `subsystem_recall` does surface it, but it feeds no count and no badge, so the reader names a missing one under the entry's own body rather than as a validator finding. A RENAMED nuance heading is **silent data loss**: the entry's index row then shows `0 nuance` with no `🔴 N OPEN` badge while the bullets sit intact on disk, and `/resume` consumes exactly that row. Fix the heading in the same turn — it is one edit, and nothing else will tell you.
 
@@ -201,22 +206,30 @@ It exits 0 with `OK — N of N entry file(s) parse`, or **3** with a `malformed 
 **Still print the unified diff before writing** — the transcript is the only record of what landed, and a reader scanning it later needs to see the bullet without opening the store. Then append **through the store API**, never with an editor:
 
 ```
-cairn append --scope <scope> --ref <entry> --session <session-uuid> \
+$DEVRC/scripts/cairn-ops/write.sh append --scope <scope> --ref <entry> --session <session-uuid> \
   --text '<the bullet, ONE line, NO leading "- ", NO leading date>'
 ```
 
-🔴 **The server adds the `- ` and the date — do not type either.** The first production append through this route reads `- <date>: <date>: …` because a caller did. `--ref` is the entry's filename stem or one of its aliases and `--scope` is the scope the probe printed. It prints `appended` or `duplicate` with the new revision: the server recognises a bullet by CONTENT HASH, so a retry after a timeout is idempotent — and `duplicate` means nothing was written, which is a different outcome from `appended` and is stated rather than swallowed.
+🔴 **The server adds the `- ` and the date — do not type either, and the script now REFUSES a text that does**: rc **21**, before anything is sent, on a leading bullet marker, a leading date, a newline or more than 2000 characters. The first production append through this route reads `- <date>: <date>: …` because a caller typed one and nothing checked. 🔴 **It also runs the post-write check above automatically** — rc **24** means the write LANDED and could not be confirmed, so re-read the scope and never retry. `--ref` is the entry's filename stem or one of its aliases and `--scope` is the scope the probe printed. It prints `appended` or `duplicate` with the new revision: the server recognises a bullet by CONTENT HASH, so a retry after a timeout is idempotent — and `duplicate` means nothing was written, which is a different outcome from `appended` and is stated rather than swallowed.
 
 🔴 **A non-zero exit wrote NOTHING and queued NOTHING — say so and stop; never fall back to editing the local mirror.** 6 = the request was refused (malformed bullet, unknown ref, unseen scope, an entry with no `## Nuance / work-history`, or a read-only image, which is an OPERATOR problem and not yours to work around); 7 = the store was unreachable; 8 = the entry moved under the edit. A write during an outage is REFUSED, not queued — that is the accepted cost, because a caller told "queued" believes the record exists. Reads keep working offline; writes do not.
 
 🔴 **Rewriting an EXISTING bullet is not an append — `OPEN:` → `RESOLVED <sha>:`, or a `## Pointers` fix, goes through `cairn put`:**
 
 ```
-cairn sync                                                        # the live bytes
-cp ~/.cache/subsystem-store/<scope>/<entry>.md <scratchpad>/entry.md
+$DEVRC/scripts/cairn-ops/health.sh sync                                  # the live bytes
+S=$($DEVRC/scripts/cairn-ops/health.sh instances --scope <scope> | cut -f2)
+cp "$S"/<scope>/<entry>.md <scratchpad>/entry.md
 #   edit <scratchpad>/entry.md — the scratch copy, never the mirror
-cairn put --scope <scope> --ref <entry> --file <scratchpad>/entry.md
+$DEVRC/scripts/cairn-ops/write.sh put --scope <scope> --ref <entry> --file <scratchpad>/entry.md
 ```
+
+🔴 **THE `$S` LINE IS NOT CEREMONY — A LITERAL CACHE PATH HERE COPIES THE WRONG BYTES.** This
+block used to spell `~/.cache/subsystem-store/<scope>/<entry>.md`, which is the DEFAULT
+instance's cache; there is one per configured instance, so for a scope on any other one that
+`cp` either fails or copies a stale namesake, and the `put` then replaces the live entry with
+it. `instances --scope <scope>` prints `<alias>\t<cache root>\t<scope>` — the reader's own
+answer for that scope.
 
 🔴 **`cairn put`'s `If-Match` is derived from a LIVE sync, and THAT IS WHAT REPLACES the two rules this step used to carry — it is a replacement, not an omission.** The retired pair, in one sentence: *re-read the entry and re-apply to its current bytes, then `Edit` anchored on `## Nuance / work-history` rather than `Write`.* Both halves existed because nothing arbitrated two concurrent writers: a whole-file retype was measured to lose a concurrent append, and a concurrent `Edit` on that anchor **succeeded silently**, so "no error" was never evidence you were alone. There is an arbiter now — the API appends under a per-entry `flock`, and a `put` whose base revision has moved is REFUSED with exit 8 instead of clobbering. 🔴 **So exit 8 IS the other writer, not a transient error:** `cairn sync`, re-read, re-apply your change to the NEW bytes, diff again, put again. Never retry the same file, and never pass `--if-match` by hand to make it go away — that is the clobber the precondition exists to stop.
 
@@ -224,8 +237,8 @@ cairn put --scope <scope> --ref <entry> --file <scratchpad>/entry.md
 
 ```
 python3 $DEVRC/scripts/lib/subsystem_touch.py --template <slug> --writer <caller> > <scratchpad>/new.md
-#   fill in <scratchpad>/new.md — a scratch path, never under ~/.claude/analyze-service-index/
-cairn create --scope <scope> --ref <slug> --file <scratchpad>/new.md
+#   fill in <scratchpad>/new.md — a scratch path, never under the frozen ~/.claude/analyze-service-index/
+$DEVRC/scripts/cairn-ops/write.sh create --scope <scope> --ref <slug> --file <scratchpad>/new.md
 ```
 
 🔴 **`--ref` becomes the filename: `<scope>/<slug>.md` on the pod, and `service:` in the front matter must normalize to the same slug** — the store refuses the pair when they disagree (422), because a ref that reaches no file is an entry nobody can read. It answers `created` with the new revision. 🔴 **It CREATES ONLY IF ABSENT and never overwrites: exit 9 means the entry is already there**, and the remedy is `cairn append` (a bullet) or `cairn put` (a rewrite) — never the same `create` again. 6/7 mean the same as everywhere else, and every one of them wrote NOTHING.
