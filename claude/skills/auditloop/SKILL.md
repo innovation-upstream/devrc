@@ -12,7 +12,7 @@ Sibling harnesses feed it — see the `ux-audit-loops` skill.
 
 | | |
 |---|---|
-| Repo / source | `ZacxDev/auditloop` (default `main`) · `~/workspace/auditloop` (Go 1.26 module `auditloop`) |
+| Repo / source | 🔴 **TWO repos. Work goes to the PRIVATE one.** `ZacxDev/auditloop-private` (default `main`) is the live dev repo and is what `~/workspace/auditloop`'s `origin` tracks (Go 1.26 module `auditloop`). `ZacxDev/auditloop` is a **PUBLIC sanitized snapshot mirror** produced by the `publish/` pipeline — every commit there is prefixed `snapshot:`, and it lags (head `cd772e8`, 2026-08-27, while private was at `324198e`, 2026-09-26). **Never push a branch or open a PR there**: ordinary auditloop work carries pod names, cluster detail, prod DB contents and spend figures. `gh` defaults to neither — pass `--repo ZacxDev/auditloop-private` explicitly. Measured 2026-09-27: a `gh pr create` that omitted `--repo` targeted the PUBLIC repo and failed only because the branch did not exist there. |
 | Live | https://auditloop.zacx.dev · GoTrue https://auditloop-auth.zacx.dev |
 | Clusters | **app** on homelab-talos **workbench** (ns `auditloop`); **GoTrue** on **homelab** (ns `supabase-auditloop`); public routing via **production+homelab** nebula gateways |
 | Kubeconfigs | `~/workspace/homelab-infra/{workbench,homelab,production}-kubeconfig` — **NOT the repo root** |
