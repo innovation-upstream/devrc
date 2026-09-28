@@ -419,8 +419,20 @@ class TestTheLedgerParsersCanSee:
 class TestEachScriptRefusesWithItsOwnCode:
     def test_read_refuses_a_read_with_no_resolvable_scope(self, world, tmp_path):
         """The realistic case: `/analyze-service` or an agent runs a recall from a
-        scratch directory. The client's honest answer is an EMPTY report, which reads
-        as "nothing recorded" rather than "nothing was asked"."""
+        scratch directory.
+
+        ⚠ WHAT THIS DOES *NOT* SHOW, corrected after being measured: an earlier
+        docstring here said the client's own answer would be an EMPTY report reading
+        as "nothing recorded". That is false. The deployed client refuses this shape
+        at **rc 2** naming the remedy (`could not derive a scope from '.': … pass
+        --scope explicitly`), and its own comment records the older behaviour as rc 1
+        plus a traceback — so no version of it ever returned an empty report here.
+        What rc 20 buys is a code in this directory's >=19 band, distinguishable from
+        the client's 2; it is co-extensive with the client's refusal, not a hole the
+        client leaves open. Scope of the claim: `recall` and `search` only — see
+        `TestTheScopePreflightCoversOnlyTheVerbsThatNeedAScope` for `ls-entries`,
+        which takes no scope and must NOT be gated on one.
+        """
         outside = tmp_path / "not-a-repo"
         outside.mkdir()
         done = world.run("read.sh", "recall", cwd=outside)
@@ -509,6 +521,71 @@ class TestEachScriptRefusesWithItsOwnCode:
                               cwd=str(tmp_path), timeout=60)
         assert done.returncode == 0, f"{script} rc={done.returncode}\n{done.stderr}"
         assert "skipped" in done.stderr
+
+
+class TestTheScopePreflightCoversOnlyTheVerbsThatNeedAScope:
+    """🔴 THE PRE-FLIGHT MUST NOT REFUSE WHAT THE CLIENT ACCEPTS.
+
+    `ls-entries` takes no scope: the real client ignores `--scope` for it and lists
+    every entry on every instance, which the module docstring above already records
+    as MEASURED. An earlier `read.sh` put `ls-entries` in the same `case` arm as
+    `recall`, so a listing from a non-repo cwd was refused at rc 20 — a call the
+    bare client answers at rc 0.
+
+    MATRIX, measured against the deployed client from three non-repo cwds
+    (`/tmp`, a fresh scratch dir, `$HOME`) before the arm was split:
+
+        cairn ls-entries              rc 0, 443 lines
+        read.sh ls-entries            rc 20, 0 lines      <- the defect
+        read.sh ls-entries --scope X  rc 0, 443 lines      <- byte-identical to bare
+
+    🔴 THE THIRD ROW IS WHY THE SECOND TEST BELOW EXISTS. A guard that a meaningless
+    `--scope` value defeats, while changing the output not at all, is walkable as
+    well as wrong — so asserting only that the bare call now succeeds would pass
+    over a wrapper that still treats that value as meaningful.
+    """
+
+    def test_ls_entries_needs_no_scope_and_is_not_refused_without_one(self, world):
+        """`world.root` is a tmp_path — not a git repo — so nothing can resolve a
+        scope here. That is exactly the shape that was refused."""
+        done = world.run("read.sh", "ls-entries")
+        assert done.returncode == 0, (
+            f"read.sh ls-entries rc={done.returncode} from a non-repo cwd.\n"
+            "`ls-entries` takes no scope — the client ignores --scope for it and "
+            "lists every instance. Refusing it here blocks a call the bare client "
+            f"answers at rc 0.\nstderr: {done.stderr}"
+        )
+        assert "no scope could be resolved" not in done.stderr
+        # The positive control: it did not merely exit 0, it LISTED. 2 alpha + 3
+        # beta entries, counts chosen pairwise-distinct by the `world` fixture.
+        lines = [ln for ln in done.stdout.splitlines() if ln.startswith("[")]
+        assert len(lines) == 5, f"listed {len(lines)} entries, expected 5\n{done.stdout}"
+
+    def test_a_meaningless_scope_value_changes_nothing_about_the_listing(self, world):
+        """The walkability control. The client ignores `--scope` for `ls-entries`, so
+        the two invocations must agree BYTE FOR BYTE on stdout and on the exit code.
+        A wrapper that gates on the flag's presence makes them disagree."""
+        bare = world.run("read.sh", "ls-entries")
+        flagged = world.run("read.sh", "ls-entries", "--scope", "no-such-scope-at-all")
+        assert (bare.returncode, bare.stdout) == (flagged.returncode, flagged.stdout), (
+            "`read.sh ls-entries` and the same call carrying a meaningless --scope "
+            "disagree, so the wrapper is treating a value the client ignores as "
+            "meaningful.\n"
+            f"  bare:    rc={bare.returncode} {len(bare.stdout)} B\n"
+            f"  --scope: rc={flagged.returncode} {len(flagged.stdout)} B\n"
+        )
+
+    def test_recall_and_search_still_refuse_with_no_resolvable_scope(self, world):
+        """The other side of the set: narrowing the arm must not disarm the refusal
+        for the two verbs that DO derive a scope. Measured co-extensive with the
+        client's own rc 2 for both, which is why rc 20 is worth having at all — it
+        is a wrapper-owned code in the >=19 band, distinguishable from the client's."""
+        for args in (("recall",), ("search", "a query")):
+            done = world.run("read.sh", *args)
+            assert done.returncode == 20, (
+                f"read.sh {args[0]} rc={done.returncode}, expected 20\n{done.stderr}"
+            )
+            assert "no scope could be resolved" in done.stderr
 
 
 # =========================================================================== #
@@ -966,6 +1043,21 @@ ROUTERS: dict[str, str] = {
     "cairn-hygiene": "hygiene.sh",
 }
 
+#: 🔴 FILES THAT POINT AT THE LAYER WITHOUT BEING A MIGRATED CALL SITE. A `MIGRATED`
+#: row asserts a recipe is GONE; this file's recipes deliberately STAY — it is the
+#: surface documentation, which is why it is the only entry in
+#: `INVOCATION_ALLOWLIST` too. It also now names the doors, so that the raw table and
+#: the skills' routing do not read as two equal choices: the two doors disagreeing on
+#: `ls-entries` is what let a wrapper refuse a listing the bare verb answers.
+#: A row here is an EXEMPTION, and an exemption is auditable where an absence is the
+#: defect — so it is pinned both ways below, exactly like `INVOCATION_ALLOWLIST`.
+POINTS_WITHOUT_MIGRATING: dict[str, str] = {
+    "cairn/SKILL.md": (
+        "the surface documentation: it keeps the raw verb table on purpose and names "
+        "the doors beside it, so it points at the layer without any recipe moving."
+    ),
+}
+
 
 class TestTheThinRouters:
     @pytest.mark.parametrize("skill", sorted(ROUTERS))
@@ -1026,6 +1118,7 @@ class TestTheCallSiteLedger:
             for p in skill_md_files()
             if "scripts/cairn-ops/" in p.read_text(encoding="utf8")
             and p.relative_to(SKILLS).parts[0] not in ROUTERS
+            and p.relative_to(SKILLS).as_posix() not in POINTS_WITHOUT_MIGRATING
         }
         ledgered = set(MIGRATED)
         assert pointing == ledgered, (
@@ -1034,6 +1127,31 @@ class TestTheCallSiteLedger:
             f"  ledgered, not pointing: {sorted(ledgered - pointing)}\n"
             "A row that vanishes is the recipe coming back; a file that appears "
             "without a row is the migration stopping quietly."
+        )
+
+    @pytest.mark.parametrize("rel", sorted(POINTS_WITHOUT_MIGRATING))
+    def test_the_non_migrating_exemption_is_not_stale(self, rel):
+        """🔴 FAILS IF THE EXEMPTION STOPS EARNING ITSELF, either way. A row for a
+        file that no longer points at the layer is a stale exemption, and a stale
+        exemption is what makes the next real one invisible — the same ruling
+        `test_the_allowlist_names_files_that_exist_and_still_need_it` applies to
+        `INVOCATION_ALLOWLIST`.
+
+        🔴 AND IT MUST NOT BE ON BOTH LEDGERS. `MIGRATED` asserts a recipe is GONE;
+        this set says no recipe moved. A file on both would have the two guards
+        asserting opposite things about it, and whichever ran first would look right.
+        """
+        path = SKILLS / rel
+        assert path.exists(), f"exempted file {rel} does not exist"
+        reason = POINTS_WITHOUT_MIGRATING[rel]
+        assert len(reason.strip()) >= 40, f"{rel}'s exemption reason is too short to be a reason"
+        assert "scripts/cairn-ops/" in path.read_text(encoding="utf8"), (
+            f"{rel} is exempted from the call-site ledger but no longer points at "
+            "`scripts/cairn-ops/` at all — drop the row rather than leaving it"
+        )
+        assert rel not in MIGRATED, (
+            f"{rel} is on BOTH the migrated ledger and the non-migrating exemption. "
+            "Those make contradictory claims about the same file; pick one."
         )
 
     def test_every_pointer_names_a_script_that_exists(self):

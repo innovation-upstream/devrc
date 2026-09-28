@@ -1,13 +1,35 @@
 #!/usr/bin/env bash
 # read.sh — the READ cluster of the cairn surface: recall, search, ls-entries.
 #
-# 🔴 WHAT IT ADDS OVER TYPING `cairn recall` IS A PRE-FLIGHT REFUSAL, and that is
-# the whole point of the wrapper. A read with no resolvable scope is the shape
-# that returns an EMPTY REPORT rather than an error — "nothing recorded" is
-# indistinguishable from "I could not work out what to look at", and
-# `claude/RULES.md` names that class: "An EMPTY RESULT cannot distinguish two
-# mechanisms." So this refuses with its OWN code (20) before the client runs,
-# leaving the client's own codes to mean only what they meant before.
+# 🔴 WHAT IT ADDS OVER TYPING `cairn recall` IS A WRAPPER-OWNED REFUSAL CODE, AND
+# THAT CLAIM IS NARROWER THAN THE ONE THIS COMMENT USED TO MAKE. It said a
+# scope-less read "returns an EMPTY REPORT rather than an error". MEASURED against
+# the deployed client, that is false: `cairn recall` and `cairn search` with no
+# resolvable scope refuse at **rc 2** naming the remedy —
+# `could not derive a scope from '.': … pass --scope explicitly` — and the client's
+# own comment records the older shape as rc 1 plus a traceback, so there is no
+# version of it that answered with an empty report. Nothing here is closing a
+# silent-zero hole, because the client does not leave one.
+#
+# What the pre-flight is actually for: the refusal arrives with a code in the
+# >=19 band this directory owns (see `common.sh`), so a caller branching on the
+# exit status can tell "the wrapper refused before doing anything" from "the store
+# refused" — which the client's own 2 (shared with every usage error) cannot. It is
+# co-extensive with the client's refusal, deliberately: the client's only scope
+# sources are `--scope` and `scope_for_repo(--repo)` with `--repo` defaulting to
+# `.`, so there is no case where this refuses a read the client would have served.
+#
+# 🔴 AND IT COVERS `recall` AND `search` ONLY — `ls-entries` TAKES NO SCOPE.
+# `ls-entries` was in `recall`'s arm once, which refused a listing from a non-repo
+# cwd at rc 20 that the bare client answers at rc 0 with every entry on every
+# instance. The client IGNORES `--scope` for it (measured; the note is on
+# `_CAIRN_STUB` in `test_cairn_ops.py`), so the guard was not merely wrong but
+# walkable — a meaningless `--scope` value satisfied it and changed the output not
+# at all. Both halves are pinned by
+# `test_cairn_ops.py::TestTheScopePreflightCoversOnlyTheVerbsThatNeedAScope`.
+# 🔴 SO: DO NOT ADD A VERB TO THE PRE-FLIGHT ARM WITHOUT MEASURING WHETHER THE
+# CLIENT DERIVES A SCOPE FOR IT. Guarding a verb that needs no scope turns a
+# working read into a refusal, and that is the direction nobody notices.
 #
 # 🔴 STDOUT IS THE CLIENT'S, BYTE FOR BYTE. Every line this script emits goes to
 # stderr. `/resume`, `/handoff` and `/analyze-service` compare recall output
@@ -40,9 +62,12 @@ this wrapper says goes to stderr.
 
 exit codes:
 $(cairn_shared_code_legend)
-  20  no scope could be resolved — neither --scope nor --repo was given and the
-      working directory is not inside a git repository, so the client would have
-      had nothing to read and would have said so as an EMPTY report
+  20  \`recall\` and \`search\` ONLY — no scope could be resolved: neither --scope nor
+      --repo was given and the working directory is not inside a git repository, so
+      the client would have refused too (rc 2, \`could not derive a scope\`). This is
+      the same refusal in this directory's own >=19 band, so a caller can tell it
+      from the client's 2. \`ls-entries\` cannot return it and is never gated on a
+      scope: it takes none, and the client ignores --scope for it.
 $(cairn_passthrough_legend)
 USAGE
 }
@@ -90,10 +115,18 @@ main() {
   done
 
   case "$verb" in
-    recall|ls-entries)
+    recall)
       require_client
       resolvable_scope "${passthrough[@]+"${passthrough[@]}"}" || refuse_no_scope
-      exec cairn "$verb" "${passthrough[@]+"${passthrough[@]}"}"
+      exec cairn recall "${passthrough[@]+"${passthrough[@]}"}"
+      ;;
+    ls-entries)
+      # 🔴 NO SCOPE PRE-FLIGHT, AND ITS ABSENCE IS THE POINT RATHER THAN AN
+      # OVERSIGHT. `ls-entries` asks what the CACHES hold, not what one scope
+      # holds: the client ignores `--scope` for it and lists every entry on every
+      # instance. See the header — guarding this refused a working listing at rc 20.
+      require_client
+      exec cairn ls-entries "${passthrough[@]+"${passthrough[@]}"}"
       ;;
     search)
       require_client
