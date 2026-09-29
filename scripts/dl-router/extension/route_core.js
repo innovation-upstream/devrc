@@ -212,11 +212,90 @@ export function discordAliasKey(channelId) {
 
 // Discord serves one attachment from two hosts: the resizing proxy goes in the
 // <img src>, downscaled to whatever the client asked for and usually
-// re-encoded to webp, while the original sits on the wrapping <a href>. So
-// `info.srcUrl` on an image names A THUMBNAIL, not the file that was posted.
-// (A <video> is unaffected -- its src is already the origin.)
+// re-encoded to webp, while the original is what the message's own
+// cdn.discordapp.com anchor points at. So `info.srcUrl` on an image names A
+// THUMBNAIL, not the file that was posted.
+//
+// A <video> is usually unaffected -- every video in the live route log was
+// ALREADY on the origin host, so the rewrite below does not fire for one.
+// But "usually" is the whole claim: video was measured at ZERO points, this
+// file's own sibling extension treats a proxy-host video src as an ordinary
+// shape, and if one occurs the rewrite DOES fire on it. There is no fallback
+// if that is wrong -- `service_worker.js` hands the result straight to
+// `chrome.downloads.download` with no retry on the original src -- so a wrong
+// rewrite there fails the download rather than degrading. Measure before
+// widening anything here on the strength of the image result.
+//
+// THAT ANCHOR IS A SIBLING, NOT AN ANCESTOR -- so Chrome never hands it to
+// us. MEASURED 2026-09-03 on 3 image attachments across 2 channels and 2
+// message shapes (single image, mosaic): the <img> sits under
+// `div[role=button].clickableWrapper`, and the number of ancestor <a> elements
+// between it and the message was 0 of 3, every time. The origin anchor exists
+// in the same message but nine levels away. `info.linkUrl` is populated ONLY
+// from an ancestor link, so on a Discord image right-click it is absent and
+// `preferOriginalUrl` can never reach its swap -- see the note there.
 const DISCORD_PREVIEW_HOST = "media.discordapp.net";
 const DISCORD_ORIGIN_HOST = "cdn.discordapp.com";
+
+// The proxy's resize knobs. Everything else on the URL -- notably the
+// `ex`/`is`/`hm` signature -- is carried across unchanged, because the
+// signature is what authorises the fetch.
+//
+// THE EMPTY-NAMED KEY DOES NOT DO WHAT AN EARLIER VERSION OF THIS COMMENT
+// CLAIMED, and the correction is the point. It said a live proxy URL carried a
+// stray `&` and that this entry is what removes it. MEASURED: it is not. The
+// urlencoded parser SKIPS empty sequences, so `?&ex=1` parses to `[[ex,1]]`
+// with no empty-named entry to delete -- the stray `&` disappears because
+// `searchParams.delete()` re-serialises the whole query, which happens with or
+// without this entry.
+//
+// It is kept because it DOES bite one shape the parser does keep: `?=value`
+// yields a genuine `["", "value"]` pair, which would otherwise ride onto the
+// origin URL. That shape has never been observed live; this is defensive, and
+// saying so is the difference between a guard and a guard nobody can price.
+const DISCORD_PREVIEW_RESIZE_PARAMS = ["format", "width", "height", "quality", ""];
+
+/**
+ * The original-quality URL for a Discord PROXY attachment url, else the url
+ * unchanged.
+ *
+ * WHY A REWRITE AND NOT A DOM READ. The origin URL is present on the page, but
+ * only on a sibling anchor the context menu cannot see (above). Reaching it
+ * would need a content script on discord.com keyed to Discord's hashed class
+ * names, which rotate every deploy. Rewriting needs neither.
+ *
+ * THE SIGNATURE IS NOT HOST-BOUND -- this is the measurement the rewrite
+ * rests on, and an earlier session eliminated this whole approach by assuming
+ * the opposite. MEASURED 2026-09-03, from the page context of a live Discord
+ * tab, with both controls:
+ *
+ *   positive control  the message's own cdn anchor .............. 206
+ *   under test        proxy url, host swapped, resize dropped ... 206
+ *   negative control  the same url with `ex`/`is`/`hm` removed ... network error
+ *
+ * The `ex`/`is`/`hm` VALUES were byte-identical between the proxy url and the
+ * cdn anchor for the same asset, so the swap carries a signature that is still
+ * valid. The negative control failed at the network layer rather than with a
+ * readable 403 -- cross-origin, so a non-CORS response is opaque -- which is
+ * enough to discriminate, which is what a control has to do.
+ *
+ * NARROW ON PURPOSE, same discipline as `preferOriginalUrl`: an avatar or an
+ * emoji is served from the same proxy host and must come back untouched, so
+ * this rewrites only what `discordChannelId` recognises as an attachment.
+ */
+export function originalFromPreview(url) {
+  if (hostOf(url) !== DISCORD_PREVIEW_HOST) return url;
+  if (!discordChannelId(url)) return url;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  parsed.host = DISCORD_ORIGIN_HOST;
+  for (const key of DISCORD_PREVIEW_RESIZE_PARAMS) parsed.searchParams.delete(key);
+  return parsed.toString();
+}
 
 /**
  * The stable ledger identity of a Discord attachment, else "".
@@ -298,36 +377,51 @@ export function ledgerSourceKey(url) {
  * preferring `linkUrl` in general would turn every linked thumbnail on every
  * site into a download of wherever the link pointed.
  *
- * KNOWN UNHANDLED VARIANT, stated rather than guessed at: if Discord ever
- * puts a FULL-SIZE PROXY url on the anchor (`media.discordapp.net?width=4096`)
- * instead of the origin, this returns `srcUrl` and the downscaled copy is still
- * what gets saved. Widening to "prefer the anchor whenever the paths match"
- * would cover it, but nothing in the live corpus shows that shape, and a
- * URL cannot be read for pixel size -- so the narrow rule stands until a real
- * instance turns up.
+ * THE VARIANT THIS USED TO CALL UNHANDLED IS NOW HANDLED -- do not widen the
+ * rule to "cover" it. If Discord puts a FULL-SIZE PROXY url on the anchor
+ * (`media.discordapp.net?width=4096`) instead of the origin, that `linkUrl`
+ * fails the origin-host test below, which no longer returns `srcUrl` but
+ * `originalFromPreview(srcUrl)` -- the full-quality origin, i.e. the right
+ * answer. Widening to "prefer the anchor whenever the paths match" would
+ * REPLACE that correct answer with a downscaled proxy copy.
  *
- * NOT OBSERVABLE: nothing records whether this ever fires. The extension has
- * no logging facility and inventing one is out of scope here, so the next
- * reader cannot answer "is this a no-op in production?" from data. Say so
- * rather than implying it has been seen to work.
+ * THE `linkUrl` PATH IS DEAD ON DISCORD ITSELF, and the fallback is what
+ * actually runs. MEASURED 2026-09-03 (see DISCORD_PREVIEW_HOST above): a
+ * Discord image attachment has NO ancestor <a>, so `info.linkUrl` is absent
+ * and every real right-click lands on the `!linkUrl` branch. The swap is kept
+ * because it is still correct wherever a browser does supply a link -- but it
+ * is no longer what makes this function work, so nothing here should be read
+ * as evidence the swap has ever fired.
+ *
+ * Every no-swap exit therefore returns `originalFromPreview(srcUrl)` rather
+ * than `srcUrl`: on a proxy attachment that IS the original, and on anything
+ * else it is `srcUrl` unchanged. That includes the last line's mismatched-path
+ * case, which is the live mosaic shape -- a multi-image message, where the
+ * anchor the menu might offer belongs to a DIFFERENT image than the one
+ * clicked, and the rewrite of the clicked image is strictly better than
+ * handing back its thumbnail.
  */
 export function preferOriginalUrl(srcUrl, linkUrl) {
   if (!srcUrl) return linkUrl || "";
-  if (!linkUrl) return srcUrl;
+  if (!linkUrl) return originalFromPreview(srcUrl);
   if (hostOf(srcUrl) !== DISCORD_PREVIEW_HOST) return srcUrl;
-  if (hostOf(linkUrl) !== DISCORD_ORIGIN_HOST) return srcUrl;
+  if (hostOf(linkUrl) !== DISCORD_ORIGIN_HOST) return originalFromPreview(srcUrl);
   // Both must be attachments, not just Discord-hosted: an avatar or an emoji
   // shares the hosts and must never be swapped for something else.
-  if (!discordChannelId(srcUrl) || !discordChannelId(linkUrl)) return srcUrl;
+  // `originalFromPreview` enforces the same rule on its own input, so an
+  // avatar still comes back untouched here.
+  if (!discordChannelId(srcUrl) || !discordChannelId(linkUrl)) {
+    return originalFromPreview(srcUrl);
+  }
   let src;
   let link;
   try {
     src = new URL(srcUrl);
     link = new URL(linkUrl);
   } catch {
-    return srcUrl;
+    return originalFromPreview(srcUrl);
   }
-  return src.pathname === link.pathname ? linkUrl : srcUrl;
+  return src.pathname === link.pathname ? linkUrl : originalFromPreview(srcUrl);
 }
 
 /**
@@ -678,7 +772,33 @@ export function correlateCapture(item, captures, opts = {}) {
   const urls = new Set([item?.url, item?.finalUrl].filter(Boolean));
   if (urls.size) {
     for (const c of list) {
-      if ((c.href && urls.has(c.href)) || (c.mediaSrc && urls.has(c.mediaSrc))) {
+      // `downloadUrl` is the THIRD field, and it exists because tier 1 is
+      // otherwise structurally impossible whenever the extension downloads a
+      // url the page never served. `preferOriginalUrl` rewrites a Discord
+      // proxy src to the origin host, so the DownloadItem's url matches
+      // neither `href` nor `mediaSrc` -- both of which hold what was on the
+      // element -- and every Discord attachment fell to tier 3, the tier this
+      // file documents as the fragile one. `onMenuClicked` stamps the url it
+      // resolved here; the original two fields are left alone so nothing that
+      // reads them changes.
+      //
+      // Precisely, because "the url it downloads" is wider than the code: the
+      // stamp runs BEFORE the streaming branch. On the ordinary path that url
+      // goes to `chrome.downloads.download`; for a manifest it goes to the
+      // sidecar's /fetch instead and no DownloadItem is ever created.
+      //
+      // THE STAMP IS DECISIVE ON THAT PATH TOO -- do not read "no
+      // DownloadItem" as "no effect". `startFetch` runs its OWN
+      // `correlateCapture` on the same url, and this clause is what binds it.
+      // A stamp also implies the rewrite fired, which implies a cdn attachment
+      // target, which implies `directFile` -- so `streaming` reduces to
+      // `manifest` there, and the fetch correlates at tier 1 against the
+      // capture just stamped. Moving the stamp below the streaming branch, or
+      // dropping this clause as download-only, silently demotes that fetch to
+      // tier 2/3.
+      if ((c.href && urls.has(c.href))
+        || (c.mediaSrc && urls.has(c.mediaSrc))
+        || (c.downloadUrl && urls.has(c.downloadUrl))) {
         return { capture: c, tier: 1 };
       }
     }

@@ -518,9 +518,28 @@ test("the menu downloads a plain link", async () => {
 });
 
 test("the menu saves the original, not the proxy thumbnail in the src", async () => {
-  // Discord puts a downscaled webp from its resizing proxy in the <img src>
-  // and the posted file on the wrapping <a href>. Taking `srcUrl` because it
-  // is listed first saves the thumbnail and silently calls it the download.
+  // Discord puts a downscaled webp from its resizing proxy in the <img src>.
+  // Taking `srcUrl` because it is listed first saves the thumbnail and
+  // silently calls it the download.
+  //
+  // This test SUPPLIES a `linkUrl`, which is why it kept passing while the
+  // feature was inert: measured, a Discord image has no ancestor <a>, so a
+  // real right-click never carries one -- the case below this one.
+  //
+  // Keep both, and keep them for DIFFERENT reasons: of the two menu tests IN
+  // THIS FILE, only THIS one reaches the swap, because the one below supplies
+  // no `linkUrl` and therefore cannot. The swap is still correct wherever a
+  // browser does supply a link, which is why it stays.
+  //
+  // Scoped to this file deliberately. The swap's UNIT coverage lives in
+  // `identity.test.mjs` ("a proxy thumbnail is swapped for the original behind
+  // it"), which predates this PR and kills the swap mutant on its own; this
+  // one covers the same branch through the `onMenuClicked` seam. Two levels,
+  // not a duplicate -- an earlier version of this comment claimed this was the
+  // swap's ONLY coverage, which would have justified deleting the unit test.
+  //
+  // The comment here used to say the original sits "on the wrapping
+  // <a href>", which is false and is why the swap looked sufficient.
   reset();
   const ch = "119283746551234567";
   const original
@@ -534,6 +553,79 @@ test("the menu saves the original, not the proxy thumbnail in the src", async ()
     pageUrl: "https://discord.com/channels/1/2",
   }, {});
   assert.deepEqual(calls.downloads[0], { url: `${original}?ex=1&is=2&hm=3` });
+});
+
+test("the menu saves the original even when Chrome offers NO link", async () => {
+  // THE PRODUCTION PATH, and the one no test owned. MEASURED 2026-09-03: a
+  // Discord image attachment has no ancestor <a>, so `linkUrl` is absent on
+  // every real right-click -- the test above supplies one and therefore only
+  // ever exercised a branch the live client cannot reach. Both suites stayed
+  // green while the shipped feature was inert.
+  //
+  // Asserts the POSITIVE half (which url was downloaded), not merely that
+  // something happened: a menu test that only counts is vacuous, and this file
+  // has been bitten by that twice.
+  reset();
+  const ch = "119283746551234567";
+  await SW.onMenuClicked({
+    menuItemId: SW.MENU_ID,
+    mediaType: "image",
+    srcUrl: `https://media.discordapp.net/attachments/${ch}`
+      + "/998877665544332211/a.png?ex=1&is=2&hm=3&format=webp&width=550",
+    pageUrl: "https://discord.com/channels/1/2",
+  }, {});
+  assert.deepEqual(calls.downloads[0], {
+    url: `https://cdn.discordapp.com/attachments/${ch}`
+      + "/998877665544332211/a.png?ex=1&is=2&hm=3",
+  });
+});
+
+test("a rewritten menu download stamps the CLICKED capture, not the newest",
+  async () => {
+    // Pins the stamp's matching rule. Two images captured in one message; the
+    // OLDER one is right-clicked. Taking "the most recent capture" here would
+    // reproduce the exact tier-3 defect the stamp exists to remove, and would
+    // still leave every assertion about "a capture was stamped" green -- so
+    // this asserts WHICH capture carries the url.
+    reset();
+    const ch = "119283746551234567";
+    const proxyA = `https://media.discordapp.net/attachments/${ch}`
+      + "/998877665544332211/a.png?ex=1&is=2&hm=3&format=webp&width=550";
+    const proxyB = `https://media.discordapp.net/attachments/${ch}`
+      + "/998877665544332299/b.png?ex=1&is=2&hm=3&format=webp&width=550";
+    SW.state.captures = [
+      { href: proxyA, mediaSrc: proxyA, pageUrl: "msg-A", ts: 10 },
+      { href: proxyB, mediaSrc: proxyB, pageUrl: "msg-B", ts: 99 },
+    ];
+    await SW.onMenuClicked({
+      menuItemId: SW.MENU_ID,
+      mediaType: "image",
+      srcUrl: proxyA,
+      pageUrl: "https://discord.com/channels/1/2",
+    }, {});
+
+    const expected = `https://cdn.discordapp.com/attachments/${ch}`
+      + "/998877665544332211/a.png?ex=1&is=2&hm=3";
+    assert.deepEqual(calls.downloads[0], { url: expected });
+    // The clicked capture carries it...
+    assert.equal(SW.state.captures[0].downloadUrl, expected);
+    // ...and the newer, unrelated one is untouched.
+    assert.equal(SW.state.captures[1].downloadUrl, undefined);
+  });
+
+test("an UNREWRITTEN menu download stamps nothing", async () => {
+  // The stamp is gated on the url having actually changed. A plain link
+  // download already matches tier 1 on `href`; writing a redundant field
+  // would be silent state nobody asked for.
+  reset();
+  SW.state.captures = [{
+    href: "https://example-site.test/f.mp4",
+    mediaSrc: "https://example-site.test/f.mp4",
+    pageUrl: "p", ts: 10,
+  }];
+  await SW.onMenuClicked({ menuItemId: SW.MENU_ID,
+    srcUrl: "https://example-site.test/f.mp4" }, {});
+  assert.equal(SW.state.captures[0].downloadUrl, undefined);
 });
 
 test("a Discord video is downloaded directly, never handed to yt-dlp", async () => {

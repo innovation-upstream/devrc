@@ -102,6 +102,50 @@ test("tier 1 also matches a captured media source", () => {
   assert.equal(out.tier, 1);
 });
 
+test("tier 1 also matches the url the extension REWROTE the download to", () => {
+  // The regression this closes: `preferOriginalUrl` downloads a url the page
+  // never served, so `href`/`mediaSrc` -- which hold the element's own src --
+  // cannot match, and every rewritten Discord download fell to tier 3, the
+  // tier this file documents as the fragile one. Without `downloadUrl` in the
+  // tier-1 set this is tier 0 here (no referrer, no active tab).
+  const captures = [{
+    href: "https://media.example-cdn.test/a.png?width=550",
+    mediaSrc: "https://media.example-cdn.test/a.png?width=550",
+    downloadUrl: "https://origin.example-cdn.test/a.png",
+    pageUrl: "p", ts: 10,
+  }];
+  const out = correlateCapture(
+    { url: "https://origin.example-cdn.test/a.png" }, captures, { now: 20 });
+  assert.equal(out.tier, 1);
+  assert.equal(out.capture.pageUrl, "p");
+});
+
+test("a rewritten download binds to ITS OWN capture, not the most recent one",
+  () => {
+    // The concrete multi-image failure: two images clicked inside the capture
+    // window. Under tier 3 the NEWEST capture wins, so the first image's
+    // routing payload would carry the second image's context. Tier 1 on
+    // `downloadUrl` binds each download to the element it came from -- note
+    // the correct answer here is the OLDER capture.
+    const captures = [
+      {
+        href: "https://media.example-cdn.test/a.png?width=550",
+        downloadUrl: "https://origin.example-cdn.test/a.png",
+        pageUrl: "msg-A", ts: 10,
+      },
+      {
+        href: "https://media.example-cdn.test/b.png?width=550",
+        downloadUrl: "https://origin.example-cdn.test/b.png",
+        pageUrl: "msg-B", ts: 99,
+      },
+    ];
+    const out = correlateCapture(
+      { url: "https://origin.example-cdn.test/a.png" }, captures,
+      { now: 100, activeTabId: 7 });
+    assert.equal(out.tier, 1);
+    assert.equal(out.capture.pageUrl, "msg-A");
+  });
+
 test("tier 2: referrer matches a captured page URL", () => {
   const captures = [{ href: "x", pageUrl: "https://example-site.test/v/1", ts: 5 }];
   const out = correlateCapture(
