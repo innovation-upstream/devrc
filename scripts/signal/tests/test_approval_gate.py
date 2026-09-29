@@ -38,6 +38,12 @@ from _signal_db import SendGateError
 
 SIGNAL_DIR = Path(consumer.__file__).resolve().parent
 PEER = "+15550101"
+
+#: An env-file path that CANNOT exist, for the assertions that must be decided
+#: by their `env` mapping alone. `task_endpoint()` reads the real
+#: ~/.claude/clawgate.env by default, and this host has one — a test that does
+#: not redirect it asserts against whatever the developer happens to carry.
+_ABSENT_ENV_FILE = "/nonexistent/devrc-signal-tests/clawgate.env"
 SELF_NUMBER = "+15559090"
 SERVER_TS = 1723500000001
 
@@ -465,7 +471,10 @@ def test_clawgate_module_cannot_transmit():
     src = Path(clawgate.__file__).read_text(encoding="utf-8")
     assert "SEND_PATH" not in src
     assert "/v2/send" not in src
-    assert clawgate.ENDPOINT.endswith("/api/tasks")
+    # Resolved, not spelled: the base comes from configuration, the PATH is the
+    # notifier's own and must stay the task-create route.
+    assert clawgate.TASKS_PATH == "/api/tasks"
+    assert clawgate.task_endpoint({}, _ABSENT_ENV_FILE).endswith("/api/tasks")
 
 
 # --------------------------------------------------------------------------- #
@@ -1043,6 +1052,193 @@ def test_draft_to_a_phone_number_transmits_to_that_number_not_a_placeholder(db):
     assert poster.calls[0]["json"]["recipients"] == [PEER]
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE TASK BASE URL IS CONFIGURATION, NOT A LITERAL
+#
+# RED at 79a9b22a (origin/main): this module held
+# `ENDPOINT = "http://192.168.50.250:30302/api/tasks"` — the PERMISSION ROUTER —
+# and read nothing from the environment but the token. The task/board service
+# was extracted out of the router into a separate process on a separate base
+# URL, and measured live 2026-09-29 the router answers `POST /api/tasks` with
+# **404**: every card this producer emitted was silently dropped.
+#
+# Its mail-actions twin was fixed in #1878; this half was deferred there with
+# the note "the deployed pod never runs `draft`". True of the POD, false of the
+# DEFECT — `consumer.py draft` is an operator command run from the workbench
+# CLI, where ~/.claude/clawgate.env exists and names the task service.
+#
+# 🔴 EVERY TEST BELOW DRIVES BOTH LAYERS EXPLICITLY. `task_endpoint()` reads the
+# real ~/.claude/clawgate.env by default, and the host that runs this gate HAS
+# one — a test that does not redirect it is green or red for reasons that have
+# nothing to do with this code.
+#
+# Fixture hosts are PAIRWISE DISTINCT and distinct from `DEFAULT_BASE`, so a
+# mutant that collapses the precedence onto any other key, onto the other layer,
+# or onto the default cannot pass by returning a coincidentally equal value.
+# --------------------------------------------------------------------------- #
+FILE_TASK_BASE = "http://file-task.example:18081"
+FILE_ROUTER_BASE = "http://file-router.example:27443"
+ENV_TASK_BASE = "http://env-task.example:34567"
+ENV_ROUTER_BASE = "http://env-router.example:41213"
+#: The shared module's fallback, spelled as a LITERAL. Deriving it from the
+#: module under test would assert nothing about it.
+DEFAULT_BASE = "http://192.168.50.250:30302"
+TASKS_PATH = "/api/tasks"
+
+
+def _env_file(monkeypatch, tmp_path, contents=None):
+    """Redirect ~/.claude/clawgate.env into `tmp_path`; return its path."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    path = home / ".claude" / "clawgate.env"
+    if contents is not None:
+        path.write_text(contents, encoding="utf-8")
+    return path
+
+
+def _clear_env(monkeypatch):
+    monkeypatch.delenv("CLAWGATE_TASK_API_URL", raising=False)
+    monkeypatch.delenv("CLAWGATE_API_URL", raising=False)
+
+
+def test_the_env_file_redirect_actually_takes_effect(monkeypatch, tmp_path):
+    """🔴 HARNESS CONTROL for the file-layer assertions below. If `HOME` were not
+    what `~/.claude/clawgate.env` expands to, the redirect would be inert: every
+    "the file wins" assertion would be measuring the absence of a file, and every
+    "no file" assertion would be reading the developer's real one."""
+    _clear_env(monkeypatch)
+    path = _env_file(monkeypatch, tmp_path,
+                     "CLAWGATE_TASK_API_URL=%s\n" % FILE_TASK_BASE)
+    assert clawgate.task_endpoint() == FILE_TASK_BASE + TASKS_PATH, (
+        "the env-file layer was not read — HOME redirect inert, so every "
+        "file-layer assertion here is vacuous")
+    path.unlink()
+    assert clawgate.task_endpoint() == DEFAULT_BASE + TASKS_PATH, (
+        "deleting the redirected file changed nothing — the resolver is not "
+        "reading the path this harness controls")
+
+
+def test_the_env_file_alone_decides_when_the_process_has_nothing(monkeypatch,
+                                                                 tmp_path):
+    """🔴 THE DEFECT THIS FIX CLOSES, in the configuration of the host that
+    actually runs `consumer.py draft`: the file names the task service, the
+    process environment names nothing. The old constant answered `DEFAULT_BASE`
+    here — the router — and the card went nowhere."""
+    _clear_env(monkeypatch)
+    _env_file(monkeypatch, tmp_path,
+              "CLAWGATE_HOOK_TOKEN=unused\n"
+              "CLAWGATE_TASK_API_URL=%s\nCLAWGATE_API_URL=%s\n"
+              % (FILE_TASK_BASE, FILE_ROUTER_BASE))
+    assert clawgate.task_endpoint() == FILE_TASK_BASE + TASKS_PATH, (
+        "with nothing in the process environment the env file's "
+        "CLAWGATE_TASK_API_URL (%s) must decide; %s means the file was not read "
+        "at all and %s means the router key won"
+        % (FILE_TASK_BASE, DEFAULT_BASE, FILE_ROUTER_BASE))
+
+
+def test_the_process_environment_OVERRIDES_the_env_file(monkeypatch, tmp_path):
+    """A one-off `CLAWGATE_TASK_API_URL=… consumer.py draft …` must still win —
+    that is the whole point of keeping a process layer at all."""
+    _env_file(monkeypatch, tmp_path,
+              "CLAWGATE_TASK_API_URL=%s\nCLAWGATE_API_URL=%s\n"
+              % (FILE_TASK_BASE, FILE_ROUTER_BASE))
+    monkeypatch.setenv("CLAWGATE_TASK_API_URL", ENV_TASK_BASE)
+    monkeypatch.delenv("CLAWGATE_API_URL", raising=False)
+    assert clawgate.task_endpoint() == ENV_TASK_BASE + TASKS_PATH
+
+
+def test_the_file_TASK_key_outranks_a_process_ROUTER_key(monkeypatch, tmp_path):
+    """🔴 THE LAYERS MERGE BEFORE THE LEDGER IS APPLIED. A process layer winning
+    WHOLESALE would let a bare `CLAWGATE_API_URL` exported in a shell beat the
+    file's `CLAWGATE_TASK_API_URL` and silently un-split the two services."""
+    _env_file(monkeypatch, tmp_path,
+              "CLAWGATE_TASK_API_URL=%s\n" % FILE_TASK_BASE)
+    monkeypatch.delenv("CLAWGATE_TASK_API_URL", raising=False)
+    monkeypatch.setenv("CLAWGATE_API_URL", ENV_ROUTER_BASE)
+    assert clawgate.task_endpoint() == FILE_TASK_BASE + TASKS_PATH, (
+        "a process-environment CLAWGATE_API_URL (%s) must NOT beat the file's "
+        "CLAWGATE_TASK_API_URL (%s) — that un-splits the services"
+        % (ENV_ROUTER_BASE, FILE_TASK_BASE))
+
+
+def test_no_task_key_anywhere_falls_back_to_the_router_key(monkeypatch,
+                                                           tmp_path):
+    """A host that never heard of the split must behave exactly as before."""
+    _clear_env(monkeypatch)
+    _env_file(monkeypatch, tmp_path,
+              "CLAWGATE_API_URL=%s\n" % FILE_ROUTER_BASE)
+    assert clawgate.task_endpoint() == FILE_ROUTER_BASE + TASKS_PATH
+
+
+def test_with_no_configuration_at_all_the_endpoint_is_unchanged(monkeypatch,
+                                                                tmp_path):
+    """The fallback is the shared default — byte-identical to the URL the old
+    literal named. A host told nothing about the split resolves to exactly what
+    it resolved to before, so this change cannot break one."""
+    _clear_env(monkeypatch)
+    _env_file(monkeypatch, tmp_path)              # no file at all
+    assert clawgate.task_endpoint() == DEFAULT_BASE + TASKS_PATH
+
+
+def test_an_empty_process_value_does_not_MASK_the_file(monkeypatch, tmp_path):
+    _env_file(monkeypatch, tmp_path,
+              "CLAWGATE_TASK_API_URL=%s\n" % FILE_TASK_BASE)
+    monkeypatch.setenv("CLAWGATE_TASK_API_URL", "")
+    monkeypatch.delenv("CLAWGATE_API_URL", raising=False)
+    assert clawgate.task_endpoint() == FILE_TASK_BASE + TASKS_PATH
+
+
+def test_a_trailing_slash_does_not_double_the_separator(monkeypatch, tmp_path):
+    _env_file(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLAWGATE_TASK_API_URL", ENV_TASK_BASE + "/")
+    assert clawgate.task_endpoint() == ENV_TASK_BASE + TASKS_PATH
+
+
+def test_the_precedence_is_the_SHARED_one_not_a_local_respelling():
+    """🔴 THE SEAM. Everything above would also pass over a private copy of the
+    rule living in this module — the exact regrowth the shared definition exists
+    to prevent. This pins that the module RESOLVES THROUGH the shared ledger:
+    feed the shared module's OWN ledger names and watch this module's resolver
+    follow them, and confirm it is the shared default it falls back to."""
+    cg = clawgate._load_clawgate_tasks()
+    assert cg.TASK_API_URL_VARS == ("CLAWGATE_TASK_API_URL", "CLAWGATE_API_URL")
+    specific, general = cg.TASK_API_URL_VARS
+    assert clawgate.task_endpoint({specific: ENV_TASK_BASE,
+                                   general: ENV_ROUTER_BASE},
+                                  _ABSENT_ENV_FILE) == ENV_TASK_BASE + TASKS_PATH
+    assert clawgate.task_endpoint({general: ENV_ROUTER_BASE},
+                                  _ABSENT_ENV_FILE) == ENV_ROUTER_BASE + TASKS_PATH
+    assert clawgate.task_endpoint({}, _ABSENT_ENV_FILE) == \
+        cg.DEFAULT_API_URL + TASKS_PATH
+
+
+def test_the_shared_module_is_loaded_by_EXPLICIT_PATH_not_sys_path():
+    """`scripts/signal/` is on `sys.path` (conftest puts it there, and the image
+    runs with WORKDIR there), so a plain `import clawgate_tasks` would be
+    shadowed by any same-named file that lands beside these modules. The loader
+    must name the file."""
+    src = Path(clawgate.__file__).read_text(encoding="utf-8")
+    assert "SourceFileLoader" in src
+    assert "DEVRC_DIR" in src
+    assert "raise ImportError" in src, (
+        "an unloadable shared module must RAISE, never degrade to a local copy "
+        "of the precedence — two copies, and the silent one goes stale")
+
+
+def test_an_UNLOADABLE_shared_module_raises_rather_than_guessing(monkeypatch):
+    """The NO-FALLBACK-COPY policy, driven rather than asserted about. With the
+    memo cleared and both candidate paths pointed at nothing, resolving must
+    raise — an honest miss, not a card posted at a guessed host."""
+    monkeypatch.setattr(clawgate, "_CG", None)
+    monkeypatch.setattr(clawgate, "SHARED_TASKS_MODULE",
+                        "scripts/lib/no_such_module_xyzzy.py")
+    monkeypatch.setattr(clawgate, "DEVRC_DIR", "/nonexistent/devrc")
+    with pytest.raises(ImportError) as exc:
+        clawgate.task_endpoint({}, _ABSENT_ENV_FILE)
+    assert "no_such_module_xyzzy.py" in str(exc.value)
+
+
 def test_emit_draft_task_is_a_graceful_noop_without_a_token(monkeypatch):
     monkeypatch.delenv("CLAWGATE_HOOK_TOKEN", raising=False)
     posted = []
@@ -1053,8 +1249,59 @@ def test_emit_draft_task_is_a_graceful_noop_without_a_token(monkeypatch):
     assert posted == []
 
 
+def test_emit_draft_task_without_a_token_resolves_NOTHING(monkeypatch):
+    """The no-op must stay exactly what it was: the endpoint is resolved AFTER
+    the token check, so no shared module is loaded and ~/.claude/clawgate.env is
+    never opened on the path that posts nothing."""
+    monkeypatch.delenv("CLAWGATE_HOOK_TOKEN", raising=False)
+    posted = []
+    module = types.ModuleType("requests")
+    module.post = lambda *a, **k: posted.append(a)
+    monkeypatch.setitem(sys.modules, "requests", module)
+
+    def explode(*a, **k):
+        raise AssertionError("task_endpoint() was called on the no-token path")
+
+    monkeypatch.setattr(clawgate, "task_endpoint", explode)
+    assert clawgate.emit_draft_task(draft_id=1, recipient=PEER, body="x") is False
+    assert posted == []
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE ORIGINAL DEFECT, pinned so it cannot come back in this module.
+# --------------------------------------------------------------------------- #
+def _reintroduced_endpoint_constant(line: str) -> bool:
+    """A base URL and the tasks path welded together in one module constant.
+    The bare default constant in the shared module is fine and is not this."""
+    stripped = line.strip()
+    if stripped.startswith("#") or stripped.startswith("*"):
+        return False              # a comment ABOUT the old literal is fine
+    return stripped.startswith("ENDPOINT") and "=" in stripped
+
+
+def test_the_producer_does_not_hardcode_a_task_endpoint_again():
+    text = Path(clawgate.__file__).read_text(encoding="utf-8")
+    for i, line in enumerate(text.splitlines(), 1):
+        assert not _reintroduced_endpoint_constant(line), (
+            "%s:%d re-introduced a hardcoded endpoint constant: %s\n"
+            "Resolve the base from configuration instead (task_endpoint)."
+            % (clawgate.__file__, i, line.strip()))
+
+
+def test_the_hardcoded_endpoint_needle_can_actually_fire():
+    """POSITIVE CONTROL for the scan above: a guard reporting zero on a clean
+    tree is indistinguishable from one wired to nothing."""
+    assert _reintroduced_endpoint_constant('ENDPOINT = "http://host:1/api/tasks"')
+    assert _reintroduced_endpoint_constant("    ENDPOINT='http://host:1/api/tasks'")
+    assert not _reintroduced_endpoint_constant(
+        '# ENDPOINT = "http://host:1/api/tasks" (removed)')
+    assert not _reintroduced_endpoint_constant('TASKS_PATH = "/api/tasks"')
+
+
 def test_emit_draft_task_posts_the_card_when_a_token_is_set(monkeypatch):
     monkeypatch.setenv("CLAWGATE_HOOK_TOKEN", "tok-signal-1")
+    monkeypatch.setenv("CLAWGATE_TASK_API_URL", ENV_TASK_BASE)
+    monkeypatch.delenv("CLAWGATE_API_URL", raising=False)
     calls = []
 
     class Resp:
@@ -1073,7 +1320,14 @@ def test_emit_draft_task_posts_the_card_when_a_token_is_set(monkeypatch):
     assert clawgate.emit_draft_task(draft_id=17, recipient=PEER,
                                     body="please approve") is True
     call = calls[0]
-    assert call["url"] == clawgate.ENDPOINT
+    # 🔴 THE POST GOES WHERE CONFIGURATION SAYS. Asserting `== clawgate.ENDPOINT`
+    # (what this line used to do) could not fail: it compared the module's own
+    # constant against the URL built from that same constant, so it stayed green
+    # across the entire lifetime of the hardcoded router address.
+    assert call["url"] == ENV_TASK_BASE + TASKS_PATH, (
+        "the card was posted at %s; configuration named %s. A card posted at "
+        "the permission router is silently dropped — that base answers "
+        "POST /api/tasks with 404." % (call["url"], ENV_TASK_BASE + TASKS_PATH))
     assert call["headers"]["Authorization"] == "Bearer tok-signal-1"
     assert "title" not in call["json"]              # clawgate ignores `title`
     assert "17" in call["json"]["directory"]

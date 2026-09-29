@@ -52,6 +52,23 @@ COPY scripts/signal/_minio.py      /app/scripts/signal/
 COPY scripts/signal/clawgate.py    /app/scripts/signal/
 COPY scripts/signal/_mentions.py   /app/scripts/signal/
 
+# 🔴 THE ONE FILE FROM OUTSIDE scripts/signal/, AND WHY IT IS HERE.
+# `clawgate.py` resolves the Task API's base URL from
+# `scripts/lib/clawgate_tasks.task_base_url` — the ONE definition of the
+# `CLAWGATE_TASK_API_URL` -> `CLAWGATE_API_URL` -> default precedence, shared
+# with the board pollers, the write-back guard and the mail-actions producer.
+# Loading it by explicit path (never sys.path) means the image must CONTAIN it:
+# without this line `consumer.py draft` raises ImportError inside the container.
+#
+# This does NOT weaken the COPY-by-name property the header argues for — it is
+# still one named, tracked, gated file, and `build-push.sh` control 2 still
+# asserts /app's contents EXACTLY, deriving its expected set from these COPY
+# lines. The destination mirrors the repo layout so the sibling `../lib/` path
+# the loader tries first resolves the same way in the image as in a checkout.
+# `tests/test_image_deps.py` pins this against `clawgate.SHARED_TASKS_MODULE`
+# and against Dockerfile.dockerignore, both directions.
+COPY scripts/lib/clawgate_tasks.py /app/scripts/lib/
+
 # --------------------------------------------------------------------------- #
 # 🔴 SIGNAL_PG_DIRECT=1 IS A PROPERTY OF THE IMAGE, NOT A DEPLOYMENT CHOICE.
 # `_signal_db._direct_target()` returns None unless SIGNAL_PG_HOST or

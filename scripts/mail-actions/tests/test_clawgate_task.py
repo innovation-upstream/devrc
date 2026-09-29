@@ -370,11 +370,14 @@ def test_the_precedence_is_the_SHARED_one_not_a_local_respelling(monkeypatch,
 # --------------------------------------------------------------------------- #
 # 🔴 THE ORIGINAL DEFECT, pinned so it cannot come back.
 #
-# This lives here rather than in a repo-wide seam file because there is exactly
-# ONE producer under guard. Its Signal twin (`scripts/signal/clawgate.py`) still
-# holds the literal on purpose — its only caller is the `draft` CLI subcommand,
-# which the deployed pod never runs — so a scan over "both producers" would be
-# asserting something false about the repo.
+# This lives here rather than in a repo-wide seam file because it guards THIS
+# module's file only. Its Signal twin (`scripts/signal/clawgate.py`) carried the
+# same literal until 2026-09-29 and now carries the same guard, next to itself,
+# in `scripts/signal/tests/test_approval_gate.py` — each producer's scan reads
+# the file it is about. The repo-wide statement that neither of them re-grows a
+# private copy of the PRECEDENCE is `scripts/tests/
+# test_clawgate_predicate_single_source.py`'s two-way importer ledger, which
+# both are on.
 # --------------------------------------------------------------------------- #
 def _reintroduced_endpoint_constant(line: str) -> bool:
     """A base URL and the tasks path welded together in one module constant.
