@@ -5219,6 +5219,224 @@ class TestTheWIDENINGDidNotOpenTwoHOLES:
         )
 
 
+# --------------------------------------------------------------------------
+# the REFERENCE TOPIC's statement of the same rule, driven against the pattern
+#
+# 🔴 THE MEASUREMENT THIS CLASS EXISTS FOR. The emphasis rule lives in THREE
+# places — `claude/skills/handoff/SKILL.md` step 3, `NEAR_MISS_REMEDY`'s own
+# wording, and `reference/write-gate.md` §C — and was guarded in ZERO. MEASURED
+# 2026-09-29: deleting the 57 B clause `Emphasis is OK (…)` from SKILL.md leaves
+# 652 passed, 0 failed over this file plus the three size suites. Deleting the
+# whole variant catalogue (220 B, emphasis clause + near-miss sentence) fails
+# exactly THREE tests, all of them about the NEAR-MISS half —
+# `test_skill_pins[rule (j): the near-miss promise is scoped to the closed
+# vocabulary]`, `test_the_skill_binds_UNLISTED_reads_ABSENT_to_the_right_
+# antecedent` and `test_the_near_miss_clause_locator_can_report_absence`. So the
+# emphasis half had no guard at all, and §C's sentence about it went stale twice:
+# it named ONE admitted spelling, and the correction named FIVE.
+#
+# 🔴 WHY A LEDGER AND NOT A PIN. A phrase pin would freeze whichever enumeration
+# is current, which is the defect — `claude/RULES.md`: a guard on words is
+# walkable by rewording, and here the words themselves are the thing that keeps
+# being wrong. So the topic carries one row per BOUNDARY of the three positional
+# rules, and this class reads those rows out of the topic and drives the LIVE
+# patterns with them. Adding a position, widening a class or un-bounding one
+# therefore goes red HERE, with a message naming the row.
+# --------------------------------------------------------------------------
+
+
+class TestTheReferenceTopicStatesTheEmphasisRuleByPOSITION:
+    """🔴 NOT REGRESSION COVERAGE FOR THE PATTERN — the pattern is correct. It is
+    the guarantee `write-gate.md` §C never had, and it is the fix for a prose
+    correction that would otherwise have preserved its own rot mechanism
+    (`claude/skills/prune-skill/SKILL.md` §0: a prune preserves rot BY
+    CONSTRUCTION).
+
+    FOUR tests: three failure directions plus the control on the instrument they
+    all share. The count is stated because it is checkable against the class, not
+    as a summary — `claude/RULES.md`: a docstring that names a relationship while
+    the body inspects one side reads as coverage while providing none.
+
+      * `test_the_pattern_still_has_exactly_THREE_decoration_positions` — the
+        SHAPE. `three` is the only number §C states, so it is derived from the
+        pattern rather than trusted: one leading lookbehind plus two `_MARKUP`
+        occurrences. A fourth position added to `_FORCING` reds here and the
+        message says to add it to the topic and the ledger.
+      * `test_every_ledger_row_behaves_as_the_topic_says` — the BEHAVIOUR, off
+        the live `_FORCING` / `_FORCING_ATTEMPT`.
+      * `test_the_ledger_is_also_true_of_the_READER` — the same rows through
+        `ranked_items`, because a structural check over two regexes can be green
+        while the thing that consults them disagrees.
+      * `test_the_ledger_locator_can_report_absence` — the NEGATIVE CONTROL on
+        `_ledger`/`_ROW`, which every one of the three above is built on: a
+        locator returning nothing, or a regex matching anything, would make them
+        all vacuous in one direction.
+    """
+
+    TOPIC = HANDOFF_SKILL.parent / "reference" / "write-gate.md"
+    #: The ledger's header row, which is also the locator. A whole normalised
+    #: line rather than a keyword: renaming a column has to come here.
+    HEADER = "| spelling | position it bounds | outcome |"
+    #: One row. The outcome vocabulary is CLOSED, so a row in any other shape is
+    #: a hard failure rather than a silently skipped line — the shape that would
+    #: let this loop degrade to "0 rows checked" and still pass.
+    _ROW = re.compile(
+        r"^\| `(?P<spelling>[^`]+)` \| [^|]+ \| "
+        r"(?P<outcome>parses `[a-z-]+`|near-miss|absent) \|$"
+    )
+    #: The three position names §C is required to state. Derived-adjacent: the
+    #: COUNT is derived from the pattern by the test below; these are the labels
+    #: the prose must carry so a reader can map a row onto a rule.
+    POSITIONS = ("**leading**", "**post-key**", "**post-colon**")
+
+    @classmethod
+    def _ledger(cls) -> list[tuple[str, str | None, bool]]:
+        """`(spelling, expected kind or None, expected near-miss)`, READ OFF THE
+        TOPIC rather than restated here.
+
+        Bounded by the blank line that closes the table, so the locator cannot
+        silently widen to the rest of the file."""
+        text = cls.TOPIC.read_text(encoding="utf-8")
+        assert text.count(cls.HEADER) == 1, (
+            f"{cls.TOPIC.name} carries {text.count(cls.HEADER)} copies of the "
+            f"ledger header {cls.HEADER!r}; the locator cannot say which table "
+            f"§C means"
+        )
+        start = text.index(cls.HEADER)
+        table = text[start:].split("\n\n", 1)[0].splitlines()
+        rows: list[tuple[str, str | None, bool]] = []
+        # [0] is the header, [1] the `|---|` rule.
+        for line in table[2:]:
+            m = cls._ROW.match(line)
+            assert m, (
+                f"a row of §C's positional ledger in {cls.TOPIC.name} is not in "
+                f"the shape this guard drives, so it would be SKIPPED — which is "
+                f"a zero indistinguishable from a guard wired to nothing.\n"
+                f"  row     : {line!r}\n"
+                f"  expected: | `<spelling>` | <position> | parses `<kind>` "
+                f"| near-miss | absent |"
+            )
+            outcome = m.group("outcome")
+            if outcome.startswith("parses "):
+                rows.append((m.group("spelling"), outcome.split("`")[1], False))
+            else:
+                rows.append((m.group("spelling"), None, outcome == "near-miss"))
+        return rows
+
+    def test_the_ledger_locator_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL, both directions a locator can be vacuous. The
+        PREDICATE half feeds `_ROW` a row shaped like prose and shows it goes
+        false — a regex that matched anything would make every assertion below
+        unfalsifiable. The BOUNDS half shows the return is a table's worth of
+        rows covering all three outcomes, not the whole file and not empty: a
+        ledger that lost its near-miss or absent rows would leave
+        `_FORCING_ATTEMPT` unexercised while this class still printed green."""
+        assert not self._ROW.match("| `forcing: gate` | none | it works |")
+        assert not self._ROW.match("Emphasis is OK, see the table.")
+        rows = self._ledger()
+        assert 6 <= len(rows) <= 40, f"the locator returned {len(rows)} row(s)"
+        outcomes = {
+            "parses" if kind else ("near-miss" if nm else "absent")
+            for _s, kind, nm in rows
+        }
+        assert outcomes == {"parses", "near-miss", "absent"}, (
+            f"§C's ledger no longer covers all three outcomes ({sorted(outcomes)}), "
+            f"so the arm that is missing is asserted by nothing — and `absent` vs "
+            f"`near-miss` is the distinction `_FORCING_ATTEMPT` exists for"
+        )
+
+    def test_the_pattern_still_has_exactly_THREE_decoration_positions(self) -> None:
+        """🔴 THE ONE NUMBER §C STATES, DERIVED FROM THE PATTERN INSTEAD OF
+        TRUSTED. A count in prose is what went stale twice here, so the count of
+        POSITIONS — the thing §C now organises itself by — must fail when the
+        pattern gains or loses one. One leading lookbehind, two `_MARKUP`
+        occurrences: three places decoration may sit.
+
+        Shown reachable by the `a-fourth-decoration-position-added` row in
+        `scripts/tests/mutants-handoff-cap.sh` — the only row in that battery
+        whose named killer is this assertion rather than the ledger."""
+        pat = hd._FORCING.pattern
+        assert pat.startswith("(?<![A-Za-z0-9])"), (
+            f"`_FORCING` no longer opens with the one-character negative "
+            f"lookbehind that §C calls the LEADING position: {pat!r}"
+        )
+        # Separated out because an EMPTY `_MARKUP` makes `str.count` return
+        # len(pat)+1 and the message below nonsense. Shown reachable by the
+        # pre-existing `markup-between-key-and-colon-rejected` row.
+        assert hd._MARKUP, (
+            "`_MARKUP` is empty, so the post-key and post-colon positions §C "
+            "describes admit nothing at all"
+        )
+        assert pat.count(hd._MARKUP) == 2, (
+            f"`_FORCING` now has {pat.count(hd._MARKUP)} `_MARKUP` position(s), "
+            f"not 2, so the number of places decoration may sit is no longer "
+            f"three. `{self.TOPIC.name}` §C states the rule POSITION BY POSITION "
+            f"— add or remove the position there, and give the new boundary a "
+            f"row in the ledger, in the SAME commit."
+        )
+        doc = self.TOPIC.read_text(encoding="utf-8")
+        for name in self.POSITIONS:
+            assert name in doc, (
+                f"§C no longer names the {name} position, so a reader cannot map "
+                f"a ledger row onto the rule that produces it"
+            )
+
+    def test_every_ledger_row_behaves_as_the_topic_says(self) -> None:
+        """🔴 THE LEDGER DRIVEN AGAINST THE LIVE PATTERNS.
+
+        Shown reachable by the `markup-bound-narrowed-to-two` and
+        `leading-lookbehind-bounded-like-markup` rows in
+        `scripts/tests/mutants-handoff-cap.sh` — one per direction the three
+        positional rules can be wrong, because a mutant to `_MARKUP` cannot say
+        anything about the leading lookbehind and vice versa."""
+        for spelling, kind, near_miss in self._ledger():
+            got = hd._FORCING.search(spelling)
+            attempt = hd._FORCING_ATTEMPT.search(spelling)
+            if kind is not None:
+                assert got and got.group(1).lower() == kind, (
+                    f"§C's ledger says {spelling!r} parses to {kind!r}; the live "
+                    f"`_FORCING` gives {(got.group(1) if got else None)!r}. "
+                    f"Either the pattern moved or the row is wrong — re-measure, "
+                    f"then fix whichever it is in the SAME commit."
+                )
+                continue
+            assert got is None, (
+                f"§C's ledger says {spelling!r} does NOT parse; the live "
+                f"`_FORCING` parsed it to {got.group(1)!r}. A position was "
+                f"widened or un-bounded and this page still states the old bound."
+            )
+            assert (attempt is not None) is near_miss, (
+                f"§C's ledger says {spelling!r} is "
+                f"{'a near-miss' if near_miss else 'ABSENT'}; the live "
+                f"`_FORCING_ATTEMPT` "
+                f"{'matched' if attempt else 'did not match'} it. That is the "
+                f"difference between a refusal that quotes the line back and "
+                f"`[no forcing: field]`, which is the arm a re-run cannot clear."
+            )
+
+    def test_the_ledger_is_also_true_of_the_READER(self) -> None:
+        """🔴 THE BEHAVIOURAL HALF, and not redundant with the structural one:
+        `ranked_items` is what an executor actually meets, and it consults
+        `_FORCING` over the joined BLOCK and `_FORCING_ATTEMPT` per LINE. A
+        structural check over the two regexes can be green while the reader that
+        combines them disagrees — `claude/RULES.md`'s isolation-seam shape."""
+        for spelling, kind, near_miss in self._ledger():
+            text = (
+                "## Next steps (ranked)\n1. Land the retry-wrapper fix.\n"
+                f"   {spelling} — CI red\n"
+            )
+            item = hd.ranked_items(text)[0]
+            assert item.kind == kind, (
+                f"§C's ledger says {spelling!r} -> kind {kind!r}; `ranked_items` "
+                f"returned {item.kind!r}"
+            )
+            assert (item.near_miss is not None) is near_miss, (
+                f"§C's ledger says {spelling!r} -> "
+                f"near_miss={near_miss}; `ranked_items` returned "
+                f"{item.near_miss!r}"
+            )
+
+
 class TestRulesIAndJDidNotMoveTheOtherExits:
     """INVARIANT GUARDS — not regression coverage, and labelled so.
 
