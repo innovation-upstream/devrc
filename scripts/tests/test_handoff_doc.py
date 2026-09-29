@@ -8374,6 +8374,41 @@ def _doc_bytes(repo: Path) -> int:
     return len(doc_of(repo).encode("utf-8"))
 
 
+def _normalised_remedy_two(refusal: str) -> str:
+    """Rule (p)'s remedy 2, whitespace-normalised to one line.
+
+    The refusal is emitted as hard-wrapped source strings, so the line breaks
+    are an artefact of how the module is typed and would make a whole-string
+    pin fail on a pure re-indent. Collapsing runs of whitespace pins the WORDS
+    and nothing else. Returns "" when no remedy 2 is present, which the caller
+    must treat as a failure rather than a match — see its docstring.
+    """
+    for line in refusal.splitlines():
+        if line.strip().startswith("2."):
+            return " ".join(line.split())
+    return ""
+
+
+#: The exact wording of rule (p)'s remedy 2, normalised by the helper above.
+#: 🔴 A WHOLE-STRING PIN, DELIBERATELY. A phrase pin on the retracted sentence
+#: was walkable by any reword that kept the denial — MEASURED in round 0 of
+#: #1926's audit, where "this tool is unable to shrink them on your behalf"
+#: passed both guards. `RULES.md`: when the artifact under test IS prose, pin
+#: the WHOLE normalised string and pay the cosmetic-reword cost.
+EXPECTED_REMEDY_TWO = (
+    "2. or EVICT what has closed out of an append-only section — ONE route "
+    "with two halves, not two alternatives. MOVE the text to the arc's "
+    "archive file, leaving a pointer, and remove the lines with "
+    "`--prune <file> --prune-count <n>`, which takes them VERBATIM from "
+    "`Open investigations`, `Findings` or `Gotchas` — rule (q), the exit rule "
+    "those sections used to lack. That is its own run and never a side effect "
+    "of this one, so evict in its own commit first, then re-run this update "
+    "unchanged. 🔴 Moving the text WITHOUT rule (q) means hand-editing the "
+    "committed doc, which bypasses every gate in this module at once — see "
+    "rule (q)'s header for what that cost us."
+)
+
+
 class TestADocOverItsCeilingMayNotGrow:
     """Rule (p). 📖 `claude/skills/handoff/reference/write-gate.md` §I."""
 
@@ -8397,22 +8432,29 @@ class TestADocOverItsCeilingMayNotGrow:
         assert tree_hash(oversize_repo) == before_tree
         assert commit_shas(oversize_repo) == before_shas
 
-    def test_the_refusal_names_the_bytes_and_ALL_THREE_ways_out(
+    def test_the_refusal_names_the_bytes_and_BOTH_ways_out(
         self, oversize_repo: Path, tmp_path: Path
     ) -> None:
         """A refusal nobody can comply with is the permanently-red gate this
-        repo forbids. THREE routes to a net-<=-0 delta — shrink a REPLACE
-        section, `--prune` the append-only ones, MOVE to the archive — and the
-        prohibition that stops the fourth, deleting a gotcha, from being the
-        cheapest one.
+        repo forbids. TWO routes to a net-<=-0 delta — shrink a REPLACE
+        section, or EVICT from an append-only one — and the prohibition that
+        stops the third, deleting a gotcha, from being the cheapest one.
 
         🔴 THE PRUNE ROUTE IS LOAD-BEARING AND WAS ABSENT FOR AS LONG AS IT
         EXISTED. Rule (q) shipped the exit in #1916; this refusal went on
         telling authors the tool "cannot shrink them for you" — see
         `test_the_refusal_does_not_deny_the_exit_rule_q_ships` below — so the
         only remedy it named for bytes sitting in `Gotchas` was the override,
-        which SHIPS the over-ceiling doc. The flags are read off the module so
-        renaming one moves this pin with it rather than quietly unpinning it.
+        which SHIPS the over-ceiling doc.
+
+        🔴 EVICTION IS ONE ROUTE WITH TWO HALVES, NOT TWO ALTERNATIVES, and
+        round 0 of this PR's own audit is why. MOVE-to-the-archive used to be
+        its own numbered remedy beside the prune. But removing lines from an
+        append-only section is reachable only by rule (q) or by hand-editing
+        the committed doc — so a standalone MOVE remedy could be complied with
+        ONLY by the hand edit that rule (q)'s own header names as the measured
+        harm it exists to remove. The flags are read off the module so renaming
+        one moves this pin with it rather than quietly unpinning it.
         """
         upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
         err = run_tool(oversize_repo, update=upd).stderr
@@ -8428,7 +8470,9 @@ class TestADocOverItsCeilingMayNotGrow:
             f"{hd.PRUNE_FLAG} is named without {hd.PRUNE_COUNT_FLAG}, so the "
             "invocation printed here is not one the author can actually run:\n"
             f"{err}")
-        assert "arc's archive file" in err
+        assert "arc's archive file" in err, (
+            "the eviction remedy no longer says where the text GOES, so it "
+            f"reads as a bare deletion:\n{err}")
         assert "Do NOT satisfy this by DELETING" in err
         assert hd.SIZE_RATCHET_FLAG in err
 
@@ -8439,23 +8483,43 @@ class TestADocOverItsCeilingMayNotGrow:
         "`Gotchas` and `Open investigations` APPEND here, so this tool cannot
         shrink them for you."
 
-        It was true when written and rule (q) falsified it, and a FALSE
-        remedy note is worse than a missing one because it stops the reader
-        looking. Pinned as a phrase because the defect WAS a phrase; the
-        structural half of the claim — that the exit is reachable from here —
-        is pinned by the sibling above, which asserts the flags themselves. A
-        reword that keeps the denial would walk this pin and be caught there,
-        the reader having nowhere to be routed.
+        It was true when written and rule (q) falsified it, and a FALSE remedy
+        note is worse than a missing one because it stops the reader looking.
+
+        🔴 PINNED AS THE WHOLE NORMALISED REMEDY, NOT AS THE RETRACTED PHRASE,
+        and round 0 of this PR's own audit is why. This guard first asserted
+        only that the phrase was absent, and its docstring claimed a reword
+        keeping the denial "would be caught" by the sibling. That was MEASURED
+        FALSE: the sibling asserts only that the two flags appear, so
+        "this tool is unable to shrink them on your behalf" passed BOTH guards
+        — a coverage claim wider than its implementation, which is the exact
+        defect class this PR exists to fix, reintroduced in the fix's own
+        scaffolding. `RULES.md`: when the artifact under test IS prose, a guard
+        on WORDS is walkable by REWORDING — pin the WHOLE normalised string.
+
+        The cost is deliberate and is the one that rule names: a COSMETIC
+        reword of remedy 2 fails this test. Update the literal below in the
+        same commit; that is the price of a machine-readable claim.
         """
         upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
         err = run_tool(oversize_repo, update=upd).stderr
         assert "status=size-ratchet" in err, (
-            f"the fixture did not trip rule (p), so the assertion below would "
+            f"the fixture did not trip rule (p), so every assertion below would "
             f"pass vacuously against an unrelated string: {err!r}")
         assert "this tool cannot shrink them for you" not in err, (
             "the refusal still denies that the tool can shrink the append-only "
             f"sections. {hd.PRUNE_FLAG} (rule (q)) does exactly that. Say which "
             "RUN cannot shrink them — this one — not which TOOL:\n" + err)
+        remedy = _normalised_remedy_two(err)
+        assert remedy == EXPECTED_REMEDY_TWO, (
+            "remedy 2's wording changed. This pin is the WHOLE normalised "
+            "string ON PURPOSE — a phrase pin is walkable by any reword that "
+            "keeps the denial, which is how the claim it replaced was measured "
+            "false. Re-read the new wording and ask whether it still (a) names "
+            f"{hd.PRUNE_FLAG}, (b) says where the moved text goes, and (c) "
+            "denies nothing rule (q) can do. Then update this literal.\n"
+            f"  expected: {EXPECTED_REMEDY_TWO!r}\n"
+            f"  actual:   {remedy!r}")
 
     # ---- criterion 2: a net-<=-0 delta LANDS, still over the ceiling --------
 

@@ -436,10 +436,15 @@ the source row, so §I now declines to publish one rather than pick.
 
 The growth is STRUCTURAL rather than careless: the bucket rules forbid durable
 content in a REPLACE section, so the correct remedy for a finding is "move it to
-`Gotchas`", which APPENDS. That section has an entry rule and no exit rule; it is
-monotonic by construction, and a warning is not a counterweight to a
-construction. A prose prune discipline was tried IN the document and the section
-regrew within seven days of being read.
+`Gotchas`", which APPENDS. A prose prune discipline was tried IN the document and
+the section regrew within seven days of being read. ⚠ THIS PARAGRAPH SAID THAT
+SECTION HAD "an entry rule and no exit rule; it is monotonic by construction",
+AND RULE (q) FALSIFIED IT — `--prune` is that exit rule. The sentence was true
+when written and survived the round that shipped its refutation, four lines from
+the header (see rule (q)) that quotes THIS docstring as its evidence of the gap.
+What still holds is the asymmetry that motivates the refusal: entry is a side
+effect of an ordinary update, while the exit is a SEPARATE deliberate run, so
+the section still grows on its own and shrinks only when someone acts.
 
 🔴 THE OVERRIDE IS NOT A CONVENIENCE, IT IS WHAT MAKES THE REFUSAL SAFE.
 `/handoff`'s write path is the ONLY step that records a session — see
@@ -3563,16 +3568,17 @@ def size_ratchet_report(relpath: str, merged_text: str, base_text: str) -> str:
             "    1. shrink a REPLACE section in THIS delta. `State now`, `Next "
             "steps` and `How to verify` are rewritten wholesale, so what they "
             "no longer need to say costs nothing to drop.",
-            "    2. or PRUNE what has closed out of the append-only sections: "
-            f"`{PRUNE_FLAG} <file> {PRUNE_COUNT_FLAG} <n>` removes lines you "
-            "name VERBATIM from `Open investigations`, `Findings` and "
+            "    2. or EVICT what has closed out of an append-only section — "
+            "ONE route with two halves, not two alternatives. MOVE the text to "
+            "the arc's archive file, leaving a pointer, and remove the lines "
+            f"with `{PRUNE_FLAG} <file> {PRUNE_COUNT_FLAG} <n>`, which takes "
+            "them VERBATIM from `Open investigations`, `Findings` or "
             "`Gotchas` — rule (q), the exit rule those sections used to lack. "
-            "It is its own run and never a side effect of this one, so prune "
-            "first, then re-run this update unchanged.",
-            "    3. or MOVE what has closed out of the document first, in its "
-            "own commit, to the arc's archive file — then re-run this update "
-            "unchanged. `Gotchas` and `Open investigations` APPEND here, so "
-            "THIS update cannot shrink them; remedy 2 is the run that can.",
+            "That is its own run and never a side effect of this one, so evict "
+            "in its own commit first, then re-run this update unchanged. 🔴 "
+            "Moving the text WITHOUT rule (q) means hand-editing the committed "
+            "doc, which bypasses every gate in this module at once — see rule "
+            "(q)'s header for what that cost us.",
             "  🔴 Do NOT satisfy this by DELETING an open investigation, a "
             "gotcha or a ruled-out theory. Eviction means MOVE, leaving a "
             "pointer: those sections exist so a future session does not repeat "
