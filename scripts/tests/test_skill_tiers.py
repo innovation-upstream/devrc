@@ -83,14 +83,14 @@ MIN_SKILLS = 30
 # 36-entry total quoted in a 37-entry tree, and one contradicted the number the
 # same change reported to its reviewer.
 # --------------------------------------------------------------------------- #
-MEASURED_ENTRIES = 39
-MEASURED_TIER_A_ENTRIES = 23
-MEASURED_TIER_A_CHARS = 7_205
+MEASURED_ENTRIES = 40
+MEASURED_TIER_A_ENTRIES = 24
+MEASURED_TIER_A_CHARS = 7_202
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 7_433
-# ...and what the same 36 entries would cost with every skill tier A. The
-# difference is what the ledger buys: 3,316 chars.
-MEASURED_ALL_TIER_A_CHARS = 10_993
+MEASURED_UNDER_LEDGER_CHARS = 7_430
+# ...and what the same 40 entries would cost with every skill tier A. The
+# difference is what the ledger buys: 3,560 chars.
+MEASURED_ALL_TIER_A_CHARS = 10_990
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
@@ -151,6 +151,36 @@ MEASURED_ALL_TIER_A_CHARS = 10_993
 # which is the one thing this ratchet exists to prevent. The reasoning was not wrong
 # about the provenance and was wrong about what to do with it — recorded so nobody
 # re-derives it. Attribution belongs in this comment; the number belongs at 0.
+#
+# 🔴 2026-09-29: `muster` ADDED, tier **A** — the task/agent/runbook half was
+# extracted OUT of clawgate into its own service, and its prose was too big to stay
+# in clawgate's always-loaded core (which has a byte ceiling of its own in
+# `scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py`, re-pinned in
+# the same commit).
+#
+# A, not B, by THIS ledger's own tie-break — "tier B when a mis-route DEGRADES the
+# answer; tier A when a mis-route takes a WRONG ACTION". The mis-route here builds
+# a task URL on the permission router's base, which does not error: it answers
+# `404 page not found`, which `clawgatectl` maps to rc 7, "this CLI is newer than
+# the server". So the operator reads a wrong base as a stale binary and acts on
+# that. And "read and evaluate task N" is a SYMPTOM phrasing naming no tool, which
+# is the other half of the A test. The cairn trio above are B because each is a
+# DOOR under an A-tier owner's pointer; muster is a SERVICE with its own surface.
+#
+# Paid the descriptions gate's playbook-step-1 way, never by raising a ceiling:
+# `clawgate` gave back the muster clauses it had briefly acquired, and mechanism
+# prose came out of `clickup`, `tekton`, `signal`, `devrc-dx` and `mailbox` — every
+# cut string restated by that same description's own Use-for list, quoted one by
+# one in `test_skill_descriptions.py`'s ledger. No trigger phrase and no
+# disambiguation clause was dropped. The block lands at 7,202 across 24 entries
+# EVEN WITH muster in it, 3 under the 7,205 ceiling — so the ceiling is LOWERED to
+# 7,202 and headroom is 0 again. The mean tier-A entry is 7,202 / 24 = 300.1.
+#
+# ⚠ AN EARLIER DRAFT OF THIS CHANGE CUT `bar` AND `session-manager` INSTEAD, and
+# was measured against a base ref that had already MOVED: #1905 had made equivalent
+# cuts to both while this branch was in flight, so that saving was already banked
+# in 7,205 and claiming it again would have been double-counting. Re-measured on
+# the merged tree, which is the only tree these numbers are about.
 #
 # The 254 chars of headroom this paragraph used to assert were consumed by the
 # RAISE in #1391 (7,242/7,496 -> 7,639/7,639), not by the re-base below; an
@@ -251,7 +281,7 @@ MEASURED_ALL_TIER_A_CHARS = 10_993
 # the one this raise was taken for. Headroom is pinned back to 0, so the next
 # addition of any size reds this gate — and if a third raise is proposed, the
 # right answer is almost certainly a demotion instead.
-TIER_A_CEILING_CHARS = 7_205
+TIER_A_CEILING_CHARS = 7_202
 
 # 🔴 Skills that must NEVER be tier B, pinned as a RELATIONSHIP rather than left
 # to review. Each one fires from a SYMPTOM Zach describes rather than from its own

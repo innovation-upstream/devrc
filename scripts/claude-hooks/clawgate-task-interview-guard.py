@@ -711,7 +711,8 @@ def body_candidates(argv, text, curl):
 _WHY = (
     "A task body with no `## Acceptance criteria` heading sends EVERY pickup to "
     "`ready_for_review`: the agent derives the criteria itself and may not grade "
-    "an exam it wrote (clawgate SKILL.md -> \"Status gate\"). That heading is the "
+    "an exam it wrote (the muster skill's SKILL.md -> \"Status gate\"). That "
+    "heading is the "
     "one lever the task AUTHOR has.\n"
     "(That is a convention the pickup ritual and this hook enforce, NOT a server "
     "check -- nothing in clawgate reads the heading.)"

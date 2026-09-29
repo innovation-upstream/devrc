@@ -3,14 +3,27 @@
 Read when: you're changing agents/repos/runbooks/privilege behaviour, wiring a new env var,
 adding a native tool, or working on the e2e suite. Routine ops don't need this file.
 
+🔴 **PHASES 2–4 ARE MUSTER'S NOW, NOT CLAWGATE'S — this file is their DESIGN RECORD, not a map of
+where the code lives.** Tasks/Repos/Agents, agent self-service, privilege profiles, runbooks and
+the native-tool loop were extracted into a separate service, **`muster`**
+(`github.com/ZacxDev/muster`, ns `muster` on workbench, `http://192.168.50.250:30306`,
+env `CLAWGATE_TASK_API_URL`). What survives here is the mechanism and the traps, which moved with
+the code. What does NOT survive: **every `internal/…` path, `deployment.yaml` cite and
+`clawgate-*` Secret/ns below is clawgate's pre-split tree.** A `git grep` in
+`containers/clawgate` that misses one of them is evidence about the SPLIT, not about the feature.
+Clawgate keeps the permission router (`:30302`) and the Wave-1 hardening section below.
+
 Full point-in-time state, loose ends and gotchas live in
 `~/workspace/homelab-talos/containers/clawgate/HANDOFF.md` (**authoritative — read it
 first**) + session memories `clawgate-phase2` / `clawgate-phase3` / `clawgate-runbooks` /
 `clawgate-loop-validation` / `authelia-passkey-sso` / `openclaw-exec-sandbox-strips-env` /
 `clawgate-version-before-build`.
 
-## Phase 2 — Tasks / Repos / Agents
+## Phase 2 — Tasks / Repos / Agents  *(now muster, `:30306`)*
 Three tabs beyond permission approval, each a real SPA route: `/`, `/tasks`, `/repos`, `/agents`.
+🔴 **Those three are served by muster today** — on the router they are 404. And the state is in
+**muster's OWN Postgres** (`muster-postgres`, ns `muster`), a different database from
+`clawgate-postgres`: a `psql` into the clawgate DB will not find a task. Historically:
 State is consolidated in an **in-cluster Postgres** (`clawgate-postgres`, ns `clawgate`). With no
 `DATABASE_URL` the app falls back to in-memory/file, so `go run` and the docker smoke test work
 with Phase 2 disabled.

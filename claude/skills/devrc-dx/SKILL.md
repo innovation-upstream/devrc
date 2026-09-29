@@ -1,6 +1,6 @@
 ---
 name: devrc-dx
-description: "Audit and fix the devrc desktop/terminal setup — home-manager, NixOS, i3, tmux + fuzzyclaw, zsh/direnv, gruvbox theming — reporting cross-cutting drift then fixing it. Use for: audit or improve my shell/tmux/i3/desktop config, a keybinding or theme inconsistency, slow shell startup, config drift or dead config in devrc. Bar work -> `bar`."
+description: "Audit and fix the devrc desktop/terminal setup — home-manager, NixOS, i3, tmux + fuzzyclaw, zsh/direnv, gruvbox theming. Use for: audit or improve my shell/tmux/i3/desktop config, a keybinding or theme inconsistency, slow shell startup, config drift or dead config in devrc. Bar work -> `bar`."
 argument-hint: "[all|tmux|i3|shell|theme|nix|tasks] [analyze|fix|verify|audit] — defaults to 'all analyze'"
 allowed-tools: Bash, Read, Grep, Glob, Edit, Write, Agent
 ---

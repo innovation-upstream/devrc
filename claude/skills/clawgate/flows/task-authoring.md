@@ -1,4 +1,8 @@
-# flow: authoring a clawgate task — the alignment interview
+# flow: authoring a task — the alignment interview
+
+⚠ **The board is `muster`'s** (`http://192.168.50.250:30306`, env `CLAWGATE_TASK_API_URL`), not the
+permission router's — see `SKILL.md` → "TWO SERVICES". `clawgatectl task …` resolves that itself;
+any raw `curl` in this flow must not.
 
 **Run this BEFORE `clawgatectl task create`.** It is enforced:
 `~/.claude/hooks/clawgate-task-interview-guard.py` (PreToolUse on Bash) DENIES a
@@ -10,7 +14,7 @@ file does not auto-fire the way a skill description does — the hook is the rou
 against. `create` returns `{"id":N}` and nothing else; there is no second chance to
 explain. And a body with no `## Acceptance criteria` heading forces every pickup to
 end at `ready_for_review` — the agent derives the criteria and may not grade an exam
-it wrote (`SKILL.md` → "Status gate"). So the heading is not decoration; it is the
+it wrote (the `muster` skill's `SKILL.md` → "Status gate"). So the heading is not decoration; it is the
 one lever the author has, and this interview exists to produce it.
 
 ⚠ **That lever is a CONVENTION, not a server check — do not oversell it.** Measured
@@ -117,9 +121,13 @@ create** (`~/.claude/skills/clawgate/reference/task-api.md` → "Tags are
 hard-validated"). It is a load-bearing
 wire contract, not a warning.
 
+🔴 **`/api/tags` is on MUSTER (`:30306`), not the permission router.** On `:30302` it is a plain
+404, and `curl -sf` makes a 404 an empty exit-22 failure that reads as "no tags exist".
+
 ```bash
 HOOK=$(grep '^CLAWGATE_HOOK_TOKEN=' ~/.claude/clawgate.env | cut -d= -f2)
-curl -sf http://192.168.50.250:30302/api/tags -H "Authorization: Bearer $HOOK" | jq -r '.[].tag'
+TASKS=$(grep '^CLAWGATE_TASK_API_URL=' ~/.claude/clawgate.env | cut -d= -f2)
+curl -sf "${TASKS:-http://192.168.50.250:30306}/api/tags" -H "Authorization: Bearer $HOOK" | jq -r '.[].tag'
 ```
 
 Grammar, in one line: lowercased, ≤20 tags, ≤64 runes each, charset `[a-z0-9._/-]`,

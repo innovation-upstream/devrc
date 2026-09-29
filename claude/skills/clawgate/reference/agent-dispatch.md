@@ -1,7 +1,12 @@
-# clawgate — agent dispatch: durable facts
+# muster — agent dispatch: durable facts
 
 Read when: you are **dispatching, debugging or reasoning about the agent loop** (a task that should
 have produced a PR, a dispatch that never started, the test fixture, `POST /agents`).
+
+🔴 **Dispatch moved with the task board: it is `muster`'s, on `http://192.168.50.250:30306`
+(`CLAWGATE_TASK_API_URL`), NOT the permission router.** Measured 2026-09-29: `:30302/agents`,
+`/api/agents`, `/agent/task` → **404**; the same on `:30306` → **401** (exist, gated). The `curl`
+below and every `/agent/*` route named here take the muster base.
 
 🔴 **Current STATUS of the loop lives in `~/workspace/homelab-talos/containers/clawgate/HANDOFF.md`,
 not here.** Two point-in-time claims were written into the skill on 2026-07-31 and were BOTH
@@ -43,10 +48,12 @@ Measured false 2026-09-12 (0.8.32): a credential-less `POST /agents` on the LAN 
 session cookie; without one it 401s and the dispatch never happens:
 
 ```bash
-curl -sS -X POST http://192.168.50.250:30302/agents \
+curl -sS -X POST http://192.168.50.250:30306/agents \
   --data-urlencode 'action=dispatch' --data-urlencode 'note_id=124' \
   --data-urlencode 'repo=ZacxDev/clawgate-loop-sandbox' --data-urlencode 'repo_branch=main'
 ```
+⚠ **This URL was `:30302` until the split.** On the router it now 404s — and a 404 on a dispatch
+POST looks like "wrong action/param", not "wrong server".
 
 🔴 **Security consequence — UNCHANGED by the correction above, and still the rule.** `clawgate.zacx.dev`
 now has **two** gates (the Authelia edge, and clawgate's own session — clawgate does not trust
