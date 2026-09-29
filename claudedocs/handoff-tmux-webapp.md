@@ -101,22 +101,45 @@ mirrors the rendezvous pattern already running here (`browser-bridge`), and `ses
 already the host-side collector — see "Build on what exists".
 
 ## 🔴 Auth — the highest-stakes decision
-**`send-keys` is arbitrary command execution as your user, on both machines.** Measured in
-source, not assumed:
-- `internal/api/auth.go:40-42` — `requireSession` is a literal `return next`. **Human auth was
-  removed**; the LAN is "treated as trusted-open" and the public path relies on the Authelia
-  forward-auth edge.
-- `internal/api/auth.go:51-54` — `requireHookToken` **fails OPEN** when no token is configured
-  ("left open for back-compat").
-- The LAN NodePort already exposes unauthenticated `DELETE /tasks/{id}` and
-  `POST /api/auto-approve-all`.
+**`send-keys` is arbitrary command execution as your user, on both machines.**
+
+🔴 **TWO OF THE THREE MEASUREMENTS THIS SECTION CARRIED WERE STALE, BOTH IN THE SAME
+DIRECTION — they described the LAN surface as WIDER OPEN than it is.** Re-measured
+2026-09-16 at `cdd5f002f`. They are corrected in place rather than deleted, because the
+wrong version was believed and acted on:
+
+| the old claim | measured 2026-09-16 |
+|---|---|
+| `auth.go:40-42` — `requireSession` is a literal `return next`; "human auth was removed" | 🔴 **REFUTED.** `requireSession` is at **`auth.go:349`** and is a real gate: it calls `BrowserAuthRefusal()`, redirects a document navigation to `/login` (or answers **503**) when `CLAWGATE_UI_PASSWORD` is unconfigured, and otherwise requires `hasValidSession(r)`. |
+| the LAN NodePort exposes unauthenticated `DELETE /tasks/{id}` and `POST /api/auto-approve-all` | 🔴 **REFUTED.** Both are registered **behind `requireSession`** — `server.go:638` and `server.go:778`. |
+| `auth.go:51-54` — `requireHookToken` **fails OPEN** when no token is configured | ✅ **STILL TRUE**, now at **`auth.go:419-424`**: `if !s.auth.hookTokenEnforced() { next(...); return }`. |
+
+🔴 **BUT THE CONTROL IS A SHARED SECRET, NOT AN IDENTITY — do not read "there is a login" as
+"clawgate knows who did it".** The session cookie is minted from **one shared operator
+password**, so it authenticates a *secret*; every holder is byte-identical in every record.
+`0035_terminal_writes_actor.sql` states the same of its own `browser-session` tier, and
+`0036_attention_resolved_by.sql` inherits it: `ui` means "came through the human surface",
+never "a human decided this". `api` is a DOOR, not a caller — one `CLAWGATE_HOOK_TOKEN`
+covers `clawgatectl`, host scripts, hooks and a person with `curl`, and because the door is
+enforce-when-set, an `api` record does not even assert a credential was presented.
+
+⚠ **How this went wrong is the reusable part.** The stale line cited `auth.go:40-42`; the
+function has been at `:349` for some time. A line-number citation rots silently, and a
+`requireSession`-is-a-pass-through claim ALSO lived in a source comment in
+`internal/api/attention_test.go`, so a reader checking the code could find the doc's own
+error repeated there and read it as corroboration. **Two artifacts agreeing is not a
+measurement when one was copied from the other.** The source comment was corrected in
+`homelab-infra#834`.
 
 **RESOLVED — a real auth check on the tmux WRITE surface**, independent of `requireSession`.
 
 🔴 **It must FAIL CLOSED.** Do **not** reuse `requireHookToken` for terminal writes: its
 enforce-when-set semantics mean an unset token silently yields an open remote shell on both
 machines. A dedicated wrapper that refuses to serve when unconfigured is the requirement, and
-the difference between the two is the whole control.
+the difference between the two is the whole control. **That requirement is unchanged by the
+corrections above** — it was never derived from `requireSession` being absent, and
+`requireHookToken`'s fail-open behaviour, the one claim that survived, is exactly what it
+exists to avoid.
 
 Reads may follow existing clawgate conventions. Writes — `send-keys`, `kill-*`, `new-*` — go
 behind the fail-closed wrapper.
