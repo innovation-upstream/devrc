@@ -262,14 +262,37 @@ debugging, changing or copying a specific pipeline.
    `taskStart + timeout` while the budget is `runStart + tasks`, so an unbounded early task
    (devrc's `notify` inherited the cluster's 1h default) lets them cross and re-opens this.
 9. ⚠ **Gotcha 6 is scoped to `homelab-infra`, not to Tekton.** `innovation-upstream/devrc` is a
-   DIFFERENT repo on a plan where protection works, and since 2026-08-23 it requires **both**
-   `tekton/devrc-nodetests` and `tekton/devrc-pytests` (measured — re-measure, this moved
-   twice in one day). A required check `ERROR`/`PENDING` ⇒ `mergeStateStatus=BLOCKED`,
-   both `SUCCESS` ⇒ `CLEAN`. So on devrc a Tekton check **is** a gate — on either tier;
-   the earlier nodetests-only window let pytests-red PRs read `UNSTABLE` and merge.
-   🔴 `enforce_admins: true` there means a wedged
-   Tekton blocks everyone with no override; the escape hatch is
-   `gh api -X DELETE /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`.
+   DIFFERENT repo on a plan where protection works, so a Tekton check there **can** be a gate.
+   🔴 **BUT TODAY IT IS NOT ONE — MEASURE, NEVER INHERIT THIS.** 2026-09-29,
+   `/repos/innovation-upstream/devrc/branches/main/protection` returns
+   `required_status_checks: null`, `enforce_admins: false`, no required reviews. So a red
+   `pytests` yields `UNSTABLE`, **not** `BLOCKED`, and **nothing mechanically prevents a
+   merge** — the judgement is the merger's to make and defend, which is the opposite posture
+   from "the gate will stop me".
+   ⚠ **RETRACTED, and kept only so the signature is recognisable:** this gotcha read *"since
+   2026-08-23 it requires **both** `tekton/devrc-nodetests` and `tekton/devrc-pytests`"* with
+   `enforce_admins: true`. Its own parenthetical said *"re-measure, this moved twice in one
+   day"* — **it moved again.** The escape hatch it offered
+   (`gh api -X DELETE …/protection/required_status_checks`) now targets something absent, and a
+   comparison against an absent operand reports SAME, not MISSING.
+   **One command, before any claim about whether devrc can be merged:**
+   `gh api repos/innovation-upstream/devrc/branches/main/protection --jq '{required_status_checks,enforce_admins:.enforce_admins.enabled}'`
+   🔴 **AND devrc IS THE MIRROR IMAGE OF `cairn` ON THE STATUS SURFACE, SO A HABIT BUILT ON ONE
+   READS A CONFIDENT EMPTY SET ON THE OTHER.** devrc posts **4 legacy commit statuses and ZERO
+   check-runs** — so `gh api …/commits/<sha>/check-runs` reads `total=0`, and `…/status`
+   `pending` **is** a real settle signal here. `cairn` is the exact opposite: **8 check-runs and
+   ZERO legacy statuses**, so `…/status` reads `state=pending total_count=0` forever and
+   `mergeStateStatus` goes `CLEAN` within seconds of a push while every job runs. Both zeros
+   look identical to "CI has not run". **Read which surface the repo populates first.**
+   🔴 **A 140-CHARACTER STATUS DESCRIPTION TRUNCATES THE EVIDENCE AND NAMES ONLY THE FIRST
+   FAILURE.** devrc's `pytests` description ends mid-word at `(fl`; five failures sat behind one
+   name. Go to the gate's own log — and note a **count is not a set**: "both sides show
+   `failed=5`" and "both sides fail the same five tests" are different claims, and only the
+   second attributes a red to something other than your diff.
+   🔴 **The runner runs `-rs`, so `short test summary info` lists SKIPS ONLY and there are no
+   `FAILED` lines to grep.** The names live in the `=== FAILURES ===` section's headers:
+   `kubectl -n tekton-ci logs <run>-gate-pod -c step-pytests | grep -E '^devrc-pytests> _{3,}.*_{3,}$'`.
+   Grepping `^FAILED` on that log matches nothing whether or not tests failed.
 10. 🔴 **RENAMING A REPO SILENTLY KILLS ITS TRIGGER.** Every trigger CEL-matches
     `body.repository.full_name`, so a renamed repo's webhooks stop matching and post-merge CI
     just… stops — no error, no red check, and a repo with no pushes looks identical. Measured
