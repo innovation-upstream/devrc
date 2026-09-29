@@ -8397,20 +8397,65 @@ class TestADocOverItsCeilingMayNotGrow:
         assert tree_hash(oversize_repo) == before_tree
         assert commit_shas(oversize_repo) == before_shas
 
-    def test_the_refusal_names_the_bytes_and_BOTH_ways_out(
+    def test_the_refusal_names_the_bytes_and_ALL_THREE_ways_out(
         self, oversize_repo: Path, tmp_path: Path
     ) -> None:
         """A refusal nobody can comply with is the permanently-red gate this
-        repo forbids. Two routes to a net-<=-0 delta, and the prohibition that
-        stops the third — deleting a gotcha — from being the cheapest one."""
+        repo forbids. THREE routes to a net-<=-0 delta — shrink a REPLACE
+        section, `--prune` the append-only ones, MOVE to the archive — and the
+        prohibition that stops the fourth, deleting a gotcha, from being the
+        cheapest one.
+
+        🔴 THE PRUNE ROUTE IS LOAD-BEARING AND WAS ABSENT FOR AS LONG AS IT
+        EXISTED. Rule (q) shipped the exit in #1916; this refusal went on
+        telling authors the tool "cannot shrink them for you" — see
+        `test_the_refusal_does_not_deny_the_exit_rule_q_ships` below — so the
+        only remedy it named for bytes sitting in `Gotchas` was the override,
+        which SHIPS the over-ceiling doc. The flags are read off the module so
+        renaming one moves this pin with it rather than quietly unpinning it.
+        """
         upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
         err = run_tool(oversize_repo, update=upd).stderr
         assert "over by" in err and "this update)" in err
         assert "net delta of 0 or less" in err
         assert "shrink a REPLACE section" in err
+        assert hd.PRUNE_FLAG in err, (
+            "the rule (p) refusal does not name the rule (q) exit, so an author "
+            "whose overage sits in an append-only section is routed to "
+            f"{hd.SIZE_RATCHET_FLAG} — which SHIPS the over-ceiling doc — as "
+            f"the only way out:\n{err}")
+        assert hd.PRUNE_COUNT_FLAG in err, (
+            f"{hd.PRUNE_FLAG} is named without {hd.PRUNE_COUNT_FLAG}, so the "
+            "invocation printed here is not one the author can actually run:\n"
+            f"{err}")
         assert "arc's archive file" in err
         assert "Do NOT satisfy this by DELETING" in err
         assert hd.SIZE_RATCHET_FLAG in err
+
+    def test_the_refusal_does_not_deny_the_exit_rule_q_ships(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 REGRESSION. The retracted sentence, verbatim as it shipped:
+        "`Gotchas` and `Open investigations` APPEND here, so this tool cannot
+        shrink them for you."
+
+        It was true when written and rule (q) falsified it, and a FALSE
+        remedy note is worse than a missing one because it stops the reader
+        looking. Pinned as a phrase because the defect WAS a phrase; the
+        structural half of the claim — that the exit is reachable from here —
+        is pinned by the sibling above, which asserts the flags themselves. A
+        reword that keeps the denial would walk this pin and be caught there,
+        the reader having nowhere to be routed.
+        """
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        err = run_tool(oversize_repo, update=upd).stderr
+        assert "status=size-ratchet" in err, (
+            f"the fixture did not trip rule (p), so the assertion below would "
+            f"pass vacuously against an unrelated string: {err!r}")
+        assert "this tool cannot shrink them for you" not in err, (
+            "the refusal still denies that the tool can shrink the append-only "
+            f"sections. {hd.PRUNE_FLAG} (rule (q)) does exactly that. Say which "
+            "RUN cannot shrink them — this one — not which TOOL:\n" + err)
 
     # ---- criterion 2: a net-<=-0 delta LANDS, still over the ceiling --------
 

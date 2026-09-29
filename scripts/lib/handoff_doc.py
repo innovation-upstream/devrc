@@ -3563,10 +3563,16 @@ def size_ratchet_report(relpath: str, merged_text: str, base_text: str) -> str:
             "    1. shrink a REPLACE section in THIS delta. `State now`, `Next "
             "steps` and `How to verify` are rewritten wholesale, so what they "
             "no longer need to say costs nothing to drop.",
-            "    2. or MOVE what has closed out of the document first, in its "
+            "    2. or PRUNE what has closed out of the append-only sections: "
+            f"`{PRUNE_FLAG} <file> {PRUNE_COUNT_FLAG} <n>` removes lines you "
+            "name VERBATIM from `Open investigations`, `Findings` and "
+            "`Gotchas` — rule (q), the exit rule those sections used to lack. "
+            "It is its own run and never a side effect of this one, so prune "
+            "first, then re-run this update unchanged.",
+            "    3. or MOVE what has closed out of the document first, in its "
             "own commit, to the arc's archive file — then re-run this update "
             "unchanged. `Gotchas` and `Open investigations` APPEND here, so "
-            "this tool cannot shrink them for you.",
+            "THIS update cannot shrink them; remedy 2 is the run that can.",
             "  🔴 Do NOT satisfy this by DELETING an open investigation, a "
             "gotcha or a ruled-out theory. Eviction means MOVE, leaving a "
             "pointer: those sections exist so a future session does not repeat "
