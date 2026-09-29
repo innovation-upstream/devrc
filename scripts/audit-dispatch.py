@@ -846,12 +846,20 @@ _HEADER_PAYLOAD_PRESENT = re.compile(r"\bpayload=(\S*)")
 # reword away from two spellings only one of which any guard recognises.
 PAYLOAD_PLACEHOLDER = "<count>"
 
+# 🔴 READ TO THE START OF `audited=`, NOT AS ONE TOKEN: a disposition carries a
+# REASON and a reason has spaces, so `\S+` here would truncate every one of them
+# to its first word. The emitter writes this field immediately before `audited=`
+# (see `emit_claims_skeleton`'s FIFTH-FIELD note), which is what makes that
+# field's own name a usable boundary.
+_HEADER_DISPOSITIONS = re.compile(r"\bdispositions=(.*?)(?=\s+audited=|$)")
+
 # `payload` defaults to None so every existing four-argument construction — in
 # this module and in the test suites — keeps meaning "no payload field", which
-# is exactly what a legacy block carries.
+# is exactly what a legacy block carries. `dispositions` is appended last for
+# the same reason, and None means "this block records no round-0 disposition".
 ClaimsBlock = namedtuple(
-    "ClaimsBlock", "round_no audited_from audited_to items payload",
-    defaults=(None,),
+    "ClaimsBlock", "round_no audited_from audited_to items payload dispositions",
+    defaults=(None, None),
 )
 
 
@@ -1014,7 +1022,11 @@ def parse_claims_blocks(texts):
                     "backticks."
                 )
 
-            blocks.append(ClaimsBlock(int(r.group(1)), frm, to, items, payload))
+            d = _HEADER_DISPOSITIONS.search(header)
+            blocks.append(ClaimsBlock(
+                int(r.group(1)), frm, to, items, payload,
+                d.group(1).strip() if d else None,
+            ))
             i = close_at + 1
     return blocks, malformed
 
@@ -1145,6 +1157,69 @@ def round_one_anchor(blocks):
     # first rather than to whichever sha sorts lower.
     candidates.sort(key=lambda c: c[0])
     return candidates[0][1] if candidates else None
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND 0'S DELETION CANDIDATES — a verdict with NO READER until now.
+# --------------------------------------------------------------------------- #
+# MEASURED on `ZacxDev/naida-ai` #256: round 0 produced FIVE deletion candidates,
+# ZERO were deleted and TWO were GROWN — its #1 candidate went 67 -> 167 lines,
+# the file 626 -> 1040 — and nothing recorded that the deletion pass had been
+# INVERTED, because round 0's verdict is prose no later round reads. So round 0
+# emits a machine-readable block too and a later round's `dispositions=` field
+# answers it. A REPORT and no rc: the disposition is a human judgement, and a
+# refusal over it is a stop the operator cannot act on.
+ROUND_ZERO_FENCE = "audit-round-0"
+_R0_FENCE_OPEN = re.compile(r"^`{3,}" + ROUND_ZERO_FENCE + r"[^\n]*$", re.M)
+# `D<n>` then an em-dash or a hyphen — tolerant on the separator a human retypes,
+# strict on the id, which is what a disposition names. The verdict vocabulary is
+# CLOSED for `payload_from_header`'s reason: an unrecognised word is reported
+# unreadable, never counted, because scoring it is the flattering answer.
+_R0_ITEM = re.compile(r"^\s*(D\d+)\s*(?:—|-{1,2})\s*\S", re.M)
+_R0_FENCE_CLOSE = re.compile(r"^`{3,}\s*$", re.M)
+_DISPOSITION = re.compile(r"^(D\d+)=(kept|deleted)(?::(.*))?$")
+
+Disposition = namedtuple("Disposition", "cid verdict reason")
+
+
+def parse_round_zero_candidates(texts):
+    """-> (candidate ids, how many `audit-round-0` fences were seen).
+
+    BOTH halves, because "a fence carrying no readable `D<n>`" and "no fence at
+    all" are different facts: a malformed block to fix, versus a PR that never
+    ran round 0.
+    """
+    ids, fences = [], 0
+    for text in texts:
+        text = text or ""
+        for m in _R0_FENCE_OPEN.finditer(text):
+            fences += 1
+            # BOUNDED AT THE CLOSING FENCE: scanning on would read a `D1 — …`
+            # line of ordinary prose as a candidate, inflating the denominator
+            # every unrecorded count is reported against.
+            close = _R0_FENCE_CLOSE.search(text, m.end())
+            body = text[m.end():close.start() if close else len(text)]
+            for im in _R0_ITEM.finditer(body):
+                if im.group(1) not in ids:
+                    ids.append(im.group(1))
+    return tuple(ids), fences
+
+
+def parse_dispositions(raw):
+    """-> ({cid: Disposition}, [unreadable tokens]) over one `dispositions=` value."""
+    out, bad = {}, []
+    for tok in (raw or "").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        m = _DISPOSITION.match(tok)
+        if not m:
+            bad.append(tok)
+            continue
+        out[m.group(1)] = Disposition(
+            m.group(1), m.group(2), (m.group(3) or "").strip() or None
+        )
+    return out, bad
 
 
 # --------------------------------------------------------------------------- #
@@ -1822,6 +1897,83 @@ def unearned_ledger_summary(un):
 
 
 # --------------------------------------------------------------------------- #
+# 🔴 ROUND 0'S DISPOSITIONS — whether the deletion pass was ANSWERED.
+# --------------------------------------------------------------------------- #
+RoundZeroDispositions = namedtuple(
+    "RoundZeroDispositions",
+    "candidates recorded unrecorded reasonless unreadable reason",
+)
+
+
+def round_zero_dispositions(candidates, fences, blocks):
+    """-> `RoundZeroDispositions`, or None when this PR ran no round 0.
+
+    None and not a NOT MEASURED line for the no-fence case, deliberately: such a
+    PR has no deletion pass to answer, and a section firing on every one of them
+    is the permanently-red gate `claude/RULES.md` names. A fence that IS there
+    and carries nothing readable is a broken record, and gets the reason.
+    """
+    if not fences:
+        return None
+    if not candidates:
+        return RoundZeroDispositions((), (), (), (), (), (
+            f"{fences} `{ROUND_ZERO_FENCE}` block(s) were found and NOT ONE "
+            "carries a readable `D<n> — <what>` line, so there is no candidate "
+            "set to answer"
+        ))
+    seen, bad = {}, []
+    for b in blocks:
+        got, unreadable = parse_dispositions(b.dispositions)
+        seen.update(got)
+        bad += unreadable
+    recorded = tuple(c for c in candidates if c in seen)
+    unrecorded = tuple(c for c in candidates if c not in seen)
+    reasonless = tuple(
+        c for c in recorded
+        if seen[c].verdict == "kept" and not seen[c].reason
+    )
+    # 🔴 AN UNREADABLE TOKEN GOES BESIDE THE COUNT, NEVER INSTEAD OF IT AND NEVER
+    # SILENTLY: collapsing to NOT MEASURED discards the ids that ARE answered,
+    # and dropping the token counts a candidate as unanswered when somebody
+    # answered it and mistyped. Only a reading with NOTHING readable is a
+    # NOT MEASURED.
+    return RoundZeroDispositions(
+        tuple(candidates), recorded, unrecorded, reasonless, tuple(sorted(bad)),
+        (
+            f"{len(bad)} `dispositions=` token(s) this script cannot read "
+            "and none it can: " + ", ".join(sorted(bad))
+        ) if bad and not recorded else None,
+    )
+
+
+def round_zero_dispositions_summary(rz):
+    """-> the ONE line all surfaces print, or "" when this PR ran no round 0."""
+    if rz is None:
+        return ""
+    if rz.reason is not None:
+        return f"ROUND 0 DISPOSITIONS: NOT MEASURED ({rz.reason})"
+    line = (
+        f"ROUND 0 DISPOSITIONS: {len(rz.recorded)} recorded, "
+        f"{len(rz.unrecorded)} unrecorded"
+        + (f" ({', '.join(rz.unrecorded)})" if rz.unrecorded else "")
+    )
+    if rz.reasonless:
+        line += (
+            " — kept with NO reason: " + ", ".join(rz.reasonless)
+            + ". `kept` is a judgement and an unreasoned one is not recorded, "
+            "it is deferred."
+        )
+    if rz.unreadable:
+        line += (
+            " ⚠ UNREADABLE `dispositions=` token(s): "
+            + ", ".join(rz.unreadable)
+            + " — an id answered in a spelling nothing reads is counted "
+            "UNRECORDED above."
+        )
+    return line
+
+
+# --------------------------------------------------------------------------- #
 # 🔴 THE ATTRIBUTION GATE — the skill's stop condition, as a BRANCH.
 # --------------------------------------------------------------------------- #
 # `claude/skills/audit-pr/SKILL.md`: "Two consecutive rounds whose fixes changed
@@ -2029,7 +2181,7 @@ Facts = namedtuple(
     "worktree branch dirty prev_sha emit_from claims claims_round checklist "
     "ledger assembled_at claims_source head_check base_assumed "
     "base_assumed_reason repo_unknown_reason round_zero payload gate_override "
-    "unearned operator_asks unverified",
+    "unearned operator_asks unverified dispositions dispositions_arg",
     # `round_zero` is appended LAST and defaulted so the two existing
     # constructions — one here, one in the suite — keep working unchanged. It is
     # None for every round except 0, and None AT round 0 means the skill was
@@ -2046,20 +2198,34 @@ Facts = namedtuple(
     # Printing a section off a reading nobody made would be the reassuring zero
     # this module refuses everywhere else.
     #
-    # 🔴 `operator_asks` is appended last for the same compatibility reason, and
-    # its None means something DIFFERENT from every field above: not "nothing was
+    # 🔴 `operator_asks` is appended for the same compatibility reason, and its
+    # None means something DIFFERENT from every field above: not "nothing was
     # read" but "this round does not print the block at all" (every round except
     # 0). At round 0 it is ALWAYS a non-empty string, because
     # `_read_operator_asks` has no path that returns None — an absent block
     # restores the defect this whole field exists to prevent.
     #
-    # 🔴 `unverified` is appended last for the same compatibility reason and
-    # carries an `UnverifiedPayload`. None means this run computed no reading —
-    # which `render_unverified_payload` treats exactly like "every round
-    # measured": SILENT. Reporting a COULD NOT MEASURE off a reading nobody took
-    # would be the reassuring zero this module refuses everywhere else, one
-    # direction over.
-    defaults=(None, None, None, None, None, None),
+    # 🔴 THE LAST THREE FIELDS CAME FROM TWO INDEPENDENT CHANGES THAT LANDED
+    # TOGETHER (#1909's `unverified`, #1892's two `dispositions` fields), so
+    # neither can call itself "appended last" any more. What is unchanged is the
+    # reason they are appended AT ALL and defaulted: every construction that
+    # predates them — one here, one in the suite — keeps reading as it does.
+    #
+    # 🔴 `unverified` carries an `UnverifiedPayload`. None means this run
+    # computed no reading — which `render_unverified_payload` treats exactly
+    # like "every round measured": SILENT. Reporting a COULD NOT MEASURE off a
+    # reading nobody took would be the reassuring zero this module refuses
+    # everywhere else, one direction over.
+    #
+    # `dispositions` (a `RoundZeroDispositions`) carries the same meaning for
+    # None as `unearned`: this run never computed one, so the section is SILENT
+    # rather than printing a verdict off a reading nobody made.
+    # `dispositions_arg` is the RAW `--dispositions` value this run would WRITE,
+    # kept separate from the READING for `prev_sha`/`emit_from`'s reason: one is
+    # what this round records, the other is what the ladder already recorded,
+    # and collapsing two anchors into one field is the defect this module has
+    # already fixed once.
+    defaults=(None, None, None, None, None, None, None, None),
 )
 # 🔴 `repo_unknown_reason` — ROUND 13'S NINTH INSTANCE, AND THE THIRD IN THIS
 # EXACT FAMILY. `no_sha_reason` was `headRefOid`, `base_assumed_reason` was
@@ -5108,7 +5274,40 @@ def render_checklist(facts):
     return "\n".join(lines)
 
 
+def emit_round_zero_skeleton():
+    """A correctly-formed `audit-round-0` block — EMITTED, never described.
+
+    `emit_claims_skeleton`'s reason: the reader of this shape is
+    `parse_round_zero_candidates` and a hand-typed near-miss parses as nothing.
+    One line per DELETION CANDIDATE, the half of round 0 that had no reader.
+    """
+    return "\n".join([
+        f"```{ROUND_ZERO_FENCE}",
+        "D1 — <one DELETION CANDIDATE: what could go, in one line>",
+        "D2 — <one line, same rule>",
+        "```",
+    ])
+
+
 def render_output_contract(facts):
+    if facts.round_no == 0:
+        return "\n".join([
+            "## OUTPUT",
+            "",
+            "The round-0 verdict and the ledger line from the section above. "
+            "Then, **required**, this block — one numbered line per deletion "
+            "candidate, pasted into the PR comment verbatim:",
+            "",
+            emit_round_zero_skeleton(),
+            "",
+            "🔴 **It is the only part of round 0 anything later READS.** A later "
+            "round records what became of each candidate with `--emit-claims "
+            "--dispositions \"D1=kept:<why>,D2=deleted\"`, and the brief for "
+            "that round prints which ids are still unanswered. Prose here is "
+            "for the human; this block is for the ladder. Deleting nothing is a "
+            "legitimate answer — an EMPTY candidate list is not, unless you say "
+            "what you examined to get there.",
+        ])
     return "\n".join([
         "## OUTPUT",
         "",
@@ -5234,6 +5433,28 @@ def render_unearned_ledger(facts):
     return "\n".join(lines)
 
 
+def render_round_zero_dispositions(facts):
+    """Round 0's candidates, and whether this ladder ANSWERED them.
+
+    🔴 BESIDE THE LEDGER BECAUSE THAT IS WHERE THE PAYLOAD NUMBERS ARE. The
+    measured failure this answers is stated once, above `ROUND_ZERO_FENCE`.
+    """
+    line = round_zero_dispositions_summary(facts.dispositions)
+    if not line:
+        return ""
+    return "\n".join([
+        "## ROUND 0'S DELETION PASS — was it answered?",
+        "",
+        line,
+        "",
+        "🔴 **An unrecorded candidate is not one that was rejected — it is one "
+        "nobody answered**, and the measured failure is worse than silence: a "
+        "candidate can be INVERTED, i.e. the thing round 0 proposed deleting is "
+        "the thing a later round GREW. If any id above names code this round's "
+        "range touches, say whether it shrank, held or grew.",
+    ])
+
+
 def render_unverified_payload(facts):
     """The COULD-NOT-MEASURE report IN THE BRIEF — "" when every round measured.
 
@@ -5326,6 +5547,14 @@ def render_brief(facts):
         # the reader needs them in the same place, immediately after the section
         # that hands them the numbers.
         render_unverified_payload(facts),
+        # 🔴 AFTER BOTH PAYLOAD-CREDIBILITY SECTIONS, AND STILL BESIDE THE
+        # LEDGER, for the reason they are: THE LEDGER hands the auditor this
+        # round's churn, and this says which of round 0's deletion candidates
+        # that churn was meant to answer. It goes last of the three because the
+        # two above are about whether the NUMBERS can be believed at all, which
+        # the reader has to settle before being asked what they answered. Later
+        # in the document and the reader has already formed a view.
+        render_round_zero_dispositions(facts),
         render_gate_override(facts),
         # 🔴 THE PROSE DETERMINATION IS NOT HERE, AND ITS ABSENCE IS THE FIX.
         # It shipped here in this PR's first draft and round-0 finding F2 caught
@@ -5442,15 +5671,28 @@ def emit_claims_skeleton(facts, head_sha):
     # "reported" had meant stderr-only, and that is why ITS defect survived.
     # OUTSIDE the fence for the same mechanical reason — a non-numbered line
     # INSIDE the body is folded into the claim above it by `_items_from_body`.
+    #
+    # 🔴 IT IS A BULLET ABOVE THE FENCE, NOT A HEADER FIELD, AND THAT IS WHY IT
+    # DOES NOT INTERACT WITH `dispositions=` BELOW. The FIFTH-FIELD note governs
+    # what goes INSIDE the fence line; a line outside it is invisible to
+    # `_EMITTED_AUDITED` and to the round-trip comparison entirely.
     if facts.unverified is not None and facts.unverified.rounds:
         lines.append(
             f"  🔴 {UNVERIFIED_PAYLOAD_TAG} — "
             + unverified_payload_summary(facts.unverified)
         )
+    # 🔴 `dispositions=` GOES BEFORE `audited=`, NEVER AFTER — the FIFTH-FIELD
+    # note above states the mechanism: `_EMITTED_AUDITED` captures to END OF LINE
+    # on purpose, so a field after `audited=` makes the round trip compare two
+    # different quantities and REFUSE every emit.
+    dispositions = (
+        f"dispositions={facts.dispositions_arg} "
+        if facts.dispositions_arg else ""
+    )
     lines += [
         "",
         f"```audit-claims round={facts.round_no} payload={payload} "
-        f"audited={audited}",
+        f"{dispositions}audited={audited}",
         "1. <one line per thing this round's fixes CLAIM to have addressed — "
         "WHAT was claimed, never WHY it is correct>",
         "2. <one line, same rule>",
@@ -5983,6 +6225,13 @@ def build_parser():
     ap.add_argument("--check", metavar="FILE",
                     help="check an EXISTING brief file for missing invariant "
                          "clauses and exit; consults no PR and no git")
+    ap.add_argument("--dispositions", metavar="SPEC",
+                    help="what became of round 0's deletion candidates — "
+                         "`D1=kept:<why>,D2=deleted`. Written into the "
+                         "`--emit-claims` block as `dispositions=`, where a "
+                         "later round's brief reads it back and names the ids "
+                         "still unanswered. A `kept` with no reason is reported "
+                         "as one.")
     ap.add_argument("--emit-claims", action="store_true",
                     help="also print an audit-claims block skeleton to paste "
                          "into this round's PR comment")
@@ -6280,6 +6529,15 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             "--emit-claims prints, which this run does not pass. The flag "
             "changed NOTHING — no round's payload count was recorded, and the "
             "attribution gate reads that field.",
+            file=err_stream,
+        )
+
+    if args.dispositions and not args.emit_claims:
+        print(
+            "⚠ --dispositions is only ever written into the block "
+            "--emit-claims prints, which this run does not pass. The flag "
+            "changed NOTHING — round 0's deletion candidates are still "
+            "unanswered as far as the next round can tell.",
             file=err_stream,
         )
 
@@ -6731,6 +6989,16 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         )
         if args.round_no >= 2 and gate_rounds else {}
     )
+    # 🔴 ROUND 0'S DISPOSITIONS, read from the SAME comment texts. Silent on a PR
+    # that never posted a round-0 block — see `round_zero_dispositions`.
+    dispositions = None
+    if args.round_no >= 2:
+        candidates, fences = parse_round_zero_candidates(comment_texts)
+        dispositions = round_zero_dispositions(candidates, fences, blocks)
+        rz_line = round_zero_dispositions_summary(dispositions)
+        if rz_line:
+            print("⚠ " + rz_line, file=err_stream)
+
     # 🔴 THE FIRST OF THREE SURFACES FOR A ROUND THE GATE READ WITHOUT
     # MEASURING, AND THE OTHER TWO ARE WHY THERE ARE THREE. #1859 recorded that
     # "reported" had meant stderr-only and that this is precisely why ITS defect
@@ -6958,6 +7226,8 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         # each to re-derive them from `blocks` and `exec_churn` — a second copy
         # of the predicate, at the sites that have to agree with the gate.
         unverified=unverified,
+        dispositions=dispositions,
+        dispositions_arg=args.dispositions,
     )
 
     # 🔴 THE REFUSAL'S SCOPE IS THE BRIEF, AND ONLY THE BRIEF. A refused run

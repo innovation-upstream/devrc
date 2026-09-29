@@ -10035,6 +10035,25 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
 INVARIANT_GUARDS_AND_LEDGERS = frozenset({
+    # 🔴 THE ROUND-0 DISPOSITIONS GUARDS (the #256 round). ALL GUARDS, and the
+    # reason is stated at their definitions rather than here: the defect measured
+    # on `ZacxDev/naida-ai` #256 was not a WRONG answer from this script — it was
+    # a question nothing asked. At `6975b1b2` the new flag is `SystemExit: 2` out
+    # of argparse and the new section simply does not exist, so a red there is a
+    # claim about a feature's absence, which this module's header says is not
+    # evidence of anything.
+    #
+    # ⚠ ONE is a SILENT/NEGATIVE control whose whole claim is that nothing fires
+    # — a PR with no round-0 block. Its "nothing fired" assertion PASSES at the
+    # base, vacuously, because no section exists to fire; its red there is the
+    # AttributeError in its own positive control. Do not read its base red as
+    # evidence about the report. Evidence: mutants RZ1-RZ5.
+    "test_round_zero_output_contract_emits_a_block_its_own_parser_reads_back",
+    "test_the_round_zero_candidate_parser_stops_at_the_CLOSING_fence",
+    "test_the_dispositions_field_is_written_BEFORE_audited_and_reads_back",
+    "test_an_unanswered_round_zero_candidate_is_NAMED_in_the_delta_brief",
+    "test_a_kept_disposition_carrying_no_reason_is_reported_as_deferred",
+    "test_a_PR_with_no_round_zero_block_reports_NOTHING_about_dispositions",
     # 🔴 THE OPERATOR-ASKS GUARDS, AND THEY ARE GUARDS RATHER THAN REGRESSION
     # COVERAGE ON PURPOSE. At `62b516a4` the `operator_asks_reader` seam does not
     # exist, so every one of them is red there for a TypeError — an API error, not
@@ -13805,6 +13824,190 @@ def test_the_payload_field_the_gate_enforces_is_documented_in_the_skill():
     assert _norm_ws("the gate is advisory and may be skipped") not in _norm_ws(
         body
     )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND-0 DISPOSITIONS — whether the deletion pass was ANSWERED.
+# --------------------------------------------------------------------------- #
+# MEASURED on `ZacxDev/naida-ai` #256: round 0 raised FIVE deletion candidates.
+# ZERO were deleted and TWO were GROWN — its #1 candidate went 67 -> 167 lines,
+# the file 626 -> 1040 — and nothing recorded that the deletion pass had been
+# INVERTED, because round 0's verdict is prose no later round reads.
+#
+# 🔴 EVERY TEST BELOW IS AN INVARIANT GUARD, AND THE REASON IS NOT "the symbol
+# is missing". It is that the defect measured on #256 was not in this script at
+# all: nothing here computed a WRONG answer, the question was simply never
+# asked. A red at `6975b1b2` is therefore `SystemExit: 2` out of argparse (the
+# new flag) or a section that does not exist — a claim about a feature's
+# absence, which this module's own header says is not evidence of anything. Each
+# one's evidence is its in-test control plus the mutants named in the battery.
+R0_BLOCK = (
+    "Round 0 report.\n\n"
+    "```audit-round-0\n"
+    "D1 — delete the hand-rolled tokenizer in push.test.mjs\n"
+    "D2 — cut the nine added CLAUDE.md lines to one line plus a pointer\n"
+    "D3 — drop the second progress spinner\n"
+    "```\n\n"
+    "D9 — this line is PROSE below the block and must not count.\n"
+)
+
+
+def two_chained_rounds(older=2, newer=3):
+    """Two blocks whose ranges chain end-to-end, as a healthy ladder's do."""
+    return [
+        payload_block(older, PAYLOAD_NONZERO_A, frm="aaaa1111", to="bbbb2222"),
+        payload_block(newer, PAYLOAD_NONZERO_B, frm="bbbb2222", to="cccc3333"),
+    ]
+
+
+def test_round_zero_output_contract_emits_a_block_its_own_parser_reads_back():
+    """🔴 INVARIANT GUARD, and it is a ROUND TRIP rather than a spelling pin.
+
+    The reader of this shape is `parse_round_zero_candidates`. A skeleton that
+    describes the format instead of being it — or that drifts from the parser by
+    one character — leaves round 0's deletion pass with no reader again, silently,
+    which is the state measured on #256.
+    """
+    rc, out, err = run_main(["900", "--round", "0"])
+    assert rc == 0, f"rc={rc}\n{err}"
+    assert f"```{ad.ROUND_ZERO_FENCE}" in out, out
+    ids, fences = ad.parse_round_zero_candidates([out])
+    assert fences == 1, f"fences={fences}\n{out}"
+    assert ids == ("D1", "D2"), (
+        f"the block round 0 is told to post parses back as {ids!r} — this "
+        "script's own parser cannot read the skeleton it printed"
+    )
+    assert "required" in out, (
+        "the OUTPUT section mentions the block without requiring it"
+    )
+
+
+def test_the_round_zero_candidate_parser_stops_at_the_CLOSING_fence():
+    """🔴 INVARIANT GUARD. A `D<n>` line of prose BELOW the block is not a candidate.
+
+    It is the denominator of every "N unrecorded" count, so an over-wide read
+    reports candidates nobody raised and can never be answered — a permanently
+    non-zero unrecorded count, which is the same permanently-red shape.
+    """
+    ids, fences = ad.parse_round_zero_candidates([R0_BLOCK])
+    assert (ids, fences) == (("D1", "D2", "D3"), 1), f"{ids!r} {fences}"
+    assert "D9" not in ids, (
+        "a `D9 —` line of ordinary prose after the closing fence was read as a "
+        "deletion candidate"
+    )
+
+
+def test_the_dispositions_field_is_written_BEFORE_audited_and_reads_back():
+    """🔴 INVARIANT GUARD, and the ORDER is the load-bearing half.
+
+    `_EMITTED_AUDITED` captures everything after `audited=` TO END OF LINE on
+    purpose. A field written AFTER it makes the emit round trip compare
+    `A..B dispositions=…` against a reconstruction of `A..B` and REFUSE every
+    emit — correctly by its own rule and uselessly. So this asserts the order in
+    the printed header AND that the emit was not refused AND that both fields
+    come back through this script's own parser.
+    """
+    spec = "D1=kept:the tokenizer is the unit under test,D2=deleted"
+    rc, out, err = run_main(
+        ["900", "--round", "4", "--emit-claims", "--audited", "cccc3333",
+         "--payload", str(PAYLOAD_NONZERO_C), "--dispositions", spec],
+        comments=two_chained_rounds(),
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    header = [ln for ln in out.splitlines() if ln.startswith("```audit-claims")]
+    assert len(header) == 1, out
+    assert header[0].index("dispositions=") < header[0].index("audited="), (
+        "`dispositions=` was written AFTER `audited=`, which makes the emit "
+        f"round trip refuse every block:\n{header[0]}"
+    )
+    blocks, malformed = ad.parse_claims_blocks([out])
+    assert len(blocks) == 1 and not malformed, f"{blocks} {malformed}"
+    assert blocks[0].dispositions == spec, (
+        f"the field reads back as {blocks[0].dispositions!r}, not {spec!r} — a "
+        "reason carries SPACES, so a one-token reader truncates it"
+    )
+    assert blocks[0].payload == PAYLOAD_NONZERO_C, (
+        "the new field displaced the payload count the gate reads"
+    )
+    got, bad = ad.parse_dispositions(blocks[0].dispositions)
+    assert not bad and set(got) == {"D1", "D2"}, f"{got} {bad}"
+    assert got["D2"].verdict == "deleted" and got["D2"].reason is None
+
+
+def test_an_unanswered_round_zero_candidate_is_NAMED_in_the_delta_brief():
+    """🔴 INVARIANT GUARD. #256's five candidates had no reader; these do.
+
+    The ids are asserted by NAME, not merely the count: "2 unrecorded" tells the
+    auditor a number, and what makes it actionable is which ones.
+    """
+    # 🔴 INSERTED IMMEDIATELY BEFORE ` audited=`, which is where the emitter puts
+    # it and where its reader's boundary is. Put it anywhere else in the header
+    # and the field swallows whatever follows it up to `audited=` — measured
+    # while writing this test, with `payload=113` landing inside the last token.
+    answered = payload_block(
+        3, PAYLOAD_NONZERO_B, frm="bbbb2222", to="cccc3333",
+    ).replace(" audited=", " dispositions=D1=deleted audited=")
+    rc, out, err = run_main(
+        ["900", "--round", "4"],
+        comments=[R0_BLOCK, payload_block(2, PAYLOAD_NONZERO_A), answered],
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    want = "ROUND 0 DISPOSITIONS: 1 recorded, 2 unrecorded (D2, D3)"
+    assert want in out, out
+    assert want in err, err
+    assert "INVERTED" in out, (
+        "the section names the unanswered ids but not the measured failure mode "
+        "— that a candidate can be GROWN rather than merely kept:\n" + out
+    )
+
+
+def test_a_kept_disposition_carrying_no_reason_is_reported_as_deferred():
+    """🔴 INVARIANT GUARD. `kept` is a judgement; an unreasoned one is deferral.
+
+    `deleted` needs no reason — the diff is the reason. `kept` is the verdict
+    that inverted the deletion pass on #256, so it is the one that must carry a
+    why, and the report names the ids rather than only counting them.
+    """
+    answered = payload_block(
+        3, PAYLOAD_NONZERO_B, frm="bbbb2222", to="cccc3333",
+    ).replace(
+        " audited=",
+        " dispositions=D1=kept,D2=kept:load-bearing,D3=deleted audited=",
+    )
+    rc, out, err = run_main(
+        ["900", "--round", "4"],
+        comments=[R0_BLOCK, payload_block(2, PAYLOAD_NONZERO_A), answered],
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    assert "3 recorded, 0 unrecorded" in out, out
+    # 🔴 THE WHOLE ID LIST, TERMINATED. `"… NO reason: D1"` alone is a PREFIX of
+    # `"… NO reason: D1, D3"`, so it passes for a reading that also flags every
+    # `deleted` — measured: that mutant SURVIVED the prefix spelling.
+    assert "kept with NO reason: D1. `kept` is a judgement" in out, out
+    tail = out.split("kept with NO reason:")[1].split("\n")[0]
+    assert "D2" not in tail and "D3" not in tail, (
+        "a disposition that needs no reason — a `kept` that HAS one, or a "
+        "`deleted`, whose reason is the diff — was reported as reasonless: "
+        + tail
+    )
+
+
+def test_a_PR_with_no_round_zero_block_reports_NOTHING_about_dispositions():
+    """🔴 INVARIANT GUARD — the SILENT control, for the same reason as above.
+
+    Most PRs have no round-0 block. A NOT MEASURED line on every one of them is
+    a section every reader learns to skip, and it would also be wrong: a PR that
+    never ran round 0 has no deletion pass to answer.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "4"], comments=two_chained_rounds(),
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    assert "ROUND 0 DISPOSITIONS" not in out + err, out + err
+    # POSITIVE CONTROL: the same reading DOES speak when a fence exists but
+    # carries nothing readable, which is a broken record rather than no record.
+    rz = ad.round_zero_dispositions((), 1, [])
+    assert "NOT MEASURED" in ad.round_zero_dispositions_summary(rz), rz
 
 
 # ---------------------------------------------------------------------------

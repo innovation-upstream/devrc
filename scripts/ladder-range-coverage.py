@@ -530,11 +530,15 @@ def find_carriers(ad, runner, repo, limit=300, state="all"):
     the bodies, so the fence test is local. Asking per PR is ~300 calls against a
     secondary rate limit and was the reason this stayed manual.
 
-    ⚠ THE BLIND SPOT IS INHERITED AND LOAD-BEARING: `gh` does not return REVIEW
-    comments here, so a block posted as a review is invisible — the same gap
-    `audit-dispatch.py` warns about when it cannot find a block a human can see.
-    A carrier count from this is therefore a FLOOR, never a census, and the note
-    it returns says so in the output rather than in this docstring alone.
+    ⚠ THE BLIND SPOT IS INHERITED AND STILL LOAD-BEARING *HERE*: `gh` does not
+    return REVIEW comments, so a block posted as a review is invisible to this
+    enumerator. A carrier count from this is therefore a FLOOR, never a census,
+    and the note it returns says so in the output rather than in this docstring
+    alone. 🔴 **It is CLOSED on the named-PR path only** — `review_surface_note`
+    consults `repos/<o>/<r>/pulls/<n>/comments` and reports `REVIEW-ONLY` when a
+    block is there and not on the issue comments. It is deliberately NOT called
+    from here: that would be one `gh` call per scanned PR against the paragraph
+    above. So a carrier this scan misses is still missed.
     """
     # `state` is requested for the SECOND consumer, `ladder-stop-rationale.py`:
     # a ladder on an OPEN PR has not stopped, and classifying why it stopped
@@ -578,6 +582,47 @@ def find_carriers(ad, runner, repo, limit=300, state="all"):
                  "examined at all — raise --limit before reading this as the "
                  "whole repo.")
     return carriers, note
+
+
+REVIEW_ONLY_LABEL = "REVIEW-ONLY"
+
+
+def review_surface_note(ad, runner, repo, pr, comment_texts):
+    """-> a one-line `REVIEW-ONLY` note, or "" when there is nothing to say.
+
+    🔴 CLOSES THE BLIND SPOT `find_carriers` DECLARES. `gh pr list/view --json
+    comments` returns ISSUE comments only, so a block posted as a REVIEW comment
+    is visible to a human on the PR and invisible to every instrument in this
+    family — including this script's own anchor. "Absent" and "posted where
+    nothing reads it" need OPPOSITE remedies: write a block, versus repost the
+    one that exists as an ISSUE comment. So they are different outcomes.
+
+    ⚠ FAIL-OPEN AND SILENT ON THE HEALTHY PATH. Consulted only when the issue
+    surface carries NO fence — one extra `gh` call on the state where this
+    script would otherwise report a ladder ABSENT. A failed or unparseable read
+    returns "": an unreadable second surface may not become a verdict about the
+    first, and it may not break a run that was measuring something else.
+    """
+    if _has_claims_fence(ad, comment_texts):
+        return ""
+    slug = repo or "{owner}/{repo}"
+    rc, out, _err = runner(["gh", "api", f"repos/{slug}/pulls/{pr}/comments"])
+    if rc != 0:
+        return ""
+    try:
+        got = json.loads(out)
+    except json.JSONDecodeError:
+        return ""
+    bodies = [c.get("body") or "" for c in got if isinstance(c, dict)]
+    if not _has_claims_fence(ad, bodies):
+        return ""
+    return (
+        f"🔴 {REVIEW_ONLY_LABEL} #{pr}: an `audit-claims` block exists on the "
+        "REVIEW-comment surface and NOT on the issue comments, so every reader "
+        "in this family — this script included — sees a ladder with no record. "
+        "It is not absent. Repost it as an ISSUE comment "
+        f"(`gh pr comment {pr}`) and re-run."
+    )
 
 
 def facts_from_gh(runner, repo, pr):
@@ -1049,7 +1094,14 @@ def main(argv=None, runner=real_runner, out_stream=sys.stdout,
         for pr in args.prs:
             if not args.no_fetch:
                 notes.append(fetch_pr_ref(runner, args.repo_dir, pr))
-            facts_list.append(facts_from_gh(runner, args.repo, pr))
+            f = facts_from_gh(runner, args.repo, pr)
+            facts_list.append(f)
+            # 🔴 ONLY ON THE NAMED-PR PATH. `--find-carriers` is ONE `gh` call
+            # by design (see its docstring); asking the review endpoint per PR
+            # would be ~300 more, so its FLOOR caveat stands unchanged there.
+            rn = review_surface_note(ad, runner, args.repo, pr, f["comments"])
+            if rn:
+                notes.append(rn)
 
     ladders = []
     for f in facts_list:

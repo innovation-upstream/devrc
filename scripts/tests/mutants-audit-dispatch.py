@@ -80,9 +80,26 @@ TEST_REL = "scripts/tests/test_audit_dispatch.py"
 HARNESS_REL = "scripts/tests/mutants-audit-dispatch.py"
 # Non-stdlib modules `TEST_REL` imports at module scope. See the copy loop in
 # `main()` for why they have to be in the sandbox at all.
+# 🔴 AND `scripts/lib/operator_asks.py` IS ONE OF THEM NOW. MEASURED on the merge
+# of `feat/audit-pr-round0-operator-asks` (#1887) with this branch: without it the
+# BASELINE goes red on eight `operator_asks` tests, `main()` returns 2, and every
+# row below is refused — "the unmutated tree is already failing", which reads as a
+# broken tree rather than an incomplete copy list. The pattern the comment above
+# describes is exactly this one recurring: a new module the TEST module reaches
+# has to be named here, and nothing warns when it is not.
 TESTLIB_RELS = (
     "scripts/testlib/__init__.py",
     "scripts/testlib/hermetic_git.py",
+    # ⚠ AND ITS OWN THREE IMPORTS, which is the part a one-line fix misses:
+    # `operator_asks` imports `handoff_arc`, `session_trailer` and
+    # `transcript_search`, and `handoff_arc` imports `session_trailer` again. A
+    # sandbox with only the first gets `No module named 'handoff_arc'`, which the
+    # reader turns into a COULD NOT LOAD block — so the baseline is red with a
+    # plausible-looking message rather than an import error.
+    "scripts/lib/operator_asks.py",
+    "scripts/lib/handoff_arc.py",
+    "scripts/lib/session_trailer.py",
+    "scripts/lib/transcript_search.py",
 )
 # 🔴 A FIFTH INPUT, AND THE BATTERY COULD NOT RUN AT ALL WITHOUT IT. The script
 # does `sys.path.insert(… / "lib")` and imports `operator_asks` inside a
@@ -167,6 +184,11 @@ SKILL_RELS = (
 # DOWNWARD, loosening the collapse floor by one on the strength of a sentence
 # nobody re-ran. Read the CONSTANT, re-derive from a COUNT, and fix the prose to
 # match — never the other way round.
+#
+# 🔴 THE #256 ROUND RAISED IT 187 -> 201, at m = 211 — COUNTED from a green run
+# of the module (`211 passed`) and put through the same formula,
+# `211 - min(50, max(1, 211 // 20))` = 211 - 10 = 201. Not derived by adding
+# this round's fifteen new tests to the last sentence.
 #
 # 🔴 ROUND 16 RAISED IT AGAIN, 116 -> 120, at m = 126 — COUNTED from a green run
 # of the module (`126 passed`), `126 - min(50, max(1, 126 // 20))` = 126 - 6 =
@@ -267,15 +289,46 @@ SKILL_RELS = (
 # clean-stderr control). ⚠ `197 + 2` happens to give 199 here too — the agreement
 # is a coincidence, not a method, and the paragraph above records the round where
 # that arithmetic would have been one too high.
-# 🔴 RAISED AGAIN 2026-09-28, 199 -> 220, at m = 231 — COUNTED the same way, from
-# a `--collect-only` on the module (`231 tests collected`) through the same
-# formula, `231 - min(50, max(1, 231 // 20))` = 231 - 11 = 220. Twenty-two node
-# ids were added by `fix/unresolvable-range-endpoint` (nine functions, one of
-# them parametrized fourteen ways). The number is the formula's output on a
-# counted m, NOT 199 + 22 — which is 221, one too high, and would have refused
-# every run. That is the arithmetic the paragraphs above record going wrong four
-# times, and it goes wrong again here if you add instead of counting.
-MIN_TESTS = 220
+# 🔴 RAISED by the #256 round (round-0 dispositions), 199 -> 205, at m = 215 —
+# COUNTED the same way, from a green run of the MERGED module (`215 passed`)
+# through the same formula, `215 - min(50, max(1, 215 // 20))` = 215 - 10 = 205.
+# ⚠ COUNTED ON THE MERGE, not on the branch: `origin/main` moved under this PR
+# (#1887 landed, touching the same four files), and a floor derived before that
+# merge would have been 12 too low.
+# 🔴 AND IT WENT DOWN BEFORE IT WENT UP — the first draft of this round landed at
+# 213 off m = 224, then `--check-record` and the SCOPE EXPANSION reading were
+# DELETED and their nine node ids with them. **The floor is a function of the
+# CURRENT measurement, so a deletion lowers it and that is correct** — carrying
+# 213 forward would have made the battery refuse every mutant with "the unmutated
+# tree is already failing", which reads as a broken tree. Re-COUNT after a
+# deletion exactly as after an addition; never keep the high-water mark.
+# 🔴 RAISED AGAIN 2026-09-28 on `origin/main`, 199 -> 220, at m = 231 — COUNTED
+# the same way, from a `--collect-only` on the module (`231 tests collected`)
+# through the same formula, `231 - min(50, max(1, 231 // 20))` = 231 - 11 = 220.
+# Twenty-two node ids were added by `fix/unresolvable-range-endpoint` (nine
+# functions, one of them parametrized fourteen ways). The number is the formula's
+# output on a counted m, NOT 199 + 22 — which is 221, one too high, and would
+# have refused every run. That is the arithmetic the paragraphs above record
+# going wrong four times, and it goes wrong again here if you add instead of
+# counting.
+# 🔴 RE-COUNTED 2026-09-28 ON THE MERGE of that change with the #256 round,
+# 220 -> 226, at m = 237. The two branches each moved this literal — the #256
+# round to 205 off m = 215, `fix/unresolvable-range-endpoint` to 220 off
+# m = 231 — and NEITHER is the merged tree's answer, because each counted a
+# module the other's node ids were missing from. Counted on the MERGED module
+# with `--collect-only` (`237 tests collected`) through the same formula,
+# `237 - min(50, max(1, 237 // 20))` = 237 - 11 = 226.
+# 🔴 AND THE NUMBER WAS COPIED FROM THE RUNNER, NOT COMPUTED BY HAND —
+# `test_the_dispatch_batterys_floor_is_re_derived_from_its_target_module`
+# prints `Set MIN_TESTS = 226` when the literal disagrees with the count, which
+# was WATCHED go red at a deliberately wrong floor before this value was
+# written. The traps this resolution had to refuse are the arithmetic ones the
+# paragraphs above record: the merged floor is not max(205, 220), not 205 + 22,
+# and not 220 + 6 (which is 226 only by coincidence — the agreement is not a
+# method). ⚠ `rerere` is enabled in this clone; the merge recorded a NEW
+# preimage rather than replaying one, so no stored resolution was accepted.
+MIN_TESTS = 226
+
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
 # green. See the module docstring — the clause ledger pins whole normalised
@@ -3123,6 +3176,52 @@ def the_unearned_heading_is_reworded(t):
     )
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 THE #256 ROUND — ROUND-0 DISPOSITIONS (RZ).
+# --------------------------------------------------------------------------- #
+# Every row below mutates the NARROWEST expression that can be wrong.
+def rz_the_candidate_scan_is_unbounded(t):
+    """Without the closing-fence bound, `D9 —` prose becomes a candidate."""
+    return _swap(
+        t,
+        "            close = _R0_FENCE_CLOSE.search(text, m.end())\n",
+        "            close = None\n",
+    )
+
+
+def rz_dispositions_is_written_after_audited(t):
+    return _swap(
+        t,
+        '        f"```audit-claims round={facts.round_no} payload={payload} "\n'
+        '        f"{dispositions}audited={audited}",\n',
+        '        f"```audit-claims round={facts.round_no} payload={payload} "\n'
+        '        f"audited={audited} {dispositions}",\n',
+    )
+
+
+def rz_reasonless_drops_the_kept_condition(t):
+    """`deleted` needs no reason — the diff is the reason. Only `kept` does."""
+    return _swap(
+        t,
+        '        if seen[c].verdict == "kept" and not seen[c].reason\n',
+        "        if not seen[c].reason\n",
+    )
+
+
+def rz_the_round_zero_block_becomes_a_DESCRIPTION(t):
+    return _swap(
+        t,
+        "            emit_round_zero_skeleton(),\n",
+        '            "    a fenced `audit-round-0` block, one line per '
+        'candidate",\n',
+    )
+
+
+def rz_a_PR_with_no_round_zero_block_is_reported_anyway(t):
+    return _swap(t, "    if not fences:\n", "    if not fences and False:\n")
+
+
+# --------------------------------------------------------------------------- #
 # 🔴 THE UNVERIFIED-PAYLOAD REPORT AND ITS REFUSAL (UV-series).
 #
 # A round the gate READ but could not MEASURE fell back to the operator's stated
@@ -4916,6 +5015,30 @@ ROWS = [
     ("U14 `*` becomes a comment prefix",
      {"test_the_classifier_reads_a_changed_line_the_way_git_wrote_it"},
      an_asterisk_becomes_a_comment_prefix),
+    # 🔴 THE #256 ROUND. See the block above ROWS for why each mutation is
+    # the narrowest expression rather than the whole branch.
+    # 🔴 THREE KILLERS, MEASURED, and the extra two are the point of the bound:
+    # `R0_BLOCK`'s trailing `D9 —` line of prose becomes a FOURTH candidate, so
+    # both disposition briefs report an unrecorded id nobody raised. That is the
+    # inflated denominator the bound exists to prevent, observed rather than
+    # asserted.
+    ("RZ1 the candidate scan is unbounded",
+     {"test_the_round_zero_candidate_parser_stops_at_the_CLOSING_fence",
+      "test_an_unanswered_round_zero_candidate_is_NAMED_in_the_delta_brief",
+      "test_a_kept_disposition_carrying_no_reason_is_reported_as_deferred"},
+     rz_the_candidate_scan_is_unbounded),
+    ("RZ2 `dispositions=` written AFTER `audited=`",
+     {"test_the_dispositions_field_is_written_BEFORE_audited_and_reads_back"},
+     rz_dispositions_is_written_after_audited),
+    ("RZ3 reasonless drops the `kept` condition",
+     {"test_a_kept_disposition_carrying_no_reason_is_reported_as_deferred"},
+     rz_reasonless_drops_the_kept_condition),
+    ("RZ4 round 0's block becomes a DESCRIPTION",
+     {"test_round_zero_output_contract_emits_a_block_its_own_parser_reads_back"},
+     rz_the_round_zero_block_becomes_a_DESCRIPTION),
+    ("RZ5 a PR with no round-0 block is reported anyway",
+     {"test_a_PR_with_no_round_zero_block_reports_NOTHING_about_dispositions"},
+     rz_a_PR_with_no_round_zero_block_is_reported_anyway),
 ]
 
 
@@ -5076,6 +5199,8 @@ def main() -> int:
         # floor check below catches it, and this comment is where to look.
         (root / "scripts" / "testlib").mkdir(parents=True, exist_ok=True)
         for rel in TESTLIB_RELS:
+            # Per-entry, because the tuple now spans more than one directory.
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(REPO / rel, root / rel)
         # The script's own `sys.path.insert(… / "lib")` target. See `LIB_RELS`:
         # its import is soft, so a missing module here surfaces as eight round-0

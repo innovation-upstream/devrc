@@ -195,6 +195,12 @@ cannot license skipping a round. Every stop rule below is unchanged by it.
 **Ledger:** `round 0 · requirements: N (unattributed: U) · deletion candidates: D`. Deleting
 nothing at all is reportable — say what you examined to get there.
 
+**Post the deletion candidates as a MACHINE-READABLE block as well** — `--round 0`'s OUTPUT
+section emits the skeleton and states the contract; a later round answers it with
+`--emit-claims --dispositions "D1=kept:<why>,D2=deleted"`. Evidence for why:
+`~/.claude/skills/audit-pr/reference/round-ladder-evidence.md` → "round 0's deletion pass had
+no reader".
+
 ## THE CHECKLIST — the nine axes (runs AFTER round 0)
 
 <!-- 🔴 LOAD-BEARING HEADING, NOT NAVIGATION. `_read_round_zero` in
