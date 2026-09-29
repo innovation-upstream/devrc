@@ -1502,7 +1502,11 @@ class TestRuleFDidNotMoveTheExitCodes:
         # 13 -> 14, 2026-09-25: rule (p) adds `EXIT_SIZE_RATCHET = 14`. Same
         # reading again — the injectivity loop ran FIRST and passed, so this is
         # a genuinely new code rather than a collision wearing a count failure.
-        assert len(codes) == 14, f"the EXIT_* constant set changed: {codes}"
+        # 14 -> 15, 2026-09-28: rule (q) adds `EXIT_PRUNE_REFUSED = 15`. Same
+        # reading once more — the injectivity loop above ran FIRST and passed,
+        # so this is a genuinely new code and not the #962/#1046 collision shape
+        # wearing a count failure.
+        assert len(codes) == 15, f"the EXIT_* constant set changed: {codes}"
 
     def test_the_exit_code_constants_did_not_move(self) -> None:
         """Their VALUES, not just their names — a caller reads the number."""
@@ -1529,6 +1533,10 @@ class TestRuleFDidNotMoveTheExitCodes:
         # legend quotes the literal 14, and an unpinned value moves while the
         # prose that quotes it stays behind.
         assert hd.EXIT_SIZE_RATCHET == 14
+        # Rule (q)'s code, pinned for the identical reason — and this one is in
+        # the pair loop below as well, so the skill's spelling of it is checked
+        # against THIS constant rather than against another string.
+        assert hd.EXIT_PRUNE_REFUSED == 15
 
     def test_the_prose_quotes_the_CONSTANT_not_a_stale_literal(self) -> None:
         """🔴 PROSE AGAINST THE CONSTANT, not prose against prose.
@@ -1562,6 +1570,12 @@ class TestRuleFDidNotMoveTheExitCodes:
             ("dated-topic", hd.EXIT_DOC_PER_EFFORT, "{}"),
             ("new-doc", hd.EXIT_DOC_PER_EFFORT, "{}"),
             ("unforced", hd.EXIT_UNFORCED, "{}"),
+            # Rule (q). Spelled WITH the `status=` prefix in the step-5 legend
+            # specifically so it can join this loop — the newer rows (10-14) use
+            # the bare form and are therefore pinned only by the derived
+            # `test_every_exit_code_the_module_can_return_is_documented`, which
+            # checks the NAME is present and says nothing about the number.
+            ("prune-refused", hd.EXIT_PRUNE_REFUSED, "{}"),
         ):
             want = f"`status={status}` ({form.format(const)})"
             assert want in doc, (
@@ -9913,3 +9927,1092 @@ def test_the_approval_banner_CARRIES_the_streak(repo: Path) -> None:
         "the operator taking the opt-in a fourth time is shown the same banner "
         f"as the first time. Got:\n{note}"
     )
+
+
+# --------------------------------------------------------------------------
+# rule (q): a PRUNE removes lines the caller NAMED
+#
+# 🔴 THE GAP. Rule (c) makes three sections append-only and rule (p) refuses to
+# GROW a doc already over its ceiling, so a document could reach a state where
+# the only sanctioned writer could not write at all. The remedy reached for then
+# is a hand `Edit` of the committed doc, which bypasses every gate in the module
+# at once — and one such edit shipped a ranked list that misrepresented the
+# state of the work, because nothing checked it. So this rule is the EXIT rule,
+# with the entry rules' posture: explicit, two-run, population-asserting, and
+# unable to touch what other tooling parses.
+#
+# 🔴 HOW THESE WERE WATCHED TO FAIL, AND WHY IT IS NOT THE RED-AT-BASE MATRIX
+# THE REST OF THIS FILE CARRIES. A whole-file run against `8c94b4c8` — the commit
+# before rule (q) — is NOT AVAILABLE and no such number is quoted here: this block
+# reads `hd.PRUNE_MARKER_*`, `hd.PRUNE_MARKERS` and `hd.LOAD_BEARING_FIELDS` at
+# class-body and decorator scope, so at base the MODULE fails to import and the
+# file errors with 0 tests collected. That is an absence of measurement, not a
+# measurement, and writing one down would be the fabricated figure this repo's
+# own comments keep having to retract.
+#
+# What WAS measured, 2026-09-28, is a 16-mutant battery run under
+# `PYTHONDONTWRITEBYTECODE=1` (a same-length edit in the same whole second is
+# invisible to CPython's mtime+size cache and scores a live mutant SURVIVED).
+# Each mutant breaks ONE guard and the run requires the NAMED test to fail
+# carrying THAT guard's own message. All 16 killed. The three that matter for
+# reading these tests:
+#
+#   * `positive-control-marker-rename` — renaming `PRUNE_MARKER_ABSENT` to
+#     `[gone]`. 🔴 IT SURVIVED THE FIRST RUN, because the marker ledger and the
+#     per-test assertions both read the CONSTANT, so a rename renames both sides.
+#     Only the literal pin in `TestThePruneRuleReachesTheSkill` can see it — the
+#     same reason `test_every_refusal_MARKER_the_module_prints_reaches_the_skill`
+#     exists. The first battery's `-k` filter did not include that test, which is
+#     the wrong-regex-flavour failure `claude/RULES.md` names: a harness defect
+#     reported as a SURVIVED mutant.
+#   * `MISATTRIBUTION` — the load-bearing refusal made to print the
+#     `[replace section]` marker instead. rc stays 15, so an rc-only assertion
+#     passes; the marker assertion is the only thing that kills it. This is why
+#     every arm below is checked on its MARKER and not on the exit code: all
+#     eight causes return 15.
+#   * `load-bearing-pass1-deleted` — 🔴 AND THIS ORDER WAS A REAL DEFECT, NOT A
+#     HYPOTHETICAL. The load-bearing check first sat in pass 2, where
+#     `[replace section]` preempted it for three of the four guarded fields, so
+#     the refusal told the author to "rewrite the section with --update" about a
+#     field that may not be removed at all. rc was 15 either way. The marker
+#     assertions caught it on their first run.
+# --------------------------------------------------------------------------
+
+#: A base document shaped for rule (q), and SMALL enough to pin literally.
+#:
+#: 🔴 IT CARRIES THINGS THE OTHER FIXTURES DELIBERATELY DO NOT — `as-of:` stamps
+#: on both investigation blocks, a `forcing:`-tagged rank, and three distinct
+#: Gotchas bullets. `BASE_DOC`'s blocks are deliberately UNSTAMPED (see the
+#: comment on `PRIOR_FINDING_A`), so reusing it would leave the `as-of:` guard
+#: and its whole-block exception — the two halves that decide whether a resolved
+#: investigation can ever be evicted — untested.
+PRUNE_BASE_DOC = """# Handoff: sample-topic — 2026-09-01
+
+## Goal
+Make the sample subsystem stop dropping work under load.
+- closing-condition: check — `python3 tools/queue_probe.py --for 240` reports 30/s
+
+## State now
+- Branch / PR: `feat/sample` / none
+
+## Open investigations — live diagnosis state
+### the widget queue drains at 3/s
+- as-of: 2026-09-01
+- **Observed (with values):** depth 41,022 after 240s.
+
+### the retry budget is consumed early
+- as-of: 2026-09-02
+- **Observed (with values):** `x-retry-remaining: 0` on the FIRST response.
+
+## Next steps (ranked)
+1. Watch the drain rate for a day. forcing: gate — the load soak blocks the release
+
+## Gotchas / decisions / dead-ends
+- Bumping the pool size did nothing; the ceiling is not connections.
+- MEASURED 2026-08-01: the shard map was stale in three of nine replicas.
+- The queue-depth grafana row was tidied away; nothing reads it now.
+
+## How to verify
+`python3 tools/queue_probe.py --for 240`
+"""
+
+#: The line every happy-path test removes. In `Gotchas`, unique, no guarded
+#: field, and NOT flagged by rule (f) — `test_the_prune_fixture_preconditions`
+#: asserts each of those, because a fixture that quietly stopped satisfying one
+#: would move which branch the test exercises without failing.
+PRUNE_PLAIN_LINE = (
+    "- Bumping the pool size did nothing; the ceiling is not connections."
+)
+#: A second Gotchas line that rule (f)'s predicate DOES flag, so the disclosure's
+#: durable-count branch is driven by a real signal rather than by a string chosen
+#: to look durable.
+PRUNE_DURABLE_LINE = (
+    "- MEASURED 2026-08-01: the shard map was stale in three of nine replicas."
+)
+
+#: 🔴 THE CONTRACT, PINNED AS A LITERAL — the whole `Gotchas` section as it must
+#: read after `PRUNE_PLAIN_LINE` is removed. Written out rather than derived,
+#: because a derived expectation cannot fail when the removal is wrong in a way
+#: the derivation shares (dropping the wrong line, dropping two, re-flowing the
+#: blanks). `test_the_literal_pin_matches_the_derived_document` ties it back to
+#: `PRUNE_BASE_DOC` so the two cannot drift apart, which is the failure the
+#: `BASE_GOAL_SECTION` comment above records from a hand-copied fixture.
+PRUNE_EXPECTED_GOTCHAS = """## Gotchas / decisions / dead-ends
+- MEASURED 2026-08-01: the shard map was stale in three of nine replicas.
+- The queue-depth grafana row was tidied away; nothing reads it now.
+"""
+
+
+def _prune_expected_doc(*removed: str) -> str:
+    """`PRUNE_BASE_DOC` with exactly those lines gone — the fixture's own
+    statement of what a prune means, taking no part of the implementation.
+
+    It is a string minus some of its lines: there is no bucket logic, no fence
+    walk and no matching in it, so it cannot agree with a wrong implementation
+    by sharing its reasoning. The literal pins above are what catch a removal
+    that is wrong in a way this derivation would reproduce.
+    """
+    drop = {" ".join(r.split()) for r in removed}
+    kept = [
+        ln for ln in PRUNE_BASE_DOC.splitlines(keepends=True)
+        if " ".join(ln.split()) not in drop
+    ]
+    return "".join(kept)
+
+
+@pytest.fixture()
+def prune_repo(repo: Path) -> Path:
+    """`repo`, with the handoff doc replaced by rule (q)'s base and committed."""
+    (repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+        PRUNE_BASE_DOC, encoding="utf-8"
+    )
+    _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=repo)
+    _sh("git", "commit", "-q", "-m", "seed prune base", cwd=repo)
+    _sh("git", "push", "-q", "origin", "main", cwd=repo)
+    return repo
+
+
+def write_prune(tmp_path: Path, *lines: str, name: str = "prune.md") -> Path:
+    """A `--prune` file naming those lines, one per line."""
+    p = tmp_path / name
+    p.write_text("".join(f"{ln}\n" for ln in lines), encoding="utf-8")
+    return p
+
+
+def run_prune(
+    repo: Path, prune: Path, count: int, *extra: str,
+    advanced: str = "evicted the stale pool-size note from Gotchas",
+    update: Path | None = None,
+):
+    return run_tool(
+        repo, "--prune", str(prune), "--prune-count", str(count), *extra,
+        update=update, advanced=advanced,
+    )
+
+
+def doc_text(repo: Path) -> str:
+    return (repo / "claudedocs" / "handoff-sample-topic.md").read_text(
+        encoding="utf-8"
+    )
+
+
+class TestThePruneFixtureIsWhatItClaims:
+    """Guard the guards. Every test below is scoped by a property of the fixture,
+    and a fixture that silently stopped having one would move which branch is
+    exercised WITHOUT failing — the vacuous-green shape."""
+
+    def test_the_plain_line_is_unique_unguarded_and_not_durable(self) -> None:
+        assert PRUNE_BASE_DOC.count(PRUNE_PLAIN_LINE) == 1, "not unique"
+        assert hd.load_bearing_field(PRUNE_PLAIN_LINE) is None, (
+            "the happy-path line carries a guarded field, so the happy-path "
+            "tests would be exercising the load-bearing refusal instead"
+        )
+        assert hd.durable_reason(PRUNE_PLAIN_LINE) is None, (
+            "the happy-path line is flagged durable, so the disclosure's "
+            "durable branch fires on every happy-path test and "
+            "test_the_disclosure_counts_only_the_durable_removals proves nothing"
+        )
+
+    def test_the_durable_line_IS_flagged_by_rule_f_s_own_predicate(self) -> None:
+        """POSITIVE CONTROL for the pair above: without it, both assertions
+        could pass over a predicate wired to nothing."""
+        assert hd.durable_reason(PRUNE_DURABLE_LINE) == hd.DURABLE_DATED
+
+    def test_the_literal_pin_matches_the_derived_document(self) -> None:
+        """Ties `PRUNE_EXPECTED_GOTCHAS` back to `PRUNE_BASE_DOC`, so the literal
+        cannot rot the way the hand-copied Goal section did."""
+        assert PRUNE_EXPECTED_GOTCHAS in _prune_expected_doc(PRUNE_PLAIN_LINE)
+        assert PRUNE_EXPECTED_GOTCHAS not in PRUNE_BASE_DOC, (
+            "the pin is already true of the UNPRUNED base, so it cannot "
+            "distinguish a prune that ran from one that did not"
+        )
+
+    def test_the_base_carries_a_stamped_investigation_block(self) -> None:
+        """The `as-of:` guard and its whole-block exception are the two halves
+        that decide whether a resolved investigation can ever be evicted; both
+        need a stamped block to exist in the fixture."""
+        assert "- as-of: 2026-09-01" in PRUNE_BASE_DOC
+        assert hd.load_bearing_field("- as-of: 2026-09-01") is not None
+
+
+class TestAPruneRemovesExactlyWhatItNamed:
+    def test_the_confirmed_doc_is_the_base_minus_that_one_line(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 VERIFIED BY CONTENT, NOT BY EXIT CODE. The literal `Gotchas` pin is
+        the contract; the whole-document comparison is the "and nothing else
+        moved" half. An exit-0 assertion alone would pass over a prune that
+        removed the wrong line, two lines, or re-flowed the blanks."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        after = doc_text(prune_repo)
+        assert PRUNE_EXPECTED_GOTCHAS in after, (
+            f"the Gotchas section is not what rule (q) promises. Got:\n{after}"
+        )
+        assert after == _prune_expected_doc(PRUNE_PLAIN_LINE), (
+            "the prune changed something other than the line it was given"
+        )
+        assert len(after) == len(PRUNE_BASE_DOC) - len(PRUNE_PLAIN_LINE) - 1, (
+            "the byte delta is not exactly the named line plus its newline"
+        )
+
+    def test_every_other_line_survives_BYTE_IDENTICAL(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """The append-verbatim guarantee, restated for the prune path: rule (c)
+        exists so an earlier session's text comes through character for
+        character, and a prune must not be the thing that re-renders it."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        after = doc_text(prune_repo).splitlines()
+        for line in PRUNE_BASE_DOC.splitlines():
+            if line == PRUNE_PLAIN_LINE:
+                assert line not in after, "the named line is still there"
+            else:
+                assert line in after, f"the prune also dropped {line!r}"
+
+    def test_it_makes_exactly_one_path_limited_commit(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        before = _sh("git", "rev-parse", "HEAD", cwd=prune_repo).strip()
+        (prune_repo / "unrelated.txt").write_text("other work\n", encoding="utf-8")
+        _sh("git", "add", "--", "unrelated.txt", cwd=prune_repo)
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        touched = _sh(
+            "git", "show", "--name-only", "--format=", "HEAD", cwd=prune_repo
+        ).split()
+        assert touched == ["claudedocs/handoff-sample-topic.md"], touched
+        assert _sh("git", "rev-parse", "HEAD~1", cwd=prune_repo).strip() == before
+
+    def test_the_PROPOSAL_run_writes_nothing_at_all(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE TWO-RUN SHAPE, unchanged for a prune. `tree_hash` sees a written
+        doc, a new commit, a moved ref and a stray lockfile alike, so this is the
+        whole claim rather than "the file is unchanged"."""
+        before = tree_hash(prune_repo)
+        res = run_prune(prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+        assert tree_hash(prune_repo) == before, (
+            "the proposal run of a PRUNE wrote something — a prune is the one "
+            "direction where an unapproved write is unrecoverable from the diff"
+        )
+
+    def test_the_removal_reaches_the_diff_as_a_minus_line(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """The proposal run's diff is the only record of what landed, so the
+        removal has to be IN it — not merely summarised above it."""
+        res = run_prune(prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1)
+        assert f"-{PRUNE_PLAIN_LINE}" in res.stdout, res.stdout
+
+    def test_the_disclosure_names_the_line_its_section_and_its_number(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        res = run_prune(prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1)
+        head = res.stdout[: res.stdout.index("--- a/")]
+        assert "prune: REMOVING 1 line(s)" in head, head
+        assert "Gotchas / decisions / dead-ends" in head, head
+        line_no = PRUNE_BASE_DOC.splitlines().index(PRUNE_PLAIN_LINE) + 1
+        assert f":{line_no}" in head, (
+            f"the disclosure does not carry the base line number {line_no}, "
+            f"which is the whole value of it — the line can be opened and read "
+            f"before it goes. Got:\n{head}"
+        )
+
+    def test_the_disclosure_counts_only_the_durable_removals(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """Rule (q) reuses `durable_reason` rather than re-deciding; the count in
+        the disclosure is what makes a new signal there visible here."""
+        plain = run_prune(prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1)
+        assert "look DURABLE" not in plain.stdout, (
+            "the plain line was reported durable, so the flag says nothing"
+        )
+        both = run_prune(
+            prune_repo,
+            write_prune(
+                tmp_path, PRUNE_PLAIN_LINE, PRUNE_DURABLE_LINE, name="two.md"
+            ),
+            2,
+        )
+        head = both.stdout[: both.stdout.index("--- a/")]
+        assert "🔴 1 of them look DURABLE" in head, head
+
+    def test_a_WHOLE_stamped_investigation_block_can_be_evicted(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE CASE THE `as-of:` GUARD BROKE BEFORE THE EXCEPTION EXISTED, and
+        it is the biggest eviction `scripts/handoff-audit.py` reports. Measured
+        on a scratch fixture: without the whole-block exception, naming a
+        complete resolved block was refused ON ITS OWN STAMP, so the one prune
+        worth doing was the one prune impossible to do."""
+        block = [
+            "### the widget queue drains at 3/s",
+            "- as-of: 2026-09-01",
+            "- **Observed (with values):** depth 41,022 after 240s.",
+        ]
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, *block, name="block.md"), 3,
+            "--confirm", advanced="the drain question is answered; block evicted",
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        after = doc_text(prune_repo)
+        assert after == _prune_expected_doc(*block), after
+        assert "### the retry budget is consumed early" in after, (
+            "the SIBLING block went too — the extent walk overran its heading"
+        )
+        assert "- as-of: 2026-09-02" in after, (
+            "the sibling block's stamp went with the pruned block's"
+        )
+
+    def test_a_prune_and_an_update_land_in_ONE_run(
+        self, prune_repo: Path, new_doc_update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE MOTIVATING WORKFLOW: a session has findings to record AND the
+        doc is at its ceiling. The prune is applied to the MERGE, so the run both
+        appends and shrinks; two runs would mean the first one landing an
+        over-budget document."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1, "--confirm",
+            update=new_doc_update_file,
+            advanced="the at-max reading was corrected; stale note evicted",
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        after = doc_text(prune_repo)
+        assert PRUNE_PLAIN_LINE not in after, "the prune did not run"
+        assert "the at-max reading was misread" in after, (
+            "the UPDATE's finding did not land — the prune replaced the merge "
+            "instead of being applied to it"
+        )
+        assert "### the widget queue drains at 3/s" in after, (
+            "an earlier session's investigation block was lost"
+        )
+
+
+class TestAPruneRefusesWhatItCannotIdentify:
+    """🔴 EACH ARM IS CHECKED ON ITS OWN MARKER, NOT ON THE EXIT CODE. All eight
+    causes return 15, so an rc assertion cannot tell them apart and a test that
+    only read rc would pass while a different guard fired — the "green for the
+    wrong reason" shape `claude/RULES.md` names."""
+
+    def test_an_absent_line_is_refused_and_writes_nothing(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        before = tree_hash(prune_repo)
+        res = run_prune(
+            prune_repo,
+            write_prune(tmp_path, "- a line this document has never contained"),
+            1,
+            "--confirm",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert "status=prune-refused" in res.stderr
+        assert hd.PRUNE_MARKER_ABSENT in res.stderr, res.stderr
+        assert "NOTHING WRITTEN" in res.stderr
+        assert tree_hash(prune_repo) == before, "a refused prune wrote something"
+
+    def test_a_pattern_matching_MORE_than_named_is_refused(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE POPULATION ASSERTION, per line. Append-verbatim makes duplicates
+        ORDINARY — rule (c) keeps a superseding block and the block it superseded
+        — so "remove the one that says X" is genuinely undecidable and must
+        refuse rather than pick."""
+        dup = "- the shard map was stale in three of nine replicas."
+        doc = PRUNE_BASE_DOC.replace(
+            "## How to verify", f"## Findings\n{dup}\n{dup}\n\n## How to verify"
+        )
+        (prune_repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+            doc, encoding="utf-8"
+        )
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=prune_repo)
+        _sh("git", "commit", "-q", "-m", "two identical findings", cwd=prune_repo)
+        before = tree_hash(prune_repo)
+        res = run_prune(prune_repo, write_prune(tmp_path, dup), 1, "--confirm")
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert hd.PRUNE_MARKER_AMBIGUOUS in res.stderr, res.stderr
+        assert "2 lines match it" in res.stderr, res.stderr
+        assert tree_hash(prune_repo) == before
+
+    def test_a_count_that_disagrees_with_the_file_is_refused(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 CHECKED BEFORE ANYTHING IS MATCHED, so the refusal is about the FILE
+        and cannot be "fixed" by editing the lines. This is the guard that catches
+        a prune file truncated by a bad heredoc — the lines that survived are all
+        individually valid, so every other check passes."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 4, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert hd.PRUNE_MARKER_COUNT in res.stderr, res.stderr
+        assert "names 1 line(s), not 4" in res.stderr, res.stderr
+
+    def test_the_count_refusal_reports_NO_per_line_problems(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """The count is a claim about the file. Reporting it beside per-line
+        problems would invite fixing the lines and re-running with a file that
+        still names the wrong number."""
+        res = run_prune(
+            prune_repo,
+            write_prune(tmp_path, "- absent one", "- absent two", name="bad.md"),
+            5,
+        )
+        assert hd.PRUNE_MARKER_COUNT in res.stderr
+        assert hd.PRUNE_MARKER_ABSENT not in res.stderr, res.stderr
+
+    @pytest.mark.parametrize(
+        "named,key",
+        [
+            ("- closing-condition: check — `python3 tools/queue_probe.py "
+             "--for 240` reports 30/s", hd.CLOSING_KEY),
+            ("- as-of: 2026-09-01", hd.INVESTIGATION_STAMP_KEY),
+            ("1. Watch the drain rate for a day. forcing: gate — the load soak "
+             "blocks the release", hd.FORCING_KEY),
+        ],
+        ids=["closing-condition", "as-of", "forcing"],
+    )
+    def test_a_load_bearing_line_is_refused_naming_its_FIELD(
+        self, prune_repo: Path, tmp_path: Path, named: str, key: str
+    ) -> None:
+        """🔴 THE REFUSAL MUST NAME THE KEY, because "load-bearing" alone tells an
+        author nothing about why their line will not go or where to check. Each
+        of these lines is PRESENT and UNIQUE in the fixture, so the refusal is
+        about the field and not about a line that was never there.
+
+        🔴 REACHABILITY: `as-of:` is the row that proves this guard is not
+        preempted. It sits in an APPEND section, so `[replace section]` cannot
+        fire on it, and it is present and unique, so `[absent]` and `[ambiguous]`
+        cannot — the load-bearing guard is the ONLY thing that can refuse it.
+        The other two rows additionally prove the guard's PRECEDENCE, since both
+        lines sit in REPLACE sections.
+        """
+        assert PRUNE_BASE_DOC.count(named) == 1, "fixture drift: not unique"
+        before = tree_hash(prune_repo)
+        res = run_prune(prune_repo, write_prune(tmp_path, named), 1, "--confirm")
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert hd.PRUNE_MARKER_LOAD_BEARING in res.stderr, res.stderr
+        assert f"`{key}:` field" in res.stderr, (
+            f"the refusal does not name the {key!r} field it fired on: "
+            f"{res.stderr}"
+        )
+        assert tree_hash(prune_repo) == before
+
+    def test_the_as_of_refusal_is_NOT_the_replace_section_refusal(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """NEGATIVE CONTROL on the reachability claim above: the `as-of:` row must
+        fire the load-bearing marker and NOT the out-of-scope one, or the
+        parametrized test is green because a different guard ran."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, "- as-of: 2026-09-01"), 1
+        )
+        assert hd.PRUNE_MARKER_LOAD_BEARING in res.stderr
+        assert hd.PRUNE_MARKER_REPLACE_SECTION not in res.stderr, res.stderr
+        assert hd.PRUNE_MARKER_ABSENT not in res.stderr, res.stderr
+
+    def test_a_clawgate_task_line_in_front_matter_cannot_be_pruned(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """The fourth guarded field. It lives in front matter, so it is in no
+        section at all — and the load-bearing guard is what gives it a message
+        naming the field rather than one about the preamble."""
+        field = f"{hd.CLAWGATE_TASK_KEY}: 193"
+        doc = f"---\n{field}\n---\n{PRUNE_BASE_DOC}"
+        (prune_repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+            doc, encoding="utf-8"
+        )
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=prune_repo)
+        _sh("git", "commit", "-q", "-m", "record a clawgate task", cwd=prune_repo)
+        res = run_prune(prune_repo, write_prune(tmp_path, field), 1, "--confirm")
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert hd.PRUNE_MARKER_LOAD_BEARING in res.stderr, res.stderr
+        assert f"`{hd.CLAWGATE_TASK_KEY}:` field" in res.stderr, res.stderr
+        assert field in doc_text(prune_repo), "the field was removed anyway"
+
+    def test_a_section_heading_is_refused(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """Naming an H2 would delete a whole SECTION — and an append-only one at
+        that, so every line under it would land in a different bucket on the next
+        update."""
+        res = run_prune(
+            prune_repo,
+            write_prune(tmp_path, "## Gotchas / decisions / dead-ends"),
+            1,
+            "--confirm",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert hd.PRUNE_MARKER_SECTION_HEADING in res.stderr, res.stderr
+        assert "## Gotchas / decisions / dead-ends" in doc_text(prune_repo)
+
+    def test_a_block_heading_named_WITHOUT_its_body_is_refused(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE ORPHAN THIS PREVENTS IS SILENT: a `### ` heading removed alone
+        leaves its body under the PREVIOUS block, where every reader — this
+        module's `investigation_blocks` and scripts/resume-state.sh alike —
+        attributes it to that block's finding."""
+        res = run_prune(
+            prune_repo,
+            write_prune(tmp_path, "### the widget queue drains at 3/s"),
+            1,
+            "--confirm",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert hd.PRUNE_MARKER_PARTIAL_BLOCK in res.stderr, res.stderr
+        assert "2 line(s) of its own block are not named" in res.stderr, res.stderr
+
+    def test_a_block_named_ALMOST_in_full_is_still_refused(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """The boundary, one line off the accepted case — which is what stops the
+        whole-block test above from being the only thing separating "named in
+        full" from "named at all"."""
+        res = run_prune(
+            prune_repo,
+            write_prune(
+                tmp_path,
+                "### the widget queue drains at 3/s",
+                "- as-of: 2026-09-01",
+                name="almost.md",
+            ),
+            2,
+        )
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert hd.PRUNE_MARKER_PARTIAL_BLOCK in res.stderr, res.stderr
+        assert "1 line(s) of its own block are not named" in res.stderr, res.stderr
+
+    def test_a_fence_delimiter_is_refused(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """Removing one end of a fence re-partitions every line after it, so the
+        heading and field walks read the rest of the document as code — a prune
+        that silently disabled the closing-condition read."""
+        doc = PRUNE_BASE_DOC.replace(
+            "## How to verify",
+            "## Findings\n```\nprobe --for 240\n```\n\n## How to verify",
+        )
+        (prune_repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+            doc, encoding="utf-8"
+        )
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=prune_repo)
+        _sh("git", "commit", "-q", "-m", "a fenced finding", cwd=prune_repo)
+        res = run_prune(prune_repo, write_prune(tmp_path, "```"), 1, "--confirm")
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert hd.PRUNE_MARKER_FENCE in res.stderr, res.stderr
+
+    def test_a_line_in_a_REPLACE_section_is_refused(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 SCOPE. Rule (c) already lets `--update` rewrite a REPLACE section
+        wholesale, so a prune there would be a SECOND way to do one thing — and
+        the one that skips the bucket line and rule (f)'s durable-drop warning."""
+        named = "- Branch / PR: `feat/sample` / none"
+        assert named in PRUNE_BASE_DOC, "fixture drift"
+        res = run_prune(prune_repo, write_prune(tmp_path, named), 1, "--confirm")
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert hd.PRUNE_MARKER_REPLACE_SECTION in res.stderr, res.stderr
+        assert "`State now`" in res.stderr, res.stderr
+        assert named in doc_text(prune_repo)
+
+    def test_a_refusal_reports_EVERY_bad_line_not_just_the_first(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """A caller told about one bad line at a time re-runs once per line and
+        learns nothing from the middle runs — the shape that made rule (j)
+        unrecoverable before `unforced_report` diagnosed per cause."""
+        res = run_prune(
+            prune_repo,
+            write_prune(
+                tmp_path,
+                "- a line that was never in this document",
+                "## Gotchas / decisions / dead-ends",
+                name="two-bad.md",
+            ),
+            2,
+        )
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert hd.PRUNE_MARKER_ABSENT in res.stderr, res.stderr
+        assert hd.PRUNE_MARKER_SECTION_HEADING in res.stderr, res.stderr
+        assert "2 named line(s) could not be removed" in res.stderr, res.stderr
+
+    def test_one_bad_line_refuses_the_WHOLE_prune(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 ALL OR NOTHING. A partial prune produces a document nobody chose,
+        and with the two-run shape the diff in the transcript is the only record
+        of what landed — so a run that removed 1 of 2 would leave a record that
+        reads as a decision."""
+        before = tree_hash(prune_repo)
+        res = run_prune(
+            prune_repo,
+            write_prune(
+                tmp_path, PRUNE_PLAIN_LINE, "- not in the document at all",
+                name="one-good-one-bad.md",
+            ),
+            2,
+            "--confirm",
+        )
+        # 🔴 THE DAMAGE IS ASSERTED BEFORE THE EXIT CODE, and the order is what
+        # makes this test say what it is for. MEASURED with the mutant
+        # `if problems and not targets:` — a best-effort prune that drops the
+        # problems and keeps the targets. With the rc assertion first, the test
+        # died on `assert 0 == 15`, i.e. on "it did not refuse", and the fact
+        # that it had REMOVED A LINE ANYWAY never reached the output. A guard
+        # whose message is never rendered teaches the next reader nothing.
+        assert PRUNE_PLAIN_LINE in doc_text(prune_repo), (
+            "the VALID half of a refused prune was removed anyway"
+        )
+        assert tree_hash(prune_repo) == before, (
+            "a refused prune wrote something — the valid half landed"
+        )
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+
+
+class TestEveryPruneMarkerIsReachable:
+    """🔴 THE REACHABILITY LEDGER. A guard an earlier check always preempts never
+    executes and its test passes vacuously, so every marker the module can print
+    is DRIVEN here from a real CLI run, and the ledger is asserted EXHAUSTIVE
+    against `hd.PRUNE_MARKERS`. A marker with no scenario is either unreachable
+    code or an untested refusal; either way this goes red rather than the set
+    quietly growing a member nothing exercises.
+    """
+
+    #: marker -> (prune-file lines, --prune-count). Each scenario must produce
+    #: THAT marker; the exhaustiveness assertion is what makes the set a ledger.
+    SCENARIOS: dict[str, tuple[tuple[str, ...], int]] = {
+        hd.PRUNE_MARKER_COUNT: ((PRUNE_PLAIN_LINE,), 9),
+        hd.PRUNE_MARKER_ABSENT: (("- never present in this document",), 1),
+        hd.PRUNE_MARKER_AMBIGUOUS: (("- as-of: 2026-09-03",), 1),
+        hd.PRUNE_MARKER_LOAD_BEARING: (("- as-of: 2026-09-01",), 1),
+        hd.PRUNE_MARKER_SECTION_HEADING: (("## Gotchas / decisions / dead-ends",), 1),
+        hd.PRUNE_MARKER_PARTIAL_BLOCK: (("### the widget queue drains at 3/s",), 1),
+        hd.PRUNE_MARKER_FENCE: (("```",), 1),
+        hd.PRUNE_MARKER_REPLACE_SECTION: (("- Branch / PR: `feat/sample` / none",), 1),
+    }
+
+    def test_the_ledger_covers_every_marker_the_module_declares(self) -> None:
+        assert set(self.SCENARIOS) == set(hd.PRUNE_MARKERS), (
+            f"the marker ledger and hd.PRUNE_MARKERS disagree. Only in the "
+            f"module: {set(hd.PRUNE_MARKERS) - set(self.SCENARIOS)}; only in "
+            f"the ledger: {set(self.SCENARIOS) - set(hd.PRUNE_MARKERS)}. A "
+            f"marker with no scenario is untested or unreachable."
+        )
+        assert len(set(hd.PRUNE_MARKERS)) == len(hd.PRUNE_MARKERS), (
+            "two markers collapsed onto one token, so their causes are "
+            "indistinguishable in the refusal"
+        )
+
+    @pytest.mark.parametrize("marker", sorted(SCENARIOS), ids=lambda m: m.strip("[]"))
+    def test_the_marker_is_reached_by_a_real_run(
+        self, prune_repo: Path, tmp_path: Path, marker: str
+    ) -> None:
+        lines, count = self.SCENARIOS[marker]
+        # The ambiguity scenario needs a duplicate that the base does not have,
+        # and the fence scenario needs a fence. Both are set up HERE rather than
+        # in the base so that every other scenario runs against the same fixture.
+        doc = PRUNE_BASE_DOC
+        if marker == hd.PRUNE_MARKER_AMBIGUOUS:
+            dup = "- as-of: 2026-09-03"
+            doc = doc.replace(
+                "## How to verify",
+                f"## Findings\n### one\n{dup}\n\n### two\n{dup}\n\n## How to verify",
+            )
+        if marker == hd.PRUNE_MARKER_FENCE:
+            doc = doc.replace(
+                "## How to verify", "## Findings\n```\nx\n```\n\n## How to verify"
+            )
+        if doc != PRUNE_BASE_DOC:
+            (prune_repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+                doc, encoding="utf-8"
+            )
+            _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md",
+                cwd=prune_repo)
+            _sh("git", "commit", "-q", "-m", "scenario base", cwd=prune_repo)
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, *lines, name="scenario.md"), count
+        )
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert marker in res.stderr, (
+            f"the scenario for {marker!r} refused for a DIFFERENT reason, so "
+            f"that marker is not shown reachable:\n{res.stderr}"
+        )
+
+
+class TestAPruneRoutesAroundNothing:
+    """🔴 THE QUESTION AN EXIT RULE HAS TO ANSWER. Every refusal in this module
+    reads the text a prune produced, so a prune cannot be the way past one."""
+
+    #: One padding bullet, `{}`-formatted with its index. Long enough that a
+    #: handful of them pays for the whole update fixture, so the "prune covers
+    #: the growth" test does not have to name hundreds of lines.
+    PAD = "- padding bullet {} " + "x" * 200
+
+    @classmethod
+    def _pad_lines(cls) -> list[str]:
+        """Enough padding bullets to take `PRUNE_BASE_DOC` past the ceiling.
+
+        🔴 DERIVED FROM `handoff_budget.MAX_BYTES`, never a literal count. A
+        hardcoded 120 was written first and the fixture came out at 27,482 B
+        against a 65,536 B ceiling, so BOTH rule (p) tests passed nothing through
+        the rule — they died on their own precondition, which is the only reason
+        the miss was visible at all. A count derived from the constant cannot go
+        stale when the ceiling moves.
+        """
+        over = hd.handoff_budget.MAX_BYTES - len(PRUNE_BASE_DOC.encode())
+        n = over // (len(cls.PAD.format(0)) + 1) + 8
+        return [cls.PAD.format(i) for i in range(n)]
+
+    @classmethod
+    def _oversize(cls, repo: Path) -> list[str]:
+        """Commit a doc over `handoff_budget.MAX_BYTES`; return its pad lines."""
+        pads = cls._pad_lines()
+        pad = "".join(f"{ln}\n" for ln in pads)
+        doc = PRUNE_BASE_DOC.replace(
+            f"{PRUNE_PLAIN_LINE}\n", f"{PRUNE_PLAIN_LINE}\n{pad}"
+        )
+        assert len(doc.encode()) > hd.handoff_budget.MAX_BYTES, (
+            f"fixture is not over the ceiling: {len(doc.encode())} <= "
+            f"{hd.handoff_budget.MAX_BYTES} — the derivation in `_pad_lines` is "
+            f"wrong, and without this the rule (p) tests pass nothing through "
+            f"the rule at all"
+        )
+        (repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+            doc, encoding="utf-8"
+        )
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "an over-ceiling doc", cwd=repo)
+        return pads
+
+    def test_rule_p_still_REFUSES_a_prune_that_leaves_the_doc_bigger(
+        self, prune_repo: Path, new_doc_update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE ROUTE-AROUND TEST. A prune must not be a way past the size
+        ratchet — only a way to SATISFY it. Here the prune removes one short line
+        while the update adds more than that, so the net delta is still positive
+        on a doc already over its ceiling, and rule (p) must still refuse."""
+        self._oversize(prune_repo)
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1, "--confirm",
+            update=new_doc_update_file,
+            advanced="added findings and removed one short line",
+        )
+        assert res.returncode == hd.EXIT_SIZE_RATCHET, res.stdout + res.stderr
+        assert "status=size-ratchet" in res.stderr
+
+    def test_rule_p_is_SATISFIED_when_the_prune_makes_the_net_delta_negative(
+        self, prune_repo: Path, new_doc_update_file: Path, tmp_path: Path
+    ) -> None:
+        """The positive control for the test above, and the whole point of the
+        rule: the same over-ceiling doc, the same update, and a prune large
+        enough to pay for it — which must now LAND rather than be refused."""
+        all_pads = self._oversize(prune_repo)
+        # Half of them: enough to make the net delta negative, few enough that
+        # the survivors below are a real "it removed only what it named" check.
+        cut = all_pads[: len(all_pads) // 2]
+        kept = all_pads[len(all_pads) // 2:]
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, *cut, name="big-prune.md"),
+            len(cut), "--confirm",
+            update=new_doc_update_file,
+            advanced=f"added findings and evicted {len(cut)} padding bullets",
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        after = doc_text(prune_repo)
+        for gone in cut:
+            assert gone not in after, f"the prune did not remove {gone[:40]!r}"
+        for survivor in kept:
+            assert survivor in after, (
+                f"the prune removed {survivor[:40]!r}, which it never named"
+            )
+        assert "the at-max reading was misread" in after, "the update did not land"
+
+    def test_a_prune_cannot_remove_a_ranked_item_to_lower_rule_n_s_floor(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 RULE (n) COUNTS THE BASE, WHICH A PRUNE NEVER REWRITES — and
+        `## Next steps` is a REPLACE heading the prune refuses outright. Both
+        halves are asserted: the refusal here, and the rank staying in the doc."""
+        rank = (
+            "1. Watch the drain rate for a day. forcing: gate — the load soak "
+            "blocks the release"
+        )
+        res = run_prune(prune_repo, write_prune(tmp_path, rank), 1, "--confirm")
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert rank in doc_text(prune_repo)
+
+    def test_rule_m_still_sees_the_closing_condition_after_a_prune(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """Rule (m) reads the PRUNED text, so this is the second guard on the
+        finish line: even if the load-bearing check let the field through, the
+        rule that owns it would refuse. Here the prune is legitimate and the
+        field must simply survive."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        after = doc_text(prune_repo)
+        assert hd.closing_condition(after).is_declared, (
+            "the arc lost its finish line across a prune"
+        )
+
+    def test_the_no_advance_refusal_still_applies_to_a_prune(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """A prune IS an advance, so rule (d) is not relaxed for it — and the
+        commit subject is built from `--advanced`, so an unstated prune would
+        also commit an unexplained deletion."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1, advanced="none"
+        )
+        assert res.returncode == hd.EXIT_NO_ADVANCE, res.stdout + res.stderr
+
+    def test_the_leak_scan_still_runs_on_a_prune_only_confirm(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """Rule (o) reads the file that is written, and a prune-only run writes
+        one. A prune can only make the scan cleaner, but skipping it would make
+        `--prune` the one write path with no leak gate."""
+        scanner = prune_repo / "tests" / "leakscan.py"
+        scanner.parent.mkdir(parents=True, exist_ok=True)
+        # `write_exec` OWNS the shebang — a call site that supplies its own is
+        # how `#!/usr/bin/env` comes back, and it asserts rather than warns.
+        write_exec(scanner, "exit 1\n")
+        _sh("git", "add", "--", "tests/leakscan.py", cwd=prune_repo)
+        _sh("git", "commit", "-q", "-m", "a scanner that refuses", cwd=prune_repo)
+        before = tree_hash(prune_repo)
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, res.stdout + res.stderr
+        assert "status=leak-refused" in res.stderr
+        assert tree_hash(prune_repo) == before, (
+            "the leak refusal did not roll the prune back"
+        )
+
+
+class TestThePruneFlagsUsageContract:
+    def test_prune_without_a_count_is_a_USAGE_refusal(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 EXIT 2, NEVER 15. Fifteen is the RULE's verdict about a document's
+        content; returning it from argument validation would tell a caller their
+        prune named the wrong lines when the truth is that a flag was missing.
+        Same argument the empty `--override-size-ratchet` reason carries."""
+        res = run_tool(
+            prune_repo, "--prune", str(write_prune(tmp_path, PRUNE_PLAIN_LINE)),
+        )
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert hd.PRUNE_COUNT_FLAG in res.stderr
+
+    def test_a_count_without_a_prune_file_is_a_USAGE_refusal(
+        self, prune_repo: Path
+    ) -> None:
+        res = run_tool(prune_repo, "--prune-count", "2")
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert hd.PRUNE_FLAG in res.stderr
+
+    def test_a_count_below_one_is_a_USAGE_refusal(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """Naming zero lines is not a prune. This also keeps the empty-file case
+        from needing a marker of its own: a file naming 0 lines can only be
+        reached with `--prune-count 0`, which dies here."""
+        res = run_prune(prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 0)
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert hd.PRUNE_COUNT_FLAG in res.stderr
+
+    def test_neither_update_nor_prune_is_a_USAGE_refusal_naming_BOTH(
+        self, prune_repo: Path
+    ) -> None:
+        """`--update` stopped being `required=True` so a pure prune is possible;
+        this is what keeps the bare invocation a refusal rather than a run that
+        proposes nothing. argparse's own message could only ever name one flag."""
+        res = run_tool(prune_repo)
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert "--update" in res.stderr and hd.PRUNE_FLAG in res.stderr, res.stderr
+
+    def test_an_unreadable_prune_file_is_an_OPERATIONAL_failure(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """Exit 3 and not 15, for the reason above: a missing file is not a
+        verdict about the document."""
+        res = run_prune(prune_repo, tmp_path / "does-not-exist.md", 1)
+        assert res.returncode == hd.EXIT_FAIL, res.stdout + res.stderr
+        assert hd.PRUNE_FLAG in res.stderr
+
+    def test_the_update_path_is_UNCHANGED_when_no_prune_is_given(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """🔴 THE REGRESSION GUARD FOR THE WHOLE RULE. Rule (q) touches the
+        argparse contract (`--update` lost `required=True`) and the merge's
+        output path, so the ordinary update must be shown to behave exactly as
+        before — including the two-run shape and the bucket line."""
+        before = tree_hash(repo)
+        res = run_tool(repo, update=update_file)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+        assert "buckets:" in res.stdout
+        assert "prune:" not in res.stdout, (
+            "an update with no --prune printed rule (q)'s disclosure"
+        )
+        assert tree_hash(repo) == before
+
+
+class TestThePruneRuleReachesTheSkill:
+    def test_the_reference_topic_documents_the_markers_and_the_flags(self) -> None:
+        """🔴 DERIVED FROM THE MODULE, not a hand list — the idiom
+        `test_every_refusal_MARKER_the_module_prints_reaches_the_skill` uses and
+        for its reason: a pin catches deletion from the doc, only derivation
+        catches a RENAME in the module. SKILL.md is at ~25 B of headroom, so the
+        procedure lives in the reference topic the step-5 legend already points
+        at; the STATUS name is what must be in the body, and the derived
+        `test_every_exit_code_the_module_can_return_is_documented` checks that."""
+        topic = (
+            REPO_ROOT / "claude" / "skills" / "handoff" / "reference"
+            / "write-gate.md"
+        )
+        doc = topic.read_text(encoding="utf-8")
+        for marker in hd.PRUNE_MARKERS:
+            assert marker in doc, (
+                f"scripts/lib/handoff_doc.py prints a refused row marked "
+                f"{marker!r} and {topic.name} never mentions it. The executor's "
+                f"only map from a marker to what to do about it would be silent "
+                f"on this one."
+            )
+        for flag in (hd.PRUNE_FLAG, hd.PRUNE_COUNT_FLAG):
+            assert f"`{flag}" in doc, f"{topic.name} never names {flag}"
+
+    def test_the_marker_pin_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL on the loop above — it iterates a module constant, so
+        without this it is indistinguishable from a loop over an empty tuple."""
+        topic = (
+            REPO_ROOT / "claude" / "skills" / "handoff" / "reference"
+            / "write-gate.md"
+        )
+        assert "[prune declined by the operator]" not in topic.read_text(
+            encoding="utf-8"
+        )
+
+    def test_every_guarded_field_is_named_in_the_reference_topic(self) -> None:
+        """The four fields are the part of rule (q) with no escape hatch, so an
+        author who hits the refusal has to be able to find out why. Derived from
+        `LOAD_BEARING_FIELDS` so adding a fifth key goes red here."""
+        doc = (
+            REPO_ROOT / "claude" / "skills" / "handoff" / "reference"
+            / "write-gate.md"
+        ).read_text(encoding="utf-8")
+        assert len(hd.LOAD_BEARING_FIELDS) == 4, (
+            "a guarded field was added or dropped — the reference topic "
+            "enumerates them, so it needs the same edit in the same commit"
+        )
+        for key, _reason, _block_scoped in hd.LOAD_BEARING_FIELDS:
+            assert f"`{key}:`" in doc, f"the reference topic never names {key!r}"
+
+
+class TestTheLoadBearingGuardIsWiderThanTheReaders:
+    """🔴 A GUARD NARROWER THAN THE READER IS THE SPELLED-GUARD SHAPE: it passes
+    while the hazard exists in a different spelling. Each reader here requires a
+    VALID VALUE as well as the key, so a guard sharing those bounds would let
+    through exactly the near-miss lines `_CLOSING_ATTEMPT` and
+    `_FORCING_ATTEMPT` exist to report."""
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "- closing-condition: check — a real one",
+            "- **closing-condition:** `check` — bolded, as the template writes it",
+            "- closing-condition: nonsense — an INVALID kind the reader rejects",
+            "- as-of: 2026-09-01",
+            "- as-of: 2026-09-01-rev2",
+            "- **as-of:** 2026-09-01",
+            "1. do a thing. forcing: gate — real",
+            "1. do a thing. **forcing:** none",
+            "1. do a thing. forcing: wat — an unrecognised kind",
+            "clawgate-task: 193",
+        ],
+    )
+    def test_each_spelling_is_seen_as_load_bearing(self, line: str) -> None:
+        assert hd.load_bearing_field(line) is not None, (
+            f"{line!r} spells a guarded field in a shape the guard misses, so a "
+            f"prune would remove it while a reader still parses it"
+        )
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "- Bumping the pool size did nothing; the ceiling is not connections.",
+            "- MEASURED 2026-08-01: the shard map was stale in three replicas.",
+            "### the widget queue drains at 3/s",
+            "- the forcing function for this was never written down",
+            "- we closed the condition by hand",
+        ],
+    )
+    def test_ordinary_prose_is_NOT_load_bearing(self, line: str) -> None:
+        """NEGATIVE CONTROL. Without it the guard could be `return True` and
+        every test above would pass — and every prune would be refused."""
+        assert hd.load_bearing_field(line) is None, (
+            f"{line!r} was treated as a guarded field; a guard that refuses "
+            f"ordinary prose refuses every prune and is the permanently-red gate "
+            f"`claude/RULES.md` calls worse than no gate"
+        )
+
+    def test_the_block_scoped_flag_is_set_for_as_of_and_nothing_else(self) -> None:
+        """🔴 THE EXCEPTION'S SCOPE, pinned. It is what lets a resolved
+        investigation block be evicted whole, and widening it to any other key
+        would be a bypass with no case behind it — the other three fields'
+        owners are never inside a `###` block."""
+        scoped = {
+            key for key, _reason, block_scoped in hd.LOAD_BEARING_FIELDS
+            if block_scoped
+        }
+        assert scoped == {hd.INVESTIGATION_STAMP_KEY}, scoped
+
+
+class TestApplyPruneIsByteExact:
+    """Unit-level, because the losslessness claim is what makes the CLI tests'
+    byte comparisons meaningful rather than approximately true."""
+
+    def test_removing_nothing_reproduces_the_document(self) -> None:
+        rows = hd._doc_rows(PRUNE_BASE_DOC)
+        assert "".join(r.raw for r in rows) == PRUNE_BASE_DOC, (
+            "the row walk is not lossless, so every line number and every byte "
+            "comparison built on it is an estimate"
+        )
+        assert hd.apply_prune(rows, set()) == PRUNE_BASE_DOC
+
+    def test_it_does_not_tidy_the_blanks_around_a_removed_block(self) -> None:
+        """🔴 DELIBERATELY DUMB. A prune that also normalised whitespace would put
+        changes in the diff the caller did not name, which is the whole property
+        `--prune` is built to have."""
+        rows = hd._doc_rows(PRUNE_BASE_DOC)
+        block = [
+            "### the widget queue drains at 3/s",
+            "- as-of: 2026-09-01",
+            "- **Observed (with values):** depth 41,022 after 240s.",
+        ]
+        nos = {r.line_no for r in rows if r.line in block}
+        assert len(nos) == 3, nos
+        out = hd.apply_prune(rows, nos)
+        assert out == _prune_expected_doc(*block), out
+
+    def test_a_fenced_heading_is_not_treated_as_a_heading(self) -> None:
+        """The step-2 template is a fenced block full of `## ` lines. A prune that
+        read those as real headings would refuse (or permit) on a SAMPLE."""
+        doc = "## Gotchas\n```\n## State now\n```\n- a real bullet\n"
+        rows = hd._doc_rows(doc)
+        fenced = next(r for r in rows if r.line == "## State now")
+        assert fenced.level == 0, "a `## ` inside a fence was read as a heading"
+        assert hd.heading_text(rows[0].heading or "") == "Gotchas"
