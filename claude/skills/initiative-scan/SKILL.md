@@ -63,6 +63,12 @@ If `$ARGUMENTS` is **`snapshot`** (or `save`), **`restore`** (optionally `restor
 python3 ~/workspace/devrc/scripts/tmux-session-restore.py <save|restore|show> [--dry-run]
 ```
 - **`save`** (the script's verb for a snapshot) — run BEFORE rebooting: writes `~/.config/initiatives/restore-plan.json` + a readable `restore-cheatsheet.md` (survives reboot). Present the cheat-sheet. Each entry carries `bind_source` and the sheet prints it per line (`(ledger)` = certain, `(fuzzy)` = a content guess to eyeball); the summary's `bound: N ledger, M pane-content` + `ledger reasons:` tally say why anything is unbound.
+- 🔴 **A BAD SAVE NO LONGER DESTROYS THE PREVIOUS ONE — AND THIS IS THE LINE TO READ WHEN IT HAPPENS.** Those two paths are now **symlinks** into `~/.config/initiatives/restore-plans/`, which keeps the last 192 generations (~48h at the 15-minute autosave). A save that drops bound session ids says so on stderr and **prints the exact recovery command**:
+  ```bash
+  python3 ~/workspace/devrc/scripts/tmux-session-restore.py restore --plan ~/.config/initiatives/restore-plans/restore-plan_<UTC-stamp>.json
+  ```
+  `--plan` also bypasses the staleness gate, so an old generation restores without argument. **Stamps are UTC**, so they sort chronologically and do not collide across a DST fall-back — expect `20260910T143956`, not local time.
+  Why this is worth knowing rather than discovering: on 2026-09-07 a continuum autosave overwrote a 47-entry plan with the 10-entry post-crash workspace, no backup, and **20 windows had to be identified by hand**. `ls ~/.config/initiatives/restore-plans/` is the first thing to run if the current plan looks wrong.
 - **`restore`** — run AFTER reboot (once tmux-continuum has restored the shells): relaunches `claude --resume <id>` in each window; windows already running claude are skipped, and windows with no certain match fall back to the interactive picker. Use `--dry-run` first to preview.
 - **⚠ host-local:** run it on the host you're rebooting — it reads that host's live tmux + `~/.claude/projects`. The plan is per-host.
 
