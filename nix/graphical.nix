@@ -451,6 +451,23 @@ let
       { button = "left"; cmd = "alacritty --class float,float -e ${home}/workspace/devrc/scripts/mail-triage"; }
     ];
   };
+  # clawgate pill — the operator-pending TASK count and the stuck-dispatch half
+  # (`i3status-clawgate`, fed by bar-status-poll's `/api/tasks?summary=1` poll).
+  # 🔴 THE CLICK OPENS THE TASK SERVICE (`:30306`), NOT THE PERMISSION ROUTER
+  # (`:30302`). The board was carved out of clawgate into its own service, and
+  # MEASURED 2026-09-29 against the live pods the router no longer serves it at
+  # all: `:30302/tasks` -> 404, `:30302/ui/tasks` -> 404, while `:30306/tasks`
+  # -> 401 (exists, session-gated) and both roots -> 401 the same way. This is
+  # the one site that spells a base URL instead of deriving it — a Nix string is
+  # evaluated at BUILD time and cannot read the operator's
+  # `~/.claude/clawgate.env` — so it follows the plain-literal convention the
+  # other LAN click targets in this file already use (`grafana.homelab.lan`,
+  # `qbittorrent.workbench.lan`); the `bar-url` indirection next door exists
+  # because that hostname is a CLIENT's and this repo is public, not as a
+  # general policy. The poller's matching toasts DO derive it
+  # (`_task_ui_action` -> `CG.task_base_url`), so this literal is the one that
+  # can drift; `test_the_clawgate_PILL_click_opens_the_TASK_service_not_the_ROUTER`
+  # pins it.
   clawgateBlock = {
     block = "custom";
     command = "${scriptsDir}/i3status-clawgate";
@@ -458,7 +475,7 @@ let
     interval = 30;
     signal = 11;
     click = lib.optionals (!isLaptop) [
-      { button = "left"; cmd = "xdg-open http://192.168.50.250:30302"; }
+      { button = "left"; cmd = "xdg-open http://192.168.50.250:30306"; }
     ];
   };
   # media (qBittorrent behind the gluetun AirVPN WireGuard sidecar). A SECOND VPN
