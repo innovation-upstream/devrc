@@ -514,7 +514,15 @@ def hex_hextet_short_ipv6() -> str:
 #: SEVEN were already covered by the original adjacent-single-slice implementation;
 #: the EIGHT after them all carry a `,` or a blank and were NOT — five of those are
 #: shapes an audit reproduced as still-reported, and three were added alongside them
-#: because they reach the same widened code by a different route.
+#: because they reach the same widened code by a different route. The last THREE are
+#: the quote-parity side: a `[` after a CLOSING quote is a subscript, and they are
+#: what makes `quote_is_closing()` reachable in the TRUE direction (the false
+#: direction is the quoted-endpoint block in the negative control).
+#:
+#: ⚠ This list is a SPELLING axis only. It carries no bracket-POSITION axis, so a
+#: widening that exempts a new position appears in neither this list nor
+#: `uncovered_slice_lines()` and fails nothing here — that is how the quoted-endpoint
+#: false negative shipped. Positions live in `bound_positions()`.
 COVERED_SLICE_LINES = (
     "for raw_name, body in zip(parts[1::2], parts[2::2]):",   # the measured line
     "names, bodies = parts[1::2], parts[2::2]",
@@ -531,6 +539,12 @@ COVERED_SLICE_LINES = (
     "x[ 1::2 ]",                     # both
     "arr[mask, 1::2]",               # the comma's left side is NOT slice-shaped
     "arr[f( [0] ), 1::2]",           # an inner CLOSED bracket: depth counting
+    # --- quote parity: the `[` follows a CLOSING quote, so these ARE subscripts ---
+    "head = d['key'][1::2]",         # single-quoted key, then a subscript
+    'head = d["key"][1::2]',         # double-quoted key
+    r'esc = "a\"b"[1::2]',           # an ESCAPED quote inside the literal: the
+                                     # unescaped count is still even. Naive counting
+                                     # makes it odd and reports this line.
 )
 
 
@@ -646,6 +660,20 @@ def test_negative_control_a_real_address_in_a_subscript_is_still_reported():
         # thing left to reject it is the opener being `(` rather than `[`.
         (f"f(a, {decimal}, b)", decimal),
         (f"x[{decimal} 3]", decimal),              # not a whole group: no separator
+
+        # --- the QUOTED ENDPOINT spelling, `"[<addr>]:port"` --------------------
+        # 🔴 A quote is in SUBSCRIPTABLE_CHARS so that `"abc"[1::2]` works, and a
+        # line-at-a-time scan cannot tell an opening quote from a closing one — so
+        # every one of these was EXEMPT until `quote_is_closing()` existed. This is
+        # the canonical IPv6 endpoint form in YAML/JSON/.env/shell/Go/Python.
+        (f'bind: "[{decimal}]:53"', decimal),
+        (f'addr = "[{decimal}]:443"', decimal),
+        (f'REDIS_URL="[{decimal}]:6379"', decimal),
+        (f'net.Dial("tcp", "[{decimal}]:80")', decimal),
+        (f'{{"upstream": "[{decimal}]:8080"}}', decimal),
+        (f'echo "[{decimal}]" > /etc/hosts', decimal),
+        (f"cfg = '[{decimal}]:9000'", decimal),
+        (f'bind: "[{hexish}]:53"', hexish),         # hex: rejected by shape as well
     ) if want not in S.find_in_line(line)]
     assert not missed, (
         "a routable public IP inside (or looking like) a subscript went "
@@ -672,6 +700,40 @@ def blind_spot_family() -> tuple[str, ...]:
         decimal_hextet_ipv6(),)
 
 
+def bound_positions(ip: str) -> tuple[str, ...]:
+    """🔴 THE BOUND. Every position a blind-spot value must STILL be reported in.
+
+    This tuple IS the argument that the carve-out's blind spot is acceptable: the gap
+    is one position (bare-unquoted-inside-a-subscript), and these are the positions
+    that make that a narrow statement rather than a broad one. `public_ip_scan`'s
+    docstring names the same list in prose — the two must move together.
+
+    🔴 IT IS NOT A DECORATIVE LIST, AND IT HAS ALREADY BEEN INCOMPLETE ONCE. The prose
+    said "still reported … quoted" while nothing asserted the QUOTED ENDPOINT
+    spelling, and `"[<addr>]:port"` was silently exempt — the canonical IPv6 endpoint
+    form in YAML, JSON, `.env`, shell, Go and Python, and far likelier in this repo
+    than a bare Python subscript. An audit found it. Adding a position to the prose
+    without adding it here is how that happens, so do both or neither.
+    """
+    return (
+        f"host {ip}",                        # bare
+        f"ping6 {ip}",                       # bare, after a command
+        f"d['{ip}']",                        # quoted dict key
+        f"peers = [{ip}]",                   # list display
+        f"url = https://[{ip}]:443/x",       # URL host
+        f"ssh [{ip}]",                       # bracketed host after a word
+        f"curl [{ip}]:443",                  # same, with a port
+        # --- the QUOTED ENDPOINT positions the audit found exempt ----------------
+        f'addr = "[{ip}]:443"',              # Python/Go assignment
+        f'bind: "[{ip}]:53"',                # YAML
+        f'REDIS_URL="[{ip}]:6379"',          # .env / shell, no blank before the quote
+        f'net.Dial("tcp", "[{ip}]:80")',     # a quoted arg inside a call
+        f'{{"upstream": "[{ip}]:8080"}}',    # JSON
+        f'echo "[{ip}]" > /etc/hosts',       # shell, no port
+        f"cfg = '[{ip}]:9000'",              # the SINGLE-quoted spelling
+    )
+
+
 def test_the_slice_carveout_is_blind_to_a_decimal_only_subscript():
     """⚠ DOCUMENTED BLIND SPOT, driven rather than asserted in prose — and driven
     on the REAL family, not one convenient value.
@@ -682,11 +744,11 @@ def test_the_slice_carveout_is_blind_to_a_decimal_only_subscript():
     docstring says so.
 
     🔴 WHAT BOUNDS THE COST, asserted here rather than argued: the gap is ONLY the
-    bare-unquoted-inside-a-subscript position. Each of these values is still
-    reported bare, quoted, in a list display, in a URL host and in the
-    bracketed-host spelling `ssh [<addr>]`. That is the case for calling the blind
-    spot acceptable, and if a future change breaks any of those positions this test
-    goes red rather than the argument quietly becoming false.
+    bare-unquoted-inside-a-subscript position, and `bound_positions()` enumerates the
+    fourteen positions where each value must STILL be reported. That is the case for
+    calling the blind spot acceptable, and if a future change breaks any of them this
+    test goes red rather than the argument quietly becoming false. It has already
+    caught that happening once — see `bound_positions`.
 
     Narrow the rule and the first assertion goes red, telling you to delete this
     test and that docstring bullet in the same commit.
@@ -701,11 +763,8 @@ def test_the_slice_carveout_is_blind_to_a_decimal_only_subscript():
         "the decimal-only subscript is now REPORTED — good news: delete this test "
         f"and the matching blind-spot bullet in public_ip_scan's docstring: {still_reported}")
 
-    # the bound: every OTHER position must still see these exact values
     escaped = [(ip, shape) for ip in family
-               for shape in (f"host {ip}", f"d['{ip}']", f"peers = [{ip}]",
-                             f"url = https://[{ip}]:443/x", f"ssh [{ip}]",
-                             f"ping6 {ip}")
+               for shape in bound_positions(ip)
                if ip not in S.find_in_line(shape)]
     assert not escaped, (
         "a blind-spot value escaped OUTSIDE a subscript too — the argument that "

@@ -66,14 +66,21 @@ author. Documented so nobody mistakes "green" for "there is no address here":
     allocated ARIN/APNIC/RIPE global-unicast space, and a short host address in one
     of them has all-decimal hextets and a slice's arity, so it is inside this gap
     (MEASURED: five such addresses are `is_reportable()` yet unreported inside a
-    subscript). What bounds the cost is that the gap is ONLY the bare-unquoted-
-    inside-a-subscript position: the same values are still reported bare, quoted,
-    in a list display, in a URL host, and — measured, and the reason condition (3)
-    forbids skipping a blank — in the bracketed-host spelling `ssh [<addr>]`. That
-    is not how an address is written in any file this gate scans. The family and
-    every one of those positions is DRIVEN, not asserted, by
+    subscript). What bounds the cost is the POSITION: the gap is only the
+    bare-unquoted-inside-a-subscript one. The same values are still reported bare,
+    quoted, in a list display, in a URL host, in the bracketed-host spelling
+    `ssh [<addr>]` — the reason condition (3) skips no blank — and in the QUOTED
+    endpoint spelling `"[<addr>]:port"`, the reason it checks quote parity. That is
+    not how an address is written in any file this gate scans.
+
+    🔴 THE POSITION LIST IS THE CLAIM, SO IT IS ENUMERATED AND ASSERTED, NOT ARGUED:
+    every position named above is driven by
     `test_no_public_ips.py::test_the_slice_carveout_is_blind_to_a_decimal_only_
-    subscript`. Change one and you are told about the other.
+    subscript`, which fails if any of them stops reporting. That test is the only
+    thing standing between this paragraph and a false claim — an audit found the
+    quoted-endpoint position exempt while this prose already said "quoted", because
+    the position was described here and not asserted there. Add a position to the
+    prose and add it to that test in the same commit, or do neither.
 
 🔴 IPv6 FALSE POSITIVE, MEASURED. A naive IPv6 regex matches `DB::` inside
 `Code: 209. DB::Exception: …` — and `ipaddress.ip_address("DB::")` parses fine
@@ -113,9 +120,39 @@ spelling it would plant a finding here. It is assembled by
 🔴 The first wording of this carve-out covered only the ADJACENT SINGLE-SLICE
 subset while claiming the whole class — a guard whose DESCRIPTION was wider than
 its implementation, in a change whose entire point was a coverage claim. An audit
-caught it. Both lists are now machine-readable: covered and NOT-covered are pinned
-in both directions by `test_the_covered_slice_shapes_are_enumerated`, so widening
-the rule without moving a shape between them fails the suite.
+caught it, and then caught this paragraph making the same mistake about the FIX:
+
+**What is pinned, exactly** — two axes, two mechanisms, and a gap between them:
+  * SLICE SPELLING. `COVERED_SLICE_LINES` must all be silent
+    (`test_python_extended_slices_are_not_addresses`) and everything
+    `uncovered_slice_lines()` returns must still be reported
+    (`test_the_covered_slice_shapes_are_enumerated`). Two directions, two tests.
+  * BRACKET POSITION. Enumerated only in the blind-spot bound assertion in
+    `test_the_slice_carveout_is_blind_to_a_decimal_only_subscript`.
+
+⚠ Neither list carries a position axis, so **a widening that swallows a shape
+appearing in NEITHER list and in NO enumerated position fails nothing.** That is not
+hypothetical — it is exactly how the quoted-endpoint false negative shipped. An
+earlier wording of this paragraph claimed the two lists pinned the rule "in both
+directions … so widening the rule without moving a shape between them fails the
+suite", which a reader would trust and stop looking at. When you widen this rule, ask
+which POSITION you have newly exempted and add it to the bound assertion; the lists
+will not tell you.
+
+🔴 QUOTED ENDPOINT — the FALSE NEGATIVE this carve-out shipped, and the reason
+`quote_is_closing()` exists. `SUBSCRIPTABLE_CHARS` holds both quote characters so
+that `"abc"[1::2]` is a subscript; a line-at-a-time scan cannot tell an opening
+quote from a closing one. So the canonical IPv6 endpoint spelling — `bind:
+"[<addr>]:53"`, `addr = "[<addr>]:443"`, `REDIS_URL="[<addr>]:6379"`,
+`net.Dial("tcp", "[<addr>]:80")`, `{"upstream": "[<addr>]:8080"}` — had a quote
+before the `[` and was EXEMPT, in YAML, JSON, `.env`, shell, Go and Python alike.
+The base branch reported every one of those lines. Bounded but real: only the
+all-decimal-hextet family could take that path (a hex hextet is still rejected by
+slice shape, measured), so it widened the accepted family's POSITIONS rather than
+the family — and it collapsed the very bound that makes that family acceptable,
+which is why it was a blocker and not part of the accepted gap. The fix is parity,
+not deleting the quotes from the set: deleting them reddens the `"abc"[1::2]`
+control, measured.
 
 ⚠ Illustrations here are `2001:db8::` (a DOC_NETWORKS address, so not reportable)
 or written INSIDE a subscript — spelling a bare routable literal in this file
@@ -171,18 +208,31 @@ IPV6_RE = re.compile(
 #: an address at all. See the DB:: note in the module docstring.
 MIN_IPV6_HEXTETS = 2
 
+#: The two quote characters. A quote before a `[` is AMBIGUOUS in a line-at-a-time
+#: scan — it closes a string in `"abc"[1::2]` and OPENS one in `bind: "[<addr>]:53"`
+#: — so membership in `SUBSCRIPTABLE_CHARS` is not enough on its own;
+#: `quote_is_closing()` decides which, and `is_subscript_slice` calls it. See the
+#: QUOTED ENDPOINT note in the module docstring: taking these on trust exempted the
+#: canonical IPv6 endpoint spelling in YAML/JSON/.env/shell/Go/Python.
+QUOTE_CHARS = frozenset("'\"")
+
 #: Characters that may be ADJACENTLY followed by a `[` which OPENS A SUBSCRIPT: an
-#: identifier, a closing paren/bracket, or a string literal's closing quote
+#: identifier, a closing paren/bracket, or a string literal's CLOSING quote
 #: (`parts[…]`, `f()[…]`, `x[0][…]`, `"abc"[…]`). A `[` preceded by ANYTHING else —
 #: a blank, `=`, `/`, `:`, or start-of-line — opens a list/array display or
 #: brackets a host, and that is exactly where a real address is legitimately
 #: written (`lighthouse: [2001:db8::1]`, `https://[2001:db8::1]:443/`,
 #: `ssh [<addr>]`). Keeping those two cases apart is what stops the carve-out
 #: becoming a place to hide an address, and it is why no blank is skipped here.
+#:
+#: 🔴 The `QUOTE_CHARS` members are NECESSARY BUT NOT SUFFICIENT — a quote here only
+#: qualifies when `quote_is_closing()` agrees. Removing them from this set instead is
+#: the wrong fix and was measured to be: it reddens the `"abc"[1::2]` positive
+#: control (this module's scan reads its own test's source).
 SUBSCRIPTABLE_CHARS = frozenset("0123456789"
                                 "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
                                 "abcdefghijklmnopqrstuvwxyz"
-                                "_)]'\"")
+                                "_)]") | QUOTE_CHARS
 
 #: Python slice arity: `start:stop:step` is THREE colon-separated components, so
 #: at most two colons. An 8-hextet address whose every hextet happens to be
@@ -286,6 +336,42 @@ def enclosing_subscript_open(line: str, pos: int) -> int:
     return -1
 
 
+def quote_is_closing(line: str, pos: int) -> bool:
+    """True when the quote at `line[pos]` CLOSES a string literal, not opens one.
+
+    🔴 THE FALSE-NEGATIVE THIS EXISTS FOR. `SUBSCRIPTABLE_CHARS` holds both quotes so
+    that `"abc"[1::2]` is recognised as a subscript, and a line-at-a-time scan cannot
+    tell an opening quote from a closing one by looking at the character alone. Taking
+    it on trust exempted the canonical IPv6 endpoint spelling — `bind: "[<addr>]:53"`,
+    `REDIS_URL="[<addr>]:6379"`, `net.Dial("tcp", "[<addr>]:80")` — in which the char
+    before the `[` is a quote that OPENS the string the address sits inside. An audit
+    found it; the base branch reported every one of those lines.
+
+    PARITY is the discriminator: count unescaped occurrences of THAT SAME quote
+    character up to and including `pos`. Even means it is the closer of a pair that
+    began earlier (`"abc"[`); odd means it opened a literal and the `[` is inside it
+    (`bind: "[`). Only that quote kind is counted, so the other kind nesting around it
+    is irrelevant — which is what lets a Python source line spelling
+    `'stride = "abcdef"[1::2]'` stay recognised while `"[<addr>]"` does not.
+
+    ⚠ Scope, stated honestly: this is parity on ONE line, not a tokenizer. A string
+    literal opened on a previous line, or a triple-quoted block, is outside what a
+    line-at-a-time scan can see (module docstring, "split across lines"). Both
+    unhandled cases resolve toward REPORTING, never toward exempting.
+    """
+    quote = line[pos]
+    seen = 0
+    i = 0
+    while i <= pos:
+        if line[i] == "\\":
+            i += 2  # an escaped character, whatever it is, is not a delimiter
+            continue
+        if line[i] == quote:
+            seen += 1
+        i += 1
+    return seen % 2 == 0
+
+
 def is_subscript_slice(line: str, start: int, end: int) -> bool:
     """True when `line[start:end]` is a Python subscript slice, not an address.
 
@@ -309,12 +395,15 @@ def is_subscript_slice(line: str, start: int, end: int) -> bool:
          unclosed `x[<addr>` — means the token is not a slice group.
       3. **subscript position** — the group's OWN opening `[` is immediately
          preceded by something SUBSCRIPTABLE (`SUBSCRIPTABLE_CHARS`), with NO
-         whitespace skipped. That adjacency is load-bearing, not fastidiousness:
-         MEASURED, `ssh [<addr>]` and `curl [<addr>]` are reported today, and
-         skipping a blank there would exempt them — the bracketed-host spelling in
-         prose or a shell line is one of the likeliest ways a real address gets
-         written down. `lighthouse: [2001:db8::1]` and `https://[2001:db8::1]:443/`
-         are the same condition doing the same work.
+         whitespace skipped, AND — when that character is a quote — by a quote that
+         `quote_is_closing()` says CLOSES a literal rather than opening one. That
+         adjacency is load-bearing, not fastidiousness: MEASURED, `ssh [<addr>]` and
+         `curl [<addr>]` are reported today, and skipping a blank there would exempt
+         them — the bracketed-host spelling in prose or a shell line is one of the
+         likeliest ways a real address gets written down. The quote-parity half is
+         the same argument for the QUOTED spelling `bind: "[<addr>]:53"`, which was
+         exempt until an audit found it. `lighthouse: [2001:db8::1]` and
+         `https://[2001:db8::1]:443/` are this condition doing the same work.
 
     ⚠ KNOWN, DELIBERATE GAP: a blank between the name and the subscript is still
     reported. It is PEP8-illegal (E211) and rare in real code, and exempting it
@@ -344,7 +433,11 @@ def is_subscript_slice(line: str, start: int, end: int) -> bool:
         return False
 
     opener = left if line[left] == "[" else enclosing_subscript_open(line, left)
-    return opener > 0 and line[opener - 1] in SUBSCRIPTABLE_CHARS
+    if opener <= 0 or line[opener - 1] not in SUBSCRIPTABLE_CHARS:
+        return False
+    if line[opener - 1] in QUOTE_CHARS:
+        return quote_is_closing(line, opener - 1)
+    return True
 
 
 def find_in_line(line: str) -> list[str]:
