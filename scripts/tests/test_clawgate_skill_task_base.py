@@ -94,9 +94,11 @@ copied in and `PYTHONDONTWRITEBYTECODE=1`:
   green both ways             the three hermetic controls -- they are controls,
                               not regression coverage
 
-Re-measured 2026-09-29 for the SKILL SPLIT, base ref `origin/main` = 79a9b22a,
-this file copied into a detached worktree of the base under
-`PYTHONDONTWRITEBYTECODE=1`. The two legs added by the split:
+Re-measured 2026-09-29 for the SKILL SPLIT, base ref `origin/main` = dc159b07
+(the base MOVED mid-branch -- #1905 landed -- so this was measured twice; the
+first reading, against 79a9b22a, is superseded). This file copied into a detached
+worktree of the base under `PYTHONDONTWRITEBYTECODE=1`: 5 failed, 4 passed at
+base; 9 passed at HEAD. The two legs added by the split:
 
   RED at base, GREEN at HEAD  …is_routed_to_the_task_base[muster] and
                               …are_distinct_everywhere[muster] -- at base the
@@ -104,6 +106,23 @@ this file copied into a detached worktree of the base under
                               exist, so both error on the read
   RED at base, GREEN at HEAD  …is_routed[clawgate] / …are_distinct[clawgate]
                               (unchanged: the pre-#1920 core named no task base)
+
+MUTATION RECORD FOR THE WIDENING, each run against the merged tree with an
+unmutated re-run (9 passed) as the positive control after every mutant:
+
+  MA  append `curl http://192.168.50.250:30302/api/tasks` to muster/SKILL.md
+      -> ONLY test_no_task_side_path… red, naming `claude/skills/muster/SKILL.md`
+         and the exact bytes. This is the control that proves the NEW directory
+         is actually scanned rather than merely listed.
+  MB  strip every task-base anchor from muster/SKILL.md except one lone `:30306`
+      placed far from any family -> ONLY …is_routed_to_the_task_base[muster] red,
+      naming `/runbooks`. The lone anchor is what keeps guard 3 green, which is
+      what ISOLATES guard 2 here (guard 3 would otherwise die with it).
+  MC  delete the whole muster pointer block from clawgate/SKILL.md
+      -> …is_routed[clawgate] red naming ['/agents', '/runbooks'] AND
+         …are_distinct[clawgate] red. This is the one that matters after the
+         split: a future prune of clawgate's core cannot silently drop the
+         hand-off to muster.
 
 MUTATION RECORD -- each guard broken on purpose and watched to die for ITS OWN
 reason, in the same scratch worktree, with an unmutated re-run as the positive
