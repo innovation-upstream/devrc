@@ -49,20 +49,8 @@ carries `site_flows` naming the exact file (off a fresh `nav`, not a later
 absence means nothing. It holds multi-step flows and the reads that lie
 there — skip it and a one-click flow gets reported as a blocker.
 
-🔴 **ADDING a flow file for a CLIENT SUBDOMAIN trips a security gate — pin it,
-never widen the pattern.** `scripts/tests/test_no_client_hostnames.py` forbids a
-client subdomain literal in this PUBLIC repo, and a per-app flow file names one
-in its `_index.json` key and its body (the FILENAME is fine — the scan reads
-content only). The fix is one pinned `ALLOWLIST` entry per `(path, host)`, with
-the justification the scanner's docstring demands: *genuinely public* — prove it
-with `env -i curl <the platform's public API>` so no ambient cookie or token is
-in play — and *genuinely not topology*. 🔴 **Do NOT "fix" it by treating the apex
-as a multi-tenant public suffix.** MEASURED 2026-09-29: requiring ≥2 labels stops
-reporting a published tenant host **and** `grafana-staging.<apex>`, the gate's own
-planted control — the two are the same shape, so widening blinds the gate to
-exactly what it exists to catch. ⚠ That test file is scanned BY ITS OWN GATE:
-assemble hosts from a shared apex constant, never spell one, or
-`test_this_guards_own_sources_are_clean` fails on your pin.
+🔴 **A flow file for a CLIENT SUBDOMAIN trips a security gate** — pin the host,
+never widen the pattern → `reference/security-ops.md`.
 
 ## Ops
 
