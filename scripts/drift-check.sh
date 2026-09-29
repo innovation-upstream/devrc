@@ -97,12 +97,15 @@
 #   * 19, 20 and 21 are RESERVED to ship.sh here and must not be taken as DRIFT
 #     codes. 22 is now TAKEN by this script (skillOverrides disagree with the
 #     tier ledger), 23 by the nix-read untracked ladder and 24 by the
-#     branch-protection arm, and 25 by the stale-protection-declaration arm, so
-#     the next free code for this script is 26.
+#     branch-protection arm, and 25 by the stale-protection-declaration arm, and
+#     26 by ship.sh — its homelab-talos cross-host PRE-FLIGHT, which refuses
+#     before either host is touched; see SOURCE-REPO PARITY below for why the
+#     PASSIVE half here deliberately sets no code on that same fact. So
+#     the next free code for this script is 27.
 #   * anything this script adds above 21 is reserved back the other way; ship.sh
 #     documents this in its own header for the same reason.
 #
-# RESERVED-TO-SHIP: 5 7 9 11 19 20 21
+# RESERVED-TO-SHIP: 5 7 9 11 19 20 21 26
 #
 # That line is a LEDGER, machine-read, not a comment: it must equal exactly the
 # set of codes ship.sh can return and this script cannot, so it fails when the
@@ -286,6 +289,14 @@
 # sitting on different branches of a shared development repo is normal, and a code
 # that fires on it would be a permanently-red gate. Like every cross-host claim
 # here it prints NOT COMPARED unless facts arrived from BOTH machines.
+#
+# 🔴 ship.sh DOES escalate on the same fact, and the difference is not an
+# inconsistency — it is WHEN each runs. This file is a passive timer, so a code
+# here fires whenever the two machines happen to differ, which is most of the
+# time. ship.sh's PRE-FLIGHT (its rc 26) fires only at the instant a
+# `home-manager switch` is about to build clawgatectl from one of those trees,
+# where a difference makes one host's vendorHash wrong and its switch fail with
+# an error naming nothing. Same measurement, two consumers, one verdict each.
 #
 # READ-ONLY, like everything else in this file: `fetch`, `rev-parse`, `rev-list`,
 # `symbolic-ref`, `status`. It never pulls, never switches, never repairs.
