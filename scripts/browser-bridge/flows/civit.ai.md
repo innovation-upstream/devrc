@@ -53,11 +53,28 @@ takes CDP `Input.dispatch*Event` and arrives `trusted:true`. So dropping `--fram
 does not merely miss the element — it upgrades the event's trust, and that is the
 second route to a trusted event, one that spells no `xdotool` anywhere.
 
-**Corollary, and the reason a "broken" money button is usually not broken:** a
-synthetic in-frame click does nothing at all on a billing control. Do not report
-that as a defect, and do not "fix" it by dropping `--frame`.
+🔴 **"A synthetic in-frame click does nothing at all on a billing control" is
+RETRACTED — it DOES, and it SPENDS REAL BUZZ.** Measured 2026-09-28 on
+`yt-thumbnail` 0.1.3: a `--frame` `click` on `[data-testid=pm-generate]`
+submitted two workflows and debited **6 Buzz** from the operator's Blue account,
+returning two real generated images.
 
-🔴 **The OBSERVATION above stands; the EXPLANATION this file used to give —
+**How the false claim survived a reproducible observation:** the button is
+`disabled` until the form validates, and this app's prompt field renders a
+*placeholder* that reads exactly like a filled-in value. A `click` on a disabled
+button still reports `ok: true` and changes nothing — indistinguishable from
+"the platform swallowed my untrusted event". **Read `.disabled` before drawing
+any conclusion about trust from a dead click.**
+
+Treat every in-frame click on a money control as LIVE. Never fire one to "test
+whether it works".
+
+**What still stands, and it is the half that matters:** do not "fix" a dead
+click by dropping `--frame`. A top-frame click arrives `trusted:true`, so that
+is a genuine trust upgrade — true independently of whether the in-frame click
+works.
+
+🔴 **The EXPLANATION this file used to give —
 "the spend path rejects untrusted events" — is RETRACTED. Measured 2026-08-30; do
 not re-derive it.** There is no `isTrusted` / `userActivation` / transient-activation
 check anywhere on the spend path: both identifiers return **zero** matches across

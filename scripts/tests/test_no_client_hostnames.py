@@ -49,7 +49,59 @@ from testlib import client_host_scan as H  # noqa: E402
 #
 # Accounting runs in BOTH directions — an unpinned hit fails, and a pin matching
 # nothing fails so a stale entry cannot pre-approve whatever appears next.
-ALLOWLIST: dict[tuple[str, str], str] = {}
+#
+# 🔴 WHY THE PATTERN WAS NOT WIDENED INSTEAD, MEASURED RATHER THAN ARGUED.
+# The platform serves every APPROVED App Block at `<slug>.<apex>`, so the
+# tempting "fix" is to treat that apex as a multi-tenant public suffix and stop
+# reporting a single-label host under it. That is a SECURITY REGRESSION, and the
+# measurement is one line: a tenant host and an internal host are the SAME SHAPE.
+#
+#     pattern              <internal service>.<apex>   <published block>.<apex>
+#     current              FOUND                       FOUND
+#     >=2 labels required  not found                   not found
+#
+# The first column is `planted_host()` below — this file's own positive control,
+# and the exact shape the scanner exists to catch. Nothing in the STRING
+# separates it from a published product; only knowledge of what is published
+# does, and that lives outside the repo. So the decision stays where it can be
+# made correctly: one pinned, justified entry per host, accounted in both
+# directions. It recurs per app, and that recurrence is the FEATURE — a human
+# deciding "this one is public" each time, instead of a regex guessing it
+# forever.
+#
+# The scanner's docstring calls a pin "the third option and the rare one — for a
+# subdomain that is genuinely public and genuinely not topology". Both halves are
+# established below, not assumed.
+#
+# 🔴 ASSEMBLED, NEVER SPELLED. This file is scanned by its own gate, so a literal
+# host in the pins — or in the prose explaining them — is a finding in the guard
+# that defines the rule. Caught here by `test_this_guards_own_sources_are_clean`
+# on the first draft of this very block, which is the trap the planted controls
+# below already carry a comment about.
+_APEX = ".".join(("civit", "ai"))
+_FLOWS = "scripts/browser-bridge/flows"
+
+#: The App Block this repo carries a browser flow for.
+#:
+#: GENUINELY PUBLIC: the platform's app API returns this as `kindData.liveUrl`
+#: for a listing whose status is `approved`, to an UNAUTHENTICATED caller —
+#: measured 2026-09-29 under `env -i`, so no cookie, no token and no proxy env —
+#: and the host itself answers HTTP 200 to anyone.
+#:
+#: GENUINELY NOT TOPOLOGY: the scanner's docstring catalogues what leaks as
+#: `grafana-new.` / `auth.` / `sish.` / `review-<hash>.` / `<unreleased
+#: product>.`. This is a RELEASED product, published by the platform's own
+#: public API. Disclosing it discloses nothing that API does not.
+_BLOCK_HOST = "yt-thumbnail." + _APEX
+
+ALLOWLIST: dict[tuple[str, str], str] = {
+    (f"{_FLOWS}/_index.json", _BLOCK_HOST):
+        "the flow registry key — longest-suffix resolution matches on the REAL "
+        "host, so a placeholder here ships a lookup that can never fire",
+    (f"{_FLOWS}/{_BLOCK_HOST}.md", _BLOCK_HOST):
+        "the block's published liveUrl, in the flow file named for that host "
+        "(the scan reads content only, never path.name — see its docstring)",
+}
 
 
 def _hits():
@@ -75,10 +127,11 @@ def test_no_client_subdomain_literal_is_committed():
 def test_every_allowlist_entry_still_matches_something():
     """Stale-pin accounting — the complement of the scan above.
 
-    INVARIANT GUARD while `ALLOWLIST` is empty: it asserts nothing today and is
-    labelled as such. It exists so the first entry anyone adds is accounted for
-    in both directions from the moment it is added, rather than the accounting
-    being remembered later.
+    🔴 THIS IS NO LONGER AN INVARIANT GUARD. It was labelled as one while
+    `ALLOWLIST` was empty; it now carries real entries, so this asserts a real
+    thing: delete or rename `flows/yt-thumbnail.civit.ai.md`, or drop its
+    `_index.json` key, and the orphaned pin fails HERE rather than silently
+    pre-approving whatever host appears at that path next.
     """
     seen = {(h[0], h[2]) for h in _hits()}
     stale = [f"{p}: {h} ({why})" for (p, h), why in ALLOWLIST.items()
@@ -99,8 +152,12 @@ def test_every_allowlist_entry_still_matches_something():
 # public_ip_scan.py report its own docstring.
 
 def planted_domain() -> str:
-    """A client apex, assembled — the scan must NOT report this."""
-    return ".".join(("civit", "ai"))
+    """A client apex, assembled — the scan must NOT report this.
+
+    Shares the one `_APEX` the pins are built from, so the apex is spelled in
+    exactly one place and a pin cannot drift from the controls that police it.
+    """
+    return _APEX
 
 
 def planted_host() -> str:
@@ -217,6 +274,31 @@ def test_positive_control_an_allowlisted_host_is_still_reported_elsewhere():
             ("nix/graphical.nix", 200, planted_host(), "y")]
     left = [h for h in hits if (h[0], h[2]) not in fabricated_allow]
     assert [h[0] for h in left] == ["nix/graphical.nix"], left
+
+
+def test_positive_control_a_pinned_PATH_still_reports_a_DIFFERENT_host():
+    """🔴 The OTHER axis of the (path, host) key — the one the first real pins
+    introduce, and the one a pin can get wrong in the dangerous direction.
+
+    The case above drives same-host/different-path. This drives
+    same-path/different-host: if a pin blinded its whole FILE, `_index.json`
+    would become a free channel for any client host at all, and the pin that
+    opened it would read as narrow.
+
+    Driven through the PRODUCTION predicate (`_unpinned`, real `ALLOWLIST`)
+    rather than a re-implementation, and the intruder is a fabricated internal
+    name that must never be pinned.
+
+    The first assert is the anti-vacuity guard: drive an UNPINNED path and this
+    case passes for the wrong reason forever, because an unpinned path reports
+    every host anyway. So it fails loudly if the pin it depends on moves.
+    """
+    pinned_path = f"{_FLOWS}/_index.json"
+    assert any(p == pinned_path for p, _ in ALLOWLIST), (
+        f"{pinned_path} is no longer pinned, so the case below would pass "
+        "vacuously — repoint it at a path that IS in ALLOWLIST")
+    intruder = (pinned_path, 1, planted_host(), '"x": "y"')
+    assert _unpinned([intruder]) == [intruder]
 
 
 # --- negative controls (the false-positive half) --------------------------------
