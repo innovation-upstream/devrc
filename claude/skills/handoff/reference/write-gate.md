@@ -1319,8 +1319,12 @@ a prune that worked, undone inside a week, is the whole of it.
 
 🔴 **The growth is STRUCTURAL, not careless.** The bucket rules forbid durable content
 in a REPLACE section, so the correct remedy for a finding is "move it to `Gotchas`" —
-which APPENDS. That section has an entry rule and **no exit rule**; it is monotonic by
-construction, and a warning is not a counterweight to a construction. One PR did
+which APPENDS. ⚠ **This paragraph said that section had "an entry rule and no exit
+rule; it is monotonic by construction", and rule (q) FALSIFIED it** — `--prune` is that
+exit rule (§J). What survives is the ASYMMETRY, which is what a warning cannot
+counterweight: entry is a side effect of an ordinary update, the exit is a deliberate
+flag naming every line, so the section grows on its own and shrinks only when someone
+acts. One PR did
 exactly that twice in one day, correctly by the bucket rule and harmfully by the size
 rule, and two blind audit rounds missed the tension because each was scoped to one
 axis.
@@ -1346,9 +1350,18 @@ Two ways, and the first is usually the right one:
 1. **Shrink a REPLACE section in the same delta.** `State now`, `Next steps` and
    `How to verify` are rewritten wholesale, so what they no longer need to say costs
    nothing to drop.
-2. **Move what has closed out of the document first**, in its own commit, to the arc's
-   archive file — then re-run the update unchanged. `Gotchas` and `Open investigations`
-   APPEND through this tool, so it cannot shrink them for you.
+2. **EVICT what has closed out of an append-only section** — ONE route with two halves,
+   not two alternatives. MOVE the text to the arc's archive file, leaving a pointer, and
+   remove the lines with `--prune <file> --prune-count <n>` (rule (q), §J). It
+   **combines with `--update`**: the prune applies to the MERGE, so one run can add this
+   round's findings, remove what has closed, and clear this refusal honestly. It is
+   never a SIDE EFFECT — you name every line — but it needs no separate run and no
+   separate commit. 🔴 Moving the text WITHOUT rule (q) means hand-editing the committed
+   doc, which bypasses every gate in this module at once.
+   ⚠ **This item used to end "`Gotchas` and `Open investigations` APPEND through this
+   tool, so it cannot shrink them for you", and rule (q) falsified that** — it is the
+   sentence #1926 removed from the refusal itself. It survived here, under the heading
+   an agent reads BEFORE running the tool, until round 1 of that PR's audit.
 
 🔴 **REMEDY 2's DESTINATION IS ITSELF A GOVERNED DOCUMENT, AND BOTH HALVES OF THAT
 MATTER.** A `claudedocs/handoff-<arc>-archive.md` sink matches `is_handoff_doc` like any
@@ -1463,10 +1476,11 @@ Rule (c) makes `Open investigations`, `Findings` and `Gotchas` **append-only**, 
 rule (p) refuses to grow a doc already over its ceiling. Between them a document can
 reach a state where **the sanctioned writer cannot write at all**: the bytes are in the
 append-only sections, and no path in `scripts/lib/handoff_doc.py` could remove one.
-`--help` listed no prune mode. Rule (p)'s own docstring names the shape — those sections
-have "an entry rule and no exit rule" — and `scripts/handoff-audit.py` measures the
+`--help` listed no prune mode. Rule (p)'s own docstring named the shape — those sections
+had "an entry rule and no exit rule" — and `scripts/handoff-audit.py` measures the
 consequence (121 of 123 revisions grew or held) while its own header says it "makes no
-edits".
+edits". ⚠ **Past tense throughout: that is the state rule (q) ENDED.** The quoted phrase
+is retracted wherever it still stands in the present tense.
 
 🔴 **The cost is not the bytes, it is the HAND EDIT.** With the only writer unable to
 remove a line, the remedy reached for is an `Edit` of the committed document, which

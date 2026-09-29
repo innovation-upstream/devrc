@@ -440,11 +440,16 @@ content in a REPLACE section, so the correct remedy for a finding is "move it to
 the section regrew within seven days of being read. ⚠ THIS PARAGRAPH SAID THAT
 SECTION HAD "an entry rule and no exit rule; it is monotonic by construction",
 AND RULE (q) FALSIFIED IT — `--prune` is that exit rule. The sentence was true
-when written and survived the round that shipped its refutation, four lines from
-the header (see rule (q)) that quotes THIS docstring as its evidence of the gap.
-What still holds is the asymmetry that motivates the refusal: entry is a side
-effect of an ordinary update, while the exit is a SEPARATE deliberate run, so
-the section still grows on its own and shrinks only when someone acts.
+when written and survived the round that shipped its refutation, inside the very
+docstring that rule (q)'s header quotes as its evidence of the gap. What still
+holds is the asymmetry that motivates the refusal: entry is a side effect of an
+ordinary update, while the exit is a separate deliberate FLAG naming every line
+— so the section still grows on its own and shrinks only when someone acts.
+🔴 A SEPARATE FLAG IS NOT A SEPARATE RUN, and conflating the two is how round 1
+of #1926's audit found this docstring asserting a NEW false thing while
+retracting the old one: `--prune` combines with `--update` (see its own `--help`,
+and `main`, which prunes `merged_text` BEFORE rule (p) reads it), so one run both
+appends and shrinks.
 
 🔴 THE OVERRIDE IS NOT A CONVENIENCE, IT IS WHAT MAKES THE REFUSAL SAFE.
 `/handoff`'s write path is the ONLY step that records a session — see
@@ -3574,11 +3579,13 @@ def size_ratchet_report(relpath: str, merged_text: str, base_text: str) -> str:
             f"with `{PRUNE_FLAG} <file> {PRUNE_COUNT_FLAG} <n>`, which takes "
             "them VERBATIM from `Open investigations`, `Findings` or "
             "`Gotchas` — rule (q), the exit rule those sections used to lack. "
-            "That is its own run and never a side effect of this one, so evict "
-            "in its own commit first, then re-run this update unchanged. 🔴 "
-            "Moving the text WITHOUT rule (q) means hand-editing the committed "
-            "doc, which bypasses every gate in this module at once — see rule "
-            "(q)'s header for what that cost us.",
+            "It COMBINES with this update: the prune applies to the MERGE, so "
+            "ONE run can add this round's findings, remove what has closed, "
+            "and clear this refusal honestly. It is never a SIDE EFFECT — you "
+            "name every line — but it needs no separate run and no separate "
+            "commit. 🔴 Moving the text WITHOUT rule (q) means hand-editing "
+            "the committed doc, which bypasses every gate in this module at "
+            "once — see rule (q)'s header for what that cost us.",
             "  🔴 Do NOT satisfy this by DELETING an open investigation, a "
             "gotcha or a ruled-out theory. Eviction means MOVE, leaving a "
             "pointer: those sections exist so a future session does not repeat "

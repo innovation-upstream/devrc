@@ -8401,12 +8401,111 @@ EXPECTED_REMEDY_TWO = (
     "archive file, leaving a pointer, and remove the lines with "
     "`--prune <file> --prune-count <n>`, which takes them VERBATIM from "
     "`Open investigations`, `Findings` or `Gotchas` — rule (q), the exit rule "
-    "those sections used to lack. That is its own run and never a side effect "
-    "of this one, so evict in its own commit first, then re-run this update "
-    "unchanged. 🔴 Moving the text WITHOUT rule (q) means hand-editing the "
-    "committed doc, which bypasses every gate in this module at once — see "
-    "rule (q)'s header for what that cost us."
+    "those sections used to lack. It COMBINES with this update: the prune "
+    "applies to the MERGE, so ONE run can add this round's findings, remove "
+    "what has closed, and clear this refusal honestly. It is never a SIDE "
+    "EFFECT — you name every line — but it needs no separate run and no "
+    "separate commit. 🔴 Moving the text WITHOUT rule (q) means hand-editing "
+    "the committed doc, which bypasses every gate in this module at once — "
+    "see rule (q)'s header for what that cost us."
 )
+
+#: The sentence rule (q) falsified, in the two spellings that have shipped.
+#: 🔴 A TREE-WIDE LEDGER, BECAUSE THE SITE-AT-A-TIME FIX FAILED TWICE ON ONE PR.
+#: #1926 removed the denial from the refusal and left an identical claim in rule
+#: (p)'s docstring (round 0 caught it); the round-0 fix swept the module and left
+#: BOTH sentences standing in `write-gate.md` §I — including under the
+#: prescriptive "How you clear it" heading, i.e. the copy an agent reads BEFORE
+#: running the tool (round 1 caught that). A retraction is a tree-wide sweep, and
+#: nothing was checking the tree.
+RETRACTED_BY_RULE_Q = (
+    "it cannot shrink them for you",
+    "an entry rule and no exit rule",
+)
+
+#: Words that mark an occurrence as a RETRACTION rather than an assertion.
+_RETRACTION_MARKERS = (
+    "falsified", "retracted", "used to", "said that", "this paragraph said",
+    "this item used to", "past tense", "ENDED",
+)
+
+#: Every file that states rule (p)'s remedies to a human or an agent.
+_RULE_P_SITES = (
+    ("scripts/lib/handoff_doc.py", REPO_ROOT / "scripts" / "lib" / "handoff_doc.py"),
+    ("claude/skills/handoff/SKILL.md", HANDOFF_SKILL),
+    ("claude/skills/handoff/reference/write-gate.md",
+     HANDOFF_SKILL.parent / "reference" / "write-gate.md"),
+)
+
+
+def test_no_site_still_ASSERTS_what_rule_q_falsified():
+    """🔴 A RETRACTION IS A TREE-WIDE SWEEP, AND NOTHING WAS CHECKING THE TREE.
+
+    #1926 exists because a refusal went on denying a capability rule (q) had
+    shipped. Fixing it site-by-site then failed TWICE on that same PR: the first
+    commit left an identical claim in rule (p)'s docstring, and the round-0 fix
+    swept the module and left BOTH sentences standing in `write-gate.md` §I —
+    one of them under the prescriptive "How you clear it" heading, i.e. the copy
+    an agent reads BEFORE running the tool, where the false remedy does exactly
+    the harm the PR names: it stops the reader looking.
+
+    🔴 THE PHRASE MAY STILL APPEAR — this asserts it appears only as a QUOTED
+    RETRACTION, never as a live claim. A bare absence test would forbid the
+    retraction notes themselves, and deleting the history is how the next writer
+    re-derives the claim. So every occurrence must carry a retraction marker
+    nearby; an occurrence with none is an assertion.
+
+    ⚠ This is a PROXIMITY heuristic over normalised text, not a parser. It
+    cannot tell a marker that belongs to a neighbouring sentence from one that
+    belongs to this occurrence. It is deliberately the loose direction: it
+    catches a NEW bare copy, which is the failure that actually happened twice.
+    """
+    offenders = []
+    for label, path in _RULE_P_SITES:
+        assert path.is_file(), (
+            f"{label} is missing, so this guard would pass over a site it "
+            "claims to cover — the vacuity this repo forbids.")
+        flat = " ".join(path.read_text(encoding="utf-8").split())
+        low = flat.lower()
+        for phrase in RETRACTED_BY_RULE_Q:
+            start = 0
+            while (i := low.find(phrase.lower(), start)) != -1:
+                window = low[max(0, i - 400): i + len(phrase) + 400]
+                if not any(m.lower() in window for m in _RETRACTION_MARKERS):
+                    offenders.append(f"{label}: ...{flat[max(0, i - 90): i + len(phrase) + 90]}...")
+                start = i + len(phrase)
+    assert not offenders, (
+        "a site still ASSERTS something rule (q) falsified, with no retraction "
+        "marker near it. `--prune` IS the exit rule, and it COMBINES with "
+        "--update. Retract the sentence where it stands — do not delete the "
+        "history, and do not fix only the site you were looking at:\n  "
+        + "\n  ".join(offenders))
+
+
+def test_control_the_retraction_sweep_CAN_fail():
+    """Positive control for the guard above — otherwise a zero offenders count
+    is indistinguishable from a probe wired to nothing, which is the failure
+    mode this repo names most often. Feeds the detector a bare assertion and
+    requires it to be caught, then the same text WITH a marker and requires it
+    not to be."""
+    bare = " ".join(
+        "The bucket rules forbid durable content in a REPLACE section. That "
+        "section has an entry rule and no exit rule; it is monotonic by "
+        "construction.".split())
+    low = bare.lower()
+    i = low.find("an entry rule and no exit rule")
+    assert i != -1, "the control fixture does not contain the phrase"
+    window = low[max(0, i - 400): i + 400]
+    assert not any(m.lower() in m2 for m in _RETRACTION_MARKERS for m2 in [window]), (
+        "the bare control already looks retracted, so the guard above would "
+        "pass it and prove nothing")
+    marked = bare + " This paragraph said that, and rule (q) falsified it."
+    lowm = marked.lower()
+    j = lowm.find("an entry rule and no exit rule")
+    windowm = lowm[max(0, j - 400): j + 400]
+    assert any(m.lower() in windowm for m in _RETRACTION_MARKERS), (
+        "a properly-retracted occurrence is NOT recognised, so the guard would "
+        "flag every retraction note and force their deletion")
 
 
 class TestADocOverItsCeilingMayNotGrow:
@@ -8467,14 +8566,25 @@ class TestADocOverItsCeilingMayNotGrow:
             f"{hd.SIZE_RATCHET_FLAG} — which SHIPS the over-ceiling doc — as "
             f"the only way out:\n{err}")
         assert hd.PRUNE_COUNT_FLAG in err, (
-            f"{hd.PRUNE_FLAG} is named without {hd.PRUNE_COUNT_FLAG}, so the "
-            "invocation printed here is not one the author can actually run:\n"
-            f"{err}")
+            f"{hd.PRUNE_FLAG} is named without {hd.PRUNE_COUNT_FLAG}, which it "
+            "REQUIRES — so the fragment printed here omits a mandatory flag. "
+            "(It is a fragment either way: --repo, --topic and --advanced are "
+            f"required too and are deliberately not restated here.)\n{err}")
         assert "arc's archive file" in err, (
             "the eviction remedy no longer says where the text GOES, so it "
             f"reads as a bare deletion:\n{err}")
         assert "Do NOT satisfy this by DELETING" in err
         assert hd.SIZE_RATCHET_FLAG in err
+        # 🔴 The remedy NAMES the prunable sections in prose while the truth is
+        # `APPEND_PREFIXES`. Without this, adding a fourth append-only section
+        # reddens nothing and the refusal silently under-reports where an
+        # author's bytes may be sitting. Pins the RELATIONSHIP, not the words.
+        missing = [p for p in hd.APPEND_PREFIXES if p.lower() not in err.lower()]
+        assert not missing, (
+            "the refusal's prose list of prunable sections has drifted from "
+            f"`APPEND_PREFIXES`; these append-only sections are not named, so "
+            f"an author whose overage sits in one is not routed anywhere: "
+            f"{missing}\n{err}")
 
     def test_the_refusal_does_not_deny_the_exit_rule_q_ships(
         self, oversize_repo: Path, tmp_path: Path
