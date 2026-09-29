@@ -17,69 +17,67 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Expand the mention system (`mention-open.py`) so clicking `repo#N` in Alacritty resolves against ALL repos the operator contributes to, not just those checked out locally in `~/workspace/`.
 
 ## State now
-**The mention effort is COMPLETE and SHIPPED — eleven PRs merged.** `#1291` resolver ·
-`#1313` detection+attribution · `#1322` copy-on-select · `#1328` local-first click ·
-`#1336` KEYS guard + `audit-pr N` · `#1331` handoff · **`#1369` (`156b4927`) picker
-universe + daily timer** · **`#1380` (`bc9b900a`) a guessed repo is overridable** ·
-**`#1387` (`72e59dff`) bare `#N` too** · **`#1421` (`a6a1c6f3`) fzf RANKING** ·
-**`#1426` (`3d02eea6`) `/pull` URLs** · **`#1454` (`e62d58ba`) fzf REPLACES rofi**.
-Adjacent, merged the same arc: `#1403` (`4f49f5dc`) three false toolchain claims ·
-`#1439` (`605b29ac`) ship.sh nebula fallback · `#1453` (`eeea9025`) co-tenant flake
-root cause · `#1441` (`0972d1d6`) its diagnostic wiring · `#1457` (`0fb5b6b1`)
-coverage guards.
+**THE ARC IS CLOSED — thirteen PRs merged, all shipped and verified live on both hosts.**
+`#1291` · `#1313` · `#1322` · `#1328` · `#1336` · `#1331` · **`#1369` (`156b4927`) picker
+universe + daily timer** · **`#1380` (`bc9b900a`)** · **`#1387` (`72e59dff`)** ·
+**`#1421` (`a6a1c6f3`) fzf RANKING** · **`#1426` (`3d02eea6`) `/pull` URLs** ·
+**`#1454` (`e62d58ba`) fzf REPLACES rofi** · **`#1509` (`af211320`) PLAUSIBILITY
+ORDERING** · **`#1535` (`ffd665fc`) this handoff**. Adjacent, same arc: `#1403`
+(`4f49f5dc`) · `#1439` (`605b29ac`) · `#1453` (`eeea9025`) · `#1441` (`0972d1d6`) ·
+`#1457` (`0fb5b6b1`).
 
-**IN FLIGHT: `#1509`** — plausibility ordering (Tier A ranges + Tier B picks). Open,
-NOT merged, NOT shipped. See rank 1.
+`ship.sh` converged + **COMPARED**: both hosts at `ffd665fc`.
 
-**Live and verified on both hosts** (`ship.sh` converged + COMPARED; deployed wrapper
-carries `alacritty-0.17.0` + `fzf-0.74.3`). Measured through the deployed wrapper,
+**The refresh unit was DRIVEN, not merely scheduled** — `Result=success
+ExecMainStatus=0`, and it wrote the third artefact for the first time. Measured on the
+real universe immediately after:
+
+    known_ranges.json   393 repos, 232 with NO refs at all (59%)
+    clicking #1291   ->  PLAUSIBLE 5  | BELOW 156 | IMPOSSIBLE 232   (top tier = 1%)
+    clicking #12     ->  PLAUSIBLE 68 | BELOW  93 | IMPOSSIBLE 232   (top tier = 17%)
+
+⚠ **59% have no refs, against the 45% predicted from a 120-repo sample** — the filter
+demotes MORE of the list than the design estimated, and the shape (sharp at high
+numbers, soft at low) is exactly as recon predicted.
+
+Click path, live through the deployed wrapper (`alacritty-0.17.0` + `fzf-0.74.3`),
 headless, no window raised:
 
     typing `civitai`  -> civitai/civitai      (was 8th of 230)
     typing `devrc`    -> innovation-upstream/devrc
-    typing `Civitai`  -> civitai/civitai      (the round-1 case regression, fixed)
+    typing `Civitai`  -> civitai/civitai      (the smart-case regression, fixed)
 
-🔴 **`main` IS RED and it is nobody's in this arc.** Two tests, reproduced by me on a
-pristine `origin/main` export with none of #1509 present:
-`test_guard_core.py::test_every_kill_server_call_site_in_the_repo_is_classified` and
-`::test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny` — 2 failed / 1534
-passed. `claudedocs/handoff-tmux-webapp.md` landed carrying `tmux kill-server` text
-without an entry in `_KILL_MENTION_LEDGER`. NEEDS AN OWNER.
-
-**This session resolved no clawgate task** — `resolve` exited 5 with its positive
-control passing (8 links for another session). 🔴 NOT evidence this session touched no
-task: a wrong session id also answers 200 with an empty array.
+🔴 **`main` IS RED and it is NOT this arc's — the one thing left open.** See rank 1.
 
 ## Open investigations — live diagnosis state
 (none — the disclosure is a known, measured state awaiting an operator decision, not a
 diagnosis in progress.)
 
 ## Next steps (ranked)
-1. **Land or close `#1509`** (plausibility ordering). Open, gated (22,322 passed, the
-   2 inherited failures above), claim released, 0 behind at its last gate. Decide, then
-   `ship.sh`. ⚠ Its author DELETED a six-round concurrency ladder after measuring the
-   lock unnecessary (−513 lines); do not re-add one without a measurement.
+1. **Classify `claudedocs/handoff-tmux-webapp.md` in `_KILL_MENTION_LEDGER`**
+   (`scripts/claude-hooks/guard_core.py`). `main` has been red since `60194765`:
+   `test_guard_core.py::test_every_kill_server_call_site_in_the_repo_is_classified` and
+   `::test_no_tracked_shell_text_writes_a_kill_this_guard_would_deny` — 2 failed / 1534
+   passed, reproduced on a pristine `origin/main` export with none of this arc present.
+   `main-green-check` should reproduce it on its next run.
+   forcing: gate — `claude/RULES.md` calls a permanently-red gate worse than none, and
+   this one is already being clicked through.
+2. **Fix `test_kills_the_LENGTH_guard`** (`scripts/tests/test_subsystem_touch.py`) — a
+   **0.195%** flake on `main` since 2026-08-12 (#432), quantified this arc. A 3-hex sha
+   prefix (4096 values) is sometimes ambiguous among the fixture repo's 9 objects, so
+   the mutant raises `CommitAmbiguousError` and the assertion is never reached. 3 chars
+   is deliberate (`COMMIT_SHA_MIN_CHARS = 4`), so "use more characters" is unavailable —
+   regenerate until unambiguous, or assert the precondition. Closing condition: the
+   600-iteration loop returns 0 failures.
+   forcing: gate — it reddens CI intermittently, which is how a real red gets ignored.
+3. **Re-click the Alacritty path now that fzf replaced rofi** — every earlier operator
+   click was against rofi, and both defects this arc fixed were found that way. The
+   picker is a float terminal now, so the LOOK changed as well as the ranking.
    forcing: none
-2. **Classify `claudedocs/handoff-tmux-webapp.md` in `_KILL_MENTION_LEDGER`** — `main`
-   is red until someone does. Two tests, reproducible on a clean export.
-   forcing: gate — `claude/RULES.md` calls a permanently-red gate worse than none.
-3. **Fix `test_kills_the_LENGTH_guard`** (`scripts/tests/test_subsystem_touch.py`) — a
-   **0.195%** flake on `main` since 2026-08-12 (#432). A 3-hex sha prefix (4096 values)
-   is sometimes ambiguous among the fixture repo's 9 objects; the mutant then raises
-   `CommitAmbiguousError` and the assertion is never reached. 3 chars is deliberate
-   (`COMMIT_SHA_MIN_CHARS = 4`), so "use more characters" is unavailable — regenerate
-   until unambiguous, or assert the precondition. Closing condition: the 600-iteration
-   loop returns 0 failures.
-   forcing: gate — it reddens CI intermittently and trains everyone to click through.
-4. ~~Exercise the Alacritty click path~~ — **DONE by the operator**, and it produced two
-   real defects (the `audit-pr` one-row picker, the civitai ranking). Residual: the
-   operator has not re-clicked since `#1454` swapped rofi for fzf.
-   forcing: none
-5. ~~Everything else from the old ranked list~~ — ranks 2-10 all **DONE**: staleness
-   signal repurposed as the timer's deadman (#1328/#1369), clipboard WIP (#1322),
-   detection/attribution (#1313), README (#1321), round-2 guard gaps (#1336), the four
-   🟢 (#1387/#1457), picker universe (#1369), disclosure threshold now structural and
-   19/20 → 9/20 (#1457).
+4. ~~Everything else~~ — **DONE**: picker universe, guessed-repo override (both shapes),
+   fuzzy ranking, `/pull` URLs, fzf replacing rofi, plausibility + picks ordering, the
+   ship.sh nebula fallback, the co-tenant flake and its diagnostic, and the coverage
+   guards.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -542,6 +540,45 @@ diagnosis in progress.)
   of 20** before #1457 made it structural (now 9/20) — one added fixture key would have
   reddened a DISCLOSURE guard, and the fixes that come to hand under pressure (raise the
   threshold, exclude the file) gut it.
+
+- 🔴 **THE PLAUSIBILITY FILTER IS STRONGER THAN THE PROXIMITY IDEA THAT MOTIVATED IT.**
+  The operator asked for "compare the clicked number to recent opens and guess by
+  proximity". Recon found something cheaper and bigger first: **59% of the universe has
+  NO issues or PRs at all**, so it can never satisfy ANY numeric click. Ordering by
+  "could this repo even have a #N" needs no history, works from the first refresh, and
+  demotes more of the list than proximity ever could. Proximity survives as the SOFT
+  tier inside the plausible set. ⚠ Its power is uneven and that is inherent: `#1291`
+  narrows to 5 candidates, `#12` only to 68.
+- 🔴 **`user/repos` NEEDED NO WIDENING — measured, so nobody adds a second API source.**
+  The obvious worry (a repo contributed to by PR without membership) was checked:
+  `search/issues?q=author:<login> type:pr` returned **28** repos, **all 28** already in
+  `user/repos`, **0 new**.
+- 🔴 **A LOCK WAS BUILT, DEFENDED OVER FOUR AUDIT ROUNDS, AND THEN DELETED — and the
+  tell was visible the whole time.** An agent added file locking to the picks log, then
+  spent rounds 3-6 finding defects in its own lock scaffolding: **+272 payload against
+  +806 test**, every finding about code the previous round had written. Deleting it
+  (−513 lines) needed one question nobody had asked: *is the thing this defends
+  reachable?* Measured after: 8 processes × 400 concurrent appends, lock removed, **0
+  torn and 0 lost**; the real window is **0.28 ms once per 500 picks** and costs one
+  learning row. Kept `_compact_picks` and tmp-then-replace, but **re-justified without
+  concurrency** — nothing else bounds a file that only grows, and a SIGKILL
+  mid-compaction should leave the old log rather than a truncated one.
+- 🔴 **AN AGENT REFUSED AN INSTRUCTION AND WAS RIGHT.** Told to add `--tiebreak=end,index`
+  as "load-bearing" — with the claim that the computed order would otherwise be
+  discarded on the first keystroke — it measured **560 typed trials, 0 differences**
+  (positive control `length` differed in 518) and declined to churn a whole-string-pinned
+  constant for zero behaviour change. **fzf appends `index` implicitly; `end` already IS
+  `end,index`.** Independently confirmed. Pre-ranking DOES survive a keystroke.
+- ⚠ **`known_ranges.json` RECORDS `UNKNOWN` SEPARATELY FROM `0`, and that distinction is
+  load-bearing.** A repo the GraphQL batch cannot answer for is not a repo with no refs —
+  and `0` is the strongest signal in the scheme, sinking a repo for every numeric click.
+  Conflating them would let a failed lookup bury a real repo permanently.
+- **The ranges leg is batched GraphQL, not 392 REST calls** — 50 repos per request,
+  ~3.8 s, so the whole universe is ~8 requests / ~30 s inside the existing daily unit.
+- 🔴 **A VACUOUS GUARD WAS WRITTEN TWICE IN THE PR THAT WAS REMOVING VACUOUS GUARDS.**
+  An `os.write` spy observed **0** calls and asserted `<= 1`; its replacement also passed
+  under the mutant. Caught only by running a negative control. The hazard does not
+  respect the fact that you are currently hunting it.
 
 ## How to verify
 ```bash
