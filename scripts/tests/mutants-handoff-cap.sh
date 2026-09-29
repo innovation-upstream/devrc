@@ -581,6 +581,55 @@ run 'retired-count-back-in-the-comment' \
   test_the_comment_still_states_the_ASCII_scope \
   's|# undercounted here twice\.|# undercounted here twice — FOUR ADMISSIONS, NOT ONE.|'
 
+printf '\n== §C states the emphasis rule BY POSITION (must be KILLED) ==\n'
+# 🔴 THE SAME CLAIM ONE FILE OVER, AND THE ROWS ABOVE CANNOT SEE IT. Those pin
+# the module COMMENT's shape; these pin `claude/skills/handoff/reference/write-
+# gate.md` §C, which is where a reader is SENT to find out which spellings parse.
+# MEASURED 2026-09-29: deleting the 57 B emphasis clause from `SKILL.md` left 652
+# passed / 0 failed over `test_handoff_doc.py` + the three size suites, and
+# deleting the whole 220 B variant catalogue failed exactly THREE tests, all
+# about the NEAR-MISS half. The emphasis half was guarded by nothing, which is
+# how §C came to name ONE admitted spelling and then five, both wrong.
+#
+# 🔴 ALL THREE ROWS ARE REGRESSION COVERAGE, not invariant guards, and it was
+# measured per row: each leaves the other 630–631 tests GREEN, so nothing here
+# would have caught it. ⚠ Each also kills `test_the_ledger_is_also_true_of_the_
+# READER`, reported as an `also:` — that is the behavioural half of one guard
+# driving the same rows through `ranked_items`, not a mutation wider than the
+# guard it isolates.
+#
+# ONE ROW PER POSITIONAL RULE, because the rules have DIFFERENT bounds and a
+# mutant to one says nothing about the others: `_MARKUP` bounds the post-key and
+# post-colon positions at three, while the LEADING position is a one-character
+# negative lookbehind and is therefore unbounded. Conflating them is the exact
+# error §C used to make.
+#
+# (a) `_MARKUP` narrowed to two. Kills on the `forcing***: gate` row — the
+# post-key bound measured AT its boundary, which is why the fixture is 3 and not
+# 2: a 2-character fixture sits on the mutant's own boundary and survives.
+run 'markup-bound-narrowed-to-two' \
+  test_every_ledger_row_behaves_as_the_topic_says \
+  's|^_MARKUP = r"\[\*_`~\]{0,3}"|_MARKUP = r"[*_`~]{0,2}"|'
+# (b) The LEADING position bounded like `_MARKUP`, ISOLATED FROM (a) — a
+# fixed-width lookbehind refusing three adjacent markup characters, which is the
+# narrowest expression that can make the leading run bounded. `**forcing:** gate`
+# still parses under it, so the row can only die to `****forcing:** gate`, i.e.
+# to the unboundedness claim itself and not to emphasis support in general.
+# Spelled on `_FORCING` alone: `_FORCING_ATTEMPT` carries the same lookbehind at
+# its own use site precisely so the two stay separately mutable.
+run 'leading-lookbehind-bounded-like-markup' \
+  test_every_ledger_row_behaves_as_the_topic_says \
+  's@rf"(?<!\[A-Za-z0-9\]){FORCING_KEY}{_MARKUP}@rf"(?<![A-Za-z0-9])(?<![*_`~][*_`~][*_`~]){FORCING_KEY}{_MARKUP}@'
+# (c) A FOURTH decoration position added to `_FORCING`. §C organises itself by
+# position and states "three"; this is the mutant that makes that number wrong,
+# and it is the only row whose killer is the SHAPE assertion rather than the
+# ledger. Anchored on `{FORCING_KEY}` so it moves `_FORCING` alone — the same
+# `{_MARKUP}\s*:\s*{_MARKUP}` run appears on `_ELIMINATION` and the investigation
+# stamp, and an unanchored sed mutates all three at once.
+run 'a-fourth-decoration-position-added' \
+  test_the_pattern_still_has_exactly_THREE_decoration_positions \
+  's@{FORCING_KEY}{_MARKUP}\\s\*:@{FORCING_KEY}{_MARKUP}{_MARKUP}\\s*:@'
+
 printf '\n== the refusals stay CLEARABLE: remedy + legend (must be KILLED) ==\n'
 # 🔴 THE ROW THAT WAS MISSING, AND ITS ABSENCE WAS MEASURED. Reverting
 # `FENCED_FIELD_REMEDY` to the bare "move it out of the fence" left the WHOLE

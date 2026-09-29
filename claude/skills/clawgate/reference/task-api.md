@@ -1,11 +1,52 @@
-# clawgate — machine (hook-token) Task API: the full producer surface
+# muster — machine (hook-token) Task API: the full producer surface
 
-Read when: you are **writing or debugging a producer** that posts Tasks/cards into clawgate
+Read when: you are **writing or debugging a producer** that posts Tasks into the board
 (task-spec drafter, repo-cos, mail-actions, a script, the extension), or you got an unexpected
 status code back from a machine endpoint.
 
-Routes registered in `internal/api/server.go` `registerNotesRoutes`, handlers in
-`internal/api/notes.go`. Token as `Authorization: Bearer <t>` **or** `X-Clawgate-Token: <t>`.
+## 🔴 THE BASE URL IS `$CLAWGATE_TASK_API_URL`, NOT `$CLAWGATE_API_URL`
+
+The task/agent/runbook half was **extracted out of clawgate into a separate service, `muster`**
+(`github.com/ZacxDev/muster`, ns `muster` on workbench). Everything below is muster's.
+
+| | base | env var |
+|---|---|---|
+| **muster** — every `/api/tasks*` · `/api/agents*` · `/agent/task*` · `/api/tags` · `/api/projects` · `/api/sessions/{id}/tasks` route on this page, and the `/tasks` UI | `http://192.168.50.250:30306` | 🔴 **`CLAWGATE_TASK_API_URL`** |
+| **clawgate** — the permission ROUTER: `/api/send`, `/api/notify`, `/api/suggest`, `/api/response/{id}`, `/api/requests`, `/api/auto-approve*`, `/api/push/*`, `/api/attention*`, `/api/layout*`, `/api/term*`, `/api/tmux*`, `/api/transcripts*` | `http://192.168.50.250:30302` | `CLAWGATE_API_URL` |
+
+🔴 **On the wrong base a route does not error — it 404s.** Measured 2026-09-29, clawgate **0.8.65**
+/ muster **0.2.0**: `:30302/api/tasks`, `/api/agents`, `/agent/task`, `/tasks`, `/api/tags`,
+`/api/projects` → **404**; the same paths on `:30306` → **401** (exist, auth-gated). Mirror image:
+`:30306/api/send`, `/api/attention`, `/api/requests`, `/api/response/1` → 404. Negative control
+`/zzz-control` → 404 on **both**, so the 404s above are the route's absence, not a dead port.
+⚠ **One `CLAWGATE_HOOK_TOKEN` opens BOTH services**, so "my token works" identifies neither the
+service nor the route. 🔴 **Never repoint `CLAWGATE_API_URL` at muster** — `clawgate-hook.sh` reads
+it for `/api/send` (`hooks.md`). devrc's ledger: `scripts/lib/clawgate_tasks.py`
+(`TASK_API_URL_VARS` / `ROUTER_API_URL_VARS`).
+
+🔑 **READ THE 404's BODY — it says which of the two 404s you got.** A wrong-base 404 and an
+absent-task 404 are the same status code; the bodies are not. Measured 2026-09-29 with the hook
+token:
+
+| request | status | body | means |
+|---|---|---|---|
+| `:30302/api/tasks?summary=1&limit=1` | 404 | `404 page not found` (text/plain) | **WRONG BASE** — the router's own mux 404. `clawgatectl` maps this to **rc 7** ("this CLI is newer than the server"), which reads as a stale binary and is not |
+| `:30306/api/tasks/1` | 404 | `{"error":"task not found"}` (JSON) | right base, that task does not exist — **rc 4** |
+| `:30306/api/tasks?summary=1&limit=1` | 200 | a task array | right base, working |
+
+So **rc 7 on a `task`/`agent` verb is a base-URL symptom until proven otherwise** — check
+`CLAWGATE_TASK_API_URL` before suspecting the binary.
+
+⚠ **EVERY CODE CITE AND EVERY `0.7.x`/`0.8.x` MEASUREMENT BELOW PREDATES THE EXTRACTION** — the
+`internal/api/…` paths, the `server.go:NNN` line numbers, and every "measured live on 0.7.9x"
+claim were all taken against **clawgate's** tree and clawgate's running binary. They are the best
+record of what the behaviour WAS, and it moved with the code — but two things follow. A `git grep`
+in `containers/clawgate` will no longer find those symbols, and **that absence is evidence about
+the split, not about the route**. And a per-route semantic (a field name, a status code, a 409
+rule) is now a claim about **muster `0.2.0`**, which nobody re-measured when it moved: re-probe
+against `:30306` before betting on one, and re-cite against `ZacxDev/muster` when you touch it.
+
+Token as `Authorization: Bearer <t>` **or** `X-Clawgate-Token: <t>`.
 
 | op | route | notes |
 |---|---|---|
@@ -122,6 +163,16 @@ worth knowing: **the note is only as good as the checkout's freshness** — `dri
 now reports a stale `homelab-talos` per host — and an **unparseable** `var buildVersion` line means
 the package is not installed at all (`clawgatectl: command not found`), never a guessed label.
 
+🔴 **It already knows the split, and the choice is PER ROUTE, not per verb** (`clawgatectl --help`
+is the authority): `CLAWGATE_API_URL` serves the `health` · `attention` · `view` · `panel` · `term`
+· `tmux` · `transcript` verbs; **`CLAWGATE_TASK_API_URL` serves `task` · `agent` · `agent task`**.
+Overrides are `--api-url` / `--task-api-url`. ⚠ `CLAWGATE_TASK_API_URL` is **OPTIONAL and falls
+back to `CLAWGATE_API_URL`** — so on a host that never heard of the split the task verbs silently
+aim at the router and every one of them 404s (rc 7, "this CLI is newer than the server"), which
+reads as a stale binary rather than a misconfigured base. ⚠ **`chief` SPANS BOTH**: `chief ask` is
+task-side (`GET /api/agents` → `POST /api/agents/{name}/messages`), `chief write`/`chief launch`
+are router-side (`/api/term/chief/*`).
+
 It reads `CLAWGATE_API_URL` + `CLAWGATE_HOOK_TOKEN` out of `~/.claude/clawgate.env` itself, so the
 `H="Authorization: Bearer $(grep '^CLAWGATE_HOOK_TOKEN=' … | cut -d= -f2)"` preamble that used to
 head every recipe in this skill **is gone** — the token never reaches argv (`/proc` is world
@@ -220,6 +271,10 @@ adjacent text → selector → accessible name. Full procedure, worked example, 
 `~/.claude/skills/clawgate/reference/element-references.md`.
 
 ## Card producers — all share `CLAWGATE_HOOK_TOKEN`
+🔴 **The split cuts through this list too: a producer that posts CARDS (`/api/send`) talks to the
+ROUTER, one that posts TASKS (`/api/tasks`) talks to MUSTER, and #2 below does the first while #3
+and #4 do the second.** One token opens both, so a producer pointed at the wrong base does not
+401 — it 404s, which a fail-open retry may swallow. Check each producer's base, not just its token.
 ⚠ **Rotation coupling: rotating the token means updating all three of 1–3 below, or they fail
 silently.** (4 is exempt — it reads clawgate's own secret rather than holding a copy.)
 1. The two local hooks (token in `~/.claude/clawgate.env`).
@@ -264,9 +319,13 @@ and **no login QR to manage**.
 - **Phone / public** → `https://clawgate.zacx.dev`, pass the **Authelia passkey** at
   `https://login.zacx.dev` (user `zach`, already enrolled). Authelia owns auth/SSO now — manage it
   there, not in clawgate. Memory `authelia-passkey-sso`.
-- **LAN** → `http://192.168.50.250:30302` or `clawgate.workbench.lan` — 🔴 **NOT open: the human UI
-  needs a session** (measured 2026-09-12, `/tasks/1` → `303` → `/login`). The machine `/api/*` door
-  still takes the hook token. This bullet said "open, no auth" and was wrong.
+- **LAN** → the ROUTER is `http://192.168.50.250:30302` (`clawgate.workbench.lan`); 🔴 **the TASK
+  board is `http://192.168.50.250:30306` (muster)** and `:30302/tasks` is now a plain **404**.
+  Neither UI is open: the human tier needs a session. ⚠ **The refusal SHAPE differs between the two
+  services** — measured 2026-09-29: clawgate answered `/tasks/1` with `303 → /login` (2026-09-12),
+  muster answers `/tasks/1` with **`401` + `Content-Type: application/json`**. So a redirect-vs-401
+  check cannot be reused across them, and a 401 there is *gated*, not *absent*. The machine `/api/*`
+  door on each still takes the same hook token. This bullet said "open, no auth" and was wrong.
 - **Which endpoints take the hook token is now enumerated exhaustively** — see "The complete
   machine surface" at the bottom of this file, derived from the checked-in route golden. Never
   hand-list it from memory: this bullet used to name seven routes out of fifteen, and that partial
@@ -300,6 +359,9 @@ and **no login QR to manage**.
   `off`/`0` disables it.
 - 🔴 **Never infer exposure from the path prefix.** Measured live 0.7.85, 2026-08-11:
   `GET /api/requests` → **200 with no credential**, `GET /api/tasks` → **401**.
+- ⚠ **`/operator*` is GONE — measured 2026-09-29, 404 on BOTH bases.** Task #633 deleted the
+  reserved `operator` agent and `CLAWGATE_OPERATOR_TOKEN` with it (`chief.md`). The bullet below is
+  kept as the record of what that credential was; do not go looking for the routes.
 - 🔴 **`/operator/*` is a THIRD credential** — `requireOperatorToken` demands the reserved Operator
   *agent's* hooks token, not the hook token, which gets `401 {"error":"not the operator"}`. It
   covers **11 of the 13** `/operator*` routes; `GET /operator` and `POST /operator/provision` are
@@ -326,10 +388,23 @@ and **no login QR to manage**.
 
 ---
 
-## The complete machine surface — all 23 `/api/*` routes, with auth
+## The complete machine surface — the `/api/*` routes, with auth
+
+🔴 **THIS INVENTORY IS A PRE-SPLIT SNAPSHOT OF ONE SERVER, AND THE SPLIT CUTS THROUGH IT.** It was
+derived when clawgate served everything. It is still the best per-route semantics on record, but
+**the counts below ("23 `/api/*`", "121 routes", "17 `requireHookToken`") are no longer a claim
+about either live service** — they are the union as it stood. Which side each route is on now,
+measured 2026-09-29 (see the base-URL block at the top of this file):
+
+| side | routes from the tables below |
+|---|---|
+| **muster `:30306`** | `GET/POST /api/tasks`, `GET/PATCH/DELETE /api/tasks/{id}`, `PATCH /api/tasks/{id}/status`, `POST/DELETE /api/tasks/{id}/comments[/{cid}]`, `GET /api/agents`, `GET /api/tags`, `GET /api/projects`, `GET /api/sessions/{id}/tasks`, `GET /api/openrouter/models`, `/agent/*`, `/agents*`, `/repos`, `/runbooks*`, `/tasks*` (incl. `POST /tasks/merge`), `/ui/tasks`, `/ui/agents/*` |
+| **clawgate `:30302`** | `POST /api/send`, `POST /api/notify`, `POST /api/suggest`, `GET/DELETE /api/response/{id}`, `GET /api/requests`, `POST /api/auto-approve`, 🔴🔴 `POST /api/auto-approve-all`, `GET /api/push/vapid-public-key`, `POST /api/push/(un)subscribe`, plus `/api/attention*`, `/api/layout*`, `/api/term*`, `/api/tmux*`, `/api/transcripts*` |
+
+**Re-derive the counts per service before quoting one** — and never quote a total across both.
 
 🔴 **Read this before concluding a capability does not exist.** The core SKILL.md used to name
-three clawgate routes (`/health`, `/api/send`, `POST /agents`) out of **120 registered**. That gap
+three routes (`/health`, `/api/send`, `POST /agents`) out of **120 registered**. That gap
 is not cosmetic: it is why `GET /api/agents` went unnoticed and someone reached into Postgres with
 `SELECT id FROM agents WHERE name=…` for a lookup one authenticated GET already answered.
 
@@ -459,18 +534,28 @@ two until it was corrected):
 | `DELETE /api/tasks/{id}/comments/{cid}` | — curl | 🔴 **SOFT delete** (0.7.90) — redacts to `body:""` + `retracted:true`, row survives, idempotent-by-404. Its session twin `DELETE /tasks/{id}/comments/{cid}` is **open on the LAN**, deliberately (the browser holds no token) |
 | `GET /api/tags` | — curl | `[{tag,count}]` |
 | `GET /api/projects` | — curl | ⚠ an OBJECT `{"projects":[…]}`, keyed `name` |
-| `POST /api/send` | — curl | the approval card the PermissionRequest hook posts |
-| `POST /api/notify` | — curl | push-only, no approve/deny card |
-| `POST /api/suggest` | — curl | the Stop hook's "Suggested next step" ingest |
-| `GET /api/response/{id}` | — curl | the hook's decision poll |
-| `DELETE /api/response/{id}` | — curl | the hook's cleanup |
+| `POST /api/send` | — curl | 🔴 **ROUTER (`:30302`)** — the approval card the PermissionRequest hook posts |
+| `POST /api/notify` | — curl | 🔴 **ROUTER** — push-only, no approve/deny card |
+| `POST /api/suggest` | — curl | 🔴 **ROUTER** — the Stop hook's "Suggested next step" ingest |
+| `GET /api/response/{id}` | — curl | 🔴 **ROUTER** — the hook's decision poll |
+| `DELETE /api/response/{id}` | — curl | 🔴 **ROUTER** — the hook's cleanup |
 
-### `requireSession` — 7 `/api/*` routes that are **WIDE OPEN on the LAN NodePort**
+⚠ Every other row above is **muster (`:30306`)**. The five router rows are kept here because this
+page is where a producer looks for them, not because one server still serves all seventeen.
+
+### `requireSession` — 7 `/api/*` routes
+⚠ The heading used to read "**WIDE OPEN on the LAN NodePort**" — retracted above; `requireSession`
+enforces. ⚠ **And they are no longer one server's**: `GET /api/openrouter/models` is on **muster**
+(`:30306`); the other six are ROUTER routes (`:30302`).
 `GET /api/requests` · `GET /api/openrouter/models` · `GET /api/push/vapid-public-key` ·
 `POST /api/push/subscribe` · `POST /api/push/unsubscribe` · `POST /api/auto-approve` ·
 🔴🔴 `POST /api/auto-approve-all` (the firehose — see above).
 
 ### The other 97 routes
+⚠ **Also split.** `/ui/tasks`, `/ui/agents/*`, `/tasks*`, `/agents*`, `/repos`, `/runbooks*` and
+`/agent/*` are **muster (`:30306`)**; the requests/approvals pages and `/api/term*` are the router.
+`/operator*` is **404 on both** — the reserved operator agent was deleted (task #633; `chief.md`).
+
 Not `/api/*` and mostly not machine-facing: `/ui/*` htmx fragments, the page routes, `/agents*`
 (dispatch, **form-encoded**, `requireSession`), `/tasks/*` session routes (incl. `POST /tasks/merge`,
 which has **no `/api` counterpart** — deliberately, since its audit comments are authored `user`),

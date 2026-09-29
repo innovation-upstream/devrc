@@ -31,8 +31,10 @@ accept this and retain decision history so a narrower gate can later be designed
   and the DEPLOYED `CLAWGATE_REQUEST_TTL` is **5m**, so Delete normally fires ~130s before Sweep's
   cutoff. ⚠ Take that TTL from `deployment.yaml`, never from `main.go`'s 1h **default** — using the
   default produced a "~35 minutes" claim that was wrong by an order of magnitude.
-- 🔴 **`clawgatectl` cannot mint a permission request** — it only reaches `/health`, `/api/agents`
-  and `/api/tasks*`, never `POST /api/send`. The genuinely hook-less producer is the agent
+- 🔴 **`clawgatectl` cannot mint a permission request** — its `task`/`agent` verbs reach
+  `/api/agents` and `/api/tasks*` on **muster** (`$CLAWGATE_TASK_API_URL`, `:30306`) and its reads
+  reach `/health` etc. on the router, but **no verb posts `POST /api/send`** — a different route on
+  a different service. The genuinely hook-less producer is the agent
   **checkpoint**, which runs on the 24h `checkpointSweepGrace`, not the 5m TTL.
 
 ⚠ **`pushResolved` is a SILENT control message, not a buzz.** `sw.js` maps `type:"resolved"` to
@@ -99,6 +101,15 @@ Wired into the EXISTING Grafana stack, **not** a bespoke event table. Two source
 - **New Prometheus metrics** (server-truth): `clawgate_permission_decisions_total{outcome}`,
   `clawgate_permission_decision_latency_seconds`, `clawgate_suggestion_events_total{action}`,
   `clawgate_runbook_runs_total`.
+
+🔴 **EVERYTHING ABOVE IS THE ROUTER'S INSTRUMENTATION, MEASURED BEFORE THE `muster` SPLIT.** The
+task/agent/runbook surfaces it names — `agent.dispatch`, `runbook.run`, `chat.sent`,
+`model.switch`, `clawgate_runbook_runs_total` — now execute in a **different process, in ns
+`muster`**. ⚠ **NOT VERIFIED HERE:** whether muster emits them at all, under which
+`app_name`/`job`, or whether Alloy scrapes it. So a `{app_name="clawgate"}` query returning **zero**
+`agent.dispatch` is indistinguishable from "muster reports under a different name" and from
+"nothing was dispatched" — do not read it as either. Establish muster's own scrape target before
+quoting a task-side number.
 
 ### Query usage (cross-cluster NodePorts)
 ```bash

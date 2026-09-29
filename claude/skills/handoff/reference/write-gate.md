@@ -227,13 +227,81 @@ near-misses it does not admit:
   in both repos' `claudedocs/` — every one of them legacy and untagged — it
   fires **0** times.
 
-One spelling *was* admitted rather than reported: **`**forcing:** gate`**, i.e.
-emphasis characters between the key and the colon. What follows the colon must
-be a member of a seven-word closed vocabulary, so a "false positive" requires
-prose that literally reads `forcing` + punctuation + one of those kinds — which
-is the tag. Refusing it would be a refusal over emphasis, in a skill body that
-bolds its field names. `forcing function:` and `forcing = gate` are **not**
-admitted: those are guesses at the grammar, and they stay near-misses.
+**EMPHASIS IS ADMITTED RATHER THAN REPORTED — AND THE ADMISSION IS A MECHANISM BY
+POSITION, NOT A LIST OF SPELLINGS AND NOT A COUNT.** Two earlier wordings here stated
+it as a list and both were wrong in the same direction: the first named **one**
+admitted spelling, a correction raised it to five. That is the failure this section
+already names further down about the anchor grid — *"what it newly admits is a GRID,
+not a list"*, *"a number in prose is the thing that went stale both times"* — and
+`scripts/lib/handoff_doc.py` machine-enforces the same rule on its own comment (`THE
+ADMISSIONS ARE A GRID, NOT A LIST`, asserted by
+`test_the_comment_still_states_the_ASCII_scope`). So what follows is the rule, not the
+members. `_FORCING` is
+
+``(?<![A-Za-z0-9])forcing[*_`~]{0,3}\s*:\s*[*_`~]{0,3}\s*([A-Za-z-]+)``
+
+and decoration may sit at three positions in it, each with a **different** rule —
+re-derived against the live pattern 2026-09-29:
+
+* **leading**, before the key — a one-character **negative lookbehind**,
+  ``(?<![A-Za-z0-9])``, which CONSUMES NOTHING: it constrains only the single
+  character adjacent to the key. So **any number of any non-alphanumeric characters**
+  may precede it: emphasis runs longer than three, and characters from outside the
+  markup class entirely. All it refuses is an ASCII letter or digit immediately before
+  the key — the one job `\b` was doing (`enforcing:`, `reinforcing:`, `forcings:`).
+* **post-key**, between the key and the colon — `_MARKUP`, i.e. ``[*_`~]{0,3}``: **at
+  most three characters, and only from that four-character class.** A fourth, or one
+  character from outside the class, does not parse. (Whitespace is admitted separately,
+  by the `\s*` beside it.)
+* **post-colon**, between the colon and the kind — the **same** `_MARKUP` bound and the
+  same class.
+
+🔴 **The bound on the two `_MARKUP` positions is NOT the bound on the leading one, and
+that is the part a reader gets wrong.** A wording here attributed the leading `**` of
+`**forcing:** gate` to "`_MARKUP` … up to three emphasis characters … in either
+placement", from which a reader predicts `****forcing:** gate` is refused. It parses.
+The mirror case is the one the bound really covers: `forcing:****gate` does not.
+
+What follows the colon must be a member of a seven-word closed vocabulary, so a "false
+positive" requires prose that literally reads `forcing` + punctuation + one of those
+kinds — which is the tag. Refusing any of it would be a refusal over emphasis, in a
+skill body that bolds its own field names. `forcing function:` and `forcing = gate` are
+**not** admitted: those are guesses at the grammar, and they stay near-misses that
+`_FORCING_ATTEMPT` NAMES, which is a different outcome from absent.
+
+**The ledger below is ILLUSTRATIVE — and it is also the GUARD.** It is *not* the set of
+spellings that parse; in the leading position that set is unbounded. It is one case per
+BOUNDARY of the three rules above, and
+`TestTheReferenceTopicStatesTheEmphasisRuleByPOSITION` READS THESE ROWS OUT OF THIS FILE
+and drives each through the live `_FORCING` and `_FORCING_ATTEMPT`, so widening a class,
+un-bounding a position or adding one goes RED here instead of quietly diverging from
+this page. Why it exists rather than another prose correction: MEASURED 2026-09-29,
+deleting the 57 B emphasis clause from `claude/skills/handoff/SKILL.md` left **652
+passed, 0 failed** over `scripts/tests/test_handoff_doc.py` plus the three size suites.
+Three guards pin the NEAR-MISS half of that sentence and **nothing** pinned the emphasis
+half — which is why it rotted twice with the suite green.
+
+| spelling | position it bounds | outcome |
+|---|---|---|
+| `forcing: gate` | none — the bare field | parses `gate` |
+| `**forcing:** gate` | leading 2, post-key 2 | parses `gate` |
+| `_forcing: gate_` | leading 1 — the `\b` hole | parses `gate` |
+| `forcing***: gate` | post-key AT the bound | parses `gate` |
+| `forcing:***gate` | post-colon AT the bound | parses `gate` |
+| `****forcing:** gate` | leading PAST `_MARKUP`'s bound | parses `gate` |
+| `!@#$%^&()forcing: gate` | leading, outside the class entirely | parses `gate` |
+| `forcing****: gate` | post-key PAST the bound | near-miss |
+| `forcing:****gate` | post-colon PAST the bound | near-miss |
+| `forcing#: gate` | post-key, outside the class | near-miss |
+| `forcing:#gate` | post-colon, outside the class | near-miss |
+| `forcing function: gate` | a word between key and colon | near-miss |
+| `forcing = gate` | a separator that is not a colon | near-miss |
+| `enforcing: gate` | leading ASCII letter — the one refusal | absent |
+
+`near-miss` means `_FORCING` does not match and `_FORCING_ATTEMPT` does, so the refusal
+quotes the line back; `absent` means neither matches, which is the `[no forcing: field]`
+arm. The distinction is the whole of `_FORCING_ATTEMPT`'s reason for existing, so the
+ledger carries both outcomes rather than collapsing them into "not admitted".
 
 #### The two holes that widening opened, and what the boundary still cannot do
 

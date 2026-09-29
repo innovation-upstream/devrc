@@ -58,8 +58,16 @@ is 170s, so nothing legitimate pends longer. On the cluster, orphans auto-evict 
 The page was opened with basic-auth creds in the URL (`https://user:pass@host`). Client fetches
 must build URLs from `location.origin` (credential-free), not relative paths. Fixed in 0.2.1.
 
+## The four AGENT symptoms below are **muster's**, not the router's
+🔴 Agent provisioning moved to `muster` (ns `muster`, `:30306`) with the rest of the task half. So
+the pod logs to read are `-n muster`, not `-n clawgate`, and the ServiceAccount/ClusterRole/
+`rbac.yaml` named below are **muster's** (`clusters/workbench/apps/muster/rbac.yaml`) — the
+clawgate copies still exist and are no longer the ones doing the provisioning. ⚠ **The names moved
+too:** SA `muster`, ClusterRole + binding `muster-agents` (read 2026-09-29), NOT `clawgate-agents`
+— so `kubectl get clusterrole clawgate-agents` succeeding proves nothing about a failing dispatch.
+
 ## Agent helm install fails: RBAC "attempting to grant permissions not currently held"
-The chart's `rbac.create` makes a per-agent Role; clawgate's ClusterRole **`clawgate-agents` must
+The chart's `rbac.create` makes a per-agent Role; the provisioner's ClusterRole **must
 be a superset** (it needs `pods/log:watch` + `apps/statefulsets`). Add the missing verbs to
 `rbac.yaml`.
 

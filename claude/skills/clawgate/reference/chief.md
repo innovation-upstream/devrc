@@ -64,11 +64,14 @@ re-point `CLAWGATE_CHIEF_TOKEN` at its hooks token.**
 They are not one tier. Presenting the wrong value is a 401 at whichever step does not
 match, and the two directions use disjoint credentials by design.
 
-| verb | route | credential | who runs it |
-|---|---|---|---|
-| `chief ask --text …` | `POST /api/agents/{name}/messages` | **`CLAWGATE_HOOK_TOKEN`** only — ONE credential since task #633 (clawgate 0.8.53) | the OPERATOR (you), talking TO chief |
-| `chief write --host --pane --text` | `POST /api/term/chief/send-keys` | **`CLAWGATE_CHIEF_TOKEN`** | CHIEF, inside its own pod |
-| `chief launch --host --cwd [--text]` | `POST /api/term/chief/new-session` | **`CLAWGATE_CHIEF_TOKEN`** | CHIEF, inside its own pod |
+🔴 **`chief` SPANS BOTH SERVICES — the base is chosen per ROUTE, not per verb group**
+(`clawgatectl --help` states this). Get it wrong and half the verb group 404s.
+
+| verb | route | **service / base** | credential | who runs it |
+|---|---|---|---|---|
+| `chief ask --text …` | `GET /api/agents` → `POST /api/agents/{name}/messages` | **muster** `:30306` (`CLAWGATE_TASK_API_URL`) | **`CLAWGATE_HOOK_TOKEN`** only — ONE credential since task #633 (clawgate 0.8.53) | the OPERATOR (you), talking TO chief |
+| `chief write --host --pane --text` | `POST /api/term/chief/send-keys` | **clawgate** `:30302` (`CLAWGATE_API_URL`) | **`CLAWGATE_CHIEF_TOKEN`** | CHIEF, inside its own pod |
+| `chief launch --host --cwd [--text]` | `POST /api/term/chief/new-session` | **clawgate** `:30302` | **`CLAWGATE_CHIEF_TOKEN`** | CHIEF, inside its own pod |
 
 🔴 **RETRACTED 2026-09-21 — `chief ask` needs ONE credential now, and the operator
 token it used to need NO LONGER EXISTS.** This block used to read *"`chief ask` needs TWO
@@ -124,17 +127,22 @@ deliberately left on `requireHookToken` (reading the operator's queue was not mo
 A 401 on the GET says NOTHING about the POSTs, and a table keyed on
 `/api/attention` alone cannot express that.
 
-| capability | route | gate | from inside chief's pod |
-|---|---|---|---|
-| send a message to a pane | `POST /api/term/chief/send-keys` | `requireChiefToken` | ✅ **when armed** |
-| read the bound task | `GET /agent/task` | `requireAgentToken` | ✅ always (answers "no task assigned" — expected) |
-| list tmux windows | `GET /api/tmux/snapshot` | `requireHookOrAgentToken` | ✅ **200** — was ❌ 401 here |
-| read a transcript | `GET /api/transcripts/{id}` | `requireHookOrAgentToken` | ✅ **404 on a bogus id = auth PASSED** — was ❌ 401 here |
-| raise an attention entry | `POST /api/attention` | `requireHookOrAgentToken` | ✅ — was ❌ 401 here |
-| resolve an attention entry | `POST /api/attention/{id}/resolve` | `requireHookOrAgentToken` | ✅ — was ❌ 401 here |
-| **read** the attention queue | `GET /api/attention` | `requireHookToken` | ❌ **401** — not moved, on purpose |
-| the task board | `GET /api/tasks` | `requireHookOrAgentToken` | ✅ **200** — re-tiered by task #633 (0.8.53); was ❌ 401 |
-| manage a layout | `POST /api/layout/views` | `requireHookToken` | ❌ 401 |
+| capability | route | service | gate | from inside chief's pod |
+|---|---|---|---|---|
+| send a message to a pane | `POST /api/term/chief/send-keys` | clawgate `:30302` | `requireChiefToken` | ✅ **when armed** |
+| read the bound task | `GET /agent/task` | **muster `:30306`** | `requireAgentToken` | ✅ always (answers "no task assigned" — expected) |
+| list tmux windows | `GET /api/tmux/snapshot` | clawgate `:30302` | `requireHookOrAgentToken` | ✅ **200** — was ❌ 401 here |
+| read a transcript | `GET /api/transcripts/{id}` | clawgate `:30302` | `requireHookOrAgentToken` | ✅ **404 on a bogus id = auth PASSED** — was ❌ 401 here |
+| raise an attention entry | `POST /api/attention` | clawgate `:30302` | `requireHookOrAgentToken` | ✅ — was ❌ 401 here |
+| resolve an attention entry | `POST /api/attention/{id}/resolve` | clawgate `:30302` | `requireHookOrAgentToken` | ✅ — was ❌ 401 here |
+| **read** the attention queue | `GET /api/attention` | clawgate `:30302` | `requireHookToken` | ❌ **401** — not moved, on purpose |
+| the task board | `GET /api/tasks` | **muster `:30306`** | `requireHookOrAgentToken` | ✅ **200** — re-tiered by task #633 (0.8.53); was ❌ 401 |
+| manage a layout | `POST /api/layout/views` | clawgate `:30302` | `requireHookToken` | ❌ 401 |
+
+🔴 **A 401-vs-404 reading of this table is only meaningful on the RIGHT base.** Since the split,
+`GET /api/tasks` and `GET /agent/task` are 404 on `:30302` and `/api/tmux/snapshot` is 404 on
+`:30306` — so a probe on the wrong base reproduces neither verdict. Re-probe with the base in the
+`service` column.
 
 🔴 **"CHIEF CANNOT ENUMERATE A PANE" WAS FALSE — MEASURED 2026-09-20.** Probed with
 chief's own agent-row token against the live pod, with the shared hook token as a
@@ -184,7 +192,8 @@ success as evidence about the agent.
 Nothing below is an agent's to run. It ends in `tmux send-keys` on both machines.
 
 1. **Create the agent** (needs a browser session — `POST /agents` is `requireSession`,
-   and there is still no machine route): the clawgate UI's Agents tab → dispatch an
+   and there is still no machine route): **muster**'s Agents tab —
+   `http://192.168.50.250:30306/agents`, NOT the router — → dispatch an
    agent named `chief`. Standing default model is **deepseek**
    (`CLAWGATE_AGENT_MODEL`) unless Zach says otherwise. ⚠ The name `chief` is
    convention only; the server does not reserve it.
