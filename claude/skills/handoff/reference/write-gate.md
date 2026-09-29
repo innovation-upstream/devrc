@@ -227,13 +227,22 @@ near-misses it does not admit:
   in both repos' `claudedocs/` — every one of them legacy and untagged — it
   fires **0** times.
 
-One spelling *was* admitted rather than reported: **`**forcing:** gate`**, i.e.
-emphasis characters between the key and the colon. What follows the colon must
-be a member of a seven-word closed vocabulary, so a "false positive" requires
-prose that literally reads `forcing` + punctuation + one of those kinds — which
-is the tag. Refusing it would be a refusal over emphasis, in a skill body that
-bolds its field names. `forcing function:` and `forcing = gate` are **not**
-admitted: those are guesses at the grammar, and they stay near-misses.
+**EMPHASIS is admitted rather than reported, and WIDER than an earlier wording here
+claimed.** That wording said "one spelling *was* admitted: `**forcing:** gate`", which
+undersells the regex and would send a reader away believing an italic tag is a
+near-miss. Measured against the live `_FORCING` pattern on 2026-09-29:
+`_MARKUP = r"[*_`~]{0,3}"` sits on **both** sides of the colon, so up to three emphasis
+characters are absorbed in either placement — `forcing: gate`, `**forcing:** gate`,
+`_forcing: gate_`, `_forcing:_ gate` and `` `forcing:` gate `` all PARSE, kind `gate`.
+What follows the colon must be a member of a seven-word closed vocabulary, so a "false
+positive" requires prose that literally reads `forcing` + punctuation + one of those
+kinds — which is the tag. Refusing any of them would be a refusal over emphasis, in a
+skill body that bolds its own field names.
+
+`forcing function:` and `forcing = gate` are **not** admitted — confirmed by the same
+measurement, both `no match` — because those are guesses at the grammar. They stay
+near-misses: `_FORCING_ATTEMPT` sees them and the refusal NAMES them, which is a
+different outcome from absent.
 
 #### The two holes that widening opened, and what the boundary still cannot do
 
