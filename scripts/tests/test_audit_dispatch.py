@@ -4228,6 +4228,16 @@ def test_every_command_a_refusal_prescribes_actually_runs():
         "1. a claim in a block whose range spans zero commits\n"
         "```"
     )
+    # 🔴 41 HEX DIGITS. Built by CONCATENATION rather than typed, so the length
+    # is the fixture's claim and not something a reader has to count — and it is
+    # NOT the wild token (`civitai/cli` #727 posted `7b9b8130` zero-padded), so a
+    # guard that happened to match that one literal cannot hide here.
+    malformed_block = (
+        "```audit-claims round=2 payload=0 "
+        f"audited={'ffff8888' + '0' * 33}..cccc3333\n"
+        "1. a claim whose `audited=` endpoint is one digit too long\n"
+        "```"
+    )
     # 🔴 THE EXPECTED rc IS PART OF THE CASE, not a constant shared by all of
     # them. REFUSAL 3b is an INPUT refusal (4) and the two above are ledger
     # refusals (2); asserting one number over all three would either exclude
@@ -4237,6 +4247,9 @@ def test_every_command_a_refusal_prescribes_actually_runs():
         "REFUSAL 1 (no block at all)": ({"comments": []}, 2),
         "REFUSAL 3b (a self-range in a block the gate reads)": (
             {"comments": [self_range_block]}, 4
+        ),
+        "REFUSAL 3c (an endpoint the gate reads that is not a commit name)": (
+            {"comments": [malformed_block]}, 4
         ),
     }
     sites = prescription_sites()
@@ -9961,6 +9974,41 @@ RED_AT_BASE_R25: frozenset[str] = frozenset({
     "test_the_block_the_operator_PASTES_carries_the_unearned_ledger_note",
 })
 
+# 🔴 ROUND 26's base is `21303569` — the tip of `main` when the silent disarm on
+# an UNRESOLVABLE `audited=` endpoint was written. MEASURED there the same way
+# as every ref above: the base `scripts/audit-dispatch.py` and the base
+# `claude/skills/audit-pr/SKILL.md` into a scratch tree with THIS module copied
+# in unchanged, under `PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider`.
+#
+# All FOUR below fail there on the ANSWER, and the first of them records the
+# defect verbatim — `rc 0` with an EMPTY stderr over a ladder the gate could not
+# measure:
+#   * the stderr report: `assert 'PAYLOAD NOT VERIFIED' in ''`;
+#   * the BRIEF section: assembled, and simply does not contain it, so the
+#     auditor is handed a `payload=` the executable-line unit never checked;
+#   * the PASTED BLOCK: the same, on the artefact that lands on the PR;
+#   * the STRUCTURAL refusal: `rc 0` where 4 is required, over a 41-character
+#     endpoint that can name no object in any repository.
+#
+# 🔴 THE OTHER FIVE TESTS THIS ROUND ADDED ARE GUARDS, AND NOT ALL FOR THE SAME
+# REASON — the distinction this module's header insists on:
+#   * TWO are GREEN at the base and are the controls that matter —
+#     `…RESOLVE_reports_NOTHING_anywhere` (the report must not fire on a healthy
+#     ladder, including one whose diff is merely EMPTY) and
+#     `…gate_still_FIRES_when_both_rounds_measure_zero` (the verdict is
+#     untouched). MEASURED at `21303569`: `16 failed, 2 passed`, and these are
+#     the two.
+#   * THREE raise `AttributeError` there for a symbol the fix introduces
+#     (`malformed_endpoint_reason`, `MALFORMED_ENDPOINT_REFUSAL_HEADER`,
+#     `UNVERIFIED_PAYLOAD_HEAD`), which this module's header says is not
+#     evidence of anything. Their evidence is the UV-series in the battery.
+RED_AT_BASE_R26: frozenset[str] = frozenset({
+    "test_an_UNRESOLVABLE_range_endpoint_says_COULD_NOT_MEASURE_on_stderr",
+    "test_an_UNRESOLVABLE_range_endpoint_reports_it_IN_THE_BRIEF",
+    "test_the_block_the_operator_PASTES_carries_the_could_not_measure_note",
+    "test_a_STRUCTURALLY_MALFORMED_endpoint_is_an_INPUT_refusal",
+})
+
 RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "abc41024": RED_AT_BASE_R2,
     "d9eb36a8": RED_AT_BASE_R3,
@@ -9982,10 +10030,30 @@ RED_AT_BASE_REFS: dict[str, frozenset[str]] = {
     "80379e83": RED_AT_BASE_R23,
     "532945d2": RED_AT_BASE_R24,
     "c4490f07": RED_AT_BASE_R25,
+    "21303569": RED_AT_BASE_R26,
 }
 RED_AT_BASE: frozenset[str] = frozenset().union(*RED_AT_BASE_REFS.values())
 
 INVARIANT_GUARDS_AND_LEDGERS = frozenset({
+    # 🔴 THE ROUND-0 DISPOSITIONS GUARDS (the #256 round). ALL GUARDS, and the
+    # reason is stated at their definitions rather than here: the defect measured
+    # on `ZacxDev/naida-ai` #256 was not a WRONG answer from this script — it was
+    # a question nothing asked. At `6975b1b2` the new flag is `SystemExit: 2` out
+    # of argparse and the new section simply does not exist, so a red there is a
+    # claim about a feature's absence, which this module's header says is not
+    # evidence of anything.
+    #
+    # ⚠ ONE is a SILENT/NEGATIVE control whose whole claim is that nothing fires
+    # — a PR with no round-0 block. Its "nothing fired" assertion PASSES at the
+    # base, vacuously, because no section exists to fire; its red there is the
+    # AttributeError in its own positive control. Do not read its base red as
+    # evidence about the report. Evidence: mutants RZ1-RZ5.
+    "test_round_zero_output_contract_emits_a_block_its_own_parser_reads_back",
+    "test_the_round_zero_candidate_parser_stops_at_the_CLOSING_fence",
+    "test_the_dispositions_field_is_written_BEFORE_audited_and_reads_back",
+    "test_an_unanswered_round_zero_candidate_is_NAMED_in_the_delta_brief",
+    "test_a_kept_disposition_carrying_no_reason_is_reported_as_deferred",
+    "test_a_PR_with_no_round_zero_block_reports_NOTHING_about_dispositions",
     # 🔴 THE OPERATOR-ASKS GUARDS, AND THEY ARE GUARDS RATHER THAN REGRESSION
     # COVERAGE ON PURPOSE. At `62b516a4` the `operator_asks_reader` seam does not
     # exist, so every one of them is red there for a TypeError — an API error, not
@@ -10328,6 +10396,39 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     # guard can see a remedy that genuinely fails. A control that went red at
     # the base would be a second sample of the thing in doubt.
     "test_control_the_prescription_extractor_can_see_a_broken_remedy",
+    # ------------------------------------------------------------------- #
+    # Round 26's five guards, for THREE different reasons. See
+    # `RED_AT_BASE_R26` for the measurement; the split is the point.
+    # ------------------------------------------------------------------- #
+    # GREEN at `21303569`, and it MUST be: it is the silence control for the
+    # whole round. A COULD NOT MEASURE on a healthy ladder is the
+    # permanently-red section the next reader learns to skip, and it is also
+    # what bounds the report's scope — an EMPTY diff over a resolvable range is
+    # unmeasured too, for a different reason, and must stay silent. Mutant UV4
+    # (the report keyed to every unmeasured cause) is its evidence, and it is
+    # the one mutant in the series no PRESENCE assertion can see.
+    "test_a_ladder_whose_ranges_all_RESOLVE_reports_NOTHING_anywhere",
+    # GREEN at `21303569` too, where the gate already did exactly this. It is
+    # here because a report keyed to `command_failed` is one mis-scoped
+    # predicate away from suppressing the measurement it reports on. Mutants
+    # `G1`/`G2` already cover the verdict itself; this asserts THIS round did
+    # not move it.
+    "test_the_gate_still_FIRES_when_both_rounds_measure_zero_and_resolve",
+    # RED at `21303569` with `AttributeError: module 'audit_dispatch' has no
+    # attribute 'malformed_endpoint_reason'` — an error for want of a name the
+    # fix introduces, which this module refuses to count as regression
+    # coverage. Mutants UV6 (a full 40-char sha refused) and UV7 (a non-hex
+    # endpoint accepted) are its evidence, one per boundary.
+    "test_malformed_endpoint_reason_refuses_only_impossible_tokens",
+    # RED there for the same kind of reason (`MALFORMED_ENDPOINT_REFUSAL_HEADER`
+    # is absent), and it is the SCOPE control: a broken endpoint in a round the
+    # gate never reads must not refuse the run. Mutant UV5.
+    "test_a_MALFORMED_endpoint_the_gate_does_NOT_read_is_not_refused",
+    # RED there for `UNVERIFIED_PAYLOAD_HEAD`. It is the two-way pin that makes
+    # the four regression rows' LITERALS the script's own — without it a reword
+    # would leave them asserting a string nothing emits, red for the right
+    # reason with the wrong diagnosis. Mutant UV8.
+    "test_the_unverified_payload_strings_are_the_scripts_own",
 })
 
 # --------------------------------------------------------------------------- #
@@ -11247,6 +11348,44 @@ FIX_MATRIX = (
     ("r25/7 a reworded heading would go red with the wrong diagnosis",
      "test_the_unearned_ledger_strings_are_the_scripts_own",
      "GUARD", "UL3, UL6"),
+    # 🔴 ROUND 26 — THE SILENT DISARM. The executable-line unit re-measures each
+    # of the gate's two rounds over that round's own `audited=` range; when an
+    # endpoint names no object the reading comes back UNMEASURED, the gate falls
+    # back to the STATED count, and there was NO could-not-measure surface on
+    # that path at all. 30 of 564 endpoints posted since the unit shipped, 11
+    # ladders, and `ZacxDev/cairn` #119's whole ladder inert.
+    ("r26/1 a round the gate READ but could not MEASURE was reported nowhere — "
+     "rc 0, empty stderr, and the gate silently reading the stated count",
+     "test_an_UNRESOLVABLE_range_endpoint_says_COULD_NOT_MEASURE_on_stderr",
+     "RED@21303569", "UV2, UV9, UV10"),
+    ("r26/2 the BRIEF handed the auditor an unverified `payload=` as measured",
+     "test_an_UNRESOLVABLE_range_endpoint_reports_it_IN_THE_BRIEF",
+     "RED@21303569", "UV1, UV8, UV9, UV10"),
+    ("r26/3 the block PASTED onto the PR carried no note either, so the next "
+     "round's reader met the same unverified count",
+     "test_the_block_the_operator_PASTES_carries_the_could_not_measure_note",
+     "RED@21303569", "UV3, UV9"),
+    ("r26/4 a STRUCTURALLY impossible endpoint (41 hex digits, `civitai/cli` "
+     "#727 r0) was treated as merely unmeasurable instead of as bad INPUT",
+     "test_a_STRUCTURALLY_MALFORMED_endpoint_is_an_INPUT_refusal",
+     "RED@21303569", "UV11"),
+    ("r26/5 a report that fires on a ladder whose ranges RESOLVE — including on "
+     "a merely EMPTY diff — is a red section nobody reads",
+     "test_a_ladder_whose_ranges_all_RESOLVE_reports_NOTHING_anywhere",
+     "GUARD", "UV4"),
+    ("r26/6 the refusal must not fire on a round the gate never reads",
+     "test_a_MALFORMED_endpoint_the_gate_does_NOT_read_is_not_refused",
+     "GUARD", "UV5"),
+    ("r26/7 a refusal rule wrong at either length boundary is a permanently-red "
+     "gate on the corpus as it is actually written",
+     "test_malformed_endpoint_reason_refuses_only_impossible_tokens",
+     "GUARD", "UV6, UV7"),
+    ("r26/8 a reworded heading would go red with the wrong diagnosis",
+     "test_the_unverified_payload_strings_are_the_scripts_own",
+     "GUARD", "UV2, UV8, UV9"),
+    ("r26/9 the gate's own verdict must be untouched by any of it",
+     "test_the_gate_still_FIRES_when_both_rounds_measure_zero_and_resolve",
+     "GUARD", "G1, G2"),
 )
 
 # A COLLAPSE floor, not a growth floor: a matrix emptied by a bad refactor
@@ -12781,6 +12920,434 @@ def test_the_unearned_reading_counts_RANGES_and_not_blocks():
     assert ad.unearned_ledger_summary(empty) == ""
 
 
+# --------------------------------------------------------------------------- #
+# 🔴 A ROUND THE GATE READ WITHOUT MEASURING — THE SILENT DISARM.
+# --------------------------------------------------------------------------- #
+# The executable-line unit re-measures each of the gate's two rounds over that
+# round's OWN `audited=` range. When an endpoint names no object,
+# `measure_executable_churn` exits non-zero, `payload_reading` falls back to the
+# operator's STATED count, and the gate reverts to pre-unit behaviour for that
+# round — silently, because the gate's own reason is printed only when the gate
+# FIRES and the brief's other COULD NOT MEASURE belongs to a different range.
+#
+# MEASURED 2026-09-28 over 564 block endpoints posted since the unit shipped:
+# 30 (5.3%) resolve to nothing, across 11 ladders. `ZacxDev/cairn` #119's entire
+# ladder is inert this way. TWO CAUSES, and they get opposite treatment:
+#   * `civitai/cli` #727 round 0 posted a 41-character endpoint — STRUCTURALLY
+#     impossible, refused as INPUT (4);
+#   * `civitai/civitai-app-starters` #474 round 3 posted `to=6e4441c1` where the
+#     commit is `6e4441c5…` — WELL-FORMED, and indistinguishable from the
+#     legitimate unresolvable range a cross-repo run produces, so it FAILS OPEN
+#     and is reported on three surfaces.
+#
+# 🔴 THE FIXTURES ARE PAIRWISE DISTINCT AND SHARE NO SHA WITH THE MODULE'S
+# DEFAULTS. A predicate that happened to match `aaaa1111`/`bbbb2222`, or a
+# summary that hardcoded a round number, cannot hide behind a fixture that could
+# only ever produce its own value.
+#
+# 🔴 LITERALS, FOR THE REASON `EXPECTED_UNEARNED_HEAD` IS ONE. These must fail
+# at `21303569` on the ANSWER — a brief and a pasted block that say nothing —
+# and a test spelled `ad.UNVERIFIED_PAYLOAD_HEAD` fails there with an
+# `AttributeError`, which is a claim about a symbol's absence and not about any
+# behaviour. `test_the_unverified_payload_strings_are_the_scripts_own` carries
+# the two-way check that these are still the script's own constants.
+EXPECTED_UNVERIFIED_HEAD = (
+    "## \U0001f534 COULD NOT MEASURE A ROUND THE ATTRIBUTION GATE READ"
+)
+EXPECTED_UNVERIFIED_TAG = "PAYLOAD NOT VERIFIED"
+
+# `<to>` on the newer round names no object; `<from>` on it, and BOTH ends of
+# the older round, resolve. So exactly ONE of the two rounds the gate reads is
+# unmeasurable — the shape that must report `1 of the 2` rather than a blanket.
+UNRESOLVED_RANGE = "7777bbbb..8888cccc"
+RESOLVED_RANGE = "6666aaaa..7777bbbb"
+UNRESOLVED_GIT_ERROR = (
+    "fatal: ambiguous argument '8888cccc': unknown revision or path not in the "
+    "working tree."
+)
+
+
+def unresolvable_newer_round(older=3, newer=4):
+    """Two consecutive rounds, both stating a NON-ZERO count. Round `newer`'s
+    `<to>` names no object here, so its count can never be checked."""
+    return [
+        payload_block(older, PAYLOAD_NONZERO_C, "6666aaaa", "7777bbbb"),
+        payload_block(newer, PAYLOAD_NONZERO_A, "7777bbbb", "8888cccc"),
+    ]
+
+
+def unresolvable_diffs(spec):
+    """rc 128 for the unresolvable range, a REAL executable diff otherwise.
+
+    🔴 THE RESOLVABLE HALF CARRIES AN EXECUTABLE DIFF, NOT AN EMPTY ONE. An
+    empty diff is UNMEASURED too — for a different reason, with the range
+    perfectly intact — so a fixture built on it could not tell "the endpoint
+    failed" apart from "this reader declined to reduce the answer to a number",
+    which is exactly the distinction under test.
+    """
+    if spec == UNRESOLVED_RANGE:
+        return 128, "", UNRESOLVED_GIT_ERROR
+    return 0, EXECUTABLE_DIFF, ""
+
+
+def test_an_UNRESOLVABLE_range_endpoint_says_COULD_NOT_MEASURE_on_stderr():
+    """🔴 REGRESSION. Red at `21303569`, where this run was SILENT.
+
+    At the base the `git log -p` over round 4's own range exited 128, the
+    reading came back UNMEASURED, `payload_reading` fell back to
+    `payload=41` as posted, and the run printed rc 0, an empty stderr and a
+    confident brief. Nothing anywhere said the executable-line check had not
+    run for that round — the gate's own reason is emitted only when the gate
+    FIRES, and it did not.
+
+    🔴 IT MUST STILL BE rc 0. An endpoint this checkout cannot resolve is
+    routinely legitimate (a force-push, an unfetched commit, a cross-repo
+    assembly), and refusing it would break every such invocation. Measured by
+    the operator: the same command returns rc 0 from one checkout and rc 5 from
+    the repository's own. So this asserts VISIBILITY, never a refusal.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "5"],
+        comments=unresolvable_newer_round(),
+        diffs=unresolvable_diffs,
+    )
+    assert rc == 0 and "DELTA re-audit" in out, (
+        f"an unresolvable `audited=` endpoint refused the run (rc {rc}) — it "
+        f"must fail OPEN:\n{err}"
+    )
+    assert EXPECTED_UNVERIFIED_TAG in err, (
+        "nothing on stderr says a round the gate read could not be measured, "
+        f"so the gate silently reverted to the stated count:\n{err}"
+    )
+    assert "1 of the 2 round(s)" in err, (
+        "the report does not print the count over its denominator, so one "
+        f"unmeasurable round reads the same as a wholly inert ladder:\n{err}"
+    )
+    assert "round 4" in err and "8888cccc" in err, (
+        f"the report names neither the round nor the offending endpoint:\n{err}"
+    )
+    assert f"`payload={PAYLOAD_NONZERO_A}`" in err, (
+        "the report does not print the count the gate is reading instead, "
+        f"which is the number the operator would otherwise trust:\n{err}"
+    )
+    assert "unknown revision" in err, (
+        f"the report does not carry git's own reason for failing:\n{err}"
+    )
+    # 🔴 IT MUST NOT READ AS A STOP, and it must not speak the gate's verdict.
+    assert ad.ATTRIBUTION_REFUSAL_HEADER not in err, (
+        f"the could-not-measure report reached for the gate's own refusal "
+        f"header:\n{err}"
+    )
+
+
+def test_an_UNRESOLVABLE_range_endpoint_reports_it_IN_THE_BRIEF():
+    """🔴 REGRESSION. Red at `21303569`, where the brief said nothing.
+
+    The auditor never sees the operator's terminal. At the base the brief
+    handed them THE LEDGER's payload numbers and the ladder's `payload=`
+    record with nothing saying that one of the two rounds behind the gate's
+    arithmetic had not been measured at all.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "5"],
+        comments=unresolvable_newer_round(),
+        diffs=unresolvable_diffs,
+    )
+    assert rc == 0, f"the run did not assemble (rc {rc}):\n{err}"
+    assert EXPECTED_UNVERIFIED_HEAD in out, (
+        "the brief carries no could-not-measure section, so the auditor is "
+        f"handed an unverified `payload=` as if it were measured:\n{out[-2000:]}"
+    )
+    section = out[out.index(EXPECTED_UNVERIFIED_HEAD):]
+    assert "1 of the 2 round(s)" in section, (
+        f"the brief section does not print the count over its denominator:\n"
+        f"{section[:900]}"
+    )
+    assert "round 4" in section and UNRESOLVED_RANGE in section, (
+        f"the brief section names neither the round nor its range:\n"
+        f"{section[:900]}"
+    )
+    assert f"`payload={PAYLOAD_NONZERO_A}`" in section, (
+        f"the brief section does not print the count that round POSTED:\n"
+        f"{section[:900]}"
+    )
+    assert "unknown revision" in section, (
+        f"the brief section does not carry git's own reason:\n{section[:900]}"
+    )
+    # 🔴 THE FALSE-STOP DIRECTION, WHICH IS THE EXPENSIVE ONE IN THIS
+    # SUBSYSTEM. A section saying a round's payload is unmeasured is one
+    # sentence away from being read as "that round found nothing".
+    assert "does NOT say" in section and "does not end this ladder" in section, (
+        "the brief section does not say what it is NOT claiming, so an auditor "
+        f"may read it as a stop condition:\n{section[:1400]}"
+    )
+    assert ad.ATTRIBUTION_REFUSAL_HEADER not in out
+
+
+def test_the_block_the_operator_PASTES_carries_the_could_not_measure_note():
+    """🔴 REGRESSION. Red at `21303569` — and the PR is the surface that lasts.
+
+    #1859 records why there are three: "reported" had meant stderr-only, and
+    that is precisely why ITS defect survived four rounds of auditors. The
+    brief goes to one auditor and is gone; this text is pasted into a comment
+    and is what the NEXT round's reader meets.
+
+    🔴 AND IT IS OUTSIDE THE FENCE. A non-numbered line INSIDE the body is
+    folded into the claim above it by `_items_from_body`, which would corrupt
+    the pasted block.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "5", "--emit-claims", "--audited", "8888cccc"],
+        comments=unresolvable_newer_round(),
+        diffs=unresolvable_diffs,
+    )
+    assert rc == 0, f"expected a fail-open rc 0, got {rc}:\n{err}"
+    assert EXPECTED_UNVERIFIED_TAG in out, (
+        "the text the operator pastes onto the PR says nothing about the "
+        f"round the gate could not measure:\n{out}"
+    )
+    note = [ln for ln in out.splitlines() if EXPECTED_UNVERIFIED_TAG in ln]
+    assert len(note) == 1, f"expected exactly one note line, got {note}"
+    assert note[0].startswith("  "), (
+        f"the note is not indented outside the fence: {note[0]!r}"
+    )
+    assert "```audit-claims" not in note[0]
+    # 🔴 `rindex`, NOT `index`, AND THE BATTERY IS WHY. This run is rc 0, so
+    # stdout carries the BRIEF as well as the block — unlike the unearned-ledger
+    # sibling above, whose corpus returns 4 and withholds the brief. `index`
+    # therefore finds whichever `audit-claims` fence appears FIRST in the whole
+    # document, which need not be the emitted one: mutant `C2` (claims read from
+    # the whole comment) renders a claims line carrying that literal into the
+    # brief, and this test fired as an EXTRA-KILLER on a mutation it does not
+    # guard. The emitted block is printed last, so its opener is the LAST such
+    # fence, and that is the one this assertion is about.
+    assert out.rindex(note[0]) < out.rindex("```audit-claims"), (
+        "the could-not-measure note was emitted INSIDE the pasted block, where "
+        f"`_items_from_body` folds it into a claim:\n{out}"
+    )
+
+
+def test_a_STRUCTURALLY_MALFORMED_endpoint_is_an_INPUT_refusal():
+    """🔴 REGRESSION. Red at `21303569`, where this returned rc 0 and a brief.
+
+    `civitai/cli` #727 round 0 posted a 41-character endpoint: an 8-char sha
+    zero-padded into something that merely LOOKS like a full one. No fetch, no
+    checkout and no network can make that resolve, so it is definitively bad
+    INPUT — the same family as the `audited=X..X` self-range PR #1859 already
+    refuses, and it takes that family's exit 4.
+
+    🔴 4 AND NOT 5, ASSERTED AS LITERALS. PR #1768 separated the two: 5 is the
+    gate's VERDICT ("the ladder has left the PR, stop auditing"), 4 is "fix
+    what you typed". A caller handed 5 for a mistyped sha would end a ladder on
+    a typo.
+    """
+    # 🔴 `PAYLOAD_NONZERO_B` (113) AND NOT `..._A` (41), DELIBERATELY. The token
+    # below is 41 characters, and the refusal says so; a fixture whose posted
+    # count is ALSO 41 could not distinguish a message printing the LENGTH from
+    # one printing the COUNT. `claude/RULES.md`: pick fixture values pairwise
+    # distinct, and distinct from any constant the assertion names.
+    corpus = [
+        payload_block(3, PAYLOAD_NONZERO_C, "6666aaaa", "7777bbbb"),
+        payload_block(4, PAYLOAD_NONZERO_B, "7777bbbb", "d4d4d4d4" + "0" * 33),
+    ]
+    rc, out, err = run_main(["900", "--round", "5"], comments=corpus)
+    assert rc == 4, (
+        f"a structurally impossible endpoint did not return the input refusal "
+        f"4 (got {rc}).\nstderr:\n{err}"
+    )
+    assert rc != 5, "an INPUT refusal spoke the attribution gate's verdict"
+    assert not out.strip(), f"the run refused AND emitted a brief:\n{out[:400]}"
+    assert "41 characters long" in err, (
+        f"the refusal does not say what is wrong with the token:\n{err}"
+    )
+    assert "round 4" in err and "d4d4d4d4" in err, (
+        f"the refusal names neither the round nor the token:\n{err}"
+    )
+    assert "INPUT refusal, not the gate's verdict" in err, (
+        f"the refusal does not distinguish itself from a stop:\n{err}"
+    )
+    assert ad.ATTRIBUTION_REFUSAL_HEADER not in err, (
+        f"an input refusal printed the gate's own header:\n{err}"
+    )
+
+
+def test_a_ladder_whose_ranges_all_RESOLVE_reports_NOTHING_anywhere():
+    """🔴 THE SILENT CASE, AND IT IS THE CONTROL FOR ALL FOUR TESTS ABOVE.
+
+    A COULD NOT MEASURE on a healthy ladder is a permanently-red section the
+    next reader learns to skip — the exact failure `claude/RULES.md` names. So
+    a ladder whose every gate-read range resolves must be byte-silent on this
+    axis: on stderr, in the brief, and in the block the operator pastes.
+
+    🔴 AND THE SECOND HALF IS THE ONE THAT BOUNDS THE REPORT'S SCOPE. An EMPTY
+    diff over a resolvable range is UNMEASURED too, and firing on it would put
+    this section on most ordinary runs. `no_diff` below is that case, and it
+    must be silent as well.
+
+    🔴 INVARIANT GUARD, not regression coverage: it is GREEN at `21303569`,
+    where none of this existed. Its evidence is the mutation battery.
+    """
+    resolvable = unresolvable_newer_round()
+    for name, diffs in (
+        ("every range measured", lambda spec: (0, EXECUTABLE_DIFF, "")),
+        ("an EMPTY diff over a resolvable range", lambda spec: (0, "", "")),
+    ):
+        rc, out, err = run_main(
+            ["900", "--round", "5", "--emit-claims", "--audited", "8888cccc"],
+            comments=resolvable,
+            diffs=diffs,
+        )
+        assert rc == 0, f"{name}: the healthy corpus did not assemble ({rc})"
+        # 🔴 SCOPED TO THIS REPORT'S OWN TOKENS. `COULD NOT MEASURE` alone is
+        # spelled by a DIFFERENT, pre-existing mechanism — the LEDGER's
+        # `<prev>..HEAD` reading — so grepping for the bare phrase would make
+        # this control fire on a feature it does not guard, which is the
+        # EXTRA-KILLER shape the unearned-ledger control was rewritten for.
+        for where, text in (("stderr", err), ("stdout", out)):
+            assert EXPECTED_UNVERIFIED_TAG not in text, (
+                f"{name}: the could-not-measure report fired on a ladder whose "
+                f"ranges all resolve, on {where}:\n{text[-1200:]}"
+            )
+        assert EXPECTED_UNVERIFIED_HEAD not in out, (
+            f"{name}: the brief carries the section on a healthy ladder"
+        )
+
+
+def test_the_gate_still_FIRES_when_both_rounds_measure_zero_and_resolve():
+    """🔴 THE GATE ITSELF IS UNTOUCHED — asserted, not assumed.
+
+    Everything this change adds is a refusal on impossible INPUT and a report
+    on an unreadable RANGE. Neither may move the verdict: two consecutive
+    rounds whose ranges resolve and whose diffs carry nothing executable must
+    still return the gate's own rc 5, and must still say the zeros were
+    MEASURED rather than stated.
+
+    🔴 INVARIANT GUARD — green at `21303569`, where the gate already did this.
+    Its evidence is the mutation battery. It is here because a report keyed to
+    `command_failed` is one mis-scoped predicate away from suppressing the
+    measurement it reports on.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "5"],
+        comments=two_stated_NONZERO_rounds(),
+        diffs=both_ranges(COMMENT_ONLY_DIFF),
+    )
+    assert rc == 5, (
+        f"the attribution gate no longer fires on two MEASURED zeros (rc "
+        f"{rc}).\nstderr:\n{err}"
+    )
+    assert not out.strip()
+    assert "both MEASURED" in err, (
+        f"the refusal no longer says both zeros were measured:\n{err}"
+    )
+    assert EXPECTED_UNVERIFIED_TAG not in err, (
+        "a run in which BOTH rounds measured cleanly was reported as "
+        f"unverified:\n{err}"
+    )
+
+
+def test_a_MALFORMED_endpoint_the_gate_does_NOT_read_is_not_refused():
+    """🔴 THE SCOPE OF THE REFUSAL, AND IT IS THE PERMANENTLY-RED QUESTION.
+
+    A broken endpoint on round 2 of a ladder now at round 5 reaches no
+    arithmetic: the gate reads rounds 3 and 4. Refusing every run whose HISTORY
+    carries one would block an operator mid-work over a comment they may not
+    own — the same argument `gate_relevant_self_ranges` makes, and the reason
+    the unearned ledger is a report rather than a second refusal.
+
+    🔴 INVARIANT GUARD — green at `21303569`, where nothing refused any of it.
+    Its evidence is mutant `UV5`.
+    """
+    corpus = [
+        payload_block(2, PAYLOAD_NONZERO_B, "5555ffff", "aaaa" + "z" * 4),
+        payload_block(3, PAYLOAD_NONZERO_C, "6666aaaa", "7777bbbb"),
+        payload_block(4, PAYLOAD_NONZERO_A, "7777bbbb", "8888cccc"),
+    ]
+    rc, out, err = run_main(["900", "--round", "5"], comments=corpus)
+    assert rc == 0 and "DELTA re-audit" in out, (
+        f"a malformed endpoint on a round the gate never reads refused a "
+        f"round-5 assembly (rc {rc}):\n{err}"
+    )
+    assert ad.MALFORMED_ENDPOINT_REFUSAL_HEADER.split(" — ")[0] not in err, (
+        f"a bystander malformed endpoint was reported as a refusal:\n{err}"
+    )
+
+
+@pytest.mark.parametrize("token,refused,why", [
+    # The corpus's real shapes — MEASURED 2026-09-28 across 356 endpoints in
+    # six repositories, every one of them hex of length 7, 8, 9, 40 or 41.
+    # These four are the lengths that must keep working.
+    ("58bfc0a", False, "a 7-char abbreviation, the commonest shape posted"),
+    ("6e4441c1", False, "an 8-char abbreviation"),
+    ("89f7730a0", False, "a 9-char abbreviation"),
+    ("7be003acf022ef5aa19e1c92aeb0de7cddea8fcb", False, "a full 40-char sha"),
+    # The one wild instance, and the boundary either side of it.
+    ("7b9b8130" + "0" * 33, True, "41 hex digits — `civitai/cli` #727 round 0"),
+    ("f" * 40, False, "exactly 40 — the boundary, and it is ALLOWED"),
+    ("f" * 41, True, "exactly 41 — the boundary, and it is REFUSED"),
+    ("abcd", False, "exactly 4 — git's own minimum abbreviation"),
+    ("abc", True, "3 — shorter than git will resolve"),
+    ("main", True, "a BRANCH: resolves HERE, to a commit the round never read"),
+    ("v1.2.3", True, "a tag"),
+    ("<the tip that round read>", True, "an unsubstituted placeholder"),
+    # 🔴 EMPTY IS NOT MALFORMED. It is the round-1 / bare-`audited=` state that
+    # REFUSAL 1b and the fail-open contract own, and answering "malformed" here
+    # would refuse a shape this script deliberately supports.
+    ("", False, "absent — REFUSAL 1b's business, not this one's"),
+    (None, False, "absent, spelled as None"),
+])
+def test_malformed_endpoint_reason_refuses_only_impossible_tokens(
+        token, refused, why):
+    """🔴 THE REFUSAL'S OWN BOUNDARY, both sides of it, as a pure function.
+
+    The dangerous direction is a rule that refuses a shape the corpus uses:
+    that is a permanently-red gate on 355 of 356 measured endpoints. So the
+    accepted rows are not decoration — they are the control that says this
+    predicate cannot fire on the record as it is actually written.
+
+    🔴 INVARIANT GUARD — `malformed_endpoint_reason` does not exist at
+    `21303569`, so a red there is an `AttributeError` and this module's header
+    says that is not evidence. Its evidence is mutants `UV6` and `UV7`.
+    """
+    got = ad.malformed_endpoint_reason(token)
+    if refused:
+        assert got, f"{token!r} ({why}) was accepted as a commit name"
+        assert isinstance(got, str) and got.strip()
+    else:
+        assert got is None, f"{token!r} ({why}) was refused: {got}"
+
+
+def test_the_unverified_payload_strings_are_the_scripts_own():
+    """🔴 THE TWO-WAY CHECK ON THE LITERALS ABOVE.
+
+    The regression tests spell the heading and the tag as literals so their red
+    at `21303569` is an ANSWER and not an `AttributeError`. That buys evidence
+    and costs a pin: a reword of the script's constant would leave those tests
+    asserting a string nothing emits, and they would go red for the right
+    reason with the wrong diagnosis. This is the half that names the cause.
+
+    🔴 INVARIANT GUARD — it names symbols absent at the base. Its evidence is
+    mutant `UV8`.
+    """
+    assert ad.UNVERIFIED_PAYLOAD_HEAD == EXPECTED_UNVERIFIED_HEAD, (
+        "the script's could-not-measure heading and this module's literal have "
+        f"diverged:\n  script: {ad.UNVERIFIED_PAYLOAD_HEAD!r}\n  here:   "
+        f"{EXPECTED_UNVERIFIED_HEAD!r}"
+    )
+    assert ad.UNVERIFIED_PAYLOAD_TAG == EXPECTED_UNVERIFIED_TAG
+    # The tag is pinned against a REAL run and not only against the constant,
+    # because a constant that stopped being used would still match itself.
+    _rc, _out, err = run_main(
+        ["900", "--round", "5"],
+        comments=unresolvable_newer_round(),
+        diffs=unresolvable_diffs,
+    )
+    assert EXPECTED_UNVERIFIED_TAG in err, (
+        f"no run emits the tag {EXPECTED_UNVERIFIED_TAG!r} that every other "
+        f"assertion in this section greps for:\n{err}"
+    )
+
+
 def test_the_unearned_ledger_strings_are_the_scripts_own():
     """🔴 THE TWO-WAY CHECK ON THE LITERALS ABOVE.
 
@@ -13257,6 +13824,190 @@ def test_the_payload_field_the_gate_enforces_is_documented_in_the_skill():
     assert _norm_ws("the gate is advisory and may be skipped") not in _norm_ws(
         body
     )
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 ROUND-0 DISPOSITIONS — whether the deletion pass was ANSWERED.
+# --------------------------------------------------------------------------- #
+# MEASURED on `ZacxDev/naida-ai` #256: round 0 raised FIVE deletion candidates.
+# ZERO were deleted and TWO were GROWN — its #1 candidate went 67 -> 167 lines,
+# the file 626 -> 1040 — and nothing recorded that the deletion pass had been
+# INVERTED, because round 0's verdict is prose no later round reads.
+#
+# 🔴 EVERY TEST BELOW IS AN INVARIANT GUARD, AND THE REASON IS NOT "the symbol
+# is missing". It is that the defect measured on #256 was not in this script at
+# all: nothing here computed a WRONG answer, the question was simply never
+# asked. A red at `6975b1b2` is therefore `SystemExit: 2` out of argparse (the
+# new flag) or a section that does not exist — a claim about a feature's
+# absence, which this module's own header says is not evidence of anything. Each
+# one's evidence is its in-test control plus the mutants named in the battery.
+R0_BLOCK = (
+    "Round 0 report.\n\n"
+    "```audit-round-0\n"
+    "D1 — delete the hand-rolled tokenizer in push.test.mjs\n"
+    "D2 — cut the nine added CLAUDE.md lines to one line plus a pointer\n"
+    "D3 — drop the second progress spinner\n"
+    "```\n\n"
+    "D9 — this line is PROSE below the block and must not count.\n"
+)
+
+
+def two_chained_rounds(older=2, newer=3):
+    """Two blocks whose ranges chain end-to-end, as a healthy ladder's do."""
+    return [
+        payload_block(older, PAYLOAD_NONZERO_A, frm="aaaa1111", to="bbbb2222"),
+        payload_block(newer, PAYLOAD_NONZERO_B, frm="bbbb2222", to="cccc3333"),
+    ]
+
+
+def test_round_zero_output_contract_emits_a_block_its_own_parser_reads_back():
+    """🔴 INVARIANT GUARD, and it is a ROUND TRIP rather than a spelling pin.
+
+    The reader of this shape is `parse_round_zero_candidates`. A skeleton that
+    describes the format instead of being it — or that drifts from the parser by
+    one character — leaves round 0's deletion pass with no reader again, silently,
+    which is the state measured on #256.
+    """
+    rc, out, err = run_main(["900", "--round", "0"])
+    assert rc == 0, f"rc={rc}\n{err}"
+    assert f"```{ad.ROUND_ZERO_FENCE}" in out, out
+    ids, fences = ad.parse_round_zero_candidates([out])
+    assert fences == 1, f"fences={fences}\n{out}"
+    assert ids == ("D1", "D2"), (
+        f"the block round 0 is told to post parses back as {ids!r} — this "
+        "script's own parser cannot read the skeleton it printed"
+    )
+    assert "required" in out, (
+        "the OUTPUT section mentions the block without requiring it"
+    )
+
+
+def test_the_round_zero_candidate_parser_stops_at_the_CLOSING_fence():
+    """🔴 INVARIANT GUARD. A `D<n>` line of prose BELOW the block is not a candidate.
+
+    It is the denominator of every "N unrecorded" count, so an over-wide read
+    reports candidates nobody raised and can never be answered — a permanently
+    non-zero unrecorded count, which is the same permanently-red shape.
+    """
+    ids, fences = ad.parse_round_zero_candidates([R0_BLOCK])
+    assert (ids, fences) == (("D1", "D2", "D3"), 1), f"{ids!r} {fences}"
+    assert "D9" not in ids, (
+        "a `D9 —` line of ordinary prose after the closing fence was read as a "
+        "deletion candidate"
+    )
+
+
+def test_the_dispositions_field_is_written_BEFORE_audited_and_reads_back():
+    """🔴 INVARIANT GUARD, and the ORDER is the load-bearing half.
+
+    `_EMITTED_AUDITED` captures everything after `audited=` TO END OF LINE on
+    purpose. A field written AFTER it makes the emit round trip compare
+    `A..B dispositions=…` against a reconstruction of `A..B` and REFUSE every
+    emit — correctly by its own rule and uselessly. So this asserts the order in
+    the printed header AND that the emit was not refused AND that both fields
+    come back through this script's own parser.
+    """
+    spec = "D1=kept:the tokenizer is the unit under test,D2=deleted"
+    rc, out, err = run_main(
+        ["900", "--round", "4", "--emit-claims", "--audited", "cccc3333",
+         "--payload", str(PAYLOAD_NONZERO_C), "--dispositions", spec],
+        comments=two_chained_rounds(),
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    header = [ln for ln in out.splitlines() if ln.startswith("```audit-claims")]
+    assert len(header) == 1, out
+    assert header[0].index("dispositions=") < header[0].index("audited="), (
+        "`dispositions=` was written AFTER `audited=`, which makes the emit "
+        f"round trip refuse every block:\n{header[0]}"
+    )
+    blocks, malformed = ad.parse_claims_blocks([out])
+    assert len(blocks) == 1 and not malformed, f"{blocks} {malformed}"
+    assert blocks[0].dispositions == spec, (
+        f"the field reads back as {blocks[0].dispositions!r}, not {spec!r} — a "
+        "reason carries SPACES, so a one-token reader truncates it"
+    )
+    assert blocks[0].payload == PAYLOAD_NONZERO_C, (
+        "the new field displaced the payload count the gate reads"
+    )
+    got, bad = ad.parse_dispositions(blocks[0].dispositions)
+    assert not bad and set(got) == {"D1", "D2"}, f"{got} {bad}"
+    assert got["D2"].verdict == "deleted" and got["D2"].reason is None
+
+
+def test_an_unanswered_round_zero_candidate_is_NAMED_in_the_delta_brief():
+    """🔴 INVARIANT GUARD. #256's five candidates had no reader; these do.
+
+    The ids are asserted by NAME, not merely the count: "2 unrecorded" tells the
+    auditor a number, and what makes it actionable is which ones.
+    """
+    # 🔴 INSERTED IMMEDIATELY BEFORE ` audited=`, which is where the emitter puts
+    # it and where its reader's boundary is. Put it anywhere else in the header
+    # and the field swallows whatever follows it up to `audited=` — measured
+    # while writing this test, with `payload=113` landing inside the last token.
+    answered = payload_block(
+        3, PAYLOAD_NONZERO_B, frm="bbbb2222", to="cccc3333",
+    ).replace(" audited=", " dispositions=D1=deleted audited=")
+    rc, out, err = run_main(
+        ["900", "--round", "4"],
+        comments=[R0_BLOCK, payload_block(2, PAYLOAD_NONZERO_A), answered],
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    want = "ROUND 0 DISPOSITIONS: 1 recorded, 2 unrecorded (D2, D3)"
+    assert want in out, out
+    assert want in err, err
+    assert "INVERTED" in out, (
+        "the section names the unanswered ids but not the measured failure mode "
+        "— that a candidate can be GROWN rather than merely kept:\n" + out
+    )
+
+
+def test_a_kept_disposition_carrying_no_reason_is_reported_as_deferred():
+    """🔴 INVARIANT GUARD. `kept` is a judgement; an unreasoned one is deferral.
+
+    `deleted` needs no reason — the diff is the reason. `kept` is the verdict
+    that inverted the deletion pass on #256, so it is the one that must carry a
+    why, and the report names the ids rather than only counting them.
+    """
+    answered = payload_block(
+        3, PAYLOAD_NONZERO_B, frm="bbbb2222", to="cccc3333",
+    ).replace(
+        " audited=",
+        " dispositions=D1=kept,D2=kept:load-bearing,D3=deleted audited=",
+    )
+    rc, out, err = run_main(
+        ["900", "--round", "4"],
+        comments=[R0_BLOCK, payload_block(2, PAYLOAD_NONZERO_A), answered],
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    assert "3 recorded, 0 unrecorded" in out, out
+    # 🔴 THE WHOLE ID LIST, TERMINATED. `"… NO reason: D1"` alone is a PREFIX of
+    # `"… NO reason: D1, D3"`, so it passes for a reading that also flags every
+    # `deleted` — measured: that mutant SURVIVED the prefix spelling.
+    assert "kept with NO reason: D1. `kept` is a judgement" in out, out
+    tail = out.split("kept with NO reason:")[1].split("\n")[0]
+    assert "D2" not in tail and "D3" not in tail, (
+        "a disposition that needs no reason — a `kept` that HAS one, or a "
+        "`deleted`, whose reason is the diff — was reported as reasonless: "
+        + tail
+    )
+
+
+def test_a_PR_with_no_round_zero_block_reports_NOTHING_about_dispositions():
+    """🔴 INVARIANT GUARD — the SILENT control, for the same reason as above.
+
+    Most PRs have no round-0 block. A NOT MEASURED line on every one of them is
+    a section every reader learns to skip, and it would also be wrong: a PR that
+    never ran round 0 has no deletion pass to answer.
+    """
+    rc, out, err = run_main(
+        ["900", "--round", "4"], comments=two_chained_rounds(),
+    )
+    assert rc == 0, f"rc={rc}\n{err}"
+    assert "ROUND 0 DISPOSITIONS" not in out + err, out + err
+    # POSITIVE CONTROL: the same reading DOES speak when a fence exists but
+    # carries nothing readable, which is a broken record rather than no record.
+    rz = ad.round_zero_dispositions((), 1, [])
+    assert "NOT MEASURED" in ad.round_zero_dispositions_summary(rz), rz
 
 
 # ---------------------------------------------------------------------------

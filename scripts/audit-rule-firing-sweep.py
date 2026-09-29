@@ -331,6 +331,18 @@ RULES: list[dict] = [
          probe='"Reported" now means THREE places',
          apply=(r"unearned ledger|measured over zero commits|"
                 r"are not evidence|arithmetic over zero commits")),
+    # 🔴 THE UNREADABLE-RANGE REPORT. Distinct from `unearned-ledger-not-evidence`
+    # one row up, and the distinction is the CAUSE: that rule is about a range
+    # spanning zero commits (`X..X`), this one about a range nothing could READ —
+    # an endpoint naming no object. Measured 2026-09-28: 30 of 564 endpoints,
+    # 11 ladders, `ZacxDev/cairn` #119 wholly. Same firing signal as its
+    # neighbour — a runner declining to quote a `payload=` nothing checked —
+    # which is why it is a rule and not an exemption.
+    dict(id="unreadable-range-not-verified",
+         name="a `payload=` from a round the gate could not MEASURE is unverified — say so",
+         probe="A RANGE THE ASSEMBLER CANNOT READ",
+         apply=(r"payload not verified|could not be measured|"
+                r"not a commit name|names no object|author's classification")),
     dict(id="decide-once-revert-test", name="decide payload/scaffolding ONCE at round 1 — the REVERT TEST",
          probe="REVERT TEST", apply=r"revert test"),
     dict(id="one-number-one-name", name="ONE NUMBER, ONE NAME",
@@ -459,22 +471,53 @@ def skill_versions() -> list[tuple[str, str, str]]:
     exactly like a working dater with some gaps. So the order is reversed in PYTHON, and
     `_assert_scan_reaches_current` refuses rather than degrading quietly.
     """
-    cmd = ["git", "-C", str(REPO), "log", "--follow",
-           "--format=%x01%H\t%aI", "--name-only", "--", SKILL_REL]
-    try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-    except Exception:
-        return []
-    versions: list[tuple[str, str, str]] = []
-    for chunk in out.stdout.split("\x01"):
-        lines = [l for l in chunk.splitlines() if l.strip()]
-        if not lines:
-            continue
+    fmt = "--format=%x01%H\t%aI"
+    # 🔴 TWO WALKS, AND NEITHER ONE ALONE IS THE HISTORY. `--follow` is the only
+    # way past the commands/skills rename, and it SILENTLY DROPS EVERY MERGE
+    # COMMIT — git does not compute rename-following diffs across a merge. So a
+    # merge that combines two branches' edits to this file is invisible to it,
+    # and the newest version `--follow` reports is then whichever ORDINARY
+    # commit is newest by date: the merged content never appears at all.
+    # MEASURED 2026-09-28 on the merge of `fix/unresolvable-range-endpoint` into
+    # this branch — `--follow` returned 38 commits with the merge absent and
+    # `a55aabca` newest, while the plain path-pinned walk returned 36 WITH the
+    # merge newest. `scan_reaches_current` then refused, correctly, and the
+    # refusal named a truncation whose cause was this flag rather than the
+    # history.
+    #
+    # 🔴 THE PLAIN WALK IS NOT A REPLACEMENT — it is the half `--follow` cannot
+    # see, and `--follow` is the half IT cannot see (the 2 pre-rename commits
+    # the counts above differ by). Unioned on sha and ordered by author date,
+    # which is the stamp every other reader in this module already dates by.
+    #
+    # ⚠ THIS DOES NOT WEAKEN `scan_reaches_current`. That guard still refuses a
+    # scan whose newest version lacks a ledger probe; nothing here injects the
+    # working tree's copy, so a genuinely truncated walk still reads as one.
+    seen: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for extra in (["--follow"], []):
+        cmd = (["git", "-C", str(REPO), "log"] + extra
+               + [fmt, "--name-only", "--", SKILL_REL])
         try:
-            sha, iso = lines[0].split("\t", 1)
-        except ValueError:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        except Exception:
             continue
-        paths = [l for l in lines[1:] if l.endswith(".md")]
+        for chunk in out.stdout.split("\x01"):
+            lines = [l for l in chunk.splitlines() if l.strip()]
+            if not lines:
+                continue
+            try:
+                sha, iso = lines[0].split("\t", 1)
+            except ValueError:
+                continue
+            paths = [l for l in lines[1:] if l.endswith(".md")]
+            if not paths:
+                # A merge commit reports no `--name-only` paths of its own.
+                # Its TREE still holds the merged file, which is the whole
+                # point of reading it, so fall back to the pinned path.
+                paths = [SKILL_REL]
+            seen.setdefault(sha, (iso.strip(), tuple(paths)))
+    versions: list[tuple[str, str, str]] = []
+    for sha, (iso, paths) in seen.items():
         for p in paths:
             try:
                 show = subprocess.run(["git", "-C", str(REPO), "show", f"{sha}:{p}"],
@@ -482,9 +525,12 @@ def skill_versions() -> list[tuple[str, str, str]]:
             except Exception:
                 continue
             if show.returncode == 0 and show.stdout:
-                versions.append((sha[:8], iso.strip(), show.stdout))
+                versions.append((sha[:8], iso, show.stdout))
                 break
-    versions.reverse()          # git gave newest-first; callers want OLDEST first
+    # OLDEST FIRST, by the author date both walks reported. Sorting rather than
+    # reversing git's own order is forced by the union: two walks emit two
+    # sequences, and there is no single stream left to reverse.
+    versions.sort(key=lambda v: v[1])
     return versions
 
 

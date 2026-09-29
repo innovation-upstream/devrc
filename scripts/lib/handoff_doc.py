@@ -242,6 +242,8 @@ EXIT CODES
      the delta, or could not be run at all; the write is rolled back
  14  size-ratchet    — rule (p): the doc is already over its byte ceiling and
      this update would make it BIGGER
+ 15  prune-refused   — rule (q): a `--prune` named content this tool will not
+     remove — absent, ambiguous, load-bearing, or outside an append-only section
 """
 
 from __future__ import annotations
@@ -459,6 +461,31 @@ positive delta over the line and is refused. That is the stated predicate
 has no previous round to have grown since, while this rule compares BYTES
 against a fixed ceiling, which a new doc can be over on its first day. The
 override is the escape, and it says why on the commit.
+"""
+
+
+EXIT_PRUNE_REFUSED = 15
+"""Rule (q). A `--prune` named content this tool will not remove. Nothing written.
+
+🔴 ONE CLASS, EIGHT CAUSES (`PRUNE_MARKERS`), and they share a code because the
+verdict is one sentence: this tool cannot identify, or may not touch, what you
+told it to remove. The alternative — a best-effort removal of whatever matched —
+is the shape `claude/RULES.md` refuses by name: a prune that silently matched
+nothing reports success, and a prune that matched more than the caller named
+removes a line nobody read.
+
+🔴 THE REFUSAL IS ALL-OR-NOTHING ON PURPOSE. A partial prune produces a document
+no one chose, and the two-run shape means the diff in the transcript is the only
+record of what landed — so a run that removed 3 of the 4 lines named would leave
+a record that reads as a decision.
+
+🔴 AND THREE OF THE CAUSES HAVE NO OVERRIDE, BY DESIGN — the load-bearing field,
+the section heading, and the partially-named block. Each of those losses is
+SILENT rather than loud in the consumer: a dropped `closing-condition:` makes
+`resume-state.sh` print "this handoff declares NO closing-condition", a dropped
+`### ` heading re-attributes its body to the block above. Rule (i-a)'s argument
+applies unchanged: a bypass for a refusal whose damage is invisible would be
+taken every time.
 """
 
 
@@ -3636,6 +3663,652 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+# --- rule (q): a PRUNE removes lines the caller NAMED, one at a time ----------
+#
+# 🔴 THE GAP THIS CLOSES, AND IT IS THE MIRROR OF RULE (p) RATHER THAN A SECOND
+# HALF OF IT. Rule (c) makes `Open investigations`, `Findings` and `Gotchas`
+# APPEND-ONLY, and rule (p) refuses to grow a document already over its ceiling.
+# Between them a doc can reach a state in which the sanctioned writer cannot
+# write at all: the bytes are in the append-only sections, and no path in this
+# module could ever remove one. `--help` listed no prune mode; the module's own
+# rule (p) docstring says the appending sections have "an entry rule and no exit
+# rule", and `scripts/handoff-audit.py` measures the consequence (121 of 123
+# revisions grew or held) while its own header says it "makes no edits".
+#
+# 🔴 THE MEASURED COST OF HAVING NO EXIT RULE IS NOT THE BYTES, IT IS THE
+# HAND EDIT. With the only writer unable to remove a line, the remedy reached for
+# is an `Edit` of the committed document — which bypasses EVERY gate in this
+# module at once: the bucket classification, the durable-drop warning, the leak
+# scan, the closing-condition read, the two-run diff. That is not a hypothesis;
+# a hand edit made for exactly this reason shipped a ranked list that
+# misrepresented the state of the work, because nothing checked it.
+#
+# SO THIS IS AN EXIT RULE WITH THE SAME POSTURE AS THE ENTRY RULES:
+#
+#   * IT IS NEVER A SIDE EFFECT. `--prune` is its own flag and it names, VERBATIM,
+#     every line to be removed. There is no "prune while you are in there", no
+#     age threshold, no section-wide sweep and no heuristic — the caller types the
+#     content out, which is what makes the transcript a record of what went.
+#   * THE TWO-RUN SHAPE IS UNCHANGED. A prune is computed into `merged_text`
+#     BEFORE the diff is printed, so the proposal run shows the removals as `-`
+#     lines and writes nothing; `--confirm` lands exactly that text. There is no
+#     one-shot prune path, for the reason rule (b) gives about the write.
+#   * IT ASSERTS ITS POPULATION BEFORE IT ACTS. `--prune-count` is REQUIRED, and
+#     a prune file naming a different number of lines is a refusal rather than a
+#     best-effort removal of whatever matched. Per line, the document must
+#     contain EXACTLY ONE match: zero refuses (`[absent]`), two or more refuse
+#     (`[ambiguous]`). `claude/RULES.md`: name the population you enumerated.
+#   * IT ROUTES AROUND NOTHING. Every refusal above still reads the text a prune
+#     produced, so rule (p) is SATISFIED by a prune (net delta <= 0) and not
+#     bypassed by one — a prune that still leaves an over-ceiling doc BIGGER is
+#     still refused. Rules (j)/(k) read the UPDATE and are untouched. Rule (n)
+#     reads `base_text`, which a prune never rewrites, and `## Next steps` is a
+#     REPLACE heading that this rule refuses to touch at all — so the ranked
+#     queue's count cannot be lowered by pruning. Rule (m) and the leak scan read
+#     the PRUNED text, which is the strict direction: a prune that removed the
+#     finish line would be caught even if the guard below somehow let it past.
+#
+# 🔴 WHAT IT WILL NOT REMOVE, AND THERE IS NO FLAG FOR IT. Four fields are parsed
+# by tooling OUTSIDE this module, and a document that loses one does not report an
+# error — it reports a FALSE ABSENCE (`no clawgate-task: field in this handoff`,
+# `this handoff declares NO closing-condition`). A bypass would be taken, so the
+# refusal is unconditional, exactly as rule (i-a)'s dated topic is.
+
+#: Rule (q)'s flags, named once so the refusals and `--help` cannot disagree.
+PRUNE_FLAG = "--prune"
+PRUNE_COUNT_FLAG = "--prune-count"
+
+#: 🔴 ONE MARKER PER CAUSE, and the refusal prints a row per NAMED LINE rather
+#: than dying on the first problem. Same argument `unforced_report` makes: a
+#: caller who has to re-run once per bad line re-runs N times, and the middle
+#: runs teach nothing. Derived by the skill-seam test the way `REFUSAL_MARKERS`
+#: is, so a rename here goes red rather than leaving the legend naming a token
+#: the tool no longer prints.
+PRUNE_MARKER_COUNT = "[count mismatch]"
+PRUNE_MARKER_ABSENT = "[absent]"
+PRUNE_MARKER_AMBIGUOUS = "[ambiguous]"
+PRUNE_MARKER_LOAD_BEARING = "[load-bearing]"
+PRUNE_MARKER_SECTION_HEADING = "[section heading]"
+PRUNE_MARKER_PARTIAL_BLOCK = "[partial block]"
+PRUNE_MARKER_FENCE = "[fence delimiter]"
+PRUNE_MARKER_REPLACE_SECTION = "[replace section]"
+
+PRUNE_MARKERS: tuple[str, ...] = (
+    PRUNE_MARKER_COUNT,
+    PRUNE_MARKER_ABSENT,
+    PRUNE_MARKER_AMBIGUOUS,
+    PRUNE_MARKER_LOAD_BEARING,
+    PRUNE_MARKER_SECTION_HEADING,
+    PRUNE_MARKER_PARTIAL_BLOCK,
+    PRUNE_MARKER_FENCE,
+    PRUNE_MARKER_REPLACE_SECTION,
+)
+
+#: 🔴 THE FIELDS A PRUNE MAY NOT TOUCH, each paired with WHO READS IT — the
+#: reason is printed, because "load-bearing" on its own tells an author nothing
+#: about why their line is refused or where to go and check.
+#:
+#: DERIVED FROM THE KEY CONSTANTS, never a second set of literals. Every one of
+#: these keys is already a named constant in this module because a reader
+#: elsewhere spells it the same way (`CLAWGATE_TASK_KEY`'s own comment pins the
+#: two-language spelling), so a rename that did not come through here would
+#: silently un-guard the field it renamed.
+#: 🔴 THE THIRD ELEMENT IS THE ONE NARROW EXCEPTION, AND WITHOUT IT THIS RULE
+#: WAS USELESS FOR ITS BIGGEST CASE — measured on the smoke fixture before it
+#: existed. `as-of:` is OWNED BY the `### ` block it stamps, so a prune that
+#: removes that whole block removes the field's owner with it and orphans
+#: nothing; with no exception, naming a complete resolved investigation block
+#: was refused on its own stamp, i.e. the single largest eviction
+#: `scripts/handoff-audit.py` reports could never be taken.
+#:
+#: It is `True` for that key ALONE, and the asymmetry is derived rather than
+#: chosen: the other three fields' owners are never inside an H3 block —
+#: `closing-condition:` lives under `## Goal` and BOTH readers scope to it
+#: (`closing_condition` here, `dod_row`'s `!goal { next }` in
+#: scripts/resume-state.sh), `forcing:` lives on a ranked item under a REPLACE
+#: heading this rule refuses outright, and `clawgate-task:` lives in front matter
+#: or the preamble, which is in no section at all. So for those three there is no
+#: "its owner is going too" state to except, and granting one would be a bypass
+#: with no case behind it.
+LOAD_BEARING_FIELDS: tuple[tuple[str, str, bool], ...] = (
+    (
+        CLAWGATE_TASK_KEY,
+        "scripts/resume-state.sh reconciles the clawgate task from it and "
+        "scripts/lib/handoff_index.py reads it; a doc that loses it reports "
+        "`(no clawgate-task: field in this handoff)` rather than an error",
+        False,
+    ),
+    (
+        CLOSING_KEY,
+        "rule (m) here and scripts/resume-state.sh both read the arc's finish "
+        "line from it; a doc that loses it declares NO closing-condition, which "
+        "is the state rule (m) exists to prevent",
+        False,
+    ),
+    (
+        FORCING_KEY,
+        "rules (j) and (n) here read a ranked item's forcing function from it, "
+        "and the rank is half a `claim-work` slug identity",
+        False,
+    ),
+    (
+        INVESTIGATION_STAMP_KEY,
+        "rule (l) here and scripts/resume-state.sh age an investigation block "
+        "by it; an unstamped block cannot be aged and reads as fresh",
+        True,
+    ),
+)
+
+#: 🔴 DELIBERATELY WIDER THAN EVERY READER'S OWN PATTERN — key, optional markup,
+#: colon, and NOTHING about the value. Each reader additionally requires a valid
+#: value (`_CLOSING` a member of a closed vocabulary, `_INVESTIGATION_STAMP` an
+#: ISO date), so a guard sharing those bounds would let through a line the reader
+#: turns away as a NEAR-MISS — and `_CLOSING_ATTEMPT` / `_FORCING_ATTEMPT` exist
+#: precisely because a near-miss line is one the author meant as the field. The
+#: cost of being wider is a refusal on a prose line that happens to spell
+#: `as-of:`; the cost of being narrower is a field deleted forever with no error.
+#: The lookbehind and `_MARKUP` are shared with `_FORCING` for the measured
+#: reason recorded there (`\b` has no boundary against `_`).
+_LOAD_BEARING: tuple[tuple[str, str, bool, typing.Pattern[str]], ...] = tuple(
+    (
+        key,
+        reason,
+        block_scoped,
+        re.compile(
+            rf"(?<![A-Za-z0-9]){re.escape(key)}{_MARKUP}\s*:", re.IGNORECASE
+        ),
+    )
+    for key, reason, block_scoped in LOAD_BEARING_FIELDS
+)
+
+#: Any ATX heading and its level. `_H2` already exists but answers only "is this
+#: an H2?", and rule (q) needs the level: an H2 IS a section (never prunable),
+#: while an `### ` is a block (prunable, but only whole).
+_ANY_ATX_HEADING = re.compile(r"^(#{1,6})\s+\S")
+
+
+def load_bearing_field(line: str) -> tuple[str, str, bool] | None:
+    """`(key, who reads it, is it block-owned)` for a guarded field, else None.
+
+    The single home of rule (q)'s "may this line be removed at all?" question,
+    for the reason `durable_reason` gives about its own: consumers branch on
+    truthiness and PRINT the reason, so a field added to `LOAD_BEARING_FIELDS`
+    becomes visible in the refusal rather than silently widening a boolean.
+
+    The third element is NOT a verdict — it says the field has an owning block,
+    and the CALLER is what knows whether that block is going too. Deciding it
+    here would need the document, which is the one thing this function does not
+    take, and a second reading of "is the block fully named" is the second site
+    `claude/RULES.md` says ends up wrong.
+    """
+    for key, reason, block_scoped, pattern in _LOAD_BEARING:
+        if pattern.search(line):
+            return key, reason, block_scoped
+    return None
+
+
+class _DocRow(typing.NamedTuple):
+    """One line of the document being pruned, with the context a guard needs."""
+
+    line_no: int
+    """1-based, in the document the diff will be taken against."""
+    raw: str
+    """The line WITH its terminator, so a rebuild is byte-exact."""
+    line: str
+    """The line without its terminator."""
+    heading: str | None
+    """The `## ` heading LINE whose section this line sits in, or None.
+
+    The LINE and not its text, so `append_bucket` — which owns rule (c)'s
+    prefix match — can be called on it directly rather than through a
+    reconstructed `f"## {text}"`, which would be a second spelling of a heading
+    and free to disagree with the first.
+    """
+    level: int
+    """ATX heading level, or 0 for a non-heading (and for anything in a fence)."""
+    fence_delim: bool
+    """Is this line itself a fence opener/closer?"""
+    block_no: int | None
+    """`line_no` of the INNERMOST enclosing `### `-or-deeper heading, or None.
+
+    The innermost, because that is the block a field on this line belongs to: an
+    `as-of:` under a `#### ` sub-block is that sub-block's stamp, and it is that
+    sub-block going away that makes removing the stamp safe. An H2 clears it —
+    a section is not a block."""
+
+
+def _doc_rows(text: str) -> list[_DocRow]:
+    """`text` as rows, FENCE AWARE and lossless.
+
+    The fence walk is `split_sections`' walk, line for line, and must stay so: a
+    handoff's step-2 template is a fenced block full of `## ` lines, and a prune
+    that read those as real headings would refuse (or worse, permit) on the
+    strength of a sample. Losslessness — `"".join(r.raw) == text` — is what makes
+    the removal below a byte-exact deletion rather than a re-render.
+    """
+    rows: list[_DocRow] = []
+    open_tok: str | None = None
+    heading: str | None = None
+    #: Open `### `+ headings, outermost first, as (level, line_no).
+    stack: list[tuple[int, int]] = []
+    for idx, raw in enumerate(text.splitlines(keepends=True), start=1):
+        line = raw.rstrip("\n")
+        tok = _fence_token(line)
+        was_open = open_tok
+        if open_tok is None:
+            if tok:
+                open_tok = tok
+        elif (
+            tok
+            and tok[0] == open_tok[0]
+            and len(tok) >= len(open_tok)
+            and line.strip() == tok
+        ):
+            open_tok = None
+        is_fence_line = tok is not None and (was_open is None or open_tok is None)
+        match = (
+            _ANY_ATX_HEADING.match(line)
+            if was_open is None and not is_fence_line
+            else None
+        )
+        level = len(match.group(1)) if match else 0
+        if level:
+            # A heading closes every open block at its own level or deeper, then
+            # opens one itself if it is `### ` or deeper. An H1/H2 closes all of
+            # them — a block cannot span a section boundary.
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            if level >= 3:
+                stack.append((level, idx))
+            else:
+                stack.clear()
+        if level == 2:
+            heading = line
+        rows.append(
+            _DocRow(
+                idx, raw, line, heading, level, is_fence_line,
+                stack[-1][1] if stack else None,
+            )
+        )
+    return rows
+
+
+class PruneTarget(typing.NamedTuple):
+    """One line a prune will remove, addressed so it can be read before it goes."""
+
+    line_no: int
+    line: str
+    heading: str
+    """The `## ` section it sits under, or `(preamble)`."""
+    reason: str | None
+    """`durable_reason(line)`, so the disclosure can say which removals look
+    durable. One rule, one place — rule (f) owns that question."""
+
+
+class PruneProblem(typing.NamedTuple):
+    marker: str
+    named: str
+    detail: str
+
+
+class PrunePlan(typing.NamedTuple):
+    text: str
+    """The document with the named lines removed — `""` when refused."""
+    removed: tuple[PruneTarget, ...]
+    problems: tuple[PruneProblem, ...]
+
+
+def prune_naming_lines(prune_text: str) -> list[str]:
+    """The lines a `--prune` file NAMES — every non-blank line, verbatim.
+
+    Blank lines are separators for the author's benefit and name nothing; a blank
+    document line is therefore not nameable, which is why a removal leaves the
+    blanks around it alone (see `apply_prune`).
+    """
+    return [ln.rstrip("\n") for ln in prune_text.splitlines() if ln.strip()]
+
+
+def _block_extent(rows: typing.Sequence[_DocRow], start: int) -> list[_DocRow]:
+    """The `### `-and-deeper block opened at index `start`, heading included.
+
+    Closed by the next heading at the SAME level or shallower — which is how
+    `investigation_blocks` bounds one — so a `#### ` sub-block travels with its
+    parent rather than being left orphaned by a prune that named only the parent.
+    """
+    level = rows[start].level
+    out = [rows[start]]
+    for row in rows[start + 1:]:
+        if 0 < row.level <= level:
+            break
+        out.append(row)
+    return out
+
+
+def prune_plan(
+    doc_text: str, prune_text: str, declared_count: int
+) -> PrunePlan:
+    """Rule (q): what a prune would remove, or every reason it will not.
+
+    🔴 EVERY PROBLEM IS COLLECTED, not just the first, and each carries its own
+    marker. A caller told about one bad line at a time re-runs once per line and
+    learns nothing from the middle runs — the shape `unforced_report`'s own
+    header records as the failure that made rule (j) unrecoverable.
+
+    🔴 THE COUNT IS CHECKED FIRST AND ALONE. It is a claim about the FILE, not
+    about the document, so reporting it beside per-line problems would invite
+    fixing the lines and re-running with a file that still names the wrong
+    number. `claude/RULES.md`: assert the population before acting on it.
+    """
+    named = prune_naming_lines(prune_text)
+    if len(named) != declared_count:
+        return PrunePlan(
+            "",
+            (),
+            (
+                PruneProblem(
+                    PRUNE_MARKER_COUNT,
+                    f"{PRUNE_COUNT_FLAG} {declared_count}",
+                    f"the prune file names {len(named)} line(s), not "
+                    f"{declared_count}. The count is a claim about what you are "
+                    f"removing, checked against the file before anything is "
+                    f"matched — a file that lost a line to a bad heredoc, or "
+                    f"gained one, is a prune of something you did not name.",
+                ),
+            ),
+        )
+
+    rows = _doc_rows(doc_text)
+    by_norm: dict[str, list[_DocRow]] = {}
+    for row in rows:
+        by_norm.setdefault(_norm_line(row.line), []).append(row)
+    named_norms = {_norm_line(ln) for ln in named}
+
+    problems: list[PruneProblem] = []
+    # ---- PASS 1: resolve each named line to exactly ONE document line --------
+    # 🔴 TWO PASSES, BECAUSE ONE CANNOT DECIDE THE BLOCK QUESTIONS. Both the
+    # partial-block refusal and the `as-of:` exception ask "is this whole block
+    # named?", which is a question about the WHOLE prune, not about the line in
+    # hand — asking it inside the resolving loop would answer it against a
+    # half-built set and be right only for whichever line came last.
+    resolved: list[tuple[str, _DocRow]] = []
+    for naming in named:
+        # 🔴 FIRST, AND THE POSITION IS A MEASURED FIX. When this check sat in
+        # pass 2 it was UNREACHABLE for three of the four guarded fields:
+        # `closing-condition:` lives under `## Goal`, `forcing:` under
+        # `## Next steps` and `clawgate-task:` in the preamble, so
+        # `[replace section]` fired first and the refusal told the author to
+        # "rewrite the section with --update" about a field that may not be
+        # removed at all. The guard still REFUSED, so a test reading only the
+        # exit code was green — `claude/RULES.md`'s "green for the wrong reason",
+        # and a guard reading as coverage of four keys while covering one.
+        #
+        # The BLOCK-SCOPED key is the exception and is deliberately deferred to
+        # pass 2: whether its owning block is going too is a question about the
+        # whole prune, so it cannot be answered here, and answering it twice is
+        # the duplicated-predicate shape.
+        field = load_bearing_field(naming)
+        if field is not None and not field[2]:
+            key, who, _block_scoped = field
+            problems.append(
+                PruneProblem(
+                    f"{PRUNE_MARKER_LOAD_BEARING}: {key}",
+                    naming,
+                    f"this line carries the `{key}:` field, and {who}. There is "
+                    f"deliberately NO flag that clears this — a bypass would be "
+                    f"taken, and the loss is silent rather than loud: the reader "
+                    f"reports a FALSE ABSENCE, not an error.",
+                )
+            )
+            continue
+        if _fence_token(naming.strip()) is not None:
+            problems.append(
+                PruneProblem(
+                    PRUNE_MARKER_FENCE,
+                    naming,
+                    "this line opens or closes a code fence. Removing one end of "
+                    "a fence re-partitions every line after it, so the heading "
+                    "and field walks in this module and in "
+                    "scripts/resume-state.sh read the rest of the document as "
+                    "code.",
+                )
+            )
+            continue
+        matches = by_norm.get(_norm_line(naming), [])
+        if not matches:
+            problems.append(
+                PruneProblem(
+                    PRUNE_MARKER_ABSENT,
+                    naming,
+                    "no line in the document matches it. A prune that silently "
+                    "matched nothing would report success having removed "
+                    "something else, or nothing at all — so an unmatched "
+                    "name is a refusal. Whitespace is collapsed before "
+                    "comparing; everything else must be verbatim.",
+                )
+            )
+            continue
+        if len(matches) > 1:
+            where = ", ".join(str(m.line_no) for m in matches[:6])
+            problems.append(
+                PruneProblem(
+                    PRUNE_MARKER_AMBIGUOUS,
+                    naming,
+                    f"{len(matches)} lines match it (lines {where}). You named "
+                    f"ONE removal and the document offers several, so which one "
+                    f"goes is not yours to decide by accident. Append-verbatim "
+                    f"makes duplicates ordinary: rule (c) keeps a superseding "
+                    f"block AND the block it superseded.",
+                )
+            )
+            continue
+        row = matches[0]
+        if row.level and row.level <= 2:
+            problems.append(
+                PruneProblem(
+                    PRUNE_MARKER_SECTION_HEADING,
+                    naming,
+                    f"it is a level-{row.level} heading, i.e. a SECTION. "
+                    f"Removing it would merge this section's remaining body into "
+                    f"the one above and change which bucket every line of it "
+                    f"lands in on the next update. Prune the section's CONTENT "
+                    f"instead.",
+                )
+            )
+            continue
+        if row.heading is None or append_bucket(row.heading) is None:
+            where = (
+                f"`{heading_text(row.heading)}`" if row.heading else "the preamble"
+            )
+            problems.append(
+                PruneProblem(
+                    PRUNE_MARKER_REPLACE_SECTION,
+                    naming,
+                    f"it sits in {where}, which is not an append-only section. "
+                    f"Rule (c) already lets an ordinary `--update` rewrite that "
+                    f"content wholesale, so a prune there would be a second way "
+                    f"to do one thing — and the one that skips the bucket "
+                    f"line and the durable-drop warning. Rewrite the section "
+                    f"with --update instead.",
+                )
+            )
+            continue
+        resolved.append((naming, row))
+
+    # ---- PASS 2: the block questions, over the FULL named set ----------------
+    # `fully_named[heading_line_no]` = every non-blank line of that block is in
+    # the prune. Computed once, for the reason above and because both consumers
+    # below must get the SAME answer: if the partial-block refusal and the
+    # `as-of:` exception could disagree, a block would be simultaneously "not
+    # fully named" (so its heading may not go) and "fully named" (so its stamp
+    # may), and the prune would remove the stamp and keep the heading.
+    fully_named: dict[int, bool] = {}
+    for naming, row in resolved:
+        if row.level >= 3:
+            fully_named[row.line_no] = not _unnamed_in_block(
+                rows, row.line_no, named_norms
+            )
+
+    targets: list[PruneTarget] = []
+    for naming, row in resolved:
+        if row.level >= 3 and not fully_named.get(row.line_no, False):
+            missing = _unnamed_in_block(rows, row.line_no, named_norms)
+            shown = _clip(missing[0].line.strip(), PRUNE_LINE_MAX)
+            problems.append(
+                PruneProblem(
+                    PRUNE_MARKER_PARTIAL_BLOCK,
+                    naming,
+                    f"it is a level-{row.level} block heading and "
+                    f"{len(missing)} line(s) of its own block are not named "
+                    f"— first at line {missing[0].line_no}: {shown}. "
+                    f"Removing a heading alone leaves its body under the "
+                    f"PREVIOUS block, where every reader attributes it to that "
+                    f"block's finding. Name the whole block, or none of it.",
+                )
+            )
+            continue
+        field = load_bearing_field(row.line)
+        # 🔴 ONLY THE BLOCK-SCOPED ARM IS LIVE HERE — pass 1 already refused
+        # every other guarded field, so a `field[2] is False` branch at this
+        # point would be dead code that reads as a second line of defence. The
+        # `field[2]` test is what keeps the two sites disjoint rather than
+        # overlapping, which is the shape that lets two copies of one predicate
+        # disagree.
+        if field is not None and field[2]:
+            key, who, _block_scoped = field
+            # 🔴 THE EXCEPTION IS `ITS OWNER IS GOING TOO`, and it is the only
+            # thing that lets a resolved investigation block be evicted whole.
+            # `row.block_no` is the INNERMOST enclosing `### `+ heading, so the
+            # block whose stamp this is; requiring that heading to be BOTH named
+            # and fully named means the field can only ever leave together with
+            # the thing that reads it.
+            owner_going = (
+                row.block_no is not None
+                and fully_named.get(row.block_no, False)
+            )
+            if not owner_going:
+                problems.append(
+                    PruneProblem(
+                        f"{PRUNE_MARKER_LOAD_BEARING}: {key}",
+                        naming,
+                        f"this line carries the `{key}:` field, and {who}. It "
+                        f"may be removed only as part of removing its whole "
+                        f"`###` block — name every line of that block, heading "
+                        f"included.",
+                    )
+                )
+                continue
+        targets.append(
+            PruneTarget(
+                row.line_no,
+                row.line,
+                heading_text(row.heading) if row.heading else "(preamble)",
+                durable_reason(row.line),
+            )
+        )
+
+    if problems:
+        return PrunePlan("", (), tuple(problems))
+    return PrunePlan(
+        apply_prune(rows, {t.line_no for t in targets}), tuple(targets), ()
+    )
+
+
+def _unnamed_in_block(
+    rows: typing.Sequence[_DocRow], heading_line_no: int,
+    named_norms: typing.AbstractSet[str],
+) -> list[_DocRow]:
+    """Non-blank lines of the block opened at `heading_line_no`, minus the
+    heading, that the prune does NOT name.
+
+    Blank lines are excluded because `prune_naming_lines` cannot name one (see
+    there), so requiring them would make every block permanently partial.
+    """
+    return [
+        r for r in _block_extent(rows, heading_line_no - 1)[1:]
+        if r.line.strip() and _norm_line(r.line) not in named_norms
+    ]
+
+
+def apply_prune(rows: typing.Sequence[_DocRow], line_nos: typing.AbstractSet[int]) -> str:
+    """The document with exactly those lines gone, and nothing else touched.
+
+    🔴 DELIBERATELY DUMB, in the same sense `_append_body` is: no blank-line
+    tidying, no re-flowing, no collapsing of the gap a removed block leaves. A
+    prune that also normalised whitespace would put changes in the diff the
+    caller did not name, which is the whole property `--prune` is built to have.
+    The trailing-newline normalisation matches `merge_report`'s, so a prune
+    cannot be the reason a document gains or loses a final newline.
+    """
+    kept = "".join(r.raw for r in rows if r.line_no not in line_nos)
+    return kept.rstrip("\n") + "\n"
+
+
+PRUNE_SHOWN_MAX = 8
+PRUNE_LINE_MAX = 120
+
+
+def prune_refusal_report(plan: PrunePlan, relpath: str) -> str:
+    """Rule (q)'s refusal. Nothing is written on any arm of it."""
+    rows = [
+        f"status=prune-refused path={relpath}",
+        "NOTHING WRITTEN — not the doc, not a commit, not a ref.",
+        f"  {len(plan.problems)} named line(s) could not be removed. A prune "
+        f"removes ALL of what it named or NONE of it: a partial removal is a "
+        f"document nobody chose, and the diff in the transcript would be the "
+        f"only record of it.",
+    ]
+    for problem in plan.problems[:PRUNE_SHOWN_MAX]:
+        rows.append(f"  {problem.marker} {_clip(problem.named, PRUNE_LINE_MAX)}")
+        rows.append(f"      {problem.detail}")
+    if len(plan.problems) > PRUNE_SHOWN_MAX:
+        rows.append(
+            f"  … and {len(plan.problems) - PRUNE_SHOWN_MAX} more not shown."
+        )
+    rows.append(
+        f"  Fix the prune file and re-run. Nothing about this run has to be "
+        f"undone; re-running after a fix is safe."
+    )
+    return "\n".join(rows)
+
+
+def prune_note(plan: PrunePlan) -> str:
+    """Rule (q)'s disclosure, printed ABOVE the diff, or "" when nothing pruned.
+
+    🔴 ABOVE THE DIFF, beside rule (f)'s warning and for its reason: it is a
+    classification of what the diff DELETES, and a reader who has to derive that
+    from several hundred `-` lines is the reader rule (f)'s own header says
+    cannot do it. It does NOT duplicate rule (f) — that rule watches for durable
+    lines a REPLACE dropped WITHOUT the author naming them, which is a different
+    claim from this one, where every line was typed out on purpose. What the two
+    share is `durable_reason`, so "looks durable" means one thing here.
+    """
+    if not plan.removed:
+        return ""
+    total = sum(len(t.line) + 1 for t in plan.removed)
+    durable = [t for t in plan.removed if t.reason]
+    out = [
+        f"prune: REMOVING {len(plan.removed)} line(s) / ~{total:,} B that you "
+        f"named. Every one is an explicit, verbatim removal:"
+    ]
+    for target in plan.removed[:PRUNE_SHOWN_MAX]:
+        tag = f"   <- looks durable: {target.reason}" if target.reason else ""
+        out.append(
+            f"  {target.heading} :{target.line_no}  "
+            f"{_clip(target.line.strip(), PRUNE_LINE_MAX)}{tag}"
+        )
+    if len(plan.removed) > PRUNE_SHOWN_MAX:
+        out.append(f"  … and {len(plan.removed) - PRUNE_SHOWN_MAX} more — see the diff.")
+    if durable:
+        out.append(
+            f"  🔴 {len(durable)} of them look DURABLE by rule (f)'s predicate. "
+            f"That predicate is a FLOOR, not a classifier, so a silent run is "
+            f"not evidence the rest were stale — read the diff. If a removal "
+            f"carries a finding worth keeping, its home is the owning skill or "
+            f"the subsystem store, not this document."
+        )
+    return "\n".join(out)
+
+
 # --- rule (h): is the BASE the document this update was written against? ------
 #
 # 🔴 THE INCIDENT. Pointed at a clone 313 commits behind its mainline, this tool
@@ -4480,6 +5153,101 @@ LEAK_PRE_EXISTING_FLAG = "--leak-pre-existing-approved"
 #: ships only a bounded TAIL, so an approval early in a long session is gone.
 LEAK_TRAILER_KEY = "Leak-Gate-Approved"
 
+#: How far back the streak walk below will look. A bound rather than a full
+#: history walk because the number is only ever READ as "this has been going on
+#: for a while"; past this it says "at least N" and stops.
+LEAK_STREAK_MAX = 25
+
+
+def consecutive_leak_approvals(repo: Path, relpath: str) -> int | None:
+    """How many of this doc's most recent commits, unbroken, were approved
+    through the leak gate. `None` means the question could not be answered.
+
+    🔴 THIS IS NOT THE ATTRIBUTION `leak_gate` REJECTS, AND THE DIFFERENCE IS
+    THE WHOLE REASON IT IS ALLOWED TO EXIST. That rejection is about "did THIS
+    delta cause the findings?", which needs two scans and is a guess for three
+    named reasons. This asks a different question with an exact answer already
+    recorded in the repository: how many times in a row did somebody take the
+    opt-in on this document? No second scan, no scanner output parsed, no
+    comparison between runs.
+
+    🔴 IT EXISTS BECAUSE THE OPT-IN HAS NO MEMORY AND THE FOURTH USE PUBLISHED A
+    LEAK. MEASURED on one arc: four consecutive handoff commits carried this
+    trailer. Scanning each committed tree afterwards, the first three were
+    genuinely CLEAN — the refusals they approved through were not in what they
+    committed, which is exactly what the flag is for, so all three were honest.
+    The fourth committed three `denied-identifier` findings to `main` of a
+    PUBLIC repository. From inside the fourth run it looked identical to the
+    three honest ones: same flag, same banner, same everything. The operator had
+    no way to see they were the fourth rather than the first.
+
+    ⚠ IT FAILS OPEN, DELIBERATELY. A handoff must never be blocked because a
+    `git log` did not answer — so every failure returns `None`, and the caller
+    says the streak is UNKNOWN. `claude/RULES.md`: a failed command is not a
+    zero, and reporting one here would be the reassuring-zero defect this
+    number exists to fight.
+
+    ⚠ AND IT IS A COUNT OF COMMITS, NOT OF SESSIONS. One session writing the doc
+    three times counts three. That over-counts relative to "how many people
+    decided this", and the over-count is in the safe direction: it can only make
+    the streak look longer, never shorter.
+    """
+    run = git_allow(
+        repo,
+        "--no-optional-locks",
+        "log",
+        f"-{LEAK_STREAK_MAX}",
+        "--format=%H%x00%B%x01",
+        "--",
+        relpath,
+    )
+    if run.code != 0:
+        return None
+    streak = 0
+    for record in run.out.split("\x01"):
+        if not record.strip():
+            continue
+        _, _, body = record.partition("\x00")
+        # The trailer sits at the start of its own line. Anchoring on that is
+        # what keeps a doc that merely DISCUSSES the trailer — this docstring's
+        # own repo does — from counting as an approval.
+        if any(
+            line.startswith(f"{LEAK_TRAILER_KEY}:")
+            for line in body.splitlines()
+        ):
+            streak += 1
+            continue
+        break
+    return streak
+
+
+def leak_streak_line(streak: int | None) -> str:
+    """The one line the approval banner gains. Separated so a test can pin the
+    wording without building a repository and a scanner around it."""
+    if streak is None:
+        return (
+            f"  ⚠ HOW MANY TIMES IN A ROW THIS HAS BEEN APPROVED: UNKNOWN — the "
+            f"`git log` behind it did not answer. That is not zero.\n"
+        )
+    if streak == 0:
+        return (
+            f"  This is the FIRST approved-through write on this document — no "
+            f"unbroken run of them precedes it.\n"
+        )
+    nth = streak + 1
+    at_least = " (at least; the walk stops there)" if streak >= LEAK_STREAK_MAX else ""
+    return (
+        f"  🔴 THIS IS APPROVED-THROUGH WRITE NUMBER {nth} IN A ROW ON THIS "
+        f"DOCUMENT{at_least} — the previous {streak} commit(s) touching it "
+        f"carry `{LEAK_TRAILER_KEY}:` too.\n"
+        f"  A streak is the tell this gate cannot get from one run: approving "
+        f"through MAKES the tree red, which makes the NEXT run's "
+        f"\"pre-existing\" reading true. Three honest approvals are exactly how "
+        f"the fourth one ships a real leak. Before taking it again, scan a "
+        f"clean checkout of the base and find out whether the findings are "
+        f"still somebody else's.\n"
+    )
+
 
 class ScanRun(typing.NamedTuple):
     """One scanner invocation: its exit code and each stream it printed.
@@ -4771,13 +5539,16 @@ def leak_approved_note(
         f"delta.\n"
         f"  ⚠ NOTHING HERE CHECKED THAT. The gate does not compare scans, so "
         f"what was approved is everything below, whatever produced it.\n"
-        f"  🔴 AND THE SCANNER MAY NEVER HAVE SCANNED. A non-zero exit is all "
-        f"this gate sees, and a scanner that died on an import, a syntax error "
-        f"or a missing dependency exits non-zero without reading one byte of "
-        f"the tree — indistinguishable here from a finding. Read the lines "
-        f"below before trusting that anything was examined.\n"
-        f"  What {rel} printed (last {LEAKSCAN_SHOWN_MAX} line(s) of each "
-        f"stream"
+        + leak_streak_line(consecutive_leak_approvals(repo, relpath))
+        + (
+            f"  🔴 AND THE SCANNER MAY NEVER HAVE SCANNED. A non-zero exit is all "
+            f"this gate sees, and a scanner that died on an import, a syntax error "
+            f"or a missing dependency exits non-zero without reading one byte of "
+            f"the tree — indistinguishable here from a finding. Read the lines "
+            f"below before trusting that anything was examined.\n"
+            f"  What {rel} printed (last {LEAKSCAN_SHOWN_MAX} line(s) of each "
+            f"stream"
+        )
         + (f"; {elided} earlier line(s) elided" if elided else "")
         + "):\n"
         + "".join(f"    {line}\n" for line in shown)
@@ -5017,13 +5788,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--repo", required=True, help="repo root the handoff lives in")
     p.add_argument("--topic", required=True, help="handoff topic slug")
+    # 🔴 NO LONGER `required=True`, AND THAT IS THE ONLY EXISTING CONTRACT RULE
+    # (q) TOUCHES. A pure prune brings no sections, so demanding `--update`
+    # would force a caller to hand-write a no-op delta — which is a REPLACE of
+    # whatever section they chose to spell, i.e. the tool teaching the hand edit
+    # it exists to replace. Omitting BOTH is still a usage refusal (exit 2), in
+    # `main`, where the message can name both flags; argparse's own
+    # "the following arguments are required" could only ever name one.
     p.add_argument(
         "--update",
-        required=True,
         help="file holding the proposed sections (## headings). A DELTA when the "
         "doc exists — omit a section and it is left alone. The WHOLE doc when it "
         "does not: with no base the file becomes the doc verbatim, front matter "
-        "included, so its line 1 is the doc's line 1.",
+        "included, so its line 1 is the doc's line 1. Required unless "
+        f"{PRUNE_FLAG} is given.",
+    )
+    p.add_argument(
+        PRUNE_FLAG,
+        metavar="FILE",
+        help="rule (q): a file naming, VERBATIM, every line to REMOVE from the "
+        "doc's append-only sections (open investigations / findings / gotchas) — "
+        "one per line, blanks ignored. Those sections append by design and had no "
+        "exit rule, so the only writer could not shrink them. A prune is NEVER a "
+        "side effect of an update: without this flag nothing is ever removed. "
+        f"Requires {PRUNE_COUNT_FLAG}. Each named line must match EXACTLY ONE "
+        "line in the document — zero or several is a refusal (exit 15), as is a "
+        "line carrying a field other tooling parses, a section heading, a "
+        "partially-named block, a fence delimiter, or a line in a REPLACE "
+        "section. Combines with --update: the prune is applied to the MERGE, so "
+        "one run can add findings and shrink the document.",
+    )
+    p.add_argument(
+        PRUNE_COUNT_FLAG,
+        metavar="N",
+        type=int,
+        help=f"how many lines {PRUNE_FLAG} names. REQUIRED with it, and checked "
+        "against the file BEFORE anything is matched: a count that disagrees is a "
+        "refusal, not a best-effort removal of whatever was found. This is the "
+        "'assert the population before acting on it' half — a prune file that "
+        "lost a line to a bad heredoc removes something you did not name.",
     )
     p.add_argument(
         "--advanced",
@@ -5227,6 +6030,40 @@ def main(argv: list[str] | None = None) -> int:
     # so it fires identically in a repo where the rule could never fire, and
     # refused with EXIT_USAGE rather than EXIT_SIZE_RATCHET: this is a complaint
     # about an ARGUMENT, not a verdict about a document.
+    # ---- rule (q)'s argument shape, refused BEFORE anything is read ---------
+    # 🔴 EXIT_USAGE, NEVER EXIT_PRUNE_REFUSED, for the reason the size-ratchet
+    # block below states about its own empty reason: 15 is the RULE's verdict
+    # about a document's content, and returning it from argument validation
+    # would tell a caller their prune named the wrong lines when the truth is
+    # that a flag was missing. Same argument, three arms.
+    if args.update is None and args.prune is None:
+        print(
+            f"nothing to do: pass --update (sections to merge), {PRUNE_FLAG} "
+            f"(lines to remove), or both.\n"
+            f"  A run that neither adds nor removes anything is not a handoff "
+            f"update — there is no diff for the two-run shape to put in the "
+            f"transcript.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if (args.prune is None) != (args.prune_count is None):
+        print(
+            f"{PRUNE_FLAG} and {PRUNE_COUNT_FLAG} go together: the count is what "
+            f"turns a prune from a best-effort removal into an assertion about "
+            f"what is being removed.\n"
+            f"  Pass both — `{PRUNE_FLAG} <file> {PRUNE_COUNT_FLAG} "
+            f"<lines in that file>` — or neither.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if args.prune_count is not None and args.prune_count < 1:
+        print(
+            f"{PRUNE_COUNT_FLAG} must be at least 1; got {args.prune_count}.\n"
+            f"  Naming zero lines is not a prune. If you meant to remove "
+            f"nothing, drop {PRUNE_FLAG} entirely.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     if args.size_ratchet_override is not None and not args.size_ratchet_override.strip():
         print(
             f"{SIZE_RATCHET_FLAG} was given an EMPTY reason "
@@ -5368,11 +6205,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_NO_ADVANCE
 
-    try:
-        update_text = Path(args.update).read_text(encoding="utf-8")
-    except OSError as exc:
-        print(f"cannot read --update: {exc}", file=sys.stderr)
-        return EXIT_FAIL
+    # 🔴 `""` FOR A PURE PRUNE, and every rule below is already correct on it
+    # rather than being made correct by a branch: `merge_report(base, "")`
+    # reproduces the base (no update section, so rule (c) touches nothing),
+    # `ranked_items("")` and `elimination_bullets("")` are empty so rules (j)/(k)
+    # are not asked a question about sections that do not exist, and
+    # `buckets_line(())` already has the words for "this update touched no
+    # section". A prune-only run therefore travels the ordinary path.
+    if args.update is None:
+        update_text = ""
+    else:
+        try:
+            update_text = Path(args.update).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"cannot read --update: {exc}", file=sys.stderr)
+            return EXIT_FAIL
+    prune_text = ""
+    if args.prune is not None:
+        try:
+            prune_text = Path(args.prune).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"cannot read {PRUNE_FLAG}: {exc}", file=sys.stderr)
+            return EXIT_FAIL
 
     # ---- rule (l): every NEW investigation block declares its date ----------
     # 🔴 FIRST, and against the UPDATE. First because every rule below reads
@@ -5417,6 +6271,33 @@ def main(argv: list[str] | None = None) -> int:
         # an empty report is the honest answer, not a missing one.
         report = MergeReport(update_text.rstrip("\n") + "\n", (), ())
     merged_text = report.text
+
+    # ---- rule (q): remove the lines the caller NAMED ------------------------
+    # 🔴 HERE, AND THE POSITION IS THE WHOLE SAFETY ARGUMENT. It is applied to
+    # the MERGE and BEFORE every rule that reads the text, so:
+    #   * rule (p) is SATISFIED by a prune rather than bypassed by one — it reads
+    #     these bytes, so a prune+update that still grows an over-ceiling doc is
+    #     still refused, and one that shrinks it clears honestly;
+    #   * rule (m) reads the PRUNED text, so a prune that somehow removed the
+    #     closing condition would be caught a second time, by the rule that
+    #     exists for it, rather than only by the guard inside `prune_plan`;
+    #   * the leak scan reads the file that is written, which is this text;
+    #   * `no-change` below is measured against what will actually land;
+    #   * the DIFF shows the removals as `-` lines, so the proposal run puts them
+    #     in the transcript — the two-run shape covers a prune with no new code.
+    #
+    # 🔴 AND RULE (n) DELIBERATELY DOES NOT SEE IT. That rule counts ranked items
+    # in `base_text`, which is never rewritten here; a prune cannot lower the
+    # floor it ratchets against. `## Next steps` is a REPLACE heading, which
+    # `prune_plan` refuses outright — belt and braces on the same property.
+    pruned_note = ""
+    if args.prune is not None:
+        plan = prune_plan(merged_text, prune_text, args.prune_count)
+        if plan.problems:
+            print(prune_refusal_report(plan, relpath), file=sys.stderr)
+            return EXIT_PRUNE_REFUSED
+        merged_text = plan.text
+        pruned_note = prune_note(plan)
 
     if _canon(merged_text) == _canon(base_text):
         print(
@@ -5691,6 +6572,14 @@ def main(argv: list[str] | None = None) -> int:
     # breath that a refusal on them was cleared by hand.
     if ratchet_override:
         print(ratchet_override)
+    # Rule (q)'s disclosure, immediately ABOVE rule (f)'s and for the same
+    # reason: both classify what the diff DELETES. They are adjacent rather than
+    # merged because the claims differ — this one lists removals the author NAMED,
+    # rule (f)'s names ones a REPLACE would drop unnoticed — and only the second
+    # is the "you may not have meant this" warning. Printed after the refusals
+    # so a run that refuses never claims to have pruned a document it never wrote.
+    if pruned_note:
+        print(pruned_note)
     warning = dropped_durable_report(report.dropped)
     if warning:
         print(warning)

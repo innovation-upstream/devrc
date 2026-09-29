@@ -30,59 +30,53 @@ findings-keyed stop rule does not terminate in the guard-hardening regime.
   condition, not as rounds of this one. Anything else outstanding is a NEW arc.
 
 ## State now
-- 🔴 **THE #1712 LADDER IS CLOSED AND MERGED. Round 24's delta re-audit over
-  `da65bf2b..a002c6e0` is DONE — no 🔴, no 🟡, all five claims verified against the tree.**
-  `#1712` → **`8512eede`**. The auditor reproduced the central premise independently rather
-  than accepting the commit message: at `da65bf2b` the harness's own Q8 mutation left the
-  module `163 passed` — SURVIVED, zero killers — and at `a002c6e0` it dies at
-  `test_audit_dispatch.py:7942` with **that guard's own error**, killer set exactly one.
-- 🔴 **IT STOPPED ON THE ATTRIBUTION GATE, NOT ON "no findings" — and that distinction is
-  the whole point of the gate.** Verified first-hand, rc 0 and non-empty on each range:
-  round 21's fix touched `scripts/audit-dispatch.py` (+116/−34) and `SKILL.md` (+30/−17);
-  **round 22 (`ad62d7e0`) and round 23 (`a002c6e0`) each changed ZERO payload lines**
-  (`scripts/tests/**` only, revert test applied — reverting both leaves
-  `render_prose_determination` byte-identical). Two consecutive zero-payload rounds ⇒ the
-  ladder had left the PR. Round 24's own payload count is **0**. All three of its findings
-  are `scaffolding`, so they were **filed, not fixed** — they are in `## Defects (batched)`.
-- **Also merged and shipped:** `#1717` → `6b060f9e` (the handoff update that had been sitting
-  unmerged while `main` carried a doc that had never heard of `#1691` or `#1712`);
-  `#1719` → **`2f24bac3`** (`MIN_TESTS` 147 → 155 + the structural pin that ends the class).
-  `#1701` **CLOSED** as superseded — by measurement, not age: 18 commits behind, and its doc
-  was 196,480 B against `main`'s 196,482, a net **−2 B**, so its stated purpose was entirely
-  consumed by its own delta.
-- ✅ **SHIPPED AND VERIFIED AT THE CONSUMER, both hosts.** `ship.sh` converged workbench +
-  laptop to `2f24bac3`, each `✅ VERIFIED … + switched`, 0 dangling / 0 stale artifacts, and
-  cross-host agreement reported on ONE sha. `claude/skills/audit-pr/SKILL.md` changed, so a
-  switch was genuinely required: `readlink -f` resolves it to a `/nix/store` copy, and the
-  deployed file's md5 is **`719698918a61da469829db86cd635f57` on BOTH hosts**, identical to
-  `origin/main`. ⚠ The laptop's LAN was unreachable and the **nebula fallback fired** —
-  which independently re-confirms rank 3's closure for a third time.
-- ✅ **`main` is GREEN at `2f24bac3`** — this REPLACES the previous `State now`'s ⚠ that it
-  carried an inherited red on `test_runtime_shebangs.py`. Measured after every merge: all
-  four `tekton/devrc-main-*` checks `success`, including the new **`gotests`** leg.
-- 🔴 **`#1712` HAD NEVER CARRIED A SINGLE `audit-claims` BLOCK — 23 rounds, zero.**
-  `audit-dispatch.py` read **0 comments** and REFUSED round 24 outright. A round-23 block was
-  reconstructed from what `ad62d7e0` and `a002c6e0` state they fixed and posted before the
-  brief would assemble. **Had nobody noticed, the next round would have run as a blind FULL
-  audit and read as covered.**
-- ⚠ **One unattributed CI red survives and is NOT resolved** — see the investigation below.
-  It did not reproduce on a second sample; `#1719` merged on that basis.
-- ⚠ **No `clawgate-task:`** — `resolve` exits **5**, 0 tasks. An unknown session id also
-  answers 200 with an empty array, so this cannot distinguish "touched no task" from "wrong
-  id". **Not a clean bill of health**, and no field was written.
-- 🔴 **THE ARC'S CLOSING CONDITION IS STILL UNMET, AND ONLY THE OPERATOR CAN MEET IT.** The
-  rule keyed on an OBSERVABLE is **shipped and live** (`#1691` → `b9a53101`; `#1712`
-  hardened its guards). Nothing in this doc records the operator's verdict. The evidence is
-  assembled and sitting in front of that line; `/resume` will keep reporting **NOT
-  ADDRESSED** until it is answered in writing here.
+- Branch / PR: `main` at `99523164`, clean. Both hosts converged and verified (`ship.sh` rc 0).
+- **The attribution gate is BUILT, SHIPPED and MEASURED.** Five PRs, each driven by an external
+  measurement of real ladders rather than by auditing its own output:
+  `#1765` `bf44bf35` the gate (exit 5 on two consecutive `payload=0` rounds) ·
+  `#1768` `ac73fbaf` split exit 4 (input refusal) from exit 5 (the gate's verdict) ·
+  `#1856` `78bf8ea7` the payload unit is **executable/non-comment lines**, not raw payload-file lines ·
+  `#1859` `ae118671` UNEARNED LEDGER reporting (`audited=X..X` spans zero commits) ·
+  `#1909` `99523164` an `audited=` endpoint the gate cannot resolve was disarming it in silence.
+- **What the gate achieves, measured at 9.55 d:** adoption 138/139 blocks carry `payload=`
+  (0/400 pre-cutoff — the field did not exist, so that is a natural control) · **0 of 99 ladders
+  continued past two consecutive `payload=0`** · **0 false positives** across 6 stops, checked by
+  revert test against the actual patches · **0 operational `--override-attribution-gate` uses in
+  1,228 invocations** (all 3 uses are synthetic self-tests in the build session).
+- 🔴 **`#1856` is the PR that produced the first real catches, and it was the one I deprioritised.**
+  Comment-inside-code pathology: **3 uncaught ladders in the 4.95 d before it, 0 in the 4.60 d
+  after**, at matched corpus volume. Three in-the-wild firings structurally impossible under the
+  original gate — `devrc#1857` (stated 6, 8 · measured 0, 0), `civitai-app-starters#478`
+  (26, 16 · 0, 0), `civitai/talos-infra#1623` (116, 108 · 0, 0).
+- 🔴 **LADDER DEPTH DID NOT MOVE, and that is SETTLED, not pending.** Pre-registered symmetric
+  9.55 d frames: PRE n=98 mean 3.786 · POST n=103 mean 3.835 · **diff +0.049, p=0.876, 95% CI
+  [−0.57, +0.67]** — the CI **excludes** the pre-registered +0.85. Every secondary, every stratum,
+  every robustness cut and an independent PR-record instrument agree (|Δ| < 0.3). **Do not
+  re-measure depth**: PRE is pinned at n=98 by the symmetric design, so the MDE floor as
+  n_post → ∞ is **0.623 rounds**; waiting to 2026-10-07 buys 0.13 rounds for 9 days.
+- Deploy/verify status: **deployed AND verified at the consumer**, not merely rolled out. Live on
+  the deployed copy: `cli#727` r2 → **rc 4** (41-char endpoint, does not speak the gate's verdict) ·
+  `app-starters#474` r5 → **rc 5** (gate still fires) · `devrc#1889` r4 → **rc 0 and silent**
+  (positive control proved the grep can match).
 
 ### Carried forward through this `State now` replace — read before replacing it again
 - 🔴 **ROUND 0 IS NOT ON TRIAL. Do not re-run the trial or re-derive the pair**; the record is
   in `claude/skills/audit-pr/SKILL.md`. Keep reporting `ran: R · changed the outcome: C`.
-  **This session's pair: `ran: 1 · changed the outcome: 1`** — round 0 on `#1719` is what
-  found the structural pin, and the PR grew because of it.
+  **This session's pair: `ran: 0 · changed the outcome: 0`** — no `/audit-pr` round 0 was
+  dispatched on any of the five PRs; every one was verified by measurement instead, and the
+  subagents offered round 0 rather than running it. Record the zero; it is not a gap.
+- 🔴 **THE ARC'S ORIGINAL CLOSING CONDITION IS `judgement` AND ONLY THE OPERATOR CAN MEET IT** —
+  see `## Goal`. The enforcement built here is the *proposal* that condition asks the operator to
+  read; shipping it does not close the arc, and no later ask extends it.
+- ⚠ **No `clawgate-task:` field, deliberately.** `clawgate_handoff.sh resolve` exits **5** (0
+  tasks). An unknown session id also answers 200 with an EMPTY ARRAY, so a zero cannot
+  distinguish "touched no task" from "wrong id" — this is NOT a clean bill of health, and no
+  task was created to fill the blank.
 - 🔴 **`#1532`/`#1533`/`#1543` were MERGED WITHOUT CI at the operator's instruction**
   (2026-09-11), so ranked item 7's post-merge evidence is the only evidence they work.
+  ⚠ **Same shape recurred 2026-09-18:** `#1765` and `#1768` were merged through PENDING checks
+  at the operator's explicit "skip ci" — the evidence for those two is the mutation battery,
+  the merged-tree run and the live exercise, never a green tier.
 - ✅ **`#1431` stays RETIRED** (issue CLOSED; dismissal `issues/1431#issuecomment-5644071037`,
   `ZacxDev`, 2026-09-12). Do not re-open it from older text.
 - ✅ **`#1287`** (`feat/workhost`) is **CLOSED** with the operator's comparison on it — carried
@@ -148,6 +142,8 @@ its sha; full text is in git history: `git log -p -- claudedocs/handoff-audit-pr
 11. **The vetr DMARC monitor is laptop-only and rebuild-fragile.** Found by round-0 trial 5, re-verified independently: `nix/home.nix`'s `dmarc-watch` block makes the UNIT declarative while `ExecStart` points at `${workspace}/scratch/vetr/scripts/dmarc-alert.py` and a `~/.config/vetr/cloudflare-dns.env` credential that **nothing manages**. That path exists on the laptop (timer live) and **not on the workbench**, where the service is emitted as a store symlink and the timer is gated off. Either give the vetr scripts a managed home or state in the block's comment that this monitor is laptop-local. Also fix that comment's claim that a hand `systemctl --user start` "still works" — on the workbench it is `203/EXEC` plus a `notify-failure@` toast. 🔴 **Belongs to `claudedocs/handoff-dmarc-enforcement-and-spoofing.md`, not this ladder** — move it there rather than working it here. forcing: regression — a spoofing monitor with a verified true positive that will silently not exist on a rebuilt host
 13. **Decide the `Gotchas` recurrence convention — MEASURED at 183 bullets / ~101 KB inside a 164 KB doc, with five redundant families.** Found by round 0 on `#1581`. The doc's established convention is a NEW full bullet per recurrence — `git grep -n 'TRAP AGAIN'` finds three separate bullets on the piped-`$?` trap alone — so each recurrence is monotonic growth with nothing to stop it. Measured families on `main`: `MUTATION DID NOT APPLY` ×3, timestamped-reading ×6, spelled/walkable guard ×2, `xargs -0 command grep` ×1, piped `$?` ×3. 🔴 **Two things deliberately NOT proposed:** ⚠ **the "no byte ceiling" half is now FALSE and is retracted** — this doc HAS one (`scripts/tests/test_handoff_doc_size.py`, which caps every `claudedocs/**/handoff-*.md` and is why the last two updates had to evict), so that argument is available after all and the item is cheaper than it reads; and **no new detector** — `scripts/lib/handoff_doc.py:179` refuses the class in terms, and no named instrument takes a `claudedocs/` doc (`/prune-skill` is `SKILL.md`, `/prune-memory` is `MEMORY.md`, `/prune-index` is the cairn store). **Closing condition:** the operator reads the five-family table and records, per family, "collapse to one bullet" or "the convention stands" — in this doc, in writing. forcing: none
 14. 🔶 **STILL OPEN. THE MEASUREMENT ANSWERS 30 OF 49 RULES (was 17). `#1610` MERGED (`e01c7dad`, shipped + consumer-validated both hosts); the dating fix is `fix/sweep-origin-dating`, UNMERGED.** 🔴 **THE REMAINING 19 ARE A DIFFERENT DEFECT AND RE-DATING WILL NOT TOUCH THEM** — their `apply` patterns match ordinary English, so they match before their section existed: `guard-lost-its-reason` (`has none`) **232** pre-origin hits, `clean-round-ends-ladder` (`clean round`) **106**, then a tail at 13 and below. Tightening a pattern is not re-dating a rule. **That is the next step, and it is pattern work.** ✅ **What the dating fix bought:** `FIRED 14 → 27 · withheld 32 → 19 · UNFIRED 3`, 13 recovered, **0 regressed**. 🔴 **BOTH SINGLE-BOUND DATERS WERE MEASURED WRONG, IN OPPOSITE DIRECTIONS — do not re-derive either.** `git log -S` on a rule's CURRENT wording dates the REWORD (44 of 49 origins landed in 2026-08/09); dating at the SECTION HEADING recovered 13 and sent **two the other way** (`dispatch-blind` 0 → 437, `nine-axes` 0 → 29) because **headings get reworded too**. So origin is an **INTERVAL** and in-between matches are `ambig` — unattributable — rather than resolved by fiat. 🔴 **A TRUNCATED HISTORY SCAN DOES NOT LOOK TRUNCATED:** the first build read **1 of 23** versions because `git log --follow --reverse` silently returns ONE commit (`--follow` 23 · `--follow --reverse` 1 · `--reverse` 19). It called the rest UNDATED — indistinguishable from a working dater with gaps, caught only because one rule went BACKWARDS from datable to UNDATED. `scan_reaches_current()` now REFUSES; ⚠ its limit is asserted, not implied. ✅ **`base-is-current-tip` — 370 injected loads, ZERO applications.** ⚠ Not a deletion case alone; silence can mean nobody violated it. ⚠ **Three surviving caveats:** `fired` counts APPLICATIONS not catches; the `AMBIGUOUS` verdict is test-pinned but has NEVER fired on the real corpus; and neither bound is the rule's cited origin INCIDENT. ⚠ **The DECISION RULE round 0 flagged is still undefined.** forcing: none
+
+15. **`civitai/gpu-fleet-infra#332` is running the #331 prose pathology RIGHT NOW, in the same repo, and the gate cannot see it.** Rounds 1–4 changed 175/150/22/19 prose lines and **0 executable lines each**, declared `payload=214/151/148/132`, ran on to round 6. Still OPEN. 🔴 **DO NOT "fix" this by making `.md` count as non-payload** — that was measured and refused: a corpus study over **241 ladders / 25 repos** scored the obvious signal ("non-prose files frozen for N rounds") at **17 false positives / 2 true positives, precision 11%, 39 audit rounds destroyed across 15 ladders**, three of them containing a 🔴, and one (`talos-infra#1445`) firing *before the PR's deliverable was written*. Every zero-FP variant fires on exactly one ladder in 241 — the one it was derived from. The only untested angle is an **operator-declared "the deliverable is complete; remaining rounds are documentation"** field, because the fact that separates #332 from a legitimate docs ladder exists in the operator's head and in **no diff**. Measure that before building it. forcing: regression — a named pathology recurring in a live open PR, in the same repo as the case that motivated the whole arc
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **The ladder never returned a clean round in twelve.** The stop rule assumes
@@ -1259,32 +1255,64 @@ its sha; full text is in git history: `git log -p -- claudedocs/handoff-audit-pr
   the file has backticks (`` `#1712` IS OPEN AT ``). The byte count disagreed, which is what
   caught it. **Pair every content check with a control you know the answer to.**
 
+- 🔴 **The gate's range measurement needs the commits in a LOCAL checkout, and failing that it
+  FAILS OPEN — so rc 0 from the wrong directory is not evidence the gate does not fire.** MEASURED
+  2026-09-28: `audit-dispatch.py --repo civitai/talos-infra 1623 --round 4` from
+  `~/workspace/devrc` → **rc 0**; the identical command from
+  `/home/zach/workspace/civit/datapacket-talos` → **rc 5, `both MEASURED`**. I nearly reported a
+  blind catch as unreproducible on the strength of the first reading. An empty/benign result
+  cannot distinguish "the gate did not fire" from "the range was unmeasurable here".
+- 🔴 **An `audited=` endpoint that names no object disarms the unit fix SILENTLY** — 30 of 564
+  endpoints (5.3%) across 11 ladders. Two shapes, both mechanical: a short sha with one corrupted
+  character (`app-starters#474` r3 `to=6e4441c1`; the real commit is `6e4441c5f296e6…`, and
+  `6e4441c1` returns **422**), and a fabricated 40-char expansion of a real short sha
+  (`cli#727` carries a **41-character** zero-padded endpoint). Closed by `#1909`: malformed ⇒
+  exit 4, unresolvable ⇒ fail open **loudly** on all three surfaces.
+- 🔴 **Keying a "could not measure" report on UNMEASURED would have been wrong** — an empty diff
+  over a perfectly **resolvable** range is also UNMEASURED, and it is the default in the existing
+  test harness. `#1909` keys on `ExecChurn.command_failed` instead. The distinction is the
+  difference between a signal and noise on every healthy ladder.
+- ⚠ **`ladder-stop-rationale.py`'s `attribution-gate` class is NOT the mechanical gate's
+  fingerprint** — re-confirmed under a **pinned** population: 11.5% → 14.4%, z=0.642, p=0.52. The
+  earlier +8.1 pp was a sliding-`--limit` artifact and does **not** reproduce. Cross-tab: of 10
+  mechanical firings, **4 are not classified `attribution-gate`** (including a blind catch), and
+  **12 of 18** PRs carrying the class had no firing at all.
+- ⚠ **Unearned-ledger rate is RISING — 1.6% → 4.1% → 5.0% — and that is benign.** All 5
+  post-`#1859` cases are the *terminal* round only, carrying `payload=0`, and at least one declares
+  itself: `cairn#107@4` reads *"No fixes were made this round, so `<from>` and `<to>` are the same
+  commit BY CONSTRUCTION and this block is a record, not evidence of a fix."* None is the
+  `homelab-infra#687` whole-ledger shape. Consequence worth knowing: for those 5, a round N+1
+  exits **4**, not 5.
+
 ## How to verify
 ```bash
-# 1. The three merges landed, BY CONTENT (ancestry is meaningless after a squash)
-git -C ~/workspace/devrc show origin/main:scripts/tests/mutants-audit-dispatch.py | grep -m1 '^MIN_TESTS'   # MIN_TESTS = 155
-git -C ~/workspace/devrc show origin/main:scripts/tests/mutants-audit-dispatch.py | grep -c '_DET_REFLOW_U0' # 0 — the old name is gone
-git -C ~/workspace/devrc show origin/main:scripts/tests/test_mutation_battery_anchors.py \
-  | grep -c 'def test_the_dispatch_batterys_floor_is_re_derived_from_its_target_module'                      # 1
+# 1. The five merges landed BY CONTENT (ancestry is meaningless after a squash)
+git -C $DEVRC fetch -q origin
+for s in "return ATTRIBUTION_STOP_RC" "command_failed" "self_range" "UNEARNED"; do
+  printf '%s -> ' "$s"; git -C $DEVRC show origin/main:scripts/audit-dispatch.py | grep -c "$s"
+done   # expect 1 / 11 / non-zero / non-zero
 
-# 2. The new floor pin is REACHABLE and goes red at the value it replaced.
-#    Mutate a `cp -a` copy with its `.git` FILE removed first.
-C=$(mktemp -d)/t; cp -a ~/workspace/devrc "$C"; rm -f "$C/.git"
-sed -i 's/^MIN_TESTS = 155$/MIN_TESTS = 147/' "$C/scripts/tests/mutants-audit-dispatch.py"
-nix develop ~/workspace/devrc -c python3 -m pytest \
-  "$C/scripts/tests/test_mutation_battery_anchors.py::test_the_dispatch_batterys_floor_is_re_derived_from_its_target_module" \
-  -q --tb=line -p no:cacheprovider     # MUST fail with "Set MIN_TESTS = 155"; passes at 155
+# 2. The gate's THREE exit codes, live on the deployed copy. Run each and read the rc.
+D=$DEVRC/scripts/audit-dispatch.py
+$D --repo civitai/cli 727 --round 2                     # expect 4  (malformed endpoint)
+$D --repo civitai/civitai-app-starters 474 --round 5    # expect 5  (gate fires)
+$D 1889 --round 4                                       # expect 0  AND silent
+# 🔴 Run #2 from a checkout that HOLDS the commits, or the range is unmeasurable and it
+#    fails open at rc 0 — see the first Gotcha. That is correct behaviour, not a failure.
 
-# 3. The battery's own positive control still reports the number the floor is derived from
-nix develop ~/workspace/devrc -c python3 -u ~/workspace/devrc/scripts/tests/mutants-audit-dispatch.py \
-  2>&1 | grep -m1 'POS '                # POS  unmutated copy ... 163 passed
+# 3. The mutation battery is GRADING again (it was refusing every row 09-27..09-28)
+nix develop $DEVRC -c python3 $DEVRC/scripts/tests/mutants-audit-dispatch.py | tail -3
+#    expect "all as expected" AND an unmutated baseline line above the floor.
 
-# 4. Both hosts carry the shipped skill AT THE CONSUMER (a switch, not a pull, is what moves it)
-md5sum < ~/.claude/skills/audit-pr/SKILL.md
-git -C ~/workspace/devrc show origin/main:claude/skills/audit-pr/SKILL.md | md5sum
-ssh zach@10.42.0.100 'md5sum < ~/.claude/skills/audit-pr/SKILL.md'   # all three identical
+# 4. NEXT SCHEDULED READ — 2026-10-12, firing classification, NOT depth.
+#    Blind catches accrue at ~0.43/day post-#1856 (2 in 4.60 d), so n ≈ 8 by then.
+#    Classify every exit-5 firing DEMONSTRATION vs BLIND CATCH, and report whether an
+#    operational --override-attribution-gate has EVER appeared (0 of 1,228 so far).
+#    🔴 Do NOT re-run the depth comparison; its MDE floor is 0.623 rounds forever.
 ```
 ## Open investigations — live diagnosis state
+
+🔴 **9 RESOLVED/CLOSED investigations were EVICTED 2026-09-28 to `claudedocs/refs/audit-pr-ladder-closed-investigations.md`** (ceiling breach, playbook step 2). They are MOVED, not deleted — read them there before re-deriving anything.
 
 ### 🔴 A stale claim I introduced in `#1023`, still on `main` — fix open as `#1035`
 - **Symptom + exact repro:**
@@ -1358,85 +1386,6 @@ ssh zach@10.42.0.100 'md5sum < ~/.claude/skills/audit-pr/SKILL.md'   # all three
 - **Next probe / fix:** sequence it — wait for the first row, then issue the second, which is
   `_wait_events`' own sanctioned "order pinned structurally" form.
 
-### RESOLVED — the sibling ordering race, and `where=` was never going to close it
-- **Was:** `test_an_absent_origin_header_is_not_the_same_as_an_empty_one` issued both `tabs`
-  commands, then waited for two rows and unpacked them positionally, while its own docstring
-  says order between them is the signal. `emit_cmd_event` runs off the critical path, after the
-  HTTP response, so file order was the scheduler's.
-- 🔴 **The reason it survived an order-safety pass: `_wait_ops`' docstring said the site's
-  `where=_routed_to(inst)` "keeps the order". IT DOES NOT.** A per-row predicate cannot order two
-  rows that satisfy it EQUALLY, and this test's two do — same op, same routing key. `where=`
-  separates your rows from a NEIGHBOUR's; that is a different hazard with a different remedy.
-  Both hazards are now named separately in the test's docstring and in `_wait_ops`'.
-- **Fix (`#1109`):** wait for row one, then issue command two — `_wait_events`' own sanctioned
-  "order pinned structurally" form. The single routed row returned before the second command
-  EXISTS is the first command's, by observation rather than by argument. `pair[0] == absent`
-  then asserts the append-only order still holds, so a future regression says so rather than
-  surfacing as a bogus attribution failure.
-- **CONTROL, run, because a passing test proves nothing about why it passes:** swapping the two
-  commands (keeping the sequencing) turns it RED at `absent["session"]` with
-  `KeyError: 'session'` — **while `pair[0] == absent` still PASSES**. So the red is the
-  assertions being genuinely order-dependent, not the new guard firing: the mutation died for
-  the right reason. File restored afterwards, and the checkable form of that claim is: the
-  worktree file, the commit, and the built store source are byte-identical.
-  ⚠ **This line used to cite `sha256 1b42b227…` as the proof.** That digest names an
-  intermediate working-tree state reaching no commit, so no reader can reproduce it. A later
-  audit found the retraction had been ADDED under Gotchas while this line still MADE the claim —
-  the doc retracting something it also still asserted, ~140 lines apart. **An append-only
-  section cannot be corrected by appending a correction to a different section.**
-- **Ruled out:** routing as the fix (closes the foreign-row half only — measured on `#1074`);
-  and a tighter deadline as a concern — the change **doubles** the budget, one 10 s wait becoming
-  two, worst case 10 s → 20 s.
-- **Still open:** the verdict of the sandbox tier. See "State now".
-
-### RESOLVED — round 1 of the blind audit found three defects, all in prose I wrote
-- **Method note that earned its keep:** the auditor was dispatched BLIND — the diff and the
-  checklist, not my conclusions. All three findings are the failure mode the PR exists to close.
-- 🔴 **(1) A FALSE HISTORICAL CITATION, introduced by the fix itself.** I wrote that `#1074`'s
-  pair reversed "with `where=` already in place". `git show e9f8ce14` refutes it: the flaking
-  site was a bare positional `_wait_events(spool_dir, len(ORIGIN_TOKENS))` and `#1074` **added**
-  the `where=`. And `where=` did not fix its order either — that site also became
-  `sorted(...) == sorted(ORIGIN_TOKENS)`. **The true version is stronger:** two halves, two
-  remedies, and a site whose order IS the signal cannot take the sorting one.
-- 🔴 **(2) THE GUARD CARRIED THE IDENTICAL RACE.** `test_a_neighbours_row_of_the_same_op_is_not_
-  selected_as_one_of_ours` — the test whose whole job is to protect the site I fixed — issued both
-  commands before waiting, unpacked `first, second` positionally, and still carried the comment
-  `# THE FIX: where= keeps the pair THIS test caused, in order`, the exact sentence the PR
-  retracts twice elsewhere. **The retraction had been applied everywhere except the one place
-  that most needed it.** Also: my sentence "THE ONE SITE IN THIS FILE THAT UNPACKS A PAIR" was
-  wrong on both halves — after my own change the test I named no longer unpacks a pair, and an
-  AST walk finds exactly one tuple-unpack site, which is this one. Now sequenced; control re-run
-  on it specifically (RED at `first["session"]`, `pair[0] == first` passing).
-- 🔴 **(3) THE NEW GUARD'S COMMENT OVER-CLAIMED — in the PR about over-claiming comments.** It
-  said `pair[0] == absent` would report a lost sequencing. It cannot: re-fold the commands and
-  `absent` becomes whatever landed first, which IS `pair[0]` by construction, so it stays green.
-  Narrowed to the append-only-order invariant it really pins, and it now says outright that
-  nothing there can detect the sequencing's removal.
-- **Independently re-derived before fixing** — the `git show`, the AST walk, and the mutation
-  were all re-run here rather than accepted from the agent.
-
-### CLOSED, and the recommendation went stale mid-investigation — the memory-detail WIP
-- **What it was:** `ship.sh` was authorised against a workbench tree holding another session's
-  uncommitted `nix/graphical.nix`, `nix/pkgs/default.nix`, staged `scripts/memory-detail` and two
-  untracked test files, deploying them to the workbench only.
-- 🔴 **OWNER FOUND ONLY BY SEARCHING BOTH RUNTIMES** — opencode session
-  `ses_fab8bd9e7ffe6En2UiziYXH9Md`, `run=d6cc95d5`, `directory=/home/zach/workspace/devrc` (the
-  base clone, **no worktree**). **No Claude Code transcript contains an `Edit`/`Write` to those
-  paths** — only mentions. Searching one runtime would have concluded nobody owned it, which is
-  the identical finding this doc already recorded for `discord-embed-ext`.
-- **Its agent-ledger record carries `pane_id: None`, `window_id: None`, `tmux_pid: None`** — a
-  headless dispatch, never attached to a tmux pane, so `session-manager` could not find a window
-  and there was no human to notify. The three live opencode windows all carry different session
-  ids.
-- 🔴 **RECOMMENDATION RETRACTED BEFORE IT WAS ACTED ON.** I recommended opening a PR for their
-  work. Between recommending and re-checking, **the owner landed it themselves** —
-  `0c0b8794 feat(bar): memory block left-click opens top RAM consumers view` on
-  `feat/memory-detail-click`, pushed. Acting on the recommendation would have DUPLICATED their
-  work, which is the shared-queue hazard `claim-work` exists for. The state moved under a
-  recommendation that was correct when made.
-- **Residue:** `nix/pkgs/default.nix` (`inxi`/`cpu-x`) is still uncommitted, so the workbench has
-  two packages the laptop lacks.
-
 ### #1185 F2: the remediation prescribes an action that does not solve the problem it names
 - **Symptom + exact repro:** `scripts/audit-dispatch.py:2959-2966` emits, into EVERY brief the
   tool produces, "⚠ … a bare `exit 1` pasted into an INTERACTIVE shell closes it. 🔴 **Wrap the
@@ -1494,75 +1443,6 @@ ssh zach@10.42.0.100 'md5sum < ~/.claude/skills/audit-pr/SKILL.md'   # all three
   moves `grep -c` back to the end and reinstates F4's inversion verbatim. via: assumed
 - **Next probe:** none — fix the comment and widen the assertion to require the verdict grep last.
 
-### RESOLVED — #1342's controls are reachable, and there are EIGHT of them, not six
-🔴 **This block was EDITED IN PLACE, not appended to.** `Open investigations` is an append-only
-section under `handoff_doc.py`, and this doc already records that a correction appended to a
-different section leaves the original still making its claim ~140 lines above. The heading and
-the count below are corrections to text that was wrong; the original wording is quoted where it
-is load-bearing rather than left standing as a live claim.
-
-- **The count in the original entry was WRONG, and it is the shape this thread keeps finding.**
-  It read "six control assertions … plus the four separators", which reconciles with nothing:
-  the block is **5 `assert` statements** carrying **8 distinct control claims** (2 `shell_code`
-  overshoot directions + 2 `last_command` overshoot directions + a 4-iteration loop over the
-  separators `;`, `||`, `|`, `&&`). Re-derived by reading the block, not by re-quoting the
-  handoff — the same rule this doc already carries three times over.
-- **REACHABILITY, measured first, because it was the live risk.** The controls sit after an
-  early `return` in `test_the_cached_build_fallback_is_emitted_with_its_guards` (line ~3085:
-  the test bails when the brief fences no sandbox tier) **and** after a `len(blocks) == 1`
-  assert. Either would have made all eight vacuous while the suite stayed green. Measured at
-  `39c31521`: `run_main(["900"])` → rc 0, the precondition string IS present, and exactly
-  **one** `nix log` fenced block is emitted. So the block executes.
-- **OWN-REASON, measured per control.** Each of the eight was isolated by mutating the PARSER —
-  never the assertion, which would only prove the assertion exists — so that exactly one
-  control's claim breaks and it is the FIRST to fail. All eight: **KILLED, carrying their own
-  message.** The four separator iterations are discriminated by the sep token their message
-  names (`';'` / `'||'` / `'|'` / `'&&'`); `"reached by '|'"` is not a substring of
-  `"reached by '||'"`, checked, which is what makes those two rows different measurements.
-- 🔴 **BOTH HARNESS CONTROLS RUN, and the second is the one that makes the first readable.**
-  Positive: `shell_code` stubbed to `return ""` is KILLED (the batch's known-caught mutant, so
-  a stale `.pyc` scoring SURVIVED would show). Negative: mutating `shell_code`'s
-  backslash-inside-double-quotes branch — which no fixture and no line of the emitted block
-  reaches — **SURVIVED**, proving the harness can report SURVIVED at all. Run under
-  `PYTHONDONTWRITEBYTECODE=1` with `-p no:cacheprovider`, each mutation asserted to have landed
-  on disk before the run, and the file restored from a `cp -a` copy (never `git checkout --`,
-  per this doc's own incident).
-- 🔴 **A KILLER SET CANNOT SEE THESE, AND THAT IS A SEAM, NOT A DETAIL.**
-  `mutants-audit-dispatch.py` expects each row to name the TESTS that must kill it; all eight
-  controls live inside ONE test, so eight rows would report the same single name and read as
-  coverage while measuring one. They landed as a second table, `TESTLIB_ROWS`, which mutates
-  `scripts/tests/test_audit_dispatch.py` (not `audit-dispatch.py`) and matches the failing
-  assertion's own MESSAGE, failing a row when ANOTHER row's message appears.
-- **And the ledger that grades the fix matrix could not see them either** —
-  `_known_mutant_ids()` read `mod.ROWS` alone, so a future matrix row citing `T5` would have
-  been rejected as "a mutant the harness does not carry". Widened to both tables; it is a
-  membership set, so widening cannot turn a passing row red, and deleting `TESTLIB_ROWS` now
-  breaks the suite at import rather than silently.
-- **Ruled out:** that the mutants could be scored without executing — the negative control
-  above is what rules it out, not the `PYTHONDONTWRITEBYTECODE=1` flag on its own.
-
-### (historical) UNVERIFIED at merge: are #1342's new control assertions reachable?
-- **Symptom + exact repro:** #1342 added control assertions pinning both overshoot
-  directions of the new `shell_code()` / `last_command()` parsers, plus the four separators the
-  scanner must recognise. **Nobody checked they are REACHABLE and fail for their OWN reason.**
-  The round-2 delta audit of #1342 was stopped by the operator after clearing items 1–3 and
-  before reaching this one. 🔴 **CLOSED — see the RESOLVED block directly above.** The original
-  wording said "six"; there are eight.
-- **Observed (with values):** items 5 and 6 WERE closed by hand against `origin/main`:
-  FIX_MATRIX = **106 rows** read from the file, `MIN_FIX_MATRIX_ROWS = 101`, and the repo
-  formula `106 − min(50, max(1, 106//20)) = 101` agrees. All four rows present (`r18/F1`,
-  `r18/F3` corrected; `r19/A1`, `r19/A2` new).
-- **Ruled out:** that this blocks the merge — the ladder's own attribution gate says otherwise:
-  the fix round preceding the merge changed **zero payload lines** (`scripts/audit-dispatch.py`
-  untouched; `74cb7409..ee201067` = `test_audit_dispatch.py` 249/32, `mutants-audit-dispatch.py`
-  55/0; rc 0, silent stderr), so one further round would have fired the gate. via: measurement
-- **Leading hypothesis:** the assertions are fine — they were written alongside measured
-  attacks — but "a control that passes vacuously is worse than none", so this is genuinely
-  open, not dismissed.
-- **Next probe:** mutate each of the six control assertions individually, under
-  `PYTHONDONTWRITEBYTECODE=1`, and confirm each fails with its OWN message rather than a
-  neighbour's; keep a known-caught mutant as positive control and report the pair.
-
 ### `main` is red: #1439's test stubs wrote their own shebang
 - **Symptom + exact repro:** `gh pr checks 1439` → `tekton/devrc-pytests fail … FAILING:
   test_no_test_writes_a_usr_bin_env_shebang_at_runtime | TOTAL collected=21455 passed=21452
@@ -1617,12 +1497,6 @@ is load-bearing rather than left standing as a live claim.
 - **Not ported, recorded so nobody re-derives it as an oversight:** parallel probing, the
   `tailscale` slot, `--json`, `--accept-key`, the standalone verb surface. `#1287`'s branch is
   the reference if any of them is wanted later; it is closed, not deleted.
-
-### RESOLVED — `main` red from #1439's test stubs
-Superseded: the "`main` is red: #1439's test stubs wrote their own shebang" block above is
-CLOSED. `#1461` → `30a1eb8b`; `test_runtime_shebangs.py` green on `main` (9 passed), and the
-guard's own stale-pin accounting passes with it. No ALLOWLIST entry was added — the offenders
-were removed, not pinned. Its "Next probe" is spent; do not re-run it.
 
 ### `#1431` was closed COMPLETED with its stated closing condition unmet
 - **Symptom + exact repro:** `gh issue view 1431 --repo innovation-upstream/devrc --json
@@ -1715,17 +1589,6 @@ were removed, not pinned. Its "Next probe" is spent; do not re-run it.
 - **Leading hypothesis:** round 0 yields, but is **too slow to matter on an active PR**. Trial 2's report landed after `#1445` merged; only the one finding that outlived the merge (the retracted figure) became actionable. Round 0 is most valuable EARLY, and nothing routes it there automatically.
 - **Next probe:** trials 3-5 on ordinary PRs, dispatched BEFORE the PR is ready to merge. Record `ran: R · changed the outcome: C` on each PR.
 
-### RESOLVED — the `#1495` ladder ran to a clean stop; the guard took four versions
-
-- **Observed (with values):** rounds 0 → 1 → 2 → 3. Round 3 returned **no code defect**. Each guard version was defeated by a *different* mechanism, every one found by mutation rather than reading:
-  - **v1 proximity** ("a retraction within 20 lines") — SURVIVED an in-place re-assertion, because the retraction note the same commit added satisfied the window. No window size fixes it.
-  - **v2 per-file COUNT** — SURVIVED the same mutant for an unrelated reason: the edit replaces the quoting line with an assertion built from the same tokens, so the count is identical whether lines or matches are counted. **A count cannot tell quotation from assertion.**
-  - **v3 normalised TEXT pin** — closed that, but narrowed `FIGURE` to the literal `min`, re-opening the class the guard exists for: the SPELLED-OUT unit ("minutes"/"mins" rather than "min") became invisible. ⚠ The literal figure is deliberately NOT quoted in this doc — see the gotcha below.
-  - **v4** — `min(?:ute)?s?`, and the comment-lead strip's `*` branch requires a following space (it was eating one star of a markdown `**BOLD**` run).
-- **Ruled out:** *"the count ledger was the remedy"* — measured, M3 survived it. This was recorded as the lesson in the `devrc/tests` cairn entry and stood FALSE until a post-merge sweep; corrected at revision `64a2bba6`. `via: measurement`
-- **Ruled out:** *"the sandbox tier is fine because a no-`.git` replica passes"* — the replica is a proxy; the authoritative answer came from `tekton/devrc-pytests` at `760c8769`. `via: measurement`
-- **Stop grounds (two, independent):** round 3 clean, AND the attribution gate fired — `d6a5aa42..2d89291a` and `2d89291a..1c3b59b2` both touched the test file only, leaving `scripts/scoped-tests.sh` untouched, i.e. two consecutive zero-payload rounds.
-
 ### `main` is RED on two guard_core tests — fix open as `#1543`, unmerged
 - **Symptom + exact repro:** `nix develop ~/workspace/devrc -c python3 -m pytest scripts/claude-hooks/tests/test_guard_core.py -q` in a **clean detached worktree of `origin/main`** → `2 failed, 1534 passed`. Not a PR-branch artefact.
 - **Observed (with values):** `AssertionError: the set of files mentioning a wide tmux kill has changed. Classify the new one(s) in _KILL_MENTION_LEDGER` with `added: ['claudedocs/handoff-mention-system-repos.md', 'claudedocs/handoff-tmux-webapp.md']`. Both mentions are prose: `handoff-tmux-webapp.md:1991` quotes a wide kill-window *read from a log* and `:3409` records a session-kill that a guard BLOCKED; `handoff-mention-system-repos.md:46` only quotes that the other doc "landed carrying" such text.
@@ -1734,44 +1597,6 @@ were removed, not pinned. Its "Next probe" is spent; do not re-run it.
 - **Ruled out:** *the allowlist additions defang the guard* — positive control: a tracked file carrying a real wide-kill command and named in neither list makes BOTH tests fail; removing it returns both to green. via: measurement
 - **Leading hypothesis:** none needed — cause identified and fixed in `#1543` (`1536 passed`). ⚠ `handoff-tmux-webapp.md:2043` already *names* `_KILL_MENTION_LEDGER`, so a prior session met this guard and did not complete the entry.
 - **Next probe:** `gh pr checks 1543`, merge it FIRST, then re-run CI on `#1532`/`#1533` from the fixed base.
-
-### RESOLVED — rank 1: round 0 WORKS; its dispatch trigger is the defect
-- **Question:** the retirement condition says run round 0 on 3-5 PRs and `DELETE this section if it ran and changed nothing`.
-- **Answer: `ran: 6 · changed the outcome: 3` — it stays.** Evidence, measured:
-  - **Round 0 changed an outcome.** `#1518` closed unmerged `2026-09-12T01:39:29Z`, its closing comment crediting *"round 0 and round 1"* for the counterexample that falsified its premise. `gh pr view 1518` → `CLOSED`, `mergedAt: null`; the step it proposed deleting is still wired (`git show origin/main:claude/skills/resume/SKILL.md | grep -c handoff_search.py` → 1).
-  - **None of MY three could act.** `#1523` merged 27 min before dispatch, `#1510` +6 min after, `#1518` closed 5 min before trial 4 returned. Runtimes 459 / 920 / 776 s.
-- **Ruled out — "delete it, it ran and changed nothing":** the condition requires *ran AND changed nothing*; it changed things every time it landed before the decision. `via: measurement`
-- **Ruled out — "the auditor is too slow":** see the runtimes against the merge offsets; no speedup reaches either. `via: measurement`
-- **Ruled out — "trial 4 independently confirmed `#1518`'s premise":** it re-implemented the same method from its description and inherited all three of its flaws. `via: measurement`
-- **Next probe — build the trigger, stop measuring.** A PR younger than 15 minutes, audited immediately, is the only missing cell:
-  ```bash
-  gh pr list --repo innovation-upstream/devrc --state open --json number,createdAt \
-    --jq '[.[]|select((now - (.createdAt|fromdateiso8601)) < 900)|.number]'
-  ```
-
-### RESOLVED — rank 14's sweep ran; the open question moved to how a rule is DATED
-- **Resolved:** the full-corpus run completed at 2026-09-12T20:33Z, `EXIT=0`, over **5,993
-  transcript files** (both tiers), 5,855 surviving the prefilter. **Controls PASSED and were
-  read before any row: positive 584, negative 0.** Verdicts: `FIRED=14 · UNFIRED=3 ·
-  UNRELIABLE=32`. Raw output `…/scratchpad/r14/full.{txt,json}`; re-run with
-  `python3 scripts/audit-rule-firing-sweep.py --samples 1`.
-- **Ruled out — the run died when I deleted the script from the base clone mid-run.** It did
-  not: the process had already loaded and compiled the source, and `rchar` was still climbing
-  past 4.4 GB after the delete. via: measurement
-- **Ruled out — "sweep not running", which my own detector reported once.** A broken detector,
-  not a dead process: the loop matched the `zsh -c` wrappers `pgrep -f` returns for my own
-  shell (the documented trap) so `ls -d /proc/...` took several PIDs and failed.
-  `pgrep -af … | grep -v 'zsh -c'` showed the python process throughout. via: command
-- **Ruled out — UNRELIABLE means my regexes are bad.** For 20 of the 32 the pre-origin count
-  is 1–8, which is a rule whose practice predates its current sentence rather than a loose
-  pattern; only ~12 (≥10 hits) are genuinely over-broad. The dominant cause is the DATING.
-  via: measurement
-- **What is still open, and it is a different question from the one rank 14 asked:** how to
-  date a rule so the window survives the rule being reworded. **Next probe:** add a per-rule
-  `origin_hint` to the ledger (or date at the earliest commit touching the containing `## `
-  section) for the 20 low-pre-origin rules, re-run, and check the withheld count drops
-  without loosening the control. 🔴 Do not raise a pre-origin threshold to make them pass —
-  that number was measured nowhere.
 
 ### The prose ladder takes two rounds to reach its escape hatch, and the 2026-09-14 attempt to shorten it was WRONG
 - as-of: 2026-09-14
@@ -1888,6 +1713,71 @@ were removed, not pinned. Its "Next probe" is spent; do not re-run it.
   Which of the two assertions fired settles it: *"N of M concurrent sessions could not
   measure"* is contention; *"sessions reported emitted but the file holds N control key(s)"*
   would mean a writer was found after all and the refutation above is incomplete.
+
+### The prose-payload hole is OPEN BY DESIGN and recurring — 7 of 52 post-`#1856` ladders
+- as-of: 2026-09-28
+- **Symptom + exact repro:** a ladder whose rounds touch only `.md` runs indefinitely; the gate
+  never fires. Repro: `audit-dispatch.py --repo civitai/gpu-fleet-infra 332 --round 5` → rc 0.
+- **Observed (with values):** post-`#1856` window (4.60 d, 52 ladders at depth ≥3) — **7** carry a
+  surviving zero-executable pair, **all 7 prose-only**: `gpu-fleet-infra#332`,
+  `civitai-developer-docs#97 #123 #125`, `civitai-app-starters#475`, `naida-ai#252`, `devrc#1889`.
+  In every case `classify_diff` returns "every changed line is in a PROSE file" ⇒ UNMEASURED ⇒
+  `payload_reading` falls back to the stated non-zero ⇒ fails open.
+- **Ruled out:** `payload=` absent — all present. via: measurement.
+  `--override-attribution-gate` — the string appears in **no comment or body** in the whole
+  corpus, 0 uses. via: measurement. A classifier bug — the classifier moves (425 `EXEC=n`
+  vs 56 `ZERO-EXECUTABLE` vs 67 `UNMEASURED-PROSE-ONLY` over 673 measured rounds). via: measurement.
+  Genuinely-nonzero values — independently re-measured as 0 executable. via: measurement.
+- **Leading hypothesis:** not a defect. The UNMEASURED-on-prose carve-out is exactly what protects
+  the **15 LEGITIMATE-PROSE ladders** in the 241-ladder corpus (skill bodies, docs PRs, handoff
+  docs) whose `.md` IS the deliverable. Closing the hole with any prose-file rule reopens it for
+  all 15; the 39 destroyed rounds are the price of the 5 saved.
+- **Next probe:** do NOT probe the file list again. Measure the operator-declared-completion
+  signal instead: for the 7 ladders above and the 15 LEGITIMATE-PROSE ones, does the PR record
+  contain a human statement that the deliverable was finished before the prose rounds began?
+  If it discriminates ≥3 true positives with 0 false positives, it is worth building.
+
+### `#1887` silently killed the mutation battery for two days — the instrument had no control of its own
+- as-of: 2026-09-28
+- **Symptom + exact repro:** `mutants-audit-dispatch.py` refused every row; no mutation result was
+  graded between 2026-09-27 and 2026-09-28.
+- **Observed (with values):** `31033cdb` (`#1887`, 2026-09-27 00:49:10 -0500) added a soft
+  `import operator_asks` to `audit-dispatch.py` **without extending the sandbox's file list**, so
+  eight tests were red on the **unmutated** copy and every row was refused. Fixed in `#1909` via
+  `LIB_RELS`. Final run after the fix: **218 rows, all as expected**, positive control
+  `231 passed` unmutated (floor 220), `S1`/`XS` controls SURVIVED as required.
+- **Ruled out:** that it produced false GREENs — it failed toward a **refusal**, not a pass, so no
+  result needs retracting. via: code. That `#1859`'s mutation results are affected — `#1887`
+  postdates it (2026-09-27 vs 2026-09-23). via: measurement.
+- **Leading hypothesis:** the battery has no positive control on its own harness that runs
+  independently of the rows, so "every row refused" and "the battery is fine" look identical from
+  outside. `test_mutation_battery_anchors.py` gates the collapse floor but is not selected by
+  `scoped-tests.sh` (the mapper picks files that NAME what changed; that module names the harness).
+- **Next probe:** `nix develop $DEVRC -c python3 scripts/tests/mutants-audit-dispatch.py` and read
+  the unmutated-baseline line. If a future change adds a lib import, check `LIB_RELS` in the same
+  commit — a test that adds N tests must also move the floor by N, counted not guessed.
+
+### Residue of the 2026-09-28 eviction — two OPEN questions rescued from RESOLVED blocks
+- as-of: 2026-09-28
+- **Symptom + exact repro:** not a bug — a bookkeeping hazard. Nine RESOLVED/CLOSED blocks were
+  moved to `claudedocs/refs/audit-pr-ladder-closed-investigations.md` to clear a ceiling breach,
+  and **two of them carried open questions inside an otherwise-closed narrative**. A block headed
+  RESOLVED is not proof every thread in it closed.
+- **Observed (with values):** grep of the evicted file for `still open|🔶` returns **2** —
+  refs file line 44, *"**Still open:** the verdict of the sandbox tier. See \"State now\""*
+  (from the sibling-ordering-race block), and line 211, *"how to date a rule so the window
+  survives the rule being reworded"* (from the rank-14 sweep block).
+- **Ruled out:** that the eviction lost them — both are carried here and the refs file is a MOVE,
+  not a delete. via: command. That line 211 is unrepresented — ranked item 14 already carries the
+  dating half at length, including both mis-measured single-bound daters. via: doc.
+- **Leading hypothesis:** line 44 is the one genuinely at risk. Its own pointer says *"See State
+  now"*, and `State now` is a REPLACE bucket — so it pointed at text that is overwritten on every
+  update, and by now points at nothing. That is how an open thread evaporates without anyone
+  deleting it.
+- **Next probe:** for line 44, re-read the sandbox-tier verdict question in the refs file and
+  decide whether it is still live at all — `nix build <tree>#checks.x86_64-linux.pytests` is the
+  tier in question. 🔴 **Never point an open thread at a REPLACE section again**; cite the refs
+  file or restate the question where it lives.
 ## Defects (batched)
 - `scripts/tests/test_audit_dispatch.py:7941,7956` — the Q8 fix pins **which line**
   structurally but still checks for a WORD: `flag in _shipped_git_line(...).split()`.

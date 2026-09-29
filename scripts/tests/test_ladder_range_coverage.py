@@ -1177,3 +1177,138 @@ def test_the_unearned_census_DENOMINATOR_includes_REFUSED_ladders(lrc, ad,
     assert "1 of them have NO valid payload record at all" in rendered
     # 🔴 The default keeps a ladder constructed without the field OUT of it.
     assert healthy.self_ranges == ()
+
+
+def test_a_block_posted_only_as_a_REVIEW_comment_is_REVIEW_ONLY_not_absent(lrc, ad):
+    """\U0001f534 THE BLIND SPOT `find_carriers`' DOCSTRING DECLARES, on the named-PR path.
+
+    `gh pr view --json comments` returns ISSUE comments ONLY, so a block posted
+    as a REVIEW comment is visible to a human on the PR and invisible to every
+    instrument in this family. "Absent" and "posted where nothing reads it" need
+    OPPOSITE remedies — write a block, versus repost the one that exists — so
+    reporting the second as the first sends the operator to duplicate it.
+
+    THREE STATES, because a label that fires on all of them is no label:
+      (a) a block on the REVIEW surface and none on the issue comments -> fires;
+      (b) a block on the ISSUE comments -> SILENT, and the review endpoint is
+          never consulted at all (asserted on the recorded command list, since a
+          reading that is merely discarded still costs a `gh` call per PR);
+      (c) nothing on either surface -> SILENT, which is the genuinely ABSENT
+          state this label must not claim.
+
+    Hermetic: `gh` is faked, so this needs no network and no PR.
+    """
+    real = ("```audit-claims round=2 audited=aaaa1111..bbbb2222\n"
+            "1. a claim\n```")
+    prose = "Round 2 fixes. Nothing machine-readable here."
+
+    def make(review_bodies):
+        seen = []
+
+        def runner(cmd, cwd=None):                       # noqa: ARG001
+            seen.append(list(cmd))
+            assert cmd[0] == "gh", cmd
+            return 0, json.dumps(
+                [{"body": b} for b in review_bodies]), ""
+
+        return runner, seen
+
+    # (a) FIRES. The remedy is named, and the word ABSENT must not appear.
+    runner, seen = make([real])
+    note = lrc.review_surface_note(ad, runner, "owner/repo", 256, [prose])
+    assert lrc.REVIEW_ONLY_LABEL in note, note
+    assert "It is not absent." in note, note
+    assert "gh pr comment 256" in note, note
+    assert seen and seen[0][:2] == ["gh", "api"], seen
+    assert seen[0][2] == "repos/owner/repo/pulls/256/comments", seen
+
+    # (b) SILENT, and it does not even ASK — a healthy ladder pays nothing.
+    runner, seen = make([real])
+    assert lrc.review_surface_note(ad, runner, "owner/repo", 256, [real]) == ""
+    assert seen == [], (
+        "the review endpoint was consulted for a PR whose ISSUE comments already "
+        f"carry a block — one wasted `gh` call per PR: {seen}")
+
+    # (c) SILENT on the genuinely ABSENT state. Without this the label would fire
+    # on every PR that never ran a ladder, which is most of them.
+    runner, _seen = make([prose])
+    assert lrc.review_surface_note(ad, runner, "owner/repo", 256, [prose]) == ""
+
+
+def test_the_REVIEW_ONLY_read_FAILS_OPEN_and_never_becomes_a_verdict(lrc, ad):
+    """\U0001f534 AN UNREADABLE SECOND SURFACE IS NOT A FACT ABOUT THE FIRST.
+
+    This read is a courtesy on the path where the script would otherwise report a
+    ladder's record absent. A failed `gh`, unparseable JSON, or a payload that is
+    not a list of objects must each return "" rather than raise — the run was
+    measuring something else, and a crash here would take the whole report down.
+    """
+    # 🔴 A NON-ZERO rc CARRYING A PERFECTLY GOOD BODY, and the shape is the point.
+    # MEASURED while writing this: with `return 1, "", "…"` the mutant that DELETES
+    # the rc check SURVIVED — the empty stdout fell through to the JSON arm, so the
+    # test went green off a DIFFERENT guard and stayed green with this one gone.
+    # `gh` genuinely does this (a partial page plus an error), so the fixture must
+    # make rc the ONLY thing that can refuse it.
+    def rc_fail(cmd, cwd=None):                          # noqa: ARG001
+        return 1, json.dumps([{"body": (
+            "```audit-claims round=2 audited=aaaa1111..bbbb2222\n1. x\n```")}]), (
+            "gh: HTTP 403 rate limited")
+
+    def not_json(cmd, cwd=None):                         # noqa: ARG001
+        return 0, "<html>a proxy error page</html>", ""
+
+    def wrong_shape(cmd, cwd=None):                      # noqa: ARG001
+        return 0, json.dumps(["a bare string", 7, None]), ""
+
+    for runner in (rc_fail, not_json, wrong_shape):
+        assert lrc.review_surface_note(
+            ad, runner, "owner/repo", 256, ["no fence here"]) == ""
+
+    # POSITIVE CONTROL, in the same test: the identical call shape DOES speak
+    # when the surface reads. Without it every assertion above passes against a
+    # function hardwired to return "".
+    def ok(cmd, cwd=None):                               # noqa: ARG001
+        return 0, json.dumps([{"body": (
+            "```audit-claims round=2 audited=aaaa1111..bbbb2222\n1. x\n```")}]), ""
+
+    assert lrc.REVIEW_ONLY_LABEL in lrc.review_surface_note(
+        ad, ok, "owner/repo", 256, ["no fence here"])
+
+
+def test_the_named_PR_path_WIRES_the_REVIEW_ONLY_note_into_the_report(lrc, ad):
+    """\U0001f534 REACHABILITY: a function nobody calls is not a guard.
+
+    The two tests above drive `review_surface_note` directly, which cannot see a
+    `main` that never calls it. This one goes through the CLI's own named-PR
+    path and asserts the label reaches the rendered output.
+    """
+    head = "b" * 40
+
+    def runner(cmd, cwd=None):                           # noqa: ARG001
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return 0, json.dumps({
+                "headRefOid": head, "baseRefName": "main",
+                "comments": [{"body": "Round 2 fixes. No block."}],
+                "url": "https://example.invalid/pr/256",
+            }), ""
+        if cmd[:2] == ["gh", "api"]:
+            return 0, json.dumps([{"body": (
+                "```audit-claims round=2 audited=aaaa1111..bbbb2222\n"
+                "1. a claim\n```")}]), ""
+        # every `git` call: this PR has no usable two-sha ladder anyway, so the
+        # report is UNMEASURABLE and the note is the only thing being asserted.
+        return 0, "", ""
+
+    sink = []
+
+    class _S:
+        def write(self, text):
+            sink.append(text)
+
+    lrc.main(["256", "--repo", "owner/repo", "--no-fetch",
+              "--repo-dir", str(REPO_ROOT)],
+             runner=runner, out_stream=_S(), err_stream=_S())
+    rendered = "".join(sink)
+    assert lrc.REVIEW_ONLY_LABEL in rendered, rendered
+    assert "Repost it as an ISSUE comment" in rendered, rendered
+    assert "gh pr comment 256" in rendered, rendered

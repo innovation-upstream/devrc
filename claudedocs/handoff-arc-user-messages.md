@@ -134,6 +134,58 @@ through the gate; this body is the retirement.
   neither, and delete it in the same command. Also: a battery resolves its own root from
   `__file__`, so a scratchpad copy cannot run — it must sit beside the real one.
 
+- 🔴 **`failed=0` beside `FAILED` on `tekton/devrc-pytests` MEANS A GUARD FIRED, NOT A TEST —
+  and the candidate list is short.** The status read `FAILED: pytests — TOTAL collected=24182
+  passed=24177 skipped=5 failed=0 (floor: 21003)`: a verdict contradicting its own counts,
+  `target_url` **null** so there is no log to open, and a description carrying only numbers
+  that look clean. **Two audit rounds read that red and both declined to attribute it** — the
+  honest call on that evidence, and wrong. The only guards that fail with no failing test are
+  GUARD 2's **skip ledger** and GUARD 3's **collected-count floors**. Check those two first.
+- 🔴 **TWO of them were red at once, and fixing one changed the visible output by NOTHING.**
+  The description is byte-identical before and after the skip-ledger fix, because it carries
+  only test counts and a guard failure moves none of them. That reads exactly like *"your fix
+  did nothing"* and invites reverting a change that was necessary. **When a red's description
+  is byte-identical across a fix, suspect a SECOND guard rather than a failed fix.**
+  - (a) **An unpinned skip.** `test_mutation_battery_anchors.py` emits one `has no multi-site
+    row to truncate` skip **per single-site battery**; adding a third battery left
+    `EXPECTED_SKIPS` pinning two. GUARD 2 is not a ceiling — every skip must match a pinned
+    `(dir, regex)` entry and the total must equal the applicable pins, so an unpinned skip
+    fails the gate with zero failing tests. CI runs `-n 8`, so the xdist entry is inapplicable
+    there and observed 5 stood against 4 applicable pins. The ledger's own comment says it:
+    *"ONE ENTRY PER BATTERY… that accounting cost is the mechanism, not an oversight."*
+  - (b) **GUARD 3's DRIFT CEILING, not its floor.** `drift = floor/4`, minimum 60,
+    `ceiling = floor + drift`. `scripts/session-analysis/tests` had floor 525 → ceiling **656**,
+    and ~227 new tests took it to **752**. The fix is the gate's OWN function on the run's own
+    count — `_suggested_floor 752` = 752 − min(50, max(1, 37)) = **715** — never arithmetic of
+    your own. Verify both bounds: 715 ≤ 752 ≤ 893.
+- 🔴 **A MUTATION RESULT IS A FACT ABOUT THE TEST AS IT STOOD.** Deleting `os.dup2` beside the
+  `BrokenPipeError` handler scored, in order: **SURVIVED** (1 draw — and that green draw is why
+  the episode exists), **20/20** red, an independent audit's **22/40**, then **10/40**. Same
+  mutant, same test, controls clean every time. It is load-dependent: whether the shutdown flush
+  still holds data depends on TextIOWrapper buffer state when the pipe closes. **There is no
+  rate to find — do not measure a fifth.** Two of those four shipped into source comments as
+  properties of the guard, one telling maintainers a load-bearing line was uncovered. The line
+  is pinned **structurally** instead (assert the redirect happens; deterministic, 20/20).
+- 🔴 **A TEST'S FIXTURE SIZE CAN AIM IT AT THE WRONG GUARD.** The test for "a write that fails
+  entirely reports success" used a 200-record fixture, so the failure surfaced mid-render and the
+  **write** arm caught it — the **close** guard was never exercised and the mutant survived the
+  assertion named after it, caught only by a sibling. The close path is reachable only when the
+  whole output fits in the buffer. **A small fixture is the test.**
+- ⚠ **`stat -c %s` on a DEPLOYED skill path measures the SYMLINK, not the file.** It reported
+  112 bytes for a 13,190-byte reference doc, and I nearly filed a truncation. `stat -Lc %s`, or
+  better a **sha256 against `git show origin/main:<path>`**, is the check. The sibling
+  `shared-queue.md` shows the same 111-vs-16,907 and is fine.
+- 🔴 **A `--tier both` gate run on this box can produce NO pytest verdict at all.** Measured:
+  `exit=124 (timeout after 3600s)`, verdict `RESULT: FAIL (exit=143)`, `Terminated` on the
+  FIRST target with **zero** `FAILED` lines and zero targets completed — while node (1,720) and
+  go (461) were FULL PASS. That is not "the tests failed"; it is the documented reason the
+  pre-merge full-suite ritual was deleted. ⚠ And **the background-task notification said "exit
+  code 0"** because the command was piped through `tail` — the gate itself printed
+  `GATE: RESULT=FAIL exit=1`. Read the gate's own line, never the pipeline's status.
+- ⚠ **Two `scripts/**/tests` targets exceed a 9-minute local timeout** under ordinary load
+  (`scripts/tests`, `scripts/session-analysis/tests`), so a guard fix in them cannot be watched
+  green locally. CI on the head is the only thing that settles it — budget for the ~20 min.
+
 ## The arc's own sessions — prose, because the resolver cannot see them
 - `ses_f2925a2e4ffeS4sq0qg70iGC52` (opencode, devrc, 2026-09-25) — **originated.** Traced
   the handoff/resume infra and produced Rec 2 (the selectors) + Rec 3 (the routing).
@@ -142,7 +194,10 @@ through the gate; this body is the retirement.
   explicitly in the same breath as its kickoff. Good disclosure; the findings then lived
   only in that transcript for a day.
 - `785fb10c-16a3-4632-aa2f-910a21bf8b3d` (Claude, devrc, 2026-09-25 05:07Z→22:51Z) — built
-  and merged **#1870**. Landed no handoff doc either.
+  and merged **#1870** (`e48eebac`), shipped it to both hosts, ran the four-round audit
+  ladder, and fixed the two CI guards above. ⚠ **Landed no handoff doc at the time** — the
+  `## Findings` and `## Gotchas` blocks above are that session's, written 2026-09-28 from
+  its own transcript, which is why they are dated later than the work.
 - `4861069d-dbe7-4cc7-9bd4-ef9d2e5e471c` (Claude, homelab-talos) — first session to use the
   shipped tool in anger; the source of the routing measurement above.
 
@@ -414,6 +469,8 @@ one).
   with anything not already tested, rather than mining the same 622.
 
 ## Defects (batched)
+<!-- The first two are CARRIED FORWARD VERBATIM: this is a REPLACE bucket, so omitting them
+     would delete them. -->
 - 🔴 **The squash subject on `main` permanently asserts the retracted claim**:
   `feat(find-session): a resolved arc names the extractor, because the prose route fired 1 of 3
   (#1883)`. GitHub took the first commit's subject; "1 of 3" was re-derived to 3 of 6, and "the
@@ -424,6 +481,22 @@ one).
 - ⚠ **This doc predicted the arc would resolve to ONE session, and it resolves to TWO** — see
   the Gotchas entry. The prediction is corrected there rather than deleted, because the reason
   it was wrong is the reusable part.
+- 🟡 Round 3's 🟡s on `extract_user_msgs.py`, left open deliberately when the ladder ended on
+  the no-🔴 stop rule. All are claims-about-coverage or narrow error paths, none deploy-blocking
+  at `e48eebac`: `UnicodeEncodeError` is not `OSError`, so a non-UTF-8 locale tracebacks at rc 1
+  on the first write (narrow — plain `LC_ALL=C`/`POSIX` are coerced to UTF-8 by CPython, so a
+  default container is unaffected); and `_emitted` in `flush_notes` is unreachable today, so it
+  would convert a future "printed twice" bug into a silent drop. **Closing condition:** a test
+  asserting a non-UTF-8 locale exits 2, merged.
+- 🟡 `scripts/README.md`'s subsystem table is stale in **every** row (it says `tests/ 19`
+  against an actual 267, `session-analysis/ 28` against 34) and no test pins it. Fixing one row
+  would make the table look maintained while nine stay wrong. **Closing condition:** a test
+  deriving each row's count from `git ls-files` and pinning it two-way — the same shape as
+  `JSONL_GLOB_SITES` — merged.
+- ⚠ Unpinned by construction, so they can drift silently: every count in `#1870`'s body and its
+  six PR comments, and the reference doc's wall-time row and RSS paragraph. Two were already
+  wrong within the session and corrected publicly (said 128 tests where the suite was 93; said
+  13,238 B where the reference was 12,879) — **in a paragraph correcting stale counts.**
 
 ## How to verify
 ```bash
@@ -458,3 +531,70 @@ session scratchpad and are gone). Over `~/.claude/projects/*/*.jsonl`:
 🔴 **zsh has no word-splitting** — `for rev in $revs` over a newline-joined string loops ONCE
 and every per-revision check reports a vacuous clean. Hit in this session; write these in
 Python, or use `${=revs}`.
+## Findings — the SCOPE half landed, and two gate guards fired that nothing warns about
+
+🔴 **THE SCOPE HALF OF THIS DOC'S OWN GOAL IS SHIPPED.** `#1870` squash-merged as
+**`e48eebac`** (2026-09-25T22:48:19Z), branch deleted. Confirmed **by CONTENT** on
+`origin/main` — `scripts/session-analysis/extract_user_msgs.py`,
+`claude/skills/handoff/reference/user-messages.md`,
+`scripts/tests/mutation_battery_extract_user_msgs.py` and the `|715` floor all present —
+never by ancestry, because a squash is never an ancestor of its base. Re-verified present
+on `origin/main` at `089d9987` while writing this, two days and ~10 merges later.
+
+**Deployed to BOTH hosts** via `ship.sh` (rc 0), every per-host line read rather than the
+verdict: workbench already at `e48eebac`, 623 artifacts resolve / **0 dangling**, 441
+repo-sourced / **0 stale**; laptop fast-forwarded `4c9a3f58 → e48eebac`, 589 resolve / 0
+dangling, 436 / 0 stale. Cross-host agreement asserted at one sha. ⚠ The laptop answered on
+nebula `10.42.0.100` only — `192.168.50.155` was unreachable, so `ship.sh` fell back.
+
+✅ **VERIFIED AGAINST THE SYMPTOM.** The deployed reference doc is **byte-identical** to
+`origin/main`'s copy on both hosts (sha256 `bbca861a…`, matched on workbench *and* over ssh
+to the laptop), and the live tool on a real arc printed its coverage notes and
+`sessions=2 msgs=27 deduped=7`.
+
+**What the scope half actually provides** (the routing half of the Goal is `#1883`/`c0fd28e3`,
+recorded above): `--arc SEED`, repeatable `--session ID`, `--ids-file PATH` (`-` = stdin),
+markdown default / `--jsonl` canonical / `-o PATH`, and a **six-code exit contract** where a
+zero can no longer stand for four different facts. The arc resolver is **imported**, not
+re-implemented — `run_arc`'s four steps were extracted to `find-session.arc_report`, verified
+behaviour-preserving by `--arc … --json` being byte-identical across the refactor.
+
+🔴 **MEASURED COST IT REMOVES, and the compose in this doc's own Goal could not be completed
+before it.** The old tool walked 974 transcripts → 13,768 records → **54.1 MiB**, and its
+records carried **no session id** — so "enumerate the arc's sessions, extract corpus-wide,
+grep the ids out" had nothing to grep on; the only filter was `project`, a cwd basename.
+`--arc handoff-find-session-arc-resolution` now yields 2 transcripts / 27 records / **172 KiB**,
+≈322× smaller. ⚠ Not faster in wall time (23 s vs 12 s) — smaller in what a reader must read.
+
+### The audit ladder — four rounds, and what each cost
+
+Rounds 0–3 of `/audit-pr`, each finding fixed before the next. The ladder ended on the
+**operator's stop rule** (*end when a round reports no high-severity findings*), not on the
+skill's findings-keyed rule — round 3 reported no 🔴. ⚠ That is the `deploy-blocking only`
+rule the audit skill explicitly rejects; the trade was stated and accepted, and the 🟡s round 3
+left are listed in Defects below.
+
+- **Round 0** caught two of my own claims false, not code: a private corpus glob justified as
+  *"wants EVERY jsonl including `subagents/`"* that had **never included one** (measured 0 of
+  5,681) — the sentence was wrong in **four** places including a line the tool PRINTED every
+  run — and a `dup2` mutation result written up as a property of the guard.
+- **Round 1** found `--jsonl` emitting **no coverage note at all** (they reached the markdown
+  renderer only, so the canonical machine form carried strictly *less* while four sentences
+  said the opposite), and exit 6 asserting "the transcripts WERE read" off the **selection**
+  size — false on an absent corpus, which includes the nix sandbox.
+- **Round 2** found two defects **round 1's own fix introduced**: the notes emitter placed
+  *after* `if not rows: return`, so exits 5 and 6 got no coverage statement at all; and a new
+  `except OSError` **masking** the pipe guard, because `BrokenPipeError` subclasses `OSError` —
+  deleting the dedicated arm stopped tracebacking and quietly exited 2, breaking `… | head`.
+- **Round 3** found exit 2 claiming *"Nothing was written"* about a run that had **destroyed a
+  file** (`open(path,"w")` truncates before the first write: 26 bytes of prior content became
+  2,048 bytes of partial output), and **four guards round 2 added that no test pinned** — three
+  reachable mutants surviving a green suite *and* a 33/33 battery, the worst turning a write
+  that put not one byte on the device into `rc 0 … out=<path>`.
+
+**Instrument state at `e48eebac`:** 101 tests in
+`scripts/session-analysis/tests/test_extract_user_msgs.py`; **37 mutants, 37/37 killed by
+their NAMED test** via the committed
+`scripts/tests/mutation_battery_extract_user_msgs.py` (registered in
+`test_mutation_battery_anchors.py`'s two-way `BATTERIES` ledger); **402 passed** across the
+suite, both two-way ledgers, all four doc ceilings and the anchors gate.

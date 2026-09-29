@@ -195,6 +195,12 @@ cannot license skipping a round. Every stop rule below is unchanged by it.
 **Ledger:** `round 0 · requirements: N (unattributed: U) · deletion candidates: D`. Deleting
 nothing at all is reportable — say what you examined to get there.
 
+**Post the deletion candidates as a MACHINE-READABLE block as well** — `--round 0`'s OUTPUT
+section emits the skeleton and states the contract; a later round answers it with
+`--emit-claims --dispositions "D1=kept:<why>,D2=deleted"`. Evidence for why:
+`~/.claude/skills/audit-pr/reference/round-ladder-evidence.md` → "round 0's deletion pass had
+no reader".
+
 ## THE CHECKLIST — the nine axes (runs AFTER round 0)
 
 <!-- 🔴 LOAD-BEARING HEADING, NOT NAVIGATION. `_read_round_zero` in
@@ -483,6 +489,24 @@ at every round ≥ 2 (the newest block is a self-range, and the gate's pair alwa
 below round 2 there is no prior block to refuse over. **If a round's `payload=` is named there, do
 not quote it — say it is unmeasured**, and if a stop is being attributed to one, that stop is
 arithmetic over zero commits.
+
+🔴 **A RANGE THE ASSEMBLER CANNOT READ IS THE OTHER WAY THAT MECHANICAL READING GOES SILENT, AND IT
+SPLITS TWO WAYS.** The reading re-runs `git log -p` over each gate-read round's own
+`audited=<from>..<to>`; an endpoint naming no object makes that exit non-zero, which is UNMEASURED,
+which falls back to your STATED count — the gate quietly reverting to what it did before the unit
+existed. Measured 2026-09-28 over **564 endpoints posted since the unit shipped: 30 (5.3%) name no
+object, across 11 ladders**, and `ZacxDev/cairn` #119's *entire* ladder ran that way.
+**One of the 30 is STRUCTURALLY impossible and is now REFUSED (exit 4)** — `civitai/cli` #727 r0
+posted a 41-character endpoint, and a branch name or a `<placeholder>` is refused for the same
+reason (it resolves *here*, to a commit the round never audited). Same family as `audited=X..X`: fix
+the comment, not the ladder. **The other 29 are well-formed and merely unresolvable in THIS
+checkout, and they still FAIL OPEN** — that is indistinguishable from a force-push, an unfetched
+commit, or the ordinary cross-repo assembly, and refusing it would break every such run. It is
+LOUD instead, on the same three surfaces: `N of the M round(s) the attribution gate reads could NOT
+be measured…` on stderr, in a brief section beside THE LEDGER, and above the emitted block so it
+lands on the PR. **If your report quotes a `payload=` from a round named there, say it is the
+author's classification and nothing checked it** — and to get the measured reading, re-run the
+assembly from a checkout that holds those commits.
 
 ⚠ **It was prose here until 2026-09-17, and prose lost.** MEASURED on `civitai/talos-infra` #1531:
 the condition was met **and stated in writing at the end of round 3** — round 2's ledger reads "zero
