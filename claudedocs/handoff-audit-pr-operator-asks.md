@@ -100,33 +100,44 @@ operator asked for, so that branch was unreachable and his stated requirements l
     came from ONE session, so a report-counting floor let one verbose audit supply 20% of it.
 
 ## State now
-- 🔴 **SHIPPED AND VERIFIED.** `#1887` squash-merged as **`31033cdb`** (2026-09-27T05:49:10Z),
-  branch deleted. Confirmed **by CONTENT** — `scripts/lib/operator_asks.py`,
-  `scripts/tests/mutation_battery_operator_asks.py`, the `EXPECTED_SKIPS` pin, `VIEWER_FIELD`
-  and 4 `--include-answers` sites are all on `origin/main`. **Ancestry is FALSE and that is
-  correct for a squash** — never read it as "did not land".
-- **All four Tekton checks green on the merged head `1780318b`**, read by description not
-  colour: `pytests` collected=24348 passed=24341 skipped=7 failed=0 · `nodetests` 1,720 ·
-  `gotests` 461 · `cairn-client-runs`.
-- 🔴 **The `nix build` SANDBOX tier was run locally — the gap every earlier commit here
-  flagged and did not close** — with a proper control pair on the SAME tree:
-  pre-fix `RESULT: FAIL (exit=1)`, fixed `RESULT: PASS (exit=0)`, both `SCOPE: FULL (30 of 30
-  hermetic target(s))` and both `collected=24348 passed=24341 skipped=7 failed=0`. Identical
-  measurements, opposite verdicts, sole delta the skip pin.
-- **Deployed to BOTH hosts** via `scripts/ship.sh` (rc 0). Every per-host line read, not the
-  verdict: workbench 624 artifacts resolve / **0 dangling** / 442 repo-sourced / **0 stale**;
-  laptop fast-forwarded `6975b1b2 → 31033cdb`, 590 / 0 / 437 / 0. Cross-host agreement
-  asserted — both at `31033cdb`. Neither host skipped. ⚠ `192.168.50.155` did not answer;
-  ship fell back to the nebula address `10.42.0.100` on its own.
-- ✅ **VERIFIED AGAINST THE SYMPTOM, not the rollout.** `readlink -f
-  ~/.claude/skills/audit-pr/SKILL.md` → `/nix/store/qdkkx0jj…` — a NEW store path (was
-  `pz6bbghd…`), so the switch genuinely swapped the `home.file` copy, and the deployed copy
-  carries the new step-1 prose. Then a live `audit-dispatch.py 1887 --round 0` printed
-  **11 asks / 16,023 B, 2 of them answers, 10 `<task-notification>` records dropped and
-  named, 4 PR comments examined**, with the review-comment blind spot declared.
-- ⚠ **No `clawgate-task:` field.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for
-  this session. An unknown session id also answers 200 with an empty array, so this is a real
-  reading and **not** a clean bill of health.
+- 🔴 **SHIPPED. `#1901` squash-merged as `79a9b22a`** (2026-09-29T06:11:31Z), branch deleted.
+  Confirmed **by CONTENT** — `scripts/round0-attribution-rate.py`,
+  `scripts/tests/test_round0_attribution_rate.py` and
+  `scripts/tests/mutants-round0-attribution-rate.py` are all on `origin/main`.
+  **Ancestry is FALSE after a squash and that is correct** — never read it as "did not land".
+- **The instrument answers the closing condition now.** A live run prints a per-report RATE,
+  a floor counting **distinct sessions**, and today's honest verdict:
+  `VERDICT: NOT MEASURABLE (n=1 distinct session(s) / 2 transcript file(s) / 3 report(s); floor 10)`.
+  The refusal is IN THE TOOL, not in prose, so it cannot be argued past.
+- **The ladder ran FIVE blind rounds and is CLOSED.** Round 4 and round 5 both returned **no 🔴**,
+  and every structural claim was re-derived by the auditor under its own mutations rather than
+  accepted from the author. Claims blocks for rounds 1–4 are posted on the PR.
+- 🔴 **Gated on the MERGED TREE, not the branch.** `strict: false` means a green check is a claim
+  about the PR branch, and `main` moved `a7d7d32f → 3573a413` while this was open. So
+  `origin/main + 37be792f → 6465ce67` was built and gated directly: battery `rc 0 · 39 of 39
+  killed · all on their own guard's ASSERTION`, and `pytests` `SCOPE: FULL (30 of 30 hermetic
+  target(s))`. Its `failed=5` was **entirely inherited** — a pristine `origin/main` worktree with
+  no merge reproduced all five (`browser SKILL.md` 12,981 B against a 12,038 B budget, from
+  `0786a55e`). ⚠ **That breach is now FIXED by someone else's `#1917`** (12,020 B); re-measured
+  2026-09-29T06:4xZ, those 160 tests pass and `main-green-check.service` is back to
+  `ExecMainStatus=0`. **Do not carry "main is red" forward — it was true for ~40 minutes.**
+- 🔴 **`#1914` (the public-IP gate carve-out) is CLOSED UNMERGED — operator's call, on evidence.**
+  Branch `fix/ip-gate-slice-false-positive` retained. A lexical carve-out on a security gate
+  produced a NEW false negative in **three consecutive rounds**; full table in the PR's closing
+  comment. The `parts[1::2]` false positive therefore STANDS: spell the slice differently, as
+  `round0-attribution-rate.py` does (`range(1, len(parts) - 1, 2)`).
+- 🔴 **CARRIED FORWARD, and do not conflate the two: the FEATURE is deployed, the INSTRUMENT is
+  not.** `#1887` (`31033cdb`, the asks block itself) shipped to **BOTH hosts** via `scripts/ship.sh`
+  rc 0 on 2026-09-27 — workbench 624 artifacts / 0 dangling / 0 stale, laptop fast-forwarded
+  `6975b1b2 → 31033cdb`, cross-host agreement asserted, neither host skipped — and was verified
+  against the symptom, not the rollout (`readlink -f ~/.claude/skills/audit-pr/SKILL.md` moved to a
+  NEW store path). 🔴 **`#1901` has had NO `ship.sh` run.** `scripts/round0-attribution-rate.py` is
+  on `origin/main` and nothing deploys it (`git grep round0-attribution -- nix/` is empty), so it is
+  invoked by absolute path and needs no switch — but any future change to a `home.file`-managed path
+  in this arc does. **Merged ≠ deployed.**
+- **No `clawgate-task:` field.** `clawgate_handoff.sh resolve` exited **5** — 0 tasks for this
+  session. An unknown session id also answers 200 with an empty array, so this is a real reading
+  and **not** a clean bill of health.
 
 ## What it does now, in one place
 `audit-dispatch.py --round 0` prints `## THE OPERATOR'S OWN ASKS` **above** the round-0
@@ -196,6 +207,90 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
   one level. 965 matches on this host, **0** in an excluded directory. It was nearly shipped
   as a docstring.
 
+- 🔴 **EVERY DEFECT THIS LADDER FOUND AFTER ROUND 0 WAS IN A GUARD'S SELF-DESCRIPTION, NEVER ITS
+  ARITHMETIC — five rounds, and the count is the finding.** Comments and docstrings claiming
+  coverage the implementation did not have, **twice inside guards added to close an earlier
+  finding**, plus **five separate claims of ABSENCE** that were each a claim about a path nobody
+  had measured (`every one of the other 39 is a source read`; `[struct. 0]` on a row the next run
+  printed 2 in; `measured impact today is ZERO`; `the first battery with a real multi-site row`
+  — actually the fourth; `both unhandled cases resolve toward REPORTING` — measured, both
+  exempt). **The correct outcome for an unsupported claim is a sentence saying it has none.**
+  A fresh rationale composed under pressure to supply one is how the next round's finding gets
+  written.
+- 🔴 **A MUTATION SWEEP IN A SCRATCHPAD IS NOT AN INSTRUMENT. Commit it.** The moment
+  `mutants-round0-attribution-rate.py` landed in the tree its own coverage check (`C4`) reported
+  **7 of 9 anchors and a whole branch named by NO mutant** — invisible while the list was
+  hand-maintained in a scratch file, because a hand-maintained list cannot see what it omits.
+  Landing it also **un-skipped a ledger control that had never once been observed working**
+  (`test_the_PAIR_check_goes_RED_on_a_real_battery_COPY`; this is the 4th battery with a
+  multi-site row, not the first). ⚠ And it must gate, not report: `if gaps: rc = 1`.
+- 🔴 **A KILLED MUTANT PROVES NOTHING UNTIL YOU READ *HOW* IT DIED.** One died on a `KeyError`
+  raised by the **test's own subscript** — scored KILLED while testing nothing. The sweep now
+  derives `KILLED(assert)` vs `KILLED(error)` from the failure text and calls an `error` kill
+  **UNPROVEN** — with the caveat, in its own docstring, that the label is still text and the
+  **named-killer set** is the primary signal. Related and distinct: a `WRONG-KILLER` has exactly
+  **two** causes — a dead expectation, or a real guard gap — and **which one holds must be
+  established BEFORE the expectation is touched.** One row had `own=[] quality=none`: 19 tests
+  failed and not one was its named killer, and it was a genuine **isolation-seam** gap (the named
+  test asserted the primitive; the mutation moved the CALL SITE behind a filter). Fixed by
+  widening the GUARD, not the expectation.
+- 🔴 **THREE MUTANTS SURVIVED A GREEN RUN BEFORE THEIR FIXTURE EXISTED, in one PR** (`#1914`) —
+  each because every existing fixture was rejected by an EARLIER condition, so the mutated one
+  never executed. The control is mechanical: feed a value the earlier conditions CANNOT reject,
+  and make sure different mutants die to DIFFERENT fixtures. A mutant killed by exactly one
+  fixture is the strongest evidence that condition does work.
+- 🔴 **A HAND-RUN MEASUREMENT IS A CLAIM, AND TWO OF MINE WERE WRONG.** (a) I reported
+  **1,563 distinct session ids**; the real figure by the script's own `_session_id_of` is **973**
+  — my probe took the first path segment WITHOUT stripping `.jsonl`, so every session with both
+  a top-level transcript and a `subagents/` dir counted twice (973 + 597 nested = 1,570, overlap
+  597). It reached the doc, the script, a test and a PR body before a blind round caught it.
+  (b) I recommended the whitespace-skip fix for the IP gate; it would have exempted
+  `ssh [<addr>]` and `curl [<addr>]:443`, because a bare command word ends in an identifier
+  character. **The test I had insisted be driven on realistic values is what refused it.**
+  🔴 And the reasoning that caught (a) — *"session ids cannot FALL while files RISE"* — is itself
+  **falsified**: measured 6,739→6,765 files with sessions 973→966. A pruned transcript breaks it.
+  The narrow survivor is only *the same method cannot give both 1,563 and 973*.
+- 🔴 **A CORPUS FIGURE IS A MEASUREMENT, NOT A CONSTANT — stop publishing bare ones.** Three
+  figures in this arc were irreproducible within a day. What is durable is the **mechanism**: the
+  committed test pins that the naive derivation double-counts and the real one does not, which
+  survives the census drifting. Same for wall-times: two runs of one tree minutes apart gave
+  36.5 s and 74.2 s (and 91 s in a third), so the stale "6-minute"/"40-minute" sweep constants
+  were **withdrawn rather than replaced**, and a "~27×" ratio that reached a PR-body heading was
+  retracted (the same ratio measures 25×–194× depending where the caller stands).
+- 🔴 **`cwd` DECIDES PYTEST'S ROOTDIR, AND IT COST ~90×.** A battery passing an absolute path but
+  no `cwd` made rootdir the common ancestor of the caller's cwd and the arg: **0.37 s with
+  `cwd=tree` vs 65.44 s without**, × 39 invocations. One word took the sweep from ~45 min to
+  ~30–90 s — the difference between an instrument people re-run and one they quote. ⚠ The
+  internal cause was NOT isolated (`--noconftest` was still slow) and deliberately carries no
+  explanation.
+- 🔴 **`cairn-client-runs` CANNOT OBSERVE A devrc CHANGE — stronger than "it was cached".** Its
+  derivation copies **no devrc source** (only the `cairn` package plus an inline fixture), so it
+  is bit-identical across every devrc commit. It also prints no `RESULT:` line on success
+  (`flake.nix` echoes only on the failure arms, then `touch "$out"`), so vouch for it on exit
+  status + a realised output path and SAY that is what you did. Accepting or rejecting its silent
+  pass carries zero information about your PR.
+- ⚠ **A LEXICAL CARVE-OUT ON A SECURITY GATE COULD NOT BE MADE SAFE — the dead end, recorded so
+  it is not re-attempted blind.** `#1914` (closed unmerged) leaked a false negative three rounds
+  running: an adjacency condition missed `grid[1::2, ::3]`; quote members of `SUBSCRIPTABLE_CHARS`
+  exempted `bind: "[<addr>]:53"` (canonical YAML/JSON/Go/shell IPv6 endpoint form); and quote
+  **parity** was then defeated by an apostrophe in ordinary prose (`# don't forget the peer
+  '[<addr>]:53'`) — reachable in committed prose, since `claudedocs/**` is deliberately not in
+  `SKIP_DIRS`. Each fix was correct about its own shape and opened another. **The asymmetry is
+  the whole argument: a false positive costs one line once, a false negative publishes an
+  address.** The deterministic alternative (`tokenize`/`ast` for `.py`, strict elsewhere) is
+  named and NOT done — it drops the module's line-at-a-time property, helps only `.py`, and puts
+  a parser inside a security gate. Pick it only if the false positive becomes more than an
+  annoyance.
+- ⚠ **An agent that stops mid-wait on a long build re-notifies with no new information.** Two did.
+  Collection is mechanical: `TaskStop` it and run the build yourself, logs to separate FILES
+  (never a pipe — a piped `nix build` log produced a 0-byte "success" on this box), verdict
+  recovered from `nix path-info --derivation` → `nix log` with `$DRV` guarded for emptiness, and
+  `wc -c` before reading. Also: **six accumulated background waiters evicted a running sweep**,
+  and `pgrep -f mutants` matched **another session's battery in a different repo** — resolve PIDs
+  and re-verify `/proc/<pid>/cwd` at the moment of the kill.
+- ⚠ **zsh ate a git ref.** `$ref:scripts/...` → `bad substitution`: `:s` is a history modifier.
+  Brace it (`${ref}:path`). The failure is loud here; the dangerous version is silent.
+
 ## Open investigations — live diagnosis state
 
 ### `viewerDidAuthor` cannot separate "the operator typed it" from "an agent posted it with his token"
@@ -223,29 +318,25 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
   operator-attributed comment BYTES carrying that footer is the size of the problem.
 
 ## Next steps (ranked)
-1. **Re-run the closing-condition RATE** — `python3 $DEVRC/scripts/round0-attribution-rate.py`
-   (not a hand count; the 2026-09-26 `1,649` figure is superseded, see closing-condition). It
-   refuses below n=10 and exits 6 today. Then read the judgement half yourself: no report may
-   raise a deletion candidate against a requirement the asks block quotes. 🔴 Do not re-tune
-   the feature off n<10.
+1. **Re-run the closing-condition RATE and read the judgement half.**
+   `python3 $DEVRC/scripts/round0-attribution-rate.py` — it refuses below n=10 (distinct
+   SESSIONS, not reports) and exits 6 today. Then check the half no tool can check: no report
+   may raise a deletion candidate against a requirement the asks block quotes. 🔴 Do not
+   re-tune the feature off n<10, and do not hand-count — the `1,649` figure is superseded and
+   every corpus number in this doc drifts.
    forcing: none
-2. **Decide the agent-posted-comment question** (open block above) — run its Next probe
-   FIRST; if the share is small, record "won't fix" rather than building a marker check.
+2. **Decide the agent-posted-comment question** (`## Open investigations` above) — run its Next
+   probe FIRST; if the share is small, record "won't fix" rather than building a marker check.
    Repo `devrc`, `scripts/lib/operator_asks.py`.
    forcing: none
-3. **Consolidate the corpus walk with `audit-rule-firing-sweep.py`** — HYGIENE, not a live
-   bug, and measured as such by `#1901 round 0`: the two walks' only behavioural divergence is
-   that the sweep credits an `Agent`/`Task` `tool_result` as signal, and that fires **0 times**
-   (0 ledger-line occurrences in any such block), while the injected/assistant split sums to
-   the rate tool's own total exactly. So the risk of leaving them separate is duplication, not
-   disagreement. Both keep their own walk on purpose (the shared `iter_transcripts` excludes
-   `subagents/`, where auditor transcripts live) and both carry a `JSONL_GLOB_SITES` row.
+3. **Consolidate the corpus walk with `audit-rule-firing-sweep.py`** — HYGIENE, not a live bug,
+   measured as such by `#1901 round 0`: the only behavioural divergence is that the sweep credits
+   an `Agent`/`Task` `tool_result` as signal, and that fires **0 times**. Both keep their own walk
+   on purpose (shared `iter_transcripts` excludes `subagents/`, where auditor transcripts live).
    forcing: none
 4. **Consider whether `extract_user_msgs.py --include-answers` should become the default.**
-   It is off so no shipped consumer moved, but the `find-session --arc` footer arguably wants
-   the operator's answers too. Blocked on `handoff-arc-user-messages.md` NEXT #2 — that arc
-   is mid-measurement against the current contract and flipping the default would invalidate
-   its in-flight reach count.
+   Blocked on `handoff-arc-user-messages.md` NEXT #2 — that arc is mid-measurement against the
+   current contract and flipping the default would invalidate its in-flight reach count.
    forcing: none
 
 ## Defects (batched)
@@ -331,40 +422,29 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
 
 ## How to verify
 ```bash
-# 0. THE CLOSING CONDITION ITSELF — the rate, both buckets, and the refusal
-python3 $DEVRC/scripts/round0-attribution-rate.py        # exit 6 = NOT MEASURABLE (n<10)
-# reads ~/.claude/projects on THIS host only; no `gh`, no network. Expect today:
-# PRE-cut 493 reports / 236 sessions / 474 files / mean 3.365 · POST-cut in-population
-# 1 session · exit 6.  `sess` is the observation count; `files` is not (subagents).
-# Read the DISPOSITIONS reasons block: every post-cut report says why it landed where it did.
-# 🔴 Two reasons that must stay RARE, and both were bugs when they were common:
-#    "no asks block in this session (a pre-fix report)" over a block delivered as a Read, and
-#    `NAMED BY` (selection) counted as the operator's words having arrived.
-# Its guards (incl. the two-way pin against scripts/lib/operator_asks.py):
-nix develop $DEVRC -c python3 -m pytest \
-  $DEVRC/scripts/tests/test_round0_attribution_rate.py -q
-# 1. the asks block renders on a real PR, from the DEPLOYED skill
-python3 $DEVRC/scripts/audit-dispatch.py 1887 --repo innovation-upstream/devrc --round 0 \
-  | awk '/THE OPERATOR.S OWN ASKS/,/^\*\*Ledger/'     # expect asks + a Sources read block
-# 2. the answers half — the flag is what recovers 93.5% more of his words
-python3 $DEVRC/scripts/session-analysis/extract_user_msgs.py \
-  --session <a-session-that-was-asked-a-question> --include-answers --jsonl \
-  | python3 -c 'import sys,json,collections; print(collections.Counter(json.loads(l)["kind"] for l in sys.stdin if l.strip()))'
-# expect {'typed': N, 'answer': M} with M>0; WITHOUT the flag, no `answer` rows at all
-# 3. the guards — and the battery, whose P1 positive control must be KILLED
-nix develop $DEVRC -c python3 -m pytest $DEVRC/scripts/tests/test_operator_asks.py -q
-nix develop $DEVRC -c python3 $DEVRC/scripts/tests/mutation_battery_operator_asks.py
-# expect 26 KILLED · 0 SURVIVED · 0 SKIPPED, C0 GREEN, restored by digest: True
-# 3b. 🔴 THE HEADLINE ARTIFACT OF THIS RANGE — the rate instrument's own battery.
-#     It exists because a sweep you cannot re-run is a sentence, not evidence.
-nix develop $DEVRC -c python3 $DEVRC/scripts/tests/mutants-round0-attribution-rate.py
-# expect rc 0 and: C4 COVERAGE … no mutant at their DECLARING site: none
-#   · 39 of 39 killed · 39 died on their own guard's ASSERTION
-#   · C3 restore: byte-identical to pristine after every mutant · RESULT: PASS
-# MEASURED 2026-09-29 at the head of this range; 36.5s / 74.2s wall on two runs
-# (this box runs concurrent suites — do not read the spread as the battery).
-# 4. 🔴 the tier the merge gates on — a SUBSET run cannot see GUARD 2
-nix build $DEVRC#checks.x86_64-linux.pytests --no-link -L   # read RESULT: and SCOPE:, not the wrapper's rc
-# 5. both hosts carry it
-bash $DEVRC/scripts/drift-check.sh   # read every per-host line, not the verdict
+# 1. the shipped instrument answers the closing condition (exit 6 = NOT MEASURABLE today)
+python3 $DEVRC/scripts/round0-attribution-rate.py; echo "rc=$?"
+# expect a RATES table (PRE/POST, in-population, and the out-of-population CONTROL row),
+# then VERDICT: NOT MEASURABLE (n=<N> distinct session(s) …; floor 10). rc 6. Numbers DRIFT.
+
+# 2. the committed battery — the sweep is evidence only because it is re-runnable
+PYTHONDONTWRITEBYTECODE=1 nix develop $DEVRC -c \
+  python3 $DEVRC/scripts/tests/mutants-round0-attribution-rate.py; echo "rc=$?"
+# expect rc 0 · C4 "no mutant at their DECLARING site: none" · C0 control green ·
+# "39 of 39 killed; 39 died on their own guard's ASSERTION" · C3 byte-identical. ~30-90s.
+
+# 3. the asks block itself, on a real in-population PR (its own commits carry the trailer)
+python3 $DEVRC/scripts/audit-dispatch.py 1901 --repo innovation-upstream/devrc --round 0 \
+  | awk '/THE OPERATOR.S OWN ASKS/,/^\*\*Ledger/'
+# expect the quoted asks + a Sources block. 🔴 Do NOT publish a quoted ask anywhere.
+
+# 4. the gate the merge actually rests on — and gate the MERGED tree, never the branch
+nix build $DEVRC#checks.x86_64-linux.pytests --no-link -L   # read RESULT:/SCOPE:, not the rc
+# ⚠ a SILENT build is the CACHED case, not a pass: recover via
+#   nix path-info --derivation … → nix log "$DRV"  (guard $DRV for emptiness), wc -c first.
+
+# 5. the false positive #1914 declined to carve out — confirm it is still a false POSITIVE
+nix develop $DEVRC -c python3 -c 'import sys; sys.path.insert(0,"'$DEVRC'/scripts"); \
+from testlib import public_ip_scan as m; print(len(m.find_in_line("x = parts[1::2]")))'
+# expect 1 — the gate reports it. That is deliberate: spell the slice differently.
 ```
