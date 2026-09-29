@@ -535,8 +535,8 @@ in
           # was REMOVED 2026-09-03 along with the other 9 live-config tests: they
           # re-broke on every snippet edit. NOTHING enforces this coupling now —
           # if attribution matters for a term, check it by hand.
-          { trigger = ":dacq"; replace = "do light recon and ask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "clarifying" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
-          { trigger = ":acq"; replace = "ask clarifying questions"; label = "ask clarifying questions"; search_terms = ["ask" "clarify" "clarifying" "questions"]; }
+          { trigger = ":dacq"; replace = "do light recon and ask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
+          { trigger = ":acq"; replace = "ask clarifying questions then proceed"; label = "ask clarifying questions"; search_terms = ["ask" "clarifying" "questions"]; }
           { trigger = ":alo"; replace = "anything left outstanding from this arc? Find all sessions associated with this handoff and check my messages then determine if all addressed shipped and closed out"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated, and if any related clawgate tasks are addresssed and up-to-date"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
           { trigger = ":kickoff"; replace = "give the kickoff message for next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
@@ -2074,9 +2074,15 @@ in
   # then.
   #
   # Its regression suite is `scripts/tests/test_base_clone_staleness.sh`, run by
-  # `scripts/run-tests.sh` as a SHELL_TESTS target (24 assertions / 8 cases,
-  # offline synthetic fixtures). Every case there is a defect that actually
-  # shipped; run it before changing this script.
+  # `scripts/run-tests.sh` as a SHELL_TESTS target (offline synthetic fixtures).
+  # Every case there is a defect that actually shipped; run it before changing this
+  # script.
+  #
+  # ⚠️ This comment used to carry a count ("24 assertions / 8 cases") and it was
+  # already wrong by the time anyone read it — the suite was at 48. A stale count
+  # makes the next reader distrust a working suite, so the number is deliberately
+  # gone; the suite prints its own, and its header says the same thing for the same
+  # reason. Run it rather than quoting it.
   home.file.".claude/hooks/base-clone-staleness.sh" = {
     source = ../scripts/claude-hooks/base-clone-staleness.sh;
     executable = true;
@@ -2226,6 +2232,13 @@ in
   # ~/.config/opencode/ existing.
   home.file.".config/opencode/guard_core.py".source = ../scripts/claude-hooks/guard_core.py;
 
+  # 🔴 base-clone-staleness.sh — the SessionStart freshness script, deployed here
+  # so opencode's base-clone-freshness plugin can run it. The SAME source file
+  # that backs ~/.claude/hooks/base-clone-staleness.sh is deployed here too,
+  # exactly like guard_core.py: one implementation, two harnesses.
+  home.file.".config/opencode/base-clone-staleness.sh".source =
+    ../scripts/claude-hooks/base-clone-staleness.sh;
+
   # Activity telemetry plugin — emits session/prompt/tool-call events into
   # activity.events via ~/.config/activity-collector/emit.
   #
@@ -2287,6 +2300,14 @@ in
   # the switch succeeds with the variable simply never set.
   home.file.".config/opencode/plugin/session-env.js".source =
     ../scripts/opencode/plugin/session-env.js;
+
+  # 🔴 Base-clone freshness plugin — refreshes the primary clone's context files
+  # (the Claude Code hook's sibling for opencode). It fires in `shell.env` once
+  # per session, non-blocking, and runs base-clone-staleness.sh deployed above.
+  # Same deployment constraints: directly in `plugin/`, `.js` only, non-recursive
+  # glob, and NEVER also in `plugins/` (plural).
+  home.file.".config/opencode/plugin/base-clone-freshness.js".source =
+    ../scripts/opencode/plugin/base-clone-freshness.js;
 
   # `shell.env` plugin — the only supported seam for putting environment into
   # opencode's bash tool (there is no `env` config key; setting one is silently

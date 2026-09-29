@@ -4867,9 +4867,15 @@ done
 # `test_base_clone_staleness.sh` is here from birth rather than being found
 # ungated later, which is the only difference between it and the two above. It
 # covers `scripts/claude-hooks/base-clone-staleness.sh`, a SessionStart hook that
-# WRITES to a clone's working tree (`git checkout <upstream> -- CLAUDE.md
-# .claude/skills/`), so an unrun suite here is an unguarded write path, not just
-# an unmeasured helper. Hermetic: its fixtures are local bare repos under a
+# WRITES to a clone's working tree (`git checkout <upstream> -- <paths>`, and a
+# bounded `rm -f`/`rmdir` for upstream deletions), so an unrun suite here is an
+# unguarded write path, not just an unmeasured helper.
+#
+# ⚠️ That parenthesis used to enumerate the paths -- `CLAUDE.md .claude/skills/` --
+# and was already stale when `AGENTS.md` joined the array, before the two `.claude/`
+# wiring entries did. The hook's own `REFRESH_PATHS` is the one list; read it there.
+#
+# Hermetic: its fixtures are local bare repos under a
 # mktemp dir — no network, no real remote, and every commit carries its identity
 # via `git -c user.email=…`, so it needs nothing from the operator's gitconfig
 # and stays inside GUARD 10's isolation.

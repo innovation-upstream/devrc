@@ -134,6 +134,20 @@ converts that into "the ladder ENDS".
    there would be a FALSE POSITIVE on a correct value. The downstream cost is
    bounded and correctly attributed: `rev-list` exits 128 and the ledger prints
    COULD NOT MEASURE naming the command, one round later.
+   🔴 "BOUNDED AND CORRECTLY ATTRIBUTED" WAS TRUE OF THE LEDGER AND FALSE OF THE
+   GATE, AND THAT SENTENCE IS WHY NOBODY LOOKED. Item 4's measured reading
+   re-runs each of the gate's two rounds over that round's OWN `audited=` range;
+   an endpoint naming no object makes that command exit non-zero, which is an
+   UNMEASURED that falls back to the STATED count — the gate reverting, for that
+   round, to exactly what it did before the unit existed. The ledger's COULD NOT
+   MEASURE is about a DIFFERENT range (`<prev>..HEAD`) and says nothing about
+   it, and the gate's own reason is printed only when the gate FIRES. So the one
+   case that most needed reporting was the one case nothing reported. MEASURED
+   2026-09-28 over 564 endpoints posted since the unit shipped: 30 (5.3%) across
+   11 ladders, and `ZacxDev/cairn` #119's ENTIRE ladder inert this way. It still
+   fails open — see `unverified_payload` for why refusing would break every
+   cross-repo invocation — and now says so on three surfaces: stderr, the brief,
+   and the block that gets pasted onto the PR.
 3b. **A DEGENERATE SELF-RANGE in a block the gate READS is refused, exit 4.**
    `audited=X..X` spans zero commits, so the round it records changed nothing
    by construction and a `payload=0` beside it was earned by nothing — measured
@@ -148,6 +162,21 @@ converts that into "the ladder ENDS".
    instances are the FINAL block of a closed ladder, so refusing every run
    whose history contains one is a permanently-red gate. A self-range further
    back is REPORTED and the run continues.
+3c. **AN `audited=` ENDPOINT THAT CANNOT NAME A COMMIT IN ANY REPOSITORY is
+   refused, exit 4** — and it is a strictly narrower claim than item 3's
+   unresolvable-token paragraph above. `civitai/cli` #727 round 0 posted
+   `7b9b8130` zero-padded to 41 characters: no fetch, no checkout and no network
+   makes that resolve, so it is bad INPUT in the same sense `audited=X..X` is,
+   and takes item 3's number rather than item 4's. Non-hex is refused too — 356
+   measured endpoints across six repositories are hex without exception, so the
+   shape this closes is a BRANCH NAME, which resolves here to a commit the round
+   never audited. 🔴 SCOPED TO THE PAIR THE GATE READS, like 3b, and ORDERED
+   BEFORE it, because `same_commit` is a PREFIX test: a fabricated expansion of
+   the other endpoint answers True there, and the operator would be told to fix
+   a "self-range" that is not one. 🔴 IT IS 1 OF THE 30 CASES ITEM 3 NAMES. The
+   other 29 are well-formed and merely unresolvable HERE, which is
+   indistinguishable from the legitimate cross-repo run, and they are REPORTED
+   rather than refused.
 4. **The ATTRIBUTION GATE refuses a delta brief (exit 5)** when the two most
    recent blocks BOTH read zero for CONSECUTIVE rounds. That is the
    skill's own stop condition, and until this existed nothing evaluated it:
@@ -1302,15 +1331,37 @@ PROSE_SUFFIXES = frozenset({
     ".md", ".markdown", ".txt", ".rst", ".adoc", ".asciidoc", ".org",
 })
 
+# 🔴 `command_failed` SEPARATES TWO UNMEASUREDS THAT DEMAND DIFFERENT REPORTS,
+# and it is a FIELD rather than a read of `reason`'s wording because a guard
+# spelled over a sentence is walkable by rewording it.
+#
+# EVERY unmeasured state falls back to the operator's stated count — that is the
+# fail-open contract and it does not change. But they are not one hazard:
+#   * `command_failed=False` — the command RAN and produced a trustworthy
+#     answer this reader declines to reduce to a number (an empty diff over a
+#     real range, a prose-only round, a path type it cannot classify, a block
+#     recording no range). The range is fine; the unit does not apply.
+#   * `command_failed=True`  — the command did NOT produce a trustworthy answer
+#     at all: it exited non-zero (an endpoint naming no object in THIS
+#     checkout), or exited 0 while writing to stderr. Nothing was measured, and
+#     `payload_reading` then silently reverts to the pre-measurement behaviour
+#     for that round.
+# MEASURED 2026-09-28 over 564 block endpoints posted since the executable-line
+# unit shipped: 30 (5.3%) across 11 ladders name no object, and on
+# `ZacxDev/cairn` #119 that is EVERY round — a ladder whose gate was wholly
+# inert with nothing anywhere saying so. `unverified_payload` is the report.
 ExecChurn = namedtuple(
     "ExecChurn",
     "executable code_lines prose_lines unknown_lines code_files unknown_paths "
-    "reason",
+    "reason command_failed",
+    # Defaulted so the five positional constructions in `classify_diff` — every
+    # one of which describes a command that RAN — keep reading as they do.
+    defaults=(False,),
 )
 
 
-def _unmeasured(reason):
-    return ExecChurn(None, None, None, None, None, (), reason)
+def _unmeasured(reason, command_failed=False):
+    return ExecChurn(None, None, None, None, None, (), reason, command_failed)
 
 
 def classify_changed_path(path):
@@ -1467,15 +1518,27 @@ def measure_executable_churn(runner, repo_dir, frm, to, base):
         "git", "-C", repo_dir, "log", "--format=", "--remerge-diff", "-p",
         "--no-color", f"{frm}..{to}", "--not", base,
     ])
+    # 🔴 `command_failed=True` below — the range itself could not be read, which
+    # on this corpus means an endpoint naming no object in THIS checkout. Still
+    # fails open, and now says so: see `unverified_payload`.
+    #
+    # 🔴 THE COMMENT IS ABOVE THE `if`, NOT INSIDE IT, AND THAT IS LOAD-BEARING.
+    # `scripts/tests/mutants-audit-dispatch.py`'s row `U11` targets these three
+    # lines as one contiguous literal; a comment between them makes the target
+    # ABSENT, and the battery then reports `MUTATION DID NOT APPLY` — measured,
+    # on this very edit. That is the right direction (a refusal, not a green),
+    # and it still means the row measured nothing.
     if rc != 0:
         return _unmeasured(
             f"`git log -p --remerge-diff {frm}..{to} --not {base}` exited "
-            f"{rc}: {(err or out).strip() or 'no output'}"
+            f"{rc}: {(err or out).strip() or 'no output'}",
+            command_failed=True,
         )
     if err.strip():
         return _unmeasured(
             "the diff command exited 0 but wrote to STDERR, so its output is "
-            f"not trustworthy: {err.strip()}"
+            f"not trustworthy: {err.strip()}",
+            command_failed=True,
         )
     return classify_diff(out)
 
@@ -1505,6 +1568,33 @@ def measure_rounds_executable_churn(runner, repo_dir, blocks, base, rounds):
     return measured
 
 
+def gate_pair(blocks, round_no):
+    """-> the blocks `attribution_stop` would READ. 0, 1 or 2 of them.
+
+    🔴 ONE RULE, ONE PLACE. Three readers ask "which blocks can reach the gate's
+    arithmetic" — the self-range refusal, the malformed-endpoint refusal and the
+    unverified-payload report — and `claude/RULES.md` is explicit that a
+    predicate open-coded at three sites is wrong at two of them in the same
+    direction. `attribution_stop` keeps its own staged walk because it must name
+    a DIFFERENT fail-open reason at each step it stops on; this returns the set.
+
+    🔴 A LITERAL `2`, AND NOT `ATTRIBUTION_STOP_ROUNDS`, for the reason
+    `attribution_stop` states at its own copy: this one says "delta rounds start
+    at 2", the constant says "two consecutive zero rounds end a ladder". Two
+    claims sharing one literal is how a change to either silently moves the
+    other.
+    """
+    if round_no < 2:
+        return []
+    by_round = {}
+    for b in blocks:
+        by_round[b.round_no] = b
+    if not by_round:
+        return []
+    newest = by_round[max(by_round)]
+    return [b for b in (by_round.get(newest.round_no - 1), newest) if b]
+
+
 # 🔴 A SELF-RANGE IN A BLOCK THE GATE READS IS AN INPUT REFUSAL, NOT A VERDICT.
 # `audited=X..X` spans zero commits, so the round it records cannot have changed
 # anything and a `payload=0` beside it was earned by nothing. Measured in the
@@ -1521,17 +1611,8 @@ def measure_rounds_executable_churn(runner, repo_dir, blocks, base, rounds):
 # gate `claude/RULES.md` forbids. Every other block keeps parsing, unchanged.
 def gate_relevant_self_ranges(blocks, round_no):
     """-> the blocks `attribution_stop` would read that record `X..X`."""
-    if round_no < 2:
-        return []
-    by_round = {}
-    for b in blocks:
-        by_round[b.round_no] = b
-    if not by_round:
-        return []
-    newest = by_round[max(by_round)]
-    pair = [b for b in (by_round.get(newest.round_no - 1), newest) if b]
     return [
-        b for b in pair
+        b for b in gate_pair(blocks, round_no)
         if b.audited_from and b.audited_to
         and same_commit(b.audited_from, b.audited_to)
     ]
@@ -1544,6 +1625,185 @@ def self_range_blocks(blocks):
         if b.audited_from and b.audited_to
         and same_commit(b.audited_from, b.audited_to)
     ]
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 AN ENDPOINT THAT CANNOT NAME A COMMIT — THE OTHER HALF OF THE SPLIT.
+# --------------------------------------------------------------------------- #
+# An `audited=` endpoint that no `git log` can resolve arrives in TWO shapes,
+# and folding them together would be wrong in both directions.
+#
+#   STRUCTURALLY MALFORMED — not an object name in ANY repository. `civitai/cli`
+#   #727 round 0 posted `7b9b8130000000000000000000000000000000000`: 41
+#   characters, an 8-char sha zero-padded to something that merely LOOKS like a
+#   full one. No fetch, no checkout and no network can make that resolve, so it
+#   is definitively bad INPUT — item 3's family, exit 4, exactly like the
+#   `audited=X..X` self-range one function up.
+#
+#   WELL-FORMED BUT UNRESOLVABLE — a plausible sha naming no object HERE.
+#   `civitai/civitai-app-starters` #474 round 3 posted `to=6e4441c1` where the
+#   commit is `6e4441c5…`: one corrupted character, and indistinguishable from
+#   the LEGITIMATE case — a force-pushed range, a commit this checkout never
+#   fetched, or a cross-repo ladder assembled from somewhere else. It MUST fail
+#   open; see `unverified_payload` for the report that makes it loud instead.
+#
+# 🔴 THE SPLIT IS 1 : 29 OF THE 30 MEASURED CASES, so the refusal is the small
+# half by design and the visibility is the fix.
+#
+# 🔴 NON-HEX IS REFUSED TOO, AND IT IS NOT SPECULATIVE. Measured 2026-09-28
+# across 356 endpoints in six repositories: every single one is hex, of length
+# 7, 8, 9, 40 or (once) 41. So nothing in the corpus spells an endpoint as a REF
+# — and a ref is the hazard the refusal closes, not a false positive it risks:
+# `audited=main..HEAD` resolves in the assembly checkout to commits that are not
+# the PR's, which is a measurement of the wrong thing reported with full
+# confidence. The emit-side round-trip guard already refuses `<…>` placeholders
+# on the same reasoning.
+SHA_TOKEN_RE = re.compile(r"^[0-9a-fA-F]{4,40}$")
+
+
+def malformed_endpoint_reason(token):
+    """-> why `token` can name no commit anywhere, or None. Pure.
+
+    🔴 EMPTY IS NOT MALFORMED. A missing endpoint is the round-1 / bare-`audited=`
+    state that REFUSAL 1b and the fail-open contract already own, and answering
+    "malformed" here would refuse a shape this script deliberately supports.
+    """
+    if not token:
+        return None
+    if len(token) > 40:
+        return (
+            f"is {len(token)} characters long, and a git object name is at "
+            "most 40 hex digits — so it names no object in ANY repository, "
+            "fetched or not"
+        )
+    if len(token) < 4:
+        return (
+            f"is {len(token)} character(s) long, and git will not resolve an "
+            "abbreviation shorter than 4"
+        )
+    if not SHA_TOKEN_RE.match(token):
+        return (
+            "carries a character that is not a hex digit, so it is not an "
+            "object name. A BRANCH or tag written here resolves in THIS "
+            "checkout to a commit that is not the one the round audited"
+        )
+    return None
+
+
+def gate_relevant_malformed_endpoints(blocks, round_no):
+    """-> `[(block, label, token, reason)]` over the pair the gate READS.
+
+    🔴 SCOPED LIKE `gate_relevant_self_ranges`, AND FOR ITS ARGUMENT. Refusing a
+    run over a block whose number no arithmetic consults is the permanently-red
+    gate `claude/RULES.md` forbids; the anchor the run actually uses belongs to
+    the newest block, which is always in this pair.
+    """
+    out = []
+    for b in gate_pair(blocks, round_no):
+        for label, token in (("`<from>`", b.audited_from),
+                             ("`<to>`", b.audited_to)):
+            why = malformed_endpoint_reason(token)
+            if why:
+                out.append((b, label, token, why))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 A ROUND THE GATE READ WITHOUT MEASURING — THE SILENT DISARM.
+# --------------------------------------------------------------------------- #
+# The executable-line unit re-measures each of the gate's two rounds over that
+# round's OWN `audited=<from>..<to>`. When that command cannot run,
+# `measure_executable_churn` returns UNMEASURED, `payload_reading` falls back to
+# the operator's STATED count — typically non-zero — and the gate reverts, for
+# that round, to exactly the behaviour the unit replaced. That fallback is
+# correct and stays; what was missing is that NOTHING SAID SO.
+#
+# 🔴 THERE WAS NO COULD-NOT-MEASURE SURFACE ON THIS PATH AT ALL. The one in
+# `render_ledger` belongs to `measure_range_churn` — the ledger's `<prev>..HEAD`,
+# a different range — and the gate's own reason is printed only when the gate
+# FIRES. So the one case where the operator most needs to know was the one case
+# nothing reported: rc 0, silent stderr, a confident brief.
+#
+# MEASURED 2026-09-28 over 564 endpoints posted since the unit shipped: 30
+# (5.3%) resolve to nothing, across 11 ladders — `civitai/civitai-app-starters`
+# #474 #475 #476 #448, `ZacxDev/cairn` #119, `civitai/civitai-developer-docs`
+# #95, `civitai/cli` #718 #727, `ZacxDev/homelab-infra` #907 and one more. On
+# #119 that is every round, so its whole ladder ran the gate inert.
+#
+# 🔴 THE PROVENANCE OF THOSE FIGURES, BECAUSE THEY ARE TWO DIFFERENT
+# MEASUREMENTS AND ONLY ONE IS THIS CHANGE'S. `564 / 30 / 11` is the operator's
+# corpus study. What THIS change re-derived independently is narrower and is the
+# part the code above is shaped by: a 356-endpoint sweep of six repositories,
+# every endpoint hex, of length 7, 8, 9, 40 or — exactly once — 41; and five of
+# the eleven ladders driven through this script end to end (#474, #119, #727,
+# `civitai/cli` #718, `ZacxDev/homelab-infra` #907), with two healthy devrc
+# ladders as the silence control. The wider count is cited, not re-run.
+#
+# 🔴 IT IS A REPORT AND NOT A REFUSAL, deliberately, and the operator's own
+# measurement is why: `audit-dispatch.py --repo civitai/talos-infra 1623 --round
+# 4` returns rc 0 from a devrc checkout and rc 5 from a talos-infra one. The
+# unresolvable range IS the ordinary cross-repo invocation; refusing it would
+# break every legitimate one. The same argument the unearned ledger makes, on
+# the same failure direction: the expensive mistake here is the FALSE STOP.
+#
+# 🔴 AND IT IS SCOPED TO `command_failed`, NOT TO "unmeasured". An empty diff
+# over a resolvable range, a prose-only round and an unclassifiable path are all
+# unmeasured with the range perfectly intact — firing on those would put a
+# COULD NOT MEASURE on healthy ladders, which is the permanently-red section the
+# next reader learns to skip.
+UnverifiedRound = namedtuple("UnverifiedRound", "block reason")
+UnverifiedPayload = namedtuple("UnverifiedPayload", "rounds read")
+
+UNVERIFIED_PAYLOAD_HEAD = (
+    "## 🔴 COULD NOT MEASURE A ROUND THE ATTRIBUTION GATE READ"
+)
+UNVERIFIED_PAYLOAD_TAG = "PAYLOAD NOT VERIFIED"
+
+
+def unverified_payload(blocks, round_no, measured):
+    """-> `UnverifiedPayload`: the gate-read rounds whose measurement FAILED.
+
+    Pure, like `attribution_stop` — `measured` is the `{round_no: ExecChurn}`
+    the caller computed — so the whole report is drivable with no git and no PR.
+    """
+    rows = []
+    pair = gate_pair(blocks, round_no)
+    for b in pair:
+        churn = (measured or {}).get(b.round_no)
+        if churn is not None and churn.command_failed:
+            rows.append(UnverifiedRound(b, churn.reason))
+    return UnverifiedPayload(tuple(rows), len(pair))
+
+
+def _posted_payload_phrase(block):
+    """`payload=41` / `no payload= field` — read by all three surfaces."""
+    if block.payload is None:
+        return "no `payload=` field"
+    return f"`payload={block.payload}`"
+
+
+def unverified_payload_summary(un):
+    """-> the ONE sentence all three surfaces lead with, or "".
+
+    🔴 ONE RULE, ONE PLACE, the same as `unearned_ledger_summary`: stderr, the
+    brief and the block pasted onto the PR print the same count over the same
+    denominator, and a second spelling of "N of M" is a second thing to get
+    wrong.
+    """
+    if not un.rounds:
+        return ""
+    rounds = [str(r.block.round_no) for r in un.rounds]
+    phrase = (
+        f"round {rounds[0]}" if len(rounds) == 1
+        else "rounds " + ", ".join(rounds[:-1]) + f" and {rounds[-1]}"
+    )
+    return (
+        f"{len(un.rounds)} of the {un.read} round(s) the attribution gate "
+        f"reads could NOT be measured over its own `audited=` range: {phrase}. "
+        "Those rounds' `payload=` counts were NOT verified — the gate is "
+        "reading the count as POSTED, which is what it did before the "
+        "executable-line unit existed."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1921,7 +2181,7 @@ Facts = namedtuple(
     "worktree branch dirty prev_sha emit_from claims claims_round checklist "
     "ledger assembled_at claims_source head_check base_assumed "
     "base_assumed_reason repo_unknown_reason round_zero payload gate_override "
-    "unearned operator_asks dispositions dispositions_arg",
+    "unearned operator_asks unverified dispositions dispositions_arg",
     # `round_zero` is appended LAST and defaulted so the two existing
     # constructions — one here, one in the suite — keep working unchanged. It is
     # None for every round except 0, and None AT round 0 means the skill was
@@ -1945,15 +2205,27 @@ Facts = namedtuple(
     # `_read_operator_asks` has no path that returns None — an absent block
     # restores the defect this whole field exists to prevent.
     #
-    # `dispositions` (a `RoundZeroDispositions`) is appended last and carries the
-    # same meaning for None as `unearned`: this run never computed one, so the
-    # section is SILENT rather than printing a verdict off a reading nobody made.
+    # 🔴 THE LAST THREE FIELDS CAME FROM TWO INDEPENDENT CHANGES THAT LANDED
+    # TOGETHER (#1909's `unverified`, #1892's two `dispositions` fields), so
+    # neither can call itself "appended last" any more. What is unchanged is the
+    # reason they are appended AT ALL and defaulted: every construction that
+    # predates them — one here, one in the suite — keeps reading as it does.
+    #
+    # 🔴 `unverified` carries an `UnverifiedPayload`. None means this run
+    # computed no reading — which `render_unverified_payload` treats exactly
+    # like "every round measured": SILENT. Reporting a COULD NOT MEASURE off a
+    # reading nobody took would be the reassuring zero this module refuses
+    # everywhere else, one direction over.
+    #
+    # `dispositions` (a `RoundZeroDispositions`) carries the same meaning for
+    # None as `unearned`: this run never computed one, so the section is SILENT
+    # rather than printing a verdict off a reading nobody made.
     # `dispositions_arg` is the RAW `--dispositions` value this run would WRITE,
     # kept separate from the READING for `prev_sha`/`emit_from`'s reason: one is
     # what this round records, the other is what the ladder already recorded,
     # and collapsing two anchors into one field is the defect this module has
     # already fixed once.
-    defaults=(None, None, None, None, None, None, None),
+    defaults=(None, None, None, None, None, None, None, None),
 )
 # 🔴 `repo_unknown_reason` — ROUND 13'S NINTH INSTANCE, AND THE THIRD IN THIS
 # EXACT FAMILY. `no_sha_reason` was `headRefOid`, `base_assumed_reason` was
@@ -5183,6 +5455,60 @@ def render_round_zero_dispositions(facts):
     ])
 
 
+def render_unverified_payload(facts):
+    """The COULD-NOT-MEASURE report IN THE BRIEF — "" when every round measured.
+
+    🔴 THE MISSING SURFACE, AND ITS ABSENCE IS THE WHOLE DEFECT. The gate's own
+    reason is printed only when the gate FIRES, and the brief's other COULD NOT
+    MEASURE belongs to the LEDGER's `<prev>..HEAD` range — a different command
+    over a different range. So a round the gate read WITHOUT measuring produced
+    rc 0, silent stderr and a brief that reads exactly like a verified one.
+
+    🔴 IT REPORTS A WEAKENED READING, NOT A BROKEN LADDER. The count the gate
+    acted on is still the operator's own, which is what it always was; the claim
+    this section makes is only that nothing independently checked it. Worded
+    that way on purpose — one sentence further and it reads as "that round found
+    nothing", which is the false stop this subsystem's whole failure direction.
+    """
+    un = facts.unverified
+    if un is None or not un.rounds:
+        return ""
+    lines = [
+        UNVERIFIED_PAYLOAD_HEAD,
+        "",
+        unverified_payload_summary(un),
+        "",
+        "The rounds, and why each could not be read:",
+        "",
+    ]
+    for r in sorted(un.rounds, key=lambda r: r.block.round_no):
+        b = r.block
+        lines += [
+            f"    round {b.round_no} — `audited={b.audited_from}.."
+            f"{b.audited_to}`, {_posted_payload_phrase(b)}",
+            f"        {r.reason}",
+        ]
+    lines += [
+        "",
+        "🔴 **What this does NOT say.** It does not say those rounds changed "
+        "nothing, it does not say the record is wrong, and it does not end this "
+        "ladder. An endpoint naming no object in THIS checkout is routinely "
+        "legitimate — a force-pushed range, a commit nobody fetched, or a "
+        "cross-repo ladder assembled from elsewhere — so the gate deliberately "
+        "reads the posted count and continues.",
+        "",
+        "What it DOES say is that the executable-line check behind those counts "
+        "did not run, so a `payload=` figure from a round named above is the "
+        "author's classification and nothing else. If your report quotes one, "
+        "say which it is.",
+        "",
+        "To get the measured reading, re-run this assembly from a checkout that "
+        "holds those commits (`git fetch` first), or fix the endpoint if it is "
+        "a typo.",
+    ]
+    return "\n".join(lines)
+
+
 def render_brief(facts):
     if facts.round_no == 0:
         kind = "ROUND 0 — REQUIREMENTS & DELETION pass (NOT a correctness audit)"
@@ -5215,10 +5541,19 @@ def render_brief(facts):
         # says which of the ladder's recorded numbers are not numbers. Put it
         # later and the reader has already formed a view.
         render_unearned_ledger(facts),
-        # 🔴 BESIDE THE LEDGER FOR THE SECTION ABOVE'S REASON: THE LEDGER hands
-        # the auditor this round's churn, and this says which of round 0's
-        # deletion candidates that churn was meant to answer. Later in the
-        # document and the reader has already formed a view.
+        # 🔴 BESIDE THE UNEARNED LEDGER, AND FOR ITS ARGUMENT. Both sections say
+        # a `payload=` figure this ladder posted is not evidence; they differ in
+        # WHY (a range spanning nothing, versus a range nothing could read), and
+        # the reader needs them in the same place, immediately after the section
+        # that hands them the numbers.
+        render_unverified_payload(facts),
+        # 🔴 AFTER BOTH PAYLOAD-CREDIBILITY SECTIONS, AND STILL BESIDE THE
+        # LEDGER, for the reason they are: THE LEDGER hands the auditor this
+        # round's churn, and this says which of round 0's deletion candidates
+        # that churn was meant to answer. It goes last of the three because the
+        # two above are about whether the NUMBERS can be believed at all, which
+        # the reader has to settle before being asked what they answered. Later
+        # in the document and the reader has already formed a view.
         render_round_zero_dispositions(facts),
         render_gate_override(facts),
         # 🔴 THE PROSE DETERMINATION IS NOT HERE, AND ITS ABSENCE IS THE FIX.
@@ -5329,6 +5664,23 @@ def emit_claims_skeleton(facts, head_sha):
     if facts.unearned is not None and facts.unearned.self_ranges:
         lines.append("  🔴 UNEARNED LEDGER — " + unearned_ledger_summary(
             facts.unearned))
+    # 🔴 THE COULD-NOT-MEASURE RECORD, ON THE ARTEFACT THAT LANDS ON THE PR, and
+    # it is here for the reason the line above is: the brief goes to one auditor
+    # and is gone, while this text is pasted into a comment and is what the NEXT
+    # round's reader meets. #1859 chose three surfaces precisely because
+    # "reported" had meant stderr-only, and that is why ITS defect survived.
+    # OUTSIDE the fence for the same mechanical reason — a non-numbered line
+    # INSIDE the body is folded into the claim above it by `_items_from_body`.
+    #
+    # 🔴 IT IS A BULLET ABOVE THE FENCE, NOT A HEADER FIELD, AND THAT IS WHY IT
+    # DOES NOT INTERACT WITH `dispositions=` BELOW. The FIFTH-FIELD note governs
+    # what goes INSIDE the fence line; a line outside it is invisible to
+    # `_EMITTED_AUDITED` and to the round-trip comparison entirely.
+    if facts.unverified is not None and facts.unverified.rounds:
+        lines.append(
+            f"  🔴 {UNVERIFIED_PAYLOAD_TAG} — "
+            + unverified_payload_summary(facts.unverified)
+        )
     # 🔴 `dispositions=` GOES BEFORE `audited=`, NEVER AFTER — the FIFTH-FIELD
     # note above states the mechanism: `_EMITTED_AUDITED` captures to END OF LINE
     # on purpose, so a field after `audited=` makes the round trip compare two
@@ -5592,6 +5944,15 @@ OVERRIDE_REFUSAL_HEADER = (
 SELF_RANGE_REFUSAL_HEADER = (
     "🔴 REFUSING TO ASSEMBLE another round — A BLOCK THE GATE READS RECORDS A "
     "SELF-RANGE"
+)
+# 🔴 A FOURTH HEADER, AND A FOURTH CLAIM. This one says an endpoint the gate
+# reads is not an object name at all — rc 4, item 3's family, the same "fix the
+# comment" action as the self-range above and NOT the gate's "stop auditing".
+# Its sibling, the endpoint that is WELL-FORMED and merely unresolvable, gets no
+# header here because it gets no refusal: see `unverified_payload`.
+MALFORMED_ENDPOINT_REFUSAL_HEADER = (
+    "🔴 REFUSING TO ASSEMBLE another round — AN `audited=` ENDPOINT THE GATE "
+    "READS IS NOT A COMMIT NAME"
 )
 
 # 🔴 A SEAM, NOT A CONVENIENCE — the same construction as the
@@ -6501,6 +6862,62 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
             # and this one is printed.
             file=err_stream,
         )
+    # ------------------------------------------------------------------ #
+    # 🔴 REFUSAL 3c — AN ENDPOINT THE GATE READS THAT IS NOT A COMMIT NAME.
+    # ------------------------------------------------------------------ #
+    # `7b9b8130000000000000000000000000000000000` — 41 characters, measured on
+    # `civitai/cli` #727 round 0. No repository anywhere holds that object, so
+    # this is item 3's family exactly like the self-range above: exit 4, "fix
+    # what you typed", and NEVER `ATTRIBUTION_STOP_RC`. A caller reading 5 may
+    # act on "the ladder is done"; handed it for a mistyped sha it would end a
+    # ladder on a typo.
+    #
+    # 🔴 ORDERED BEFORE THE SELF-RANGE REFUSAL, and that ordering is a
+    # diagnosis. `same_commit` is a PREFIX test, so a fabricated 41-char
+    # expansion of the other endpoint answers True there — and the operator
+    # would be told to fix a "self-range" when the actual fault is a token that
+    # cannot name a commit. Whichever refusal fires first writes the fix
+    # instruction, so the more fundamental complaint goes first.
+    #
+    # 🔴 AND ITS SIBLING GETS NO REFUSAL AT ALL. A WELL-FORMED endpoint that
+    # merely resolves to nothing here is reported below and fails open — see
+    # `unverified_payload` for the measurement that says why refusing it would
+    # break every cross-repo invocation.
+    malformed = gate_relevant_malformed_endpoints(blocks, args.round_no)
+    if malformed and brief_refused is None:
+        print("\n".join([
+            f"{MALFORMED_ENDPOINT_REFUSAL_HEADER} for round {args.round_no} of "
+            f"PR #{args.pr}.",
+            "",
+        ] + [
+            f"  round {b.round_no} records `audited={b.audited_from}.."
+            f"{b.audited_to}`, whose {label} `{token}` {why}"
+            for b, label, token, why in malformed
+        ] + [
+            "",
+            "  The attribution gate re-measures each of these two rounds over "
+            "its own range. An endpoint that can name no object cannot be "
+            "measured in ANY checkout, so that round's `payload=` count would "
+            "be taken as posted forever, with nothing saying so.",
+            "",
+            "  🔴 This is an INPUT refusal, not the gate's verdict. The ladder "
+            "is not over — the RECORD of it is broken.",
+            "",
+            "  🔴 It is NOT the same as a sha that simply is not in this "
+            "checkout. That one is legitimate — a force-push, an unfetched "
+            "commit, a cross-repo assembly — and this run REPORTS it and "
+            "continues. This endpoint is not a sha at all.",
+            "",
+            "  Fix: edit that comment so both ends of `audited=` are hex "
+            "object names (4-40 digits), or re-run "
+            f"`audit-dispatch.py {args.pr} --round {malformed[-1][0].round_no} "
+            "--emit-claims --audited <the tip that round read>` and replace "
+            "the block with what it prints.",
+        ]), file=err_stream)
+        if not args.emit_claims:
+            return 4
+        brief_refused = 4
+
     if degenerate and brief_refused is None:
         print("\n".join([
             f"{SELF_RANGE_REFUSAL_HEADER} for round {args.round_no} of PR "
@@ -6582,6 +6999,32 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         if rz_line:
             print("⚠ " + rz_line, file=err_stream)
 
+    # 🔴 THE FIRST OF THREE SURFACES FOR A ROUND THE GATE READ WITHOUT
+    # MEASURING, AND THE OTHER TWO ARE WHY THERE ARE THREE. #1859 recorded that
+    # "reported" had meant stderr-only and that this is precisely why ITS defect
+    # survived four rounds, so this reading also reaches the BRIEF (the auditor)
+    # and the PASTED BLOCK (the PR, and the next round's reader). Computed here,
+    # off the same `exec_churn` the gate reads, so the report and the arithmetic
+    # can never disagree about which rounds were measured.
+    #
+    # 🔴 IT IS PRINTED WHETHER OR NOT THE GATE FIRES. A gate that fires on two
+    # STATED zeros while neither was verified is exactly the pre-measurement
+    # behaviour, and an operator reading that refusal is entitled to know the
+    # unit behind it did not run.
+    unverified = unverified_payload(blocks, args.round_no, exec_churn)
+    if unverified.rounds:
+        print(
+            f"🔴 {UNVERIFIED_PAYLOAD_TAG} — "
+            + unverified_payload_summary(unverified),
+            file=err_stream,
+        )
+        for r in sorted(unverified.rounds, key=lambda r: r.block.round_no):
+            print(
+                f"    round {r.block.round_no} "
+                f"(`audited={r.block.audited_from}..{r.block.audited_to}`, "
+                f"{_posted_payload_phrase(r.block)}): {r.reason}",
+                file=err_stream,
+            )
     stop = attribution_stop(blocks, args.round_no, exec_churn)
     if stop.fires and brief_refused is None and not args.gate_override:
         print("\n".join([
@@ -6777,6 +7220,12 @@ def main(argv=None, runner=real_runner, cwd=None, stdout=None, stderr=None,
         # forced it to re-derive them from `blocks` — a second copy of the
         # predicate, at the one site that has to be right.
         unearned=unearned,
+        # 🔴 THE READING ITSELF, for `unearned`'s own reason: the brief section
+        # and the pasted note both name every offending round, its range, its
+        # posted count and why the command failed. A boolean would have forced
+        # each to re-derive them from `blocks` and `exec_churn` — a second copy
+        # of the predicate, at the sites that have to agree with the gate.
+        unverified=unverified,
         dispositions=dispositions,
         dispositions_arg=args.dispositions,
     )

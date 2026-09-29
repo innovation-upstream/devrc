@@ -902,6 +902,40 @@ def _strip_literals(cmd):
                   re.sub(QUOTED_PAT, QUOTED_PLACEHOLDER, cmd))
 
 
+def _unquote(cmd):
+    """Like `_strip_literals`, but for the WRITE detector: it removes the quote
+    CHARACTERS instead of blanking what they contain.
+
+    🔴 THIS IS THE ONE PLACE THE PRECEDENT'S STRIPPER IS WRONG, AND IT FAILED SILENT
+    IN THE WORST DIRECTION. `_strip_literals` blanks a quoted run so a command that
+    MENTIONS a work verb is not mistaken for one that RUNS it — correct for
+    `WORK_BASH_PAT`, where the risk is a false POSITIVE and blanking is conservative.
+    Reused for `HANDOFF_RUN_RX` the same conservatism inverts: the thing being matched
+    is a PATH, and a path is exactly what people quote. So
+
+        python3 "$DEVRC/scripts/lib/handoff_doc.py" --repo "$WT" --confirm --push
+
+    strips to `python3 '' --repo '' --confirm --push`, matches nothing, and the write
+    is never stamped — while the byte-identical unquoted form is. The session then
+    gets blocked at Stop for not writing a handoff it *did* write, twice, and pushed.
+    MEASURED 2026-09-27, on a session that had already landed two commits through
+    `handoff_doc.py`: ledger had `read` and `work` records and no `wrote` record.
+
+    ⚠ IT IS ALSO WHY THE BUG SURVIVES A CASUAL CHECK. `HANDOFF_RUN_RX` matches the
+    quoted command perfectly on its own — the loss happens in the wrapper — so testing
+    the regex rather than the predicate reports the quoted form as detected. Assert
+    through `is_handoff_write`, never through the pattern.
+
+    Removing the quote characters keeps the false-positive protection that actually
+    matters here, because `HANDOFF_RUN_RX` is anchored on the INTERPRETER: an `echo`
+    or a doc mentioning the filename still does not match, since no `python3` precedes
+    it. What it stops requiring is that the caller leave the path unquoted — which is
+    not something a hook may ask of a shell command, and which `$VAR`-bearing paths
+    make the natural spelling.
+    """
+    return re.sub(COMMENT_PAT, " ", cmd).replace('"', "").replace("'", "")
+
+
 def _is_handoff_basename(path):
     return bool(HANDOFF_BASENAME_RX.match(os.path.basename(path)))
 
@@ -1136,7 +1170,7 @@ def is_handoff_write(data):
     cmd = (d.get("tool_input") or {}).get("command")
     if not isinstance(cmd, str):
         return False
-    return bool(HANDOFF_RUN_RX.search(_strip_literals(cmd)))
+    return bool(HANDOFF_RUN_RX.search(_unquote(cmd)))
 
 
 # --------------------------------------------------------------------------- #

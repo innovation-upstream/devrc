@@ -4480,6 +4480,101 @@ LEAK_PRE_EXISTING_FLAG = "--leak-pre-existing-approved"
 #: ships only a bounded TAIL, so an approval early in a long session is gone.
 LEAK_TRAILER_KEY = "Leak-Gate-Approved"
 
+#: How far back the streak walk below will look. A bound rather than a full
+#: history walk because the number is only ever READ as "this has been going on
+#: for a while"; past this it says "at least N" and stops.
+LEAK_STREAK_MAX = 25
+
+
+def consecutive_leak_approvals(repo: Path, relpath: str) -> int | None:
+    """How many of this doc's most recent commits, unbroken, were approved
+    through the leak gate. `None` means the question could not be answered.
+
+    🔴 THIS IS NOT THE ATTRIBUTION `leak_gate` REJECTS, AND THE DIFFERENCE IS
+    THE WHOLE REASON IT IS ALLOWED TO EXIST. That rejection is about "did THIS
+    delta cause the findings?", which needs two scans and is a guess for three
+    named reasons. This asks a different question with an exact answer already
+    recorded in the repository: how many times in a row did somebody take the
+    opt-in on this document? No second scan, no scanner output parsed, no
+    comparison between runs.
+
+    🔴 IT EXISTS BECAUSE THE OPT-IN HAS NO MEMORY AND THE FOURTH USE PUBLISHED A
+    LEAK. MEASURED on one arc: four consecutive handoff commits carried this
+    trailer. Scanning each committed tree afterwards, the first three were
+    genuinely CLEAN — the refusals they approved through were not in what they
+    committed, which is exactly what the flag is for, so all three were honest.
+    The fourth committed three `denied-identifier` findings to `main` of a
+    PUBLIC repository. From inside the fourth run it looked identical to the
+    three honest ones: same flag, same banner, same everything. The operator had
+    no way to see they were the fourth rather than the first.
+
+    ⚠ IT FAILS OPEN, DELIBERATELY. A handoff must never be blocked because a
+    `git log` did not answer — so every failure returns `None`, and the caller
+    says the streak is UNKNOWN. `claude/RULES.md`: a failed command is not a
+    zero, and reporting one here would be the reassuring-zero defect this
+    number exists to fight.
+
+    ⚠ AND IT IS A COUNT OF COMMITS, NOT OF SESSIONS. One session writing the doc
+    three times counts three. That over-counts relative to "how many people
+    decided this", and the over-count is in the safe direction: it can only make
+    the streak look longer, never shorter.
+    """
+    run = git_allow(
+        repo,
+        "--no-optional-locks",
+        "log",
+        f"-{LEAK_STREAK_MAX}",
+        "--format=%H%x00%B%x01",
+        "--",
+        relpath,
+    )
+    if run.code != 0:
+        return None
+    streak = 0
+    for record in run.out.split("\x01"):
+        if not record.strip():
+            continue
+        _, _, body = record.partition("\x00")
+        # The trailer sits at the start of its own line. Anchoring on that is
+        # what keeps a doc that merely DISCUSSES the trailer — this docstring's
+        # own repo does — from counting as an approval.
+        if any(
+            line.startswith(f"{LEAK_TRAILER_KEY}:")
+            for line in body.splitlines()
+        ):
+            streak += 1
+            continue
+        break
+    return streak
+
+
+def leak_streak_line(streak: int | None) -> str:
+    """The one line the approval banner gains. Separated so a test can pin the
+    wording without building a repository and a scanner around it."""
+    if streak is None:
+        return (
+            f"  ⚠ HOW MANY TIMES IN A ROW THIS HAS BEEN APPROVED: UNKNOWN — the "
+            f"`git log` behind it did not answer. That is not zero.\n"
+        )
+    if streak == 0:
+        return (
+            f"  This is the FIRST approved-through write on this document — no "
+            f"unbroken run of them precedes it.\n"
+        )
+    nth = streak + 1
+    at_least = " (at least; the walk stops there)" if streak >= LEAK_STREAK_MAX else ""
+    return (
+        f"  🔴 THIS IS APPROVED-THROUGH WRITE NUMBER {nth} IN A ROW ON THIS "
+        f"DOCUMENT{at_least} — the previous {streak} commit(s) touching it "
+        f"carry `{LEAK_TRAILER_KEY}:` too.\n"
+        f"  A streak is the tell this gate cannot get from one run: approving "
+        f"through MAKES the tree red, which makes the NEXT run's "
+        f"\"pre-existing\" reading true. Three honest approvals are exactly how "
+        f"the fourth one ships a real leak. Before taking it again, scan a "
+        f"clean checkout of the base and find out whether the findings are "
+        f"still somebody else's.\n"
+    )
+
 
 class ScanRun(typing.NamedTuple):
     """One scanner invocation: its exit code and each stream it printed.
@@ -4771,13 +4866,16 @@ def leak_approved_note(
         f"delta.\n"
         f"  ⚠ NOTHING HERE CHECKED THAT. The gate does not compare scans, so "
         f"what was approved is everything below, whatever produced it.\n"
-        f"  🔴 AND THE SCANNER MAY NEVER HAVE SCANNED. A non-zero exit is all "
-        f"this gate sees, and a scanner that died on an import, a syntax error "
-        f"or a missing dependency exits non-zero without reading one byte of "
-        f"the tree — indistinguishable here from a finding. Read the lines "
-        f"below before trusting that anything was examined.\n"
-        f"  What {rel} printed (last {LEAKSCAN_SHOWN_MAX} line(s) of each "
-        f"stream"
+        + leak_streak_line(consecutive_leak_approvals(repo, relpath))
+        + (
+            f"  🔴 AND THE SCANNER MAY NEVER HAVE SCANNED. A non-zero exit is all "
+            f"this gate sees, and a scanner that died on an import, a syntax error "
+            f"or a missing dependency exits non-zero without reading one byte of "
+            f"the tree — indistinguishable here from a finding. Read the lines "
+            f"below before trusting that anything was examined.\n"
+            f"  What {rel} printed (last {LEAKSCAN_SHOWN_MAX} line(s) of each "
+            f"stream"
+        )
         + (f"; {elided} earlier line(s) elided" if elided else "")
         + "):\n"
         + "".join(f"    {line}\n" for line in shown)

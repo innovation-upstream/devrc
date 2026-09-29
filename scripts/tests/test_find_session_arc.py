@@ -1047,3 +1047,162 @@ def test_this_module_compiles_clean_under_W_error_SyntaxWarning():
         py_compile.compile(str(Path(__file__).resolve()), doraise=True,
                            cfile=str(Path(__file__).with_suffix(".guardcheck")))
     Path(__file__).with_suffix(".guardcheck").unlink(missing_ok=True)
+
+
+@pytest.fixture()
+def stale_clone_repo(tmp_path: Path) -> Path:
+    """A clone whose LOCAL branch is rewound behind its upstream.
+
+    🔴 This is the shape the handoff flow itself produces, not a contrivance. Rule
+    10 of `datapacket-talos` forbids committing in the primary clone, so every
+    handoff lands via `git worktree add --detach origin/<branch>` +
+    `push HEAD:<branch>` — which advances the REMOTE ref and never the local one.
+    A clone that only ever reads is therefore permanently behind, and the doc's
+    commits are reachable from `origin/<branch>` alone.
+    """
+    _sh("git", "init", "-q", "--bare", "-b", "main", "origin.git", cwd=tmp_path)
+    _sh("git", "clone", "-q", str(tmp_path / "origin.git"), "work", cwd=tmp_path)
+    work = tmp_path / "work"
+
+    # A commit BEFORE the doc exists, so rewinding to it makes the doc absent
+    # from HEAD entirely — the exact state that returns a confident empty arc.
+    (work / "README.md").write_text("base\n", encoding="utf-8")
+    _sh("git", "add", "--", "README.md", cwd=work)
+    _sh("git", "commit", "-q", "-m", "chore: base commit, no doc", cwd=work)
+    base = _sh("git", "rev-parse", "HEAD", cwd=work).strip()
+
+    (work / "claudedocs").mkdir()
+    doc = work / DOC
+    doc.write_text("# fixture\n\nfirst\n", encoding="utf-8")
+    _sh("git", "add", "--", DOC, cwd=work)
+    _sh("git", "commit", "-q", "-m", "docs(handoff): new doc, no trailer", cwd=work)
+    doc.write_text("# fixture\n\nsecond\n", encoding="utf-8")
+    _sh("git", "add", "--", DOC, cwd=work)
+    _sh("git", "commit", "-q", "-m", SQUASH_BODY, cwd=work)
+    doc.write_text("# fixture\n\nthird\n", encoding="utf-8")
+    _sh("git", "add", "--", DOC, cwd=work)
+    _sh("git", "commit", "-q", "-m", PLAIN_BODY, cwd=work)
+
+    _sh("git", "push", "-q", "origin", "main", cwd=work)
+    # Rewind the LOCAL branch only. `origin/main` keeps all four commits.
+    _sh("git", "reset", "--hard", "-q", base, cwd=work)
+    return work
+
+
+class TestStaleLocalBranchDoesNotHideTheArc:
+    """🔴 The regression this module's worst measured failure produced.
+
+    Red at the pre-fix `doc_commits` (which walked `HEAD` implicitly), green now.
+    """
+
+    def test_the_BUG_STATE_is_real__HEAD_alone_sees_nothing(self, stale_clone_repo):
+        """The control that makes the next test meaningful rather than tautological.
+
+        If `HEAD` could see these commits the fixture would not reproduce the
+        defect, and a green next test would prove nothing. Measured here so the
+        regression test's redness at base is attributable to the walk's REF and
+        not to the fixture being wrong.
+        """
+        out = _sh("git", "log", "--format=%H", "--follow", "--", DOC,
+                  cwd=stale_clone_repo)
+        assert out.strip() == "", (
+            "the fixture does not reproduce the bug: HEAD can still reach the "
+            "doc's commits, so this file cannot test the stale-branch case")
+        # …and the upstream genuinely has them, or the fix has nothing to find.
+        up = _sh("git", "log", "--format=%H", "--follow", "origin/main", "--", DOC,
+                 cwd=stale_clone_repo)
+        assert len(up.strip().splitlines()) == 3
+
+    def test_doc_commits_FINDS_all_three_via_the_upstream(self, stale_clone_repo):
+        commits = ha.doc_commits(str(stale_clone_repo), DOC)
+        assert len(commits) == 3, (
+            "the writer half walked HEAD alone: a stale local branch hid the "
+            f"whole arc (got {len(commits)} of 3)")
+
+    def test_the_ORIGINATING_session_is_recovered(self, stale_clone_repo):
+        """The one writer the reader half structurally cannot see.
+
+        An originating session never resumed the doc it created, so it appears in
+        no transcript search. Losing it to a stale ref loses it entirely.
+        """
+        commits = ha.doc_commits(str(stale_clone_repo), DOC)
+        oldest = commits[-1]
+        assert oldest.stamped is False
+        ids = [i for c in commits for i in c.session_ids]
+        assert "11111111-1111-4111-8111-111111111111" in ids
+        assert "22222222-2222-4222-8222-222222222222" in ids
+
+    def test_commits_are_NEWEST_FIRST_across_the_merge(self, stale_clone_repo):
+        """The single-rev walk gave this ordering for free; the merge must keep it.
+
+        Pinned because `writer_members` reads `commits[-1]` as the ORIGINATING
+        commit, so an ordering regression silently relabels who originated an arc.
+
+        🔴 ASSERTED AGAINST GIT'S OWN ORDER, NOT AGAINST `%aI`. Every commit in
+        this fixture is created inside the same second, so a
+        `dates == sorted(dates, reverse=True)` assertion is VACUOUS here — it
+        holds for any permutation. That is not a fixture wart to work around: it
+        is the exact condition under which the first implementation of the merge
+        mis-ordered (it sorted on the second-resolution date and tie-broke by
+        sha), so the fixture is the bug's natural habitat and the assertion has
+        to be structural.
+        """
+        expected = _sh("git", "log", "--format=%H", "--follow", "origin/main",
+                       "--", DOC, cwd=stale_clone_repo).split()
+        commits = ha.doc_commits(str(stale_clone_repo), DOC)
+        assert [c.sha for c in commits] == expected, (
+            "the merged walk does not reproduce git's own newest-first order")
+        assert commits[-1].session_ids == (), (
+            "the oldest commit is not the unstamped originating one — ordering "
+            "inverted, which would relabel the arc's originator")
+
+    def test_a_commit_on_BOTH_refs_is_counted_ONCE(self, stale_clone_repo):
+        """Dedup. Without it every commit reachable from both refs doubles, and
+        `total_commits` — which the report prints as a coverage denominator —
+        overstates.
+
+        ⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE: green at the pre-fix module
+        too, because a single-rev walk cannot double-count in the first place. It
+        pins the property the two-rev walk newly has to maintain.
+        """
+        _sh("git", "merge", "-q", "--ff-only", "origin/main", cwd=stale_clone_repo)
+        commits = ha.doc_commits(str(stale_clone_repo), DOC)
+        shas = [c.sha for c in commits]
+        assert len(shas) == len(set(shas)) == 3, (
+            f"a commit reachable from both HEAD and the upstream was counted "
+            f"more than once: {shas}")
+
+
+class TestDocCommitRevs:
+    """⚠ NEW-EXPORT SPECS, NOT REGRESSION COVERAGE.
+
+    `doc_commit_revs` does not exist at the pre-fix module, so every test here is
+    red there only as `AttributeError` — which proves the symbol is new, not that
+    any assertion bites. The regression weight is carried entirely by
+    `TestStaleLocalBranchDoesNotHideTheArc`, whose central test fails at base with
+    its own message (`got 0 of 3`).
+    """
+
+    def test_returns_HEAD_AND_the_upstream_with_no_note(self, stale_clone_repo):
+        revs, note = ha.doc_commit_revs(str(stale_clone_repo))
+        assert revs[0] == "HEAD"
+        assert "origin/main" in revs
+        assert note is None
+
+    def test_a_repo_with_NO_upstream_gets_HEAD_ONLY_and_a_NOTE(self, arc_repo):
+        """`arc_repo` is a bare `git init` — no remote, no upstream.
+
+        🔴 The note is the point: falling back to `HEAD` alone is exactly the
+        blind state, so a caller must be able to say the coverage is narrower.
+        Returning `('HEAD',)` silently would reintroduce the defect as a default.
+        """
+        revs, note = ha.doc_commit_revs(str(arc_repo))
+        assert revs == ("HEAD",)
+        assert note and "HEAD` alone" in note
+
+    def test_the_note_reaches_the_REPORT(self, arc_repo):
+        report = ha.resolve_arc(str(arc_repo), DOC, reader_rows=[],
+                                readers_measured=True)
+        assert any("HEAD` alone" in n for n in report.unmeasured_notes), (
+            "the coverage note was computed and then dropped, so the report "
+            f"reads as complete: {report.unmeasured_notes!r}")

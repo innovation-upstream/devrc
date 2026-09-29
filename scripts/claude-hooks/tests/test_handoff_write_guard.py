@@ -1141,3 +1141,92 @@ def test_the_block_text_points_at_a_flow_that_exists():
 
 if __name__ == "__main__":                                  # pragma: no cover
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# --------------------------------------------------------------------------- #
+# A QUOTED SCRIPT PATH — the write detector's blind spot, 2026-09-27
+# --------------------------------------------------------------------------- #
+
+
+def test_a_quoted_handoff_doc_path_still_counts_as_a_write():
+    """🔴 THE FALSE NEGATIVE THAT BLOCKED A SESSION WHICH HAD WRITTEN ITS HANDOFF.
+
+    `_strip_literals` BLANKS a quoted run, which is right for `WORK_BASH_PAT` (the
+    risk there is a command that MENTIONS a work verb) and inverts for this
+    detector, whose subject is a PATH — and a path is exactly what people quote.
+    Measured 2026-09-27: a session ran
+
+        python3 "$DEVRC/scripts/lib/handoff_doc.py" --repo "$WT" --confirm --push
+
+    twice, landing two pushed commits, and its ledger held `read` and `work`
+    records and NO `wrote` record, so Stop blocked it for not writing a handoff it
+    had written. All three spellings must satisfy.
+    """
+    for cmd in (
+        'python3 "$DEVRC/scripts/lib/handoff_doc.py" --repo "$WT" --confirm --push',
+        "python3 '$DEVRC/scripts/lib/handoff_doc.py' --repo /x --confirm --push",
+        "python3 $DEVRC/scripts/lib/handoff_doc.py --repo /x --confirm --push",
+    ):
+        assert guard.is_handoff_write(bash(cmd)) is True, cmd
+
+
+def test_the_quoted_path_bug_is_invisible_to_the_pattern_alone():
+    """🔴 WHY THE BUG SURVIVED: THE REGEX IS INNOCENT, THE WRAPPER LOSES IT.
+
+    `HANDOFF_RUN_RX` matches the quoted command perfectly on its own, so a check
+    written against the PATTERN reports the quoted form as detected and a check
+    written against the PREDICATE does not. This pins that the two agree, which is
+    the property the original defect violated — and it fails if anyone reinstates
+    `_strip_literals` here, even though the pattern would still look correct.
+    """
+    cmd = 'python3 "$DEVRC/scripts/lib/handoff_doc.py" --confirm --push'
+    assert guard.HANDOFF_RUN_RX.search(cmd) is not None
+    assert guard.is_handoff_write(bash(cmd)) is True
+    # And the stripper that caused it still behaves as `WORK_BASH_PAT` needs.
+    assert "handoff_doc.py" not in guard._strip_literals(cmd)
+
+
+def test_unquoting_does_not_admit_a_mere_mention():
+    """🔴 THE NEGATIVE CONTROL, AND THE REASON THE FIX IS SAFE.
+
+    Removing quote characters rather than the quoted CONTENT could have opened the
+    false positive `_strip_literals` exists to prevent. It does not, because
+    `HANDOFF_RUN_RX` is anchored on the INTERPRETER: with no `python3` immediately
+    before it, a filename in prose, in an echo, in a grep pattern or in a trailing
+    comment still matches nothing. Every line here would match a bare
+    `"handoff_doc.py" in cmd`.
+
+    ⚠ THIS ONE IS AN INVARIANT GUARD, NOT REGRESSION COVERAGE, and is labelled so it
+    is not counted as the latter: it passes at the base commit too, because the bug
+    was a false NEGATIVE and never violated this property. Its three siblings above
+    were watched RED at the base; this was watched GREEN at both ends, which is
+    exactly what a control for a fix is supposed to do.
+    """
+    for cmd in (
+        'echo "remember to run handoff_doc.py at the end"',
+        "grep -n handoff_doc.py ~/.claude/skills/handoff/SKILL.md",
+        "ls   # python3 scripts/lib/handoff_doc.py",
+        'cat "$DEVRC/scripts/lib/handoff_doc.py"',
+        "git log --oneline -- scripts/lib/handoff_doc.py",
+    ):
+        assert guard.is_handoff_write(bash(cmd)) is False, cmd
+
+
+def test_a_quoted_write_satisfies_the_guard_end_to_end(home, repo):
+    """🔴 THE PREDICATE IS NOT THE VERDICT — assert the OBSERVABLE.
+
+    A unit test on `is_handoff_write` would have passed all along on the unquoted
+    form while the session still got blocked, because what decides a Stop is the
+    `wrote` record the PostToolUse path stamps. This drives the real sequence —
+    read, work, quoted write — and asserts the Stop goes silent, which is the thing
+    that was actually broken.
+    """
+    doc = str(repo / "claudedocs" / DOC)
+    sd = seed(doc)
+    guard.post_tool_use(bash("git commit -m x"), now=AFTER_READ_EPOCH)
+    guard.post_tool_use(
+        bash('python3 "$DEVRC/scripts/lib/handoff_doc.py" --repo "$WT" --confirm --push'),
+        now=AFTER_READ_EPOCH)
+    assert os.path.exists(os.path.join(sd, guard.STATE_WROTE)), \
+        "a quoted invocation must stamp the session-level `wrote` record"
+    assert guard.stop_decision(payload(event="Stop")) == ("silent", "")
