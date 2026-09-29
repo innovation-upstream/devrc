@@ -26,6 +26,19 @@ generates the range, the cross-repo worktree directive, checkout state and toolc
 prior round's claims from the fenced `audit-claims` block ONLY, and carries the invariant clauses
 verbatim. **A delta round with no parseable block is REFUSED.**
 
+🔴 **PASS `--repo <owner>/<name>` WHENEVER THE PR IS NOT IN YOUR CWD'S REPO — without it the PR
+NUMBER IS RESOLVED AGAINST THE CWD'S REPO, SILENTLY.** This is a dispatch hub: sessions routinely
+sit in one repo and audit a PR in another, and PR numbers collide across repos by construction.
+MEASURED 2026-09-01: `audit-dispatch.py 1220` run from `civitai/talos-infra` for
+`innovation-upstream/devrc#1220` assembled a **complete, well-formed, confident brief for
+talos-infra#1220** — a real, unrelated mongo-alerts PR. Nothing errored; the only tell is the
+repo name on the brief's own title line. An auditor handed that brief audits the wrong PR and
+reports findings about work you never touched. **Read the title line of every brief before
+dispatching it.** With `--repo` the script also emits the CROSS-REPO section that tells the agent
+**not** to use `isolation: "worktree"` (which would worktree the cwd's repo — the same class of
+error one level down); without it, that section is silently absent because the script believes the
+PR is local.
+
 🔴 **That refusal covers NO block at all — it does NOT cover a MISSING INTERMEDIATE one, which
 proceeds and SILENTLY WIDENS the range.** The anchor is the newest block the script can PARSE, not
 the previous round's, so when round N−1 posted nothing, round N anchors on round N−2's tip and the
