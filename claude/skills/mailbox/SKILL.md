@@ -166,6 +166,14 @@ STORED generated columns (auto-computed) + the automation state columns:
 - `labels text[]` + `processed_at` — claim/track messages.
 
 ## ⚠ Gotchas (each cost real time at go-live)
+- 🔴 **READING AN ATTACHMENT: never round-trip `raw` through `psql`.** `psql -At -c "select
+  encode(raw,'base64')"` piped to `base64 -d` printed `base64: invalid input` and still wrote a
+  **truncated** file — 27,285 B of a 36,880 B message — which `email.message_from_file` then parsed
+  into a plausible-looking but ASCII "`.docx`" that no reader would question. `file` said `ASCII
+  text` and `unzip -t` said `cannot find zipfile directory`; a real one is `PK\x03\x04`. Read the
+  column as BYTES instead — psycopg2 over a `kubectl port-forward`, `email.message_from_bytes`,
+  `part.get_payload(decode=True)` — and **verify the extraction** (`file`, `unzip -t`, and the
+  `raw` length against the row's own `size_bytes`) before trusting what you read out of it.
 - **aiosmtpd + asyncpg event-loop:** the receiver MUST run the SMTP server on the asyncpg
   pool's loop (`loop.create_server(SMTP(...))`), **NOT** the threaded `Controller` (separate
   loop → every message 451s "another operation in progress"). Keep it that way if you edit
