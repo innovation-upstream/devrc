@@ -8419,7 +8419,14 @@ EXPECTED_REMEDY_TWO = (
 #: prescriptive "How you clear it" heading, i.e. the copy an agent reads BEFORE
 #: running the tool (round 1 caught that). A retraction is a tree-wide sweep, and
 #: nothing was checking the tree.
+#: 🔴 THE MARKER BELOW IS LOAD-BEARING, NOT DECORATION. These two literals are
+#: themselves occurrences, so the sweep scans them like any other text. They used
+#: to clear it only because `retracted` matched INSIDE the constant's own name 25
+#: chars away — so round 3 measured that a pure RENAME of this constant made the
+#: sweep fail on its own ledger. Markers are word-bounded now, and the words
+#: `falsified` and `retracted` below are what legitimately clear these two lines.
 RETRACTED_BY_RULE_Q = (
+    # both falsified by rule (q); quoted here so they can be retracted elsewhere
     "it cannot shrink them for you",
     "an entry rule and no exit rule",
 )
@@ -8438,7 +8445,17 @@ _RETRACTION_MARKERS = (
 
 
 def _rule_p_sites() -> tuple:
-    """Every file that states rule (p)'s remedies to a human or an agent.
+    """The handoff SKILL and MODULE surfaces that state rule (p)'s remedies.
+
+    ⚠ NOT "every file in the repo that states them" — an earlier wording claimed
+    that and it was the same over-claim as the 3-tuple it replaced. Also stating
+    them and deliberately UNSWEPT: `claudedocs/handoff-evictable-note-ungated.md`,
+    `claudedocs/handoff-handoff-resume-prune.md`,
+    `claudedocs/proposal-handoff-resume-prune.md`, `scripts/tests/mutants-handoff-cap.sh`.
+    None carries a bare copy today (round 3 scanned all 1,573 tracked files), and
+    `claudedocs/` is transient by convention — but the gap is named here so the
+    next author knows to look rather than trusting a universal.
+
 
     🔴 GLOBBED, NOT HARDCODED. Round 2's F2: the docstring said "tree-wide"
     while the implementation was a 3-path tuple, so a bare copy in a NEW
@@ -8485,8 +8502,20 @@ def _scan(text: str) -> tuple:
     it. So the sweep counts what it actually SAW and asserts a floor; a scan that
     read nothing reports 0 occurrences and cannot be mistaken for a clean tree.
     """
-    lines = [re.sub(r"^\s*(?:#+|//+|\*+|--)\s?", "", ln) for ln in text.splitlines()]
-    flat = " ".join(" ".join(lines).split())
+    stripped = []
+    for ln in text.splitlines():
+        ln = re.sub(r"^\s*(?:#+|//+|\*+|--)\s?", "", ln)
+        # 🔴 AND THE STRING-LITERAL BOUNDARY, which is where this module's
+        # AGENT-FACING prose actually lives. Round 3 measured it: the refusals
+        # and `--help` text are built from adjacent literals, 916 lines of this
+        # module end in a bare closing quote, and a phrase split across two of
+        # them was not merely unflagged — it was not COUNTED (`seen=0`). The
+        # round-2 fix closed the `#` comment case and left the strings, i.e. it
+        # covered the copy nobody reads and missed the copy an agent does.
+        ln = re.sub(r'^\s*["\']', "", ln)
+        ln = re.sub(r'["\']\s*(?:,|\+)?\s*$', "", ln)
+        stripped.append(ln)
+    flat = " ".join(" ".join(stripped).split())
     low = flat.lower()
     hits: list = []
     seen = 0
@@ -8495,7 +8524,14 @@ def _scan(text: str) -> tuple:
         while (i := low.find(phrase.lower(), start)) != -1:
             seen += 1
             window = low[max(0, i - 400): i + len(phrase) + 400]
-            if not any(m.lower() in window for m in _RETRACTION_MARKERS):
+            # 🔴 WORD BOUNDARIES, because a marker matching INSIDE an identifier
+            # is the `ENDED`-in-`appended` accident again. Round 3 found the
+            # tuple's own literal cleared solely by `retracted` matching inside
+            # the constant name `RETRACTED_BY_RULE_Q` 25 chars away — so a pure
+            # RENAME of that constant made the sweep fail on its own ledger, and
+            # any new bare copy near a mention of it was auto-cleared.
+            if not any(re.search(rf"\b{re.escape(m.lower())}\b", window)
+                       for m in _RETRACTION_MARKERS):
                 hits.append(flat[max(0, i - 90): i + len(phrase) + 90])
             start = i + len(phrase)
     return hits, seen
@@ -8524,6 +8560,7 @@ def test_no_site_still_ASSERTS_what_rule_q_falsified():
     catches a NEW bare copy, which is the failure that actually happened twice.
     """
     offenders: list = []
+    per_site: dict = {}
     files = 0
     seen = 0
     for label, path in _rule_p_sites():
@@ -8533,6 +8570,7 @@ def test_no_site_still_ASSERTS_what_rule_q_falsified():
         files += 1
         bare, total = _scan(path.read_text(encoding="utf-8"))
         seen += total
+        per_site[label] = total
         offenders.extend(f"{label}: ...{hit}..." for hit in bare)
     # 🔴 POSITIVE CONTROL, IN THE GUARD'S OWN BODY. Report the pair — files read
     # and phrase occurrences SEEN — never the zero alone. Round 2 gutted this
@@ -8545,6 +8583,18 @@ def test_no_site_still_ASSERTS_what_rule_q_falsified():
         "count this low means the scan did not run — and a zero offenders list "
         "from a scan that read nothing is indistinguishable from a clean tree. "
         "Check the loop above still iterates `_rule_p_sites()`.")
+    # 🔴 PER-SITE, NOT JUST A TOTAL. Round 3 measured that a filtered call site
+    # — `[s for s in _rule_p_sites() if s[0].endswith('.md')]` — clears the
+    # totals above (files=8, seen=3) while NEVER READING `handoff_doc.py`, the
+    # file that carried the two live assertions round 2 found. A total is
+    # satisfiable by the files that cannot fail.
+    for required in ("scripts/lib/handoff_doc.py",
+                     "claude/skills/handoff/reference/write-gate.md"):
+        assert per_site.get(required, 0) >= 1, (
+            f"{required} contributed 0 occurrences, so it was not actually "
+            f"read. Per-site counts: {per_site}. Both of these carry retracted "
+            "phrases today; a zero from either means the scan skipped it while "
+            "the totals were satisfied by files that contain nothing.")
     assert not offenders, (
         "a site still ASSERTS something rule (q) falsified, with no retraction "
         "marker near it. `--prune` IS the exit rule, and it COMBINES with "
@@ -8576,14 +8626,23 @@ def test_the_sweep_actually_READS_the_files_it_claims_to_cover():
         "empty or truncated list makes it pass while checking nothing — the "
         "exact mutation round 2 landed and both prior tests survived.")
     labels = {label for label, _ in sites}
+    # 🔴 THREE surfaces have each carried a LIVE copy of the retracted sentence
+    # during this PR; `SKILL.md` has NOT (measured across all 10 revisions in and
+    # behind it: 0 occurrences at every sha). It is required here because the
+    # glob supplies it and it STATES rule (p)'s remedies at step 5 — a different
+    # reason, and the message used to assert the wrong one for it.
     for required in ("scripts/lib/handoff_doc.py",
                      "scripts/tests/test_handoff_doc.py",
-                     "claude/skills/handoff/SKILL.md",
                      "claude/skills/handoff/reference/write-gate.md"):
         assert required in labels, (
-            f"{required} is not in the sweep's site list. Every one of these has "
-            "carried a LIVE copy of the retracted sentence at some point in this "
-            f"PR. Covered: {sorted(labels)}")
+            f"{required} is not in the sweep's site list, and each of these HAS "
+            "carried a live copy of the retracted sentence during this PR. "
+            f"Covered: {sorted(labels)}")
+    assert "claude/skills/handoff/SKILL.md" in labels, (
+        "claude/skills/handoff/SKILL.md is not in the sweep's site list. It has "
+        "never carried the phrase, but it is the ONLY file an executing agent "
+        "reads at step 5, so a false remedy appearing there is the worst case. "
+        f"Covered: {sorted(labels)}")
     for label, path in sites:
         assert path.is_file(), f"{label} is listed but does not exist"
 

@@ -3691,9 +3691,9 @@ def _clip(text: str, limit: int) -> str:
 # 🔴 THE GAP THIS CLOSES, AND IT IS THE MIRROR OF RULE (p) RATHER THAN A SECOND
 # HALF OF IT. Rule (c) makes `Open investigations`, `Findings` and `Gotchas`
 # APPEND-ONLY, and rule (p) refuses to grow a document already over its ceiling.
-# Between them a doc can reach a state in which the sanctioned writer cannot
-# write at all: the bytes are in the append-only sections, and no path in this
-# module could ever remove one. `--help` listed no prune mode; rule (p)'s own
+# Between them a doc COULD reach a state in which the sanctioned writer COULD
+# NOT write at all: the bytes WERE in the append-only sections, and no path in
+# this module could remove one. `--help` listed no prune mode; rule (p)'s own
 # docstring SAID the appending sections HAD "an entry rule and no exit rule", and
 # `scripts/handoff-audit.py` measures the consequence (121 of 123 revisions grew
 # or held) while its own header says it "makes no edits". ⚠ PAST TENSE IS THE
