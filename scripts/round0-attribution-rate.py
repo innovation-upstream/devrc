@@ -145,9 +145,14 @@ unless each comes out as its ledger says, AND unless every branch is the one tha
 DECIDES some pole. ⚠ The count is not fixed: read `BEHAVIOURAL_POLES`, never a
 number in prose. This paragraph said "two" after the set had grown to four, which
 is the same count-in-prose defect `WalkFacts` below records.
-The role set that can produce `in` is its own one-line ledger
-(`IN_POPULATION_ROLES`), so re-admitting `selected` there is a visible edit that
-fails a test rather than a quiet change of meaning. A NEW ask SOURCE added to
+The role set that can produce `in` is DERIVED from `BRANCHES` and is NOT a second
+ledger — `IN_POPULATION_ROLES` is built at `:591-592`. So the edit that re-admits
+`selected` is flipping its `BRANCHES` disposition to `"in"`, which is visible and
+fails a test; ⚠ do not go hunting a literal tuple to change, because there is
+none, and restoring one would reinstate the two-sources-of-truth defect the
+derivation removed. This sentence claimed a "one-line ledger" three lines after
+the paragraph above self-corrected a stale count — the same count-in-prose defect,
+twice in one docstring. A NEW ask SOURCE added to
 `operator_asks` also fails the pin, because every `### from the …` heading a live
 render emits must match an anchor — nobody gets to decide by accident whether a
 new source counts as the words arriving.

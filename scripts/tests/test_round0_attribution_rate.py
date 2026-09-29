@@ -452,9 +452,12 @@ def test_a_block_that_NAMED_a_session_but_could_read_NOTHING_is_NOT_in_populatio
 
 
 def test_only_the_answered_role_can_make_a_report_in_population(r0):
-    """🔴 REGRESSION: the one-line ledger that replaced the precedence bug.
-    Re-admitting `selected` here is what the defect WAS, so it must be a visible
-    edit that fails a test rather than a quiet change of meaning."""
+    """🔴 REGRESSION: the DERIVED role set that replaced the precedence bug.
+    Re-admitting `selected` is what the defect WAS. ⚠ It is not re-admitted HERE:
+    `IN_POPULATION_ROLES` is derived from `BRANCHES` (`round0-attribution-rate.py`
+    `:591-592`), so the edit that would re-admit it is flipping that branch's
+    disposition to `"in"`. This assertion pins the derived RESULT, which is why it
+    goes red either way."""
     assert r0.IN_POPULATION_ROLES == ("answered",)
     assert "selected" not in r0.IN_POPULATION_ROLES
     # …and the role really is carried by the ask-heading anchor, not by a source

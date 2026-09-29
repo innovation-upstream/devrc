@@ -564,8 +564,16 @@ def main() -> int:
             # that case today — it has an anchor mutant
             # (`unmeasured-anchor-made-block-scoped`) and no mutant on its
             # `BRANCHES` line. Tightening this to per-kind would report that as
-            # a gap; it is a real, narrower gap and deliberately out of this
-            # round's scope.
+            # a gap — but it is a BOOKKEEPING gap, not a hole, and that was
+            # MEASURED rather than argued: a 40th row flipping
+            # `"unmeasured": ("out", …)` to `("in", …)` is KILLED, by
+            # `…NAMED_a_session_but_could_read_NOTHING_is_NOT_in_population`,
+            # `…could_not_read_a_trailer_is_out` and
+            # `test_only_the_answered_role_can_make_a_report_in_population`,
+            # each on its OWN assertion, plus a `SystemExit: 5` from the pole
+            # check. So do NOT add that row to close a gap: it proves nothing
+            # the suite does not already prove. Tighten to per-kind only if you
+            # first find a declared id whose mutation nothing kills.
             return any(f'id="{x}"' in p or f'"{x}": (' in p for p in patches)
 
         gaps = sorted({x for x in anchor_ids + branches if not _declared(x)})
@@ -575,7 +583,14 @@ def main() -> int:
         if gaps:
             say("🔴 C4 FAILED — a hand-maintained list is blind to code added "
                   "in the same round; name these or the sweep is not a claim "
-                  "about the file.")
+                  "about the file. ⚠ TWO causes reach this line, and the fix "
+                  "differs: (a) no mutant declares the id, or (b) a mutant "
+                  "exists but its `old` string does not span the DECLARING "
+                  "line — anchors are multi-line dicts, so a minimal "
+                  "single-line mutation of one lands in case (b) and is "
+                  "diagnosed here as (a). Check which before adding a row: a "
+                  "second redundant row turns this green without covering "
+                  "anything.")
             rc = 1
 
         # ---- C0: control ------------------------------------------------
