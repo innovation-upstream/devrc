@@ -96,15 +96,25 @@ EXPECTED_IMPORTERS = {
     # ONE definition of which base URL the task service lives on now that it is
     # a separate process from the permission router. It held
     # `ENDPOINT = "http://<host>:<port>/api/tasks"` and could not follow that
-    # split. ⚠ Its Signal twin (scripts/signal/clawgate.py) still holds that
-    # literal and is deliberately NOT on this ledger: its one caller is the
-    # `draft` CLI subcommand, which the deployed pod never runs, and the module
-    # ships in an image that COPYs its own directory by name — so importing the
-    # shared module there means widening a security-motivated allowlist for a
-    # path that cannot post a card today. Fixing it is its own change; see
-    # scripts/mail-actions/tests/test_clawgate_task.py for the guard that keeps
-    # the literal from coming back HERE.
+    # split.
     "scripts/mail-actions/clawgate.py",
+    # 🔴 THE SIGNAL TWIN, joined 2026-09-29 — and the entry above used to say it
+    # never would. That note read: "its one caller is the `draft` CLI
+    # subcommand, which the deployed pod never runs … importing the shared
+    # module there means widening a security-motivated allowlist for a path that
+    # cannot post a card today." The first half is true of the POD and false of
+    # the DEFECT: `consumer.py draft` is an OPERATOR command, run from the
+    # workbench CLI where ~/.claude/clawgate.env exists and names the task
+    # service, so the hardcoded router address was live-wrong every time a draft
+    # was raised. (Measured 2026-09-29: the router answers POST /api/tasks with
+    # 404 — the cards were not merely misrouted, they were dropped.) The second
+    # half overstated the cost: the allowlist is COPY-BY-NAME, and naming one
+    # more tracked, gated, stdlib-only file preserves that property exactly —
+    # build-push.sh control 2 derives its expected /app set from the Dockerfile,
+    # so only the dockerignore and scripts/signal/tests/test_image_deps.py
+    # needed widening, and the latter now pins "what the module loads" against
+    # "what the image ships" in both directions.
+    "scripts/signal/clawgate.py",
     # 🔴 The write-back guard takes only `TASK_API_URL_VARS` — the task-API base-URL
     # ledger — NOT the pending/stuck predicate, so it renders none of this queue and
     # the "its output was never reviewed here" reading does not apply to it. It is

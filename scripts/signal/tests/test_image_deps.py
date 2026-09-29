@@ -120,15 +120,26 @@ def requirement_dists() -> list[str]:
     return dists
 
 
-def dockerfile_copied_files() -> set[str]:
-    """Basenames of the scripts/signal/ files the Dockerfile COPYs."""
+def dockerfile_copied_paths() -> set[str]:
+    """EVERY source path the Dockerfile COPYs, repo-root-relative.
+
+    Not filtered to `scripts/signal/`: since #1878's Signal half landed, the
+    image also carries `scripts/lib/clawgate_tasks.py`, the shared task-API
+    base-URL resolver `clawgate.py` loads by explicit path. A derivation that
+    silently dropped it would let the dockerignore drift from the COPY list in
+    exactly the direction that empties the build context of it.
+    """
     copied = set()
     for m in re.finditer(r"^COPY\s+(\S+)\s+\S+\s*$", DOCKERFILE.read_text(encoding="utf-8"),
                          re.MULTILINE):
-        src = m.group(1)
-        if src.startswith("scripts/signal/"):
-            copied.add(Path(src).name)
+        copied.add(m.group(1))
     return copied
+
+
+def dockerfile_copied_files() -> set[str]:
+    """Basenames of the scripts/signal/ files the Dockerfile COPYs."""
+    return {Path(src).name for src in dockerfile_copied_paths()
+            if src.startswith("scripts/signal/")}
 
 
 # --------------------------------------------------------------------------- #
@@ -152,6 +163,13 @@ def test_the_derivations_observe_something():
     assert dockerfile_copied_files(), (
         "HARNESS BROKEN: the Dockerfile COPY regex matched nothing — every "
         "COPY-list assertion below would pass vacuously")
+    # The whole-path derivation is a SUPERSET of the signal-only one, and the
+    # shared-module guard below is built on the difference. Two equal sets here
+    # would mean the image ships nothing from outside scripts/signal/ and that
+    # guard would be asserting over an empty difference.
+    assert len(dockerfile_copied_paths()) > len(dockerfile_copied_files()), (
+        "HARNESS BROKEN: dockerfile_copied_paths() found no COPY outside "
+        "scripts/signal/, so the shared-module image guard has nothing to see")
 
 
 def test_the_ast_walker_can_see_a_new_import():
@@ -282,11 +300,103 @@ def test_dockerignore_allowlists_exactly_the_copied_files():
     assert lines and lines[0] == "**", (
         "Dockerfile.dockerignore must DENY everything on its first line and "
         f"re-admit by name; it starts with {lines[0]!r}")
-    admitted = {Path(ln[1:]).name for ln in lines[1:] if ln.startswith("!")}
-    copied = dockerfile_copied_files()
+    # 🔴 WHOLE PATHS, not basenames. Basenames stopped being a safe key when the
+    # image began carrying a file from a second directory: `scripts/lib/x.py`
+    # and `scripts/signal/x.py` are one name and two files, so a basename
+    # comparison would call a dockerignore that admits the WRONG directory a
+    # match — and the build would then fail on a missing source, or worse admit
+    # a path nobody named.
+    admitted = {ln[1:] for ln in lines[1:] if ln.startswith("!")}
+    copied = dockerfile_copied_paths()
     assert admitted == copied, (
         f"Dockerfile.dockerignore admits {sorted(admitted)} but the Dockerfile "
         f"COPYs {sorted(copied)}")
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE OTHER SEAM: a module the image does not contain
+#
+# `test_dockerfile_copies_every_runtime_module` pins scripts/signal/ against the
+# COPY list. It is structurally blind to a file loaded from ANYWHERE ELSE —
+# which is what `clawgate.py` now does: it resolves the Task API base URL from
+# `scripts/lib/clawgate_tasks.py`, by explicit path, so that the precedence has
+# ONE definition instead of a second copy going stale in here.
+#
+# A module loaded by path that the image lacks is an ImportError at runtime, in
+# the container, on the `draft` subcommand — the same shape as the missing
+# dependency this whole file exists to catch, one directory over. These pin the
+# relationship "what the code loads" == "what the image ships", in both
+# directions, deriving one side from the module under test and the other from
+# the Dockerfile.
+# --------------------------------------------------------------------------- #
+REPO_ROOT = SIGNAL_DIR.parents[1]
+
+
+def test_the_image_ships_the_shared_module_the_producer_LOADS():
+    import clawgate
+
+    needed = clawgate.SHARED_TASKS_MODULE
+    assert needed and needed.endswith(".py"), (
+        f"HARNESS BROKEN: clawgate.SHARED_TASKS_MODULE is {needed!r}; there is "
+        "no path to check the image against")
+    assert (REPO_ROOT / needed).is_file(), (
+        f"{needed} does not exist in the repo — the loader would raise "
+        "ImportError everywhere, container or not")
+    assert needed in dockerfile_copied_paths(), (
+        f"scripts/signal/clawgate.py loads {needed} at runtime, but the "
+        f"Dockerfile COPYs {sorted(dockerfile_copied_paths())}. The image would "
+        "build clean and `consumer.py draft` would raise ImportError inside the "
+        f"container.\nAdd:  COPY {needed} /app/{Path(needed).parent.as_posix()}/")
+
+
+def test_the_shared_module_is_copied_where_the_LOADER_looks_for_it():
+    """Set membership is not placement. The loader tries the SIBLING `../lib/`
+    first, which resolves only because the Dockerfile reproduces the repo layout
+    under /app. A COPY that flattened it into the signal directory would satisfy
+    the test above and still leave the container path unresolvable.
+    """
+    import clawgate
+
+    needed = clawgate.SHARED_TASKS_MODULE
+    dests = {}
+    for m in re.finditer(r"^COPY\s+(\S+)\s+(\S+)\s*$",
+                         DOCKERFILE.read_text(encoding="utf-8"), re.MULTILINE):
+        dests[m.group(1)] = m.group(2)
+    assert dests, "HARNESS BROKEN: no COPY line parsed with a destination"
+    dest = dests.get(needed)
+    assert dest is not None, f"{needed} is not COPYd at all"
+    # WORKDIR is /app/scripts/signal; the loader joins `here/../<tail>`.
+    landed = (dest + Path(needed).name) if dest.endswith("/") else dest
+    expected = "/app/" + needed
+    assert landed == expected, (
+        f"{needed} lands at {landed!r} in the image, but clawgate.py's first "
+        f"candidate path resolves to {expected!r} (WORKDIR /app/scripts/signal "
+        f"+ ../lib/). Copy it to /app/{Path(needed).parent.as_posix()}/.")
+
+
+def test_the_shared_module_adds_no_dependency_the_image_does_not_INSTALL():
+    """🔴 THE GAP THE BUILD CONTROL CANNOT SEE. `build-push.sh` control 1 walks
+    `/app/scripts/signal/*.py` only, so a third-party import inside the shared
+    module is invisible to it AND to
+    `test_requirements_matches_what_the_modules_actually_import` above — the
+    image would build, install nothing for it, and fail at `draft` time.
+
+    `scripts/lib/clawgate_tasks.py` is pure stdlib today (its own docstring says
+    so: "no network, no clock of its own"). This fails the moment that stops
+    being true, naming the two places that would then need updating.
+    """
+    import clawgate
+
+    path = REPO_ROOT / clawgate.SHARED_TASKS_MODULE
+    local = {p.stem for p in runtime_modules()} | {path.stem}
+    found = imported_names(path.read_text(encoding="utf-8"), local=local)
+    declared = {DIST_TO_IMPORT.get(d, d) for d in requirement_dists()}
+    missing = found - declared
+    assert not missing, (
+        f"{clawgate.SHARED_TASKS_MODULE} imports {sorted(missing)}, which "
+        "requirements.txt does not declare. build-push.sh control 1 only walks "
+        "scripts/signal/, so nothing else would notice: add it to "
+        "scripts/signal/requirements.txt and widen control 1's glob.")
 
 
 def test_the_dockerfile_does_not_hand_write_a_second_dependency_list():
