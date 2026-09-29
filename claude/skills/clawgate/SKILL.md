@@ -30,8 +30,9 @@ feature.
 
 ## Reference files
 `devrc/claude/skills/clawgate/reference/` → `~/.claude/skills/clawgate/` after a switch.
-⚠ Several of these are **muster's** and the `muster` skill routes to them; they were not moved when
-the service was.
+⚠ **Four of the files in that directory are NOT in the table below** — `task-api.md`,
+`agent-dispatch.md`, `agent-hardening.md` and `element-references.md` are **muster's**, and the
+`muster` skill routes to them. They sit here only because they were not moved when the service was.
 
 | file | read it when |
 |---|---|

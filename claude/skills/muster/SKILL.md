@@ -36,21 +36,20 @@ about muster `0.2.0`. Re-probe `:30306` before betting on one (`task-api.md`).
 
 ## Reference + flow files
 🔴 **They live under the `clawgate` skill's directory, not this one** — muster was extracted from
-clawgate and its documentation has not been moved with it. Every name below is
-`~/.claude/skills/clawgate/reference/<name>`, and a `flows/` one is
-`~/.claude/skills/clawgate/flows/<name>`.
+clawgate and its documentation has not been moved with it. The paths below are the DEPLOYED ones,
+and every bare `<name>.md` cited below means `~/.claude/skills/clawgate/reference/<name>.md`.
 
 | file | read it when |
 |---|---|
-| `task-api.md` | **writing/debugging a producer**; `clawgatectl` + exit codes; the `/api/*` inventory with its auth **and which service serves it**; tag grammar |
-| `agent-dispatch.md` | debugging the agent loop; `POST /agents`; the sandbox fixture; a silent non-start |
-| `architecture.md` | changing agents / repos / runbooks / privilege / native tools; muster's OWN Postgres |
-| `auth-doors.md` | 🔴 which door takes which credential; the retraction, measured BOTH ways |
-| `agent-hardening.md` | locking down a **homelab** kubeclaw devpod (netpol: Cilium) |
-| `element-references.md` | a task body carries extension-picked element refs |
-| `chief.md` | driving chief: verbs, creds, arming — ⚠ it SPANS both services |
-| `troubleshooting.md` | the four AGENT symptoms — and muster's RBAC: SA `muster`, ClusterRole `muster-agents`, **not** `clawgate-agents` |
-| `internals.md` | Go code: the two `taskTitle`s, migrations — **look in muster's tree, not clawgate's** |
+| `~/.claude/skills/clawgate/reference/task-api.md` | **writing/debugging a producer**; `clawgatectl` + exit codes; the `/api/*` inventory with its auth **and which service serves it**; tag grammar |
+| `~/.claude/skills/clawgate/reference/agent-dispatch.md` | debugging the agent loop; `POST /agents`; the sandbox fixture; a silent non-start |
+| `~/.claude/skills/clawgate/reference/architecture.md` | changing agents / repos / runbooks / privilege / native tools; muster's OWN Postgres |
+| `~/.claude/skills/clawgate/reference/auth-doors.md` | 🔴 which door takes which credential; the retraction, measured BOTH ways |
+| `~/.claude/skills/clawgate/reference/agent-hardening.md` | locking down a **homelab** kubeclaw devpod (netpol: Cilium) |
+| `~/.claude/skills/clawgate/reference/element-references.md` | a task body carries extension-picked element refs |
+| `~/.claude/skills/clawgate/reference/chief.md` | driving chief: verbs, creds, arming — ⚠ it SPANS both services |
+| `~/.claude/skills/clawgate/reference/troubleshooting.md` | the four AGENT symptoms — and muster's RBAC: SA `muster`, ClusterRole `muster-agents`, **not** `clawgate-agents` |
+| `~/.claude/skills/clawgate/reference/internals.md` | Go code: the two `taskTitle`s, migrations — **look in muster's tree, not clawgate's** |
 
 ## Flow files
 `flows/` = PROCEDURES you execute (`reference/` = FACTS you verify against). A flow does not
@@ -58,8 +57,8 @@ auto-fire — something must name it.
 
 | file | run it when |
 |---|---|
-| `flows/task-authoring.md` | **CREATING a task** — pre-verify → interview → recommend → tags → confirm → create. 🔴 A PreToolUse hook DENIES a create with no `## Acceptance criteria`, or an unreadable body. Override `CLAWGATE_NO_INTERVIEW=1`. |
-| `flows/task-pickup.md` | **PICKING UP a task** — the full ritual, criteria detector, ordering trap and comment rules. See `task pickup` below, which owns the status gate. |
+| `~/.claude/skills/clawgate/flows/task-authoring.md` | **CREATING a task** — pre-verify → interview → recommend → tags → confirm → create. 🔴 A PreToolUse hook DENIES a create with no `## Acceptance criteria`, or an unreadable body. Override `CLAWGATE_NO_INTERVIEW=1`. |
+| `~/.claude/skills/clawgate/flows/task-pickup.md` | **PICKING UP a task** — the full ritual, criteria detector, ordering trap and comment rules. See `task pickup` below, which owns the status gate. |
 
 ## Key facts (verify before asserting)
 
