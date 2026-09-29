@@ -459,9 +459,23 @@ def test_db_colon_colon_is_not_an_address():
 # luck and would have reddened `main` for the next author who wrote a slice. A
 # path pin would have hidden the class and left them broken.
 #
-# The rule is `public_ip_scan.is_subscript_slice` — enclosure AND subscript
-# position AND slice shape, all three. The tests below are split so that each
-# condition has a case that fails if it is dropped.
+# The rule is `public_ip_scan.is_subscript_slice` — slice SHAPE and WHOLE-GROUP
+# enclosure and SUBSCRIPT position, all three. The tests below are split so that
+# each condition has a case that fails if it is dropped.
+#
+# 🔴 THE FIRST VERSION OF THIS CARVE-OUT COVERED ONLY THE ADJACENT SINGLE-SLICE
+# SUBSET while its docstring and commit message claimed the whole class — the
+# guard-description-wider-than-implementation defect, in a change whose entire
+# point was a coverage claim. An audit reproduced six shapes it missed, every one
+# of them valid Python: `grid[1::2, ::3]`, `arr[::2, 1::2]`, `grid[1::2,3]`,
+# `x[1::2 ]`, `x[ 1::2]`, and one more with a blank BETWEEN the name and the `[`.
+# The first five are now covered; the sixth deliberately is NOT, and
+# `is_subscript_slice`'s docstring says why (exempting a blank there would exempt
+# `ssh [<addr>]`, which is MEASURED to be reported today). It is the one shape this
+# comment cannot spell — outside a subscript the token is a finding in this very
+# file — so `uncovered_slice_lines()` assembles it and
+# `test_the_covered_slice_shapes_are_enumerated` pins the split, leaving nobody to
+# trust this comment.
 #
 # ⚠ Every routable literal here is ASSEMBLED at run time, never spelled: a bare
 # one would be a finding in this file (see `SELF`).
@@ -496,39 +510,103 @@ def hex_hextet_short_ipv6() -> str:
     return ":".join(("2a01", "", "1"))
 
 
+#: Slice spellings the carve-out MUST cover. Every one is valid Python. The first
+#: SEVEN were already covered by the original adjacent-single-slice implementation;
+#: the EIGHT after them all carry a `,` or a blank and were NOT — five of those are
+#: shapes an audit reproduced as still-reported, and three were added alongside them
+#: because they reach the same widened code by a different route.
+COVERED_SLICE_LINES = (
+    "for raw_name, body in zip(parts[1::2], parts[2::2]):",   # the measured line
+    "names, bodies = parts[1::2], parts[2::2]",
+    "evens = x[::2]",
+    "every_third = a[10::3]",
+    "tail = fn()[1::2]",
+    'stride = "abcdef"[1::2]',
+    "inner = grid[0][1::2]",
+    "rows = grid[1::2, ::3]",        # numpy multi-axis: a LATER comma group
+    "arr[::2, 1::2]",                # the token IS the later group
+    "grid[1::2,3]",                  # no blank after the comma
+    "x[1::2 ]",                      # blank before the `]`
+    "x[ 1::2]",                      # blank after the `[`
+    "x[ 1::2 ]",                     # both
+    "arr[mask, 1::2]",               # the comma's left side is NOT slice-shaped
+    "arr[f( [0] ), 1::2]",           # an inner CLOSED bracket: depth counting
+)
+
+
+def slice_token() -> str:
+    """The `N::M` token from the measured incident, ASSEMBLED not spelled.
+
+    Inside a subscript it is exempt, which is why `COVERED_SLICE_LINES` above can
+    write those lines out verbatim. The uncovered shape below is the mirror image:
+    there the same token is REPORTED, so spelling it would plant a finding in this
+    file. Same trap the incident's own mutation script hit in a COMMENT.
+    """
+    return ":".join(("1", "", "2"))
+
+
+def uncovered_slice_lines() -> tuple[str, ...]:
+    """Shapes the carve-out deliberately does NOT cover — still REPORTED, i.e. a
+    false positive rather than a hole. Enumerated so the split is a machine-readable
+    claim instead of a sentence in a docstring.
+
+    Today: a blank between the name and the `[`. PEP8-illegal (E211); exempting it
+    would mean skipping blanks before the bracket, which exempts `ssh [<addr>]`.
+    """
+    return (f"a [{slice_token()}]",)
+
+
 def test_python_extended_slices_are_not_addresses():
-    """POSITIVE CONTROL for the carve-out: the measured line, plus the other
-    plausible slice spellings. Each must yield NOTHING.
+    """POSITIVE CONTROL for the carve-out: every covered spelling yields NOTHING.
 
     ⚠ `x[::2]` is ALSO below the hextet floor, so it would pass even with this
     carve-out deleted — the load-bearing cases are the ones with two hextets.
     """
-    reported = {line: S.find_in_line(line) for line in (
-        "for raw_name, body in zip(parts[1::2], parts[2::2]):",
-        "names, bodies = parts[1::2], parts[2::2]",
-        "evens = x[::2]",
-        "every_third = a[10::3]",
-        "tail = fn()[1::2]",
-        'stride = "abcdef"[1::2]',
-        "inner = grid[0][1::2]",
-    )}
+    reported = {line: S.find_in_line(line) for line in COVERED_SLICE_LINES}
     assert all(v == [] for v in reported.values()), (
         "ordinary Python extended slices are being reported as committed public "
-        f"IPs — the subscript-slice carve-out is not working: {reported}")
+        "IPs — the subscript-slice carve-out is not working: "
+        f"{ {k: v for k, v in reported.items() if v} }")
+
+
+def test_the_covered_slice_shapes_are_enumerated():
+    """🔴 The COVERAGE claim, made machine-readable in both directions.
+
+    An audit found the first version of this carve-out covering the adjacent
+    single-slice subset while its prose claimed the class. Prose cannot be trusted
+    to stay true, so: every line in `COVERED_SLICE_LINES` must be silent (the test
+    above), and every line `uncovered_slice_lines()` returns must still be REPORTED.
+    The second half is the one that matters here — it fails if a future widening
+    silently swallows a shape this change decided to leave alone, which is how a
+    documented gap becomes an undocumented hole.
+    """
+    wrongly_silent = [ln for ln in uncovered_slice_lines() if S.find_in_line(ln) == []]
+    assert not wrongly_silent, (
+        "a shape listed as NOT covered is now silently exempt — either it was "
+        "covered on purpose (move it to COVERED_SLICE_LINES and say so in "
+        "is_subscript_slice's docstring) or the carve-out has widened by accident: "
+        f"{wrongly_silent}")
 
 
 def test_negative_control_a_real_address_in_a_subscript_is_still_reported():
     """🔴 THE HOLE CONTROL. "Ignore anything inside brackets" would be a way to
     commit a real address; this fails if the carve-out ever becomes that.
 
-    Four shapes, one per condition of the rule — each fixture chosen so that it is
-    rejected by ONE condition and would sail past the others:
+    Shapes are chosen so each is rejected by ONE condition and would sail past the
+    others:
       * hex hextets WITH slice arity — only the DIGITS half rejects it;
       * all-decimal hextets but too many components — only the ARITY half does;
       * a long hex address in a subscript — the ordinary case, both halves;
-      * a bracketed host that is NOT a subscript (list display, URL) — rejected by
-        the SUBSCRIPT-POSITION condition, and this is the only case that catches a
-        carve-out keyed on brackets alone.
+      * a bracketed host that is NOT a subscript (list display, URL, `ssh [<addr>]`)
+        — rejected by SUBSCRIPT POSITION, the only cases that catch a carve-out
+        keyed on brackets alone;
+      * a call or a dict display reached through a comma — rejected because the
+        backward bracket match refuses a `(`/`{` opener.
+
+    🔴 THE SECOND BLOCK IS THE WIDENING CONTROL. The rule was widened to tolerate
+    blanks and comma groups; every new shape it accepts is re-checked here with a
+    REAL address in it, because a widened exemption is exactly how a carve-out turns
+    into a hole. Do not assume the shapes above cover the new ones.
     """
     hexish, decimal = planted_ipv6(), decimal_hextet_ipv6()
     wide, hexshort = decimal_hextet_ipv6_full(), hex_hextet_short_ipv6()
@@ -543,48 +621,123 @@ def test_negative_control_a_real_address_in_a_subscript_is_still_reported():
         (f"lighthouse: [{decimal}]", decimal),     # list display, NOT a subscript
         (f"url = https://[{decimal}]:443/x", decimal),   # URL host
         (f"peers = [{decimal}, {hexish}]", decimal),     # list element
+        (f"ssh [{decimal}]", decimal),             # the bracketed-host spelling
+        (f"curl [{decimal}]:443", decimal),        # same, with a port
         # the IPv4 pass runs through the same carve-out: a dotted quad is ONE
         # component and is never all-decimal, so slice shape rejects it.
         (f"hosts[{planted_ipv4()}]", planted_ipv4()),
+
+        # --- the shapes the WIDENING added, each with a real address in it -------
+        (f"grid[{hexish}, 3]", hexish),            # comma group, hex hextets
+        (f"grid[{hexshort}, 3]", hexshort),        # comma group, slice arity
+        (f"grid[{wide}, 3]", wide),                # comma group, arity bound
+        (f"arr[3, {hexish}]", hexish),             # LATER comma group
+        (f"arr[::2, {hexish}]", hexish),           # later group, after a real SLICE
+        (f"arr[mask, {hexish}]", hexish),          # later group, after a NAME
+        (f"x[ {hexish} ]", hexish),                # blanks inside the brackets
+        (f"x[ {hexshort} ]", hexshort),            # blanks + slice arity
+        (f"f(x, {decimal})", decimal),             # a CALL: `)` is not a separator
+        (f"s = {{3, {decimal}}}", decimal),        # a display: `}` is not a separator
+        # 🔴 The case that REACHES the backward bracket match's opener test. The two
+        # above never get there — their right-hand neighbour is `)`/`}`, so the
+        # whole-group condition rejects them first, and a mutant that accepted a
+        # `(` opener SURVIVED a fully green run until this line existed. Here the
+        # token is a middle argument, so both separators are commas and the only
+        # thing left to reject it is the opener being `(` rather than `[`.
+        (f"f(a, {decimal}, b)", decimal),
+        (f"x[{decimal} 3]", decimal),              # not a whole group: no separator
     ) if want not in S.find_in_line(line)]
     assert not missed, (
         "a routable public IP inside (or looking like) a subscript went "
         f"UNREPORTED — the slice carve-out has become a hole: {missed}")
 
 
-def test_the_slice_carveout_is_blind_to_a_decimal_only_subscript():
-    """⚠ DOCUMENTED BLIND SPOT, driven rather than asserted in prose.
+def blind_spot_family() -> tuple[str, ...]:
+    """Every shape inside the carve-out's blind spot — ASSEMBLED, never spelled.
 
-    An address whose every hextet is decimal AND which has slice arity is
-    genuinely indistinguishable from a slice — `x[1234::5678]` is valid Python
-    either way, and no lexical rule can separate them. The carve-out therefore
-    misses it, and the module docstring says so.
+    🔴 THESE ARE NOT IMPLAUSIBLE VALUES, and an earlier version of this test
+    illustrated the gap with one arbitrary literal, which made the blind spot look
+    cheaper than it is. `26xx::`, `28xx::` and `30xx::` are allocated
+    ARIN/APNIC/RIPE global-unicast prefixes, and a SHORT host address in one of
+    them has all-decimal hextets and a slice's arity — so it is in the gap. Every
+    one of them is `is_reportable()`; the assertions below prove exactly where the
+    gate can and cannot see them.
 
-    This test exists so the two cannot drift: narrow the rule and it goes red,
-    telling you to delete this test and that docstring bullet in the same commit.
-    The same value in NON-subscript position is still reported — the test above
-    pins that, which is what bounds the cost of this miss.
+    Spelling any of them here would plant a finding in this file (they are
+    reportable outside a subscript), which is the trap the incident's own mutation
+    script hit — hence the run-time assembly.
     """
-    ip = decimal_hextet_ipv6()
-    assert S.is_reportable(ip)
-    assert S.find_in_line(f"x[{ip}]") == [], (
-        "the decimal-only subscript is now REPORTED — good news: delete this "
-        "test and the matching blind-spot bullet in public_ip_scan's docstring")
+    return tuple(":".join((p, "", "1"))
+                 for p in ("2600", "2606", "2620", "2800", "3000")) + (
+        decimal_hextet_ipv6(),)
 
 
-def test_the_carveout_requires_bracket_enclosure():
-    """The ENCLOSURE condition, on its own. A slice-shaped token that is not
-    exactly what sits between `[` and `]` is an address, not a slice."""
+def test_the_slice_carveout_is_blind_to_a_decimal_only_subscript():
+    """⚠ DOCUMENTED BLIND SPOT, driven rather than asserted in prose — and driven
+    on the REAL family, not one convenient value.
+
+    An address whose every hextet is decimal AND which has slice arity is genuinely
+    indistinguishable from a slice — `x[1234::5678]` is valid Python either way, and
+    no lexical rule separates them. The carve-out misses it, and the module
+    docstring says so.
+
+    🔴 WHAT BOUNDS THE COST, asserted here rather than argued: the gap is ONLY the
+    bare-unquoted-inside-a-subscript position. Each of these values is still
+    reported bare, quoted, in a list display, in a URL host and in the
+    bracketed-host spelling `ssh [<addr>]`. That is the case for calling the blind
+    spot acceptable, and if a future change breaks any of those positions this test
+    goes red rather than the argument quietly becoming false.
+
+    Narrow the rule and the first assertion goes red, telling you to delete this
+    test and that docstring bullet in the same commit.
+    """
+    family = blind_spot_family()
+    for ip in family:
+        assert S.is_reportable(ip), f"stale fixture: {ip} is not reportable"
+
+    still_reported = [(ip, S.find_in_line(f"x[{ip}]")) for ip in family
+                      if S.find_in_line(f"x[{ip}]") != []]
+    assert not still_reported, (
+        "the decimal-only subscript is now REPORTED — good news: delete this test "
+        f"and the matching blind-spot bullet in public_ip_scan's docstring: {still_reported}")
+
+    # the bound: every OTHER position must still see these exact values
+    escaped = [(ip, shape) for ip in family
+               for shape in (f"host {ip}", f"d['{ip}']", f"peers = [{ip}]",
+                             f"url = https://[{ip}]:443/x", f"ssh [{ip}]",
+                             f"ping6 {ip}")
+               if ip not in S.find_in_line(shape)]
+    assert not escaped, (
+        "a blind-spot value escaped OUTSIDE a subscript too — the argument that "
+        "this blind spot is acceptable rests on exactly these positions still "
+        f"reporting, and one of them no longer does: {escaped}")
+
+
+def test_the_carveout_requires_a_whole_bracket_group():
+    """The WHOLE-GROUP condition, on its own: a slice-shaped token that is not one
+    complete comma-separated group of a bracketed list is an address, not a slice.
+
+    🔴 WHY THE RIGHT-HAND HALF (the `]`-or-`,` terminator) EARNS ITS PLACE — it was
+    raised as a deletion candidate, measured to close three shapes and cost no
+    fixture, and is KEPT deliberately. It is the only condition requiring the group
+    to CLOSE on this line, and this scan is line-at-a-time by construction. A
+    subscript split across lines therefore leaves a token with an opener it cannot
+    see; with this half present that token is REPORTED (a false positive), and
+    without it that same token is EXEMPT (a hole). Keeping it makes the unfixable
+    line-boundary ambiguity fail in the safe direction, which no other condition
+    does. The blanks/comma widening subsumed its *false-positive* cost, so what is
+    left is only the safe-direction guarantee.
+    """
     ip = decimal_hextet_ipv6()
     reported = [line for line in (
         f"host = {ip}",                  # bare
-        f"x[{ip}",                       # unclosed
+        f"x[{ip}",                       # unclosed: the line-split case
+        f"    {ip}, ::3]",               # continuation line: no opener in sight
         f"d['{ip}']",                    # a QUOTED dict key, not a slice
-        f"x[ {ip}]",                     # space before: the `[` is not adjacent
-        f"x[{ip} ]",                     # space after: the `]` is not adjacent
+        f"x[{ip} 3]",                    # no separator: not a whole group
     ) if S.find_in_line(line) != [ip]]
     assert not reported, (
-        f"{ip} was treated as a slice without being bracket-enclosed: {reported}")
+        f"{ip} was treated as a slice without being a whole bracket group: {reported}")
 
 
 def test_this_guards_own_sources_are_clean():

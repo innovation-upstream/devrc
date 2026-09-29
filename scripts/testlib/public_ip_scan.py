@@ -60,9 +60,18 @@ author. Documented so nobody mistakes "green" for "there is no address here":
   * IPv6 with a **`%zone` suffix**.
   * the value in a **FILENAME** rather than file CONTENT — `scan_file` never
     inspects `path.name`.
-  * an address whose every hextet is DECIMAL, written inside a Python subscript
-    (`x[1234::5678]`) — see the slice carve-out below. That shape is the price of
-    the carve-out and it is DRIVEN, not merely asserted, by
+  * an address whose every hextet is DECIMAL, written inside a Python subscript —
+    see the slice carve-out below. 🔴 STATE ITS REACH HONESTLY: this is NOT a
+    family of implausible values. `26xx::`, `28xx::` and `30xx::` prefixes are
+    allocated ARIN/APNIC/RIPE global-unicast space, and a short host address in one
+    of them has all-decimal hextets and a slice's arity, so it is inside this gap
+    (MEASURED: five such addresses are `is_reportable()` yet unreported inside a
+    subscript). What bounds the cost is that the gap is ONLY the bare-unquoted-
+    inside-a-subscript position: the same values are still reported bare, quoted,
+    in a list display, in a URL host, and — measured, and the reason condition (3)
+    forbids skipping a blank — in the bracketed-host spelling `ssh [<addr>]`. That
+    is not how an address is written in any file this gate scans. The family and
+    every one of those positions is DRIVEN, not asserted, by
     `test_no_public_ips.py::test_the_slice_carveout_is_blind_to_a_decimal_only_
     subscript`. Change one and you are told about the other.
 
@@ -84,12 +93,29 @@ the next extended slice anyone wrote would have reddened `main`.
 
 `is_subscript_slice()` is the carve-out, and it is deliberately NOT "ignore
 anything inside brackets" — that would be a way to commit a real address. It
-requires all three of: bracket ENCLOSURE, SUBSCRIPT position (the `[` follows an
-identifier / `)` / `]` / a closing quote, so a list display or a bracketed URL
-host is untouched), and the token having Python slice ARITY AND DIGITS (at most
-`_MAX_SLICE_COMPONENTS` colon-separated parts, each empty or DECIMAL). A real
-address in a subscript keeps being reported on any one of those failing, which is
-what the negative controls in `test_no_public_ips.py` pin.
+requires all three of: Python slice ARITY AND DIGITS (at most
+`_MAX_SLICE_COMPONENTS` colon-separated parts, each empty or DECIMAL), being a
+WHOLE comma-separated group of a bracketed list (blanks allowed either side, so
+`grid[1::2, ::3]`, `arr[mask, 1::2]` and `x[ 1::2 ]` are covered), and SUBSCRIPT
+position (the group's `[` is ADJACENT to an identifier / `)` / `]` / a closing
+quote, so a list display, a bracketed URL host and `ssh [<addr>]` are untouched).
+A real address keeps being reported on any one of those failing, which is what the
+negative controls in `test_no_public_ips.py` pin at every one of those shapes.
+
+⚠ Two shapes it deliberately does NOT cover, both still REPORTED (false positive,
+never a hole): a blank BETWEEN the name and the `[` — PEP8-illegal (E211), and
+exempting it would exempt `ssh [<addr>]` — and a subscript split across lines,
+which is outside a line-at-a-time scan by construction. (That first shape is one
+this file cannot write out: outside a subscript the token is reportable, so
+spelling it would plant a finding here. It is assembled by
+`test_no_public_ips.py::uncovered_slice_lines`, which pins it.)
+
+🔴 The first wording of this carve-out covered only the ADJACENT SINGLE-SLICE
+subset while claiming the whole class — a guard whose DESCRIPTION was wider than
+its implementation, in a change whose entire point was a coverage claim. An audit
+caught it. Both lists are now machine-readable: covered and NOT-covered are pinned
+in both directions by `test_the_covered_slice_shapes_are_enumerated`, so widening
+the rule without moving a shape between them fails the suite.
 
 ⚠ Illustrations here are `2001:db8::` (a DOC_NETWORKS address, so not reportable)
 or written INSIDE a subscript — spelling a bare routable literal in this file
@@ -145,13 +171,14 @@ IPV6_RE = re.compile(
 #: an address at all. See the DB:: note in the module docstring.
 MIN_IPV6_HEXTETS = 2
 
-#: Characters that may precede a `[` which OPENS A SUBSCRIPT: an identifier, a
-#: closing paren/bracket, or a string literal's closing quote (`parts[…]`,
-#: `f()[…]`, `x[0][…]`, `"abc"[…]`). A `[` preceded by ANYTHING else — a space,
-#: `=`, `/`, `:`, or start-of-line — opens a list/array display or brackets a
-#: host, and that is exactly where a real address is legitimately written
-#: (`lighthouse: [2001:db8::1]`, `https://[2001:db8::1]:443/`). Keeping those two
-#: cases apart is what stops the carve-out becoming a place to hide an address.
+#: Characters that may be ADJACENTLY followed by a `[` which OPENS A SUBSCRIPT: an
+#: identifier, a closing paren/bracket, or a string literal's closing quote
+#: (`parts[…]`, `f()[…]`, `x[0][…]`, `"abc"[…]`). A `[` preceded by ANYTHING else —
+#: a blank, `=`, `/`, `:`, or start-of-line — opens a list/array display or
+#: brackets a host, and that is exactly where a real address is legitimately
+#: written (`lighthouse: [2001:db8::1]`, `https://[2001:db8::1]:443/`,
+#: `ssh [<addr>]`). Keeping those two cases apart is what stops the carve-out
+#: becoming a place to hide an address, and it is why no blank is skipped here.
 SUBSCRIPTABLE_CHARS = frozenset("0123456789"
                                 "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
                                 "abcdefghijklmnopqrstuvwxyz"
@@ -212,6 +239,53 @@ def _hextets(token: str) -> int:
     return len([h for h in token.split(":") if h])
 
 
+def _skip_ws_left(line: str, pos: int) -> int:
+    """Index of the first non-blank at or left of `pos - 1`; -1 if there is none."""
+    i = pos - 1
+    while i >= 0 and line[i] in " \t":
+        i -= 1
+    return i
+
+
+def _skip_ws_right(line: str, pos: int) -> int:
+    """Index of the first non-blank at or right of `pos`; `len(line)` if none."""
+    i = pos
+    while i < len(line) and line[i] in " \t":
+        i += 1
+    return i
+
+
+def enclosing_subscript_open(line: str, pos: int) -> int:
+    """Index of the `[` opening the bracket group containing `pos`, else -1.
+
+    A backward bracket match: the first opener not closed again before `pos`. When
+    that opener is `(` or `{` the token sits in a CALL or a dict display, not a
+    subscript, and -1 says so — which is what keeps `f(x, <addr>)` reportable.
+
+    Needed because a tuple subscript puts the token in a LATER group:
+    `arr[mask, 1::2]` reaches its `[` only by matching backwards past a comma and
+    whatever precedes it. Depth counting is what stops an inner CLOSED bracket
+    (`arr[f( [0] ), 1::2]`) being mistaken for the enclosing one.
+
+    ⚠ Only reached when BOTH of the token's neighbours are separators, so the
+    `(`-opener case that matters is a MIDDLE argument (`f(a, <addr>, b)`) — a
+    trailing one is already rejected by the `)` beside it. Measured: a mutant
+    accepting a `(` opener survived a green suite until a middle-argument fixture
+    existed. The `{` arm shares this path; no fixture reaches it separately, because
+    a `{` adjacent to a subscriptable character is not valid Python.
+    """
+    depth = 0
+    for i in range(pos - 1, -1, -1):
+        ch = line[i]
+        if ch in ")]}":
+            depth += 1
+        elif ch in "([{":
+            if depth == 0:
+                return i if ch == "[" else -1
+            depth -= 1
+    return -1
+
+
 def is_subscript_slice(line: str, start: int, end: int) -> bool:
     """True when `line[start:end]` is a Python subscript slice, not an address.
 
@@ -221,31 +295,56 @@ def is_subscript_slice(line: str, start: int, end: int) -> bool:
 
     🔴 THREE conditions, ALL required, because any one of them alone is a hole:
 
-      1. **enclosure** — the token is exactly what sits between `[` and `]`;
-      2. **subscript position** — the `[` follows something SUBSCRIPTABLE
-         (`SUBSCRIPTABLE_CHARS`). This is what leaves `lighthouse: [2001:db8::1]`
-         and `https://[2001:db8::1]:443/` reportable: those brackets follow a
-         space and a `/`, so they are a list display and a URL host, not a
-         subscript;
-      3. **slice shape** — at most `_MAX_SLICE_COMPONENTS` colon-separated
+      1. **slice shape** — at most `_MAX_SLICE_COMPONENTS` colon-separated
          components, each empty or DECIMAL. A hextet containing any of `a`-`f`
          (`x[2001:db8::1]`) is an address in a subscript and stays reportable, and
-         so is an all-decimal run too long to be a slice.
+         so is an all-decimal run too long to be a slice. Tested FIRST because it
+         is what rejects every IPv4 match — a dotted quad is one non-decimal
+         component — so the scan's IPv4 pass never reaches the bracket walk.
+      2. **whole group** — the token is one complete comma-separated group of a
+         bracketed list: `[` or `,` to its left and `]` or `,` to its right,
+         BLANKS ALLOWED on both sides. That is what covers the tuple/numpy
+         subscripts `grid[1::2, ::3]`, `arr[mask, 1::2]` and `grid[1::2,3]`, and
+         `x[ 1::2 ]`. Anything else between — `x[<addr> 3]`, `d['<addr>']`, an
+         unclosed `x[<addr>` — means the token is not a slice group.
+      3. **subscript position** — the group's OWN opening `[` is immediately
+         preceded by something SUBSCRIPTABLE (`SUBSCRIPTABLE_CHARS`), with NO
+         whitespace skipped. That adjacency is load-bearing, not fastidiousness:
+         MEASURED, `ssh [<addr>]` and `curl [<addr>]` are reported today, and
+         skipping a blank there would exempt them — the bracketed-host spelling in
+         prose or a shell line is one of the likeliest ways a real address gets
+         written down. `lighthouse: [2001:db8::1]` and `https://[2001:db8::1]:443/`
+         are the same condition doing the same work.
 
-    Evaluated per-line and per-match, so it costs nothing on the IPv4 pass: a
-    dotted quad is one component and never all-decimal, so (3) rejects it.
+    ⚠ KNOWN, DELIBERATE GAP: a blank between the name and the subscript is still
+    reported. It is PEP8-illegal (E211) and rare in real code, and exempting it
+    means exempting the `ssh [<addr>]` class above, which is worth more. That trade
+    is the operator's to revisit; it is not an oversight. (Not spelled here on
+    purpose — the token is reportable in that position, so writing the example out
+    would make this module match its own scan. `uncovered_slice_lines()` in
+    `test_no_public_ips.py` assembles it and pins that it stays reported.)
+
+    ⚠ A subscript SPLIT ACROSS LINES is also still reported: this scan is
+    line-at-a-time by construction, so the group's `[` is not on the line at all.
+    Condition (2)'s right-hand half is what keeps that failing in the SAFE
+    direction — see the D4 note in `test_no_public_ips.py`.
     """
     token = line[start:end]
-    if start == 0 or line[start - 1] != "[":
-        return False
-    if end >= len(line) or line[end] != "]":
-        return False
-    if start < 2 or line[start - 2] not in SUBSCRIPTABLE_CHARS:
-        return False
     components = token.split(":")
     if len(components) > _MAX_SLICE_COMPONENTS:
         return False
-    return all(_DECIMAL_RE.fullmatch(c) for c in components if c)
+    if not all(_DECIMAL_RE.fullmatch(c) for c in components if c):
+        return False
+
+    left = _skip_ws_left(line, start)
+    if left < 0 or line[left] not in "[,":
+        return False
+    right = _skip_ws_right(line, end)
+    if right >= len(line) or line[right] not in "],":
+        return False
+
+    opener = left if line[left] == "[" else enclosing_subscript_open(line, left)
+    return opener > 0 and line[opener - 1] in SUBSCRIPTABLE_CHARS
 
 
 def find_in_line(line: str) -> list[str]:
