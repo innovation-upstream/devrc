@@ -275,6 +275,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import gzip
 import hashlib
 import hmac
 import io
@@ -4001,9 +4002,24 @@ class StoreRequestHandler(BaseHTTPRequestHandler):
             # re-transfers the entire store every tick, so the multiplier is the
             # thing that matters, not the absolute size. The client opens with
             # mode="r", which auto-detects, so this needs no client change.
-            with tarfile.open(
-                fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT
-            ) as tar:
+            # 🔴 TWO DIFFERENT mtimes LIVE HERE AND ONLY ONE IS NORMALISED.
+            # The GZIP CONTAINER header carries a 4-byte mtime of its own, and
+            # `mode="w:gz"` stamps it with the wall clock — so two snapshots of an
+            # IDENTICAL store differ in bytes 4-7 whenever they straddle a second
+            # boundary. MEASURED: that reddened
+            # `test_a_scope_FILTERED_snapshot_of_a_denied_scope_ships_nothing`
+            # (which byte-compares a refused scope against an absent one) with
+            # `\x90\x08\xa6j` vs `\x91\x08\xa6j` — 1789266064 vs 1789266065, one
+            # second apart — on a merged-tree gate run. It also made the response
+            # uncacheable and any ETag over it meaningless.
+            # 🔴 THIS IS *NOT* THE "reproducible tar" THAT
+            # `test_mtimes_are_PRESERVED_not_normalised` FORBIDS. That test guards
+            # the TAR MEMBER mtimes, which the reader uses to order the index
+            # newest-first; normalising those silently reorders every digest.
+            # `_member()` still carries each entry's real mtime, untouched — the
+            # only field zeroed is the gzip wrapper's, which nothing reads.
+            with gzip.GzipFile(filename="", mode="wb", fileobj=buf, mtime=0) as gz, \
+                    tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as tar:
                 stamp = root / SEED_STAMP_NAME
                 if stamp.is_file() and not stamp.is_symlink():
                     with stamp.open("rb") as fh:

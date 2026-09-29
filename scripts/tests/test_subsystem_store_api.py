@@ -71,6 +71,7 @@ import signal
 import socket
 import socketserver
 import stat
+import struct
 import tarfile
 import secrets
 import select
@@ -12634,6 +12635,62 @@ class TestEnumerationChannelsAreClosed:
             + [f"{DENY_SCOPE}/broken-shard.md"]
         ), names
         assert headers["X-Store-Entries"] == "4"
+
+    def test_the_snapshot_gzip_header_carries_NO_wall_clock_mtime(
+        self, scoped_store: Path
+    ):
+        """🔴 REGRESSION, watched RED on a merged-tree gate run before the fix.
+
+        A gzip header carries its OWN 4-byte mtime at bytes 4-7, and
+        `tarfile.open(mode="w:gz")` stamps it with the wall clock. Two snapshots of
+        an IDENTICAL store then differ in those bytes whenever they straddle a
+        second boundary — measured as `1789266064` vs `1789266065`, which reddened
+        `test_a_scope_FILTERED_snapshot_of_a_denied_scope_ships_nothing` (the test
+        directly below, which byte-compares a refused scope against an absent one).
+        It also made the response uncacheable and any ETag over it meaningless.
+
+        🔴 ASSERTED ON THE HEADER FIELD, NOT BY BUILDING TWO SNAPSHOTS A SECOND
+        APART. The two-build version would have to SLEEP past a second boundary to
+        fail, so it would pass ~99% of the time against the very defect it exists
+        to catch — the flake's own shape, reproduced in the test for it. Reading the
+        field is exact and instant.
+
+        🔴 THIS DOES NOT WEAKEN `test_mtimes_are_PRESERVED_not_normalised`. That
+        guards the TAR MEMBER mtimes, which the reader uses to order the index
+        newest-first. Only the gzip WRAPPER's mtime is zeroed here, and the
+        assertions below prove the member mtimes are still real.
+        """
+        with running(scoped_store, tokens=(GOOD_TOKEN,)) as (base, _):
+            code, headers, body = fetch(f"{base}/api/v1/snapshot", token=GOOD_TOKEN)
+        assert code == 200
+        assert headers["Content-Type"] == "application/gzip"
+        assert body[:2] == b"\x1f\x8b", "not a gzip stream at all"
+        gz_mtime = struct.unpack("<I", body[4:8])[0]
+        assert gz_mtime == 0, (
+            f"the gzip header carries a wall-clock mtime ({gz_mtime}) — two "
+            "snapshots of an identical store will differ in bytes 4-7 across a "
+            "second boundary. Build with gzip.GzipFile(..., mtime=0), NOT "
+            'tarfile.open(mode="w:gz").'
+        )
+        # POSITIVE CONTROL for the assertion above: a wall-clock stamp is what the
+        # field WOULD hold, so a zero must not be mistaken for "this field is
+        # always zero in gzip".
+        import gzip as _gzip
+        probe = io.BytesIO()
+        with _gzip.GzipFile(fileobj=probe, mode="wb") as gz:
+            gz.write(b"x")
+        assert struct.unpack("<I", probe.getvalue()[4:8])[0] > 0, (
+            "control failed: a default GzipFile should stamp a non-zero mtime, so "
+            "the zero asserted above would prove nothing"
+        )
+        # and the MEMBER mtimes are untouched — real, non-zero, from the files
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r") as tar:
+            member_mtimes = [m.mtime for m in tar.getmembers() if m.isfile()]
+        assert member_mtimes, "no file members to check"
+        assert all(m > 0 for m in member_mtimes), (
+            f"tar MEMBER mtimes were normalised too: {member_mtimes}. That is the "
+            "change test_mtimes_are_PRESERVED_not_normalised forbids."
+        )
 
     def test_a_scope_FILTERED_snapshot_of_a_denied_scope_ships_nothing(
         self, scoped_store: Path
