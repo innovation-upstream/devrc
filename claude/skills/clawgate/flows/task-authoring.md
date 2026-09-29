@@ -14,7 +14,7 @@ file does not auto-fire the way a skill description does — the hook is the rou
 against. `create` returns `{"id":N}` and nothing else; there is no second chance to
 explain. And a body with no `## Acceptance criteria` heading forces every pickup to
 end at `ready_for_review` — the agent derives the criteria and may not grade an exam
-it wrote (`SKILL.md` → "Status gate"). So the heading is not decoration; it is the
+it wrote (the `muster` skill's `SKILL.md` → "Status gate"). So the heading is not decoration; it is the
 one lever the author has, and this interview exists to produce it.
 
 ⚠ **That lever is a CONVENTION, not a server check — do not oversell it.** Measured

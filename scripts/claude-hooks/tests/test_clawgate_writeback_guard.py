@@ -3120,6 +3120,13 @@ def test_the_WHOLE_LOOP_THROUGH_THE_REAL_PROCESS(home, tmp_path):
 # rewording.
 # =========================================================================== #
 SKILL = ROOT / "claude" / "skills" / "clawgate" / "SKILL.md"
+#: 🔴 The always-loaded surface a reader picking up a TASK has open moved on
+#: 2026-09-29: the board was extracted out of clawgate into the `muster`
+#: service, and the skill followed. The FLOW FILES did not move — the hook
+#: below names them by DEPLOYED path — so the three pins in this module that
+#: are about the task ritual now read muster's core, and the one that is about
+#: the flow file still reads clawgate's tree.
+MUSTER_SKILL = ROOT / "claude" / "skills" / "muster" / "SKILL.md"
 DEPLOYED_SKILLS_PREFIX = "~/.claude/skills/"
 
 #: 🔴 The status gate, pinned as the WHOLE NORMALISED TABLE. It is the one part of
@@ -3206,27 +3213,40 @@ def test_the_flow_the_block_text_names_EXISTS_and_is_git_tracked():
 
 def test_the_skill_routes_to_the_pickup_flow_from_its_flow_table():
     """The flow must be reachable from the ALWAYS-LOADED surface too, not only from
-    a block — a reader who never trips the hook still has to find it."""
-    text = SKILL.read_text(encoding="utf-8")
+    a block — a reader who never trips the hook still has to find it.
+
+    🔴 THAT SURFACE IS `muster`'s SINCE 2026-09-29. Picking up a task is muster's
+    job; clawgate is the permission router. Reading clawgate's core here would be a
+    pin on a file that no longer carries the table, which is the vacuous-green this
+    module exists to refuse."""
+    text = MUSTER_SKILL.read_text(encoding="utf-8")
     parts = text.split("## Flow files", 1)
     assert len(parts) == 2, "SKILL.md no longer has a `## Flow files` section"
     table = parts[1].split("\n## ", 1)[0]
-    assert "`task-pickup.md`" in table, (
-        "SKILL.md's Flow files table does not name task-pickup.md. A flows/ file "
-        "does not auto-fire the way a skill description does; without a router row "
-        "it is dead weight.")
+    assert guard.FLOW_DEPLOYED in table, (
+        "the Flow files table does not name %s. A flows/ file does not auto-fire "
+        "the way a skill description does; without a router row it is dead weight. "
+        "🔴 The DEPLOYED path is asserted, not the bare filename: the flow lives "
+        "under the clawgate skill's directory while the table is muster's, so a "
+        "bare `task-pickup.md` here would resolve against the reader's cwd and "
+        "find nothing." % guard.FLOW_DEPLOYED)
     # Anti-vacuity: the split really did isolate the table, not the whole file.
-    assert "`task-authoring.md`" in table and "machine (hook-token)" not in table
+    assert "flows/task-authoring.md" in table and "machine (hook-token)" not in table
 
 
 def test_the_skill_names_the_same_DEPLOYED_path_the_hook_prints():
     """🔴 THE SEAM ITSELF. Three surfaces, one string. The failure this catches is
     a MOVE that updates two of them: the hook keeps blocking with a path nobody
-    maintains, or SKILL.md points somewhere the enforcer never mentions."""
-    text = SKILL.read_text(encoding="utf-8")
+    maintains, or the skill points somewhere the enforcer never mentions.
+
+    🔴 The 2026-09-29 skill split is exactly that move, and it is why the SURFACE
+    read here changed while `FLOW_DEPLOYED` did not: the flow file stayed under the
+    clawgate tree, the core that routes to it is now muster's."""
+    text = MUSTER_SKILL.read_text(encoding="utf-8")
     assert guard.FLOW_DEPLOYED in text, (
-        "SKILL.md does not carry the deployed flow path the hook's block text "
-        "prints (%s). Both surfaces must name the SAME file." % guard.FLOW_DEPLOYED)
+        "claude/skills/muster/SKILL.md does not carry the deployed flow path the "
+        "hook's block text prints (%s). Both surfaces must name the SAME file."
+        % guard.FLOW_DEPLOYED)
 
 
 def test_the_status_gate_table_did_NOT_leave_the_skill():
@@ -3235,17 +3255,28 @@ def test_the_status_gate_table_did_NOT_leave_the_skill():
     tested. What it pins is the half of the ritual that must NOT move: the gate is
     cited as `SKILL.md -> "Status gate"` by flows/task-authoring.md AND by
     clawgate-task-interview-guard.py's `_WHY`, so demoting it into the flow would
-    break two live pointers and hide the one table a reader must not miss."""
-    text = _norm(SKILL.read_text(encoding="utf-8"))
+    break two live pointers and hide the one table a reader must not miss.
+
+    🔴 It moved SKILLS on 2026-09-29 — clawgate -> muster — and did NOT move out of
+    an always-loaded core, which is the property this guard is about. The two live
+    pointers were re-worded in the same commit to name the muster skill. The second
+    assertion below is new and is NOT an invariant: it pins the HAND-OFF, so a
+    reader who lands on the router's skill is still sent to the gate rather than
+    left at a dead end."""
+    text = _norm(MUSTER_SKILL.read_text(encoding="utf-8"))
     missing = [r for r in STATUS_GATE_ROWS if _norm(r) not in text]
     assert not missing, (
-        "the status gate table changed or left claude/skills/clawgate/SKILL.md:\n  "
+        "the status gate table changed or left claude/skills/muster/SKILL.md:\n  "
         + "\n  ".join(missing)
         + "\n\nIt is pinned WHOLE on purpose — a guard on the word `complete` "
         "would pass while the table said the opposite. If the reword is "
         "deliberate, update STATUS_GATE_ROWS in the SAME commit, and re-check "
         "flows/task-authoring.md and clawgate-task-interview-guard.py, which both "
         "cite this table by name.")
+    assert "muster" in SKILL.read_text(encoding="utf-8"), (
+        "claude/skills/clawgate/SKILL.md no longer hands off to the muster skill, "
+        "so a reader who loads the ROUTER's skill for a task has no route to the "
+        "status gate at all.")
 
 
 def test_every_claim_that_MOVED_landed_in_the_flow():
