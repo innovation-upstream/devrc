@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -43,6 +44,9 @@ def _load(name: str, alias: str):
 
 
 snap = _load("bar-remote-snapshot", "_bar_remote_snapshot")
+#: The router/task base-URL ledger, loaded so the nix click-target guard below
+#: can name the ROUTER base by its ONE definition instead of retyping a port.
+CG = _load("lib/clawgate_tasks.py", "_clawgate_tasks")
 
 
 # ---------------------------------------------------------------------------
@@ -807,9 +811,10 @@ def test_the_global_service_blocks_render_on_BOTH_hosts():
 
 def test_the_LAN_BOUND_clicks_are_withheld_from_the_laptop():
     """🔴 MEASURED: these clicks target `grafana.homelab.lan`,
-    `qbittorrent.workbench.lan` and `http://192.168.50.250:30302` — a LAN
-    hostname, a LAN hostname and a LAN IP, none of which resolve from a
-    nebula-only laptop; civitai and media additionally need per-host 0600
+    `qbittorrent.workbench.lan` and `http://192.168.50.250:30306` (the clawgate
+    TASK service — the pill's click moved off the permission router's `:30302`
+    when the board was carved out into its own service) — a LAN hostname, a LAN
+    hostname and a LAN IP, none of which resolve from a nebula-only laptop; civitai and media additionally need per-host 0600
     credential files that do not exist there. Shipping them would put several
     silently dead buttons on the laptop bar."""
     nix = _nix()
@@ -820,6 +825,45 @@ def test_the_LAN_BOUND_clicks_are_withheld_from_the_laptop():
         body = m.group(1)
         assert "click = lib.optionals (!isLaptop) [" in body, \
             "%s's click list is not withheld from the laptop" % blk
+
+
+def test_the_clawgate_PILL_click_opens_the_TASK_service_not_the_ROUTER():
+    """🔴 The pill counts TASKS, so its click must land on the TASK service.
+
+    `i3status-clawgate` renders the operator-pending board count and the stuck-
+    dispatch half, both computed from `/api/tasks?summary=1`. That board was
+    carved out of the permission router into its own service; MEASURED
+    2026-09-29 against the live pods, the router does not serve it any more —
+    `:30302/tasks` -> 404 and `:30302/ui/tasks` -> 404, while the task service's
+    `/tasks` -> 401 (present, session-gated). The left-click pointed at the
+    router root, so the one affordance on the pill opened the wrong service.
+
+    🔴 ASSERTED AS SERVICE IDENTITY, NOT AS A SPELLING. The claim is "this is not
+    the permission router's base", derived from `clawgate_tasks.DEFAULT_API_URL`
+    (the router fallback the whole repo resolves through) rather than from the
+    string `30302`, so a reworded-but-still-router target still fails. Host AND
+    port are compared, because the two services differ only in port.
+
+    ⚠ WHAT THIS CANNOT CHECK, stated rather than implied: this is the ONE site
+    that spells a base URL instead of deriving it — a Nix string is evaluated at
+    build time and cannot read `~/.claude/clawgate.env` — so nothing here can
+    prove the literal matches the operator's configured task base. The matching
+    toasts in `bar-status-poll` DO derive it
+    (`test_the_clawgate_TOASTS_open_the_TASK_service_not_the_router`); this
+    guard covers the wrong-SERVICE class, not a wrong-HOST one.
+    """
+    nix = _nix()
+    m = re.search(r"^  clawgateBlock = \{\n(.*?)^  \};$", nix, re.M | re.S)
+    assert m, "clawgateBlock not found — this test measured nothing"
+    clicks = re.findall(r'cmd = "xdg-open (http://[^"]+)"', m.group(1))
+    assert clicks, "clawgateBlock has no xdg-open click — nothing to check"
+    router = urlparse(CG.DEFAULT_API_URL)
+    for url in clicks:
+        got = urlparse(url)
+        assert (got.hostname, got.port) != (router.hostname, router.port), (
+            "the clawgate pill's click opens the permission ROUTER (%s); the "
+            "pill counts TASKS and the router no longer serves the board"
+            % url)
 
 
 def test_the_pull_and_the_poller_can_NEVER_run_on_the_same_host():

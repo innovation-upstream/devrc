@@ -48,6 +48,8 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
 
    🔴 **Never `Write` the doc yourself, and the NEW-doc case is the one this is about.** MEASURED: step 5 is the only step that commits, and against a doc you already wrote in full it returns `status=no-change` (exit 5) — *report the line and stop*. The doc then ends the session **untracked**, which `claude/RULES.md` names as unsaved work one routine `checkout` from silent deletion. `handoff_doc.py` handles the no-base case itself with the same diff, warnings and commit+push; writing the file first is what takes them away.
 
+   🔴 **An arc whose subject matter is CLIENT INFRASTRUCTURE gets its doc in the CLIENT repo — this one is PUBLIC.**
+
    🔴 **The `clawgate-task:` field from step 1 goes in YAML front matter at the VERY TOP — `---` on LINE 1, nothing above it, and the closing `---` is load-bearing.** `/resume` only parses a block whose `---` is line 1, because a `---` further down is a horizontal rule and letting one open front matter would let body prose mint a task id. On a NEW doc that means the top of your SCRATCH file. Omit the block entirely when step 1 resolved nothing. 🔴 **On an UPDATE, check before you add:** `bash ~/workspace/devrc/scripts/lib/clawgate_handoff.sh field <doc>` exits **0** (readable field already there — leave it), **1** (none; add it), **2** (present but unreadable — a non-id value or an unclosed block; stderr says which). Repair *that* block, never add a second. 📖 the DROPS-the-task remedy (which INVERTS rule (f)): `~/.claude/skills/handoff/reference/clawgate-task.md`.
 
    ````markdown
@@ -94,15 +96,11 @@ Topic argument (optional): `$ARGUMENTS`. If empty, infer a short kebab-case topi
    2. ... forcing: none
    🔴 **EVERY item MUST carry `forcing: <kind>`** or step 5 refuses (`status=unforced`). CLOSED vocabulary: `incident`, `user`, `gate`, `deadline`, `regression`, `security`, `none` — an unrecognised kind is refused, so there is no `followup`/`tech-debt` to hide under. **EXTERNAL — NOT the previous session's list; the refusal spells it out.** `forcing: none` is the honest opt-out: **accepted and counted, and not eligible to be worked.** ⚠ The tool cannot check a cited forcing function is real or external — it makes the claim mandatory and greppable, nothing more.
    🔴 **The field may sit anywhere on the item, continuation lines included — but INDENT it.** The block ends at the next item, or at the first unindented line once a blank has intervened, which an intervening FENCE does not reset: trailing prose tags nothing, and a FLUSH-LEFT tag there reads ABSENT. Emphasis is OK (`**forcing:** gate`, `_forcing: gate_`); `forcing function:`/`forcing = gate` **with a listed kind** (unlisted reads ABSENT), and a fenced field regardless of kind, are **near-misses, NAMED** not absent. 📖 write-gate §C.
-   🔴 **This list is a WORK QUEUE, and `claim-work` is its LOCK** — every
-   `/resume` session draws from it, so a *better* ranked list produces *more*
-   duplicate work, not less. **NUMBER the items and keep the numbering stable:
-   the rank is half a claim's identity** (`claim-work --slug-for <this doc>
-   <rank>`), and re-ranking silently re-points every live claim. Make each item
-   cheap to check — name the repo and the files it will touch, and mark anything
-   in flight `IN FLIGHT: <repo>#<pr>`; that marker is the SOFT half, the lock is
-   the command `/resume` step 6 runs before touching an item. Worktrees do NOT
-   prevent this. 📖 `~/.claude/skills/handoff/reference/shared-queue.md`.
+   🔴 **This list is a WORK QUEUE and `claim-work` is its LOCK.** NUMBER the items
+   and keep the numbering STABLE — the rank is half a claim's identity, so re-ranking
+   re-points every live claim. Name each item's repo and the files it will touch, and
+   mark anything in flight `IN FLIGHT: <repo>#<pr>` — the SOFT half, not the lock.
+   📖 `~/.claude/skills/handoff/reference/shared-queue.md`.
    🔴 **AND IT IS RATCHETED: an audit finding is a DEFECT, not a rank.** Step 5 refuses
    an update whose `forcing: none` count EXCEEDS the doc's. Batch findings under
    `## Defects (batched)` and fix them in ONE round; closing one buys room for one.

@@ -255,6 +255,28 @@ as an invariant guard rather than counted as regression coverage.
 
 ## Producing side
 
+### Demoted from `SKILL.md` step 2 (2026-09-29) — VERBATIM
+
+The paragraph below is the one `SKILL.md`'s `## Next steps (ranked)` template
+carried until the byte gate needed room. The body now keeps only the imperative
+half (number stably, name repo + files, mark `IN FLIGHT`) and points here:
+
+> 🔴 **This list is a WORK QUEUE, and `claim-work` is its LOCK** — every
+> `/resume` session draws from it, so a *better* ranked list produces *more*
+> duplicate work, not less. **NUMBER the items and keep the numbering stable:
+> the rank is half a claim's identity** (`claim-work --slug-for <this doc>
+> <rank>`), and re-ranking silently re-points every live claim. Make each item
+> cheap to check — name the repo and the files it will touch, and mark anything
+> in flight `IN FLIGHT: <repo>#<pr>`; that marker is the SOFT half, the lock is
+> the command `/resume` step 6 runs before touching an item. Worktrees do NOT
+> prevent this.
+
+Every claim in it is argued at length elsewhere on this page: the *better list
+produces more duplication* finding under **What was measured — 2026-08-24**, the
+worktree half under **Worktree isolation is REFUTED as the explanation**, and
+`--slug-for` under **THE MECHANISM**. Nothing was lost in the demotion; what the
+body lost is the reasoning, not a rule.
+
 When writing an item into `## Next steps (ranked)`, make "is this already taken?"
 cheap to answer: name the repo and the files it will touch, and mark anything
 already in progress as `IN FLIGHT: <repo>#<pr>` or `BRANCH: <name>`.

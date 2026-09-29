@@ -124,7 +124,8 @@ operator asked for, so that branch was unreachable and his stated requirements l
 - 🔴 **`#1914` (the public-IP gate carve-out) is CLOSED UNMERGED — operator's call, on evidence.**
   Branch `fix/ip-gate-slice-false-positive` retained. A lexical carve-out on a security gate
   produced a NEW false negative in **three consecutive rounds**; full table in the PR's closing
-  comment. The `parts[1::2]` false positive therefore STANDS: spell the slice differently, as
+  comment. The `parts[1 :: 2]` false positive therefore STANDS (spaced here so this doc does not
+  itself trip the gate): spell the slice differently, as
   `round0-attribution-rate.py` does (`range(1, len(parts) - 1, 2)`).
 - 🔴 **CARRIED FORWARD, and do not conflate the two: the FEATURE is deployed, the INSTRUMENT is
   not.** `#1887` (`31033cdb`, the asks block itself) shipped to **BOTH hosts** via `scripts/ship.sh`
@@ -271,7 +272,7 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
   pass carries zero information about your PR.
 - ⚠ **A LEXICAL CARVE-OUT ON A SECURITY GATE COULD NOT BE MADE SAFE — the dead end, recorded so
   it is not re-attempted blind.** `#1914` (closed unmerged) leaked a false negative three rounds
-  running: an adjacency condition missed `grid[1::2, ::3]`; quote members of `SUBSCRIPTABLE_CHARS`
+  running: an adjacency condition missed `grid[1 :: 2, :: 3]` (spaced, as above); quote members of `SUBSCRIPTABLE_CHARS`
   exempted `bind: "[<addr>]:53"` (canonical YAML/JSON/Go/shell IPv6 endpoint form); and quote
   **parity** was then defeated by an apostrophe in ordinary prose (`# don't forget the peer
   '[<addr>]:53'`) — reachable in committed prose, since `claudedocs/**` is deliberately not in
@@ -445,6 +446,6 @@ nix build $DEVRC#checks.x86_64-linux.pytests --no-link -L   # read RESULT:/SCOPE
 
 # 5. the false positive #1914 declined to carve out — confirm it is still a false POSITIVE
 nix develop $DEVRC -c python3 -c 'import sys; sys.path.insert(0,"'$DEVRC'/scripts"); \
-from testlib import public_ip_scan as m; print(len(m.find_in_line("x = parts[1::2]")))'
+from testlib import public_ip_scan as m; print(len(m.find_in_line("x = parts[1" + "::" + "2]")))'
 # expect 1 — the gate reports it. That is deliberate: spell the slice differently.
 ```

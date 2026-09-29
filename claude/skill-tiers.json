@@ -121,6 +121,9 @@
     "mailbox": {
       "tier": "A"
     },
+    "muster": {
+      "tier": "A"
+    },
     "obs-read": {
       "tier": "A"
     },

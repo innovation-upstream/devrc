@@ -44,7 +44,8 @@ because they are the only structural enforcement of the task rituals, and both u
 | `clawgate-writeback-guard.py` | `PostToolUse` + `Stop` | arms on a read of a specific task id, and at Stop does a LIVE re-read to check a `claude-code` comment landed after the last work event. |
 
 🔴 **Both accept TWO CLI spellings — `clawgatectl` and `muster`.** The tasks+dispatch half of
-clawgate is being extracted into `muster` (`github.com/ZacxDev/muster`), same verbs. Each guard
+clawgate **has been extracted** into `muster` (`github.com/ZacxDev/muster`), same verbs — live on
+`http://192.168.50.250:30306` (muster `0.2.0`) since 2026-09; the router keeps `:30302`. Each guard
 keyed on the literal string `clawgatectl`, so the rename alone would have made both match
 nothing — the interview gate allowing every criteria-less create, and the writeback gate reaching
 **no verdict at all**, which is indistinguishable from a session that wrote back correctly. Both
@@ -52,6 +53,10 @@ spellings therefore landed **before** the rename. Each hook derives every predic
 `TASK_CLI_NAMES` tuple; add a third spelling there, not at the call sites.
 
 🔴 **`CLAWGATE_TASK_API_URL` — the second base URL, in the SAME `~/.claude/clawgate.env`.**
+It is muster's: `http://192.168.50.250:30306`. 🔴 **Now that the extraction has LANDED, leaving it
+unset is no longer harmless.** The fall-through below aims the re-read at the router, which since
+the split answers `/api/tasks/<id>` with a **404**, not the "right-looking 200" this note was
+written about — so the failure mode changed from a silent wrong answer to an `UNVERIFIED` notice.
 Optional. When set, the writeback guard's live re-read targets it (passed to the CLI as
 `--api-url`, and used by the curl fallback) instead of `CLAWGATE_API_URL`. An optional
 `CLAWGATE_TASKS_HOOK_TOKEN` overrides `CLAWGATE_HOOK_TOKEN` for the same reads.

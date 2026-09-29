@@ -1,7 +1,14 @@
-# clawgate — code-level traps
+# clawgate / muster — code-level traps
 
-Read when: you are **changing clawgate's Go code or its htmx markup**, or a producer is getting an
+Read when: you are **changing the Go code or the htmx markup**, or a producer is getting an
 unexpected status back. Not needed to merely operate it.
+
+🔴 **WHICH REPO: the task half moved.** Tags, `title`-vs-`directory`, comment authorship, the
+`taskTitle` collision, the `notes` naming gotcha and migrations 0003–0018 all describe the
+**task/agent surface, which now lives in `muster`** (`github.com/ZacxDev/muster`) — the
+`internal/notes`, `internal/api/notes.go` and `internal/ui/notes.go` paths below are clawgate's
+**pre-split** tree, so look for them in muster's. The markdown renderer, the htmx traps and the
+`g.If` gotcha are generic and apply to both. Clawgate keeps the permission-router code.
 
 ## The markdown renderer (0.7.77) — `internal/ui/markdown.go`
 
