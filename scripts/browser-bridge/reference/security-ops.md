@@ -84,3 +84,45 @@ then target with `browser --instance <label> <op>`.
 
 > After updating the extension you MUST reload it — and reload ↻ is unreliable;
 > see `~/workspace/devrc/scripts/browser-bridge/reference/errors.md`. Brave may prompt to re-confirm the `debugger` permission.
+
+## 🔴 Adding a flow file for a CLIENT SUBDOMAIN — pin the host, never widen the gate
+
+`scripts/tests/test_no_client_hostnames.py` forbids a client subdomain literal in
+this PUBLIC repo. A per-app flow file names one twice — the `flows/_index.json`
+key and the body — so **adding one turns `tekton/devrc-pytests` red**. The
+FILENAME is fine: the scan reads content only, and a host followed by `.md` fails
+its right lookahead `(?!\.[A-Za-z0-9])`.
+
+🔴 **Do NOT "fix" it by treating the hosting apex as a multi-tenant public
+suffix.** A platform that serves every tenant at `<slug>.<apex>` makes that
+tempting. MEASURED 2026-09-29: requiring ≥2 labels before the apex stops
+reporting a published tenant host **and** stops reporting `planted_host()` —
+the gate's own positive control, an internal-service shape. Current pattern:
+both FOUND. Widened: both **not found**. A tenant host and an internal host are
+the *same shape*; nothing in the string separates them, only knowledge of what
+is published, which lives outside the repo. Widening therefore blinds the gate
+to exactly what it exists to catch.
+
+**The remedy is one pinned `ALLOWLIST` entry per `(path, host)`** — what the
+scanner's docstring calls "the third option and the rare one … for a subdomain
+that is genuinely public and genuinely not topology". Establish both halves:
+
+- *genuinely public* — `env -i curl <the platform's public app API>` returns the
+  host for an **approved** listing. 🔴 `env -i` is load-bearing: a probe carrying
+  an ambient cookie or token proves nothing about what a stranger can see.
+- *genuinely not topology* — the scanner catalogues what leaks as `grafana-new.`
+  / `auth.` / `sish.` / `review-<hash>.` / `<unreleased product>.`. A RELEASED,
+  publicly-listed product is none of those, and `CLAUDE.md`'s ban is qualified
+  "used as an **example**", which an operational flow target is not.
+
+It recurs per app, and that is the FEATURE — a human deciding "this one is
+public" each time, rather than a regex guessing it forever.
+
+⚠ **That test file is scanned BY ITS OWN GATE.** Spell a host in a pin or in the
+prose explaining it and `test_this_guards_own_sources_are_clean` fails on your
+own block. Assemble from the shared `_APEX` constant. Same applies to THIS file.
+
+⚠ **A note added to `SKILL.md` about this cost 693 B over its size target** and
+turned three gates red (`test_skill_audit.py` ×2, `test_prune_skill_size.py`).
+That is why the detail lives here and the skill carries one line: `SKILL.md` has
+~200-500 B of headroom, and reference files cost nothing until loaded.
