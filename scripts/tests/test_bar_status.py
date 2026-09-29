@@ -276,6 +276,50 @@ def test_the_poller_falls_back_to_the_router_when_the_task_url_is_unset(
         % (SEAM_ROUTER_URL, seen["url"]))
 
 
+@pytest.mark.parametrize("spec_name", ["clawgate", "clawgate_stuck"])
+def test_the_clawgate_TOASTS_open_the_TASK_service_not_the_router(
+        spec_name, tmp_path, monkeypatch):
+    """🔴 SAME SEAM AS THE POLL, ONE LAYER OUT: the toast's CLICK TARGET.
+
+    Both clawgate toasts announce the board, and both spelled the ROUTER base by
+    hand (`xdg-open http://…:30302`) while the board itself had already moved to
+    the task service — MEASURED 2026-09-29 on the live pods: `:30302/tasks` and
+    `:30302/ui/tasks` both 404, the task service's `/tasks` 401. So a toast the
+    operator clicked landed on a service that does not have the page.
+
+    Asserted as STATE — the base the toast resolves to, driven through the same
+    real env file the poll seam uses — and not as "the string does not contain
+    30302": a second hardcoded literal would satisfy that spelling and fail this.
+    Both URLs are synthetic and pairwise distinct, so no hardcoded-constant
+    mutant can land on the expected value by construction.
+    """
+    _seam_env(tmp_path, monkeypatch)
+    # `task_base_url` layers the PROCESS environment over the file; a host that
+    # exports either key would otherwise decide this test's answer.
+    for var in poll.CG.TASK_API_URL_VARS:
+        monkeypatch.delenv(var, raising=False)
+    action = poll._toast_specs()[spec_name]["action"]
+    assert action == "xdg-open " + SEAM_TASK_URL, (
+        "the %r toast must open the task service %s, got %r"
+        % (spec_name, SEAM_TASK_URL, action))
+    assert SEAM_ROUTER_URL not in action, (
+        "the %r toast still opens the permission router (%r)"
+        % (spec_name, action))
+
+
+def test_the_clawgate_toasts_fall_back_to_the_router_when_the_task_url_is_unset(
+        tmp_path, monkeypatch):
+    """⚠ The companion to the poll's fallback test, and the reason this is a
+    DERIVED base rather than a pasted `:30306`: a host that has never heard of
+    the split must still open exactly where it opened before."""
+    _seam_env(tmp_path, monkeypatch, task=None)
+    for var in poll.CG.TASK_API_URL_VARS:
+        monkeypatch.delenv(var, raising=False)
+    for name in ("clawgate", "clawgate_stuck"):
+        assert poll._toast_specs()[name]["action"] == \
+            "xdg-open " + SEAM_ROUTER_URL, name
+
+
 def test_a_failing_clawgate_fetch_never_leaks_the_token_into_the_cache(
         monkeypatch, tmp_path):
     """The `stale` marker formats the exception. Pin that the credential cannot
