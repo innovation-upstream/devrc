@@ -1402,15 +1402,31 @@ def test_every_render_KWARG_is_exercised_by_a_probe(r0, oa, tmp_path):
         assert bad == [], f"uncovered source line(s): {bad}"
 
 
+#: A source line no anchor covers, for a source that is NOT the session
+#: transcript. 🔴 Both halves are load-bearing: uncovered, so it must GROW; and
+#: non-session, so a reader filtered through `session_source_lines` drops it.
+UNCOVERED_OTHER_SOURCE = "a source nobody has classified: 1 thing(s) considered"
+
+
 def test_the_pin_reach_the_ANCHORS_header_CLAIMS_is_the_reach_it_HAS(
-        r0, oa, tmp_path):
+        r0, oa, tmp_path, capsys):
     """🔴 REGRESSION for `#1901 round 1`'s F4: that header claimed two things the
-    implementation did not do, both measured INERT (rc 4, not rc 5). Both are
-    asserted here as behaviour rather than prose.
+    implementation did not do, both measured INERT (rc 4, not rc 5). All three
+    are asserted here as behaviour rather than prose.
 
     (a) a NEW ask source must reach a probe — the probes are derived from
         `oa.SOURCE_ORDER`, not from two hand-named constants;
-    (b) GROWS must cover EVERY source line, not just session-transcript ones.
+    (b) GROWS must cover EVERY source line, not just session-transcript ones;
+    (c) 🔴 …AND THE REACH BEING CLAIMED IS `check_pins`'s, NOT `match_anchors`'s.
+        (a) and (b) were both true of the PRIMITIVE while the CALL SITE inside
+        `check_pins` filtered through `session_source_lines` first — which is
+        exactly the inertness F4 named, and this test could not see it. MEASURED:
+        the `grows-only-session-lines` mutant, which restores that filter at the
+        call site, left every assertion above PASSING; 19 other tests failed, not
+        one of them this one, so the mutant was scored KILLED while nothing
+        proved the guard that names it had run at all
+        (`claude/RULES.md` → "isolation-seam": each surface was tested alone and
+        the defect lives in the seam). So (c) drives `check_pins` itself.
     """
     probes = r0.renderer_probes(oa, tmp_path / "nope")
     # (a) every declared source appears as a heading in the `every-source` probe
@@ -1427,6 +1443,40 @@ def test_the_pin_reach_the_ANCHORS_header_CLAIMS_is_the_reach_it_HAS(
     _r, _i, invented = r0.match_anchors(
         ["  a new source: 3 thing(s) considered"], "sources")
     assert invented, "an uncovered source line must be reported as unmatched"
+
+    # ---- (c) the CALL SITE, end to end through `check_pins` ---------------
+    # POSITIVE CONTROL on the fixture first: a probe that cannot GROW would make
+    # the refusal below a claim about nothing.
+    line = r0.SOURCE_LINE_INDENT + UNCOVERED_OTHER_SOURCE
+    assert oa.SOURCE_SESSION + ":" not in line, (
+        "the injected line must NOT be a session-transcript source line, or a "
+        "session-filtered reader would still see it and (c) proves nothing")
+    _r2, _i2, uncovered = r0.match_anchors([line], "sources")
+    assert uncovered == [line], (
+        f"the injected line must be uncovered by ANCHORS: {uncovered!r}")
+
+    base = probes["every-source"]
+    assert base.count(r0.ANCHOR_SOURCES) == 1, "one Sources block in the probe"
+    grown = base.replace(r0.ANCHOR_SOURCES, r0.ANCHOR_SOURCES + "\n" + line, 1)
+    # ⚠ The grown probe is passed ALONE, not alongside the real ones. `check_pins`
+    # prints only the first few unmatched lines, so a full probe set could push
+    # this line out of the message and make the assertion below fail for a reason
+    # that has nothing to do with the reach. Alone, SHRINKS also fires (most
+    # anchors are unseen) and is deliberately NOT asserted on.
+    code = None
+    try:
+        r0.check_pins(oa, {"grown": grown})
+    except SystemExit as exc:
+        code = exc.code
+    err = capsys.readouterr().err
+    assert code == r0.EXIT_PIN, (
+        f"check_pins did not refuse (exit {code!r}) on a rendered block carrying "
+        "an uncovered NON-session source line — its GROWS half is not reaching "
+        f"every source line.\n{err}")
+    assert "GROWS" in err and UNCOVERED_OTHER_SOURCE in err, (
+        "check_pins refused without naming the uncovered NON-session source "
+        "line under GROWS — the source-line reader at that call site is "
+        f"filtered to session-transcript lines again.\n{err}")
 
 
 def test_every_exit_code_constant_is_documented_in_the_docstring(r0):
