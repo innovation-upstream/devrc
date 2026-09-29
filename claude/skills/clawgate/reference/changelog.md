@@ -12,6 +12,14 @@ machine API, or debug.
 🔑 **Never derive the next release number from this file** — always from the LIVE
 deployment pin (see the core's deploy section).
 
+🔴 **AND THE PRODUCT SPLIT IN TWO AFTER THE LAST ENTRY HERE.** Phases 2–4 below — Tasks, Repos,
+Agents, the Operator, runbooks and every `/api/tasks*` · `/api/agents*` · `/agent/task*` entry —
+were extracted into a **separate service, `muster`** (`github.com/ZacxDev/muster`, ns `muster`,
+`http://192.168.50.250:30306`, env `CLAWGATE_TASK_API_URL`); clawgate kept the permission router on
+`:30302`. So **every `:30302` URL in this file's task entries is a historical record, not a working
+address** — on the router those paths are 404 today. Versions also forked: clawgate `0.8.65` and
+muster `0.2.0` when this line was written (2026-09-29).
+
 ## Phases
 - **0–1** permission approval (replaced the dead Telegram notify-bot).
 - **2** Tasks/Repos/Agents tabs on Postgres.

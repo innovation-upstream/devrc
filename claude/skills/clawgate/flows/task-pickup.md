@@ -1,4 +1,9 @@
-# flow: picking up a clawgate task — the comment/status ritual
+# flow: picking up a task — the comment/status ritual
+
+⚠ **The board is `muster`'s** (`http://192.168.50.250:30306`, env `CLAWGATE_TASK_API_URL`) — every
+`/api/tasks*` and `/agent/task*` route named below, and the `/tasks` UI. The permission router
+(`:30302`) **404s all of them**; see `SKILL.md` → "TWO SERVICES". Every `clawgatectl task …`
+command in this flow resolves the right base by itself — that is the reason to use it over `curl`.
 
 **Run this on "read and evaluate clawgate task N", and on "local dispatch".** It is
 enforced: `~/.claude/hooks/clawgate-writeback-guard.py` (PostToolUse watches, Stop

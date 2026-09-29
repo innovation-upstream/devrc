@@ -306,6 +306,12 @@ per-agent token is the open design question, not a thing that exists.
 | every READ (`health`, `tmux`, `transcript`, `task`, `agent`, `attention`, `view`, `panel`) | `CLAWGATE_HOOK_TOKEN` | **enforce-when-set** — an unconfigured server serves them |
 | `term send` / `term launch` / **`term ls`** | `CLAWGATE_TERMINAL_TOKEN` | **fail-CLOSED** — a server with no terminal token serves nothing there |
 
+⚠ **One credential, but TWO SERVERS.** `task` and `agent` go to **muster**
+(`CLAWGATE_TASK_API_URL`, `:30306`); `health`, `tmux`, `transcript`, `attention`, `view`, `panel`
+and every `term` verb go to the router (`CLAWGATE_API_URL`, `:30302`). The same hook token opens
+both, so a credential that works proves nothing about the base — and on the wrong base a read 404s
+rather than 401s. `SKILL.md` → "TWO SERVICES".
+
 They are different secrets and **neither falls back to the other**. The hook token is handed to
 every hook script on both hosts and rendered into every dispatched agent pod's environment; these
 routes are arbitrary command execution. So **a dispatched agent pod carries the hook token and NOT
@@ -328,6 +334,10 @@ clawgatectl: refusing to send a terminal write with no terminal credential. … 
 If you are running inside a dispatched agent pod: that pod carries CLAWGATE_API_URL and
 CLAWGATE_HOOK_TOKEN only, by design. Read verbs work there; these do not.
 ```
+⚠ **That message predates the split and its "read verbs work there" is now conditional.** muster
+writes `CLAWGATE_TASK_API_URL` into every agent's env file, and without it `task`/`agent` fall back
+to `CLAWGATE_API_URL` — the router — where they 404. If a pod's read verbs 404, check that variable
+before concluding the server is down.
 ⚠ Setting `CLAWGATE_TERMINAL_TOKEN=` **empty does not disarm the client** — `~/.claude/clawgate.env`
 still supplies it and the call succeeds (measured rc=0). To test the unarmed path, point
 `--env-file` at an empty file and `env -u` the variable.

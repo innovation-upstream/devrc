@@ -4,6 +4,15 @@ Read when: you are actually **building and shipping a clawgate version** (Go cod
 chart, CSS, manifest pin), or debugging a local e2e failure. Routine ops (status / send a test /
 logs) don't need this file.
 
+🔴 **THIS FILE SHIPS THE ROUTER ONLY.** `muster` — the extracted task/agent/runbook service
+(`github.com/ZacxDev/muster`, ns `muster`, `:30306`) — is a **separate repo, a separate image and a
+separate manifest pin** (`clusters/workbench/apps/muster/deployment.yaml`, image
+`harbor.homelab.lan/library/muster:<ver>@sha256:…` — a **digest** pin, not the literal tag this
+page's whole "silent manifest" argument is built on), on its own version line (`0.2.0` vs clawgate
+`0.8.65`, 2026-09-29). Nothing in this runbook deploys it, and bumping clawgate's pin changes
+nothing on the task board. ⚠ Muster's own build procedure is **not documented here and was not
+verified by this page's author** — read its repo before shipping it.
+
 ## 🔴 "Committing IS deploying" is true of the MANIFEST, not of container CODE — and the difference is silent
 `deployment.yaml` pins an **immutable literal tag** (`clawgate:<ver>`) and there is **no Flux image
 automation** in `clusters/workbench/apps/clawgate/` (MEASURED 2026-08-02: no `ImageRepository`, no
@@ -148,7 +157,11 @@ git -C ~/workspace/kubeclaw fetch origin && git -C ~/workspace/kubeclaw merge --
 `--ff-only` is the point: it cannot autostash, and a refusal is the signal that the clone diverged.
 
 ## 🔴 Verifying UI live NEEDS A SESSION — this section said the LAN UI was open, and it is not
-**Measured 2026-09-12 (0.8.32): `GET http://192.168.50.250:30302/tasks/1` → `303` → `/login`.**
+⚠ **`/tasks/1` on the ROUTER base is a 404 today** (2026-09-29) — the tasks UI is **muster**'s
+(`http://192.168.50.250:30306/tasks/1`, which refuses with `401` + JSON rather than a redirect).
+The conclusion below still holds for clawgate's own pages; only the URL that demonstrated it moved,
+which is why it is no longer written out here as a copyable router-base task URL.
+**Measured 2026-09-12 (0.8.32): `GET /tasks/1` on the router base → `303` → `/login`.**
 `requireSession` enforces (`internal/api/auth.go:210-232` — `BrowserAuthRefusal` → `hasValidSession`
 → `refuseUnauthenticated`); it is no longer the pass-through this file assumed. A Playwright run
 that "just drives the LAN pod" now lands on a login form and will report the UI broken.

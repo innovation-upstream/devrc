@@ -85,12 +85,12 @@ MIN_SKILLS = 30
 # --------------------------------------------------------------------------- #
 MEASURED_ENTRIES = 36
 MEASURED_TIER_A_ENTRIES = 23
-MEASURED_TIER_A_CHARS = 7_485
+MEASURED_TIER_A_CHARS = 7_480
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 7_670
+MEASURED_UNDER_LEDGER_CHARS = 7_665
 # ...and what the same 36 entries would cost with every skill tier A. The
 # difference is what the ledger buys: 3,316 chars.
-MEASURED_ALL_TIER_A_CHARS = 10_986
+MEASURED_ALL_TIER_A_CHARS = 10_981
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
@@ -118,6 +118,17 @@ MEASURED_ALL_TIER_A_CHARS = 10_986
 # entry. Do not treat the headroom as licence — the descriptions gate above this
 # one is the one that actually went red in 2026-09-26's +27, on the SUM rather
 # than on this block.
+#
+# 🔴 2026-09-29: `clawgate`'s description was CORRECTED — it claimed clawgate owns
+# "Tasks/agents/runbooks", which stopped being true when that half was extracted
+# into the separate `muster` service. The rewrite names muster and adds
+# `clawgatectl`/`task board` as triggers, and PAYS for them inside its own entry
+# per the descriptions gate's eviction playbook step 1 rather than by raising a
+# ceiling: out went `manage credentials/QR` (the login QR was REMOVED in 0.7.37 —
+# a dead trigger phrase, so dropping it costs no routing), and `build and deploy a
+# version` collapsed to `deploy`. Net −5 chars, so the block is 7,480 across 23
+# entries, the ceiling stays 7,617 and headroom is 137. The mean tier-A entry is
+# 7,480 / 23 = 325.2.
 #
 # 🔴 2026-09-25: `opencode` was RENAMED `opencode-dispatch` — the exact product
 # name made every bare mention of "opencode" route into the dispatch skill. The

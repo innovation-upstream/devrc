@@ -1,14 +1,33 @@
 ---
 name: clawgate
-description: "Operate clawgate — the self-hosted Claude Code permission router (plus Tasks/agents/runbooks). Status, send-a-test, push/SSE logs, build and deploy a version, toggle the approval hook, manage credentials/QR. Use for: clawgate, clawgate.zacx.dev, remote approval, the PermissionRequest approval hook, push notifications for permission prompts."
+description: "Operate clawgate (Claude Code's permission router) and muster, the SEPARATE task/agent/runbook service split out of it. Status, send-a-test, push/SSE logs, deploy, approval hook, task board. Use for: clawgate, clawgate.zacx.dev, muster, clawgatectl, remote approval, the PermissionRequest hook, push notifications for permission prompts."
 ---
 
 # clawgate operations
 
 Self-hosted Go + htmx PWA routing Claude Code permission prompts to Zach's phone (it ROUTES; does
-NOT gate — `telemetry.md`), grown into the **agent dispatch loop**: Tasks/Repos/Agents on Postgres,
-agent self-service + privilege profiles + an Operator, runbooks with approval gates, and a machine
-Task API producers post work into for one-tap Dispatch.
+NOT gate — `telemetry.md`). 🔴 **Tasks/agents/runbooks are NO LONGER clawgate's** — that half was
+extracted into a separate service, **muster**; this skill covers both, and the split is the first
+thing to get right.
+
+## 🔴 TWO SERVICES, TWO BASES — pick the base from the ROUTE, never from habit
+
+| service | LAN base | env var | owns |
+|---|---|---|---|
+| **clawgate** — the permission ROUTER | `http://192.168.50.250:30302` | `CLAWGATE_API_URL` | approvals (`/requests`, `/api/send`, `/api/gate`, `/api/response/{id}`, `/api/auto-approve*`, `/api/push/*`), `/api/notify`, `/api/suggest`, `/api/attention*`, `/api/layout*`, `/api/term*`, `/api/tmux*`, `/api/transcripts*` |
+| **muster** — TASK/agent/runbook service (`github.com/ZacxDev/muster`, ns `muster`) | `http://192.168.50.250:30306` | 🔴 **`CLAWGATE_TASK_API_URL`** | `/api/tasks*`, `/api/agents*`, `/agent/task*`, `/api/tags`, `/api/projects`, `/api/sessions/{id}/tasks`, the `/tasks` UI, `/agents`, `/repos`, `/runbooks` |
+
+🔴 **A task-side path on the ROUTER base is a silent 404 — the wrong base does not error.**
+Measured 2026-09-29, clawgate **0.8.65** / muster **0.2.0**:
+`:30302/api/tasks|/api/agents|/agent/task|/tasks` → **404**; the same four on `:30306` → **401**
+(exist, auth-gated); the reverse holds (`:30306/api/send|/api/attention` → 404); `/zzz-control`
+404s on **both** (negative control). 🔑 **Tell the two 404s apart by BODY**: `404 page not found`
+(text/plain, `clawgatectl` **rc 7**) = wrong base; `{"error":"task not found"}` (JSON, rc 4) = right
+base, absent task. Per-route inventory + the discriminator table: `task-api.md`.
+⚠ **One `CLAWGATE_HOOK_TOKEN` opens BOTH servers**, so a working token proves nothing about which
+one you reached. 🔴 **Never repoint `CLAWGATE_API_URL` at muster** — `clawgate-hook.sh` reads it
+for `/api/send` (`hooks.md`). `clawgatectl` picks the base per route; devrc's ledger is
+`scripts/lib/clawgate_tasks.py` (`TASK_API_URL_VARS` / `ROUTER_API_URL_VARS`).
 
 🔴 **Point-in-time state: `~/workspace/homelab-talos/containers/clawgate/HANDOFF.md` —
 GREP it for the section you need, never read it whole (~190 KB, lower half superseded).**
@@ -23,8 +42,8 @@ feature.
 | file | read it when |
 |---|---|
 | `deploy.md` | **building + shipping a version**: manifest-vs-code + CSS-cwd traps; chart sync |
-| `task-api.md` | **writing/debugging a producer**; `clawgatectl` + exit codes; **the 23-route `/api/*` inventory with its auth**; tag grammar |
-| `agent-dispatch.md` | debugging the agent loop; `POST /agents`; the sandbox fixture; a silent non-start |
+| `task-api.md` | **writing/debugging a producer** against **muster**; `clawgatectl` + exit codes; the `/api/*` inventory with its auth **and which service serves it**; tag grammar |
+| `agent-dispatch.md` | debugging the agent loop; `POST /agents` (muster); the sandbox fixture; a silent non-start |
 | `extension.md` | you changed the extension, or need the loaded build |
 | `changelog.md` | *when* a feature landed / why a decision stands |
 | `architecture.md` | changing agents / repos / runbooks / privilege / native tools |
@@ -55,19 +74,20 @@ Memories: `clawgate-phase2` · `clawgate-phase3` · `clawgate-runbooks` ·
 
 | Thing | Value |
 |---|---|
-| Source | `~/workspace/homelab-talos/containers/clawgate/` (module `github.com/zacxdev/clawgate`) |
+| Source | `~/workspace/homelab-talos/containers/clawgate/` (module `github.com/zacxdev/clawgate`). 🔴 **muster is its OWN repo (`github.com/ZacxDev/muster`)** — a `git grep` here is no evidence about a task route |
 | Hook scripts | `hook/clawgate-hook.sh` (PermissionRequest → `/api/send`) + `hook/clawgate-stop-hook.sh` (Stop → `/api/suggest`); both read `~/.claude/clawgate.env` |
-| Cluster | **workbench**, ns `clawgate`; dispatched agents in ns **`devpod-<agent-name>`** |
+| Cluster | **workbench**. ns `clawgate` (router + its Postgres) · ns **`muster`** (tasks/agents + its OWN Postgres — `muster-postgres`, a SEPARATE database) · dispatched agents in ns **`devpod-<agent-name>`** |
 | 🔴 kubeconfig is PER-HOST | never hardcode — `ls` both, take the one that EXISTS; the other is **absent** on each host. Paths + telling the hosts apart: `troubleshooting.md` |
-| Image / manifest | `harbor.homelab.lan/library/clawgate:<ver>`, pinned in `clusters/workbench/apps/clawgate/deployment.yaml` (Flux from `trunk`) |
-| LAN URL (hook + UI) | `http://192.168.50.250:30302` (NodePort) — 🔴 the UI needs a SESSION, `/api/*` takes the hook token; see the two-door block below |
+| Image / manifest | `harbor.homelab.lan/library/clawgate:<ver>` in `clusters/workbench/apps/clawgate/deployment.yaml` (Flux from `trunk`). **muster: `harbor.homelab.lan/library/muster:<ver>@sha256:…` in `clusters/workbench/apps/muster/` — a DIGEST pin, separate version line.** Bumping one deploys nothing of the other |
+| LAN URL (hook + approvals UI) | **clawgate** `http://192.168.50.250:30302` (NodePort) — 🔴 the UI needs a SESSION, `/api/*` takes the hook token; see the two-door block below |
+| LAN URL (tasks + agents) | **muster** `http://192.168.50.250:30306` (NodePort) — the `/tasks` UI and every `/api/tasks*` · `/api/agents*` · `/agent/task*` route. Same hook token, DIFFERENT server |
 | Public / nebula URL | `https://clawgate.zacx.dev` behind **Authelia passkey** (portal `login.zacx.dev`); laptop `http://10.42.0.10:8109` (homelab gateway) |
 | Hook events | `PermissionRequest` (`CLAWGATE_REMOTE_APPROVAL=off`) + `Stop` (async, `CLAWGATE_SUGGEST=off`), both in `~/.claude/settings.json`, ON by default. 🔴 `Stop` carries OTHER hooks — **preserve every non-clawgate one**; DERIVE, never count: `jq -r '.hooks.Stop[].hooks[].command'` |
 | 🔴 Machine client | **`clawgatectl`** (`nix/pkgs/tools/clawgatectl.nix`; on PATH after a switch). 🔴 **Built from a LOCAL tree, so it can be present but STALE — a behind checkout ships a binary MISSING verbs that prints help and exits 0 under a plausible version.** JSON on stdout; rc 0–8; else curl. Commands + staleness closure: `task-api.md` |
 
 🔴 **TWO DOORS, DIFFERENT CREDENTIALS — a working hook token proves NOTHING about the UI.** `/api/*`
-takes `Bearer $CLAWGATE_HOOK_TOKEN`; `/tasks*` and the UI take a **session cookie** and answer
-`303 → /login` without one (public host: Authelia on top, whose headers clawgate does not trust).
+takes `Bearer $CLAWGATE_HOOK_TOKEN`; `/tasks*` (**on muster**) and both UIs take a **session
+cookie** and refuse without one (public host: Authelia on top, whose headers clawgate does not trust).
 Proving the API door open proves nothing about the human one — that is why the extension's "open in
 clawgate" links were inert (PR #802).
 🔴 **`POST /api/auto-approve-all` arms a global auto-approve window over EVERY future request in
@@ -90,8 +110,11 @@ cairn is absent reads as this step FAILING; a bare `if` skips SILENTLY). `prior-
 ```bash
 KC=$(ls ~/workspace/homelab-{talos,infra}/workbench-kubeconfig 2>/dev/null | head -1)  # PER-HOST
 kubectl --kubeconfig $KC -n clawgate get pods -l app=clawgate -o wide
+kubectl --kubeconfig $KC -n muster   get pods -o wide          # the TASK service — separate ns
 clawgatectl health   # live version + uptime; rc 6 = unreachable, rc 8 = you hit the public host
+curl -s http://192.168.50.250:30306/health   # muster's OWN version + pin — TWO services, two pins
 ```
+⚠ `clawgatectl health` reports the ROUTER only. A healthy router is **not** evidence the task board is up.
 
 ## send a test
 ⚠ **No `clawgatectl` verb for `/api/send`** — stays curl. Creates a real pending request (card + Web
@@ -119,6 +142,7 @@ version-from-the-live-pin, the ONE commit path (worktree off `origin/trunk`; nev
 test gate, build/push, pin bump, the CSS-cwd trap that fakes ~25 e2e failures, chart sync.
 
 ## task pickup — "read and evaluate clawgate task N", then "local dispatch"
+(The board is **muster**'s. The ritual below is unchanged; only the server it talks to moved.)
 🔴 **Run `flows/task-pickup.md`** — the comment/status ritual is NOT optional and NOT a thing to be
 asked for. Run it unprompted. The bash block, the criteria detector, the frozen-verdict rule, the
 completion-comment shape, the ordering trap and the two-comments rule are all there.
@@ -138,13 +162,16 @@ else means you **DERIVED** them, and that verdict is frozen at your first read.
 | DERIVED | yes | **`ready_for_review`** — you must not grade an exam you wrote |
 | either | **no** | **`ready_for_review`**, naming WHICH criterion and WHY it was not validatable |
 
-## machine (hook-token) Task API
+## machine (hook-token) Task API — **muster's, on `$CLAWGATE_TASK_API_URL` (`:30306`)**
+🔴 Every route below 404s on the router base. `clawgatectl` resolves it; a hand-rolled `curl` must.
 🔴 **Authoring one? `flows/task-authoring.md` FIRST** — a hook denies a criteria-less create.
 Read/create with `clawgatectl task ls --summary [--status open --tag t --limit n]` · `task get <id>`
 · `task create --body …`; **`--summary`/`--status`/`--limit` filter SERVER-side** (re-measured 0.7.87
 — was false at 0.7.85). Write status + comments with `clawgatectl task status` / `task comment`
-(above). Every remaining verb (`PATCH`, `DELETE`, comment DELETE, `/api/tags`, `/api/projects`,
-`/api/notify`) is still curl with `Authorization: Bearer $CLAWGATE_HOOK_TOKEN` (`task-api.md`).
+(above). Every remaining verb (`PATCH`, `DELETE`, comment DELETE, `/api/tags`, `/api/projects`) is
+still curl — `Authorization: Bearer $CLAWGATE_HOOK_TOKEN` against **`$CLAWGATE_TASK_API_URL`**
+(`task-api.md`). ⚠ **`/api/notify` is NOT one of them: it is a ROUTER route** (`:30302`) and used to
+be listed here — it pushes a card, it does not touch a task.
 Statuses are exactly `open` / `in_progress` / `ready_for_review` / `complete` — no `dismissed`;
 dismissing deletes.
 
@@ -161,7 +188,9 @@ create** — a load-bearing wire contract producers key their retry on.
 (`element-references.md`).
 
 ⚠ **Task↔session threads (#357).** `GET /api/tasks/{id}/sessions` **404s BY DESIGN** (pinned by
-`TestNoForwardSessionsSubRoute`) — the thread is EMBEDDED on task reads. So
+`TestNoForwardSessionsSubRoute`) — the thread is EMBEDDED on task reads. 🔴 **Since the split, a
+by-design 404 and a wrong-base 404 are the SAME observable** — before reading any task-route 404 as
+"absent by design", confirm the base you used was `:30306`. So
 `clawgatectl task get N | jq .sessions` answers *"which sessions worked task N"*; NOT UI-only.
 🔴 Membership OVER-reports: a subagent inherits the parent's id, and a mere READ links you.
 (#306's rejected-PATCH link is FIXED, live 0.7.99.) `task-api.md`
@@ -169,15 +198,16 @@ create** — a load-bearing wire contract producers key their retry on.
 **Writing/debugging a producer? Load `task-api.md`** — per-op semantics + status codes,
 409/immutability, the author allowlist, provenance, tag grammar, the route×auth inventory.
 
-## agent dispatch
+## agent dispatch — **muster's, on `:30306`**
 🔴 **Current STATUS of the loop lives in `HANDOFF.md`, not here** — claims here have been superseded
 within two days, twice. `agent-dispatch.md` has the sandbox fixture, the agent image's absent
 toolchain and the dispatch `curl`. Durable facts only:
 - **The loop DOES close unattended** (two real runs). "The 5-minute kickoff deadline is why it never
   worked" is DEAD — don't reopen it.
-- **`POST /agents` is FORM-ENCODED, not JSON** (hence no `clawgatectl` verb) and needs a SESSION —
-  a credential-less LAN call returns `401` (`auth-doors.md`). 🔴 A future webhook needs a **separate
-  hostname**, never a path bypass on `clawgate.zacx.dev` — that would put dispatch on the open net.
+- **`POST /agents` is FORM-ENCODED, not JSON** (hence no `clawgatectl` verb), **is on muster
+  (`:30306/agents` — the router 404s it)**, and needs a SESSION — a credential-less LAN call
+  returns `401` (`auth-doors.md`). 🔴 A future webhook needs a **separate hostname**, never a path
+  bypass on a public clawgate/muster host — that would put dispatch on the open net.
 - ⚠ **A dispatch that cannot START surfaces almost nothing** — the agent goes `error` but the task
   stays `in_progress`, `kicked_off` stays `false`, and nothing pushes. **Read the AGENT POD LOGS
   first — ns `devpod-<agent-name>`, not ns `clawgate`** (`agent-dispatch.md`).
