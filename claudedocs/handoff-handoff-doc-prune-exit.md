@@ -28,40 +28,47 @@ delete path. This arc builds that path and fixes one false claim found on the wa
   ranked item 2) and the arc cannot close without it.
 
 ## State now
-- **`devrc` `main` @ `79a9b22a`**; the base clone is 4 behind and carries one untracked file
-  (`claudedocs/scope-chief-model-selector-2026-09-19.md`) that is **not mine** — leave it.
-- **#1916 MERGED as `3cdf8a8f`** — `--prune FILE --prune-count N` on `handoff_doc.py`.
-  Refusals are `status=prune-refused`, **exit 15**, one marker per cause
-  (`[count mismatch]` `[absent]` `[ambiguous]` `[load-bearing]: <key>` `[section heading]`
-  `[partial block]` `[fence delimiter]` `[replace section]`). Scoped to the three append-only
-  sections; four fields can never be pruned (`clawgate-task:` `closing-condition:` `forcing:`
-  `as-of:`) with no override, except `as-of:` when its whole enclosing `###` block is named.
-  🔴 **The CODE IS LIVE with no switch** — `readlink -f scripts/lib/handoff_doc.py` terminates
-  **in the repo**, so it went live when the base clone fast-forwarded.
-- 🔴 **I EXERCISED IT ON A REAL DOCUMENT and it worked** — the author's own stated gap was
-  "all fixtures". Proposal run against `jev-ui-demo`'s handoff removing a 10-line `###` block:
-  `status=proposed`, nothing written, correct diff, and it exercised the `as-of:` exception.
-  **It also fired the durable-content warning correctly** — the block's last line was a real
-  instruction the surviving sibling did not carry, so **I did not land that prune.** First time
-  that warning has fired on a non-fixture doc.
-- **#1919 OPEN at `4243755b`, CI GREEN** — all four Tekton statuses `success`,
-  `collected=24694 passed=24687 skipped=7 failed=0`. Ready to merge. It corrects `write-gate.md`
-  §C, which claimed **one** emphasis spelling is admitted for a `forcing:` field, and adds a
-  guard. `claude/skills/handoff/SKILL.md` is **untouched** by it.
-- **Pre-push verification of #1919 in the correct devShell: 781 passed, 0 failed** across
-  `test_handoff_doc.py` + `test_skill_audit.py` + `test_run_tests_targets.py`.
-- 🔴 **I verified the new guard's mutation kill MYSELF rather than accepting the report.**
-  `_MARKUP` `{0,3}` -> `{0,2}` reds **two** tests with the guard's own message —
-  *"§C's ledger says 'forcing***: gate' parses to 'gate'; the live `_FORCING` gives None"* — one
-  structural, one behavioural through `ranked_items`, the real consumer. 2 failed / 631 passed.
-  Isolated needle (count asserted 1), `.git` removed from the `cp -a` copy, restore verified
-  byte-identical (`41d089d203c2634a`), green again after.
-- 🔴 **No `clawgate-task:` field**: `clawgate_handoff.sh resolve` exited **5** (NOTHING
-  RESOLVED). An unknown session id answers 200 with an empty array, so that zero cannot
+- **`devrc` `origin/main` @ `3cfaca85`**; the base clone is 7 behind and carries two untracked
+  `claudedocs/scope-chief-*.md` files that are **not mine** — leave them.
+- **#1919 MERGED as `643fd0ef`** (19:51:28Z, by ZacxDev). Verified **by content on
+  `origin/main`**, not by the PR's state: `write-gate.md` carries the POSITION grid, the
+  negative lookbehind and the `_MARKUP` bounds; `scripts/tests/mutants-handoff-cap.sh` and the
+  new test class are present. Ancestry happened to hold too, so this one was not a squash.
+- **#1926 OPEN at `12e1d611`** — `fix/size-ratchet-names-the-prune-exit`. All four Tekton
+  statuses registered and `pending` at the time of writing. 🔴 **The first SHA-pinned read
+  returned `n=0`, and that is the unregistered-rollup case, not a result** — the floor here is
+  4, never 0.
+- **The `MAX_BYTES` decision was PUT TO THE OPERATOR and ANSWERED: lever 1.** Fix the tool
+  message; do **not** raise the ceiling; leave `claude/skills/handoff/SKILL.md` untouched.
+- **What #1926 does.** Rule (p)'s `size-ratchet` refusal ended remedy 2 with *"`Gotchas` and
+  `Open investigations` APPEND here, so this tool cannot shrink them for you."* That was true
+  when written and **rule (q) falsified it in #1916**, so an author whose overage sat in an
+  append-only section was routed to `--override-size-ratchet`, which **ships the over-ceiling
+  doc**. Remedy 2 is now the prune route (flags read off `PRUNE_FLAG`/`PRUNE_COUNT_FLAG`);
+  MOVE became remedy 3, keeping its real function and losing the false half.
+- 🔴 **The arc still CANNOT close, and lever 1 is why.** The closing condition's second clause
+  wants `--prune` on `SKILL.md`'s `size-ratchet` line; lever 1 deliberately does not touch that
+  file. Either the raise happens later or the condition gets amended — ranked item 2.
+- **Re-measured, and the previous doc's figures had MOVED**: `claude/skills/handoff/SKILL.md` is
+  **20,213 B** against an enforced budget of **20,300** (`MAX_BYTES 21_200` −
+  `MIN_HEADROOM_BYTES 900`) = **87 B** of headroom, not the 25 B recorded. `--prune` appears
+  **once** in that file, in the trailing `📖` pointer — **not** on the `size-ratchet` line.
+- **Carried forward, still true, do not re-derive:**
+  - **#1916 MERGED as `3cdf8a8f`** — `--prune FILE --prune-count N`. Refusals are
+    `status=prune-refused`, **exit 15**, one marker per cause (`[count mismatch]` `[absent]`
+    `[ambiguous]` `[load-bearing]: <key>` `[section heading]` `[partial block]`
+    `[fence delimiter]` `[replace section]`). Scoped to the three append-only sections; four
+    fields can never be pruned (`clawgate-task:` `closing-condition:` `forcing:` `as-of:`) with
+    no override, except `as-of:` when its whole enclosing `###` block is named.
+  - 🔴 **The code is LIVE with no switch** — `readlink -f scripts/lib/handoff_doc.py` terminates
+    **in the repo**, so it went live when the base clone fast-forwarded.
+  - **`--prune` has been exercised on a real document**, not only fixtures, and its
+    durable-content warning fired correctly on a non-fixture doc; that prune was not landed.
+  - **Not this arc:** `jev-ui-demo` has its own current doc
+    (`claudedocs/handoff-jev-ui-demo.md`). Do not fold it in here.
+- 🔴 **No `clawgate-task:` field again this session**: `clawgate_handoff.sh resolve` exited **5**
+  (NOTHING RESOLVED). An unknown session id answers 200 with an empty array, so that zero cannot
   distinguish "touched no task" from "wrong id". **Not a clean bill of health.**
-- **Not this arc, recorded so nobody re-derives it:** `jev-ui-demo` has its own current doc
-  (`claudedocs/handoff-jev-ui-demo.md` @ `a756766`) carrying four merged PRs, a deployed and
-  twice-verified build, and an unauthorised paid sweep. Do not fold it in here.
 
 ## Open investigations — live diagnosis state
 
@@ -99,41 +106,42 @@ delete path. This arc builds that path and fixes one false claim found on the wa
   reading of "main is green" is currently wrong.
 
 ## Next steps (ranked)
-1. **Merge devrc#1919.** CI is green at `4243755b`, round 0 ran and sent it back once, the rework
-   addressed all four items, and I independently re-verified the mutation kill and the pre-push
-   suite. Nothing is outstanding on it. `IN FLIGHT: innovation-upstream/devrc#1919`.
-    forcing: user — the operator said to land the correction, then to run round 0, then proceed.
-2. **Decide the `MAX_BYTES` raise, then wire step 5 to reach for `--prune`.** This is what makes
-   #1916 reachable: today `size-ratchet`'s only named remedy is `--override-size-ratchet`, which
-   ships the over-ceiling doc. The wiring costs ~**144 B**; `claude/skills/handoff/SKILL.md` has
-   **25 B** against its enforced budget (`MAX_BYTES 21_200` − `MIN_HEADROOM_BYTES 900` = 20,300,
-   file 20,275 at the time — 🔴 **re-measure, `main` moved the file to 20,213 B under me**).
-   🔴 **The obvious trim is REFUTED, do not retry it:** demoting the emphasis/near-miss variant
-   catalogue out of `SKILL.md` reds **three** `TestSkillAndModuleAgree` guards, by mutation — they
-   pin those exact phrases because the skill is the only copy an executor reads at step 5. So the
-   remaining path is a deliberate raise to ~21,400, recorded in
-   `scripts/tests/test_handoff_skill_size.py` which owns the constant. **Operator's call; I did
-   not take it.** Files: that test + `claude/skills/handoff/SKILL.md`.
+1. **Merge devrc#1926 once its four statuses settle.** Read them SHA-pinned off
+   `repos/innovation-upstream/devrc/commits/<sha>/status`, never `gh pr checks`, and require
+   **four terminal** conclusions — an empty or two-status rollup settles instantly and
+   correctly-looking. `IN FLIGHT: innovation-upstream/devrc#1926`. Files:
+   `scripts/lib/handoff_doc.py`, `scripts/tests/test_handoff_doc.py`.
+    forcing: user — the operator chose lever 1 this session and the work is the answer to it.
+2. **Resolve the arc's second clause: raise `MAX_BYTES`, or amend the closing condition to
+   match lever 1.** These are the only two ways this arc closes, and picking is the operator's.
+   The raise is ~21,200 → ~21,400 in `scripts/tests/test_handoff_skill_size.py` (which owns the
+   constant and wants a ledger entry naming the instruction that would not fit), plus ~144 B of
+   wiring into `claude/skills/handoff/SKILL.md` against 87 B of headroom. 🔴 **Against it:** that
+   file's own ledger says the answer to the next round is *"lever 1 or 2, not another raise"*,
+   and it last **ratcheted DOWN**. 🔴 **The obvious trim is REFUTED — do not retry it:** demoting
+   the emphasis/near-miss catalogue out of `SKILL.md` reds **three** `TestSkillAndModuleAgree`
+   guards, by mutation.
     forcing: none
-3. **File the browser-skill knife-edge.** `scripts/browser-bridge/SKILL.md` is 12,020 B against a
-   12,038 B enforced budget — **18 B** — and it has already blown that budget once (#1917), which
-   is what reddened two unrelated PRs for an hour. Needs an issue with a closing condition.
+3. **File the browser-skill knife-edge.** `scripts/browser-bridge/SKILL.md` is **12,020 B**
+   (re-measured at `3cfaca85`, unchanged) against a **12,038 B** enforced budget
+   (`MAX_BYTES = 12_288` in `scripts/browser-bridge/tests/test_skill_size.py`, minus 250) —
+   **18 B**. It has already blown that budget once (#1917), reddening two unrelated PRs for an
+   hour. Needs an issue with a closing condition.
     forcing: none
 
 ## Defects (batched)
-- **`scripts/browser-bridge/SKILL.md` has 18 B of headroom** (12,020 / 12,038) and blew its
-  budget once on 2026-09-29, reddening PRs #1919 and #1922 for ~1 h. Ranked item 3.
-- **No pre-push hook is installed in this clone** — `core.hooksPath` unset, no
-  `.git/hooks/pre-push`, only `prepare-commit-msg`. devrc's documented synchronous gate never
-  ran on either push this session. Nothing was bypassed; it is simply absent.
-- **`scripts/gate.sh` cannot print PASS off a scoped run** (exit 91), so no tier verdict was
-  produced for #1919; two attempts were killed at 40 and 60 minutes against other sessions' full
-  suites. In-cluster CI is the gate that actually ran.
-- **A PR body of mine carried two false claims, both corrected in the rework**: "four guards" was
-  **three**, and "81 pinned phrases / 2,050 B" was not reproducible — the strict inventory is
-  **46 / 1,468 B** by the rework's hand-read count, against round 0's **23**. 🔴 That quantity has
-  now been measured three times with three answers; **do not let any count of it become
-  load-bearing.**
+- **`scripts/browser-bridge/SKILL.md` has 18 B of headroom** (12,020 / 12,038, re-measured at
+  `3cfaca85`) and blew its budget once on 2026-09-29, reddening PRs #1919 and #1922 for ~1 h.
+  Ranked item 3.
+- **No pre-push hook is installed in this clone** — re-checked at `3cfaca85`: `core.hooksPath`
+  unset, `.git/hooks/` holds only `prepare-commit-msg`. devrc's documented synchronous gate has
+  not run on any push from here. Nothing is being bypassed; it is simply absent.
+- **`scripts/gate.sh` cannot print PASS off a scoped run** (exit 91), so it produced no tier
+  verdict for #1919 and none for #1926 either. In-cluster CI is the gate that actually runs.
+- ✅ **CLOSED:** the two false claims in an earlier PR body ("four guards" was three; the
+  "81 pinned phrases / 2,050 B" figure was not reproducible) were corrected in that PR's rework.
+  🔴 The phrase count was measured three times with three answers — **do not let any count of it
+  become load-bearing.**
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **devrc's tests REQUIRE its devShell, and the wrong python fails in two different lying
@@ -195,22 +203,65 @@ delete path. This arc builds that path and fixes one false claim found on the wa
   the 57 B emphasis clause from `SKILL.md` left **642 passed, 0 failed**). The guard, not the
   sentence, was the fix.
 
+- 🔴 **A REFUSAL MESSAGE IS A CLAIM WITH A SHELF LIFE, AND NOTHING IN THIS REPO WAS WATCHING IT.**
+  `--prune` shipped in #1916 and rule (p)'s refusal went on asserting *"this tool cannot shrink
+  them for you"* — a sentence that was true when written, that the very next feature falsified,
+  and that steered authors away from the exit at the exact moment it applied. **A false remedy
+  note is worse than a missing one: it stops the reader looking.** The general tell is a message
+  that says what the tool CANNOT do; that is the clause a new feature invalidates, and no test
+  fails when it goes stale. When you ship a capability, grep the refusals for denials of it.
+- 🔴 **THE ELIGIBLE LEVER WAS NOT THE ONE THE RANKED ITEM NAMED, AND THE OWNING TEST SAID SO IN
+  WRITING.** Item 2 was framed as a `MAX_BYTES` raise + `SKILL.md` wiring. But
+  `scripts/tests/test_handoff_skill_size.py`'s eviction playbook ranks its own remedies —
+  **1. move guidance INTO the tool · 2. demote a block to `reference/` · 3. raise `MAX_BYTES`**
+  — and the ledger on the constant says *"the answer to the next round is lever 1 or 2, not
+  another raise"*, having last **ratcheted DOWN**. Lever 1 cost **0 bytes** in the skill body and
+  fixed a live false claim as a side effect. **Read the owning test's own playbook before
+  accepting a handoff's framing of a byte problem** — the previous session's ranking was a
+  hypothesis about the remedy, not a measurement of it.
+- 🔴 **A SHORT-CIRCUITED ASSERTION IS AN UNREACHABLE GUARD, AND THE RED BASELINE HIDES IT.** Both
+  new guards went red at the base — but in that run the `--prune-count` assertion **never
+  executed**, because the `--prune` assertion above it fails first. A red-at-base / green-at-HEAD
+  matrix is therefore NOT evidence that every assertion in the test works. The control is an
+  **isolated** mutation of the narrowest expression: dropping only the `--prune-count` token
+  (needle count asserted 1) reds that assertion alone with its own message, 1 failed / 1 passed,
+  and the sibling test stays green — which also proves the two guards cover distinct properties.
+- ⚠ **`git push origin HEAD:<branch>` from a DETACHED worktree is rejected** — *"Neither worked,
+  so we gave up. You must fully qualify the ref."* Git cannot guess whether an unqualified name
+  means a new branch when the source is a bare commit object. Use
+  `git push origin HEAD:refs/heads/<branch>`. Cheap, but it costs a round trip every time and the
+  error text does not read like a detached-HEAD problem.
+- **`--prune`'s scope is rule (q) at `scripts/lib/handoff_doc.py`, and its rationale is worth
+  reading before touching either rule**: it is the deliberate MIRROR of rule (p), not a second
+  half of it. Its header records the measured cost of having had no exit rule — not the bytes,
+  **the hand edit**: with the sanctioned writer unable to remove a line, the remedy reached for
+  was an `Edit` of the committed doc, which bypasses every gate at once, and one such edit
+  shipped a ranked list that misrepresented the state of the work.
+- **The `size-ratchet` refusal has a pinned ledger test that is NOT the remedy list.**
+  `SIZE_RATCHET_WHO_MAY` is pinned across five sites (refusal, override note, `--help`,
+  `SKILL.md`, `write-gate.md` §I) because three of them once said "OPERATOR" while the ruling was
+  the opposite. Editing the remedies does not touch it — but editing who may pull the override
+  touches all five, in one commit.
+
 ## How to verify
 ```bash
 D=/home/zach/workspace/devrc
-# 1. --prune exists and is LIVE (readlink must terminate IN the repo, not /nix/store)
-readlink -f "$D/scripts/lib/handoff_doc.py"
-python3 "$D/scripts/lib/handoff_doc.py" --help | grep -A1 -- --prune
-# 2. #1919's guard, in the CORRECT environment
+R=innovation-upstream/devrc
+# 1. #1919 landed — by CONTENT, never by the PR's state
+git -C $D show origin/main:claude/skills/handoff/reference/write-gate.md | grep -c 'GRID, NOT A LIST'
+git -C $D cat-file -e origin/main:scripts/tests/mutants-handoff-cap.sh && echo present
+# 2. #1926's guards, in the CORRECT environment (devrc's devShell — another repo's venv LIES)
 nix develop "$D" --command bash -c "cd $D && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
-  scripts/tests/test_handoff_doc.py -k EmphasisRuleByPOSITION -q"
-# 3. the guard is not vacuous: break it and watch ITS OWN message
-#    _MARKUP {0,3} -> {0,2} in scripts/lib/handoff_doc.py, in a `cp -a` copy with .git removed,
-#    expect 2 failed / 631 passed and "§C's ledger says ... the live `_FORCING` gives None"
+  scripts/tests/test_handoff_doc.py -k 'ALL_THREE_ways_out or does_not_deny_the_exit' -q"
+# 3. the guards are not vacuous — ISOLATE the mutation, do not just revert the file:
+#    in a `cp -a` copy with .git REMOVED, change only the --prune-count token in the remedy-2
+#    string; expect 1 failed / 1 passed and the assertion's OWN message.
 # 4. CI, SHA-pinned — never `gh pr checks`, which re-resolves the sha at call time
-SHA=$(gh pr view 1919 --repo innovation-upstream/devrc --json headRefOid --jq .headRefOid)
-gh api "repos/innovation-upstream/devrc/commits/$SHA/status" \
-  --jq '[.statuses[]|"\(.context)=\(.state)"]|sort|join("  ")'
+SHA=$(gh pr view 1926 --repo $R --json headRefOid --jq .headRefOid)
+gh api "repos/$R/commits/$SHA/status" --jq '"n=\(.statuses|length) "+([.statuses[]|"\(.context)=\(.state)"]|sort|join("  "))'
+# 5. the arc's OPEN clause: --prune is still absent from SKILL.md's size-ratchet line
+git -C $D show origin/main:claude/skills/handoff/SKILL.md | grep -n 'size-ratchet' | grep -c 'prune'
 ```
-🔴 **Expect FOUR statuses and read all four** — `devrc-{pytests,gotests,nodetests,cairn-client-runs}`.
-A PR's contexts have no `-main-` infix; `main`'s do, and they are a different gate.
+🔴 **Expect FOUR statuses at step 4 and read all four** — `devrc-{pytests,gotests,nodetests,cairn-client-runs}`.
+A PR's contexts have no `-main-` infix; `main`'s do, and they are a different gate. **`n=0` is the
+unregistered rollup, not a verdict.** Step 5 returning **0** is the arc's second clause still open.
