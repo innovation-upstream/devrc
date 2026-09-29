@@ -203,6 +203,88 @@ blind spots and the ten-entry defect ledger: `claudedocs/measurement-scripts-tes
 - **Consequence:** PodSecurity *permits*, it does not *grant*. So the label buys nothing **regardless of whether the hostPath ever comes back** — the sharper form of the reference's "buys nothing while the PVC is back". It also explains gotcha 6(b): nix's sandbox cannot engage because the pod never asks for the capability, so it falls back and the `sandbox = true` in `nix config show` is cosmetic.
 - **Consequence for ranked item 5:** reverting that label is **not blocked on the unpin**, and re-granting it later would not by itself make a hostPath work.
 
+### Rank 7: the ownership probe RAN. Fresh PVC ≡ fresh hostPath — and the failure did NOT reproduce
+- **What was run:** a scratch diagnostic Pod in `tekton-ci`, applied by hand (**not** GitOps, no Flux, no `eventlistener.yaml` edit), `priorityClassName: ci-bulk` (-10000, `preemptionPolicy: Never`) so it could preempt nothing, pinned to `talos-xr6-r7p`. **It never mounted the live `nix-store-cache`** — that PVC is RWO and gate pods on the same node can mount it concurrently, so writing to it would be testing in production. Two arms instead: a fresh 10Gi `local-path` PVC and a fresh `hostPath` `DirectoryOrCreate` at `/var/lib/mnt/disk-1/nixlock-probe-hostpath`, **both seeded by the same `cp -a /nix/. <vol>/` the gate's `seed-nix` step uses**, so the seed is not a variable. Manifest: `scratchpad/nixlock-probe2.yaml`.
+- **Observed (with values) — the two arms are INDISTINGUISHABLE on every dimension measured:**
+
+  | measurement | PVC arm | hostPath arm |
+  |---|---|---|
+  | `stat` /nix · /nix/var/nix/db · /nix/store | `755 root:root` | **identical** |
+  | `stat` /nix/var/nix/db/big-lock | **`600 root:root`** | **identical** |
+  | `build-users-group` | `nixbld` | identical |
+  | `sandbox` / `sandbox-fallback` | `false` / `true` | identical |
+  | `/build` exists? | **no** — unsandboxed fallback | identical |
+  | ROOT client `nix-instantiate` (positive control) | **`ok`** | **`ok`** |
+  | builder can read big-lock | `no` | `no` |
+  | `nix-build` of a trivial derivation | `ok` | `ok` |
+
+- 🔴 **THE FAILURE DID NOT REPRODUCE ON EITHER ARM.** That is the result, and it is a negative one: **a freshly-seeded hostPath is byte-identical in ownership and mode to a freshly-seeded PVC**, which extends the reference's already-REFUTED candidate 1 from "the volume ROOT's mode" to *the whole tree*. So neither the volume KIND nor fresh-seed ownership can be the variable, and `7839ef54`'s stated cause is now **less** supported than before, not more.
+- 🔴 **TWO THINGS WERE NOT MEASURED — do not fold either into the clean result.**
+  - **The unprivileged-client test never ran.** `nixos/nix:2.24.15` ships **no** `su`, `setpriv`, `runuser` or `doas`, so `NIXBLD_CLIENT=NOT_MEASURED` on both arms. The single most direct test of "can a non-root nix client take this lock" is still outstanding.
+  - **The builder's uid came back EMPTY** (`BUILDER_UID=`): the build environment's `/bin/sh` is a static busybox with no `id`, so measurement B proved the build succeeds but never identified who ran it.
+- **Ruled out (this session):** volume kind; fresh-seed ownership/mode across the whole tree; "the PVC works only because earlier runs populated it" **as far as a fresh volume goes** — a fresh PVC works too, so accumulated history is not what makes the PVC usable.
+- **Leading hypothesis, updated:** the variable is not the volume at all. Candidates now: (a) the real incident's hostPath was shared by **concurrent** gate pods on one node while the PVC is effectively serialised; (b) the failing population is specifically **devrc's own tests that shell out to `nix-instantiate` from inside a build**, which a trivial derivation does not exercise; (c) something the gate's `step-capture-etc` does to `/etc/nix` (see the gotcha below).
+- **Next probe:** run **devrc's actual nested-nix tests** against both arms, not a synthetic derivation — that is the only population the incident names. Build the arm image with `util-linux` (for `setpriv`) and `coreutils` so both blind spots above close. Still a scratch pod; still never `devrc-ci`.
+
+### Rank 7 SOLVED (mechanism), and `7839ef54`'s hostPath diagnosis is REFUTED
+- **The mechanism, reproduced with the exact production error string:**
+  **any nix invocation from inside a nix build — i.e. running as an unprivileged
+  `nixbld` uid — is denied by the `0600 root:root` store lock.**
+  ```
+  BUILDER_Uid:  30001 30001 30001 30001
+  error: opening lock file '/nix/var/nix/db/big-lock': Permission denied
+  ```
+  That is byte-identical to the 75 occurrences across 42 tests in `7839ef54`.
+- **The full 2×2, measured on a freshly-seeded `local-path` PVC (probe 5):**
+
+  | | pure `--eval -E '1+1'` | instantiate a derivation |
+  |---|---|---|
+  | **root** | ok | ok |
+  | **builder (uid 30001)** | **DENIED** | **DENIED** |
+
+  🔴 **Even PURE EVALUATION is denied.** nix opens the store DB lock at startup
+  regardless of the operation, so this is not write-dependent and no
+  "read-only nix is fine" carve-out exists.
+- 🔴 **THREE THEORIES DIED HERE, TWO OF THEM MINE:**
+  1. **The hostPath-specific diagnosis (`7839ef54`) is REFUTED.** The failure
+     reproduces **identically on a fresh `local-path` PVC** — the very volume
+     kind that is live and green today. Probes 3 and 4 ran both arms side by
+     side and every field matched. **The volume kind is not the variable, and
+     the unpin was reverted for a reason that does not hold.**
+  2. **"The PVC works because earlier runs populated it with usable ownership"
+     — REFUTED.** A *fresh* PVC fails exactly the same way, so accumulated
+     history is not what makes the live PVC usable.
+  3. **My own store-warmth hypothesis — REFUTED by my own A/B, ~30 minutes
+     after I formed it.** Probe 4 had root pre-instantiate the EXACT derivation
+     the builder would then ask for; the builder was denied anyway
+     (`A_PREWARMED=DENIED`). Warmth is not the variable either.
+- **Ruled out earlier this session:** volume kind; fresh-seed ownership/mode
+  across the whole tree (both arms `755 root:root` throughout, `600 root:root`
+  big-lock); root-directory mode (already refuted upstream).
+- 🔴 **THE QUESTION HAS FLIPPED, AND THIS IS THE ONE TO CARRY FORWARD.** It is no
+  longer *"why did the hostPath break it"*. It is:
+  **why is the gate GREEN today at all?** The live `nix-store-cache` was measured
+  in a running gate pod carrying the **same** `600 root:root` big-lock, and
+  `scripts/tests/test_clawgatectl_version.py` documents that it *evaluates*
+  `clawgatectl.nix` with `nix-instantiate` and **FAILS rather than skips** when
+  the binary is absent. By the 2×2 above, that test cannot pass as a builder.
+  So one of these must be true and none is yet measured:
+  (a) the sandbox tier does not run those tests as a build user;
+  (b) they are skipped in that tier;
+  (c) the gate's `step-capture-etc` changes something that lifts the restriction.
+- **Next probe:** answer (a)/(b)/(c) *without* touching `devrc-ci` — run
+  `nix build .#checks.x86_64-linux.pytests` on the workbench and print `id -u`
+  plus a `nix-instantiate --eval` probe from inside that build. That is the same
+  tier the gate runs, reproducible locally, and it needs no cluster at all.
+  ⚠ Build the two check derivations ONE AT A TIME (`CLAUDE.md`: a combined
+  invocation produces false failures through store contention).
+- **The fix this points at, once (a)/(b)/(c) is answered:** make the store lock
+  reachable by the build users in `seed-nix` — `chgrp nixbld` + `chmod 0660`, or
+  `chmod 0666`, on `/nix/var/nix/db/big-lock`. It is **volume-independent**, so
+  it is not an unpin workaround: it closes a latent fragility that exists on the
+  PVC today. 🔴 Prove it on a scratch pod first; `enforce_admins: true` with both
+  legs required means a wrong guess blocks every contributor.
+
 ## Next steps (ranked)
 🔴 **RANKS 1–7 ARE THE PRE-EXISTING NUMBERING AND MUST NOT MOVE** — the rank is half a
 claim's identity (`claim-work --slug-for <this doc> <rank>`), so inserting an item
@@ -280,6 +362,45 @@ made the node unpin `ci-speedup-8` here while `main`'s copy still called it
 - 🔴 **I pushed three times in quick succession to a docs-only PR and put three runs into a shared queue.** Measured while working: **8 `devrc-ci` runs Running/Pending at once**, one gate pod Pending, all on `talos-xr6-r7p`. The `tekton` skill states this plainly — *"PUSHING N BRANCHES IS NOT N INDEPENDENT ACTIONS — IT IS ONE BLAST-RADIUS ACTION … Push, wait for the queue to drain, push"* — and it is not only my own checks that suffer. **Batch handoff updates into one push.**
 - 🔴 **`PipelineRun` creation→`startTime` is a decoy metric: median 0.0s.** It reads like "there is no queue" and is the opposite of the truth. The wait lives in TaskRun→pod scheduling (p90 748s). Anyone re-measuring this must use the TaskRun's first-step `startedAt`, not the PipelineRun's `startTime`.
 - **The gate's `sandbox = true` is cosmetic today** — `/build` does not exist, so builds run unsandboxed. Read `/build`'s existence, never `nix config show`, exactly as gotcha 6(b) says; this session confirmed it live on a healthy run rather than a broken one.
+
+- 🔴 **v1 of this probe reported `NIXBLD_CLIENT=FAILED` and it was a BROKEN INSTRUMENT, not a finding** — the image has no `su`, so the line read as "the unprivileged client was denied" when nothing had been tested. It was caught only by printing the command's stderr (`su: command not found`) and reading the CONTENT rather than the label. **A probe that reports a denial must prove it could ever have reported success**; v2 carries `ROOT_CLIENT` as an explicit positive control for exactly this, and reports `NOT_MEASURED` rather than a verdict when the tool is missing.
+- 🔴 **The gate's nix config is NOT the image's — `step-capture-etc` is in the chain.** Measured: a live gate pod reports `sandbox = true`, while the raw `nixos/nix:2.24.15` image reports **`sandbox = false`**. Same image, different answer, so anything read from a bare image arm is not automatically a statement about the gate. Both agree that `/build` is absent, i.e. builds run unsandboxed either way.
+- 🔴 **CORRECTION to this doc's earlier claim that the `privileged` namespace label "grants nothing".** That was half wrong and the half matters: the label grants nothing to the *current* gate (which requests no privilege and uses a PVC), **but hostPath admission genuinely depends on it** — measured via `kubectl apply --dry-run=server`, which warned the probe pod "would violate PodSecurity `restricted:latest` … restricted volume type `hostPath`" and admitted it only because the namespace enforces `privileged`. **So ranked items 5 and 7 are COUPLED: reverting the label would block any hostPath retry at admission.** Do not do item 5 while item 7 is live.
+- **Probe residue, stated so nobody hunts it:** an **empty** directory `/var/lib/mnt/disk-1/nixlock-probe-hostpath` remains on `talos-xr6-r7p` (contents removed, `du` = 0). Every other object — both probe pods, the cleanup pod, the `nixlock-probe-pvc` PVC — was deleted, and `nix-store-cache` was verified `Bound 30Gi` afterwards. Removing the empty dir needs a pod mounting its PARENT, which was judged not worth the typo risk against a shared disk.
+- **A diagnostic does not need GitOps.** The approved plan was a scratch pipeline via a `homelab-infra` PR; a hand-applied Pod answered the same question with strictly less blast radius — no Flux reconcile, no shared `eventlistener.yaml` edit, nothing persisted. **Put the FIX through GitOps; keep the DIAGNOSIS out of it.**
+
+- 🔴 **A POSITIVE CONTROL CAUGHT A BROKEN INSTRUMENT TWICE IN ONE SESSION, and
+  both would have published a false finding.**
+  - Probe 1 printed `NIXBLD_CLIENT=FAILED` — which reads as "the unprivileged
+    client was denied", the exact conclusion being sought. It was
+    `su: command not found`; the image ships no `su`, `setpriv`, `runuser` or
+    `doas`. Caught only by printing stderr and reading the CONTENT, not the label.
+  - Probe 3 printed `ROOT_INSTANTIATE=FAILED` — because
+    **`readlink -f` on a nix tool collapses it to the multi-call `nix` binary**,
+    which selects behaviour from `argv[0]` and rejects `-E` with
+    "unrecognised flag". Resolve the **directory**, then re-append the tool's
+    name: `$(dirname $(readlink -f $(command -v nix-instantiate)))/nix-instantiate`.
+  **Both were caught by a control that asserts the probe CAN observe success.**
+  A probe reporting a denial must first prove it could ever report an `ok`.
+- 🔴 **`nix-instantiate --eval -E '1+1'` is NOT a test of store access.** Probe 2
+  used it and got a reassuring `ok` while touching nothing that needs the DB.
+  A lock-taking probe must instantiate a derivation… **except that the 2×2 then
+  showed even pure eval is denied for a builder**, so the distinction turned out
+  not to matter *for the verdict* — but it did matter for whether the earlier
+  probe measured anything at all. It did not.
+- **A builder's uid is readable with no external binary:**
+  `while read -r l; do case "$l" in Uid:*) echo "$l";; esac; done < /proc/self/status`.
+  The build env's `/bin/sh` is static busybox with no `id`, which is what made
+  probe 2 report `BUILDER_UID=` (empty) — an instrument gap that reads as data.
+- **Reaching nix from inside a build needs its ABSOLUTE STORE PATH**, resolved
+  outside and interpolated in — legal only because `sandbox = false` (measured on
+  both arms). If sandboxing is ever actually engaged, this probe stops working
+  and its silence must not be read as a pass.
+- **Probe hygiene:** five probe pods, three PVCs and two cleanup pods were created
+  and **all deleted**; `nix-store-cache` was verified `Bound 30Gi` after each
+  round. The hostPath scratch dir was emptied (`732.3M → 0`). An **empty**
+  `/var/lib/mnt/disk-1/nixlock-probe-hostpath` remains on `talos-xr6-r7p`.
+  `devrc-ci` was never touched, and no probe ever mounted the live cache.
 
 ## How to verify
 1. **The full measurement (this run's numbers):**
