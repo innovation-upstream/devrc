@@ -1655,9 +1655,14 @@ def m_store_api_traffic(env: Env) -> dict:
 #: here; there is no derivable definition of "mints work" to enumerate from, and
 #: pretending otherwise would be a scan that walked nothing reporting all-clear.
 WORK_INTAKE: tuple[tuple[str, bool, str, tuple[str, ...]], ...] = (
-    ("clawgate Tasks", True,
+    # Named "clawgate Tasks" until 2026-09-29. The board was EXTRACTED out of
+    # clawgate into the `muster` service, and the skill followed it, so the entry
+    # point moved with it. The FLOW file did not move — the PreToolUse hook that
+    # enforces it names the clawgate path by deployed path — which is exactly the
+    # sort of half-move this row exists to keep honest.
+    ("muster Tasks", True,
      "dispatch, agents, acceptance criteria, a status gate",
-     ("claude/skills/clawgate/SKILL.md",
+     ("claude/skills/muster/SKILL.md",
       "claude/skills/clawgate/flows/task-authoring.md")),
     ("ClickUp", False,
      "someone else's system of record — set off this machine",

@@ -318,7 +318,22 @@ MIN_LISTING_ENTRIES = 30
 # -16 of mechanism prose. The 2026-09-26 `civitai-app-fleet` cut (−19 net) then
 # landed under it, so the merged tree re-pins to the exact measurement:
 # 10,832 -> 10,807. Headroom stays 0 by choice.
-LISTING_TOTAL_CEILING_CHARS = 10_807
+# 🔴 LOWERED 10,807 -> 10,771 ACROSS 37 ENTRIES on 2026-09-29, while ADMITTING a
+# new tier-A skill, `muster` (286 chars). The task/agent/runbook half was extracted
+# out of clawgate into its own service and its prose could not stay in clawgate's
+# always-loaded core, which carries a byte ceiling of its own. The new entry was
+# paid for by step 1 above and by NOTHING else — five descriptions gave up prose
+# their own Use-for lists already spell, and `clawgate` gave back the muster
+# clauses it had just acquired:
+#   clawgate        345 -> 311   (the muster half moved to muster's own entry)
+#   clickup         557 -> 497   (mechanism clause; disambiguation re-pointed at
+#                                 `muster`, which is where the task board now is)
+#   session-manager 456 -> 370   (opening clause, every term restated in Use-for)
+#   devrc-dx        348 -> 301   (mechanism clause; "config drift" already there)
+#   bar             390 -> 300   (four tokens, all four in its own Use-for list)
+# No trigger phrase and no disambiguation clause was dropped, and no ceiling was
+# raised. Re-pinned to the exact measurement, so headroom is 0 again by choice.
+LISTING_TOTAL_CEILING_CHARS = 10_771
 
 # The skills deployed by `mkOutOfStoreSymlink` from `scripts/` instead of by the
 # recursive `claude/skills` mapping (`nix/home.nix`). They are listing entries
@@ -351,7 +366,12 @@ HOME_NIX_SKILL_SOURCE = re.compile(
 # directories -- asserted, so a rename cannot leave a dead pointer in the
 # always-on listing.
 CLICKUP_SIBLINGS = {
-    "clawgate": "the self-hosted approval UI, which has its own Tasks",
+    # 🔴 Was `clawgate` until 2026-09-29. The task/agent/runbook half was
+    # EXTRACTED out of clawgate into `muster`, so the self-hosted board a bare
+    # "task N" prompt could be confused with is muster's now, not the router's.
+    # Leaving `clawgate` here would route a task prompt at the service that 404s
+    # every task route.
+    "muster": "the self-hosted task board, which has its own Tasks",
     # `initiatives` (the durable cross-repo board) was a sibling here until it was
     # RETIRED 2026-09-07. Dropping the entry is the point of the two-way pin below:
     # a disambiguation that keeps routing readers at a skill which no longer exists
@@ -378,8 +398,8 @@ CLICKUP_SIBLINGS = {
 # change -- rigidifying those would make the gate fight the very tuning it exists
 # to protect.
 CLICKUP_DISAMBIGUATION = (
-    "This is the EXTERNAL ClickUp workspace — the self-hosted approval UI and "
-    "ITS Tasks are `clawgate`, "
+    "This is the EXTERNAL ClickUp workspace — the self-hosted task board is "
+    "`muster`, "
     "the email action-items queue is `mailbox`, and verifying from session "
     "transcripts whether work on a task was actually done is "
     "`check-clickup-addressed`."
@@ -751,7 +771,7 @@ def test_control_a_passing_mention_of_every_sibling_still_fails_the_pin():
     """The walk the whole-sentence pin exists to block: name all three siblings,
     disambiguate from none of them. A per-name substring check passes this."""
     walked = (
-        "Interact with ClickUp tasks and documents. See also clawgate, "
+        "Interact with ClickUp tasks and documents. See also muster, "
         "initiatives, mailbox and check-clickup-addressed."
     )
     for sibling in CLICKUP_SIBLINGS:

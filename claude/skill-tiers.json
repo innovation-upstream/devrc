@@ -76,6 +76,7 @@
       "why": "CLOSEST CALL in this ledger -- 'what's stalled' IS a symptom, but the mis-route lands on `initiatives` (the durable board), a degraded answer rather than a wrong action; flip to A the first time that costs anything"
     },
     "mailbox": { "tier": "A" },
+    "muster": { "tier": "A" },
     "obs-read": { "tier": "A" },
     "opencode-dispatch": { "tier": "A" },
     "prune-index": {

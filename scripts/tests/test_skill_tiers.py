@@ -83,14 +83,14 @@ MIN_SKILLS = 30
 # 36-entry total quoted in a 37-entry tree, and one contradicted the number the
 # same change reported to its reviewer.
 # --------------------------------------------------------------------------- #
-MEASURED_ENTRIES = 36
-MEASURED_TIER_A_ENTRIES = 23
-MEASURED_TIER_A_CHARS = 7_480
+MEASURED_ENTRIES = 37
+MEASURED_TIER_A_ENTRIES = 24
+MEASURED_TIER_A_CHARS = 7_454
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 7_665
-# ...and what the same 36 entries would cost with every skill tier A. The
+MEASURED_UNDER_LEDGER_CHARS = 7_639
+# ...and what the same 37 entries would cost with every skill tier A. The
 # difference is what the ledger buys: 3,316 chars.
-MEASURED_ALL_TIER_A_CHARS = 10_981
+MEASURED_ALL_TIER_A_CHARS = 10_955
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
@@ -119,16 +119,32 @@ MEASURED_ALL_TIER_A_CHARS = 10_981
 # one is the one that actually went red in 2026-09-26's +27, on the SUM rather
 # than on this block.
 #
-# 🔴 2026-09-29: `clawgate`'s description was CORRECTED — it claimed clawgate owns
-# "Tasks/agents/runbooks", which stopped being true when that half was extracted
-# into the separate `muster` service. The rewrite names muster and adds
-# `clawgatectl`/`task board` as triggers, and PAYS for them inside its own entry
-# per the descriptions gate's eviction playbook step 1 rather than by raising a
-# ceiling: out went `manage credentials/QR` (the login QR was REMOVED in 0.7.37 —
-# a dead trigger phrase, so dropping it costs no routing), and `build and deploy a
-# version` collapsed to `deploy`. Net −5 chars, so the block is 7,480 across 23
-# entries, the ceiling stays 7,617 and headroom is 137. The mean tier-A entry is
-# 7,480 / 23 = 325.2.
+# 🔴 2026-09-29: `muster` was ADDED as a tier-A skill — the task/agent/runbook half
+# was extracted OUT of clawgate into its own service, and its prose was too big to
+# live in clawgate's always-loaded core (which has a byte ceiling of its own in
+# `scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py`). Tier A, not
+# B, by this ledger's own tie-break: a mis-route takes a WRONG ACTION — a task URL
+# built on the permission router's base 404s silently — rather than merely
+# degrading an answer, and "read and evaluate task N" is a SYMPTOM phrasing that
+# names no tool.
+#
+# It was paid for the descriptions gate's eviction-playbook-step-1 way, NOT by
+# raising a ceiling. `clawgate`'s own entry gave back the muster clauses it had
+# just acquired (345 -> 311); `clickup` dropped `— subtasks, attachments,
+# workspace search` (mechanism restated by its own Use-for list) and re-pointed
+# its disambiguation at `muster`, since the self-hosted task board is no longer
+# clawgate's; `session-manager` lost an opening clause whose every term its own
+# Use-for list already spells (`WAITING ON A HUMAN` -> "is anything waiting on
+# me", `how stale it is` -> "stale/idle/busy/blocked", `UNSENT PROMPTS` -> "did I
+# leave anything half-typed / unsent"); `devrc-dx` lost `— reporting cross-cutting
+# drift then fixing it` (its Use-for already says "config drift"); `bar` lost
+# `add/reorder blocks, tune the count pills and their thresholds, debug the
+# bar-status-poll timer` (every one of those four tokens is in its own Use-for
+# list). No trigger phrase and no disambiguation clause was dropped.
+#
+# Net: the tier-A block FELL to 7,454 across 24 entries even with muster in it,
+# the ceiling stays 7,617 and headroom is 163. The mean tier-A entry is
+# 7,454 / 24 = 310.6.
 #
 # 🔴 2026-09-25: `opencode` was RENAMED `opencode-dispatch` — the exact product
 # name made every bare mention of "opencode" route into the dispatch skill. The

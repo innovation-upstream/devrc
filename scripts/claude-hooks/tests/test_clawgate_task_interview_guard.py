@@ -64,6 +64,11 @@ FLOW = ROOT / "claude" / "skills" / "clawgate" / "flows" / "task-authoring.md"
 HOME_NIX = ROOT / "nix" / "home.nix"
 REGISTRAR = ROOT / "scripts" / "claude-hooks" / "register-nudge-hook.py"
 SKILL = ROOT / "claude" / "skills" / "clawgate" / "SKILL.md"
+#: The task half's own always-loaded core, created 2026-09-29 when the task board
+#: was extracted out of clawgate into the `muster` service. The FLOW files stay
+#: under the clawgate skill's directory (the hooks name them by deployed path), but
+#: the surface that ROUTES to them is this one.
+MUSTER_SKILL = ROOT / "claude" / "skills" / "muster" / "SKILL.md"
 
 
 def _load(name, path):
@@ -1179,10 +1184,22 @@ def test_the_registrar_manages_the_hooks_interpreter():
 
 
 def test_the_skill_routes_to_the_flow():
-    """The flow is reachable from the always-loaded surface, not only from a block."""
-    text = SKILL.read_text(encoding="utf-8")
+    """The flow is reachable from the always-loaded surface, not only from a block.
+
+    🔴 THE SURFACE MOVED, 2026-09-29. Task authoring is `muster`'s — the board was
+    extracted out of clawgate — so the always-loaded core a reader authoring a task
+    has open is `claude/skills/muster/SKILL.md`, and that is where the flow must be
+    reachable from. The flow FILE did not move (the hook that enforces it names
+    `~/.claude/skills/clawgate/flows/task-authoring.md` by deployed path), so the
+    pointer has to survive the split in the new core rather than the old one.
+
+    The clawgate half is still asserted, one step wider than before: a reader who
+    lands on the ROUTER's skill must be handed off to the muster skill, or the
+    split has a dead end in it."""
+    text = MUSTER_SKILL.read_text(encoding="utf-8")
     assert "flows/task-authoring.md" in text
     assert "Flow files" in text
+    assert "muster" in SKILL.read_text(encoding="utf-8")
 
 
 def test_the_skill_did_not_grow():
@@ -1212,12 +1229,24 @@ def test_the_skill_did_not_grow():
     Every remaining candidate eviction was a measured incident warning (the nginx
     `.svc` crash, the unpacked-extension deploy, the CI-vs-e2e distinction). The
     trade taken was 577 bytes of ceiling over deleting one of those. If you are
-    adding to this file, that argument does NOT extend to you: evict."""
-    assert SKILL.stat().st_size <= 15665, (
+    adding to this file, that argument does NOT extend to you: evict.
+
+    🔴 RE-PINNED 15665 -> 10912 on 2026-09-29, per the "RE-PIN IT WHENEVER THE FILE
+    SHRINKS" rule above. The task/agent/runbook half of clawgate was extracted into
+    a separate service, `muster`, and the prose that documents it left this file
+    for `claude/skills/muster/SKILL.md` — the two-bases routing rule, the task
+    pickup ritual and its status gate, the machine Task API and agent dispatch.
+    What stayed is a short pointer block naming muster's base, so a session cannot
+    build a task URL on the router base without meeting the correction first
+    (pinned structurally by `scripts/tests/test_clawgate_skill_task_base.py`).
+    Leaving the ceiling at 15665 would have licensed 4,753 bytes of regrowth —
+    more than the whole `muster` body this split just created."""
+    assert SKILL.stat().st_size <= 10912, (
         "claude/skills/clawgate/SKILL.md is %d bytes. History: 18868 before the "
         "task-authoring flow, 18858 after, 15088 after the task-pickup ritual "
         "moved out to flows/task-pickup.md, 15665 after the prior-work recall "
-        "step (see the docstring — raised with a stated justification, once). "
+        "step (see the docstring — raised with a stated justification, once), "
+        "10912 after the muster split moved the task half to its own skill. "
         "Any addition needs an eviction in the SAME commit." % SKILL.stat().st_size)
 
 

@@ -1,10 +1,14 @@
-"""Gate the clawgate skill's TWO BASE URLS: a task-side path must never be built
-on the permission ROUTER's base.
+"""Gate the clawgate and muster skills' TWO BASE URLS: a task-side path must never
+be built on the permission ROUTER's base.
 
 WHY THIS EXISTS
 ---------------
 The task/agent/runbook half of clawgate was extracted into a separate service,
-`muster`. Two processes now answer on two base URLs:
+`muster` -- and, 2026-09-29, into a separate SKILL (`claude/skills/muster/`),
+because the prose no longer fitted the byte ceiling on clawgate's always-loaded
+core. Both trees are scanned here; scanning only clawgate's would leave the file
+the split created -- the one most likely to spell a base URL -- unguarded, while
+still returning a reassuring zero. Two processes answer on two base URLs:
 
     router  http://192.168.50.250:30302   $CLAWGATE_API_URL
     tasks   http://192.168.50.250:30306   $CLAWGATE_TASK_API_URL
@@ -33,14 +37,35 @@ router base token with a task-side path CONCATENATED onto it. You cannot reword
 instruction and no longer matches.
 
 The second guard pins a RELATIONSHIP rather than a word: every task-path family
-must appear in the skill's core WITHIN REACH of the task base, so deleting the
-routing block -- or adding a task family to the skill without routing it -- reds
-this file. It fails when the set GROWS *or* SHRINKS.
+must appear in a skill's core WITHIN REACH of the task base, so deleting the
+routing block -- or adding a task family to a core without routing it -- reds
+this file. It fails when the set GROWS *or* SHRINKS, and it runs over BOTH cores.
 
-The third guard is the two-way pin that stops this module's own ledger drifting
-from the runtime's: the families below are asserted EQUAL to the ones
-`scripts/lib/clawgate_tasks.py` names, so a change there cannot leave this test
-guarding a stale set.
+The third guard stops the first two passing VACUOUSLY: each core must name both
+bases, so a deleted routing block cannot read as clean.
+
+🔴 REMOVED 2026-09-29 -- a fourth guard, `test_the_family_ledger_matches_the_runtime`,
+and its parse control. DO NOT RE-ADD THEM; the reasoning, so it is not re-derived:
+
+  * it was GREEN at the base ref and GREEN at head. By this repo's own rule that
+    makes it an INVARIANT PIN, not regression coverage, and it was never labelled
+    as one;
+  * its docstring claimed the ledger below "must EQUAL the one every consumer
+    reads". It did not check that. `scripts/lib/clawgate_tasks.py` holds no code
+    constant of path families -- what every consumer actually reads there is
+    `TASK_API_URL_VARS`/`ROUTER_API_URL_VARS`, which are ENV VAR names and are
+    already pinned whole by `scripts/tests/test_clawgate_tasks.py`. The only
+    anchor available was a PROSE COMMENT, matched by regex. So the pin measured
+    comment WORDING: a harmless reword reddened it, and a real change to the
+    runtime split could land without reddening it at all. That is
+    `claude/RULES.md`'s "a guard's DESCRIPTION claims COVERAGE -- check the
+    implementation is as wide as the sentence";
+  * its documented response to a red was "re-point this regex", i.e. edit the
+    gate. A gate whose red is routinely cleared by editing the gate trains the
+    click-through the rules forbid;
+  * and it actively DEGRADED the evidence for guard 1: mutating the ledger
+    removed that guard's INPUT as well as this one, so the mutant died for two
+    reasons at once (recorded as M3 below).
 
 NOT asserted: that any particular sentence is present, that the frontmatter
 description reads a certain way, or that muster is named a certain number of
@@ -66,8 +91,19 @@ copied in and `PYTHONDONTWRITEBYTECODE=1`:
   RED at base, GREEN at HEAD  test_every_task_family_named_in_the_core_is_routed…
                               (6 unrouted families; SKILL.md had no task base)
   RED at base, GREEN at HEAD  test_the_two_bases_are_distinct_everywhere…
-  green both ways             the three hermetic controls and the ledger pin --
-                              they are controls, not regression coverage
+  green both ways             the three hermetic controls -- they are controls,
+                              not regression coverage
+
+Re-measured 2026-09-29 for the SKILL SPLIT, base ref `origin/main` = 79a9b22a,
+this file copied into a detached worktree of the base under
+`PYTHONDONTWRITEBYTECODE=1`. The two legs added by the split:
+
+  RED at base, GREEN at HEAD  …is_routed_to_the_task_base[muster] and
+                              …are_distinct_everywhere[muster] -- at base the
+                              file `claude/skills/muster/SKILL.md` does not
+                              exist, so both error on the read
+  RED at base, GREEN at HEAD  …is_routed[clawgate] / …are_distinct[clawgate]
+                              (unchanged: the pre-#1920 core named no task base)
 
 MUTATION RECORD -- each guard broken on purpose and watched to die for ITS OWN
 reason, in the same scratch worktree, with an unmutated re-run as the positive
@@ -81,11 +117,12 @@ control (9 passed) after every mutant:
          why guard 4 exists and why M5 was needed to isolate guard 2.
   M5  strip BOTH anchors (`:30306` and the env var) from SKILL.md, keeping every
       task path -> test_every_task_family… red naming all 10 families
-  M3  drop `/agent/task` from LEDGER_TASK_FAMILIES
-      -> test_the_family_ledger_matches_the_runtime red. ⚠ The mis-based-URL
-         CONTROL also went red, because the ledger feeds ALL_TASK_FAMILIES --
-         a mutant that removes a guard's INPUT as well as the guard, so read M1
-         (which isolates that detector) as the evidence for guard 1, not M3.
+  M3  drop `/agent/task` from the family ledger
+      -> the (now removed) runtime pin red. ⚠ The mis-based-URL CONTROL also went
+         red, because the ledger feeds ALL_TASK_FAMILIES -- a mutant that removes
+         a guard's INPUT as well as the guard, so read M1 (which isolates that
+         detector) as the evidence for guard 1, not M3. This coupling is part of
+         why the pin was removed.
 """
 from __future__ import annotations
 
@@ -95,26 +132,37 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SKILL_DIR = REPO_ROOT / "claude" / "skills" / "clawgate"
-SKILL_CORE = SKILL_DIR / "SKILL.md"
-TASKS_LIB = REPO_ROOT / "scripts" / "lib" / "clawgate_tasks.py"
+
+#: 🔴 BOTH skill trees, not just clawgate's. The task half now has its own skill
+#: (`claude/skills/muster/`), so a gate that scanned only `clawgate/` would have
+#: gone quietly blind to exactly the file the split created — the one most likely
+#: to spell a base URL. Widened 2026-09-29 with the split itself.
+SKILL_DIRS = (
+    REPO_ROOT / "claude" / "skills" / "clawgate",
+    REPO_ROOT / "claude" / "skills" / "muster",
+)
+
+#: The ALWAYS-LOADED cores — one per service. Both are checked, because either one
+#: can name a task family and neither one is where the reader necessarily starts.
+SKILL_CORES = tuple(d / "SKILL.md" for d in SKILL_DIRS)
 
 # --------------------------------------------------------------------------- #
 # The ledger. Families are PATH PREFIXES, matched immediately after a base.
 # --------------------------------------------------------------------------- #
 
-#: The three families the runtime ledger names. Pinned two-way against
-#: `scripts/lib/clawgate_tasks.py` by `test_the_family_ledger_matches_the_runtime`
-#: so this constant cannot silently drift from the module every consumer reads.
-LEDGER_TASK_FAMILIES = ("/api/tasks", "/api/agents", "/agent/task")
-
-#: Further task-side prefixes, MEASURED 2026-09-29 rather than inherited from the
-#: runtime ledger (which only needs the three the CLI routes). Each answered 401
-#: on `:30306` and 404 on `:30302`, with `/zzz-control` 404 on both as the
-#: negative control. They are kept SEPARATE from the ledger above because the
-#: two-way pin must compare like with like -- folding them in would red that pin
-#: for a reason that has nothing to do with drift.
-MEASURED_TASK_FAMILIES = (
+#: Every task-side path prefix, MEASURED 2026-09-29: each answered 401 on
+#: `:30306` and 404 on `:30302`, with `/zzz-control` 404 on both as the negative
+#: control. The first three are also the ones `clawgatectl` routes and the ones
+#: `scripts/lib/clawgate_tasks.py` names in prose.
+#:
+#: ⚠ These were two tuples until 2026-09-29, kept apart so a two-way pin against
+#: that prose could "compare like with like". That pin is GONE -- see the note at
+#: the end of this module's docstring -- and with it the only reason to split
+#: them, so they are one list again.
+ALL_TASK_FAMILIES = (
+    "/api/tasks",
+    "/api/agents",
+    "/agent/task",
     "/api/tags",
     "/api/projects",
     "/api/sessions/",
@@ -125,8 +173,6 @@ MEASURED_TASK_FAMILIES = (
     "/ui/tasks",
     "/ui/agents",
 )
-
-ALL_TASK_FAMILIES = LEDGER_TASK_FAMILIES + MEASURED_TASK_FAMILIES
 
 #: How a router base is spelled in prose and in shell. The literal NodePort and
 #: the env var are the two forms that actually appear; both are checked because a
@@ -153,7 +199,7 @@ REACH_CHARS = 1200
 
 
 def _skill_files():
-    return sorted(p for p in SKILL_DIR.rglob("*.md") if p.is_file())
+    return sorted(p for d in SKILL_DIRS for p in d.rglob("*.md") if p.is_file())
 
 
 def _mis_based_urls(text: str):
@@ -270,18 +316,28 @@ def _families_not_routed(text: str, families=ALL_TASK_FAMILIES):
     return unrouted
 
 
-def test_every_task_family_named_in_the_core_is_routed_to_the_task_base():
+@pytest.mark.parametrize("core", SKILL_CORES, ids=lambda c: c.parent.name)
+def test_every_task_family_named_in_the_core_is_routed_to_the_task_base(core):
     """🔴 A RELATIONSHIP, not a word. Fails when the set GROWS (a new task family
     is documented without routing it) or SHRINKS (the routing block is deleted,
     or the task base stops being named).
 
-    Red at `origin/main`: `SKILL.md` names `/api/tasks`, `/api/agents`,
+    Red at `origin/main`: clawgate's `SKILL.md` names `/api/tasks`, `/api/agents`,
     `/agent/task` and `/tasks` and mentions no task base anywhere, so all four
     come back unrouted.
+
+    🔴 PARAMETRISED OVER BOTH CORES, 2026-09-29. The task half moved to its own
+    skill, so most of the families this guard is about are now named in
+    `muster/SKILL.md` -- and a guard still reading only clawgate's core would have
+    scored a reassuring zero over a file that no longer contains the thing being
+    guarded. The clawgate leg is NOT vestigial: its core keeps a pointer block
+    that names the task families precisely so a reader who lands there cannot
+    build one on the router base, and this leg is what stops that block being
+    deleted or left un-based.
     """
-    unrouted = _families_not_routed(SKILL_CORE.read_text())
+    unrouted = _families_not_routed(core.read_text())
     assert not unrouted, (
-        f"{SKILL_CORE.relative_to(REPO_ROOT)} names these TASK-side path "
+        f"{core.relative_to(REPO_ROOT)} names these TASK-side path "
         "families but never within "
         f"{REACH_CHARS} chars of the task base "
         "(`:30306` / `CLAWGATE_TASK_API_URL`), so a reader building a URL from "
@@ -321,73 +377,34 @@ def test_control_the_routing_detector_accepts_a_routed_family():
 
 
 # --------------------------------------------------------------------------- #
-# GUARD 3 -- two-way pin against the runtime ledger.
+# GUARD 3 -- the two bases are not the same string.
 # --------------------------------------------------------------------------- #
 
-_RUNTIME_LEDGER_RE = re.compile(r"^#:\s*task side\s*—(.*)$", re.M)
-
-
-def test_the_family_ledger_matches_the_runtime():
-    """🔴 The ledger this module guards must EQUAL the one every consumer reads.
-
-    `scripts/lib/clawgate_tasks.py` is the single source of the task/router
-    split for the bar poller, the session manager and the write-back hook. If it
-    grows or loses a family, this test reds rather than letting the skill gate
-    keep guarding a stale set. Set equality -- it fails in BOTH directions.
-    """
-    text = TASKS_LIB.read_text()
-    m = _RUNTIME_LEDGER_RE.search(text)
-    assert m, (
-        f"could not find the `#:   task side — …` ledger line in "
-        f"{TASKS_LIB.relative_to(REPO_ROOT)}. That line is the two-way pin's "
-        "only anchor; if it was reworded, re-point this regex AND re-check "
-        "LEDGER_TASK_FAMILIES against it by hand."
-    )
-    runtime = {
-        f.strip().rstrip("*").rstrip(",").strip("`")
-        for f in m.group(1).split(",")
-        if f.strip()
-    }
-    assert runtime == set(LEDGER_TASK_FAMILIES), (
-        "this module's LEDGER_TASK_FAMILIES has drifted from "
-        f"{TASKS_LIB.relative_to(REPO_ROOT)}: runtime={sorted(runtime)} "
-        f"module={sorted(LEDGER_TASK_FAMILIES)}"
-    )
-
-
-def test_control_the_runtime_ledger_parse_finds_something():
-    """POSITIVE control for the parse above: a zero-length match set would make
-    `runtime == set(...)` fail loudly rather than pass vacuously, but a parse that
-    silently returned the WHOLE line as one family would pass nothing useful --
-    so assert the parse produced exactly three non-empty entries."""
-    m = _RUNTIME_LEDGER_RE.search(TASKS_LIB.read_text())
-    assert m
-    parsed = [f.strip() for f in m.group(1).split(",") if f.strip()]
-    assert len(parsed) == 3, parsed
-    assert all(f.startswith("/") for f in parsed), parsed
-
-
-# --------------------------------------------------------------------------- #
-# GUARD 4 -- the two bases are not the same string.
-# --------------------------------------------------------------------------- #
-
-def test_the_two_bases_are_distinct_everywhere_the_skill_states_them():
-    """The guard that stops the two above passing VACUOUSLY: if the skill stops
+@pytest.mark.parametrize("core", SKILL_CORES, ids=lambda c: c.parent.name)
+def test_the_two_bases_are_distinct_everywhere_the_skill_states_them(core):
+    """The guard that stops the two above passing VACUOUSLY: if a core stops
     naming the task base at all, `_families_not_routed` has no anchor to measure
     against and a deleted routing block would read as clean.
 
     🔴 It IS regression coverage, measured, not an invariant guard: red at
     `origin/main` (3573a413), where `SKILL.md` contained no `:30306` anywhere. An
     earlier draft of this docstring asserted the opposite ('it never failed
-    against pre-change content') without running it -- the claim was wrong.
+    against pre-change content') without running it -- the claim was wrong. The
+    muster leg is red against pre-change content too, in the blunter way: the file
+    did not exist.
+
+    🔴 BOTH cores must name BOTH bases, and that is the point rather than
+    symmetry for its own sake. A core naming only its OWN base teaches a reader
+    nothing about the base that 404s, and the 404 is silent.
     """
-    text = SKILL_CORE.read_text()
+    text = core.read_text()
+    who = core.relative_to(REPO_ROOT)
     assert ":30306" in text, (
-        "the clawgate SKILL.md does not name the task base at all; every routing "
+        f"{who} does not name the task base at all; every routing "
         "guard in this file then passes vacuously"
     )
     assert ":30302" in text, (
-        "the clawgate SKILL.md no longer names the router base; the split it "
+        f"{who} no longer names the router base; the split it "
         "documents needs both halves"
     )
 
