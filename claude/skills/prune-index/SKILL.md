@@ -1,13 +1,13 @@
 ---
 name: prune-index
-description: "Audit and prune the /analyze-service index store. Use for: prune/shrink/audit the analyze-service index, the subsystem index store, an entry that got huge, `--ref X` is ref-ambiguous, RESOLVED bullets piling up, ~/.claude/analyze-service-index. A SKILL.md body is `prune-skill`; MEMORY.md is `prune-memory`; the store itself is `cairn`."
+description: "Audit and prune the /analyze-service index store. Use for: prune/shrink/audit the analyze-service index, the subsystem index store, an entry that got huge, `--ref X` is ref-ambiguous, RESOLVED bullets piling up, the frozen ~/.claude/analyze-service-index. A SKILL.md body is `prune-skill`; MEMORY.md is `prune-memory`; the store itself is `cairn`."
 argument-hint: "[SCOPE | SCOPE/ENTRY.md] — optional; defaults to the whole store"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ---
 
 # prune-index — audit & prune the `/analyze-service` index store
 
-The store is a **pointer/nuance sheet per service** under `~/.claude/analyze-service-index/<scope>/<slug>.md`. Its measured value is **recency-ordered selection** — an index-primed agent avoids a superseded fact a repo-only agent asserts confidently — and selection is exactly what degrades as entries grow. Nothing applies pressure to it, so it grows monotonically. This is the pressure.
+The store is a **pointer/nuance sheet per service**, held on the pod and read through **one read-through cache per configured instance** — `$DEVRC/scripts/cairn-ops/health.sh instances` names them. (`~/.claude/analyze-service-index/<scope>/<slug>.md` is the frozen pre-cutover mirror, not the store; cg#563 owns the code default that still points there.) Its measured value is **recency-ordered selection** — an index-primed agent avoids a superseded fact a repo-only agent asserts confidently — and selection is exactly what degrades as entries grow. Nothing applies pressure to it, so it grows monotonically. This is the pressure.
 
 **Reference topics** — deployed at `~/.claude/skills/prune-index/reference/`, source `~/workspace/devrc/claude/skills/prune-index/reference/`:
 
@@ -39,13 +39,31 @@ The store is a **pointer/nuance sheet per service** under `~/.claude/analyze-ser
 Full rules incl. cross-repo targets and the stale-clone trap: `~/.claude/skills/prune-index/reference/classification.md`.
 
 ## 1. Audit (deterministic, READ-ONLY — no edits, no git in the store)
-🔴 **Sync first and audit the CACHE, not `~/.claude/analyze-service-index/`.** Since the Cairn cutover the pod is the authority and the local store is a frozen (`0444`) mirror that **no write updates** — every bullet appended through `cairn append` since the freeze is missing from it. Auditing the stale copy silently under-counts `OPEN:` bullets, which is the one number §6 compares before and after.
+🔴 **Sync first, and audit the cache the READER resolves for THAT SCOPE.** Two distinct
+reasons, and the second one is newer:
+
+- `~/.claude/analyze-service-index/` is a frozen (`0444`) pre-cutover mirror that **no write
+  updates** — every bullet appended through `cairn append` since the freeze is missing from
+  it, so auditing it silently under-counts `OPEN:` bullets, which is the one number §6
+  compares before and after. (cg#563 owns the code default that still points there; this
+  skill's job is not to describe it as the store.)
+- 🔴 **AND THERE IS NO SINGLE CACHE EITHER — one read-through cache PER CONFIGURED
+  INSTANCE.** Measured on this host 2026-09-27: two caches plus the frozen mirror, three
+  trees. A literal `S=~/.cache/subsystem-store` audits the DEFAULT instance and walks an
+  empty directory for any scope that lives on another one, at exit 0. devrc PR #1872 carries
+  the split's measurement; `hygiene.sh` refuses that zero with rc **22**.
+
 ```bash
-cairn sync && S=~/.cache/subsystem-store
-python3 $DEVRC/scripts/subsystem-audit.py --store $S                 # whole store
-python3 $DEVRC/scripts/subsystem-audit.py --store $S --scope devrc   # one scope
-python3 $DEVRC/scripts/subsystem-audit.py --store $S --all           # list every entry
+$DEVRC/scripts/cairn-ops/health.sh sync
+$DEVRC/scripts/cairn-ops/hygiene.sh audit --scope devrc         # one scope, its own instance
+$DEVRC/scripts/cairn-ops/hygiene.sh audit --scope devrc --all   # list every entry
+$DEVRC/scripts/cairn-ops/health.sh instances                    # <alias> <cache root>, one line each
 ```
+⚠ **The whole-store sweep has no per-instance form and is still the bare tool** — it takes
+one `--store`, so run it once per cache root `health.sh instances` printed:
+`python3 $DEVRC/scripts/subsystem-audit.py --store <root>`. Naming that as a gap is the
+point; a single invocation that looked whole-store and read one instance is the reading this
+section exists to stop.
 Prints, each **with its denominator**: per-entry bytes vs budget; bullet shape vs the schema (advisory); the lifecycle split (OPEN kept / EVICTABLE / **NO HOME** / NOT CHECKED); pointer integrity; front-matter completeness; **ref collisions**; scopes with no README; and a verdict.
 
 🔴 **`NOT CHECKED` is not a pass.** It means a scope had no derivable owning repo, or a PR ref needs the network (`--check-prs`). Read it as an unmeasured scope, never fold it into a clean count.
@@ -55,9 +73,14 @@ If the verdict says **"no prune needed (stop; do not churn the files)"** — sto
 ## 2. Back up first (the cut rewrites curated files the timers have not captured yet)
 🔴 **Chain with `&&` and count the files** — `cp …; echo ok` prints success even when the copy failed. Back up the **synced cache**: that is what you are about to overwrite, and the frozen local mirror is a different, older set of bytes.
 ```bash
-cairn sync && BK=/tmp/index-prune-$(date +%s) && mkdir -p "$BK"
-cp -a ~/.cache/subsystem-store/. "$BK"/ && echo "backed up to $BK: $(find "$BK" -type f | wc -l) file(s)"
+$DEVRC/scripts/cairn-ops/health.sh sync && BK=/tmp/index-prune-$(date +%s) && mkdir -p "$BK"
+S=$($DEVRC/scripts/cairn-ops/health.sh instances --scope <scope> | cut -f2)
+cp -a "$S"/. "$BK"/ && echo "backed up to $BK: $(find "$BK" -type f | wc -l) file(s)"
 ```
+🔴 **BACK UP THE CACHE THE SCOPE ACTUALLY LIVES ON.** A literal default-cache path here backs
+up bytes that were never at risk, and a reassuring copy is what makes the loss
+unrecoverable. `hygiene.sh prune` takes this backup itself, of the resolved instance, before
+it writes.
 
 ## 3. Classify every bullet in an over-budget entry
 - **KEEP_OPEN** — any `OPEN:` bullet. 🔒 Off the table. Also anything the audit reports as a *near-miss* or *unmarked action*: those are open bullets whose marker did not parse, so fix the marker, never cut the bullet.
@@ -73,11 +96,17 @@ Bias toward EVICT/MERGE **only inside the RESOLVED population**. Everywhere else
 ## 4. Propose — confirm-gated, diff first
 Present a **unified diff** against the current file, one compact block, ask one yes/no. On confirm, land the cut **through the store API** — the local entry files are `0444`, but 🔴 **that does NOT stop an editor: `Edit` rewrites-and-renames straight through it and `Write` makes a fresh `0644` file** (only a shell `>>` gets `EACCES`). A cut applied locally therefore SUCCEEDS silently and is invisible to every reader, which is the loss this step exists to prevent:
 ```bash
-cairn sync                                                    # the live bytes
-cp ~/.cache/subsystem-store/<scope>/<entry>.md /tmp/prune-<entry>.md
+$DEVRC/scripts/cairn-ops/health.sh sync                       # the live bytes
+S=$($DEVRC/scripts/cairn-ops/health.sh instances --scope <scope> | cut -f2)
+cp "$S"/<scope>/<entry>.md /tmp/prune-<entry>.md
 #   apply the CONFIRMED cut to /tmp/prune-<entry>.md — the scratch copy, never the store
-cairn put --scope <scope> --ref <entry> --file /tmp/prune-<entry>.md
+$DEVRC/scripts/cairn-ops/hygiene.sh prune --scope <scope> --ref <entry> \
+  --file /tmp/prune-<entry>.md --confirm
 ```
+🔴 **`--confirm` IS THE GATE, IN THE TOOL RATHER THAN IN THIS PROSE.** `hygiene.sh prune`
+refuses without it (rc 2), takes its own `cp -a` backup of the resolved instance cache first,
+and then goes through `write.sh put`, so the mandated post-write check runs on a prune exactly
+as on any other write. The y/N above is still yours to ask — the flag records that you did.
 🔴 **`cairn put` derives its `If-Match` from a LIVE sync, and that is what REPLACES "re-read the file first, re-apply to current bytes" — a replacement, not an omission.** A session that appended between your sync and your put makes the put fail with **exit 8** instead of silently deleting their bullet, which is exactly the loss the old re-read rule was guessing at. **Exit 8 IS that writer**: `cairn sync`, re-apply the cut to the NEW bytes, show the diff again, ask again, put again. Never retry the same file and never pass `--if-match` by hand — that is the clobber the precondition exists to stop. Exit 6 = refused (bad ref or scope); exit 7 = the store was unreachable and **nothing was written or queued**. On decline, discard the scratch file. Full contract: `~/.claude/skills/prune-index/reference/writing-and-safety.md`.
 
 ⚠ **This used to read "same contract as `analyze-service`'s write-back", and that pointer is now false** — the append prompt was retired everywhere on 2026-08-31 and `write-back.md` no longer carries a protocol at all (the one append protocol is `~/.claude/skills/subsystem-index/SKILL.md`). 🔴 **A prune is NOT an append, so the retirement does not reach it**: the evidence that retired the prompt was "the answer was always `y`" on an APPEND, and a cut REMOVES bytes that are often their content's only copy. Blast radius earns the gate. **Keep the y/N here.** Only the write MECHANISM moved: a cut necessarily rewrites the whole entry, so it is a `cairn put` rather than the append verb — and step 2's `cp -a` backup, not the API, is still what lets you read back what left.
@@ -88,16 +117,17 @@ cairn put --scope <scope> --ref <entry> --file /tmp/prune-<entry>.md
 An ambiguous ref surfaces **nothing at all** — `--ref <it>` returns `ref-ambiguous` and no body, so the entry is unreachable by the name a human would type. Drop the alias from whichever entry it does not actually name (usually the one where it is an *initialism* rather than the word itself). 🔴 **The `aliases:` line is inside a frozen entry file, so this is a `cairn put` too** — same scratch-copy route as §4, same exit-8 rule; it is a one-line edit, not an exemption. Then prove the fix:
 ```bash
 REF=<the ambiguous ref>; SCOPE=<the scope>
-cairn sync && python3 "$(python3 "$DEVRC/scripts/lib/cairn_pin.py")/subsystem_recall.py" \
-  --store ~/.cache/subsystem-store --ref "$REF" --scope "$SCOPE"
+$DEVRC/scripts/cairn-ops/health.sh sync
+$DEVRC/scripts/cairn-ops/read.sh recall --scope "$SCOPE" --ref "$REF"
 ```
 Must print `status=hit`, naming the entry you expect. 🔴 Clearing the collision by making the ref resolve to **nothing** is a regression, not a fix.
 
 ## 6. Verify (don't trust — measure)
 ```bash
-cairn sync && python3 $DEVRC/scripts/subsystem-audit.py --store ~/.cache/subsystem-store --scope <scope>
+$DEVRC/scripts/cairn-ops/health.sh sync
+$DEVRC/scripts/cairn-ops/hygiene.sh audit --scope <scope>
 ```
-🔴 **`cairn sync` again, or you re-measure the bytes you measured in §1** — the put landed on the pod, and a cache read without a refresh is a claim about your own pre-put copy, which is byte-identical whether or not the write succeeded.
+🔴 **Sync again, or you re-measure the bytes you measured in §1** — the put landed on the pod, and a cache read without a refresh is a claim about your own pre-put copy, which is byte-identical whether or not the write succeeded.
 
 **Structural**: entries under budget, no collisions, `NO HOME` count unchanged or lower, and — the one that matters — **the OPEN count is IDENTICAL to before**. A prune that lost an OPEN bullet destroyed the store's only irreplaceable content while every other number improved.
 

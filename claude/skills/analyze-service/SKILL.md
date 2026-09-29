@@ -14,11 +14,12 @@ Input: `$ARGUMENTS`. Split it into:
 ## Step 1 — run the recon script. One call, not six.
 
 ```
-cairn sync; python3 ~/workspace/devrc/scripts/lib/service_recon.py <service>
+$DEVRC/scripts/cairn-ops/health.sh sync; python3 $DEVRC/scripts/lib/service_recon.py <service>
 ```
 
 🔴 **`;` — NOT `&&`. The separator is load-bearing and `&&` silently deletes the
-whole brief.** `cairn sync` exits **4** whenever the pod is unreachable but a
+whole brief.** `health.sh sync` passes the client's code through untranslated, and
+`cairn sync` exits **4** whenever the pod is unreachable but a
 usable cache survives (that is `sync`'s contract: its job is to REFRESH, so a
 stale cache is a failed refresh). Under `&&` that non-zero short-circuits, the
 recon never runs, and `/analyze-service` produces **nothing at all** — during an
@@ -36,9 +37,14 @@ is read-only and touches no cluster.
 🔴 **The recon refuses a store that cannot DATE itself, and dates the one it
 reads. It does NOT refuse a stale store — nothing here does.** Since the Cairn
 cutover the pod is the datastore and `~/.claude/analyze-service-index` is a
-FROZEN mirror; the recon reads the synced cache (`~/.cache/subsystem-store`) and,
-if that cache carries no `.sync-stamp`, prints
-`index: store-unstamped — the index could not be read: …` and names `cairn sync`.
+FROZEN mirror refreshed by nothing (cg#563 owns the code default that still
+points at it). 🔴 **The recon reads the cache the READER resolves, and there is one
+per configured INSTANCE — not one directory.** `$DEVRC/scripts/cairn-ops/health.sh
+instances` prints `<alias>	<cache root>` for each, and `… instances --scope <s>`
+names the one a scope routes to; on a single-instance host that is exactly the one
+path this line used to quote. If the resolved cache carries no `.sync-stamp` the
+recon prints `index: store-unstamped — the index could not be read: …` and names
+`cairn sync`.
 That degrades ONE section — roots, config and git log still run — so a failed
 sync costs you the index block, never the brief. `--store <path>` reads a
 directory deliberately and is not refused.

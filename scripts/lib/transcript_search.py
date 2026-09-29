@@ -25,6 +25,7 @@ and a date, not a constant.)
 docstring said it was. These other production files glob `*.jsonl` under their own roots:
 
     scripts/audit-rule-firing-sweep.py
+    scripts/round0-attribution-rate.py
     scripts/collector/claude/_shared.py
     scripts/collector/claude/tailer.py
     scripts/session-analysis/extract_genesis.py

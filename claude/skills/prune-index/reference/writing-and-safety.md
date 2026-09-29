@@ -20,7 +20,8 @@ which is confirm-gated, not in the script, which is not.
 
 ## The store is git, and that is a hazard rather than a safety net
 
-`~/.claude/analyze-service-index/` is **not** one repo: each `<scope>/` is its
+The frozen mirror at `~/.claude/analyze-service-index/` is **not** one repo — and
+neither is any instance's cache: each `<scope>/` is its
 own remote-less repo, the root is not a repo, and an **out-of-band autocommit**
 runs against them. Consequences:
 

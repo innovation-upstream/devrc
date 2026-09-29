@@ -808,6 +808,14 @@ JSONL_GLOB_SITES = {
             "shared walk EXCLUDES subagents/ because a subagent is not a resumable "
             "session, which is right for /find-session and wrong here, since an AUDITOR "
             "IS a subagent and its own transcript is where a rule gets applied"),
+    ("scripts/round0-attribution-rate.py", "ENUMERATING"):
+        (1, "round-0 attribution rate: the same reason as the firing sweep above — the "
+            "shared walk EXCLUDES subagents/, and a round-0 report is written BY AN "
+            "AUDITOR SUBAGENT, so its own transcript is where the ledger line lives. "
+            "MEASURED 2026-09-27 on this host: of the 12 real asks blocks in the "
+            "corpus, several sit under <project>/<session>/subagents/, which "
+            "iter_transcripts cannot reach. It also applies a raw-line prefilter (a "
+            "7.9 GB corpus) and must see RAW lines for its negative control"),
     ("scripts/session-analysis/extract_genesis.py", "ENUMERATING"):
         (1, "session-analysis one-shot: wants EVERY jsonl including subagents"),
     # 🔴 REMOVED 2026-09-25 with the walk it described, and its REASON was FALSE

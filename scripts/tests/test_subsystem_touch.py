@@ -1852,8 +1852,23 @@ class TestSkillDocsArePinned:
         # so the answer is to pin the whole normalised command. The cost is real
         # and is the point: a cosmetic reword of this line now fails the test, and
         # that is what buys a machine-readable claim about which BINARY runs.
+        # ⚠ RESPELLED 2026-09-27 (clawgate cg#665), and the WHOLE normalised command
+        # is still what is pinned — for the reason the paragraph above gives, which
+        # has not weakened. The mandated line is now
+        # `$DEVRC/scripts/cairn-ops/hygiene.sh validate --scope <scope>`, which names
+        # the WRITER exactly as before (the door shells `cairn-validate`, never the
+        # packaged client's `validate`) and additionally SUBSUMES the `cairn sync`:
+        # the script syncs first and refuses to check unsynced bytes, so the property
+        # the old `&&` carried is now structural instead of a rule a caller has to
+        # remember. It also resolves the store PER INSTANCE, which the two-command
+        # form could not — measured on a two-instance host, the old form checked ZERO
+        # files and exited 0 for a scope on the non-default instance.
+        # 🔴 Both walkable forms the paragraph above names are still refused: the door
+        # cannot be "routed at the packaged client" (it is a path to a script in this
+        # repo, and `scripts/tests/test_cairn_ops.py` pins which binary it shells),
+        # and demoting it to an optional aside would fail this pin exactly as before.
         (
-            "cairn sync && cairn-validate --scope <scope>",
+            "$DEVRC/scripts/cairn-ops/hygiene.sh validate --scope <scope>",
             "🔴 the write-time parse check — the WRITER finds its own defect, "
             "not a different tool in a later session",
         ),
@@ -1898,8 +1913,16 @@ class TestSkillDocsArePinned:
         # `--if-match`, so the pin moves to the command that does the work.
         # Deleting it instead would have removed the only assertion that this
         # step names a write mechanism at all.
+        # ⚠ RESPELLED 2026-09-27 (clawgate cg#665) for the same reason as the
+        # validate pin above: the append goes through
+        # `$DEVRC/scripts/cairn-ops/write.sh`, which refuses a bullet carrying its own
+        # marker or date BEFORE the network (rc 21) and runs the mandated post-write
+        # check after it (rc 24 when the write landed unconfirmed). The claim this pin
+        # carries — that the step names a write mechanism that lands on the POD — is
+        # unchanged; the mechanism gained two refusals it did not have.
         (
-            "cairn append --scope <scope> --ref <entry> --session <session-uuid>",
+            "$DEVRC/scripts/cairn-ops/write.sh append --scope <scope> --ref <entry> "
+            "--session <session-uuid>",
             "the mandated mechanism: the append lands on the POD, not locally",
         ),
         (
