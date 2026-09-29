@@ -1383,3 +1383,150 @@ silent failure that would leave the run claiming a durable record that does not 
   a COUNT across rounds and a new doc has no previous round to have grown since, while
   this rule compares BYTES against a fixed ceiling a new doc can be over on day one.
 * It **prunes no document**. This is the mechanism only.
+
+## §J — rule (q): a PRUNE removes lines the caller NAMED (2026-09-28)
+
+§I's mechanism ends "It **prunes no document**. This is the mechanism only." This is
+the exit rule that closes that sentence.
+
+### The gap
+
+Rule (c) makes `Open investigations`, `Findings` and `Gotchas` **append-only**, and
+rule (p) refuses to grow a doc already over its ceiling. Between them a document can
+reach a state where **the sanctioned writer cannot write at all**: the bytes are in the
+append-only sections, and no path in `scripts/lib/handoff_doc.py` could remove one.
+`--help` listed no prune mode. Rule (p)'s own docstring names the shape — those sections
+have "an entry rule and no exit rule" — and `scripts/handoff-audit.py` measures the
+consequence (121 of 123 revisions grew or held) while its own header says it "makes no
+edits".
+
+🔴 **The cost is not the bytes, it is the HAND EDIT.** With the only writer unable to
+remove a line, the remedy reached for is an `Edit` of the committed document, which
+bypasses every gate in the module at once: the bucket classification, the durable-drop
+warning, the leak scan, the closing-condition read, and the two-run diff that is the
+only record of what landed. A hand edit made for exactly this reason shipped a ranked
+list that misrepresented the state of the work, because nothing checked it.
+
+### How to prune
+
+🔴 **`$VAR`, never `<name>`, inside the fence.** In shell `<` and `>` are
+redirection operators, so a pasted `--topic <topic>` runs as a redirect and fails
+naming something that appears nowhere in the command — and if a file called
+`topic` exists it TRUNCATES it. Angle brackets are fine in the prose above.
+
+```bash
+TOPIC=queue-drain                # the effort slug; the doc is claudedocs/handoff-$TOPIC.md
+PRUNE=/tmp/prune-$TOPIC.md       # the VERBATIM lines to remove, one per line
+# proposal run — writes NOTHING, prints the diff:
+python3 scripts/lib/handoff_doc.py --repo "$PWD" --topic "$TOPIC" \
+  --prune "$PRUNE" --prune-count 3 --advanced 'what changed this session'
+# land it — the identical command plus --confirm --push
+```
+
+* `--prune FILE` names, **verbatim**, every line to remove. Blank lines in the file are
+  ignored and name nothing. There is no age threshold, no section sweep and no
+  heuristic: a prune is never a side effect of an update, and without the flag nothing
+  is ever removed.
+* `--prune-count N` is **required** with it and is checked against the file **before
+  anything is matched**. A count that disagrees is a refusal, not a best-effort removal
+  of whatever was found — `claude/RULES.md`'s "assert the population before acting on
+  it". It catches the prune file that lost a line to a bad heredoc.
+* It **combines with `--update`**: the prune is applied to the MERGE, so one run can add
+  this session's findings and shrink the document past rule (p)'s refusal.
+* `--update` is no longer required — but one of `--update` / `--prune` is (exit 2). A
+  pure prune brings no sections, and forcing a no-op delta would mean REPLACING a
+  section the author had to pick, i.e. the tool teaching the hand edit it replaces.
+
+### Refusal semantics — `status=prune-refused`, exit 15
+
+**All-or-nothing.** A partial prune produces a document nobody chose, and with the
+two-run shape the diff in the transcript is the only record of what landed — so a run
+that removed 3 of the 4 lines named would leave a record that reads as a decision. Every
+problem is reported, not just the first, each with its own marker:
+
+| marker | fires when | fix |
+|---|---|---|
+| `[count mismatch]` | the file names a different number of lines than `--prune-count` | fix whichever is wrong |
+| `[absent]` | a named line matches NO line in the document | copy it verbatim (whitespace is collapsed; nothing else is) |
+| `[ambiguous]` | a named line matches MORE than one | append-verbatim makes duplicates ordinary — name a unique line, or the whole block |
+| `[load-bearing]: <key>` | the line carries a field other tooling parses | **no flag clears this** — see below |
+| `[section heading]` | the line is an H1/H2, i.e. a whole SECTION | prune the section's CONTENT |
+| `[partial block]` | the line is an `###`+ heading and part of its block is unnamed | name the whole block, or none of it |
+| `[fence delimiter]` | the line opens or closes a code fence | removing one end re-partitions every line after it |
+| `[replace section]` | the line is outside an append-only section | rewrite that section with `--update`; rule (c) already replaces it |
+
+🔴 **Four fields may not be pruned, and there is deliberately no override.** Each is
+read by tooling outside the module, and a document that loses one does not report an
+error — it reports a **FALSE ABSENCE**:
+
+* `clawgate-task:` — `scripts/resume-state.sh` reconciles the task from it and
+  `scripts/lib/handoff_index.py` reads it; losing it prints `(no clawgate-task: field in
+  this handoff)`.
+* `closing-condition:` — rule (m) and `scripts/resume-state.sh`'s `dod_row` read the
+  arc's finish line from it; losing it declares NO closing-condition.
+* `forcing:` — rules (j) and (n) read a ranked item's forcing function from it, and the
+  rank is half a `claim-work` slug identity.
+* `as-of:` — rule (l) and `scripts/resume-state.sh` age an investigation block by it; an
+  unstamped block cannot be aged and reads as fresh.
+
+Rule (i-a)'s argument applies unchanged: a bypass for a refusal whose damage is
+invisible would be taken every time. The guard is also **wider than every reader's own
+pattern** — key, optional markup, colon, and nothing about the value — because each
+reader additionally requires a valid value, so a guard sharing those bounds would let
+through exactly the near-miss lines `_CLOSING_ATTEMPT` / `_FORCING_ATTEMPT` exist to
+report. Cost of being wider: a refusal on prose that happens to spell `as-of:`. Cost of
+being narrower: a field deleted forever, with no error anywhere.
+
+🔴 **ONE narrow exception, and without it the rule was useless for its biggest case.**
+`as-of:` is OWNED BY the `###` block it stamps, so a prune that removes that whole block
+removes the field's owner with it and orphans nothing. With no exception, naming a
+complete resolved investigation block — the single largest eviction
+`scripts/handoff-audit.py` reports — was refused **on its own stamp**. So an `as-of:`
+line may go when, and only when, its innermost enclosing `###`+ block is named IN FULL,
+heading included. The exception is that key ALONE, and the asymmetry is derived rather
+than chosen: the other three fields' owners are never inside a block —
+`closing-condition:` lives under `## Goal` and both readers scope to it, `forcing:` lives
+on a ranked item under a REPLACE heading the rule refuses outright, and `clawgate-task:`
+lives in front matter. For those three there is no "its owner is going too" state to
+except.
+
+### Which existing refusals still apply, and which do not
+
+The prune is computed into the merged text **before every rule that reads it**, so:
+
+* **rule (p) `size-ratchet` is SATISFIED by a prune, never bypassed by one.** It reads
+  the pruned bytes, so a prune+update that still grows an over-ceiling doc is still
+  refused, and one that shrinks it clears honestly. This is the rule a prune exists for.
+* **rule (m) `undefined-done` reads the PRUNED text**, so a prune that removed the
+  closing condition would be caught twice — once by the load-bearing guard, once by the
+  rule that owns the field.
+* **rule (o), the leak scan, runs unchanged** on the file that is written. A prune can
+  only make it cleaner, but it is not skipped: the run may also carry an update.
+* **`no-change` (5) is measured against what will actually land**, and the diff shows the
+  removals as `-` lines, so the two-run shape covers a prune with no new mechanism.
+* **rule (n) `rank-growth` deliberately does NOT see it.** It counts ranked items in the
+  BASE, which a prune never rewrites, so a prune cannot lower the floor it ratchets
+  against. `## Next steps` is also a REPLACE heading the prune refuses outright — belt
+  and braces on the same property.
+* **rules (j) `unforced` and (k) `unevidenced` read the UPDATE** and are untouched.
+  Pruning an old unevidenced bullet is legitimate and routes around nothing, because
+  those rules never read the document.
+* **rule (f)'s durable-drop warning is not reused for pruned lines.** It watches for
+  durable lines a REPLACE drops WITHOUT the author naming them, which is a different
+  claim. A prune prints its own disclosure above the diff, listing every removal with its
+  line number and flagging the ones `durable_reason` calls durable — the same predicate,
+  so "looks durable" means one thing in both places.
+* **rules (h) `stale-base`, (i) `doc-per-effort`, (d) `no-advance` and `behind` are
+  untouched.** `--advanced` is still required: a prune IS an advance and the caller still
+  has to say what changed, which is also what the commit subject is built from.
+
+### What it deliberately does not do
+
+* **No tidying.** Exactly the named lines go; blank lines around a removed block are left
+  alone. A prune that also normalised whitespace would put changes in the diff the caller
+  did not name, which is the whole property the flag is built to have.
+* **No relocation.** `scripts/handoff-audit.py`'s `RELOCATE_DURABLE` report says which
+  bullets are candidates; acting on it is still a human read. If a removal carries a
+  finding worth keeping, its home is the owning skill or the subsystem store.
+* **No judgement about whether the content deserved to go.** As with rules (j) and (k),
+  the guard is structural; the decision is the author's and is recorded in the diff.
