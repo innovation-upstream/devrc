@@ -3354,10 +3354,14 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
 # --- rule (p): a doc already over its ceiling may not GROW --------------------
 #
 # 🔴 THE MECHANISM THIS RULE INTERRUPTS, and it is the SAME SHAPE as rule (n)'s
-# self-extending rank queue one level down: a section with an ENTRY RULE AND NO
-# EXIT RULE. `Gotchas` and `Open investigations` APPEND by design, the bucket
-# rules forbid durable content anywhere else, so "move it to `Gotchas`" is the
-# CORRECT remedy for every finding and the section is monotonic by construction.
+# self-extending rank queue one level down: a section whose ENTRY is a side
+# effect of an ordinary update while its EXIT is a deliberate flag. `Gotchas` and
+# `Open investigations` APPEND by design, the bucket rules forbid durable content
+# anywhere else, so "move it to `Gotchas`" is the CORRECT remedy for every
+# finding and the section grows on its own. ⚠ THIS COMMENT SAID "an ENTRY RULE
+# AND NO EXIT RULE … monotonic by construction", AND RULE (q) FALSIFIED IT —
+# `--prune` is that exit rule. Retracted here rather than deleted, because the
+# asymmetry is still what motivates the refusal.
 # MEASURED on one arc: a prune landed the doc under the ceiling and it more than
 # DOUBLED inside a week, the growth landing in `Gotchas`. The figures, and the two
 # commands that re-measure them, are owned by
@@ -3689,10 +3693,11 @@ def _clip(text: str, limit: int) -> str:
 # APPEND-ONLY, and rule (p) refuses to grow a document already over its ceiling.
 # Between them a doc can reach a state in which the sanctioned writer cannot
 # write at all: the bytes are in the append-only sections, and no path in this
-# module could ever remove one. `--help` listed no prune mode; the module's own
-# rule (p) docstring says the appending sections have "an entry rule and no exit
-# rule", and `scripts/handoff-audit.py` measures the consequence (121 of 123
-# revisions grew or held) while its own header says it "makes no edits".
+# module could ever remove one. `--help` listed no prune mode; rule (p)'s own
+# docstring SAID the appending sections HAD "an entry rule and no exit rule", and
+# `scripts/handoff-audit.py` measures the consequence (121 of 123 revisions grew
+# or held) while its own header says it "makes no edits". ⚠ PAST TENSE IS THE
+# POINT: that is the state THIS RULE ENDED, and the docstring now retracts it.
 #
 # 🔴 THE MEASURED COST OF HAVING NO EXIT RULE IS NOT THE BYTES, IT IS THE
 # HAND EDIT. With the only writer unable to remove a line, the remedy reached for

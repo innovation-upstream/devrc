@@ -1473,8 +1473,8 @@ the exit rule that closes that sentence.
 ### The gap
 
 Rule (c) makes `Open investigations`, `Findings` and `Gotchas` **append-only**, and
-rule (p) refuses to grow a doc already over its ceiling. Between them a document can
-reach a state where **the sanctioned writer cannot write at all**: the bytes are in the
+rule (p) refuses to grow a doc already over its ceiling. Between them a document **could**
+reach a state where **the sanctioned writer could not write at all**: the bytes were in the
 append-only sections, and no path in `scripts/lib/handoff_doc.py` could remove one.
 `--help` listed no prune mode. Rule (p)'s own docstring named the shape — those sections
 had "an entry rule and no exit rule" — and `scripts/handoff-audit.py` measures the
