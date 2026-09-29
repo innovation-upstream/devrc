@@ -14,55 +14,54 @@ Non-blocking: if it exits non-zero, print the stderr line and carry on.
 Measure the churn that an audit ladder's `audit-claims` blocks do NOT cover, in devrc and
 then outside it. Came in as ranks 10 and 8 of `handoff-audit-pr-ladder.md`; that doc has
 since renumbered and dropped both, so this is the durable home.
-
-closing-condition: every open item of `claudedocs/audit-ladder-review-2026-09-04.md` that
-this arc owns — **4** (stop-rationale, CLOSED), **5** (the range-coverage hole, CLOSED) and
-**6** (the unledgered rounds) — carries either a CLOSED marker with its residuals or a
-written operator decision not to read it. *Checked by:* a reader opening that doc's
-`## Open items` section and finding no uncrossed item whose text names range-coverage,
-stop-rationale or the gap census. The instruments themselves are shipped and guarded; this
-arc ends at the ITEMS, not at more measurement.
+- **closing-condition:** `check` — every open item of
+  `claudedocs/audit-ladder-review-2026-09-04.md` that this arc owns — **4** (stop-rationale),
+  **5** (the range-coverage hole) and **6** (the unledgered rounds) — carries a CLOSED marker
+  with its residuals, or a written operator decision not to read it. **ALL THREE ARE CLOSED as
+  of 2026-09-14, so this condition is MET.** *Checked by:* opening that doc's `## Open items`
+  and finding no uncrossed item whose text names range-coverage, stop-rationale or the gap
+  census. 🔴 **FROZEN — it does NOT extend to items 1, 2, 7 or 8 there**, which are open and
+  are not this arc's; 7 and 8 are the stop-rationale run's own residuals. The instruments are
+  shipped and guarded; this arc ended at the ITEMS, not at more measurement.
+  ⚠ **Reformatted 2026-09-14 from a bare `closing-condition:` line**, which rule (m)'s parser
+  did not read — the write gate reported this doc as declaring none and GRANDFATHERED it. A
+  closing condition a tool cannot see is one nobody is held to, and this arc closes ON it.
 
 ## State now
-- **Branch / PR: all SEVEN PRs of this arc are MERGED** and verified by content on
-  `origin/main`: `#1519`→`766c1295`, `#1528`→`b42ac7c3`, `#1552`→`b1abf6b1`,
-  `#1564`→`61f41adf`, `#1576`→`3409d325`, **`#1649`→`46ebb689`** (rank 1) and
-  **`#1643`→`e6f05e04`** (rank 2 / the arc's rank 9), both merged **2026-09-14T04:15Z and
-  04:21Z**.
-- 🔴 **RANK 9 SHIPPED — and this doc said "NEVER STARTED" for ten hours after it did.**
-  The bullet here used to read *"9 WAS NEVER STARTED … the one user-specified objective of
-  this arc that did not ship"*, and a `/resume` kickoff was written from it **after**
-  `#1643` merged, instructing the next session to start work that was already on `main`.
-  The doc's own investigation entry below had said rank 9 was measured since 2026-09-13.
-  **The doc contradicted itself and the kickoff drew the stale half** — see the gotcha.
-  Of the five ranked items the original kickoff named (8, 9, 10, 14, 16): **8, 9 and 10 are
-  mine and done; 14 and 16 were closed by OTHER sessions and re-verified here. All five are
-  now closed.**
-- ✅ **Re-verified, not remembered** — rank 14: `#1287` closed, its port `#1505` **MERGED**
-  2026-09-11T20:20Z. Rank 16: `#1431` was reopened and then closed carrying a **written
-  dismissal naming the reader**, which is its stated closing condition, met.
-- **Deploy/verify status:** nothing in this arc needs a `home-manager switch` except `#1519`'s
-  one managed path (`claude/skills/audit-pr/reference/round-ladder-evidence.md`), which is
-  **deployed and byte-verified on BOTH hosts** (`md5 cfaf3169` identical across `origin/main`,
-  workbench and laptop). Everything else is `scripts/` + `claudedocs/`, which home-manager does
-  not deploy. `ladder-range-coverage.py` is invoked BY PATH and is not on `PATH`.
-- **CARRIED FORWARD for the third time, because every `State now` replace tries to eat it:**
-  the DURABLE RESULTS of this arc do not live in this doc — they live in
-  `claudedocs/audit-ladder-review-2026-09-04.md`, where open items **4** (stop-rationale) and
-  **5** (the range-coverage hole) and the devrc-only half of the CANNOT-SEE bullet are marked
-  CLOSED with their residuals, and the six-repo census table sits. Of the items this arc owns
-  only **6** (the unledgered rounds) is still open. Read that doc, not this one, for the
-  findings. ⚠ Items **1**, **2**, **7** and **8** there are open but are NOT in this arc's
-  closing condition. **7** (the `parse_claims_blocks` numbering gap, 2 of 201) and **8** (the
-  400-PR scan limit, hit by three repos) were filed BY rank 2's run as its own residuals —
-  read them as the stop-rationale measurement's known limits, not as unstarted work.
-- ⚠ **No `clawgate-task:` field** — `clawgate_handoff.sh resolve` exits **5** (nothing
-  resolved), which cannot distinguish "touched no task" from "wrong id". Not a clean bill, and
-  no task was created to fill it.
-- ⚠ **The shared clone `$DEVRC`'s branch is VOLATILE — re-read it, never carry it.** It was on
-  `fix/tmux-osc8-hyperlinks` on 2026-09-12 and on `main` on 2026-09-14. `git -C $DEVRC branch
-  --show-current` immediately before any write. This doc is written from a worktree on `main`
-  either way — see the gotcha below.
+- ✅ **THE ARC IS CLOSED BY ITS OWN STATED CLOSING CONDITION, 2026-09-14.** That condition
+  names items **4**, **5** and **6** of `claudedocs/audit-ladder-review-2026-09-04.md`; 4 and
+  5 were already CLOSED, and **6 is now CLOSED** — the interior unledgered rounds were READ,
+  which is the first of the two closures that item offered. Re-check by opening that doc's
+  `## Open items` and confirming no uncrossed item names range-coverage, stop-rationale or the
+  gap census. 🔴 **Items 1, 2, 7 and 8 there are still open and are NOT this arc's** — 7 and 8
+  are the stop-rationale run's own residuals. Do not read a closed arc as a clean document.
+- ✅ **Item 6's finding, written where its closing condition lives — not only here.** Over the
+  full devrc population (**62 carriers found, 60 measured**) the INTERIOR class is exactly
+  **one** commit: `#1326`, round 7 `to` → round 8 `from`, `404ec208..b9848f9d`, **191 lines**,
+  the operator's design decisions 9–16 recorded into a proposal. **Never re-audited under any
+  later round's block** — round 8 anchors past it and rounds 8→9, 9→head are TIGHT. Totals:
+  interior 191 / tail 6,727; gap census INTERIOR `round-ref 0 · merge 0 · unclassified 1`.
+- 🔴 **THIS DOC TOLD THREE SESSIONS THE WORK WAS DONE WHILE THE ITEM WAS STILL OPEN.** The
+  measurement above was taken on 2026-09-14 and written into THIS doc; the item it closes
+  lives in the review doc, and nothing wrote it there for hours. This doc's own rank 3 said in
+  terms *"What REMAINS to close item 6: write that finding onto the item"* — correct, and
+  still unactioned through two further handoff updates. **A finding recorded in the doc that
+  MOTIVATED the work is not recorded where the work CLOSES.** Same shape as the false kickoff
+  in the gotchas below, one level up.
+- **All seven PRs of this arc remain MERGED and verified by content** on `origin/main`:
+  `#1519`→`766c1295`, `#1528`→`b42ac7c3`, `#1552`→`b1abf6b1`, `#1564`→`61f41adf`,
+  `#1576`→`3409d325`, `#1649`→`46ebb689`, `#1643`→`e6f05e04`. Plus `#1676` (this doc's own
+  truth repair) → merged 2026-09-14T18:11Z.
+- ✅ **The original kickoff's ranks 14 and 16 stay CLOSED** — rank 14: `#1287` closed, its
+  port `#1505` MERGED 2026-09-11T20:20Z. Rank 16: `#1431` was reopened and then closed
+  carrying a written dismissal naming the reader, which is its stated closing condition, met.
+  Carried because no other line records them.
+- ⚠ **No `clawgate-task:`** — `resolve` exits 5; the positive control answers for another
+  session, so the board is reachable, but a wrong id also answers 200 with an empty array.
+  Not a clean bill of health.
+- ⚠ **The shared clone `$DEVRC`'s branch is VOLATILE** — measured on `main`, then
+  `fix/tmux-osc8-hyperlinks`, then `feat/the-algorithm-skill`, then `main` again, all within
+  this arc's life. `git -C $DEVRC branch --show-current` immediately before any write.
 
 ## Open investigations — live diagnosis state
 
@@ -384,6 +383,23 @@ worst gotcha, recorded below, was another doc doing exactly that. Do not compact
   arc's — every one removed as it finished. Other sessions' agent checkouts, nothing prunes
   them, and not this effort's to clean. Recorded because the number is now large enough that
   `git worktree list` is no longer a usable orientation command.
+
+- 🔴 **A CLOSING CONDITION POINTING AT ANOTHER DOCUMENT IS ONLY AS GOOD AS THE WRITE INTO THAT
+  DOCUMENT, AND THAT WRITE IS THE STEP THAT GETS SKIPPED.** This arc's condition named three
+  items in `audit-ladder-review-2026-09-04.md`. The measurement closing item 6 was taken, was
+  correct, and was written into the HANDOFF doc — where it read like completion — while the
+  review doc's item 6 stayed uncrossed and its `*Closes when*` clause unmet. Two subsequent
+  handoff updates passed over it. **The tell was available the whole time and was written down
+  by me:** rank 3 literally said what remained. 🔴 **So: when a closing condition names a
+  FOREIGN file, the work is not done until that file changes — and a handoff entry describing
+  the finding is evidence of MEASUREMENT, never of CLOSURE.** Check by grepping the foreign
+  file for the finding's own identifier (here `#1326` / `404ec208`), not by re-reading the
+  handoff.
+- ⚠ **The item closed on a DIFFERENT population than it was written against, and that is
+  stated rather than smoothed over.** The item said "1 of the 40 on devrc" from a 20-ladder
+  census; the closure re-measured over 60 ladders and also found 1. Those are not the same
+  claim, and reporting the second as though it confirmed the first would be the
+  count-and-measurement-from-different-populations defect this very arc exists to catch.
 
 ## How to verify
 ```bash
