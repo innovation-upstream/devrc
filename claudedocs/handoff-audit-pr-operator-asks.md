@@ -296,10 +296,17 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
   Found by **`#1901 round 0`** (blind), reproduced by the coordinator. Fixed structurally
   rather than by flipping a precedence: *named by a trailer* is now the `selected` role
   (SELECTION), `answered` comes only from a rendered `### from the session transcript`
-  heading, `IN_POPULATION_ROLES` is a one-line ledger, and **both poles of a live `render()`
-  are classified on every run** (exit 5) because every anchor string was already correct when
-  the defect shipped. The population is now *the operator's words actually reached the
-  auditor*. ⚠ The script's own blind-spot 8 had asserted the SAFE direction ("trailers exist
+  heading, `IN_POPULATION_ROLES` is **DERIVED** from the `BRANCHES` precedence ledger rather
+  than being a second source of truth (`round0-attribution-rate.py:591-592` —
+  `tuple(r for r, (disp, _why) in BRANCHES.items() if disp == "in")`), and **EVERY pole in
+  `BEHAVIOURAL_POLES` is classified from a live `render()` on every run** (exit 5) because
+  every anchor string was already correct when the defect shipped. 🔴 **Read
+  `BEHAVIOURAL_POLES`, never a count here** — the script's own rule at `:143-145`, and this
+  sentence said "both poles" and "a one-line ledger" after the set had grown past two and the
+  ledger had stopped being a literal, which is the same count-in-prose defect it records.
+  (`f8506db7`: five poles, one per `BRANCHES` branch.) The population is now *the operator's
+  words actually reached the auditor*.
+  ⚠ The script's own blind-spot 8 had asserted the SAFE direction ("trailers exist
   but the transcript was pruned is out-of-population") while the code took the unsafe one —
   that sentence was unreachable, and a doc naming the safe direction over unsafe code is worse
   than silence.
@@ -348,6 +355,14 @@ python3 $DEVRC/scripts/session-analysis/extract_user_msgs.py \
 nix develop $DEVRC -c python3 -m pytest $DEVRC/scripts/tests/test_operator_asks.py -q
 nix develop $DEVRC -c python3 $DEVRC/scripts/tests/mutation_battery_operator_asks.py
 # expect 26 KILLED · 0 SURVIVED · 0 SKIPPED, C0 GREEN, restored by digest: True
+# 3b. 🔴 THE HEADLINE ARTIFACT OF THIS RANGE — the rate instrument's own battery.
+#     It exists because a sweep you cannot re-run is a sentence, not evidence.
+nix develop $DEVRC -c python3 $DEVRC/scripts/tests/mutants-round0-attribution-rate.py
+# expect rc 0 and: C4 COVERAGE … no mutant at their DECLARING site: none
+#   · 39 of 39 killed · 39 died on their own guard's ASSERTION
+#   · C3 restore: byte-identical to pristine after every mutant · RESULT: PASS
+# MEASURED 2026-09-29 at the head of this range; 36.5s / 74.2s wall on two runs
+# (this box runs concurrent suites — do not read the spread as the battery).
 # 4. 🔴 the tier the merge gates on — a SUBSET run cannot see GUARD 2
 nix build $DEVRC#checks.x86_64-linux.pytests --no-link -L   # read RESULT: and SCOPE:, not the wrapper's rc
 # 5. both hosts carry it

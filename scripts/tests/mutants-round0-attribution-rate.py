@@ -85,9 +85,16 @@ import tempfile
 from functools import partial
 from pathlib import Path
 
-#: Redirected to a log (which is how anyone reads a 6-minute sweep), an
+#: Redirected to a log (which is how anyone reads a sweep of this size), an
 #: unflushed print shows NOTHING until exit — indistinguishable from a hang,
 #: and `wc -c` then reports a near-empty log for a run that is fine.
+#: ⚠ NO MINUTE FIGURE HERE ANY MORE. This said "6-minute sweep" while the run
+#: was slow for a reason that had nothing to do with the row count: `pytest_run`
+#: passed no `cwd`, which is fixed below. MEASURED after that fix, 39 rows, two
+#: runs of one tree minutes apart: 36.5s and 74.2s wall — the spread is this
+#: box's concurrent-suite load, not the battery, which is exactly why no minute
+#: figure belongs in prose. The reason to flush is that the log is read live, at
+#: any duration.
 say = partial(print, flush=True)
 
 REPO = Path(__file__).resolve().parents[2]
@@ -158,6 +165,20 @@ MUTANTS: list[tuple[str, str, set[str], str | tuple[str, ...],
       "test_the_printed_files_per_session_ratio_is_not_INVERTED"},
      "    head = parts[1]", "    head = parts[-1]"),
     # ---- precedence: the defect of rounds 0, 2 and 3 ---------------------
+    # 🔴 ADDED AFTER `#1901 round 4`: `answered` is the ONLY branch that can
+    # produce `in`, i.e. the entire numerator of the closing condition, and it
+    # had NO mutant — C4 reported `none` because it was a substring test and
+    # `role="answered"` appears inside another row's patch text. The C4 check
+    # now matches the DECLARING site, which is what surfaced this.
+    ("answered-branch-is-out-of-population",
+     "the one branch that can produce `in` disposes `out`, so the numerator of "
+     "the closing condition is structurally zero and the post-cut rate can "
+     "never rise however many asks reach the auditor",
+     {"test_only_the_answered_role_can_make_a_report_in_population",
+      "test_a_session_whose_asks_block_ANSWERED_is_in_population",
+      RUNTIME},
+     '    "answered": ("in", "an ask from a session transcript was rendered into the "',
+     '    "answered": ("out", "an ask from a session transcript was rendered into the "'),
     ("precedence-selected-is-in-population",
      "`selected` re-enters the in-population set — `#1901 round 0`'s defect "
      "verbatim: trailers NAMING a session scored as the words arriving",
@@ -443,12 +464,27 @@ MUTANTS: list[tuple[str, str, set[str], str | tuple[str, ...],
 
 
 # --------------------------------------------------------------------------- #
+def _sites(field: str | tuple[str, ...]) -> tuple[str, ...]:
+    """A row's `old`/`new` as a tuple of site texts, single-site rows included."""
+    return field if isinstance(field, tuple) else (field,)
+
+
 def pytest_run(tree: Path) -> subprocess.CompletedProcess:
+    # 🔴 `cwd=tree` is not cosmetic — it is the difference between a sweep of
+    # seconds and one of minutes. With no `cwd`, pytest derives its rootdir from
+    # the common ancestor of the caller's cwd and the arg path, and the run gets
+    # dramatically slower. MEASURED on one tree at one moment, same 60 tests:
+    # `cwd=tree` → 0.39s, no `cwd` → 10.70s (and 65.44s when the caller sat in a
+    # repo copy) — 39 invocations of that is the whole sweep's wall time.
+    # ⚠ The internal cause was NOT isolated (`--noconftest` was still slow, so it
+    # is not the guard plugins); this pins the INVOCATION, and no explanation of
+    # the mechanism is offered here because none was measured.
     for cache in (tree / "scripts").rglob("__pycache__"):
         shutil.rmtree(cache, ignore_errors=True)
     return subprocess.run(
         [sys.executable, "-m", "pytest", str(tree / REL_TEST), "-q",
          "--no-header", "-p", "no:cacheprovider"],
+        cwd=str(tree),
         capture_output=True, text=True,
         env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
 
@@ -507,13 +543,35 @@ def main() -> int:
     rc = 0
     try:
         # ---- C4: the list's own coverage, derived from the module -------
+        # 🔴 THE DECLARING SITE, never a substring of a blob. This was a
+        # bare `x not in named` over the row names concatenated with every
+        # patch text, so `role="answered"` inside ANOTHER row's `new` made
+        # the `answered` branch read as covered — and `answered` is the only
+        # branch that can produce `in`, so the one branch the closing
+        # condition's numerator depends on had no mutant at all while C4
+        # printed `none`. Matching `"<x>": (` / `id="<x>"` is what exposes
+        # that: a row must mutate the line where the id is DECLARED.
         anchor_ids = re.findall(r'dict\(id="([\w-]+)"', pristine)
         branches = re.findall(r'^    "([\w-]+)": \("(?:in|out)"', pristine, re.M)
-        named = " ".join(f"{n} {old} {new}"
-                         for n, _why, _k, old, new in MUTANTS)
-        gaps = sorted({x for x in anchor_ids + branches if x not in named})
+        patches = [" ".join(_sites(old)) + "\n" + " ".join(_sites(new))
+                   for _n, _why, _k, old, new in MUTANTS]
+
+        def _declared(x: str) -> bool:
+            # The two forms in which this module declares an id: an ANCHOR row
+            # (`id="x"`) and a `BRANCHES` key (`"x": (`). ⚠ KNOWN LIMIT, named
+            # rather than left for a reader to find: an id declared in BOTH
+            # forms is satisfied by a mutant at EITHER. `unmeasured` is exactly
+            # that case today — it has an anchor mutant
+            # (`unmeasured-anchor-made-block-scoped`) and no mutant on its
+            # `BRANCHES` line. Tightening this to per-kind would report that as
+            # a gap; it is a real, narrower gap and deliberately out of this
+            # round's scope.
+            return any(f'id="{x}"' in p or f'"{x}": (' in p for p in patches)
+
+        gaps = sorted({x for x in anchor_ids + branches if not _declared(x)})
         say(f"C4 COVERAGE: {len(anchor_ids)} anchors + {len(branches)} branches "
-              f"derived from the module; unnamed by any mutant: {gaps or 'none'}")
+              f"derived from the module; no mutant at their DECLARING site: "
+              f"{gaps or 'none'}")
         if gaps:
             say("🔴 C4 FAILED — a hand-maintained list is blind to code added "
                   "in the same round; name these or the sweep is not a claim "

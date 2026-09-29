@@ -110,7 +110,11 @@ BATTERIES = (
     # not the 4th field and `_anchors` could not read it at all. Reshaped to the
     # `(id, why, killers, old, new)` convention in the same commit, which is the
     # point of the two-way pin — a battery the reader cannot parse is caught at
-    # the moment it lands, not by whoever next runs a 40-minute sweep.
+    # the moment it lands, not by whoever next runs the sweep.
+    # ⚠ This said "40-minute sweep" and that figure is WITHDRAWN: the battery was
+    # slow because its `pytest_run` passed no `cwd`, not because of its row count.
+    # MEASURED after that fix, 39 rows, two runs minutes apart: 36.5s and 74.2s
+    # wall. The argument does not rest on the duration, so no number replaces it.
     "mutants-round0-attribution-rate.py",
 )
 
