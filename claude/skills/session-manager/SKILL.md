@@ -1,6 +1,6 @@
 ---
 name: session-manager
-description: "Live cross-host view of every tmux window, plus the clawgate approval queue, recent agent sessions and unsent prompts. Use for: is anything waiting on me, active sessions, what's running where, tmux state across both hosts, cross-host session status, tail a tmux window, which windows are stale/idle/busy/blocked, did I leave anything half-typed / unsent."
+description: "Live cross-host view of every tmux window. Use for: is anything waiting on me, active sessions, what's running where, tmux state across both hosts, cross-host session status, tail a tmux window, which windows are stale/idle/busy/blocked, did I leave anything half-typed / unsent."
 ---
 
 # session-manager — cross-host tmux + agent activity

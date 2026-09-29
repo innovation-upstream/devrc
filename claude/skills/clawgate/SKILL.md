@@ -79,12 +79,12 @@ per-door table and the two corrected routes: `auth-doors.md`.
 
 ## prior work — has this been fought before? (run FIRST)
 ```bash
-if command -v cairn >/dev/null; then cairn search 'clawgate' --scope homelab-talos; else echo "skipped: cairn unavailable"; fi
+$DEVRC/scripts/cairn-ops/read.sh search 'clawgate' --scope homelab-talos --if-available
 ```
 Past sessions' MEASUREMENTS — `RECALL, NOT LIVE OBSERVATION`, verify before acting. Also search
-`clawgatectl` · `e2e` · `task api` · `deploy`: what a READER types, not the file you stand in. No
-`cairn sync;` prefix (`search` syncs). 🔴 **Guard stays an `if`/`else`, never `&&`** (rc≠0 when
-cairn is absent reads as this step FAILING; a bare `if` skips SILENTLY). `prior-work-recall.md`
+`clawgatectl` · `e2e` · `task api` · `deploy`: what a READER types, not the file you stand in.
+🔴 **`--if-available` makes an absent client a SKIP at rc 0** — the default is a refusal, which
+is right for a mandated check and wrong for a preflight. `prior-work-recall.md`
 
 ## status
 ```bash

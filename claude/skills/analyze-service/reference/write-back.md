@@ -49,8 +49,12 @@ never the tool's. `--census` reads that split back, which is the only reason the
 stamp exists.
 
 **Where the entry goes:** it is addressed as `<scope>/<slug>` **on the pod** —
-`cairn create --scope <scope> --ref <slug> --file <scratch>` for a first-ever
-entry, which makes the scope directory there too. 🔴 **Never write it into
+`$DEVRC/scripts/cairn-ops/write.sh create --scope <scope> --ref <slug> --file <scratch>`
+for a first-ever entry, which makes the scope directory there too. 🔴 **The door,
+not the bare verb, and the two doors must not disagree**: `subsystem-index/SKILL.md`
+names the same one, the door enforces the append protocol before the network and runs
+the mandated post-write check after it, and a second spelling here is how the fork
+this file's opening paragraph closed would reopen. 🔴 **Never write it into
 `~/.claude/analyze-service-index/`**: that tree is a read-only mirror, reads come
 from the synced cache, and a file written there reaches nobody. Use
 `<slug>.<kind>.md` **only** when a same-slug entry of another kind already

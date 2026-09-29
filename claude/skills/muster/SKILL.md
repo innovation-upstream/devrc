@@ -1,6 +1,6 @@
 ---
 name: muster
-description: "Operate muster — the task board, agent dispatch and runbook service split OUT of clawgate onto its own base `:30306`. Use for: muster, a clawgate task, \"read and evaluate task N\", dispatch an agent, runbooks, `clawgatectl task`, a task route that 404s. Approvals are `clawgate`."
+description: "Operate muster — the task board / agent / runbook service split OUT of clawgate onto `:30306`. Use for: muster, a clawgate task, \"read and evaluate task N\", dispatch an agent, runbooks, `clawgatectl task`, a task route that 404s. Approvals are `clawgate`."
 ---
 
 # muster — the task board, agent dispatch and runbooks

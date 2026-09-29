@@ -1231,7 +1231,7 @@ def test_the_skill_did_not_grow():
     trade taken was 577 bytes of ceiling over deleting one of those. If you are
     adding to this file, that argument does NOT extend to you: evict.
 
-    🔴 RE-PINNED 15665 -> 10912 on 2026-09-29, per the "RE-PIN IT WHENEVER THE FILE
+    🔴 RE-PINNED 15665 -> 10854 on 2026-09-29, per the "RE-PIN IT WHENEVER THE FILE
     SHRINKS" rule above. The task/agent/runbook half of clawgate was extracted into
     a separate service, `muster`, and the prose that documents it left this file
     for `claude/skills/muster/SKILL.md` — the two-bases routing rule, the task
@@ -1239,14 +1239,14 @@ def test_the_skill_did_not_grow():
     What stayed is a short pointer block naming muster's base, so a session cannot
     build a task URL on the router base without meeting the correction first
     (pinned structurally by `scripts/tests/test_clawgate_skill_task_base.py`).
-    Leaving the ceiling at 15665 would have licensed 4,753 bytes of regrowth —
+    Leaving the ceiling at 15665 would have licensed 4,811 bytes of regrowth —
     more than the whole `muster` body this split just created."""
-    assert SKILL.stat().st_size <= 10912, (
+    assert SKILL.stat().st_size <= 10854, (
         "claude/skills/clawgate/SKILL.md is %d bytes. History: 18868 before the "
         "task-authoring flow, 18858 after, 15088 after the task-pickup ritual "
         "moved out to flows/task-pickup.md, 15665 after the prior-work recall "
         "step (see the docstring — raised with a stated justification, once), "
-        "10912 after the muster split moved the task half to its own skill. "
+        "10854 after the muster split moved the task half to its own skill. "
         "Any addition needs an eviction in the SAME commit." % SKILL.stat().st_size)
 
 

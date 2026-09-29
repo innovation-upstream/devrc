@@ -318,22 +318,37 @@ MIN_LISTING_ENTRIES = 30
 # -16 of mechanism prose. The 2026-09-26 `civitai-app-fleet` cut (−19 net) then
 # landed under it, so the merged tree re-pins to the exact measurement:
 # 10,832 -> 10,807. Headroom stays 0 by choice.
-# 🔴 LOWERED 10,807 -> 10,771 ACROSS 37 ENTRIES on 2026-09-29, while ADMITTING a
-# new tier-A skill, `muster` (286 chars). The task/agent/runbook half was extracted
-# out of clawgate into its own service and its prose could not stay in clawgate's
-# always-loaded core, which carries a byte ceiling of its own. The new entry was
-# paid for by step 1 above and by NOTHING else — five descriptions gave up prose
-# their own Use-for lists already spell, and `clawgate` gave back the muster
-# clauses it had just acquired:
-#   clawgate        345 -> 311   (the muster half moved to muster's own entry)
-#   clickup         557 -> 497   (mechanism clause; disambiguation re-pointed at
-#                                 `muster`, which is where the task board now is)
-#   session-manager 456 -> 370   (opening clause, every term restated in Use-for)
-#   devrc-dx        348 -> 301   (mechanism clause; "config drift" already there)
-#   bar             390 -> 300   (four tokens, all four in its own Use-for list)
+# 🔴 LOWERED 10,807 -> 10,791 ACROSS 40 ENTRIES on 2026-09-29, while ADMITTING a
+# new tier-A skill, `muster` (263 chars). The task/agent/runbook half was extracted
+# out of clawgate into its own SERVICE, and now into its own SKILL: its prose could
+# not stay in clawgate's always-loaded core, which carries a byte ceiling of its
+# own (`scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py`). The new
+# entry was paid for by step 1 above and by NOTHING else — five descriptions gave
+# up prose their own Use-for lists already spell, and `clawgate` gave back the
+# muster clauses it had briefly acquired:
+#   clawgate  345 -> 311  the muster half moved to muster's own entry
+#   clickup   557 -> 497  mechanism clause `— subtasks, attachments, workspace
+#                         search`, all three restated in its own Use-for list; and
+#                         its disambiguation re-pointed at `muster`, which is where
+#                         the self-hosted task board now is
+#   tekton    355 -> 305  `Pipelines/Triggers/Dashboard, the GitHub webhook`, every
+#                         token of it in its own Use-for list
+#   signal    407 -> 357  `and DRAFT outbound replies for clawgate approval` —
+#                         "draft a Signal reply" is already a Use-for trigger
+#   devrc-dx  348 -> 301  `— reporting cross-cutting drift then fixing it`; its
+#                         Use-for already says "config drift"
+#   mailbox   387 -> 362  `Query and`/`via Gmail SMTP` — pure mechanism, and
+#                         "querying my email" is already a Use-for trigger
 # No trigger phrase and no disambiguation clause was dropped, and no ceiling was
 # raised. Re-pinned to the exact measurement, so headroom is 0 again by choice.
-LISTING_TOTAL_CEILING_CHARS = 10_771
+#
+# ⚠ AN EARLIER DRAFT OF THIS COMMIT ALSO CUT `bar` AND `session-manager` and was
+# WRONG TO CLAIM THEM: #1905 had already made equivalent cuts to both while this
+# branch was in flight, so the saving was already banked in the 10,807 above. The
+# branch was measured against a base ref that had MOVED; re-measured on the merged
+# tree, those two rows disappeared and two more evictions were needed to replace
+# them. Recorded because the number, not the reasoning, is what would have lied.
+LISTING_TOTAL_CEILING_CHARS = 10_791
 
 # The skills deployed by `mkOutOfStoreSymlink` from `scripts/` instead of by the
 # recursive `claude/skills` mapping (`nix/home.nix`). They are listing entries

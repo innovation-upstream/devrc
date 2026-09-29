@@ -37,6 +37,18 @@ staleness it was run to measure.
 | which sessions/windows/transcripts worked a task | `cairn-who <task>` (`--json`, `--host`, `--no-windows`) — a SEPARATE binary |
 | diagnose anything above going wrong | `cairn doctor` |
 
+🔴 **THE TABLE ABOVE IS THE RAW CLIENT, AND THE SKILLS NOW GO THROUGH A DOOR — SO
+SAY WHICH, RATHER THAN LEAVING TWO ROUTES THAT LOOK LIKE A CHOICE.** Reads go through
+`$DEVRC/scripts/cairn-ops/read.sh`, writes through `write.sh`, the checks through
+`hygiene.sh`, and `sync`/`doctor`/`instances` through `health.sh` (`cairn-read`,
+`cairn-write`, `cairn-hygiene`). This file keeps the raw form on purpose — it is the
+one place the surface is written down — but **prefer the door in a flow**: it enforces
+the append protocol before the network, runs the mandated post-write check after it,
+and resolves the store PER INSTANCE. ⚠ **`ls-entries` is the row where the two are
+equivalent**: it takes no scope, the client ignores `--scope` for it, and
+`read.sh ls-entries` passes straight through — so the bare verb here and the door
+answer identically, and neither needs a repo.
+
 🔴 **`cairn validate` IS NOT THE WRITE-PROTOCOL CHECK, and it stops being one
 silently, at exit 0.** Once a host has run `home-manager switch`, the client on
 PATH is the pinned OSS package, which reimplements `validate` on the reader's

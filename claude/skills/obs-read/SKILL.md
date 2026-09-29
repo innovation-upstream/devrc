@@ -37,15 +37,17 @@ case "$CLUSTER" in
   dpprod)                    SCOPE=datapacket-talos ;;
   homelab|workbench|nebula)  SCOPE=homelab-talos ;;
 esac
-if command -v cairn >/dev/null; then cairn search "$Q" --scope "$SCOPE"; else echo "skipped: cairn unavailable"; fi
+$DEVRC/scripts/cairn-ops/read.sh search "$Q" --scope "$SCOPE" --if-available
 ```
 
-- 🔴 **Keep the `if … then … else … fi` form.** `command -v cairn && …` exits
-  non-zero when cairn is absent (1 in bash/zsh, **127 in dash**) and reads as the
-  observability step failing; a bare `if` with no `else` skips SILENTLY. The `else`
-  echo is load-bearing.
-- **No `cairn sync` prefix** — `cairn search` syncs itself; a prefix fetches the
-  whole store twice.
+- 🔴 **`--if-available` is load-bearing, and the guard is no longer yours to
+  spell.** The hand-written `if command -v cairn …; else echo skipped; fi` was
+  open-coded here and in two clawgate files; it is now
+  `scripts/cairn-ops/common.sh::require_client`, whose DEFAULT is a refusal.
+  `--if-available` is how a best-effort preflight opts back into rc 0 — without it
+  an absent client refuses, which is right for a mandated check and wrong here.
+- **No `cairn sync` prefix** — `search` syncs itself and the script never prefixes
+  one; a prefix fetches the whole store twice.
 - 🔴 **Explicit `--scope`, never `--all-scopes`.** `--all-scopes` derives a scope
   from the cwd's git repo and exits **rc 2** outside one (obs-read is documented to
   run from any cwd), and it would answer a homelab question out of a CLIENT

@@ -511,7 +511,8 @@ class TestTheOwnerCarriesTheProtocol:
         # write that returns EACCES. The pin is REPLACED, not dropped: the
         # mechanism it named still has to be pinned, at its new spelling.
         (
-            "cairn append --scope <scope> --ref <entry> --session <session-uuid>",
+            "$DEVRC/scripts/cairn-ops/write.sh append --scope <scope> --ref <entry> "
+            "--session <session-uuid>",
             "🔴 the mandated mechanism: the append lands on the POD, which is "
             "the authority — a local write is invisible to it",
         ),
@@ -545,7 +546,8 @@ class TestTheOwnerCarriesTheProtocol:
         # create route whose absence the carve-out existed for, so the pin is
         # REPLACED by the mechanism that now carries the case — never dropped.
         (
-            "cairn create --scope <scope> --ref <slug> --file <scratchpad>/new.md",
+            "$DEVRC/scripts/cairn-ops/write.sh create --scope <scope> --ref <slug> "
+            "--file <scratchpad>/new.md",
             "🔴 the THIRD write: a brand-new entry is created ON THE POD, which "
             "is the case that used to be a local write and used to strand content",
         ),
@@ -684,7 +686,15 @@ class TestThePointerRegionIsPinnedWHOLE:
     # historical record of the 2026-08-31 fork plus the two caller facts. The
     # owner states ONE protocol for both callers, and the create case is stated
     # there for BOTH — there is no per-caller carve-out on either side.
-    EXPECTED_SHA = "92939ac197a058c9bf600aaac41140a0d8a39aaf49c342edc6101a40878401a7"
+    # 🔴 RE-PINNED 2026-09-27 (clawgate cg#665) AFTER READING BOTH DOORS, which is
+    # what this guard asks for and the only thing that makes updating the hash
+    # legitimate. The mechanism spelling moved from the bare verbs to
+    # `$DEVRC/scripts/cairn-ops/write.sh` — a door that enforces the append protocol
+    # before the network (rc 21) and runs the mandated post-write check after it
+    # (rc 24). BOTH doors moved in this same commit and both name the SAME one, so the
+    # 2026-08-31 fork stays closed; there is still no per-caller exception anywhere in
+    # either file, and `write-back.md` still carries only the two CALLER facts.
+    EXPECTED_SHA = "7c91b19439081ffbbdd7248d33d0fafa6723db6c3bf77727bc1f41ee0e3b6169"
 
     def test_region_hash(self, pointer: str) -> None:
         body = _normalise(_region(pointer, self.REGION))
@@ -1161,7 +1171,15 @@ class TestTheOwnersMechanismProseIsPinnedWHOLE:
     # mechanism of its own. And this is the OPPOSITE of a carve-out: a handle
     # resolves identically for `/handoff` and `/analyze-service`, whereas the
     # literal it replaced was correct for exactly one home directory.
-    EXPECTED_SHA = "547dea481bfeacd578464529de9f0c7252b4c790263da7499b47b791f773ec98"
+    # 🔴 RE-PINNED 2026-09-27 (clawgate cg#665) AFTER READING BOTH DOORS, which is
+    # what this guard asks for and the only thing that makes updating the hash
+    # legitimate. The mechanism spelling moved from the bare verbs to
+    # `$DEVRC/scripts/cairn-ops/write.sh` — a door that enforces the append protocol
+    # before the network (rc 21) and runs the mandated post-write check after it
+    # (rc 24). BOTH doors moved in this same commit and both name the SAME one, so the
+    # 2026-08-31 fork stays closed; there is still no per-caller exception anywhere in
+    # either file, and `write-back.md` still carries only the two CALLER facts.
+    EXPECTED_SHA = "9d6477f80a3f23105acb7ea05c3a730768b71062aafbc9dc2df13d8ba326543c"
 
     @staticmethod
     def _digest(owner: str) -> tuple[str, list[str]]:
@@ -1424,7 +1442,7 @@ class TestThePruneDoorMovedItsMechanismAndKeptItsGate:
     SENTENCES: list[tuple[str, str, str]] = [
         (
             "SKILL.md",
-            "cairn put --scope <scope> --ref <entry> --file /tmp/prune-<entry>.md",
+            "$DEVRC/scripts/cairn-ops/hygiene.sh prune --scope <scope> --ref <entry>",
             "🔴 the migrated mechanism — a cut lands on the pod, not on a 0444 file",
         ),
         (
@@ -1462,7 +1480,7 @@ class TestThePruneDoorMovedItsMechanismAndKeptItsGate:
         ),
         (
             "SKILL.md",
-            "Sync first and audit the CACHE",
+            "Sync first, and audit the cache the READER resolves for THAT SCOPE",
             "🔴 the data-loss shape: a cut built from the frozen mirror's stale "
             "bytes silently deletes every bullet appended since the freeze",
         ),

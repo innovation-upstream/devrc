@@ -44,8 +44,8 @@ normally enough; add a second term only when the first misses.
 
 ## Flags and failure modes
 
-- **No `cairn sync;` prefix.** `cairn search` syncs by itself; prefixing it fetches the whole store
-  twice.
+- **The no-sync rule is now the script's**, not a rule you have to remember: `search` syncs by
+  itself and prefixing it fetches the whole store twice, so `read.sh search` never prefixes one.
 - **Pass `--scope homelab-talos`.** `--all-scopes` still derives a scope from the **cwd's git
   repo**: measured from `/tmp` it returns 0 hunks and **rc 2**. It does name the reason
   (`could not derive a scope from '.'`), so read the banner instead of reading the empty result as
@@ -55,25 +55,23 @@ normally enough; add a second term only when the first misses.
 - **The reader's banner carries stale prose** — it still claims the store is "PER-HOST and
   unreplicated", which predates the pod cutover. Don't relay that verbatim.
 
-## 🔴 Why the guard is spelled `if … ; then … ; fi`
+## 🔴 The client guard is the SCRIPT's now, and it was open-coded in three files
 
 ```bash
-if command -v cairn >/dev/null; then cairn search 'clawgate' --scope homelab-talos; else echo "skipped: cairn unavailable"; fi
+$DEVRC/scripts/cairn-ops/read.sh search 'clawgate' --scope homelab-talos --if-available
 ```
 
-Two independent reasons, both measured:
+The hand-written `if command -v cairn …; else echo "skipped: cairn unavailable"; fi` appeared
+VERBATIM here, in `clawgate/SKILL.md` and in `obs-read/SKILL.md`. It is now
+`common.sh::require_client`, and the two measured reasons for its shape live beside that function
+rather than in three copies: `&&` exits non-zero when cairn is absent (1 in bash/zsh, **127 in
+dash**) and reads as this step FAILING, and a bare `if` with no `else` skips in silence, which for
+an autonomous run is indistinguishable from having run and found nothing.
 
-1. **Never `&&`.** With cairn absent, `command -v cairn >/dev/null && cairn search …` exits
-   **non-zero** — 1 in bash/zsh, **127 in dash** — and a caller can only read that as the recall
-   step having FAILED. The `if` form exits **0**. Measured here under
-   `env PATH=/usr/bin:/bin sh -c`: guarded form printed `skipped: cairn unavailable`, rc **0**; the
-   `&&` form rc **1**.
-2. **The `else` echo is load-bearing.** A bare `if …; then …; fi` with no else branch skips in
-   **silence**, which for an autonomous run is indistinguishable from having run and found nothing
-   — the exact failure the guard exists to prevent.
-
-⚠ Do not "simplify" it to `command -v cairn >/dev/null; cairn search …` either: the `;` invokes
-`cairn` unconditionally and reinstates the rc 127 failure.
+🔴 **What changed with it: the DEFAULT is now a refusal, and the skip is opt-in.** The old
+one-liner exited 0 on an absent client everywhere it was pasted — right for a preflight like this
+one, and wrong for a mandated post-write check, where a flow branching on the exit code records a
+pass over nothing. `--if-available` is how a preflight asks for the old behaviour explicitly.
 
 ⚠ **Reachability is host-local.** `cairn` is a devrc home-manager artifact on Zach's two machines;
 an agent running in-cluster has neither the binary nor an allowlisted identity. That is what the
