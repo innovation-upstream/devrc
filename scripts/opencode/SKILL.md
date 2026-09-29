@@ -77,6 +77,26 @@ tail -n 60 <the log path printed on dispatch>
    in both directions — a read, then a write.
    *Closed two ways:* the brief is written **inside** `--dir`, and preflight
    **refuses (rc 3)** if the brief's text names any absolute path outside it.
+   🔴 **Neither closure covers a path the BRIEF NEVER NAMES, and two such shapes
+   killed four dispatches on 2026-08-28.** Preflight scans the brief's text, so a
+   path produced at RUNTIME is structurally invisible to it — a clean preflight is
+   not evidence a run is safe.
+   (a) **A TOOL's own output path.** `browser screenshot` with no argument writes
+   into the system temp dir; the read of that file was auto-rejected and the run
+   died. *Fix in the BRIEF, not the config:* pass an explicit path under `--dir`
+   (`screenshot .opencode-dispatch/shot-1.png`), or set `TMPDIR` to a dir inside it.
+   🔴 Do **not** allow the temp glob in `opencode.jsonc`: a screenshot is a
+   pixel-perfect image of an AUTHENTICATED view, the prefix is fixed and the dir is
+   shared, so an allow lets any dispatch read captures left by ANY session.
+   (b) **A SKILL's `reference/` files at a path the carve-out misses.** The existing
+   allow covers `/home/zach/.config/opencode/skills/**`, but an agent that loads a
+   skill can resolve `reference/…` against **`~/.claude/skills/<name>/`** instead and
+   be rejected there. 🔴 Preflight printed `skill reference/ : readable` — a **FALSE
+   all-clear** for this shape. *Fix:* name the in-`--dir` reference path in the brief
+   and say explicitly when no note exists for the site, so it stops hunting.
+   ⚠ **Preflight also refuses a brief that merely MENTIONS an external path in
+   PROSE** — a warning reading "it writes to /tmp" blocks at rc 3. Say "the system
+   temporary directory" instead.
 2. **`--file` is an array option** and swallowed the message as a second
    filename (`Error: File not found: Execute the task described in…`). The
    message positional now always comes first, pinned by a test on its argv index.
