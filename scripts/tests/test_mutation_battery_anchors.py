@@ -100,6 +100,22 @@ BATTERIES = (
     # inputs. A kill proves a test watches a branch, never that the branch is
     # REACHABLE — reachability is the suite's seam class, not this file's.
     "mutation_battery_operator_asks.py",
+    # Single-target (`scripts/round0-attribution-rate.py`), so no `TARGETS`. The
+    # FIRST `mutants-<x>.py` to be PINNED here rather than exempted — F5's glob
+    # widening is what makes that possible, and the exemption door is shut to it
+    # by `test_the_EXEMPTION_list_is_not_a_hiding_place`: this file binds a
+    # module-level `MUTANTS`, so "no readable table" is not true of it.
+    # 🔴 It is also the first row whose battery had to be RESHAPED to be
+    # pinnable: its table was `(name, [(old, new), …], killers)`, so `old` was
+    # not the 4th field and `_anchors` could not read it at all. Reshaped to the
+    # `(id, why, killers, old, new)` convention in the same commit, which is the
+    # point of the two-way pin — a battery the reader cannot parse is caught at
+    # the moment it lands, not by whoever next runs the sweep.
+    # ⚠ This said "40-minute sweep" and that figure is WITHDRAWN: the battery was
+    # slow because its `pytest_run` passed no `cwd`, not because of its row count.
+    # MEASURED after that fix, 39 rows, two runs minutes apart: 36.5s and 74.2s
+    # wall. The argument does not rest on the duration, so no number replaces it.
+    "mutants-round0-attribution-rate.py",
 )
 
 # 🔴 PYTHON MUTATION INSTRUMENTS THIS MODULE CANNOT PIN, each with its reason.

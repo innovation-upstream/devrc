@@ -16,12 +16,88 @@ ask)**" — but the auditor is dispatched read-only with a diff and had no way t
 operator asked for, so that branch was unreachable and his stated requirements landed on
 `unattributed`, which the section treats as a finding. Give round 0 his own words.
 
-- **closing-condition:** `check` — over round-0 reports recorded after `31033cdb`, on PRs
-  whose commits carry a `Claude-Session-Id:` trailer, the ledger's `unattributed:` count is
-  lower than the pre-ship baseline **and** no report raises a deletion candidate against a
-  requirement the asks block quotes. Baseline measured 2026-09-26: **1,649 round-0 ledger
-  lines across 728 sessions in 7 repos, most common line `requirements: 7 (unattributed: 2)`.**
+- **closing-condition:** `check` — `python3 $DEVRC/scripts/round0-attribution-rate.py` reports
+  the post-cut **in-population RATE** (mean `unattributed` per round-0 report, and
+  `unattributed` as a share of `requirements`) as LOWER than the pre-cut rate, at
+  n ≥ `MIN_SESSIONS` (10 **distinct sessions**, not ledger lines) **and** no report raises a
+  deletion candidate against a requirement the asks block quotes.
   **Judgement over named evidence:** the operator reads that count.
+  - 🔴 **IN-POPULATION MEANS "THE OPERATOR'S WORDS ACTUALLY REACHED THE AUDITOR"** — an ask
+    RENDERED from a session transcript (`### from the session transcript` in the brief). It
+    does **NOT** mean "the PR's commits carry a `Claude-Session-Id:` trailer", which is the
+    definition this condition inherited from `#1887` and is the **wrong fact**: `render()`
+    prints `N session(s) NAMED BY … trailers` whenever trailers NAMED a session — including
+    when nothing could be read off them — so the inherited reading counted reports whose own
+    block says *NO OPERATOR ASK COULD BE READ FOR THIS PR*. Found by **`#1901 round 0`**,
+    reproduced, and fixed; see Defects.
+  - 🔴 **The left-hand side is a RATE, not a count** — see Defects for why the original
+    absolute count could never be met.
+  - **Read the CONTEMPORANEOUS control beside it.** The run prints POST-cut
+    out-of-population — same skill revisions, models and repos, differing only in whether the
+    asks arrived — because the comparator is otherwise a SELECTED post population against an
+    UNSELECTED pre one. A difference that also appears in the control is not the asks block.
+  - **Reproducible pre-cut baseline, method named:** assistant-authored text blocks ONLY, one
+    round-0 ledger line = one report, corpus `~/.claude/projects` on **this host**, cut =
+    `31033cdb`'s **committer date** (`%cI` — when the squash LANDED on `main`, not when its
+    author wrote it; the run prints which clock it read). Measured 2026-09-28: **493 ledger
+    lines in 236 REAL SESSIONS (474 transcript files) across 7 projects, mean 3.365
+    unattributed per report, share 0.331.** Re-derivable by re-running the command — that is
+    the point of it being a command.
+    - ⚠ **`474` was published here as a session count and it is a FILE count** — **2.01×**
+      the number of observations (474 files / 236 sessions). A round-0 report is written by an
+      auditor SUBAGENT whose transcript is `<project>/<sid>/subagents/agent-*.jsonl`: a
+      different file from the parent's, and several auditors of one session are several files
+      again. `#1901 round 1` found it; the run now prints `sess` and `files` side by side plus
+      the per-bucket ratio, and the FLOOR counts sessions.
+    - 🔴 **TWO DIFFERENT RATIOS — do not quote one for the other.** The **2.01×** above is the
+      PRE-BUCKET figure (files that carry a report). The **CORPUS** figure is **~6.9×**,
+      measured with the script's own `_session_id_of` at **2026-09-28T17:05Z**: **6,739 files
+      / 973 sessions**, 5,766 under `subagents/`. ⚠ A `1,563 distinct session ids` figure
+      circulated in this arc and is **WITHDRAWN**: it came from taking the first path segment
+      *without stripping `.jsonl`*, which counts a session holding both a top-level transcript
+      and a `subagents/` dir twice — measured at the same instant, naive **1,570** against 973.
+      ⚠ **An earlier version of this bullet said "session ids cannot fall while files rise" as
+      the reason it was caught. That invariant is FALSIFIED** — a pruned transcript breaks it,
+      and four runs over three days gave 6,717/973, 6,736/973, 6,739/973 with sessions flat
+      while files rose. The sound claim is the narrower one: **the same method cannot give both
+      1,563 and 973.** 🔴 Every corpus figure here drifts and is stamped for that reason —
+      treat it like the tables marked "re-run, never quote". The MECHANISM does not drift, and
+      `test_the_naive_session_derivation_double_counts_and_ours_does_not` pins it so a wrong
+      number fails rather than reads fine. **Third irreproducible figure in this arc — derive
+      it with the code, or do not write it.**
+    - ⚠ **The clock is load-bearing and the coincidence here is not a property of the tool.**
+      `31033cdb`'s author and committer dates are identical to the second, so this baseline
+      reads the same either way — which is why reading the wrong one was invisible. Over the
+      1,200 newest `main` commits, 10 diverge, the widest by **42.6 min** (`daa6fd65`:
+      author 13:20:35, committer 14:03:11). The author date would put reports written in
+      that window in the POST bucket while the fix was not yet on `main` or deployed.
+  - ⚠ **The doc's earlier `1,649 / 728 / 7` figure is NOT reproducible by this method and is
+    SUPERSEDED as a comparator.** Two defensible methods over the same corpus disagree and
+    neither yields it: assistant-authored blocks give the 493 above; counting every record of
+    any role gives **1,977 / 707 / 8**. Kept here so nobody re-derives it as if it were the
+    baseline. A number quoted without its method has no defined left-hand side.
+  - **Today's real answer is `VERDICT: NOT MEASURABLE (n=1 distinct session(s) / 2 transcript
+    file(s) / 3 report(s); floor 10)`** — the tool refuses to compare below ten sessions on
+    purpose, so it cannot be used to justify re-tuning the feature. Fresh run, 2026-09-28T06:0xZ,
+    every figure from that ONE run (files/sess: PRE 2.01×, POST 1.42×):
+    | bucket | reports | sess | files | mean/report | share |
+    |---|---|---|---|---|---|
+    | PRE-cut (all) | 493 | 236 | 474 | 3.365 | 0.331 |
+    | PRE-cut in-population | 2 | 1 | 1 | 5.500 | 0.423 |
+    | POST-cut (all) | 28 | 19 | 27 | 3.857 | 0.268 |
+    | POST-cut out-of-population **[control]** | 23 | 18 | 23 | 3.043 | 0.232 |
+    | POST-cut in-population | 3 | 1 | 2 | 4.667 | 0.389 |
+    Post-cut reasons: 21 × the session source was consulted and could not be read · 3 × an
+    ask arrived · 2 × UNKNOWN · 2 × no asks block at all. 🔴 **These GROW with every audit** —
+    the post bucket went 20 → 22 → 28 across three runs of this one arc, which is defect 2 in
+    miniature: **re-run, never quote this table.**
+  - ⚠ **PRE-cut in-population is NOT structurally zero, and a label here said it was.** The
+    feature's own development session rendered real asks blocks from its BRANCH before the
+    squash landed: 2 reports / 1 session. The run's note now describes whichever case holds;
+    it is not the comparator either way.
+  - The number the condition reads is the **in-population distinct-SESSION count**, never the
+    bucket's size and never a file count — measured on `#1901`'s own round 0, two ledger lines
+    came from ONE session, so a report-counting floor let one verbose audit supply 20% of it.
 
 ## State now
 - 🔴 **SHIPPED AND VERIFIED.** `#1887` squash-merged as **`31033cdb`** (2026-09-27T05:49:10Z),
@@ -147,17 +223,25 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
   operator-attributed comment BYTES carrying that footer is the size of the problem.
 
 ## Next steps (ranked)
-1. **Read the closing-condition count.** Over round-0 reports recorded after `31033cdb` on
-   PRs whose commits carry a session trailer, compare `unattributed:` against the 2026-09-26
-   baseline (1,649 ledger lines / 728 sessions / most common `requirements: 7 (unattributed:
-   2)`), and check no report raises a deletion candidate against a requirement the asks block
-   quotes. 🔴 Do not re-tune the feature off n<10.
+1. **Re-run the closing-condition RATE** — `python3 $DEVRC/scripts/round0-attribution-rate.py`
+   (not a hand count; the 2026-09-26 `1,649` figure is superseded, see closing-condition). It
+   refuses below n=10 and exits 6 today. Then read the judgement half yourself: no report may
+   raise a deletion candidate against a requirement the asks block quotes. 🔴 Do not re-tune
+   the feature off n<10.
    forcing: none
 2. **Decide the agent-posted-comment question** (open block above) — run its Next probe
    FIRST; if the share is small, record "won't fix" rather than building a marker check.
    Repo `devrc`, `scripts/lib/operator_asks.py`.
    forcing: none
-3. **Consider whether `extract_user_msgs.py --include-answers` should become the default.**
+3. **Consolidate the corpus walk with `audit-rule-firing-sweep.py`** — HYGIENE, not a live
+   bug, and measured as such by `#1901 round 0`: the two walks' only behavioural divergence is
+   that the sweep credits an `Agent`/`Task` `tool_result` as signal, and that fires **0 times**
+   (0 ledger-line occurrences in any such block), while the injected/assistant split sums to
+   the rate tool's own total exactly. So the risk of leaving them separate is duplication, not
+   disagreement. Both keep their own walk on purpose (the shared `iter_transcripts` excludes
+   `subagents/`, where auditor transcripts live) and both carry a `JSONL_GLOB_SITES` row.
+   forcing: none
+4. **Consider whether `extract_user_msgs.py --include-answers` should become the default.**
    It is off so no shipped consumer moved, but the `find-session --arc` footer arguably wants
    the operator's answers too. Blocked on `handoff-arc-user-messages.md` NEXT #2 — that arc
    is mid-measurement against the current contract and flipping the default would invalidate
@@ -165,6 +249,79 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
    forcing: none
 
 ## Defects (batched)
+- 🔴 **THE CLASSIFIER WAS BLIND TO THE DOMINANT DELIVERY PATH — a brief the auditor READS.**
+  `audit-dispatch.py`'s output is redirected to a scratchpad `.md` and the dispatch prompt says
+  to read it, so the block arrives as a `cat -n` tool_result with every line prefixed
+  `<spaces><n>\t`. A `^`-anchored matcher (added in round 0 to stop a source READ of
+  `operator_asks.py` counting as a received block) cannot match that. MEASURED by **`#1901
+  round 1`** (blind) and reproduced: **13 of 20** post-cut reports were scored `out` with the
+  reason *"no asks block in this session (a pre-fix report)"* while their numbered copy
+  demonstrably carried `**Sources read:**`. Three consequences, all of them the instrument
+  lying in the reader's favour: the printed reason was affirmatively FALSE; the contemporaneous
+  control row was contaminated with sessions that DID receive a block; and `post_in` was
+  deflated with the floor unreachable by the path that actually delivers. Fixed by an OPTIONAL
+  line-number prefix, applied to **every** line-anchored matcher (a fix to one while a sibling
+  stayed blind would move the defect, not remove it), with both poles pinned — a numbered real
+  render matches, a numbered source read still does not. After the fix the corpus reads
+  **2** "no asks block" and **16** "consulted and could not be read" — both stamped
+  2026-09-28T04:57Z, and both drifting (at 17:0xZ the same corpus read 2 and 22). 🔴 Re-run;
+  this paragraph is about not quoting drifting counts and must not become an instance of it.
+  ⚠ **An "instead of 14" comparison appeared here and is WITHDRAWN as unverifiable.** The
+  pre-fix figure round 1 reported is **13 of 20**; a later sentence said the same corpus read
+  "2 instead of 14", and both cannot be one corpus's pre-fix count — the post bucket itself grew
+  20 → 22 between the two measurements. Re-deriving it needs the pre-fix code against a corpus
+  that has since changed, so neither number is recoverable now. **13 of 20** is what round 1
+  measured and is the only figure kept; the delta is stated as the post-fix counts, not as a
+  difference. Picking whichever read better is exactly how this arc's irreproducible numbers got
+  in.
+  ⚠ Two claims of the round-0 fix were REFUTED in the process and are retracted rather than
+  patched: that "every one of the other 39 [substring matches] is a source read or a discussion
+  of this feature" (round 1 found ≥11 real renders in that residual), and that the PRE-cut
+  in-population row "cannot be non-zero". A guard-comment that reads as coverage is what stops
+  the next reader looking. Also fixed in the same round: an undefined `unattributed` share was
+  read as 0 and printed a **fabricated** delta inside the verdict line
+  (`share — vs 0.750, Δ-0.750`); the `ANCHORS` header claimed two reaches the pin did not have
+  (both measured INERT — rc 4, not rc 5 — now implemented); and the exit-code legend described
+  an unreadable corpus as rc 2 where the code refuses with rc 4.
+- 🔴 **THE INHERITED POPULATION DEFINITION BOUGHT THE WRONG FACT, and it was measurably
+  unsafe.** `#1887`'s closing condition said "PRs whose commits carry a `Claude-Session-Id:`
+  trailer", and `round0-attribution-rate.py` implemented that literally by reading
+  `render()`'s `N session(s) NAMED BY … trailers` line as evidence the asks had been read.
+  That line is guarded by `if session_ids:` alone and is emitted BESIDE
+  `! session transcript: UNKNOWN — …` in the common case where the trailers name a session
+  whose transcript is not on this host — which `audit-dispatch.py` records as the ORDINARY
+  case, because the operator runs two hosts. So a report whose own block says *NO OPERATOR ASK
+  COULD BE READ FOR THIS PR* scored IN-population and entered the closing condition's
+  left-hand side; on the live corpus 3 of 20 post-cut reports were in exactly that state.
+  Found by **`#1901 round 0`** (blind), reproduced by the coordinator. Fixed structurally
+  rather than by flipping a precedence: *named by a trailer* is now the `selected` role
+  (SELECTION), `answered` comes only from a rendered `### from the session transcript`
+  heading, `IN_POPULATION_ROLES` is **DERIVED** from the `BRANCHES` precedence ledger rather
+  than being a second source of truth (`round0-attribution-rate.py:591-592` —
+  `tuple(r for r, (disp, _why) in BRANCHES.items() if disp == "in")`), and **EVERY pole in
+  `BEHAVIOURAL_POLES` is classified from a live `render()` on every run** (exit 5) because
+  every anchor string was already correct when the defect shipped. 🔴 **Read
+  `BEHAVIOURAL_POLES`, never a count here** — the script's own rule at `:143-145`, and this
+  sentence said "both poles" and "a one-line ledger" after the set had grown past two and the
+  ledger had stopped being a literal, which is the same count-in-prose defect it records.
+  (`f8506db7`: five poles, one per `BRANCHES` branch.) The population is now *the operator's
+  words actually reached the auditor*.
+  ⚠ The script's own blind-spot 8 had asserted the SAFE direction ("trailers exist
+  but the transcript was pruned is out-of-population") while the code took the unsafe one —
+  that sentence was unreachable, and a doc naming the safe direction over unsafe code is worse
+  than silence.
+- 🔴 **The original closing condition was an ABSOLUTE CORPUS-WIDE COUNT, so it could only
+  GROW.** It compared a post-ship `unattributed:` count against a pre-ship count over the same
+  cumulative corpus: every pre-fix report stays in that corpus forever and each new one adds to
+  it, so the left-hand side increases monotonically and "lower than the baseline" was
+  unfalsifiable in the direction it wanted. Measured while fixing it: the whole-corpus count
+  moved 493 → 509 in one day with no change to the feature. Closed by making the statistic a
+  RATE over each bucket's own reports — `scripts/round0-attribution-rate.py`.
+- 🔴 **And its baseline was not reproducible** — the `1,649 / 728 / 7` figure cannot be
+  re-derived by either of the two defensible methods over the same corpus (493 reports in
+  **236 sessions** / 474 FILES / 7 projects assistant-authored — note the middle number of the
+  original triple was a FILE count, the arc's headline error; 1,977/707/8 all-roles). The instrument now STATES its method in its own
+  output, so the next reader compares like with like.
 - ⚠ **The `#1887` squash subject on `main` says "round 0 reads the operator's own asks"** and
   the PR went on to four audit rounds that rewrote most of it. Not editable without rewriting
   a shared `main`, so it stands; the commit BODY and four PR comments carry the corrections.
@@ -174,6 +331,18 @@ with `UNATTRIBUTED-UNKNOWN` guidance; `render()` has no path that emits a quiet 
 
 ## How to verify
 ```bash
+# 0. THE CLOSING CONDITION ITSELF — the rate, both buckets, and the refusal
+python3 $DEVRC/scripts/round0-attribution-rate.py        # exit 6 = NOT MEASURABLE (n<10)
+# reads ~/.claude/projects on THIS host only; no `gh`, no network. Expect today:
+# PRE-cut 493 reports / 236 sessions / 474 files / mean 3.365 · POST-cut in-population
+# 1 session · exit 6.  `sess` is the observation count; `files` is not (subagents).
+# Read the DISPOSITIONS reasons block: every post-cut report says why it landed where it did.
+# 🔴 Two reasons that must stay RARE, and both were bugs when they were common:
+#    "no asks block in this session (a pre-fix report)" over a block delivered as a Read, and
+#    `NAMED BY` (selection) counted as the operator's words having arrived.
+# Its guards (incl. the two-way pin against scripts/lib/operator_asks.py):
+nix develop $DEVRC -c python3 -m pytest \
+  $DEVRC/scripts/tests/test_round0_attribution_rate.py -q
 # 1. the asks block renders on a real PR, from the DEPLOYED skill
 python3 $DEVRC/scripts/audit-dispatch.py 1887 --repo innovation-upstream/devrc --round 0 \
   | awk '/THE OPERATOR.S OWN ASKS/,/^\*\*Ledger/'     # expect asks + a Sources read block
@@ -186,6 +355,14 @@ python3 $DEVRC/scripts/session-analysis/extract_user_msgs.py \
 nix develop $DEVRC -c python3 -m pytest $DEVRC/scripts/tests/test_operator_asks.py -q
 nix develop $DEVRC -c python3 $DEVRC/scripts/tests/mutation_battery_operator_asks.py
 # expect 26 KILLED · 0 SURVIVED · 0 SKIPPED, C0 GREEN, restored by digest: True
+# 3b. 🔴 THE HEADLINE ARTIFACT OF THIS RANGE — the rate instrument's own battery.
+#     It exists because a sweep you cannot re-run is a sentence, not evidence.
+nix develop $DEVRC -c python3 $DEVRC/scripts/tests/mutants-round0-attribution-rate.py
+# expect rc 0 and: C4 COVERAGE … no mutant at their DECLARING site: none
+#   · 39 of 39 killed · 39 died on their own guard's ASSERTION
+#   · C3 restore: byte-identical to pristine after every mutant · RESULT: PASS
+# MEASURED 2026-09-29 at the head of this range; 36.5s / 74.2s wall on two runs
+# (this box runs concurrent suites — do not read the spread as the battery).
 # 4. 🔴 the tier the merge gates on — a SUBSET run cannot see GUARD 2
 nix build $DEVRC#checks.x86_64-linux.pytests --no-link -L   # read RESULT: and SCOPE:, not the wrapper's rc
 # 5. both hosts carry it

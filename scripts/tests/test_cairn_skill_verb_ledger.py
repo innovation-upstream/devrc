@@ -365,11 +365,28 @@ _SENTINEL_WINDOW = 120
 # mandates in the body today; a demotion to a sidecar would keep the count and
 # change `_Hit.source`, which is exactly the outcome we want — the obligation
 # belongs to the skill, not to one of its files.
+#
+# 🔴 `claude/skills/subsystem-index/SKILL.md` LEFT THIS LEDGER ON 2026-09-27, AND
+# THE ROW IS RECORDED AS REMOVED RATHER THAN SIMPLY GONE — a vanished mandate is the
+# failure this ledger exists to catch, so a deliberate removal has to say so.
+# It no longer names the two-command form at all: both of its occurrences became
+# `$DEVRC/scripts/cairn-ops/hygiene.sh validate --scope <scope>` (clawgate cg#665),
+# which SUBSUMES the `cairn sync` — the script performs it, refuses to check
+# unsynced bytes, and additionally resolves the store PER INSTANCE, which the
+# two-command form could not. THE PROPERTY IS NOT DROPPED, IT MOVED AND GOT WIDER:
+#   * that the pointer is present and the old recipe is gone —
+#     `test_cairn_ops.py::TestTheCallSiteLedger`, two-way on the whole migrated set;
+#   * that the sync actually happens — `test_cairn_ops.py::TestTheCheckSyncsFirst`,
+#     which reads the CALL LOG of a stub client rather than the prose. That is a
+#     stronger claim than this file could make: this one pinned that a skill SAID
+#     `cairn sync &&`, never that anything ran it.
+# ⚠ This ledger's remaining row, `cairn/SKILL.md`, is the SURFACE documentation for
+# the raw two-command form and keeps both occurrences. Do not "tidy" it to match
+# `subsystem-index` — a router that cannot spell the commands it routes to
+# documents nothing, and that file is the one place the raw form is written down.
 POST_WRITE_SITES: dict[str, int] = {
     # the verb table row, and the prose mandate below it
     "claude/skills/cairn/SKILL.md": 2,
-    # the prose mandate, and the runnable command fence
-    "claude/skills/subsystem-index/SKILL.md": 2,
 }
 
 # Named rather than omitted. An exemption is auditable; an absence is the defect.

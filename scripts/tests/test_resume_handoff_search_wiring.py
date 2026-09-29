@@ -78,7 +78,16 @@ EXPECTED_COMMAND = (
 
 # The step that was MEASURED to fire 5/6, and whose company this command was
 # moved into. Pinned as the first command of that same numbered step.
-CO_LOCATED_COMMAND = "cairn recall --repo"
+#
+# ⚠ RESPELLED 2026-09-27 (clawgate cg#665): the recall now goes through
+# `$DEVRC/scripts/cairn-ops/read.sh`, which refuses at rc 20 when no scope resolves
+# instead of letting the client answer with an EMPTY report — the shape a resume
+# cannot distinguish from "nothing recorded". The PROPERTY this constant pins is
+# unchanged: the handoff-corpus query must share a numbered step and a FENCE with the
+# repo-scoped recall. Only the spelling of that recall moved, and the substring is
+# narrowed to the part that identifies it (`read.sh recall --repo`) so a future
+# `$DEVRC` handle change does not silently stop matching.
+CO_LOCATED_COMMAND = "read.sh recall --repo"
 
 # Opens the paragraph that warns the reader the corpus query is NOT repo-scoped.
 # The handle pin is scoped to THIS paragraph; widened to the whole block, its

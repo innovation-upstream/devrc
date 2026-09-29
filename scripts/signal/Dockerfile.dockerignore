@@ -5,3 +5,4 @@
 !scripts/signal/_minio.py
 !scripts/signal/clawgate.py
 !scripts/signal/_mentions.py
+!scripts/lib/clawgate_tasks.py
