@@ -1,0 +1,20 @@
+# devrc's publication posture, read by rule (q) of scripts/lib/handoff_doc.py.
+#
+# 🔴 THIS REPOSITORY IS PUBLIC. An arc whose subject matter is another
+# organisation's infrastructure gets its handoff doc in THAT repo, not here —
+# and rule (q) is what enforces it, at the moment a doc is written rather than
+# as a sentence in claude/skills/handoff/SKILL.md that nobody runs.
+#
+# Grammar (see `parse_publication`): `visibility:` once, `own:` repeatable.
+# An unknown directive is an ERROR, not a skip — the file is three lines long
+# and a typo here silently disarms the gate.
+#
+# `own:` is an ALLOWLIST of the labels a `subject-repo:` field may name in this
+# repo's handoff docs. It deliberately does NOT enumerate client repos: that
+# list would itself be a disclosure, and an allowlist the author must pick from
+# is not walkable by rewording the way a blocklist is.
+#
+# 📖 claude/skills/handoff/reference/write-gate.md §Q
+
+visibility: public
+own: devrc

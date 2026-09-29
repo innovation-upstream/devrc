@@ -224,6 +224,53 @@ j. A RANKED NEXT-STEP MUST NAME AN EXTERNAL FORCING FUNCTION. Same decision, and
    and `claim-work`, and is NOT implemented. What ships here is the declaration
    those consumers would need to read.
 
+q. A CLIENT-INFRASTRUCTURE ARC DOES NOT GET ITS DOC IN A PUBLISHED REPO. The
+   standing instruction was a SENTENCE — "an arc whose subject matter is CLIENT
+   INFRASTRUCTURE gets its doc in the CLIENT repo — this one is PUBLIC" — and it
+   could not fit: adding it took `claude/skills/handoff/SKILL.md` from 966 B of
+   working headroom to 848 B against a 900 B floor, and that gate's own eviction
+   playbook names "move guidance INTO the tool" as lever 1. So the rule is here,
+   stated by the tool at the moment it applies rather than paid on every load.
+
+   🔴 THE SIGNAL IS A DECLARED FIELD, AND THE ALTERNATIVE WAS MEASURED AND
+   REJECTED. The obvious design is to match CLIENT MARKERS in the delta. It does
+   not discriminate: over devrc's 102 real `claudedocs/handoff-*.md`, the token
+   set `datapacket|talos|homelab|civitai|clickup` matched **52** docs anywhere
+   and still **10** when narrowed to the identity surface (front matter +
+   preamble + `## Goal`), while matching the topic slug in **0**. A gate firing
+   on 10–51% of ordinary devrc tooling arcs is the permanently-red one
+   `claude/RULES.md` says trains everyone to route around it. It is also
+   self-defeating: the marker list would have to name client repos IN THE PUBLIC
+   REPO. So rule (q) asks the author instead, exactly as rules (j) and (k) do —
+   `subject-repo: <label>` in the doc's front matter or preamble, against an
+   ALLOWLIST the repo declares of the labels it owns. An allowlist the author
+   must pick from is not walkable by rewording, and it puts no client name on a
+   public branch.
+
+   🔴 TWO FACTS, ANDed, AND BOTH ARE READ RATHER THAN INFERRED. The repository's
+   PUBLICATION POSTURE comes from one declared file (`PUBLICATION_CANDIDATES`);
+   the arc's SUBJECT comes from the merged document. Neither is guessed, and no
+   network call is made — `gh repo view --json visibility` would make a handoff
+   depend on a remote being reachable, which is the `ScannerUnusable` arm of
+   rule (o) turned into the ordinary case.
+
+   ⚠ IT FAILS OPEN ON ABSENCE AND REFUSES LOUDLY ON A DECLARATION IT CANNOT
+   READ — the same split rule (o) makes at `lookup.path is None` versus
+   `lookup.unusable`, and for the same reason. Most repositories are private
+   client repos, which is the population this rule must never block, and a repo
+   that has not declared itself published cannot be asserted to be. But a repo
+   that DOES declare a posture and then cannot be read about it is not a pass:
+   `claude/RULES.md`'s reassuring-zero rule applies to a gate that silently did
+   not run as much as to one wired to nothing.
+
+   🔴 WHAT IT DOES *NOT* DO, stated here rather than discovered later. It cannot
+   tell a TRUE `subject-repo: devrc` from a false one. An author writing up a
+   client cluster who types this repo's own label is accepted. That is rule
+   (j)'s limitation verbatim and it is not closable by any check this module can
+   run; what it buys is that the claim becomes MANDATORY, ATTRIBUTABLE and
+   GREPPABLE, and that a closed allowlist gives a foreign subject no honest
+   label to hide under.
+
 EXIT CODES
   0  proposed (diff shown, nothing written) — or written/pushed under --confirm.
      `written` WITHOUT `--push` also reports the branch and that it is not pushed
@@ -242,6 +289,10 @@ EXIT CODES
      the delta, or could not be run at all; the write is rolled back
  14  size-ratchet    — rule (p): the doc is already over its byte ceiling and
      this update would make it BIGGER
+ 15  client-subject  — rule (q): this repo declares itself PUBLISHED and the
+     arc's declared subject is not one of the labels it owns, or no subject is
+     declared at all on a doc that must carry one, or the declaration itself
+     could not be read
 """
 
 from __future__ import annotations
@@ -459,6 +510,23 @@ positive delta over the line and is refused. That is the stated predicate
 has no previous round to have grown since, while this rule compares BYTES
 against a fixed ceiling, which a new doc can be over on its first day. The
 override is the escape, and it says why on the commit.
+"""
+
+EXIT_CLIENT_SUBJECT = 15
+"""Rule (q). A PUBLISHED repo was asked to host a doc whose subject is not its own.
+
+🔴 ONE STATUS TOKEN, FOUR CAUSES, and that is rule (o)'s shape rather than rule
+(i)'s. The verdict is the GATE's — "this document must not be written HERE" —
+and the four routes to it (a foreign label, no label where one is required, two
+labels disagreeing, a publication declaration that cannot be read) are one
+class with four remedies, all printed. `cause=` names which. Nothing is written
+on any of them.
+
+🔴 THE OVERRIDE REACHES THREE OF THE FOUR, AND THE EXCLUSION IS RULE (o)'s.
+`--client-subject-approved "<why>"` clears the arms where a human can have READ
+a verdict about a document. It does not reach the unreadable-declaration arm:
+there is no verdict for anyone to have read, and the fix is a one-line edit to
+a file in the repository rather than an assertion about it.
 """
 
 
@@ -4973,6 +5041,491 @@ def leak_gate(
     return LeakVerdict(leak_refusal_report(lookup.rel, repo, relpath, run), "")
 
 
+# --------------------------------------------------------------------------
+# rule (q): a CLIENT-INFRASTRUCTURE arc does not get its doc in a PUBLISHED repo
+#
+# Sibling of rule (o) by construction, not by resemblance: a declared file at a
+# CLOSED set of relative paths, a lookup that separates "absent" from "present
+# and unusable", a gate function returning a verdict the caller acts on, an
+# operator opt-in recorded on the run AND stamped on the commit. Read `leak_gate`
+# and `ScannerLookup` before changing anything here — the two are meant to stay
+# one shape.
+# --------------------------------------------------------------------------
+
+#: The ONE relative path a repository may declare its publication posture at.
+#:
+#: 🔴 A CLOSED SET, NOT A SEARCH, for `find_leak_scanner`'s reason: a glob would
+#: let an unrelated file in a vendored tree decide whether a handoff is refused,
+#: and the path a repo must write is then unpredictable at the moment someone is
+#: trying to satisfy the rule. One tuple, one answer.
+PUBLICATION_CANDIDATES = ("claudedocs/PUBLICATION.txt",)
+
+#: The front-matter / preamble key naming the repo an arc's subject matter
+#: belongs to. Same shape and same durability story as `CLAWGATE_TASK_KEY`:
+#: front matter survives a merge structurally (`split_front_matter`), a preamble
+#: line survives only while the update does not bring its own preamble — which
+#: is why a MERGE that loses a field the BASE had is its own refusal arm below
+#: rather than a silent downgrade to the grandfathered advisory.
+SUBJECT_FIELD_KEY = "subject-repo"
+
+_SUBJECT_LINE = re.compile(
+    rf"^[ \t>*-]*{re.escape(SUBJECT_FIELD_KEY)}\s*:\s*(.+?)\s*$",
+    re.MULTILINE,
+)
+
+#: 🔴 THE OPERATOR OPT-IN, SHAPED LIKE `SIZE_RATCHET_FLAG` RATHER THAN LIKE
+#: `LEAK_PRE_EXISTING_FLAG`, and the choice is deliberate. Rule (o)'s flag is a
+#: bare `store_true` because the thing being asserted is "I read the scanner's
+#: output"; here the assertion is "this document belongs in this published repo
+#: anyway", which is a judgement with a REASON, and a reason recorded nowhere is
+#: the unfalsifiable shape rule (p)'s own comment refuses. REQUIRED, echoed above
+#: the diff, stamped on the commit.
+CLIENT_SUBJECT_FLAG = "--client-subject-approved"
+
+#: The trailer key that makes an approved-through run readable off the artifact.
+#: Rule (o)'s argument, unchanged: stdout survives only in a transcript
+#: `scripts/transcript-push.sh` ships as a bounded TAIL.
+CLIENT_SUBJECT_TRAILER_KEY = "Public-Doc-Subject-Approved"
+
+
+def _subject_trailer_value(reason: str) -> str:
+    """`reason`, repaired and clipped to something a trailer can carry.
+
+    🔴 THE SAME POST-CONDITION `_ratchet_trailer_value` OWNS, reached through
+    the SAME helper rather than re-derived: `session_trailer.valid_id` accepts
+    the result for every `str` input that is not whitespace-only. The widths are
+    deliberately shared — two override reasons clipped at two different lengths
+    would be a difference nobody chose — and this wrapper exists so that sharing
+    is a named decision rather than a `SIZE_RATCHET_REASON_MAX` appearing,
+    unexplained, inside rule (q).
+    """
+    return _printable_clipped(reason, SIZE_RATCHET_REASON_MAX)
+
+
+class PublicationLookup(typing.NamedTuple):
+    """What the closed-set lookup found at the ONE declared relative path.
+
+    Three fields rather than `Path | None`, for `ScannerLookup`'s measured
+    reason: `is_file()` is False for a genuine absence, for a DIRECTORY and for
+    a DANGLING SYMLINK, and only the first of those is "this repository makes no
+    claim". The other two are a declaration we cannot read, which is a refusal.
+    """
+
+    path: Path | None
+    rel: str
+    unusable: str
+
+
+class Publication(typing.NamedTuple):
+    """A repository's parsed publication posture.
+
+    `error` non-empty means the declaration could not be read and NOTHING else
+    on this tuple may be trusted — the caller refuses rather than reading
+    `public`, whose False would otherwise be an invented permissive answer.
+    """
+
+    public: bool
+    own: frozenset[str]
+    error: str
+
+
+def find_publication_declaration(repo: Path) -> PublicationLookup:
+    """`repo`'s publication declaration, and what is at that path if not one.
+
+    `exists()` FOLLOWS the link, so it is False for a dangling symlink too —
+    `is_symlink()` is the only question separating "nothing here" from "a link
+    to nothing", and a broken symlink is the realistic one: it is what a tree
+    move leaves behind. Same three-way answer as `find_leak_scanner`.
+    """
+    for rel in PUBLICATION_CANDIDATES:
+        candidate = repo / rel
+        if candidate.is_file():
+            return PublicationLookup(candidate, rel, "")
+        if candidate.is_symlink() and not candidate.exists():
+            return PublicationLookup(
+                None, rel, "it is a symlink whose target does not exist")
+        if candidate.exists():
+            return PublicationLookup(None, rel, "it is not a regular file")
+    return PublicationLookup(None, "", "")
+
+
+def parse_publication(text: str) -> Publication:
+    """Parse a declaration file. Never raises; a bad file becomes `error`.
+
+    The grammar is two directives, `#` comments and blank lines:
+
+        visibility: public | private
+        own: <label>            # repeatable; required when visibility is public
+
+    🔴 AN UNKNOWN DIRECTIVE IS AN ERROR, NOT A SKIP. A silently-ignored line is
+    how `visibilty: public` (or a future directive this parser predates) becomes
+    a repository that believes it declared something and a gate that reads the
+    default. The file is three lines long; there is no ergonomic case for
+    tolerating a typo in it.
+
+    🔴 A PUBLIC REPO DECLARING NO `own:` LABEL IS ALSO AN ERROR. Read
+    permissively it would refuse every document in that repo — the
+    permanently-red gate `claude/RULES.md` says trains everyone to route around
+    it; read the other way it would accept every document, which is the gate
+    wired to nothing. Neither reading is right, so the CONFIG is what gets
+    refused, loudly, with a one-line fix.
+    """
+    public: bool | None = None
+    own: set[str] = set()
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition(":")
+        if not sep:
+            return Publication(False, frozenset(), (
+                f"line {number} is not `<directive>: <value>`: {line!r}"))
+        key = key.strip().casefold()
+        value = value.strip()
+        if key == "visibility":
+            posture = value.casefold()
+            if posture not in ("public", "private"):
+                return Publication(False, frozenset(), (
+                    f"line {number} declares `visibility: {value}` — the only "
+                    f"values are `public` and `private`"))
+            if public is not None:
+                return Publication(False, frozenset(), (
+                    f"line {number} declares `visibility:` a second time"))
+            public = posture == "public"
+        elif key == "own":
+            if not value or value.split() != [value]:
+                return Publication(False, frozenset(), (
+                    f"line {number} declares `own: {value!r}` — a label is one "
+                    f"non-empty token with no whitespace"))
+            own.add(value.casefold())
+        else:
+            return Publication(False, frozenset(), (
+                f"line {number} declares an unknown directive "
+                f"`{key}:` — this parser knows `visibility:` and `own:`"))
+    if public is None:
+        return Publication(False, frozenset(), (
+            "it declares no `visibility:` line, so the one fact this gate "
+            "reads it for is missing"))
+    if public and not own:
+        return Publication(False, frozenset(), (
+            "it declares `visibility: public` and no `own:` label, so every "
+            "subject would be foreign and every document here refused"))
+    return Publication(public, frozenset(own), "")
+
+
+def _subject_surface(text: str) -> str:
+    """The doc's IDENTITY surface: front matter plus preamble, nothing else.
+
+    🔴 NOT THE WHOLE DOCUMENT, AND THAT IS THE DISCRIMINATION. A `subject-repo:`
+    line quoted inside `## Gotchas` — this arc's own handoff will quote one — is
+    prose about the field, not a declaration of it. Bounding the read to the two
+    blocks that carry a document's identity is what keeps the field from being
+    settable by a sentence anywhere in an 800-line doc.
+    """
+    front, rest = split_front_matter(text)
+    # 🔴 `split_sections` RETURNS THE PREAMBLE AS A STRING, and the sections as
+    # lists of lines. Joining it as if it were a list of lines splits it into
+    # CHARACTERS — which still matched a front-matter declaration (that half is
+    # concatenated whole) and never matched a preamble one, so the bug was
+    # invisible to every end-to-end test that put the field where the skill
+    # tells you to. Caught by `test_a_preamble_line_counts`, which is the only
+    # case that can see it.
+    preamble, _ = split_sections(rest)
+    return front + "\n" + preamble
+
+
+def declared_subject(text: str) -> tuple[str, str]:
+    """`(label, error)` — the arc's declared subject repo, casefolded.
+
+    Both empty ⇒ no declaration. `error` non-empty ⇒ the declarations disagree,
+    which is its own refusal: a check that reads the FIRST of two conflicting
+    answers is a check that can be satisfied by writing the harmless one above
+    the real one.
+    """
+    values = [
+        m.group(1).strip().strip("`").casefold()
+        for m in _SUBJECT_LINE.finditer(_subject_surface(text))
+    ]
+    values = [v for v in values if v]
+    if not values:
+        return "", ""
+    distinct = sorted(set(values))
+    if len(distinct) > 1:
+        return "", (
+            f"the document declares `{SUBJECT_FIELD_KEY}:` "
+            f"{len(values)} times with {len(distinct)} different values "
+            f"({', '.join(distinct)})")
+    return distinct[0], ""
+
+
+class SubjectVerdict(typing.NamedTuple):
+    """`refusal` is stderr and means NOTHING may be written; `notes` is stdout on
+    a run that proceeds. Exactly one of those two is non-empty.
+
+    `trailer` is the DURABLE half and is non-empty on exactly one arm: an
+    approved-through run. It is the trailer VALUE, not the line —
+    `commit_message` owns the key and the formatting, so there is one appender.
+    """
+
+    refusal: str
+    notes: str
+    trailer: str = ""
+
+
+def publication_absent_note(repo: Path) -> str:
+    """🔴 A PASS BY ABSENCE IS NOT A CLEAN RESULT, AND IT SAYS SO.
+
+    Rule (o)'s `leak_absent_note` verbatim in posture. Most repositories are
+    private client repos and declare nothing, so this is the ordinary line; it
+    exists because a run that printed nothing here would be indistinguishable
+    from a repo that declared `private` and from one whose subject checked out.
+    """
+    return (
+        f"publication: NO DECLARATION in {repo} — looked for "
+        + ", ".join(PUBLICATION_CANDIDATES)
+        + f".\n  Rule (q) did not run: whether this repo is PUBLISHED is "
+        f"unknown, so the doc's `{SUBJECT_FIELD_KEY}:` was not checked against "
+        f"anything. That is a PASS BY ABSENCE, not a clean result."
+    )
+
+
+def publication_private_note(rel: str) -> str:
+    return (
+        f"publication: {rel} declares `visibility: private`, so rule (q) "
+        f"cannot fire — a private repo is a legitimate home for any subject."
+    )
+
+
+def subject_clean_note(rel: str, label: str) -> str:
+    return (
+        f"publication: {rel} declares this repo PUBLISHED and the doc declares "
+        f"`{SUBJECT_FIELD_KEY}: {label}`, which is a label this repo owns."
+    )
+
+
+def subject_legacy_note(rel: str, relpath: str) -> str:
+    """The GRANDFATHERED arm: an existing doc that predates the field.
+
+    🔴 AN ADVISORY, NOT A REFUSAL, and the population is the argument. Every
+    handoff doc written before this rule carries no field — 102 of them in devrc
+    alone — so refusing them would be red-by-construction on the first update of
+    every established arc. Rule (m)'s `legacy_dod_report` makes the identical
+    trade for the identical reason, and like that one this line is the ONLY
+    thing that ever surfaces the gap, so it prints on every update until someone
+    adds the field.
+    """
+    return (
+        f"⚠ RULE (q) IS GRANDFATHERED ON THIS DOCUMENT — {rel} declares this "
+        f"repo PUBLISHED and {relpath} declares no `{SUBJECT_FIELD_KEY}:`, so "
+        f"nothing checked whether this arc's subject matter belongs here.\n"
+        f"  An arc whose subject is CLIENT INFRASTRUCTURE belongs in the CLIENT "
+        f"repo; this one is PUBLISHED. Add the field to the doc's front matter "
+        f"and the next update is checked rather than assumed:\n"
+        f"    {SUBJECT_FIELD_KEY}: <label>"
+    )
+
+
+def _subject_remedy(rel: str, own: typing.Iterable[str]) -> str:
+    labels = ", ".join(sorted(own)) or "(none declared)"
+    return (
+        f"  Labels this repo declares it OWNS ({rel}): {labels}\n"
+        f"  If the arc IS one of those, declare it in the doc's FRONT MATTER "
+        f"(or its preamble):\n"
+        f"    {SUBJECT_FIELD_KEY}: <label>\n"
+        f"  If it is NOT — if the subject matter is another organisation's "
+        f"infrastructure — the fix is not a flag: re-run with `--repo <that "
+        f"repo>` so the doc lands where the subject lives. A handoff doc is the "
+        f"exact path four leak events took, one of them onto a PUBLIC "
+        f"repository's mainline."
+    )
+
+
+def subject_foreign_report(
+    rel: str, relpath: str, label: str, own: typing.Iterable[str]
+) -> str:
+    return (
+        f"status=client-subject cause=foreign-subject declared={label}\n"
+        f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+        f"  {rel} declares this repository PUBLISHED, and {relpath} declares "
+        f"`{SUBJECT_FIELD_KEY}: {label}` — a label this repo does NOT own. "
+        f"Writing it here publishes an arc about someone else's work.\n"
+        + _subject_remedy(rel, own)
+        + f"\n  🔴 IF THIS SUBJECT REALLY DOES BELONG IN A PUBLISHED REPO, that "
+        f"is an OPERATOR DECISION and not a guess this tool may make for you: "
+        f"re-run with `{CLIENT_SUBJECT_FLAG} \"<why>\"`, which records the "
+        f"reason on the run AND stamps `{CLIENT_SUBJECT_TRAILER_KEY}:` on the "
+        f"commit."
+    )
+
+
+def subject_undeclared_report(
+    rel: str, relpath: str, own: typing.Iterable[str], base_had_one: bool
+) -> str:
+    why = (
+        f"  This document DECLARED a subject and this update DELETES it. The "
+        f"field lives in the front matter or the preamble, and a delta bringing "
+        f"its own preamble replaces the old one wholesale — so losing it is an "
+        f"accident of the merge, not a decision.\n"
+        if base_had_one else
+        f"  This is a NEW document in a PUBLISHED repository, so the question "
+        f"`does this arc's subject matter belong here?` has never been "
+        f"answered for it. It is answered once, in the doc, not once per "
+        f"reader.\n"
+    )
+    cause = "dropped-subject" if base_had_one else "undeclared-subject"
+    return (
+        f"status=client-subject cause={cause}\n"
+        f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+        f"  {rel} declares this repository PUBLISHED and {relpath} declares no "
+        f"`{SUBJECT_FIELD_KEY}:`.\n"
+        + why
+        + _subject_remedy(rel, own)
+        + f"\n  🔴 The tool cannot check that a declared label is TRUE — that is "
+        f"rule (j)'s limitation and it is not closable here. What the field "
+        f"buys is that the claim is mandatory, attributable and greppable."
+    )
+
+
+def subject_conflict_report(rel: str, relpath: str, error: str) -> str:
+    return (
+        f"status=client-subject cause=conflicting-subject\n"
+        f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+        f"  {rel} declares this repository PUBLISHED, and {error}.\n"
+        f"  🔴 THE FIRST ONE IS NOT THE ANSWER. A gate that reads the first of "
+        f"two conflicting declarations can be satisfied by writing the harmless "
+        f"one above the real one, so it reads neither. Leave exactly one "
+        f"`{SUBJECT_FIELD_KEY}:` line in the front matter or the preamble."
+    )
+
+
+def publication_unusable_report(rel: str, repo: Path, reason: str) -> str:
+    """The repo DECLARES a posture and this run could not read it.
+
+    🔴 A GATE THAT CANNOT READ IS NOT A PASS — `leak_unscannable_report`'s
+    sentence, and the same scope note applies: the operator opt-in does not
+    reach this arm, because there is no verdict for anyone to have read.
+    """
+    return (
+        f"status=client-subject cause=unreadable-declaration\n"
+        f"NOTHING WRITTEN — not the doc, not a commit, not a ref.\n"
+        f"  {rel} EXISTS in {repo}, so this repository declares a publication "
+        f"posture — but this run could not get one out of it: {reason}.\n"
+        f"  🔴 `could not read` and `private` are different answers, and only "
+        f"one of them lets an arc's doc land here. `{CLIENT_SUBJECT_FLAG}` does "
+        f"not reach this arm: there is no verdict for anyone to have read and "
+        f"approved.\n"
+        f"  Fix the declaration — it is three lines:\n"
+        f"      visibility: public\n"
+        f"      own: <this repo's label>"
+    )
+
+
+def subject_approved_note(
+    rel: str, relpath: str, label: str, reason: str
+) -> str:
+    """The gate refused and the OPERATOR approved it through. WRITTEN.
+
+    🔴 AN APPROVED-THROUGH RUN MUST NOT READ LIKE A CLEAN ONE — rule (o)'s
+    sentence, and the same two channels: this note at the moment it is taken,
+    the commit trailer for every reader afterwards. Neither is the other's
+    backup.
+    """
+    subject = f"`{SUBJECT_FIELD_KEY}: {label}`" if label else "no declared subject"
+    return (
+        f"🔴 RULE (q) APPROVED THROUGH by {CLIENT_SUBJECT_FLAG} — {rel} declares "
+        f"this repository PUBLISHED and {relpath} carries {subject}, and the "
+        f"write went ahead anyway.\n"
+        f"  This is an OPERATOR DECISION, not a clean result: the gate refused, "
+        f"and the flag asserts a human judged this subject matter publishable "
+        f"HERE.\n"
+        f"  ⚠ NOTHING HERE CHECKED THAT. The gate reads a declared label "
+        f"against a declared allowlist; it cannot read subject matter.\n"
+        f"  Reason given: {_printable_clipped(reason, SIZE_RATCHET_ECHO_MAX)}\n"
+        f"  Stamped on the commit as `{CLIENT_SUBJECT_TRAILER_KEY}:`."
+    )
+
+
+def client_subject_gate(
+    repo: Path,
+    relpath: str,
+    lookup: PublicationLookup,
+    merged_text: str,
+    base_text: str,
+    is_new_doc: bool,
+    approved: str | None,
+) -> SubjectVerdict:
+    """Rule (q). Refuse to write this doc HERE when the repo declares itself
+    PUBLISHED and the arc's declared subject is not one this repo owns.
+
+    🔴 FAIL OPEN ON ABSENCE, REFUSE LOUDLY ON AN UNREADABLE DECLARATION. Stated
+    in the module docstring and restated here because it is the one design
+    choice a future reader is most likely to "tidy". The absence arm is rule
+    (o)'s `lookup.path is None`: a repo that declares nothing is overwhelmingly
+    a private client repo, which is the population this rule exists to protect
+    and must never block, and publication is a property only the repository can
+    assert. The unusable arm is rule (o)'s `lookup.unusable`: a declaration we
+    cannot read is not a pass.
+
+    🔴 THE SUBJECT IS READ FROM THE MERGE, NOT THE UPDATE, and that is rule
+    (m)'s reason rather than rule (j)'s. The field is DURABLE — it lives in the
+    front matter and is meant to outlive every delta — so the question is what
+    the DOCUMENT will declare after this run, not what this delta happened to
+    restate. It is also what makes the deletion arm possible at all.
+    """
+    if lookup.unusable:
+        return SubjectVerdict(
+            publication_unusable_report(lookup.rel, repo, lookup.unusable), "")
+    if lookup.path is None:
+        return SubjectVerdict("", publication_absent_note(repo))
+    try:
+        declaration = parse_publication(
+            lookup.path.read_text(encoding="utf-8", errors="replace"))
+    except OSError as exc:
+        return SubjectVerdict(
+            publication_unusable_report(
+                lookup.rel, repo, f"it could not be read: {exc}"), "")
+    if declaration.error:
+        return SubjectVerdict(
+            publication_unusable_report(lookup.rel, repo, declaration.error), "")
+    if not declaration.public:
+        return SubjectVerdict("", publication_private_note(lookup.rel))
+
+    label, conflict = declared_subject(merged_text)
+    trailer = _subject_trailer_value(approved or "")
+    if conflict:
+        if approved:
+            return SubjectVerdict(
+                "",
+                subject_approved_note(lookup.rel, relpath, "", approved),
+                trailer,
+            )
+        return SubjectVerdict(
+            subject_conflict_report(lookup.rel, relpath, conflict), "")
+    if label and label in declaration.own:
+        return SubjectVerdict("", subject_clean_note(lookup.rel, label))
+    if approved:
+        return SubjectVerdict(
+            "",
+            subject_approved_note(lookup.rel, relpath, label, approved),
+            trailer,
+        )
+    if label:
+        return SubjectVerdict(
+            subject_foreign_report(
+                lookup.rel, relpath, label, declaration.own), "")
+    # ⚠ A BASE WHOSE OWN DECLARATIONS CONFLICT READS AS "HAD NONE" here, and
+    # that is the harmless direction: such a base cannot reach this line at all
+    # while its front matter survives the merge (the conflict arm above fires
+    # first), and if the merge DID drop both lines the run is told it is adding
+    # a field rather than deleting one — a weaker remedy, never a wrong verdict.
+    base_label, _ = declared_subject(base_text)
+    if is_new_doc or base_label:
+        return SubjectVerdict(
+            subject_undeclared_report(
+                lookup.rel, relpath, declaration.own, bool(base_label)), "")
+    return SubjectVerdict("", subject_legacy_note(lookup.rel, relpath))
+
+
 def uncommitted_paths(repo: Path) -> list[str]:
     """Paths with uncommitted changes in `repo`'s working tree, staged or not.
 
@@ -5198,6 +5751,26 @@ def build_parser() -> argparse.ArgumentParser:
         "The ordinary fix is a net delta of 0 or less; the refusal spells out "
         "both ways to get one.",
     )
+    # 🔴 THE ESCAPE HATCH FOR RULE (q), and its reason is not optional for
+    # SIZE_RATCHET_FLAG's reason: an override with no stated reason records
+    # nothing while still suppressing the refusal. An empty value is a USAGE
+    # refusal (exit 2), never EXIT_CLIENT_SUBJECT — that number is the RULE's
+    # verdict about a document, and returning it from argument validation would
+    # tell a caller its subject was foreign when the truth is that a flag was
+    # empty.
+    p.add_argument(
+        CLIENT_SUBJECT_FLAG,
+        metavar="REASON",
+        dest="client_subject_override",
+        help="override the status=client-subject refusal: land this doc even "
+        "though this repo declares itself PUBLISHED and the arc's declared "
+        f"subject is not one it owns. REASON is REQUIRED — it is echoed above "
+        f"the diff and stamped `{CLIENT_SUBJECT_TRAILER_KEY}: <why>` on the "
+        "commit. SCOPE: it clears a foreign, missing, dropped or conflicting "
+        "subject declaration. It does NOT reach an unreadable publication "
+        "declaration — there is no verdict for anyone to have read. The "
+        "ordinary fix is `--repo <the repo the subject lives in>`.",
+    )
     p.add_argument(
         "--push",
         action="store_true",
@@ -5245,7 +5818,7 @@ def resolve_session_id(env: typing.Mapping[str, str] | None = None) -> str:
 
 def commit_message(
     subject: str, session_id: str | None = None, leak_trailer: str = "",
-    ratchet_trailer: str = "",
+    ratchet_trailer: str = "", subject_trailer: str = "",
 ) -> str:
     """`subject`, carrying exactly one `Claude-Session-Id:` trailer when known,
     a `Leak-Gate-Approved:` trailer when rule (o) was approved through, and a
@@ -5300,6 +5873,14 @@ def commit_message(
     if ratchet_trailer:
         message = session_trailer.append_trailer(
             message, ratchet_trailer, key=SIZE_RATCHET_TRAILER_KEY)
+    # 🔴 SAME APPENDER, FOURTH KEY. Rule (q)'s override is the third operator
+    # decision this tool can be asked to take on its own authority, and it gets
+    # the same durable record as rules (o) and (p) for their reason: the run's
+    # stdout survives only in a transcript shipped as a bounded TAIL, and this
+    # one's stake is a published repository.
+    if subject_trailer:
+        message = session_trailer.append_trailer(
+            message, subject_trailer, key=CLIENT_SUBJECT_TRAILER_KEY)
     return message
 
 
@@ -5337,6 +5918,25 @@ def main(argv: list[str] | None = None) -> int:
             f"  Pass what you would have written in the doc: "
             f'`{SIZE_RATCHET_FLAG} "the incident writeup has to land tonight; '
             f'the prune is ranked first for the next round"`.',
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    # Rule (q)'s override, guarded identically and for the identical reason —
+    # see the comment above. One rule, one place would be a shared helper; two
+    # flags is not yet N, and the two messages name different stakes.
+    if args.client_subject_override is not None and not args.client_subject_override.strip():
+        print(
+            f"{CLIENT_SUBJECT_FLAG} was given an EMPTY reason "
+            f"({args.client_subject_override!r}).\n"
+            f"  The reason is the whole point of the flag: it is echoed above "
+            f"the diff and stamped `{CLIENT_SUBJECT_TRAILER_KEY}:` on the "
+            f"commit, so the next reader can see that an arc whose declared "
+            f"subject this repo does not own was published here anyway, and "
+            f"why. An empty one records nothing while still suppressing the "
+            f"refusal.\n"
+            f"  Pass what you would have written in the doc: "
+            f'`{CLIENT_SUBJECT_FLAG} "the subsystem is ours; only the host it '
+            f'runs on is the client\'s"`.',
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -5743,6 +6343,30 @@ def main(argv: list[str] | None = None) -> int:
         print(undefined_done, file=sys.stderr)
         return EXIT_UNDEFINED_DONE
 
+    # ---- rule (q): this doc's SUBJECT belongs in this repository ------------
+    # 🔴 ABOVE RULE (p), AND THE ORDER IS THE SAME ARGUMENT rule (h) MAKES. This
+    # rule asks whether the document belongs HERE AT ALL; rule (p) asks how many
+    # bytes it may be. Telling an author their doc grew past a ceiling in a
+    # repository it must not be written to is answering the second question
+    # first, and the remedy it prints (prune, or override) is the wrong work.
+    #
+    # 🔴 BELOW rule (m), because it reads `merged_text` and `is_new_doc`, both of
+    # which the classification block above computes — and because the arc rules
+    # sit below rule (h) for the reason stated there: a wrong base makes every
+    # statement about "the document" a statement about one nobody is editing.
+    subject_verdict = client_subject_gate(
+        repo,
+        relpath,
+        find_publication_declaration(repo),
+        merged_text,
+        base_text,
+        is_new_doc,
+        args.client_subject_override,
+    )
+    if subject_verdict.refusal:
+        print(subject_verdict.refusal, file=sys.stderr)
+        return EXIT_CLIENT_SUBJECT
+
     # ---- rule (p): a doc already over its ceiling may not GROW --------------
     # 🔴 ABOVE `budget_warning` AND NOT BESIDE IT, for the reason the comment
     # below already gives about the other refusals: that warning asserts "this
@@ -5789,6 +6413,13 @@ def main(argv: list[str] | None = None) -> int:
     # breath that a refusal on them was cleared by hand.
     if ratchet_override:
         print(ratchet_override)
+    # Rule (q)'s non-refusing half, beside the other advisories and for their
+    # reason: every arm of it — the pass by absence, the private declaration,
+    # the clean label, the grandfathered legacy doc and the approved-through
+    # banner — is a statement about the document the diff below is proposing,
+    # and a run that printed nothing here would make "checked and clean" and
+    # "never checked" the same observable.
+    print(subject_verdict.notes)
     warning = dropped_durable_report(report.dropped)
     if warning:
         print(warning)
@@ -6013,6 +6644,12 @@ def main(argv: list[str] | None = None) -> int:
                 _ratchet_trailer_value(args.size_ratchet_override)
                 if ratchet_override else ""
             ),
+            # 🔴 KEYED ON THE VERDICT, NOT ON THE FLAG — rule (p)'s reason. A
+            # reason passed on a run rule (q) never refused leaves the gate's
+            # trailer EMPTY, so no commit carries an override of nothing. The
+            # gate is the single predicate: it sets `trailer` on exactly the
+            # arm where it was overridden.
+            subject_trailer=subject_verdict.trailer,
         )
         # Path-limited on purpose: exactly one commit, carrying exactly the
         # diff that was shown, even if the caller had other work staged.

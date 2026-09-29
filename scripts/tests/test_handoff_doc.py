@@ -1502,7 +1502,11 @@ class TestRuleFDidNotMoveTheExitCodes:
         # 13 -> 14, 2026-09-25: rule (p) adds `EXIT_SIZE_RATCHET = 14`. Same
         # reading again — the injectivity loop ran FIRST and passed, so this is
         # a genuinely new code rather than a collision wearing a count failure.
-        assert len(codes) == 14, f"the EXIT_* constant set changed: {codes}"
+        # 14 -> 15, 2026-09-28: rule (q) adds `EXIT_CLIENT_SUBJECT = 15`. Same
+        # reading again — the injectivity loop above ran FIRST and passed, so
+        # this is a genuinely new code rather than a collision wearing a count
+        # failure.
+        assert len(codes) == 15, f"the EXIT_* constant set changed: {codes}"
 
     def test_the_exit_code_constants_did_not_move(self) -> None:
         """Their VALUES, not just their names — a caller reads the number."""
@@ -3604,7 +3608,22 @@ class TestAStaleBaseIsLoud:
         # 🔴 THE STRUCTURAL HALF — see `between_buckets_and_diff`. The two
         # headline assertions above are walkable by printing a block that
         # contains neither, which a mutant did.
-        assert between_buckets_and_diff(out) == [], out
+        #
+        # 🔴 RULE (q)'s PASS-BY-ABSENCE NOTE IS SUBTRACTED, AND IT IS DERIVED
+        # FROM THE MODULE RATHER THAN SPELLED HERE. That note prints on EVERY
+        # run in a repo with no publication declaration — deliberately, for
+        # `leak_absent_note`'s reason: a run that printed nothing would make
+        # "checked and clean" and "never checked" the same observable. So the
+        # window is no longer empty, and asserting emptiness would either fail
+        # forever or have to be weakened to "ignore lines mentioning
+        # publication", which is the SPELLED guard this assertion exists to
+        # replace. Computing the exact expected text keeps the property intact:
+        # anything rule (h) prints is still an extra line and still fails.
+        expected = [
+            ln for ln in hd.publication_absent_note(repo).splitlines()
+            if ln.strip()
+        ]
+        assert between_buckets_and_diff(out) == expected, out
 
     def test_behind_on_CODE_but_current_on_the_DOC_stays_SILENT(
         self, repo: Path, tmp_path: Path, update_file: Path
@@ -9913,3 +9932,514 @@ def test_the_approval_banner_CARRIES_the_streak(repo: Path) -> None:
         "the operator taking the opt-in a fourth time is shown the same banner "
         f"as the first time. Got:\n{note}"
     )
+
+
+# --------------------------------------------------------------------------
+# rule (q): a CLIENT-INFRASTRUCTURE arc does not get its doc in a PUBLISHED repo
+#
+# 🔴 THE SENTENCE THIS REPLACED. `claude/skills/handoff/SKILL.md` step 2 was to
+# gain "an arc whose subject matter is CLIENT INFRASTRUCTURE gets its doc in the
+# CLIENT repo — this one is PUBLIC." It is 118 B and it did not fit: the skill
+# would have gone from 966 B of working headroom to 848 B against the 900 B
+# floor in `scripts/tests/test_handoff_skill_size.py`, whose own playbook says
+# do NOT narrow an instruction to make this pass and names "move guidance INTO
+# the tool" as lever 1.
+#
+# 🔴 WHAT THESE TESTS ARE AND ARE NOT. Every refusal class below is a REGRESSION
+# test — at `origin/main` there is no rule (q) at all, so each exits 0 and writes
+# the doc. The classes named `…DidNotMove…` are INVARIANT GUARDS and say so.
+#
+# 🔴 THE DISCRIMINATION IS THE POINT, and it is why `TestRuleQDiscriminates`
+# comes first: a check that cannot tell a client-infrastructure arc from an
+# ordinary one is worse than none. The positive and negative cases there differ
+# in ONE token.
+# --------------------------------------------------------------------------
+
+#: A label devrc's own declaration does NOT own. Synthetic: it names no real
+#: repository, so nothing here asserts anything about one.
+FOREIGN_LABEL = "alpha-client-infra"
+
+#: The label the fixture repo's declaration DOES own.
+OWN_LABEL = "toolrepo"
+
+PUBLIC_DECL = f"# a comment\n\nvisibility: public\nown: {OWN_LABEL}\n"
+PRIVATE_DECL = "visibility: private\n"
+
+
+def declare_publication(repo: Path, text: str) -> Path:
+    """Put a publication declaration where `find_publication_declaration` looks."""
+    rel = hd.PUBLICATION_CANDIDATES[0]
+    p = repo / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def subject_front_matter(label: str | None) -> str:
+    return "" if label is None else f"---\n{hd.SUBJECT_FIELD_KEY}: {label}\n---\n\n"
+
+
+def new_doc_with_subject(tmp_path: Path, label: str | None,
+                         name: str = "q-new.md") -> Path:
+    """A delta fit to BECOME a document, carrying (or omitting) rule (q)'s field.
+
+    Built on `NEW_DOC_UPDATE` so it satisfies rules (j), (k) and (m) — the point
+    of every assertion below is that rule (q) is what decides the run, and a
+    fixture a neighbouring rule would refuse proves nothing about rule (q)."""
+    return write_delta(tmp_path, name, subject_front_matter(label) + NEW_DOC_UPDATE)
+
+
+def run_new_doc(repo: Path, update: Path, *extra: str):
+    return run_tool(repo, "--new-effort", *extra, update=update, topic="q-topic")
+
+
+def q_doc_path(repo: Path) -> Path:
+    return repo / "claudedocs" / "handoff-q-topic.md"
+
+
+class TestTheFixtureDeclaresNothingUnlessAskedTo:
+    """🔴 VALIDATE THE INSTRUMENT. Rule (q) FAILS OPEN on an absent declaration,
+    so every OTHER test in this file must be unaffected by it — and the way that
+    claim goes wrong is a fixture that quietly grows a declaration. Pinned here
+    rather than assumed."""
+
+    def test_the_repo_fixture_carries_no_publication_declaration(
+        self, repo: Path
+    ) -> None:
+        found = hd.find_publication_declaration(repo)
+        assert found.path is None and found.unusable == "", found
+
+    def test_and_the_absence_is_STATED_not_silent(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """A run that printed nothing here would make `checked and clean` and
+        `never checked` the same observable — `claude/RULES.md`'s reassuring
+        zero, applied to a gate that did not run."""
+        res = run_tool(repo, update=update_file)
+        assert res.returncode == hd.EXIT_OK, res.stderr
+        assert "NO DECLARATION" in res.stdout, res.stdout
+        assert "PASS BY ABSENCE" in res.stdout, res.stdout
+
+
+class TestRuleQDiscriminates:
+    """🔴 THE HEADLINE. Two runs differing in ONE TOKEN: the label the document
+    declares. One is refused, one lands. Neither the repo, the delta's prose,
+    the topic nor any flag differs between them."""
+
+    def test_POSITIVE_a_foreign_subject_in_a_published_repo_is_refused(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        declare_publication(repo, PUBLIC_DECL)
+        shas_before = commit_shas(repo)
+
+        res = run_new_doc(repo, new_doc_with_subject(tmp_path, FOREIGN_LABEL),
+                          "--confirm")
+
+        assert res.returncode == hd.EXIT_CLIENT_SUBJECT, (
+            res.returncode, res.stdout, res.stderr)
+        assert "status=client-subject" in res.stderr, res.stderr
+        assert "cause=foreign-subject" in res.stderr, res.stderr
+        assert FOREIGN_LABEL in res.stderr, res.stderr
+        # …and the remedy names the repo's own allowlist, not just the problem.
+        assert OWN_LABEL in res.stderr, res.stderr
+        # NOTHING WRITTEN, this module's standing property.
+        assert not q_doc_path(repo).exists(), "the refused doc was written"
+        assert commit_shas(repo) == shas_before, "a commit was made despite the refusal"
+        staged = _sh("git", "diff", "--cached", "--name-only", cwd=repo).split()
+        assert staged == [], f"paths left STAGED after the refusal: {staged}"
+
+    def test_NEGATIVE_an_owned_subject_in_the_SAME_repo_lands(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 PROVE THE GUARD REACHABLE, NOT MERELY BREAKABLE. Same repo, same
+        declaration, same delta, same flags — only the label differs — and this
+        one reaches `status=written`. Without it the test above is green whether
+        or not rule (q) reads the label at all, because an unforced rank, a
+        missing `via:` or a stale base would refuse the fixture just as loudly."""
+        declare_publication(repo, PUBLIC_DECL)
+
+        res = run_new_doc(repo, new_doc_with_subject(tmp_path, OWN_LABEL),
+                          "--confirm")
+
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stdout, res.stderr)
+        assert "status=written" in res.stdout, res.stdout
+        assert "which is a label this repo owns" in res.stdout, res.stdout
+        assert q_doc_path(repo).exists()
+
+    def test_NEGATIVE_the_same_foreign_subject_lands_where_nothing_is_declared(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """FAIL OPEN. The refusal above is a fact about a PUBLISHED repo, not
+        about the label — a private client repo is the legitimate home for
+        exactly this doc and must not be blocked."""
+        res = run_new_doc(repo, new_doc_with_subject(tmp_path, FOREIGN_LABEL),
+                          "--confirm")
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert "status=written" in res.stdout, res.stdout
+
+    def test_NEGATIVE_a_repo_declaring_PRIVATE_does_not_fire_either(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        declare_publication(repo, PRIVATE_DECL)
+        res = run_new_doc(repo, new_doc_with_subject(tmp_path, FOREIGN_LABEL),
+                          "--confirm")
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert "visibility: private" in res.stdout, res.stdout
+        assert "cannot fire" in res.stdout, res.stdout
+
+
+class TestTheSubjectIsReadFromTheIDENTITYSurfaceOnly:
+    """🔴 A GUARD THAT CAN BE SPELLED IS WALKABLE. The field must not be
+    settable by a sentence anywhere in an 800-line document — this arc's own
+    handoff quotes `subject-repo:` inside a Gotchas block, and that must be
+    prose, not a declaration."""
+
+    def test_front_matter_counts(self) -> None:
+        label, err = hd.declared_subject(
+            f"---\n{hd.SUBJECT_FIELD_KEY}: {OWN_LABEL}\n---\n\n# Handoff: x\n")
+        assert (label, err) == (OWN_LABEL, "")
+
+    def test_a_preamble_line_counts(self) -> None:
+        label, err = hd.declared_subject(
+            f"# Handoff: x\n{hd.SUBJECT_FIELD_KEY}: {OWN_LABEL}\n\n## Goal\nz\n")
+        assert (label, err) == (OWN_LABEL, "")
+
+    def test_NEGATIVE_CONTROL_a_body_section_line_does_NOT(self) -> None:
+        """The discriminating case: the SAME line, one section lower.
+
+        🔴 THE SPELLING IS LOAD-BEARING AND THE FIRST VERSION OF THIS FIXTURE
+        WAS BLIND. It wrote the field mid-sentence (``- write `subject-repo:
+        x` in the front matter``), which the line anchor in `_SUBJECT_LINE`
+        already refuses wherever it appears — so the mutant `_subject_surface
+        -> return text` SURVIVED a green run of this class. A fixture that
+        cannot distinguish the two readings is not a control. The field is
+        written here at the START of a body line, which is the only spelling
+        the surface bound (rather than the anchor) is what rejects."""
+        label, err = hd.declared_subject(
+            f"# Handoff: x\n\n## Gotchas / decisions / dead-ends\n"
+            f"- {hd.SUBJECT_FIELD_KEY}: {FOREIGN_LABEL}\n")
+        assert (label, err) == ("", ""), (label, err)
+
+    def test_and_that_body_line_is_REFUSED_end_to_end(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """The unit above is about `declared_subject`; this is about the gate,
+        because a surface bound correctly and then read from the wrong string
+        would leave that unit green."""
+        declare_publication(repo, PUBLIC_DECL)
+        delta = write_delta(
+            tmp_path, "q-body.md",
+            NEW_DOC_UPDATE
+            + f"\n## Gotchas / decisions / dead-ends\n"
+            f"- {hd.SUBJECT_FIELD_KEY}: {OWN_LABEL} is what the front matter needs\n")
+        res = run_new_doc(repo, delta, "--confirm")
+        assert res.returncode == hd.EXIT_CLIENT_SUBJECT, (res.returncode, res.stderr)
+        assert "cause=undeclared-subject" in res.stderr, res.stderr
+
+
+class TestTheOtherArmsAreEachReachable:
+    """Each `cause=` has a case no other arm can produce — otherwise a single
+    over-broad predicate would satisfy the whole table."""
+
+    def test_a_NEW_doc_declaring_nothing_is_refused(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        declare_publication(repo, PUBLIC_DECL)
+        res = run_new_doc(repo, new_doc_with_subject(tmp_path, None), "--confirm")
+        assert res.returncode == hd.EXIT_CLIENT_SUBJECT, (res.returncode, res.stderr)
+        assert "cause=undeclared-subject" in res.stderr, res.stderr
+        assert "NEW document" in res.stderr, res.stderr
+
+    def test_an_UPDATE_that_DROPS_the_field_is_refused_with_its_own_cause(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE SILENT ONE, AND THE PREAMBLE IS WHERE IT LIVES. A field in
+        YAML front matter survives a merge structurally (`split_front_matter`);
+        one in the PREAMBLE does not, because a delta bringing its own preamble
+        replaces the old one wholesale — the same hole `_dropped_preamble_task`
+        exists for. Downgrading that to the grandfathered advisory would lose
+        the declaration on the very update that removed it."""
+        declare_publication(repo, PUBLIC_DECL)
+        seeded = write_delta(
+            tmp_path, "q-seed.md",
+            f"# Handoff: q-topic\n{hd.SUBJECT_FIELD_KEY}: {OWN_LABEL}\n\n"
+            + NEW_DOC_UPDATE)
+        assert run_new_doc(repo, seeded, "--confirm").returncode == hd.EXIT_OK
+        assert hd.declared_subject(
+            q_doc_path(repo).read_text(encoding="utf-8"))[0] == OWN_LABEL
+
+        stripped = write_delta(
+            tmp_path, "q-strip.md", "# Handoff: q-topic\n\n" + NEW_DOC_UPDATE)
+        res = run_tool(repo, "--confirm", update=stripped, topic="q-topic",
+                       advanced="the preamble was rewritten")
+        assert res.returncode == hd.EXIT_CLIENT_SUBJECT, (res.returncode, res.stderr)
+        assert "cause=dropped-subject" in res.stderr, res.stderr
+        assert "DELETES it" in res.stderr, res.stderr
+
+    def test_two_disagreeing_declarations_are_refused_rather_than_read(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE FIRST ONE IS NOT THE ANSWER. A gate that reads the first of two
+        conflicting declarations is satisfied by writing the harmless one above
+        the real one, so it reads neither."""
+        declare_publication(repo, PUBLIC_DECL)
+        delta = write_delta(
+            tmp_path, "q-two.md",
+            f"---\n{hd.SUBJECT_FIELD_KEY}: {OWN_LABEL}\n"
+            f"{hd.SUBJECT_FIELD_KEY}: {FOREIGN_LABEL}\n---\n\n" + NEW_DOC_UPDATE)
+        res = run_new_doc(repo, delta, "--confirm")
+        assert res.returncode == hd.EXIT_CLIENT_SUBJECT, (res.returncode, res.stderr)
+        assert "cause=conflicting-subject" in res.stderr, res.stderr
+
+    @pytest.mark.parametrize("make,tell", [
+        (lambda p: p.mkdir(parents=True), "not a regular file"),
+        (lambda p: (p.parent.mkdir(parents=True, exist_ok=True),
+                    p.symlink_to("gone.txt")), "symlink"),
+    ], ids=["directory", "dangling-symlink"])
+    def test_a_declaration_that_cannot_be_READ_refuses_loudly(
+        self, repo: Path, tmp_path: Path, make, tell: str
+    ) -> None:
+        """🔴 `is_file()` IS FALSE FOR THREE DIFFERENT WORLDS and only one of
+        them is a repository making no claim. Both of the others let an arc land
+        unchecked while the run printed `NO DECLARATION … PASS BY ABSENCE` — a
+        false statement about a repository that plainly declares something."""
+        make(repo / hd.PUBLICATION_CANDIDATES[0])
+        res = run_new_doc(repo, new_doc_with_subject(tmp_path, OWN_LABEL),
+                          "--confirm")
+        assert res.returncode == hd.EXIT_CLIENT_SUBJECT, (res.returncode, res.stderr)
+        assert "cause=unreadable-declaration" in res.stderr, res.stderr
+        assert tell in res.stderr, res.stderr
+        assert "PASS BY ABSENCE" not in res.stdout, res.stdout
+
+    def test_a_MALFORMED_declaration_refuses_too(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        declare_publication(repo, "visibilty: public\nown: x\n")
+        res = run_new_doc(repo, new_doc_with_subject(tmp_path, OWN_LABEL),
+                          "--confirm")
+        assert res.returncode == hd.EXIT_CLIENT_SUBJECT, (res.returncode, res.stderr)
+        assert "cause=unreadable-declaration" in res.stderr, res.stderr
+        assert "unknown directive" in res.stderr, res.stderr
+
+
+class TestTheLegacyDocIsGrandfathered:
+    """🔴 RED-BY-CONSTRUCTION IS THE FAILURE MODE THIS AVOIDS. Every handoff doc
+    written before rule (q) carries no field — 102 in devrc alone — so refusing
+    them would break the first update of every established arc. Rule (m)'s
+    `legacy_dod_report` makes the identical trade."""
+
+    def test_an_existing_doc_with_no_field_still_UPDATES(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        declare_publication(repo, PUBLIC_DECL)
+        res = run_tool(repo, "--confirm", update=update_file)
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert "status=written" in res.stdout, res.stdout
+
+    def test_but_the_gap_is_STATED_on_every_such_run(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """The advisory is the ONLY thing that ever surfaces a missing field on
+        a legacy doc, so it must name the field and the remedy, not merely
+        mention the rule."""
+        declare_publication(repo, PUBLIC_DECL)
+        res = run_tool(repo, update=update_file)
+        assert "GRANDFATHERED" in res.stdout, res.stdout
+        assert hd.SUBJECT_FIELD_KEY in res.stdout, res.stdout
+
+    def test_NEGATIVE_CONTROL_the_advisory_is_absent_once_the_field_exists(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """A line printed unconditionally is not an advisory."""
+        declare_publication(repo, PUBLIC_DECL)
+        res = run_new_doc(repo, new_doc_with_subject(tmp_path, OWN_LABEL))
+        assert "GRANDFATHERED" not in res.stdout, res.stdout
+
+
+class TestTheOverrideIsExplicitReasonedAndRECORDED:
+    """`claude/RULES.md`: a gate with no way past trains people to route around
+    it. Same shape as `--override-size-ratchet` — REQUIRED reason, echoed above
+    the diff, stamped on the commit — rather than rule (o)'s bare `store_true`,
+    because the assertion here is a judgement with a reason."""
+
+    def test_it_clears_the_foreign_subject_refusal(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        declare_publication(repo, PUBLIC_DECL)
+        res = run_new_doc(
+            repo, new_doc_with_subject(tmp_path, FOREIGN_LABEL), "--confirm",
+            hd.CLIENT_SUBJECT_FLAG, "operator: the subsystem is ours")
+        assert res.returncode == hd.EXIT_OK, (res.returncode, res.stderr)
+        assert "status=written" in res.stdout, res.stdout
+
+    def test_and_the_run_does_NOT_read_like_a_clean_one(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        declare_publication(repo, PUBLIC_DECL)
+        res = run_new_doc(
+            repo, new_doc_with_subject(tmp_path, FOREIGN_LABEL), "--confirm",
+            hd.CLIENT_SUBJECT_FLAG, "operator: the subsystem is ours")
+        assert "APPROVED THROUGH" in res.stdout, res.stdout
+        assert hd.CLIENT_SUBJECT_FLAG in res.stdout, res.stdout
+        assert "operator: the subsystem is ours" in res.stdout, res.stdout
+        assert "which is a label this repo owns" not in res.stdout, res.stdout
+
+    def test_and_the_COMMIT_carries_the_reason(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE DURABLE HALF. stdout survives only in a transcript
+        `scripts/transcript-push.sh` ships as a bounded TAIL, so an approval
+        early in a long session is unrecoverable from it."""
+        declare_publication(repo, PUBLIC_DECL)
+        run_new_doc(
+            repo, new_doc_with_subject(tmp_path, FOREIGN_LABEL), "--confirm",
+            hd.CLIENT_SUBJECT_FLAG, "operator: the subsystem is ours")
+        body = _sh("git", "log", "-1", "--format=%B", cwd=repo)
+        assert f"{hd.CLIENT_SUBJECT_TRAILER_KEY}: operator: the subsystem is ours" \
+            in body, body
+
+    def test_NEGATIVE_CONTROL_an_unrefused_run_carries_NO_trailer(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 KEYED ON THE VERDICT, NOT ON THE FLAG. A reason passed on a run
+        rule (q) never refused must stamp nothing, or the trailer stops meaning
+        `this was overridden`."""
+        declare_publication(repo, PUBLIC_DECL)
+        run_new_doc(
+            repo, new_doc_with_subject(tmp_path, OWN_LABEL), "--confirm",
+            hd.CLIENT_SUBJECT_FLAG, "belt and braces")
+        body = _sh("git", "log", "-1", "--format=%B", cwd=repo)
+        assert hd.CLIENT_SUBJECT_TRAILER_KEY not in body, body
+
+    def test_an_EMPTY_reason_is_a_USAGE_refusal_and_writes_nothing(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """Exit 2, never 15: that number is the rule's verdict about a document,
+        and returning it from argument validation would tell a caller its
+        subject was foreign when the truth is that a flag was empty."""
+        declare_publication(repo, PUBLIC_DECL)
+        before = tree_hash(repo)
+        res = run_new_doc(
+            repo, new_doc_with_subject(tmp_path, FOREIGN_LABEL), "--confirm",
+            hd.CLIENT_SUBJECT_FLAG, "   ")
+        assert res.returncode == hd.EXIT_USAGE, (res.returncode, res.stderr)
+        assert "EMPTY reason" in res.stderr, res.stderr
+        assert tree_hash(repo) == before
+
+    def test_it_does_NOT_reach_the_unreadable_declaration_arm(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """Rule (o)'s exclusion verbatim: there is no verdict for anyone to have
+        read and approved, and the fix is a one-line edit to a file that is
+        right there."""
+        (repo / hd.PUBLICATION_CANDIDATES[0]).mkdir(parents=True)
+        res = run_new_doc(
+            repo, new_doc_with_subject(tmp_path, OWN_LABEL), "--confirm",
+            hd.CLIENT_SUBJECT_FLAG, "I read it, honest")
+        assert res.returncode == hd.EXIT_CLIENT_SUBJECT, (res.returncode, res.stderr)
+        assert "cause=unreadable-declaration" in res.stderr, res.stderr
+
+
+class TestParsePublicationRefusesWhatItCannotRead:
+    """The parser's own table. Each error is a REFUSAL upstream, so a reading
+    that silently returned a default would disarm the gate in the quiet
+    direction."""
+
+    def test_the_happy_case(self) -> None:
+        got = hd.parse_publication(PUBLIC_DECL)
+        assert got.error == "" and got.public is True
+        assert got.own == frozenset({OWN_LABEL})
+
+    def test_comments_and_blank_lines_are_fine(self) -> None:
+        assert hd.parse_publication("\n# hi\n\nvisibility: private\n").error == ""
+
+    def test_labels_are_case_folded_on_BOTH_sides(self) -> None:
+        """Otherwise `subject-repo: DevRC` against `own: devrc` is a foreign
+        subject, which is a refusal the author cannot diagnose."""
+        decl = hd.parse_publication("visibility: public\nown: ToolRepo\n")
+        assert decl.own == frozenset({"toolrepo"})
+        assert hd.declared_subject("---\nsubject-repo: TOOLREPO\n---\n")[0] \
+            == "toolrepo"
+
+    @pytest.mark.parametrize("text,tell", [
+        ("own: x\n", "no `visibility:` line"),
+        ("visibility: public\n", "no `own:` label"),
+        ("visibility: maybe\nown: x\n", "only values"),
+        ("visibilty: public\nown: x\n", "unknown directive"),
+        ("visibility: public\nvisibility: private\nown: x\n", "a second time"),
+        ("visibility: public\nown: two words\n", "one non-empty token"),
+        ("visibility: public\nown:\n", "one non-empty token"),
+        ("just prose\n", "not `<directive>: <value>`"),
+    ], ids=["no-visibility", "public-no-own", "bad-visibility", "typo-directive",
+            "duplicate-visibility", "label-with-space", "empty-label", "not-a-directive"])
+    def test_each_malformed_declaration_is_an_error(self, text: str, tell: str) -> None:
+        got = hd.parse_publication(text)
+        assert tell in got.error, (text, got)
+
+    def test_NEGATIVE_CONTROL_the_error_field_can_be_EMPTY(self) -> None:
+        """A parser that errored on everything would make the table above green
+        and the gate permanently red."""
+        assert hd.parse_publication(PRIVATE_DECL).error == ""
+
+
+class TestThisRepoOwnDeclarationIsTheONEThisGateReads:
+    """🔴 THE SEAM. The module is hermetically tested above against synthetic
+    declarations; the LIVE behaviour of `/handoff` in devrc depends on a data
+    file none of those tests load. A typo in it disarms rule (q) here and every
+    module test stays green."""
+
+    def test_devrc_declares_itself_PUBLISHED_and_parses(self) -> None:
+        found = hd.find_publication_declaration(REPO_ROOT)
+        assert found.path is not None, (
+            f"devrc no longer declares a publication posture at "
+            f"{hd.PUBLICATION_CANDIDATES}; rule (q) is a PASS BY ABSENCE in the "
+            f"one repo it was written for")
+        decl = hd.parse_publication(found.path.read_text(encoding="utf-8"))
+        assert decl.error == "", decl.error
+        assert decl.public is True, "devrc is a PUBLIC repository"
+        assert decl.own, "a published repo declaring no `own:` label refuses everything"
+
+    def test_the_declaration_names_no_client_repo(self) -> None:
+        """🔴 THE ALLOWLIST IS WHY THIS RULE HAS NO BLOCKLIST. A marker list
+        would have to name client repos IN THE PUBLIC REPO, which is the
+        disclosure the rule exists to prevent. Pinned so nobody 'improves' the
+        declaration into one."""
+        found = hd.find_publication_declaration(REPO_ROOT)
+        assert found.path is not None
+        decl = hd.parse_publication(found.path.read_text(encoding="utf-8"))
+        assert decl.own == frozenset({"devrc"}), (
+            f"devrc's declaration owns {sorted(decl.own)}. `own:` is an "
+            f"ALLOWLIST of what THIS repo's arcs may declare, not an "
+            f"enumeration of anyone else's repositories.")
+
+
+class TestRuleQDidNotMoveTheOtherExits:
+    """INVARIANT GUARDS — green at `origin/main` too. Rule (q) sits between
+    rules (m) and (p), which is the middle of a refusal chain, and a new
+    `return` there is exactly the shape that has silently renumbered a status in
+    this module before."""
+
+    def test_no_advance_is_still_4(self, repo: Path, update_file: Path) -> None:
+        declare_publication(repo, PUBLIC_DECL)
+        assert run_tool(repo, update=update_file,
+                        advanced=None).returncode == hd.EXIT_NO_ADVANCE
+
+    def test_no_change_is_still_5(self, repo: Path, tmp_path: Path) -> None:
+        declare_publication(repo, PUBLIC_DECL)
+        same = write_delta(tmp_path, "q-same.md", BASE_GOAL_SECTION)
+        assert run_tool(repo, "--confirm",
+                        update=same).returncode == hd.EXIT_NO_CHANGE
+
+    def test_unforced_is_still_8_even_under_a_published_declaration(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 ORDER PIN. Rule (j) runs BEFORE rule (q) and must keep doing so:
+        an untagged rank in a published repo is a rank problem, and answering
+        the subject question first would print the wrong remedy."""
+        declare_publication(repo, PUBLIC_DECL)
+        delta = write_delta(
+            tmp_path, "q-unforced.md",
+            subject_front_matter(FOREIGN_LABEL)
+            + "## Next steps (ranked)\n1. Do a thing.\n")
+        assert run_tool(repo, "--confirm", "--new-effort", update=delta,
+                        topic="q-topic").returncode == hd.EXIT_UNFORCED

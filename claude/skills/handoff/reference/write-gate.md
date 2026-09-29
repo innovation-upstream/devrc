@@ -1383,3 +1383,124 @@ silent failure that would leave the run claiming a durable record that does not 
   a COUNT across rounds and a new doc has no previous round to have grown since, while
   this rule compares BYTES against a fixed ceiling a new doc can be over on day one.
 * It **prunes no document**. This is the mechanism only.
+
+## §Q — rule (q): a CLIENT-INFRASTRUCTURE arc does not get its doc in a PUBLISHED repo (2026-09-28)
+
+### Why this is code and not a sentence
+
+The standing instruction was one: *"an arc whose subject matter is CLIENT
+INFRASTRUCTURE gets its doc in the CLIENT repo — this one is PUBLIC."* It is 118 B and
+it **did not fit**: adding it took `claude/skills/handoff/SKILL.md` from 966 B of
+working headroom to 848 B against the 900 B floor in
+`scripts/tests/test_handoff_skill_size.py`, whose own eviction playbook names *"move
+guidance INTO the tool"* as lever 1 and *"do NOT delete or narrow an instruction to make
+this pass"* as the thing you may not do instead. So the rule moved into
+`scripts/lib/handoff_doc.py`, where it is stated at the moment it applies rather than
+paid on every skill load. SKILL.md gained 50 B — the status token and the remedy field —
+because `test_every_exit_code_the_module_can_return_is_documented` requires every
+`status=` the module can print to appear there.
+
+### The signal, and the one that was measured and rejected
+
+The obvious design is to match **client markers in the delta**. Measured over devrc's
+**102** real `claudedocs/handoff-*.md`, the token set
+`datapacket|talos|homelab|civitai|clickup`, word-anchored and case-insensitive, matched:
+
+| surface | docs matched |
+|---|---|
+| anywhere in the doc | **52 / 102** |
+| front matter + preamble + `## Goal` | **10 / 102** |
+| the topic slug | **0 / 102** |
+
+A gate firing on 10–51% of ordinary devrc *tooling* arcs is the permanently-red one
+`claude/RULES.md` says trains everyone to route around it. It is also self-defeating:
+the marker list would have to name client repos **in the public repo**.
+
+So rule (q) asks the author, exactly as rules (j) and (k) do — a `subject-repo: <label>`
+field, checked against an **allowlist the repo declares of the labels it owns**. An
+allowlist the author must pick from is not walkable by rewording the way a blocklist is,
+and it puts no client name on a public branch.
+
+### The two facts it reads, and neither is inferred
+
+1. **The repository's publication posture**, from one declared file at a closed set of
+   relative paths (`PUBLICATION_CANDIDATES` — today `claudedocs/PUBLICATION.txt`).
+   Grammar: `visibility: public|private` once, `own: <label>` repeatable. `#` comments
+   and blank lines are fine; **an unknown directive is an ERROR, not a skip** (a
+   silently-ignored `visibilty:` is how a repo believes it declared something and the
+   gate reads the default), and **`visibility: public` with no `own:` label is also an
+   error** — read one way it refuses every doc here, read the other it accepts every
+   doc, so the config is what gets refused.
+2. **The arc's declared subject**, from the MERGED document's **identity surface only**:
+   front matter plus preamble. Not the whole document — a `subject-repo:` line quoted
+   inside `## Gotchas` (this arc's own doc quotes one) is prose about the field, not a
+   declaration of it. Read from the MERGE rather than the update because the field is
+   durable and the question is what the document will declare *after* this run, which is
+   also what makes the deletion arm possible.
+
+No network call. `gh repo view --json visibility` would make every handoff depend on a
+remote being reachable — rule (o)'s `ScannerUnusable` arm turned into the ordinary case.
+
+### Fail OPEN on absence, refuse LOUDLY on a declaration it cannot read
+
+The same split rule (o) makes at `lookup.path is None` versus `lookup.unusable`, for the
+same reason. **Most repositories are private client repos and declare nothing** — the
+population this rule exists to protect and must never block — and publication is a
+property only the repository can assert. But a repo that DOES declare a posture and then
+cannot be read about it is not a pass: `claude/RULES.md`'s reassuring-zero rule applies
+to a gate that silently did not run as much as to one wired to nothing. `is_file()` is
+False for a genuine absence, a DIRECTORY and a DANGLING SYMLINK; only the first is a
+repository making no claim.
+
+Every non-refusing arm still **prints a line** — a pass by absence, a private
+declaration, a clean label, a grandfathered legacy doc — because a run that printed
+nothing would make "checked and clean" and "never checked" the same observable.
+
+### The arms — one status token, `client-subject` (exit 15), five causes
+
+| `cause=` | when | override clears it |
+|---|---|---|
+| `foreign-subject` | the declared label is not one the repo owns | yes |
+| `undeclared-subject` | a NEW doc in a published repo declares nothing | yes |
+| `dropped-subject` | the base declared one and the merge loses it | yes |
+| `conflicting-subject` | two `subject-repo:` lines disagree | yes |
+| `unreadable-declaration` | the posture file is present and unparseable | **no** |
+
+The last is rule (o)'s exclusion verbatim: there is no verdict for anyone to have read,
+and the fix is a one-line edit to a file in the repository rather than an assertion
+about it.
+
+**Legacy docs are GRANDFATHERED to an advisory**, not refused. Every handoff written
+before this rule carries no field — 102 in devrc alone — so refusing them would be
+red-by-construction on the first update of every established arc. Rule (m)'s
+`legacy_dod_report` makes the identical trade, and like that one the advisory is the
+only thing that ever surfaces the gap, so it prints on every update until the field is
+added.
+
+### How you clear it
+
+`--client-subject-approved "<why>"`, shaped like `--override-size-ratchet` rather than
+like `--leak-pre-existing-approved`: the assertion here is a judgement with a reason, and
+a reason recorded nowhere is the unfalsifiable shape rule (p)'s comment refuses. The
+reason is **REQUIRED** — an empty one is a USAGE refusal (exit 2), never exit 15, because
+that number is the rule's verdict about a document and returning it from argument
+validation would tell a caller its subject was foreign when the truth is a flag was
+empty. An overridden run is recorded **twice, in two channels, neither a backup for the
+other**: a banner above the diff at the moment the decision is taken, and
+`Public-Doc-Subject-Approved: <why>` on the commit, which survives a transcript shipped
+as a bounded tail.
+
+**The ordinary fix is not the flag.** It is `--repo <the repo the subject lives in>`, so
+the doc lands where the subject lives. The refusal says so before it mentions the flag.
+
+### What it does NOT do
+
+* It **cannot tell a true `subject-repo: devrc` from a false one.** An author writing up
+  a client cluster who types this repo's own label is accepted. That is rule (j)'s
+  limitation verbatim and it is not closable by any check this module can run; what the
+  field buys is that the claim is mandatory, attributable and greppable, and that a
+  closed allowlist gives a foreign subject no honest label to hide under.
+* It **reads a label, not subject matter.** Nothing here scans the doc for client
+  content — that is rule (o)'s job, and in a repo with no leak scanner rule (o) is a
+  pass by absence. The two are independent and neither is the other's backstop.
+* It **is not a per-doc visibility setting.** `own:` is a property of the repository.
