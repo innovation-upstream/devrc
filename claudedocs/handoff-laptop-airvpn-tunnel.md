@@ -21,15 +21,13 @@ unaffected while the tunnel is up.
   — no MTU/routing churn.
 
 ## State now
-- Branch / PR: `devrc` `main` at `4f0cbd48`. Base clone re-synced (`merge --ff-only`).
-- ✅ **The mosh arc is CLOSED, and it closed by DELETING most of it.** #1865 was **closed unmerged** after five audit rounds; **#1869 merged as `4f0cbd48`** carrying one package line plus a 28-line comment. What was dropped: an **812-line** staged `/etc/nixos` editor and **1473** lines of tests, whose whole complexity budget went on making a sudo rewrite of a remote host's config safe on a machine the operator cannot reach — to mitigate a fault that had already stopped. `nix/pkgs/default.nix` now spells out the two-line server-side edit instead.
-- 🔴 **mosh DOES NOT WORK YET, deliberately.** No host runs `mosh-server`; `mosh <host>` hangs at `Connecting...`. It needs a two-line edit at the console of the host you want to mosh INTO — the recipe is in the comment in `nix/pkgs/default.nix`, and `programs.mosh.openFirewall` **defaults to TRUE** and must be set false or it opens 1001 UDP ports on every interface including WAN.
-- ✅ **The 2026-09-23 leak recurrence stays CLOSED** — #1861 (`5834b4c5`), corrections rescued in #1866 (`b7a30bc3`); `test_no_public_ips` green on `main`.
-- **`main` is fully green** — all four Tekton legs pass. The `TestMutationKillMatrix.test_kills_the_readme_exclusion` red that blocked things was someone else's and was fixed by #1868 (`811fa910`).
-- 🔴 **The `ip rule` pin (applied 2026-09-23 ~20:35 CDT) is STILL APPLIED and STILL NOT PERSISTENT.** `ip rule show | rg 5150` confirms it live. A reboot reverts it silently and the roaming returns with nothing to announce it. This is the only genuinely unfinished thing in the arc.
-- **Workbench helper: still BLOCKED on sudo, by design.** `sudo -n` over ssh fails, so it is operator-run. `/etc/nixos/i3blocks-scripts/airvpn-updown` is still the Jul 21 copy (11,306 B, **0** `uidrange` lines) vs the laptop's synced 16,099 B (**3**). Laptop helper verified IN SYNC.
-- **The mesh-flap arc is CLOSED on measurement, and NOT by anything we did.** Loss to home climbed **16% → 30% → 45%** between ~22:45 and ~00:03 local on 2026-09-23, then stopped dead with no config change. It has not recurred in ~14 h: watcher pid `2709742` alive at 14h20m, **1925+ polls, 0 triggers**; live four-path check 0/100 on every path.
-- Untracked in the laptop tree: `nix/system/apply-networkmanager-openvpn.sh` (unrelated, pre-existing).
+- Branch / PR: devrc **PR #1937** (`handoff-laptop-airvpn-tunnel`), OPEN. Commits: `a9bcf992`, `9ab5dfd1`, `a58d97ec`, + this.
+- No `clawgate-task:` field: `clawgate_handoff.sh resolve` → **5 (NOTHING RESOLVED)**; cannot distinguish "no task" from "wrong id".
+- Watcher: **v3, pid `2309463`** (`ppid=1`; earlier commits recorded `2309522`, which was a transient and is dead). Resolve it from `/proc/<pid>/cmdline`, never `pgrep -f`, never the pid file alone.
+- 🔴 `ip rule` 5150 pin **NOT applied** since the 2026-09-27 15:33 reboot — and not the lever: `10.42.0.10` measures 0% in every round without it.
+- 🔴 Sudoers: NOPASSWD covers `airvpn-sudo`, the whole `tailscale` binary, `systemctl restart|start|stop tailscaled` / `restart nebula@mesh`. **`ip`/`nft` are NOT granted**, so no agent here can apply an `ip rule`/fwmark remedy. `tcpdump` is absent but `nix-shell -p tcpdump` supplies it.
+- Deploy/verify: nothing deployed, nothing left changed. The one routing experiment (`accept-routes=false`) was reverted in-run via a trap; `RouteAll = True` re-confirmed.
+- 🔴 CARRIED: mosh DOES NOT WORK YET — no host runs `mosh-server`; `programs.mosh.openFirewall` DEFAULTS TRUE (must be false or it opens 1001 UDP ports on every interface incl. WAN).
 
 ## Open investigations — live diagnosis state
 <!-- as-of: 2026-09-21 -->
@@ -92,99 +90,7 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 
 <!-- as-of: 2026-09-23 -->
 ### Nebula mesh flaps: "connection keeps hanging and recovering" — TWO mechanisms, one FIXED, one NOT NEBULA'S
-- as-of: 2026-09-23
-- 🔴 **THIS BLOCK'S EARLIER VERDICT WAS HALF RIGHT, AND THE HALF IT GOT WRONG IS THE HALF
-  THAT STILL BITES.** It read `ROOT CAUSE MEASURED, fix not applied` and attributed the
-  whole symptom to nebula identity-roaming. The pin was applied 2026-09-23 ~20:35 CDT and
-  **the roaming stopped while the flap did not**, so the symptom had TWO causes and this
-  block described one. Do not resume by re-chasing nebula: three measurement rounds below,
-  each with a control, put the residual flap outside nebula, outside this laptop and
-  outside devrc entirely. ⚠ **ONE NEBULA SYMPTOM IS EXPLICITLY NOT COVERED BY THAT
-  SENTENCE, AND IS STILL LIVE:** both lighthouses (`10.42.0.1`, `10.42.0.2`) remain
-  **100% loss from BOTH hosts**, re-measured 2026-09-23 after the pin. The two-cause split
-  does not account for it, and an older `homelab-talos` handoff recorded lighthouse ICMP
-  flapping independently of any of this. Keep it on the queue.
-- **FIXED — nebula identity-roaming (the mechanism this block originally described).**
-  `sudo ip rule add to 192.168.50.94 priority 5150 lookup main` moved the homelab node off
-  the tailscale subnet route (`ip route get 192.168.50.94` → `via 192.168.1.1 dev
-  wlp170s0`, was `dev tailscale0 table 52`), and the ssh burst that used to be five
-  consecutive `rc=255` is **5/5 `rc=0`** — re-run and re-confirmed. `via: measurement`
-  🔴 **BUT "THE ROAMING STOPPED" IS UNPROVEN, AND AN EARLIER WORDING OF THIS BULLET
-  COMPARED TWO DIFFERENT INSTRUMENTS.** It read "`Host roamed|header is too short` =
-  1 event in 40 min (was a storm)". The **1** was counted in the LAPTOP's
-  `journalctl -u nebula@mesh`; **"a storm" described the GATEWAY POD's log**, read via
-  `kubectl`. Those are different sources, so the pair was never a before/after.
-  Re-measured on the laptop journal for 2026-09-23: 11:00→1, 12:00→1, 14:00→2, 20:00→1,
-  21:00→1 — the pin went in ~20:35, so **post-pin is indistinguishable from pre-pin**,
-  14 events in 7 days; the workbench's journal shows 9 in 17 days and never storms.
-  And the pod-log side **cannot now be re-read, because the pin itself breaks `kubectl`
-  against homelab** (rc 124, measured) — so this doc can no longer reach its own
-  before-number. Treat the roaming as UNMEASURED either way; the ssh burst is the only
-  re-derivable half. ⚠ **The pin is live kernel state and is NOT persistent — a reboot reverts
-  it, and the roaming comes back.** It also breaks `kubectl` against homelab while in place
-  (`$KC_HOMELAB` targets that node); `sudo ip rule del priority 5150` restores it.
-- 🔴 **NOT FIXED, AND NOT NEBULA'S — periodic ~6.5 s blackouts of the path TO HOME.**
-  Measured concurrently, one probe per transport, 0.5 s spacing:
-  | target | loss | blackout |
-  |---|---|---|
-  | nebula → workbench (home) | 15/140 | epoch 1790215400, **+6.5 s** |
-  | tailscale → workbench (home) | 15/140 | epoch 1790215400, **+6.5 s — same second** |
-  | a far endpoint of ours NOT at home | **0/140** | NONE |
-  | nearby anycast resolver | 1/140 | NONE |
-  | local wifi gateway | 0/140 | NONE |
-  Tailscale knows nothing about nebula's hostmap, so no nebula mechanism can blank both in
-  the same second. Loss is **dominated by one contiguous ~13-packet (6.5 s) run** —
-  blackout-shaped, not lossy-path-shaped. ⚠ An earlier wording said "clustered, **never**
-  scattered: zero isolated drops", and the table's own arithmetic refutes it: 15 lost
-  against a 13-packet run leaves 2 isolated. An independent re-probe an hour later gave
-  14/140 = one run of 13 plus one isolated drop. The run is the signal; the absolute was
-  overstated. ⚠ **Window: ONE ~70 s sample per transport** (140 packets at 0.5 s), so
-  "only traffic to HOME dies" rests on that single window. `via: measurement`
-- **Ruled out — the laptop's uplink, its ISP, and the local router's NAT.** The local wifi
-  gateway is 0 % loss at 1–2 ms, signal −43 dBm, 650/866 Mbit. A local-router conntrack
-  flush would blank both overlays at once while sparing ICMP — **the far non-home endpoint
-  is the control that kills it: 0/140, no blackouts, same wifi, same router, same ISP, same
-  long-haul distance.** Only traffic to HOME dies. `via: measurement`
-- **Ruled out — the home uplink being down.** From the workbench (which is AT home), its own
-  outbound internet was **1 lost packet in 280** across a window that fully contains two
-  laptop-side blackouts — probe epochs `…563`–`…703` vs blackouts `…614`→`…621` and
-  `…681`→`…688`, and its single loss at `…566` falls outside both. Home egress works
-  throughout. `via: measurement` ⚠ An earlier run of this same check was thrown away
-  because its epoch range was not recorded, so overlap could not be proven — record both
-  clocks or the comparison is worthless.
-- **Ruled out — a clean period to plan around.** Observed gaps are **141 s, 67 s, 143 s** —
-  irregular, roughly one to two and a half minutes. An earlier draft of this block said
-  "~every 67 s" off two points; that is RETRACTED. `via: measurement`
-- **Leading hypothesis (home side, NOT high confidence):** the home router is periodically
-  losing NAT/conntrack state, so established long-lived UDP flows (both overlays) stall
-  until they re-punch, while ICMP and fresh outbound flows rebuild state per packet and
-  survive. That fits every observation above but has **not** been tested at the router.
-  `mtr` to the home endpoint shows the last responding hop at 0.0 % over 70 probes (~129 ms)
-  — intermediate hops at 40–70 % are ICMP rate-limiting, since later hops are clean — so the
-  failure is at or beyond the home edge. One sample; the window may simply have missed a
-  blackout.
-- **Next probe — AT THE HOME ROUTER, not here.** Its uptime and logs around the epochs
-  above, its conntrack table size and eviction counters, and whether the ISP link is
-  renegotiating. If the onset is recent, a firmware update or a reboot is the cheap first
-  move. 🔴 **Nothing in devrc, nothing in nebula's config and nothing on this laptop can
-  cure this** — the levers here only shorten each stall: nebula already has
-  `use_relays: true`. 🔴 **Do NOT read the 0/140 row as "the relay works" — an earlier
-  wording of this bullet did, and it conflated two addresses.** That row probed the relay
-  host's UNDERLAY endpoint, which shows only that the host is reachable. The relay's MESH
-  address — `10.42.0.2`, the one `relays:` actually names — is **100% loss from both
-  hosts**, measured again 2026-09-23 beside the underlay at 0% / 109 ms. So relaying is
-  NOT known to work and any lever resting on it is unproven.
-  For a human working across it, `mosh` should ride a 6.5 s blackout where `ssh` hangs —
-  ⚠ `via: inference`, NOT measurement: it is a long-lived-UDP tool proposed against a
-  hypothesised long-lived-UDP-state fault, and it is installed on neither host, so nothing
-  here has demonstrated it. `devrc#1865` stages it.
-- **Symptom + exact repro:** laptop↔workbench over nebula drops for ~30–60 s windows, then recovers. Repro: `ping -c 4 -i 0.3 10.42.0.30` loops — measured at 17:15:34–17:15:52 CDT a 100%-loss window of ~7 samples between clean stretches; `ssh zach@10.42.0.30` times out during banner exchange for minutes at a time (17:58–18:03, five consecutive rc=255) then succeeds.
-- **Observed (with values):** failing set is exactly the LIGHTHOUSES: `ping 10.42.0.1` (homelab lighthouse) and `10.42.0.2` (Hetzner lighthouse) 100% loss from BOTH laptop and workbench; `10.42.0.30` (workbench) and `10.42.0.20` (prod-gw) reachable with 0% loss (~137 ms / ~109 ms). Gateway pod (`nebula-gateway-5fpfv`, kubectl `-n nebula`, node `talos-jkj-deb` 192.168.50.94) log: `Tunnel status certName=zach-laptop tunnelCheck="map[method:active state:dead]"` (19:03:22Z) and `Host roamed ... newAddr="10.244.0.220:50519"` (19:05:09Z). Workbench log: my handshakes arrive `from="100.71.230.83:41232"` (my TAILSCALE addr) and lighthouse parsed garbage `from 10.244.0.220:54949: header is too short` (22:15:25Z) — `10.244.0.220` = `tailscale-subnet-router-5f4658c69f-2g99j` pod (kubectl field-selector lookup, 15d old, 0 restarts). Laptop routing: `ip route get 192.168.50.94` → `dev tailscale0 table 52`; `ip route show table 52` → `192.168.50.0/24 dev tailscale0` (rule 5270).
-- **Ruled out:** lighthouse pods down — kubectl `-n nebula` shows both `nebula-lighthouse-xl58z` and `nebula-gateway-5fpfv` Running 0 restarts; via: measurement. Gateway node dead — workbench pings `192.168.50.94` at 0.1 ms and `<home-public-ip>` at 1.0 ms; via: measurement. Tailscale broken — `tailscale status` shows subnet-router `active; direct`; via: measurement. talosctl route to node internals — `talosctl -n 192.168.50.94 netstat` fails `tls: expired certificate` (client cert expiry, separate defect); via: command.
-- **Leading hypothesis (high confidence, measured)** — ⚠ **SUPERSEDED, kept for the record.**
-  Correct about the roaming, which the pin fixed; it does not explain the residual blackouts,
-  and "high confidence" was asserted over a symptom that turned out to have two causes: laptop's tailscale subnet route `192.168.50.0/24 → tailscale0` intercepts nebula's UDP to `192.168.50.94:4242`, so stage-1s ride the subnet-router POD and arrive at nebula pods sourced from bogus addrs (`100.71.230.83`, `10.244.0.220`). Peers "roam" my identity onto those paths; when the tailscale path churns the roamed paths die → hang; a fresh handshake over a live path (this host's WAN address, `<laptop-wan-ip>`, seen in lighthouse log at 19:02:55Z) → recover. Lighthouse ICMP failing is likely the same arrival-path corruption, and every node's hostmap resolution degrades with the lighthouse tunnels.
-- **Next probe** — ⚠ **DONE 2026-09-23; the verdict is the two-mechanism split above.** The recipe it carried is deleted rather than preserved: `claude/skills/handoff/SKILL.md` protects a superseded *reading* verbatim but says to delete a now-wrong **instruction** in the same delta, and re-running that `ip rule add` is exactly the wrong instruction — the pin is already applied. Its one still-live idea (a tailscale route exclusion for UDP:4242, rather than a `to <node>` pin) is carried in next-step 1, where it can be acted on.
+- 🔴 **EVICTED 2026-09-30 to `claudedocs/archive/handoff-laptop-airvpn-tunnel-2026-09-30.md`** — superseded 2026-09-30: the `ip rule` pin it turns on is not the lever (the peer it targeted measures 0% without it), and its residual-flap evidence is replaced by the 9-hour dataset block below. Read it there before re-deriving anything; the eliminations it records still stand.
 
 ### 🔴 SUPERSEDES the "home router NAT/conntrack" hypothesis above — THREE vantages put the fault on the PATH, not at either end
 - as-of: 2026-09-24
@@ -198,31 +104,154 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - **Next probe:** the discriminator is already built and RUNNING — `bash <scratchpad>/flap-watch.sh <log>`, pid recorded in `flap-watch.pid`. It polls 20 packets every 20 s and, on ≥15% loss, fires a 5-way 60 s concurrent probe (nebula, tailscale, ICMP-to-last-hop-before-home, ICMP-to-far-box, ICMP-to-local-gw) DURING the episode. **Its trigger and parser were positive-controlled** (a black-hole target returns 100% → TRIGGER; a synthetic gap parses to the right run length), so its zero is a real zero. ⚠ It is a plain background process, not a unit — a suspend or reboot ends it, and the fault has not recurred in 12.5 h, so it may need re-launching.
 
 ### mosh's stated benefit was WRONG, and the correction is smaller than the claim
-- as-of: 2026-09-24
-- **Symptom + exact repro:** not a bug — a false claim that shipped in three places (PR body, commit message, source comment) and would have been acted on. Read `nix/pkgs/default.nix`'s mosh comment on `main` for the corrected wording.
-- **Observed (with values):** mosh does **not** open a UDP session first. It runs `ssh <host> mosh-server new`, parses the key and port out of **that ssh session**, and only then switches to UDP. So the TCP/SSH handshake — the exact thing described as failing with a banner-exchange timeout — is **unchanged** by installing mosh. `via: code`
-- **Ruled out — that mosh helps you *initiate* a session over a link failing during connect.** It cannot; the bootstrap is ssh. What it buys is keeping an **already-established** session alive across a drop, which is real but smaller. `via: code`
-- **Ruled out — that the benefit was ever demonstrated here.** mosh was never installed while a blackout was live, and no host runs `mosh-server`. The shipped comment labels it an inference for that reason. `via: measurement`
-- **Leading hypothesis:** for the 6.5–20 s blackouts measured on this path, plain ssh over TCP mostly *survives* — you get a frozen terminal, not a dropped session — so mosh's practical gain here is comfort rather than continuity. Untested.
-- **Next probe:** none needed for the claim; it is settled. If you want the benefit, do the two-line edit in `nix/pkgs/default.nix`'s comment on the target host and then `mosh zach@10.42.0.30` during a live episode.
+- 🔴 **EVICTED 2026-09-30 to `claudedocs/archive/handoff-laptop-airvpn-tunnel-2026-09-30.md`** — CLOSED: the claim was settled and corrected; the corrected wording lives in `nix/pkgs/default.nix`. Read it there before re-deriving anything; the eliminations it records still stand.
+
+### Mesh blackouts laptop↔home (UDP-only) — RECURRENCE CONFIRMED 2026-09-30
+- 🔴 **EVICTED 2026-09-30 to `claudedocs/archive/handoff-laptop-airvpn-tunnel-2026-09-30.md`** — superseded 2026-09-30 by the 9-hour dataset block below, which measures the same fault at 173 episodes instead of one. Read it there before re-deriving anything; the eliminations it records still stand.
+
+### 🔴 SUPERSEDES "only traffic to HOME dies" — the fault is ONE WIRE FLOW (laptop↔workbench), not the path to home
+- as-of: 2026-09-30
+- 🔴 **Retires the framing in "Mesh blackouts laptop↔home (UDP-only) — RECURRENCE CONFIRMED 2026-09-30" and in "THREE vantages put the fault on the PATH, not at either end".** Their *eliminations* stand (laptop link, home router/NAT, forward+return IP path — all still ruled out). What is refuted is the conclusion drawn from them: "only traffic to HOME dies" and "the fault is on the PATH". 🔴 **Their shared `Next probe` — "decide the permanent `ip rule` pin form vs a tailscale route exclusion" — is now a WRONG INSTRUCTION as written**, because it presumes the pin's target address is the right one. It is not; see below.
+- **Symptom + exact repro:** `bash <scratchpad>/probe2.sh` — warm-up 6 pkt to each target (discarded), then 100 pkt @0.5 s **concurrently** to four targets: workbench `10.42.0.30` (home), homelab gateway `10.42.0.10` (**also home**), Hetzner prod-gw `10.42.0.20` (not home), local default gw (control).
+- **Observed (with values), two rounds:**
+
+  | target | round A | round B |
+  |---|---|---|
+  | home-workbench `10.42.0.30` | 0% | **16%, one contiguous 16-pkt run (8 s)** |
+  | home-gateway `10.42.0.10` | 0% | **0%** |
+  | non-home Hetzner `10.42.0.20` | 0% | 0% |
+  | control local gw | 0% | 0% |
+
+  Two hosts on the **same home LAN**, reached over the **same overlay** across the **same internet path**, in the **same 50 s window**: one loses a contiguous 8-second run, the other is flawless. An earlier un-warmed run showed the same asymmetry (workbench 11.67%/run 14, gateway 0%). `via: measurement`
+- **Ruled out — "only traffic to HOME dies" / a bad middle segment on the path to home.** The homelab gateway IS at home and is 0% in the same window that the workbench loses 16%. A path fault common to the home location cannot be selective between two hosts behind it. `via: measurement`
+- **Observed — the mechanism, confirmed on the WORKBENCH, not inferred here.** `journalctl -u nebula@mesh` on `10.42.0.30`, last 24 h, counting the source address of `certName=zach-laptop` handshakes: **5 arrive from the laptop's TAILSCALE address (100.64/10), 1 from a public address.** So nebula-to-workbench is being routed into `tailscale0` and encapsulated inside the tailscale flow. `ip route get` confirms **both** `192.168.50.94` and `192.168.50.250` resolve `dev tailscale0 table 52`. `tailscale ping` to the workbench reports **`direct <endpoint>:41641`, 138 ms** — a single public UDP flow. `via: measurement`
+- **Leading hypothesis (fits every observation, one step still untested):** nebula's packets to the workbench ride inside the laptop's **direct tailscale UDP:41641 flow**; when that one flow stalls, both overlays stall *in the same second* because they are literally the same packets on the wire — which is what the watcher has been recording all along (identical loss %, identical run length, same second, on both overlays). The homelab gateway escaped because nebula **roamed it onto the public endpoint** on its own (journal: `Host roamed … newAddr=<home-public-ip>:38552`, certName=homelab-gateway), so it never traverses tailscale. ⚠ **Untested:** that removing the tailscale path for nebula actually clears the loss. That is next-step 1.
+- **Next probe:** apply a route exclusion for nebula's UDP:4242 only (fwmark → separate rule, so `kubectl`/LAN-over-tailscale survive), then re-run `probe2.sh` twice and confirm `home-workbench` joins `home-gateway` at 0%.
+
+### Lighthouse mesh addresses still 100% loss — unchanged, and NOT explained by the above
+- as-of: 2026-09-30
+- **Observed (with values):** `10.42.0.1` and `10.42.0.2` → **100% loss**; `10.42.0.10`, `10.42.0.20`, `10.42.0.30` → 0% in the same sweep. Unchanged from 2026-09-23. `via: measurement`
+- **Ruled out — that the wire-flow finding above accounts for it.** That block explains selective loss to the *workbench*; the lighthouses are 100%, permanently, and one of them is at Hetzner on the path measured clean. `via: measurement`
+- **Leading hypothesis:** unchanged and untested — likely ICMP handling on the lighthouse side rather than reachability, since discovery demonstrably works throughout (every data peer resolves and connects).
+- **Next probe:** from the far box (`ssh root@10.42.0.20`, works with `StrictHostKeyChecking=accept-new`), ping `10.42.0.1` and `10.42.0.2` — if they also fail from a host on a clean path, it is the lighthouses, not the laptop.
+
+### 🔴 RETRACTION — "nebula rides the tailscale subnet route, and that is the fault" is REFUTED (it was asserted earlier TODAY, in this same doc)
+- as-of: 2026-09-30
+- 🔴 **This retracts the causal claim in the block "SUPERSEDES 'only traffic to HOME dies' — the fault is ONE WIRE FLOW", committed in `a9bcf992` a few hours earlier.** That block's *measurements* stand. Its **mechanism does not**, and its `Next probe` — apply a UDP:4242 route exclusion and expect `home-workbench` to reach 0% — is now a **wrong instruction**: the experiment was run and the loss did not move.
+- **Symptom + exact repro:** `bash <scratchpad>/experiment.sh` — capture `tailscale debug prefs`, `sudo tailscale set --accept-routes=false`, settle 20 s, `probe2.sh` ×2, restore via an `EXIT` trap.
+- **Observed (with values):** with the subnet route **gone** (`ip route get 192.168.50.250` → `via 192.168.1.1 dev wlp170s0`, no `tailscale0`): round A all four targets 0%; **round B `home-workbench` 13%, one contiguous 13-pkt run**, `home-gateway` 0%, Hetzner 0%, control 0%. Identical in shape to the 16%/run-16 measured *with* the route present. `via: measurement`
+- **Ruled out — that the tailscale subnet route causes the loss.** Removing it changed nothing. `via: measurement`
+- 🔴 **Ruled out — that nebula's DATA path was ever using the LAN address.** The disproof is in the same run: nebula logged **no handshakes at all** during the window, yet stayed at 0–13% instead of 100%. Had its data path been sending to `192.168.50.250:4242`, deleting that route would have blackholed it entirely. It was already on the workbench's public endpoint. `via: measurement`
+- 🔴 **Ruled out — that the `from=` arrival address reports the data path.** It reports **handshake** packets only. "5 of 6 from `100.64/10`" was a true reading promoted to a claim it does not support; that promotion is what produced the refuted hypothesis. `via: measurement`
+- **Leading hypothesis:** NONE that is load-bearing. What survives is the *observation set*, which is now well constrained and still unexplained: (a) the workbench flaps and the homelab gateway does not, though both sit behind one home public IP — so it is **per-flow or per-port, not per-site and not per-destination-host**; (b) nebula and tailscale to the workbench lose **identically, to the second**, though they are separate flows to that same home IP; (c) every ICMP control (local gw, last hop before home, far box) is 0% throughout; (d) a third vantage reaches the workbench at 0% while the laptop cannot. CGNAT per-flow state eviction still fits (a), (c) and (d) — but (b) is what it does not explain, and (b) is the observation that keeps surviving.
+- **Next probe:** stop proposing remedies and characterise (b). The question is whether the nebula and tailscale flows to the workbench share a NAT binding — capture the laptop's actual source ports for both (needs root: `ss -unp` or `conntrack -L`, neither available to an agent here) and check whether the two flows die together because they share one mapping, or because something upstream drops both. Until (b) is explained, any "route around it" proposal is a guess — this session already shipped one and had to retract it inside an hour.
+
+### 🔴 THE CENTRAL FACT, now on a 9-hour dataset: the two overlays fail in LOCKSTEP, packet-for-packet, while ICMP on the same paths is clean
+- as-of: 2026-09-30
+- 🔴 **This is the observation every remedy proposed in this arc has failed to engage with, and it is now the best-evidenced thing in the document.** Both remedies proposed so far (the `ip rule` pin; the tailscale route exclusion) were aimed at mechanisms that would break the coupling — and the coupling survived both. **Do not propose another remedy before explaining this block.**
+- **Symptom + exact repro:** v3 watcher, 9 h unattended (`flap-watch3.sh`, pid `2309463`). On each ≥15% poll it fires a 60 s 5-way concurrent probe: nebula(UDP), tailscale(UDP), ICMP-local-gw, ICMP-last-hop-before-home, ICMP-far-box. Re-derive with the analysis one-liner in `How to verify`.
+- **Observed (with values), 2026-09-30 06:09Z→15:14Z:**
+  - **610 polls, 173 triggers (28.4% of polls).** `BADPARSE`: **0** — so the v2 defect that silently swallowed the worst polls is not operating.
+  - **169 episodes measured both overlays. In 167 (98.8%) the loss% AND the longest run were IDENTICAL.** The only two exceptions differ by a single packet with the *same* run length (`14.1667%` vs `15.0%`, run 15; `7.5%` vs `8.33333%`, run 7).
+  - **ICMP controls: 344 readings at 0%, 2 non-zero**, across the same episodes.
+  - **Worst episode: `2026-09-30T10:16:16Z` — 99.1667% loss, a contiguous 118-packet run = 59 SECONDS**, both overlays identical. Next worst 65% / 40 pkt, then 63.3% / 37 pkt.
+  - `via: measurement`
+- 🔴 **Ruled out — the "6.5–20 s blackout" size this doc has carried since 09-24.** The real distribution reaches **59 s**, and episodes fire on 28% of polls. Any plan sized against 6.5–20 s is sized against the wrong fault. `via: measurement`
+- **Ruled out — that the coupling is nebula riding tailscale.** See the retraction block: the subnet route was removed and the loss was unchanged. `via: measurement`
+- **Leading hypothesis:** NONE load-bearing, and the lockstep is why. Two *separate* UDP flows — different protocols, different local ports, different remote ports — to one destination host lose the *same packets* for the *same duration*, while ICMP to that host's own last hop stays at 0%. That is very hard to explain by anything per-flow, which is what the CGNAT story requires. It points instead at something that drops UDP to that destination wholesale for seconds at a time, and at nothing this laptop or this repo controls. ⚠ Explicitly untested.
+- **Next probe:** the discriminating question is whether the two flows share one NAT binding or are being dropped independently. Needs root on the laptop **during** an episode (the watcher's timestamps say when): `ss -unp` / `conntrack -L` for the two flows' source ports, and whether the mappings change across a blackout. Neither command is available to an agent here — operator-run.
+
+### Both nebula peers egress to ONE shared underlay endpoint — so the differing segment is NOT on the internet path
+- as-of: 2026-09-30
+- 🔴 **Reframes the arc: it puts the 09-24 third-vantage exoneration of the home side back in play.** Everything here assumed the two home peers are reached independently. They are not — both are dominated by the same remote endpoint, so the segment where they differ lies BEYOND it, inside the home network, not on the carrier path probed all week.
+- **Symptom + exact repro:** capture nebula's own LOCAL socket while driving exactly one peer; count OUTBOUND remote ports. 🔴 Filter on the local ephemeral port, NOT `:4242` (see gotcha).
+  ```bash
+  TD=$(nix-shell -p tcpdump --run 'command -v tcpdump'); P=51711   # re-derive: listen.port is 0
+  sudo sh -c "timeout 12 $TD -i wlp170s0 -n -l 'udp port $P' > /tmp/c.txt 2>/dev/null & \
+    sleep 1; ping -c 20 -i 0.4 -W 2 <peer> | tail -2; wait; \
+    grep -oP '\.$P > [0-9.]+\.\K[0-9]+(?=:)' /tmp/c.txt | sort | uniq -c | sort -rn"
+  ```
+- **Observed, 2026-09-30 ~15:50Z (both peers 0% loss at the time):** driving workbench `10.42.0.30` → **`:38552` ×27**, `:4242` ×4, `:40155` ×2. Driving gateway `10.42.0.10` → **`:38552` ×80**, `:49527` ×7, `:4242` ×4, `:40155` ×2. `:38552` dominates for BOTH. `via: measurement`
+- ⚠ **Not airtight:** the runs were not background-controlled (93 vs 33 outbound packets), so it is not *proven* the workbench's 20 pings rode `:38552` — only that it is the sole destination with the volume to contain them. Quiesce and subtract a no-ping baseline for a clean version.
+- **Ruled out — that nebula reaches peers on `:4242`.** `listen.port: 0` ⇒ ONE ephemeral local socket; each peer is reached at the address:port the lighthouse observed (NAT-mapped for a peer behind NAT). The only `:4242` destinations are the **two lighthouses** — the config's only public `static_host_map` entries (verified: 2, both port 4242). `via: measurement`
+- **Leading hypothesis — NOT adopted:** consistent with the workbench being reached *through* the gateway, making the failing segment a home-network hop. ⚠ NOT established: `:38552` was tied to the gateway by a 2026-09-29 21:53 journal line and NAT mappings change; that attribution was never re-derived.
+- 🔴 **What it still does not explain, and what has outlived every hypothesis here:** tailscale reaches the workbench **directly** (`tailscale ping` → `direct …:41641`), so a nebula-only relay hop cannot account for both overlays losing identical packets in the same second in 167 of 169 episodes. **Any next mechanism must predict the lockstep or it is not the mechanism.**
+- **Next probe, in order:** (1) **re-run the 09-24 third-vantage measurement** (far box → `10.42.0.30` concurrent with laptop → same, epochs recorded) — it is the only result exonerating the home side and it is six days old; (2) re-derive which peer `:38552` is *now*, from live state not a stale journal line; (3) only then capture during a live episode.
+
+### ✅ THE 09-24 THIRD-VANTAGE RESULT REPRODUCES under proper controls — the home side stays exonerated, and the fault is isolated to the laptop↔workbench PAIRING
+- as-of: 2026-09-30
+- 🔴 **This was the single result keeping the home network out of scope, it was six days old, and it now holds under a re-run with the two controls the original lacked.** Three suspects die on one round, each on a CONCURRENT control rather than a separate run.
+- **Symptom + exact repro:** `bash <scratchpad>/third-vantage.sh` — warm-up, then the far box (`root@10.42.0.20`) pings `10.42.0.30` for 140 pkt while the laptop pings `10.42.0.30` AND `10.42.0.10` for 100 pkt each, all concurrent; both clocks recorded. Up to 6 rounds, stopping on the first round where the laptop sees ≥10% loss — a quiet round proves nothing.
+- **Observed (with values), round 1, 2026-09-30:**
+
+  | vantage | result |
+  |---|---|
+  | laptop → workbench `10.42.0.30` | **13 lost / 100**, one contiguous 13-pkt run |
+  | laptop → gateway `10.42.0.10` (control) | **0 / 100** |
+  | far box → workbench `10.42.0.30` | **0 lost / 140** |
+
+  Windows from the packets' own timestamps: far `1790784753.6..1790784823.3` **contains** laptop `1790784759.8..1790784809.5`. The laptop's blackout was **seqs 40–52, epoch 1790784778.9 → 1790784785.9 (7.1 s)**; inside that exact window the far box delivered **14 of 14**. `via: measurement`
+- **Ruled out — the workbench HOST.** It answered a third vantage flawlessly during the precise 7.1 s it was dropping the laptop's packets. `via: measurement`
+- **Ruled out — the laptop's uplink / its link generally.** The gateway control was 0% in the same window, on the same wifi, same router, same ISP. `via: measurement`
+- **Ruled out — the home site as a whole.** The gateway is at that site and shares the dominant underlay endpoint; untouched. `via: measurement`
+- **Leading hypothesis:** the fault belongs to the laptop↔workbench pairing specifically — not to either endpoint, not to the site, not to the laptop's access network. Combined with the shared-underlay-endpoint block, the failing segment is whatever is unique to that pairing beyond the shared endpoint. ⚠ Untested.
+- 🔴 **STILL does not explain the lockstep**, which remains the fact no hypothesis in this arc has predicted: both overlays lose identical packets in the same second in 167 of 169 episodes. A candidate — that both overlays funnel through the homelab node to reach the workbench, since that node also hosts the tailscale subnet router — is contradicted by `tailscale ping` reporting the workbench as `direct`, and is recorded as a question, NOT a finding. Three hypotheses were promoted on this kind of resemblance today and all three were retracted.
+- **Next probe:** determine whether the laptop's nebula path to the workbench traverses the homelab node. From the far box, `ssh root@10.42.0.20` and re-run the pairing matrix with the gateway as the *source* if possible; or on the workbench, compare the arrival source address of laptop traffic against far-box traffic during an episode.
+
+### 🔴 QUALIFIES the third-vantage block above — the "far box" is the laptop's own nebula RELAY, so it is NOT an independent vantage for nebula
+- as-of: 2026-09-30
+- 🔴 **Landed and corrected the same day.** The block above concludes "the fault is isolated to the laptop↔workbench PAIRING". That conclusion is **not supported**, because it assumed `10.42.0.20` observes the workbench over a path independent of the laptop's. It does not.
+- **Observed (with values):** `ssh root@10.42.0.20` → `hostname: diffsona`, and `ip -4 -br addr` shows **both** `nebula1 10.42.0.20/24` **and** `nebula0 10.42.0.2/24` — one machine, two nebula interfaces. The laptop's RUNNING config (`/nix/store/…-nebula-config-mesh.yml`) carries `use_relays: true` with `10.42.0.2` in `relays:`. So the laptop's nebula traffic may transit the very box being used as the control. `via: measurement`
+- **What SURVIVES from the block above — unchanged:**
+  - **The workbench HOST is innocent.** It delivered 14/14 to the far box during the laptop's exact 7.1 s blackout. That is a fact about the host, independent of which path the far box took.
+  - **The laptop's uplink is innocent.** The `laptop → gateway` control read 0% in the same window and is measured wholly on the laptop side.
+- **What is WITHDRAWN:** "isolated to the laptop↔workbench pairing". If the laptop relays via `10.42.0.2`, then "far box → workbench is clean" localises the fault to the **laptop → far-box leg**, which is a different claim. The measurement as run cannot separate the two.
+- 🔴 **Ruled out — that this can be fixed by re-running the same probe.** The confound is structural: for nebula there is no third vantage, because the only candidate IS the relay. A genuinely independent arm must be **tailscale-only** (the far box has no tailscale installed at all) or a fourth host. `via: measurement`
+- **Leading hypothesis:** unchanged and still none. The lockstep remains unexplained and is now the only thing that has survived every round.
+- **Next probe:** run the arrival probe (below) — its workbench-side `(srcMAC, srcIP)` discriminator does not depend on any vantage being independent, which is exactly why it is the right instrument now.
+
+### Arrival probe — BUILT and controlled, NOT yet run to conclusion
+- as-of: 2026-09-30
+- **What it does:** each arm pings over its overlay with a distinct inner ICMP size, so each lands on a distinct *outer* UDP length; a workbench-side root sensor captures outer headers with `-e`, and the verdict is the **(srcMAC, srcIP)** each arm arrives with. Arm→length is **learned** by calibration, never assumed. Episode windows come from the packets' own `ping -D` stamps. Episode-triggered: a quiet run reports `NO EPISODE OBSERVED` and suppresses the table.
+- **Where:** `<scratchpad>/agent-arrival-probe/arrival-probe.sh` (laptop controller: `preflight|controls|sensor-cmd|calibrate|watch|analyze`) and `wb-sensor.sh` (workbench root sensor, operator-run). `./arrival-probe.sh sensor-cmd` prints the operator sequence.
+- **Controls that PASSED (with numbers):** capture positive — **60 packets at outer length 1141**, 0 dropped by kernel; capture negative — **0** hits for a never-sent size *in the same pcap* (the pair is the evidence, not either alone); a deliberately-wrong BPF → `captured=0`, labelled as the shape of an instrument failure; address-scrubber positive/negative and an IPv6 arm; `analyze` exercised on a real capture, on no-episodes, and on an empty pcap.
+- 🔴 **NOT validated, and this is the gap that matters:** `wb-sensor.sh` **has never run as root on the workbench** (no root there). It was validated as root on the far box with port overrides, plus an unprivileged dry-run of its discovery logic on the workbench. **No laptop-arm packet has ever been observed arriving at the workbench**, so the verdict path is unexercised. `TS_PORTS_OVERRIDE=41641` is the escape hatch if the `/proc/<pid>/fd` inode→port mapping fails.
+- **Reading it — outcomes that mean INSTRUMENT BROKEN, not a finding:** sensor reports nebula port `4242` (you are watching lighthouses); rotation self-check FAIL or a single pcap (capture overwriting itself); nonzero "packets dropped by kernel" (counts unreliable); `total captured packets: 0`; any arm `UNLEARNED` (that vantage never saw it — row skipped, never fabricated); `distinct (srcMAC,srcIP) tokens < 2` ("all arms identical" is unproven). `NO EPISODE OBSERVED` is a null about the run, not the network.
+- **The finding, if it comes:** a *learned* arm with ≥2 distinct sources present, showing the laptop arms on the homelab node's MAC while the far-box arm shows the router's.
+
+### ✅ REFUTED — "both overlays funnel through the homelab node" was the last standing candidate for the lockstep, and it is measured FALSE
+- as-of: 2026-09-30
+- 🔴 **Read this before proposing the homelab node / tailscale subnet-router as a shared hop. It was the only mechanism left that predicted the lockstep, and packet capture at the workbench kills it.**
+- **Symptom + exact repro:** run the arrival probe to capture at the workbench, then attribute INBOUND packets by source MAC directly from the pcap — **no privileges needed to read a pcap**:
+  ```bash
+  tcpdump -r <wb.pcap> -n -e "ip dst 192.168.50.250 and udp port <port>" \
+    | grep -oP '^\S+ \K[0-9a-f:]{17}' | sort | uniq -c | sort -rn
+  ```
+  MAC legend: sensor's own `sensor-meta-*.txt` (`ip neigh`) — `192.168.50.1` router, `192.168.50.94` homelab node.
+- **Observed (with values), 2026-09-30, capture of 94,788 packets, 0 dropped by kernel, 3 episodes inside it:**
+
+  | overlay, inbound to workbench | via router | via homelab node |
+  |---|---|---|
+  | tailscale `:41641` | **14,021** | **0** |
+  | nebula `:49527` | 628 | 61 |
+
+  Not ONE tailscale packet arrived via the homelab node. The 61 nebula packets from it are the gateway peer's own on-LAN traffic (`10.42.0.10` shares that LAN with the workbench). `via: measurement`
+- **Ruled out — that the laptop's two overlays share the homelab node as a hop.** Both arrive from the router, i.e. off the internet. `via: measurement`
+- **Leading hypothesis:** none. What survives is that both overlays share the ROUTER hop into the workbench — but the far box reaches the workbench through that same router and was clean during a laptop blackout, so "the router drops inbound UDP" does not fit either. **The lockstep is now unexplained with every candidate mechanism eliminated.**
+- **Next probe:** the surviving asymmetry is between two INTERNET SOURCES arriving via the same router — the laptop (loses) and the far box (clean). Capture at the workbench with both driving concurrently and compare their inbound source addresses and arrival gaps inside one episode window. The pcap tooling for this now exists and is controlled.
 
 ## Next steps (ranked)
-1. **Decide the PERMANENT form of the `ip rule` pin**, in whichever repo owns the laptop's nebula unit. Kernel-state-only today, so a reboot silently reverts it. 🔴 **Justify it on the ssh evidence (5/5 `rc=0` vs five consecutive `rc=255`), NOT on "it stopped the roaming"** — that claim did not survive re-measurement, and the instrument that could settle it is the one the pin disables. Costs: breaks `kubectl` against homelab while active; a tailscale route exclusion for UDP:4242 may be the better shape than a `to <node>` pin.
-   `forcing: incident`
-2. **Operator, ON THE LAN: refresh the workbench stable-path helper** — `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown`. Verify: `cmp -s /etc/nixos/i3blocks-scripts/airvpn-updown ~/workspace/devrc/scripts/airvpn-updown && echo SYNC`. ⚠ Not urgent — measured that no timer and no enabled unit can fire it — but pair it with the killswitch re-test, because toggling that tunnel with the stale copy while off-LAN is a plausible lockout.
-   `forcing: regression`
-3. Silence the gateway v6-remote noise — nebula config in `homelab-talos` (advertise v4 only from the gateway, or v6-listen on the laptop).
-   `forcing: none`
-4. Re-run `scripts/data/refresh-airvpn-servers` from a host with qBit-pod access and bake country_code the supported way (its `_from_github` fallback is DEAD).
-   `forcing: none`
-5. `i3status-airvpn`'s no-country-code fallback abbreviates the full country NAME (`"United States"[:2]` → `UN`). One-line fix if it ever shows again; with cc baked it should be unreachable.
-   `forcing: none`
+1. **Capture the two flows' NAT state during a live episode** (open investigation above) — operator-run, root, on the laptop; use the v3 watcher's episode timestamps to time it. This is DIAGNOSIS, not a remedy: this arc has now proposed two remedies and measurement killed both, and the lockstep observation engages neither.
+   forcing: incident — 173 episodes in 9 hours on 2026-09-30, worst 99.2% loss over a contiguous 59 s, both overlays identical in 98.8% of 169 episodes
+2. **Merge #1937 once its Tekton checks settle** — it carries the correction, the retraction and this dataset.
+   forcing: incident — the same live recurrence; leaving it open leaves a refuted mechanism standing as the doc's leading hypothesis
 
 ## Defects (batched)
-- talosctl client cert EXPIRED (`tls: expired certificate` against 192.168.50.94) — blocks node-level debugging from this host.
-- Workbench's stable-path `airvpn-updown` is stale (0 `uidrange` lines vs the repo's 3) — closed by next-step 2. General hazard: `/etc/nixos/i3blocks-scripts/` copies are NOT ship-managed nor covered by `drift-check.sh` rc 17.
-- `refresh-airvpn-servers --from-github` fallback rotted (gluetun moved to `servers.go`); the kube source still works from the workbench.
-- Nothing in the repo checks whether any fleet host has `programs.mosh.enable` set, so the shipped client stays inert with no signal. `drift-check.sh` is the natural home if that ever matters.
+- Workbench stale `airvpn-updown` copy — operator, ON THE LAN: `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown`, pair with killswitch re-test per `claude/skills/bar/reference/airvpn.md`.
+- Nebula gateway v6-remote noise (config in homelab-talos).
+- `refresh-airvpn-servers --from-github` fallback rotted; re-run from a qBit-pod host and bake country_code.
+- `i3status-airvpn` no-country-code fallback abbreviates full country NAME — one-line fix if ever seen again.
+- The flap watcher is still a plain background process, not a unit — v3 is pid 2309522 and a suspend/reboot ends it silently, as v2's predecessor did (3 days of coverage lost).
 
 ## Gotchas / decisions / dead-ends
 - 🔴 The laptop has NO systemd-resolved: NetworkManager `dns=none` + local dnsmasq (`127.0.0.1` → public resolver). wg-quick ABORTS on the conf's `DNS =` line (`resolvconf` fails, interface torn down in the same invocation — measured on first connect). The apply script now strips that line when resolved is absent. Do NOT re-add DNS to the laptop conf.
@@ -305,76 +334,81 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - ⚠ **`pgrep -c -f <pattern>` counts ITSELF.** It reported two `flap-watch.sh` processes; resolving PIDs and reading `/proc/<pid>/cwd` found one. An audit round filed the phantom as a leaked process. Resolve PIDs; never trust the count.
 - ⚠ **An auditor's concrete numbers need the same re-derivation as anyone's.** Round 0 on #1869 reported the workbench's nebula inbound as two groups; measured, it has three (`admin`, `homelab`, `lighthouse`) — the laptop also has three, differing only in the third (`workbench`). Its *point* was right and its *number* was not; the comment now carries no count at all.
 
-## How to verify
-🔴 **The arc's own closing-condition block is preserved verbatim below — do NOT replace it
-with the watcher checks; those answer a different question.** New this session, first:
-```bash
-# the flap watcher — still running, and did it catch an episode?
-ps -o pid=,etime= -p "$(cat <scratchpad>/flap-watch.pid)"
-rg -c 'quiet|TRIGGER' <scratchpad>/flap-watch.log
-rg -A8 'EPISODE' <scratchpad>/flap-watch.log      # empty = the fault has not recurred
-# loss to home, WITH the controls that make it interpretable (a bare number is not a reading):
-ping -c 120 -i 0.5 10.42.0.30   | tail -2         # home over nebula — UDP on the wire
-ping -c 120 -i 0.5 192.168.1.1  | tail -2         # own link — must be 0%
-# the pin (kernel state only; reverts on reboot):
-ip rule show | rg 5150
-# PR #1865 after taking main in (the red is INHERITED, fixed on main by 811fa910):
-gh pr checks 1865 --repo innovation-upstream/devrc
-```
+- (carried) 🔴 NO routable address of ours in this doc — `<home-public-ip>` / `<laptop-wan-ip>` / `<hetzner-lighthouse-ip>` placeholders or runtime vars only; it recurred once already within 24 h.
+- (carried) The flap watcher is a plain background process, NOT a unit — suspend/reboot kills it; the old one died silently after 3.5 days and lost 09-27→09-30 coverage. Re-check `ps -p $(cat flap-watch.pid)` at every resume.
+- The old watcher's loss% fields are GARBAGE (parse bug) — read only its `longest_run` and trigger lines; v2 is fixed.
+- (carried) A 20-s poll cannot size an episodic fault; the discriminator (120 pkt @0.5 s concurrent) is the reading.
+- (carried) Laptop has NO systemd-resolved — never re-add `DNS` to the laptop wg conf.
 
+- 🔴 **The v2 watcher under-reported the WORST episodes.** `loss_pct()` had no `tail -1`, so any ping output matching `% packet loss` twice returned a MULTI-LINE value; the caller's `[ "$p" -ge N ]` then errored and fell through to the else branch, logging it as **quiet**. Observed at `2026-09-30T06:00:29Z` as `poll: 100\n100% quiet` — a 100%-loss poll that never fired the discriminator. Reproduced with a `ping` shim (v2 → "quiet", v3 → TRIGGER).
+- ⚠ **The ping output that produced the double match was NOT reproducible** — black-hole, unreachable-network and no-stats shapes all match exactly once. v3 therefore fixes the CLASS (validate the value's shape, fail LOUD) rather than a guessed cause, and says so in its own comment. Do not write up a mechanism for it; none was established.
+- 🔴 **The first version of that fix contained an unreachable guard.** `grep -oP '(\d+(?:\.\d+)?)(?=% packet loss)'` on `1.2.3% packet loss` matches the **tail** `2.3` — a plausible-but-wrong number, so the `BADPARSE` branch could never run. The lookbehind `(?<![\d.])` is load-bearing; `BADPARSE` was then proved reachable. Also: the caller now compares with `awk`, because `[ -ge ]` is integer-only and the log already contains `10.8333%` readings it could never have evaluated.
+- 🔴 **A 4-way ping probe needs a WARM-UP or its first seconds read as a blackout.** An un-warmed run lost exactly seqs 1–8 — tunnel re-establishment, not an episode. `probe2.sh` sends 6 discarded packets to each target first. Any probe that starts cold will manufacture a leading blackout.
+- 🔴 **`pgrep -f 'flap-watch3.sh'` matched the Claude Code wrapper shell, not the watcher** — it wrote the wrong PID into `flap-watch.pid`. Resolve by scanning `pgrep -x bash` and reading `/proc/<pid>/cmdline`. This is the third time a `-f` pattern has misfired in this arc.
+- **The homelab gateway is clean because nebula ROAMED it to the public endpoint, not because of the pin** — the pin has been absent for three days and `10.42.0.10` measured 0% twice. Do not read its health as evidence the pin works.
+- **`ssh root@10.42.0.20` (far box, `diffsona`) works from the laptop over the mesh** — needs `-o StrictHostKeyChecking=accept-new` on first use. That is the third vantage; use it rather than re-deriving one.
+- ⚠ **A 120 s probe does not fit a 2-minute foreground command budget** — it gets truncated and silently yields short files. Keep concurrent probes at 100 pkt @0.5 s (50 s), or background them properly.
+
+- 🔴 **THIS SESSION SHIPPED A CONFIDENT MECHANISM AND RETRACTED IT WITHIN THE HOUR — the tell was there at write time and was read past.** The evidence was `from=` addresses on **handshake** log lines; the claim was about the **data path**. Those are different packet types, and nothing measured connected them. **A log field names the packets that produced it and nothing else.** The cheap disproof existed before the commit and cost one command: had nebula's data path used the LAN address, removing that route would have given 100% loss, not 13%.
+- 🔴 **`sudo -n -l` is worth reading BEFORE designing a remedy.** Two rounds of this arc specified `ip rule`/fwmark fixes that no agent on this host can apply — `ip` is not in the sudoers list, `tailscale` (entirely) is. Design to the privileges that exist, or hand the step over explicitly.
+- **A routing experiment must carry its own restore.** `experiment.sh` puts the revert in an `EXIT`/`INT`/`TERM` trap, so an interrupt or a probe failure still restores `accept-routes`. Verify the restore by re-reading `tailscale debug prefs` (`RouteAll`) **and** `ip route get`, not by assuming the command worked.
+- **`tailscale set` changes only the pref you name; `tailscale up` re-asserts a whole prefs set.** Use `set` for a single-pref experiment.
+- 🔴 **The v2 watcher under-reported the WORST episodes.** `loss_pct()` had no `tail -1`, so ping output matching `% packet loss` twice returned a MULTI-LINE value; `[ "$p" -ge N ]` then errored and fell to the else branch, logging it **quiet**. Seen at `2026-09-30T06:00:29Z` as `poll: 100\n100% quiet`. Reproduced with a `ping` shim. Old log "quiet" lines are not trustworthy at the high end.
+- ⚠ **The ping output producing that double match was NOT reproducible** — v3 fixes the CLASS (shape-validate, fail LOUD via `BADPARSE`) rather than a guessed cause. Do not write up a mechanism for it.
+- 🔴 **The first version of that fix contained an unreachable guard** — `1.2.3% packet loss` matched the tail `2.3`, so `BADPARSE` could never fire. The lookbehind `(?<![\d.])` is load-bearing; reachability was then proved.
+- 🔴 **`cairn-validate --validate <path>` fails a PRISTINE template with "missing or empty `scope:`"** when the file sits outside the store. Control it against `--template` output before believing a verdict about your own file; the authoritative check is the post-write `hygiene.sh validate --scope <scope>`.
+- ⚠ **`handoff_doc.py` reports `leakscan: NO SCANNER FOUND … PASS BY ABSENCE`** in devrc — it looks for `tests/leakscan.py`, which does not exist here. The real gate is `scripts/tests/test_no_public_ips.py`; run it yourself on a doc with a leak history.
+- 🔴 **`claim-work --release` is per-WORKTREE**: claiming from the base clone and releasing from elsewhere is refused. Release from the same checkout you claimed in.
+
+- 🔴 **A PID resolved immediately after `setsid` can be a transient — this arc recorded a dead one twice in one day.** `2309522` was written into two commits as "the running watcher"; the real process was `2309463` (`ppid=1`). Re-resolve from `/proc/<pid>/cmdline` at the moment you need it, and treat both the pid file and any number in this doc as a hint.
+- 🔴 **LET THE INSTRUMENT RUN BEFORE THEORISING — 9 hours of it changed the question.** Every hypothesis in this arc was built on single ad-hoc probes of 100–300 packets. The unattended dataset showed the blackouts reach **59 s** (not 6.5–20 s), fire on **28%** of polls, and couple the two overlays in **98.8%** of episodes. None of that was visible in the hand-run samples the remedies were designed against.
+- ⚠ **`grep -c TRIGGER` over the whole watcher log double-counts across watcher generations** — the log is appended across the v2→v3 handover. Slice from the `WATCHER HANDOVER` marker (`awk '/WATCHER HANDOVER/{f=1} f'`) before quoting any count.
+
+- 🔴 **NEBULA DOES NOT TALK TO PEERS ON `:4242` — filtering on it watches the LIGHTHOUSES.** `listen.port: 0` ⇒ one ephemeral local socket (`51711`); NATed peers are reached on their NAT-mapped port. A `udp port 4242` capture returns lighthouse keepalives while looking exactly like peer traffic. It produced a confident wrong reading: a conntrack flow `[ASSURED]` with a stable source port through a 75% episode was reported as "the peer's flow survived, the local stack is innocent" — it was a **lighthouse** flow; the peer's data path was never observed. **Filter on the LOCAL port.**
+- 🔴 **FIVE INSTRUMENT FAILURES IN ONE SESSION, EACH PRODUCING OUTPUT THAT LOOKED LIKE A FINDING.** (1) `pgrep -f` matched the agent's own wrapper shell → a dead PID in two commits. (2) A conntrack-timeout differential assumed idle flows decay; keepalives pin them near the 120 s max, so every peer read `NONE` — i.e. "all peers relayed". (3) `tcpdump -G` without `-w` is fatal, and with stderr to `/dev/null` it reported a clean-looking 0 packets. (4) A positive control tested `wc -l > 0` instead of "a packet matched", passing on a line tcpdump called `0 packets captured`. (5) The `:4242` filter. 🔴 **The pattern: every one was a ZERO or a UNIFORM result — a uniform result across all arms is the tell that the INSTRUMENT failed, not the system.** Never silence stderr on a capture tool; make a positive control assert the THING, never a proxy.
+- ⚠ **`tcpdump` arg errors fire BEFORE the permission check** — reaching "You don't have permission" proves the flags parsed. The FILTER cannot be validated that way (a malformed filter gives the same error), so filter correctness rests on the run's own positive control.
+- 🔴 **An outbound-port extractor must anchor on the LOCAL port** or it counts inbound replies as remotes: `> [0-9.]+\.\K[0-9]+` matched our own `51711` on reply lines. Use `\.<localport> > [0-9.]+\.\K[0-9]+`, and control it BOTH ways — reject the local port, and confirm a second genuine remote still counts.
+
+- 🔴 **VERIFY WINDOW CONTAINMENT FROM THE PACKETS' OWN TIMESTAMPS, not from a computed end time.** `third-vantage.sh` computed `F_END = F_START + count/2` and declared `NOT CONTAINED` on windows that plainly nest (`759..809` inside `753..823`) — instrument failure #6 of this session. The reliable derivation is `min`/`max` of the received packets' `ping -D` stamps on each side, which also lets you align the far box's packets against the laptop's blackout SECONDS rather than against the whole run. ⚠ This one failed SAFE — it refused a real result rather than manufacturing one — which is the direction a guard should fail.
+- ⚠ **A `nohup … &` launched from an agent Bash call dies when the call returns; `setsid` survives.** Cost one silently truncated measurement run here and one earlier in the session (a 120 s probe that produced short files).
+
+- 🔴 **`/etc/nebula/config.yaml` ON THE LAPTOP IS A DECOY — it says `port: 4242` and the running process does not use it.** The live config is a nix-store path with `listen.port: 0`, `use_relays: true`, `relays: [10.42.0.2]`; laptop mesh addr is `10.42.0.100`, local port currently `51711` (uid 991). Read the config the RUNNING unit was given (`systemctl cat nebula@mesh`), never the conventional path. This is the same family as the `:4242` filter error: the obvious answer is wrong and looks right.
+- 🔴 **`sudo -n -l <cmd>` IS A BROKEN INSTRUMENT ON THIS LAPTOP.** A `(ALL : ALL) SETENV: ALL` line makes it report EVERY command as permitted, so it cannot tell you what is passwordless. Read the NOPASSWD lines in bare `sudo -n -l` output, or actually invoke the command and see whether it prompts.
+- ⚠ **`pgrep -x tailscaled` finds nothing on NixOS** — the wrapper makes `comm` = `.tailscaled-wra`. Use the unit's `MainPID`.
+- ⚠ **`tcpdump -G` makes `-w` a strftime TEMPLATE**: `%03d` expands to day-of-month, so every rotation overwrites one file while tcpdump still reports packets captured. `-G`+`-W` also does not wrap — it STOPS, so the capture is bounded, not a ring. And tcpdump drops privileges after the first rotation file (`-Z root` segfaulted on 4.99.4 under `-G`; a mode-1777 output dir is the workaround).
+- ⚠ **The homelab node is Talos — no ssh, no node-side capture.** The workbench-side `(srcMAC, srcIP)` is the only available discriminator for which path laptop traffic took.
+
+- 🔴 **READING A PCAP NEEDS NO PRIVILEGES — capture is the only privileged half.** Three rounds were spent handing capture-and-analyse scripts to the operator when only the `tcpdump -i` step needed root; `tcpdump -r` on the pulled file is an ordinary user operation. Pull the pcap, analyse it locally, iterate freely.
+- 🔴 **An arrival analysis MUST filter by direction, or it counts the capture host's OWN EGRESS as arrivals.** The probe's table reported ~1,300–1,900 "arrivals" per episode whose source was `192.168.50.250` — the workbench itself. Add `ip dst <capture host>` to the filter.
+- 🔴 **A MAC address looks like an IPv6 address to an address scrubber.** The probe's own scrubber rewrote every `srcMAC` in its analysis output to an `ip6x:` token, destroying the primary discriminator, while the legend in the sensor meta file survived. If a scrubber is in the path, verify the field you are about to reason over is still readable.
+- ⚠ **Size-tagging arms by inner ICMP size worked for tailscale and NOT for nebula** (`LAP_NEB`/`FAR_NEB` both `UNLEARNED` — no distinct outer length appeared above the control slab). Do not assume a 1:1 inner→outer length mapping per overlay. The probe correctly refused to print rows for the unlearned arms rather than fabricate them.
+
+## How to verify
 ```bash
-# mesh stability after the fix (want 0% loss over 60 samples):
-ping -c 60 -i 1 10.42.0.30 | tail -1
-# ssh burst (want rc=0, no banner-exchange timeouts):
-for i in 1 2 3 4 5; do ssh -o ConnectTimeout=10 zach@10.42.0.30 'true'; echo rc=$?; sleep 2; done
-# lighthouse tunnels (want 0% loss — currently 100% from BOTH hosts):
-ping -c 5 -i 0.3 10.42.0.1; ping -c 5 -i 0.3 10.42.0.2
-# ship state (want both hosts at one sha):
-scripts/ship.sh
+S=/tmp/claude-1000/-home-zach-workspace-devrc/765865a3-5a34-4368-9c27-c442fd52106c/scratchpad
+for p in $(pgrep -x bash); do [ -r /proc/$p/cmdline ] && tr '\0' ' ' < /proc/$p/cmdline \
+  | grep -q flap-watch3 && ps -o pid=,etime= -p $p; done        # watcher alive
+awk '/WATCHER HANDOVER/{f=1} f' $S/flap-watch2.log > /tmp/v3.log  # v3's OWN record only
+grep -c 'poll:' /tmp/v3.log; grep -c TRIGGER /tmp/v3.log; grep -c BADPARSE /tmp/v3.log
+ip rule show | grep 5150        # ABSENT since the 2026-09-27 reboot
+sudo -n -l                      # `ip`/`nft` NOT granted — design remedies to this
 ```
-🔴 **THE BLOCK BELOW IS THE ARC'S OWN CLOSING CONDITION and was DELETED WHOLESALE by the
-mesh-flap rewrite** — **seven** command lines plus the killswitch escape hatch. This is that
-block restored from `1c7ad1b9`, **plus two additions** (the `HOME_PUB` assignment, and the
-`journalctl` line that makes closing-condition item 4 runnable, and the `HOME_PUB`
-placeholder guard) — a restoration, not a transcription. ⚠ An earlier wording said "plus
-two additions" and undercounted by one: the guard is executable and was not in the
-original, so a reader auditing this fence against `1c7ad1b9` would find a line the
-manifest did not account for. One address literal is replaced by a runtime lookup; `<home-public-ip>` was
-ALREADY a placeholder at `1c7ad1b9`, which is what #1853 did.
-🔴 **RUN IT ALL WITH THE TUNNEL UP, and substitute `HOME_PUB` first.** With the tunnel down
-*several* lines go vacuously green — but not all: `ip link show airvpn` fails outright, the
-split-tunnel probe returns `dev wlp170s0` instead of `dev airvpn table 51820`, and the pill
-read returns `up`=false. Those three are the ones that catch you.
+Lockstep check (the central fact): parse `/tmp/v3.log` for paired `nebula(`/`tailscale(` loss+run per episode and count exact matches — was 167/169 on 2026-09-30.
+## How to verify — CARRIED verbatim from the 09-24 doc (arc closing-condition)
+🔴 RUN IT ALL WITH THE TUNNEL UP, and substitute HOME_PUB first; with the tunnel down several lines go vacuously green (`ip link show airvpn` fails, split-tunnel probe returns `dev wlp170s0`, pill up=false — those three catch you).
 ```bash
 # tunnel + split-tunnel, with the tunnel UP:
-ip link show airvpn && ip rule | rg 500          # pin present: uidrange 991-991 lookup main
-HOME_PUB='<home-public-ip>'                      # set at run time; NEVER inline the value
-# Guard the mistake you will ACTUALLY make -- pasting this fence WITHOUT substituting.
-# 🔴 An earlier version of this guard was `: "${HOME_PUB:?...}"`, which fires only when the
-# variable is EMPTY. The block above never produces empty, so that guard was UNREACHABLE:
-# the unsubstituted paste walked straight past it into `ip route get '<home-public-ip>'`,
-# whose error is the SAME "any valid prefix is expected" the doc teaches means "you passed
-# a hostname". Match the placeholder, not the empty string.
-case "$HOME_PUB" in *'<'*) echo "substitute HOME_PUB first" >&2; return 2>/dev/null || exit 2;; esac
-ip route get "$HOME_PUB" uid 991                 # → via <gw> dev wlp170s0 (NOT airvpn)
-# the other half of the SPLIT: a non-LAN target must leave via the tunnel. `ip route get`
-# needs an ADDRESS, so resolve the resolver's NAME at run time rather than pinning a literal:
+ip link show airvpn && ip rule | grep 500         # pin present: uidrange 991-991 lookup main
+HOME_PUB='<home-public-ip>'                       # set at run time; NEVER inline the value
+case "$HOME_PUB" in *'<'*) echo "substitute HOME_PUB first" >&2; exit 2;; esac
+ip route get "$HOME_PUB" uid 991                  # → via <gw> dev wlp170s0 (NOT airvpn)
 ip route get "$(getent ahostsv4 one.one.one.one | awk '{print $1; exit}')" | head -1
-                                                 # → dev airvpn table 51820
+                                                  # → dev airvpn table 51820
 curl -s https://ipinfo.io/json | jq -r .country   # → US
 ssh zach@10.42.0.30 'echo nebula-ok'              # nebula path alive with tunnel up
-# pill (after ~60s post-connect) — this is closing-condition item 3:
 python3 -c "import json,os; d=json.load(open(os.path.expanduser('~/.cache/bar-status/airvpn.json'))); print(d['up'], d['verdict'], d['server'], d['country_code'])"
-# writer + timer:
 systemctl --user list-timers airvpn-status-poll.timer --no-pager | head -3
-# closing-condition item 4 — ONLY the IPv6-remote noise, no MTU/routing churn:
-SINCE='<up-time>'                                 # e.g. '2026-09-23 20:35'
-journalctl -u 'nebula@mesh' --since "$SINCE" | rg -c 'Failed to write outgoing packet|Failed to send handshake'
+# v6-remote noise only, no MTU/routing churn:
+journalctl -u 'nebula@mesh' --since '<up-time>' | grep -c 'Failed to write outgoing packet|Failed to send handshake'
 ```
-🔴 **Killswitch re-test protocol: `claude/skills/bar/reference/airvpn.md` (laptop section).**
-It is FAIL-CLOSED on this laptop's ONLY uplink. Instant bail that KEEPS the tunnel:
-`sudo nft delete table inet airvpn_ks`; full teardown:
-`sudo /etc/nixos/i3blocks-scripts/airvpn-sudo down`. ⚠ The original block's `python3 -c`
-passed a literal `~` to `open()`, which does not expand it — that line always raised
-`FileNotFoundError`. Fixed above with `os.path.expanduser`; it is a repair, not a
-transcription.
+🔴 Killswitch re-test protocol: `claude/skills/bar/reference/airvpn.md` (laptop section) — FAIL-CLOSED on this laptop's ONLY uplink. Instant bail keeping the tunnel: `sudo nft delete table inet airvpn_ks`; full teardown: `sudo /etc/nixos/i3blocks-scripts/airvpn-sudo down`.
