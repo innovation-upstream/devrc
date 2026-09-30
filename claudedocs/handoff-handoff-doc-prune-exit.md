@@ -28,51 +28,66 @@ delete path. This arc builds that path and fixes one false claim found on the wa
   ranked item 2) and the arc cannot close without it.
 
 ## State now
-- 🔴 **CLAUSE 2 IS WIRED AND IN FLIGHT: `innovation-upstream/devrc#1943`**, branch
-  `zach/size-ratchet-names-prune`, commit `7f762c8d`. SKILL.md step 5's `size-ratchet`
-  field now names `--prune <file> --prune-count <n>` as the FIRST remedy, states the rule
-  it serves (an over-budget doc may be UPDATED, not GROWN), says it COMBINES with the same
-  run, and falls back to the override. **The arc closes when #1943 merges** — nothing else
-  is outstanding on it.
-- 🔴 **RANKED ITEM 1'S PREMISE WAS STALE AND THE FORK DISSOLVED — NO `MAX_BYTES` RAISE WAS
-  NEEDED, AND NO OPERATOR DECISION WAS NEEDED EITHER.** The previous list framed this as
-  *raise the constant, or amend the closing condition*, on **87 B** of headroom measured at
-  `dc159b07`. `f1801784` (#1925, the doc relocation) shrank `SKILL.md` to **20,031 B**
-  afterwards, so the real headroom was **269 B** against **150 B** of wiring. The file lands
-  at **20,181 B** with **119 B** of slack. `MAX_BYTES` (21,200), `MIN_HEADROOM_BYTES` (900)
-  and the ratchet-DOWN ledger in `scripts/tests/test_handoff_skill_size.py` are UNTOUCHED —
-  the refuted trim in the old item 1 was never attempted.
-- **Clause 1 was already met and is met under either reading of the condition.** The Goal's
-  condition names **#1919**; `State now` credited **#1926**. Both are merged (`#1919`
-  `643fd0ef` 2026-09-29T19:51Z, `#1926` `ed947e1a` 2026-09-30T17:17Z), so the ambiguity has
-  no effect.
-- ⚠ **The closing condition embeds the RETRACTED line-scoped check.** It is frozen at round
-  1, so it is left as written — but `How to verify` step 5 is the authoritative form. The
-  naive check returns **1 whether or not the clause is open**; see the Gotchas already in
-  this doc, and the guard #1943 adds to stop it recurring.
-- **Two guards shipped with the wiring, because it was otherwise unwatched** — the same
-  shape as the stale refusal that started this arc. In
-  `scripts/tests/test_handoff_doc.py::TestSkillAndModuleAgree`:
-  `test_the_size_ratchet_remedy_routes_to_the_prune_EXIT_not_the_override` (the field must
-  name `hd.PRUNE_FLAG`, read OFF the module so a flag rename reds the skill, and must name
-  it BEFORE the override) and
-  `test_the_size_ratchet_locator_reads_a_FIELD_not_the_whole_line` (the negative control).
-- **CI: all four `tekton/devrc-*` statuses REGISTERED and PENDING** at `19:32:2xZ` on
-  `7f762c8d`. 🔴 **NOT verified in CI.** Everything below was measured on the dev-host
-  devShell tier only; the sandbox `nix build` tier is still unverified for this branch, as
-  it was for #1926.
-- **Every local measurement, six suites: `887 passed`** = the 885 baseline population +
-  these 2 guards. Clean accounting, no test displaced.
-- 🔴 **No `clawgate-task:` field**: `clawgate_handoff.sh resolve` exited **5** (NOTHING
-  RESOLVED) again this session. An unknown session id answers 200 with an empty array, so
-  that zero cannot distinguish "touched no task" from "wrong id". **Not a clean bill of
-  health.**
-- **The claim `handoff-doc-prune-exit-1` is HELD** (`claim-work`, host nixos) while #1943 is
-  open. Release it on merge: `claim-work --release handoff-doc-prune-exit-1`.
-- **Worktree `/tmp/wt-prune-exit-clause2`** is retained on branch
-  `zach/size-ratchet-names-prune` until CI settles. `git -C /home/zach/workspace/devrc
-  worktree remove /tmp/wt-prune-exit-clause2` after merge — 🔴 the EXACT path, never a glob.
-- **`jev-ui-demo#14` (the eviction) is still OPEN**, untouched this session.
+- 🔴 **THE ARC IS CLOSED. VERDICT: ADDRESSED.** `devrc#1943` merged as **`022da5e0`** (squash,
+  2026-09-30T22:49:24Z). Clause 1 was already met; clause 2 now returns **1** where it returned
+  0 all session. Verified by CONTENT on `origin/main`, never by ancestry — a squash makes
+  `merge-base --is-ancestor` false forever.
+- 🔴 **AND VERIFIED AT THE CONSUMER, WHICH THE CLOSING CONDITION CANNOT SEE.** `~/.claude/skills`
+  is a `home.file` **store copy** (`nix/home.nix:1427`), so merging changed nothing an executor
+  reads. `bash scripts/ship.sh --no-remote` converged this host; the before/after pair is the
+  evidence, not the exit code:
+
+  | | pre-switch | post-switch |
+  |---|---|---|
+  | store path | `…qvxnx808jrby…` | **`…w3y3bhhv6g4w…`** |
+  | bytes | 20,031 | **20,222** |
+  | sha256 | `a12ceaf80c9570a7` | **`5d3fa0266a1b78f2`** |
+  | field names `--prune` | **0** | **1** |
+
+- ⚠ **THE LAPTOP IS DELIBERATELY UN-SWITCHED** — `--no-remote` was chosen because ship.sh's
+  remote leg fails on this box (exit 255, *"NO candidate address answered"*) and prints a
+  per-host `✅ VERIFIED … + switched` BEFORE the line saying agreement was never compared. The
+  run's own summary says it: *"1 host (local=workbench); cross-host agreement NOT COMPARED."*
+  That host still serves the override-only field. See ranked item 2.
+- ⚠ **CARRIED FORWARD — THE FROZEN `Goal` ABOVE STILL EMBEDS THE RETRACTED CHECK, AND IT IS
+  WRONG TWICE OVER.** Its closing-condition line spells `grep -c 'prune'` against the
+  `size-ratchet` LINE. That is (a) line-scoped, so it returns 1 regardless — step 5 is one
+  physical line whose trailing pointer names `--prune` — and (b) prefix-blind, so it returns 1
+  even on a field naming only `--prune-count`, which the tool refuses. The condition is frozen at
+  round 1 and is left as written; **`How to verify` step 1 is the authoritative form.** The arc
+  graded ADDRESSED against that corrected check, not against the frozen text.
+- ⚠ **CARRIED FORWARD — the `Goal` names `#1919` while `State now` credited `#1926`; both are
+  merged** (`#1919` `643fd0ef` 2026-09-29T19:51Z, `#1926` `ed947e1a` 2026-09-30T17:17Z), so
+  clause 1 holds under either reading and the ambiguity never had an effect. Recorded so a future
+  reader of the frozen Goal does not go looking for an unmerged #1919.
+- 🔴 **NO `MAX_BYTES` RAISE HAPPENED, AND THE FORK THIS DOC BLOCKED ON WAS NEVER REAL.** The
+  previous ranked item 1 was carried as an operator decision — raise the constant or amend the
+  closing condition — on **87 B** of headroom measured at `dc159b07`. `f1801784` had already
+  shrunk `SKILL.md` to 20,031 B, leaving **269 B** against **150 B** of wiring. `MAX_BYTES`
+  (21,200) and `MIN_HEADROOM_BYTES` (900) are untouched on `origin/main`. Final size **20,222 B**,
+  **78 B** of slack to the enforced 20,300 — and that is tight: the owning module sizes a real
+  edit at ~486 B, so the next content edit to `SKILL.md` reds the headroom test and must evict
+  first.
+- **The ladder ran FOUR rounds (0–3) and was STOPPED BY THE ATTRIBUTION GATE, not by a clean
+  round.** `audit-dispatch.py --round 4` exits **5**: rounds 2 and 3 both changed zero payload
+  lines, so the ladder was auditing scaffolding it had written itself. Ending there is the
+  gate's stated correct outcome.
+- 🔴 **NINE FINDINGS ACROSS THE ARC, EVERY ONE A FALSE CLAIM IN MY OWN PROSE, ZERO BEHAVIOUR
+  DEFECTS.** Rounds 0–3 added: a wrong provenance sha in three places, a vacuous assertion, a
+  fresh byte figure written while deleting a stale one, a docstring crediting the wrong
+  assertion (four consecutive times), a commit message claiming a fix landed in the PR body when
+  it had not, and an evidence record whose two cited mutants included one that was already red.
+- **Both CI tiers green at the merged head.** Four `tekton/devrc-*` statuses `success` at
+  `22:48:27–29Z` against a `22:29:17Z` commit (so not a stale rollup), and round 3 independently
+  ran the merge-gating sandbox tier: `SCOPE: FULL (30 of 30 hermetic targets)`, `RESULT: PASS`.
+- **Six suites: 888 passed** (the 885 baseline + three guards). The six are named in
+  `How to verify`; a different plausible six gives 1,021.
+- **Claim `handoff-doc-prune-exit-1` RELEASED. Worktree removed** (exact path). The branch was
+  auto-deleted on merge. Base clone is on `main` at `022da5e0`; its two untracked
+  `claudedocs/scope-chief-*` files predate this session and are not mine.
+- 🔴 **No `clawgate-task:` field**: `clawgate_handoff.sh resolve` exited **5** again. An unknown
+  session id answers 200 with an empty array, so that zero cannot distinguish "touched no task"
+  from "wrong id". **Not a clean bill of health.**
 
 ## Open investigations — live diagnosis state
 
@@ -110,38 +125,38 @@ delete path. This arc builds that path and fixes one false claim found on the wa
   reading of "main is green" is currently wrong.
 
 ## Next steps (ranked)
-1. **Merge `devrc#1943` once its four statuses are terminal, then close the arc.** This is
-   the ONLY thing between the arc and CLOSED. On merge: run `How to verify` step 5 (it must
-   return **1**; it returns 0 today), release the claim, remove the worktree. 🔴 **Do not
-   grade the merge by ancestry** — a squash makes `merge-base --is-ancestor` false forever;
-   check by CONTENT plus `gh pr view --json mergedAt,mergeCommit`. 🔴 **Read the four
-   statuses SHA-PINNED** (`gh api repos/.../commits/$SHA/status`) — `gh pr checks` re-resolves
-   the head at call time and can return the PREVIOUS commit's green rollup. Files:
-   `claude/skills/handoff/SKILL.md`, `scripts/tests/test_handoff_doc.py`.
-    forcing: none
-2. **Decide `jev-ui-demo`'s doc budget, then close `ZacxDev/jev-ui-demo#14`.** Unchanged and
-   uninvestigated this session. Round 0 of that PR found `handoff_budget.GRANDFATHERED` holds
-   **71 foreign entries** at allowances up to **425,984 B**, and that doc is bound by the bare
-   65,536 **only because `jev-ui-demo` is not in `handoff_index.REPO_ENV_HANDLES`** — so it was
-   never in the population that block was measured over. One ledger line would have been the
-   precedented treatment and would have made #14 unnecessary.
-   `IN FLIGHT: ZacxDev/jev-ui-demo#14`. Files: `scripts/lib/handoff_budget.py`,
+1. **Decide `jev-ui-demo`'s doc budget, then close `ZacxDev/jev-ui-demo#14`.** Untouched by this
+   session and the only substantive item left. Round 0 of that PR found
+   `handoff_budget.GRANDFATHERED` holds **71 foreign entries** at allowances up to **425,984 B**,
+   and that doc is bound by the bare 65,536 **only because `jev-ui-demo` is not in
+   `handoff_index.REPO_ENV_HANDLES`** — so it was never in the population that block was measured
+   over. One ledger line would have been the precedented treatment and would have made #14
+   unnecessary. `IN FLIGHT: ZacxDev/jev-ui-demo#14`. Files: `scripts/lib/handoff_budget.py`,
    `scripts/lib/handoff_index.py`.
+    forcing: none
+2. **Converge the laptop, or accept that it serves the old skill.** Closing condition, runnable
+   on that host: `tr '·' '\n' < ~/.claude/skills/handoff/SKILL.md | grep -F '`size-ratchet`' |
+   grep -cE -- '--prune($|[^-[:alnum:]])'` returns **1**. 🔴 A plain `ship.sh` run will NOT do it
+   — its remote leg exits 255 here with *"NO candidate address answered"* while the same probe
+   command succeeds standalone (cause unmeasured; see the `scripts` entry in the cairn store).
+   Either pin `REMOTE_SSH` or run `ship.sh --no-remote` ON that host. Files: `scripts/ship.sh`.
     forcing: none
 
 ## Defects (batched)
-- **`scripts/browser-bridge/SKILL.md` has 18 B of headroom** (12,020 / 12,038) and blew its budget
-  once on 2026-09-29, reddening two unrelated PRs for ~1 h. Moved here from the ranked list: an
-  audit-style finding is a defect, not a rank.
+- **`scripts/tests/test_handoff_doc.py:11769` says "SKILL.md is at ~25 B of headroom"** in the
+  present tense against a real 978 B under the hard ceiling / 78 B under the enforced budget.
+  Pre-existing, out of every audited range, untouched by #1943 — recorded here rather than filed,
+  because it is a one-line prose fix with no owner and minting an object for it would be the
+  object-leak this repo's rule 11 forbids. It is the same claim-with-a-shelf-life class the whole
+  arc is about, surviving in the same file.
+- **`field.index("--override-size-ratchet")` takes the FIRST occurrence**, so a correctly-routed
+  field that names the override early in a warning reds. Pre-existing semantics, accepted and
+  noted at the site; no positional guard can distinguish it from a genuine misroute.
+- **`scripts/browser-bridge/SKILL.md` has 18 B of headroom** (12,020 / 12,038) and blew its
+  budget once on 2026-09-29, reddening two unrelated PRs for ~1 h.
 - **No pre-push hook is installed in this clone** — `core.hooksPath` unset, only
-  `prepare-commit-msg`. devrc's documented synchronous gate has not run on any push from here.
-- **`scripts/gate.sh` cannot print PASS off a scoped run** (exit 91) — no tier verdict for any
-  round of #1926. In-cluster CI is the gate that actually ran.
-- **The sandbox `nix build` tier was never verified for #1926** — rounds 2 and 3 both killed it
-  unfinished rather than leak load. Every green on that PR is the dev-host pytest tier.
-- 🔴 **#1926's payload is now comment-only for two consecutive rounds** — r2 25 payload / 0
-  executable, r3 6 / 0, against 229 and 75 scaffolding lines. The attribution gate cannot fire
-  (the range carries executable scaffolding), but that is the shape it exists to catch.
+  `prepare-commit-msg`.
+- **`scripts/gate.sh` cannot print PASS off a scoped run** (exit 91).
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **devrc's tests REQUIRE its devShell, and the wrong python fails in two different lying
@@ -408,41 +423,124 @@ delete path. This arc builds that path and fixes one false claim found on the wa
   on every edit to the file and no test watches it — the same claim-with-a-shelf-life class as the
   refusal that opened the arc, sitting in the file that guards against it.
 
+- 🔴 **ONE PREFIX RELATION DEFEATED THREE GUARDS IN SUCCESSION, AND EACH FIX LOOKED COMPLETE.**
+  `--prune` is a **prefix of** `--prune-count`, and the module requires the PAIR (`parse_args`
+  exits `EXIT_USAGE` on one alone). So: (a) `assert PRUNE_FLAG in field` passes a field naming
+  only `--prune-count <n>` — measured, deleting `--prune-count` left the module GREEN at **639
+  passed**; (b) adding `assert PRUNE_COUNT_FLAG in field` still passes the MIRROR case, because
+  `--prune` is a substring of the longer flag; (c) with presence finally closed by
+  `rf"{flag}(?![-\w])"`, the ORDERING check was still `field.index(hd.PRUNE_FLAG)` — and a field
+  naming `--prune-count` before the override with `--prune` only INSIDE the override clause gives
+  index 72 < 130, real token at 237, **639 passed, rc 0**, executor routed to the override. And
+  (d) the arc's own closing-condition grep had it too: `grep -c -- '--prune'` returns **1** on
+  that same refused field. **Four sites, one root cause, and each fix was verified by a mutation
+  in only ONE direction.** The lesson is the mirror: when a token is a prefix of another, every
+  test of it needs BOTH deletion directions and a right-hand boundary — in the assertion, in the
+  position lookup, and in the shell check.
+- 🔴 **FOUR CONSECUTIVE VERSIONS OF ONE DOCSTRING MIS-ATTRIBUTED ITS OWN ASSERTIONS. THE CURE WAS
+  A GUARD, NOT A FIFTH REWRITE.** Each version was written carefully by a round fixing the
+  previous one, and each was measured false by the next: "three assertions" against six; a credit
+  given to an assertion that cannot execute for the shape it named; an ordinal pointing at a live
+  assertion as if deleted. `test_this_controls_docstring_numbering_matches_its_own_assertions`
+  now walks the AST and fails when the docstring's stated count or its `1..N` ordinals disagree
+  with the code. 🔴 **It went red on its FIRST run** — my own edit had left two intro sentences
+  ("SIX assertions" above "FIVE assertions") and it read the stale one. **A count in prose is a
+  claim; make it a checked one.** Keep such a guard deliberately NARROW (count and ordinals, not
+  semantic attribution) or it becomes the too-wide docstring it exists to prevent.
+- 🔴 **A GUARD CAN BE DOMINATED — NO REACHABLE CASE OF ITS OWN — AND FOUR ROUNDS WILL INVENT
+  REASONS TO KEEP IT.** The locator's length bound was credited with catching a
+  field-START-to-END-OF-LINE locator "which drags in no neighbour". Measured: `size-ratchet` sits
+  at offset 293 on step 5's line and `leak-refused` at 615, so that shape is 1,186 chars and
+  **contains the neighbour** — the scope control fires, not the bound. Reaching it needed a field
+  starting with `size-ratchet`, excluding `leak-refused`, over 600 chars, against a
+  field-to-neighbour span of 322. **Deleted, with all four dead rationales recorded at the site**,
+  per RULES: if a guard has lost its reason, write that it has none — do not go looking for a
+  better one. Verified after removal: all three locator shapes still red.
+- 🔴 **A MUTANT THAT WAS ALREADY RED AT THE PRE-FIX TIP IS NOT EVIDENCE FOR THE FIX.** A commit of
+  mine cited two shapes as proof of an ordering fix; one of them reded at the base too, so it
+  discriminated nothing, and the shape that actually proved the new half (`--prune` before the
+  override, `--prune-count` after — 2 passed at base, 1 failed at HEAD) was in neither the commit
+  nor the PR body. **The property was guarded; the written evidence did not contain the case that
+  proved it.** Check each cited mutant against the BASE before listing it as a control.
+- 🔴 **A DEPLOY IS NOT THE CONSUMER, AND `readlink -f` IS THE ARBITER.** The closing condition
+  greps `origin/main`, so it closes *"the repo says X"*, never *"an executor reads X"*.
+  `~/.claude/skills/handoff/SKILL.md` resolves into `/nix/store/…-devrc-claude-skills/`, a
+  `home.file` COPY — so the merged fix was invisible to every executor until a `home-manager
+  switch`. **Record the store path, byte count and sha BEFORE the switch**; "switch exited 0" is
+  a claim about the switch. ⚠ And read ship.sh's SUMMARY line, not its per-host ticks: the ticks
+  print `✅ VERIFIED … + switched` before the line that says cross-host agreement was never
+  compared.
+- 🔴 **`audit-dispatch.py` RESOLVES BOTH THE REPO AND ITS GIT FROM CWD, AND THIS DIRECTORY IS A
+  DISPATCH HUB.** Run from `datapacket-talos` against a devrc PR it fails
+  `Could not resolve to a PullRequest` (fixed by `--repo owner/name`) — and even WITH `--repo` it
+  cannot resolve the PR's shas, so the payload reading degrades to **`PAYLOAD NOT VERIFIED`** and
+  the attribution gate silently falls back to the count you typed. **Assemble from a checkout of
+  the target repo** (a worktree is fine) whenever the payload figure is load-bearing. Same class
+  as this repo's gotcha #20.
+- ⚠ **A `round=0` `audit-claims` block is REFUSED by design** — round 0 fixes nothing, so
+  anchoring a delta on it would attribute the whole change to a round that changed no code. Round
+  0's verdict goes in a PR comment as prose, and its **dispositions ride the first FIXING round's
+  block** (`--dispositions D1=…,D2=…`). ⚠ Commas inside a disposition REASON are parsed as token
+  separators — the tail is reported as an unreadable token in every later brief. Write the reason
+  without commas.
+- ⚠ **The attribution gate fires on TWO CONSECUTIVE payload-zero rounds and exits 5** — a
+  mechanical stop, not a judgement, and it is the correct end for a ladder whose rounds are
+  fixing only the scaffolding earlier rounds wrote. Watch it fire rather than asserting the
+  condition is met: this session's rounds 2 and 3 were both payload-zero and the refusal printed
+  its own reasoning, citing two measured precedents where the condition was met *and stated in
+  writing* and the ladder ran nine and twenty-one more rounds anyway.
+- ⚠ **`cairn-ops/write.sh append` BREAKS ITS OWN POST-WRITE CHECK ON A LARGE `--text`.** A 1,926
+  char bullet (cap 2,000) appended fine, then verification printed
+  `common.sh: line 131: .../sed: Argument list too long` and `NOTHING WAS CHECKED … exit 22`,
+  reported as *the write LANDED but is UNCONFIRMED*. The store was fine — `cairn routes` resolves
+  the scope and a direct `cairn validate --scope devrc` exits 0 with `36 of 36 entry file(s)
+  parse`. Follow the protocol anyway (do NOT retry the append); confirm by reading the entry back
+  and validating directly.
+- ⚠ **`… | tail -N; echo rc=$?` reports `tail`'s status.** A wrapper exiting 22 printed `rc=0`
+  this session. Capture the status before piping — gotcha #8, hit while reading a tool's verdict.
+- ⚠ **A `grep -F` pattern with BACKSLASH-ESCAPED backticks inside single quotes matches nothing**,
+  and the zero reads as a regression. `grep -F '\`size-ratchet\`'` returned 0 on a file that
+  contained it. Use `cmp`/`sha256sum` when the question is "is this file the bytes I meant".
+
 ## How to verify
 ```bash
 D=/home/zach/workspace/devrc
-# 1. THE ARC'S ONLY OPEN CLAUSE. Returns 0 while open, 1 once #1943 merges.
-#    🔴 SPLIT ON `·` FIRST. SKILL.md step 5 is ONE physical line holding every status, and
-#    its trailing pointer names `--prune` — so a line-scoped grep returns 1 EITHER WAY. That
-#    false positive is the form embedded in the frozen closing condition; this is the real one.
+# 1. THE ARC'S CLOSING CONDITION — 1 = closed. 🔴 BOTH corrections are load-bearing:
+#    SPLIT on `·` first (step 5 is one physical line whose trailing pointer names --prune, so a
+#    line-scoped grep returns 1 either way), AND match a right-hand boundary (--prune is a PREFIX
+#    of --prune-count, so a bare grep returns 1 on a field naming only the longer flag, which the
+#    tool REFUSES). The originally-registered check had BOTH defects.
 git -C $D show origin/main:claude/skills/handoff/SKILL.md \
-  | tr '·' '\n' | grep -F '`size-ratchet`' | grep -c -- '--prune'
-# 2. the wiring is GUARDED, not just present — both names must exist on origin/main
-git -C $D show origin/main:scripts/tests/test_handoff_doc.py \
-  | grep -c 'test_the_size_ratchet_remedy_routes_to_the_prune_EXIT_not_the_override'   # 1
-git -C $D show origin/main:scripts/tests/test_handoff_doc.py \
-  | grep -c 'test_the_size_ratchet_locator_reads_a_FIELD_not_the_whole_line'           # 1
-# 3. the byte claim — no MAX_BYTES raise happened
-git -C $D show origin/main:claude/skills/handoff/SKILL.md | wc -c                      # 20181
+  | tr '·' '\n' | grep -F '`size-ratchet`' | grep -cE -- '--prune($|[^-[:alnum:]])'   # 1
+# 2. 🔴 THE CONSUMER — what an executor actually reads. Distinct from (1) and NOT implied by it.
+readlink -f ~/.claude/skills/handoff/SKILL.md          # /nix/store/…-devrc-claude-skills/…
+tr '·' '\n' < ~/.claude/skills/handoff/SKILL.md | grep -F '`size-ratchet`' \
+  | grep -cE -- '--prune($|[^-[:alnum:]])'             # 1  (0 ⇒ this host needs a switch)
+# 3. the three guards reached main
+git -C $D show origin/main:scripts/tests/test_handoff_doc.py | grep -c \
+  -e 'test_the_size_ratchet_remedy_routes_to_the_prune_EXIT_not_the_override' \
+  -e 'test_the_size_ratchet_locator_reads_a_FIELD_not_the_whole_line' \
+  -e 'test_this_controls_docstring_numbering_matches_its_own_assertions'
+# 4. no raise happened
 git -C $D show origin/main:scripts/tests/test_handoff_skill_size.py \
-  | grep -E '^(MAX_BYTES|MIN_HEADROOM_BYTES) ='                                        # 21_200 / 900
-# 4. the suites — EXACTLY these six sum to 887 (885 baseline + the 2 new guards)
+  | grep -E '^(MAX_BYTES|MIN_HEADROOM_BYTES) ='        # 21_200 / 900
+git -C $D show origin/main:claude/skills/handoff/SKILL.md | wc -c   # 20222 (78 B slack)
+# 5. the suites — EXACTLY these six sum to 888; a different plausible six gives 1,021
 nix develop "$D" --command bash -c "cd $D && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
   scripts/tests/test_handoff_doc.py scripts/tests/test_handoff_skill_size.py \
   scripts/tests/test_skill_audit.py scripts/tests/test_run_tests_targets.py \
   scripts/tests/test_no_public_ips.py scripts/tests/test_doc_path_rot.py -q"
-# 5. the guards are not vacuous. In a worktree, revert ONE at a time — each is 1 failed/1 passed:
-#      SKILL.md's `size-ratchet` field -> its base text  (expect: REMEDY test red, control GREEN)
-#      `--prune` moved AFTER the override               (expect: the ORDERING assert red, alone)
-#      `doc.split("·")` -> `doc.splitlines()` in
-#      `_size_ratchet_field`                            (expect: CONTROL red, REMEDY test GREEN)
-#    🔴 the third is the one that matters: it is the shipped false positive, and the remedy
-#    test cannot see it.
-# 6. CI, SHA-PINNED — `gh pr checks` re-resolves the head and can serve the PREVIOUS commit.
-SHA=$(gh pr view 1943 --repo innovation-upstream/devrc --json headRefOid --jq .headRefOid)
-gh api "repos/innovation-upstream/devrc/commits/$SHA/status" \
-  --jq '.state, ([.statuses[] | "\(.context) \(.state) \(.updated_at)"] | .[])'   # expect 4, all success
+# 6. the guards are not vacuous — in a worktree, revert ONE at a time (each 1 failed / 1 passed):
+#      drop `--prune-count <n>` from the field        -> remedy RED   (was 639 passed)
+#      drop `--prune`, keep `--prune-count`           -> remedy RED   (was 2 passed)
+#      `--prune` only INSIDE the override clause      -> ordering RED (was 639 passed)
+#      locator -> doc.splitlines()                    -> control RED
+#      docstring count FIVE -> FOUR                   -> numbering guard RED
+#      add an assertion, leave the count              -> numbering guard RED
+#      drop the whole override clause                 -> five-site WHO_MAY pin RED
+# 7. the ladder is over, mechanically — expect exit 5, "THE ATTRIBUTION GATE HAS FIRED"
+(cd $D && python3 scripts/audit-dispatch.py 1943 --repo innovation-upstream/devrc --round 4)
 ```
-🔴 **Step 1 returning 0 is the arc still open.** Step 5 is the one that matters — a green
-suite proved nothing about this class for five rounds; watching each guard red for its OWN
-reason is what shows the wiring is watched rather than merely written.
+🔴 **(1) and (2) are different claims and (1) does not imply (2).** `~/.claude/skills` is a
+`home.file` store copy, so `origin/main` can say the right thing while every executor on a host
+reads the old field. Run both, per host.
