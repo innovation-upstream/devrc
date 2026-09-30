@@ -22,18 +22,22 @@ they had accumulated in one document and pushed it to its 65,536 B ceiling.
   merely coexists with the lockstep does NOT satisfy this line.
 
 ## State now
-- Split from the tunnel arc at devrc `37cca5b7`; no code changes, measurement only.
+- Split out of the tunnel arc and merged to `main` as `ad437b54` (PR #1941). The tunnel arc is CLOSED; this one is not.
 - Watcher: **flap-watch v3, pid `2309463`** (`ppid=1`). Resolve from `/proc/<pid>/cmdline`, never `pgrep -f`, never the pid file alone.
-- 🔴 **The `ip rule` 5150 pin is NOT APPLIED** and has not been since the **2026-09-27 15:33 reboot**
-  (`uptime -s`); a previous doc carried "still applied" for three days because the claim was
-  forwarded without re-checking. It is also not the lever: it targeted `192.168.50.94`, which
-  measures 0% in every round WITHOUT it. An `ip rule` is kernel state and a reboot reverts it
-  silently — any remedy written as a bare `ip rule add` needs a persistence story.
-- 🔴 **Every candidate mechanism has been ELIMINATED** — the `ip rule` pin, nebula riding the tailscale subnet route, and the homelab node as a shared hop. The lockstep is unexplained.
-- 🔴 Sudoers on the laptop: NOPASSWD covers `airvpn-sudo`, the whole `tailscale` binary, `systemctl restart|start|stop tailscaled` / `restart nebula@mesh`. **`ip`, `nft`, `tcpdump` are NOT passwordless**; `sudo -n` fails entirely on the workbench. This bounds every remedy an agent can apply here.
-- Arrival probe built and controlled at `<scratchpad>/agent-arrival-probe/` (`arrival-probe.sh`, `wb-sensor.sh`).
+- 🔴 **Every candidate mechanism is ELIMINATED** — the `ip rule` pin, nebula riding the tailscale subnet route, the homelab node as a shared hop, the workbench host, the laptop's uplink, and the home site. The lockstep (170 of 172 episodes identical) survived all of them.
+- 🔴 **The `ip rule` 5150 pin is NOT APPLIED** since the 2026-09-27 15:33 reboot, and is not the lever: it targeted `192.168.50.94`, which measures 0% in every round WITHOUT it. An `ip rule` is kernel state a reboot reverts silently.
+- 🔴 Sudoers: on the laptop NOPASSWD covers `airvpn-sudo`, the whole `tailscale` binary, `systemctl restart|start|stop tailscaled` / `restart nebula@mesh`. **`ip`, `nft`, `tcpdump` are NOT passwordless**; `sudo -n` fails entirely on the workbench. This bounds every remedy an agent can apply.
+- **Arrival probe built and controlled** at `<scratchpad>/agent-arrival-probe/`; `wb-sensor.sh` is STAGED at `/var/tmp/wb-sensor.sh` on the workbench and needs one operator `sudo` to run.
+- ⚠ Leftover root-owned probe files on the workbench: `sudo rm -rf /var/tmp/arrival-probe /var/tmp/wb-sensor.sh` when done.
 
 ## Open investigations — live diagnosis state
+### 🔴 The "two internet sources, one router" comparison is STRUCTURALLY CONFOUNDED — do not spend a session on it
+- as-of: 2026-09-30
+- 🔴 **This retires the previous rank 1 of this document.** It read "capture at the workbench with the laptop and the far box driving concurrently and compare". That comparison cannot be made.
+- **Observed (with values):** the far box (`10.42.0.20`, `diffsona`) has **no tailscale installed at all**, and its only route to the workbench's LAN address is `via 172.31.1.1 dev eth0` — i.e. out to the internet, where the workbench is behind home NAT and unreachable. Its sole working path to the workbench is **nebula**, and it is simultaneously the nebula **relay** (`10.42.0.2`, on `nebula0`, same machine). `via: measurement`
+- **Ruled out — that a different probe design fixes it.** The confound is that the only available second vantage IS the relay; no re-run separates them. A genuinely independent arm needs a FOURTH host, or tailscale installed on the far box. `via: measurement`
+- **Leading hypothesis:** none. Superseded by the next-probe below, which needs no second vantage.
+- **Next probe:** the inbound-vs-return question in rank 1 — it uses one source and is unconfounded.
 ## Open investigations — live diagnosis state
 <!-- as-of: 2026-09-21 -->
 ### Gateway IPv6-remote noise — "listener is IPv4, but writing to IPv6 remote" (homelab-gateway)
@@ -206,8 +210,8 @@ they had accumulated in one document and pushed it to its 65,536 B ceiling.
 
 
 ## Next steps (ranked)
-1. **Two internet sources, one router — compare them inside one episode.** Both the laptop (lossy) and the far box (clean) arrive at the workbench via the router. Capture at the workbench with both driving concurrently and compare inbound arrival gaps within a single episode window. The pcap tooling exists and is controlled. 🔴 Read a pcap with `tcpdump -r` — that needs NO privileges; only `-i` capture does.
-   forcing: incident — 173 episodes in 9 hours on 2026-09-30, worst 99.2% loss over a contiguous 59 s, and 170 of 172 episodes with the two overlays identical
+1. **Does the laptop's traffic ARRIVE at the workbench during a blackout?** Run the workbench sensor (operator `sudo`, one command — `ssh -t zach@10.42.0.30 'sudo TCPDUMP=<store-path>/bin/tcpdump /var/tmp/wb-sensor.sh'`), drive the laptop over tailscale with `ping -D`, then count inbound packets from the laptop bucketed per second and aligned to the laptop's blackout seconds taken from its OWN packet timestamps. 🔴 Analyse with `tcpdump -r` on the pulled pcap — that needs NO privileges; only `-i` capture does. **Arrivals continue ⇒ the loss is on the RETURN leg and every hypothesis so far has been looking the wrong way. Arrivals stop ⇒ inbound.** Neither answer has ever been measured; every mechanism proposed to date silently assumed inbound.
+   forcing: incident — 173 episodes in 9 hours on 2026-09-30, worst 99.2% loss over a contiguous 59 s, 170 of 172 episodes with both overlays identical
 2. **Check the workbench's own NIC/driver state**, which no round has examined: `ethtool -S eth0` rx drops/overruns across an episode, and any offload or power-saving setting the gateway lacks.
    forcing: incident — the same recurrence; the workbench is the only host that loses
 
@@ -279,6 +283,10 @@ they had accumulated in one document and pushed it to its 65,536 B ceiling.
 - 🔴 **An arrival analysis MUST filter by direction, or it counts the capture host's OWN EGRESS as arrivals.** The probe's table reported ~1,300–1,900 "arrivals" per episode whose source was `192.168.50.250` — the workbench itself. Add `ip dst <capture host>` to the filter.
 - 🔴 **A MAC address looks like an IPv6 address to an address scrubber.** The probe's own scrubber rewrote every `srcMAC` in its analysis output to an `ip6x:` token, destroying the primary discriminator, while the legend in the sensor meta file survived. If a scrubber is in the path, verify the field you are about to reason over is still readable.
 - ⚠ **Size-tagging arms by inner ICMP size worked for tailscale and NOT for nebula** (`LAP_NEB`/`FAR_NEB` both `UNLEARNED` — no distinct outer length appeared above the control slab). Do not assume a 1:1 inner→outer length mapping per overlay. The probe correctly refused to print rows for the unlearned arms rather than fabricate them.
+
+- 🔴 **AN AD-HOC LEAK CHECK THAT ALLOWLISTS ITS OWN CANONICAL EXAMPLE SCANS CLEAN WHILE THE REAL GATE FAILS.** The throwaway scanner used all session excluded `1.1.1.1` as "benign", so it reported NONE on a doc that contained it, and `tekton/devrc-pytests` failed on exactly that literal (`test_no_unallowlisted_public_ip_literal_is_committed`). The repo's allowlist is keyed on `(relpath, value)`, so `1.1.1.1` being present-and-pinned in another file does NOT cover yours. **Run `scripts/tests/test_no_public_ips.py` itself; never a hand-rolled substitute.** Fixed by removing the literal, not by adding allowlist debt.
+- ⚠ **`test_tmux_reply_agent.py` fails on a PRISTINE `origin/main` worktree (93 failures) on this host** — it touches live tmux. A full local suite therefore reports ~200 reds that are environmental. Control any local red against a pristine main worktree before attributing it to your branch; measured twice on 2026-09-30, once in each direction.
+- 🔴 **Bringing the AirVPN tunnel UP does NOT change either overlay's egress** — `ip rule 500 uidrange 991-991` exempts nebula and `ip rule 5210 fwmark 0x80000` exempts tailscale, by design. Verified `uid 991 → wlp170s0`, `uid 1000 → airvpn`. A session proposed the tunnel as a way to test the laptop's outbound path; it cannot.
 
 
 ## How to verify
