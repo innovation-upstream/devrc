@@ -21,15 +21,12 @@ unaffected while the tunnel is up.
   — no MTU/routing churn.
 
 ## State now
-- Branch / PR: `devrc` `main` at `4f0cbd48`. Base clone re-synced (`merge --ff-only`).
-- ✅ **The mosh arc is CLOSED, and it closed by DELETING most of it.** #1865 was **closed unmerged** after five audit rounds; **#1869 merged as `4f0cbd48`** carrying one package line plus a 28-line comment. What was dropped: an **812-line** staged `/etc/nixos` editor and **1473** lines of tests, whose whole complexity budget went on making a sudo rewrite of a remote host's config safe on a machine the operator cannot reach — to mitigate a fault that had already stopped. `nix/pkgs/default.nix` now spells out the two-line server-side edit instead.
-- 🔴 **mosh DOES NOT WORK YET, deliberately.** No host runs `mosh-server`; `mosh <host>` hangs at `Connecting...`. It needs a two-line edit at the console of the host you want to mosh INTO — the recipe is in the comment in `nix/pkgs/default.nix`, and `programs.mosh.openFirewall` **defaults to TRUE** and must be set false or it opens 1001 UDP ports on every interface including WAN.
-- ✅ **The 2026-09-23 leak recurrence stays CLOSED** — #1861 (`5834b4c5`), corrections rescued in #1866 (`b7a30bc3`); `test_no_public_ips` green on `main`.
-- **`main` is fully green** — all four Tekton legs pass. The `TestMutationKillMatrix.test_kills_the_readme_exclusion` red that blocked things was someone else's and was fixed by #1868 (`811fa910`).
-- 🔴 **The `ip rule` pin (applied 2026-09-23 ~20:35 CDT) is STILL APPLIED and STILL NOT PERSISTENT.** `ip rule show | rg 5150` confirms it live. A reboot reverts it silently and the roaming returns with nothing to announce it. This is the only genuinely unfinished thing in the arc.
-- **Workbench helper: still BLOCKED on sudo, by design.** `sudo -n` over ssh fails, so it is operator-run. `/etc/nixos/i3blocks-scripts/airvpn-updown` is still the Jul 21 copy (11,306 B, **0** `uidrange` lines) vs the laptop's synced 16,099 B (**3**). Laptop helper verified IN SYNC.
-- **The mesh-flap arc is CLOSED on measurement, and NOT by anything we did.** Loss to home climbed **16% → 30% → 45%** between ~22:45 and ~00:03 local on 2026-09-23, then stopped dead with no config change. It has not recurred in ~14 h: watcher pid `2709742` alive at 14h20m, **1925+ polls, 0 triggers**; live four-path check 0/100 on every path.
-- Untracked in the laptop tree: `nix/system/apply-networkmanager-openvpn.sh` (unrelated, pre-existing).
+- Branch / PR: devrc `main` at `773f99d8` (clean except an unrelated untracked `nix/system/apply-networkmanager-openvpn.sh`); no open PR for this arc.
+- Done this session (2026-09-30): recurrence CHECK + watcher relaunch, no repo changes, no commits.
+- IN FLIGHT: flap-watch v2 running (see the open investigation).
+- Deploy/verify status: n/a — no config changed this session; measurement only.
+- 🔴 CARRIED (still true): the `ip rule` pin (applied 2026-09-23 ~20:35 CDT) is STILL APPLIED and STILL NOT PERSISTENT (`ip rule show | rg 5150`) — a reboot reverts it silently; that is next-step 1.
+- 🔴 CARRIED: mosh DOES NOT WORK YET, deliberately — no host runs `mosh-server`; the two-line console edit recipe is in `nix/pkgs/default.nix`, and `programs.mosh.openFirewall` DEFAULTS TRUE (must be false or it opens 1001 UDP ports on every interface incl. WAN).
 
 ## Open investigations — live diagnosis state
 <!-- as-of: 2026-09-21 -->
@@ -206,23 +203,28 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - **Leading hypothesis:** for the 6.5–20 s blackouts measured on this path, plain ssh over TCP mostly *survives* — you get a frozen terminal, not a dropped session — so mosh's practical gain here is comfort rather than continuity. Untested.
 - **Next probe:** none needed for the claim; it is settled. If you want the benefit, do the two-line edit in `nix/pkgs/default.nix`'s comment on the target host and then `mosh zach@10.42.0.30` during a live episode.
 
+### Mesh blackouts laptop↔home (UDP-only) — RECURRENCE CONFIRMED 2026-09-30
+- as-of: 2026-09-30
+- **Symptom + exact repro:** `ping -c 120 -i 0.5 10.42.0.30` shows contiguous blackout runs; own-link control `ping -c 120 -i 0.5 192.168.1.1` must be 0%.
+- **Observed (with values), 2026-09-30 05:50Z:** nebula to home 21.7% loss (26/120), blackouts at epochs 1790747264→1790747303 (~40 s) plus singles; local-gw control 0/120. ssh burst ×5: 4× `rc=0`, then `banner exchange timeout` rc=255 — the exact failure mode the `ip rule` pin was justified on.
+- **Watcher relaunched same session:** old watcher (pid 2709742, launched 09-24 05:09Z) found DEAD — log gap 09-27 20:28 → present, 1 episode total (09-25 21:53Z: all three ICMP controls 0%, UDP runs 1–2 pkt, but its loss% fields garbled by a parse bug). New watcher pid **2115782** (`setsid`), log `<scratchpad>/flap-watch2.log`, pid file `flap-watch.pid`. Parse bug FIXED and positive-controlled (regex `\d+(?=% packet loss)` concatenated multi-digit lines → `loss=833333%`; new regex `(\d+(?:\.\d+)?)% packet loss | tail -1` verified reading 75.0).
+- **First catch of the new watcher, 2026-09-30 05:52:57Z (TRIGGER at 95% poll loss):** discriminator 60 s concurrent — `icmp-local-gw` 0%/run 0 · `icmp-last-hop-before-home` 0%/run 0 · `icmp-far-box` 0%/run 0 · `nebula(UDP)` **7.5%, run 5 pkt** · `tailscale(UDP)` **7.5%, run 5 pkt**.
+  - via: measurement
+- **Ruled out — laptop link, home router/NAT, forward+return IP path:** carried from 09-24, unchanged — third vantage 0/300 loss while laptop lost 45% in the same window; mtr both directions clean; local gw 0%.
+  - via: measurement
+- **Leading hypothesis (STILL untested):** per-flow UDP state eviction on the CGNAT path — now backed by an episode-triggered capture (identical simultaneous loss on BOTH overlays while every ICMP control was clean), not just ad-hoc pings.
+- **Next probe:** let the watcher accumulate episodes overnight (`grep -A9 'EPISODE' <scratchpad>/flap-watch2.log`), then decide the permanent `ip rule` pin form vs a tailscale route exclusion for UDP:4242 on the accumulated evidence.
+- Scratchpad: `/tmp/claude-1000/-home-zach-workspace-devrc/765865a3-5a34-4368-9c27-c442fd52106c/scratchpad` (flap-watch.sh, flap-watch2.log, flap-watch.pid).
+
 ## Next steps (ranked)
-1. **Decide the PERMANENT form of the `ip rule` pin**, in whichever repo owns the laptop's nebula unit. Kernel-state-only today, so a reboot silently reverts it. 🔴 **Justify it on the ssh evidence (5/5 `rc=0` vs five consecutive `rc=255`), NOT on "it stopped the roaming"** — that claim did not survive re-measurement, and the instrument that could settle it is the one the pin disables. Costs: breaks `kubectl` against homelab while active; a tailscale route exclusion for UDP:4242 may be the better shape than a `to <node>` pin.
-   `forcing: incident`
-2. **Operator, ON THE LAN: refresh the workbench stable-path helper** — `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown`. Verify: `cmp -s /etc/nixos/i3blocks-scripts/airvpn-updown ~/workspace/devrc/scripts/airvpn-updown && echo SYNC`. ⚠ Not urgent — measured that no timer and no enabled unit can fire it — but pair it with the killswitch re-test, because toggling that tunnel with the stale copy while off-LAN is a plausible lockout.
-   `forcing: regression`
-3. Silence the gateway v6-remote noise — nebula config in `homelab-talos` (advertise v4 only from the gateway, or v6-listen on the laptop).
-   `forcing: none`
-4. Re-run `scripts/data/refresh-airvpn-servers` from a host with qBit-pod access and bake country_code the supported way (its `_from_github` fallback is DEAD).
-   `forcing: none`
-5. `i3status-airvpn`'s no-country-code fallback abbreviates the full country NAME (`"United States"[:2]` → `UN`). One-line fix if it ever shows again; with cc baked it should be unreachable.
-   `forcing: none`
+1. Decide the PERMANENT form of the `ip rule` pin (repo owning the laptop's nebula unit) — kernel-state-only today, reverts on reboot; justify on ssh evidence (now including the 2026-09-30 burst: 4× rc=0 then rc=255 banner timeout). A tailscale route exclusion for UDP:4242 may beat a `to <node>` pin. Costs: breaks kubectl against homelab while active.
+   forcing: incident — mesh blackouts re-measured live 2026-09-30 (21.7% loss, ~40 s blackout, ssh banner timeout)
 
 ## Defects (batched)
-- talosctl client cert EXPIRED (`tls: expired certificate` against 192.168.50.94) — blocks node-level debugging from this host.
-- Workbench's stable-path `airvpn-updown` is stale (0 `uidrange` lines vs the repo's 3) — closed by next-step 2. General hazard: `/etc/nixos/i3blocks-scripts/` copies are NOT ship-managed nor covered by `drift-check.sh` rc 17.
-- `refresh-airvpn-servers --from-github` fallback rotted (gluetun moved to `servers.go`); the kube source still works from the workbench.
-- Nothing in the repo checks whether any fleet host has `programs.mosh.enable` set, so the shipped client stays inert with no signal. `drift-check.sh` is the natural home if that ever matters.
+- Workbench stale `airvpn-updown` copy — operator, ON THE LAN: `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown`, pair with killswitch re-test per `claude/skills/bar/reference/airvpn.md`.
+- Nebula gateway v6-remote noise (config in homelab-talos).
+- `refresh-airvpn-servers --from-github` fallback rotted; re-run from a qBit-pod host and bake country_code.
+- `i3status-airvpn` no-country-code fallback abbreviates full country NAME — one-line fix if ever seen again.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 The laptop has NO systemd-resolved: NetworkManager `dns=none` + local dnsmasq (`127.0.0.1` → public resolver). wg-quick ABORTS on the conf's `DNS =` line (`resolvconf` fails, interface torn down in the same invocation — measured on first connect). The apply script now strips that line when resolved is absent. Do NOT re-add DNS to the laptop conf.
@@ -305,76 +307,37 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - ⚠ **`pgrep -c -f <pattern>` counts ITSELF.** It reported two `flap-watch.sh` processes; resolving PIDs and reading `/proc/<pid>/cwd` found one. An audit round filed the phantom as a leaked process. Resolve PIDs; never trust the count.
 - ⚠ **An auditor's concrete numbers need the same re-derivation as anyone's.** Round 0 on #1869 reported the workbench's nebula inbound as two groups; measured, it has three (`admin`, `homelab`, `lighthouse`) — the laptop also has three, differing only in the third (`workbench`). Its *point* was right and its *number* was not; the comment now carries no count at all.
 
-## How to verify
-🔴 **The arc's own closing-condition block is preserved verbatim below — do NOT replace it
-with the watcher checks; those answer a different question.** New this session, first:
-```bash
-# the flap watcher — still running, and did it catch an episode?
-ps -o pid=,etime= -p "$(cat <scratchpad>/flap-watch.pid)"
-rg -c 'quiet|TRIGGER' <scratchpad>/flap-watch.log
-rg -A8 'EPISODE' <scratchpad>/flap-watch.log      # empty = the fault has not recurred
-# loss to home, WITH the controls that make it interpretable (a bare number is not a reading):
-ping -c 120 -i 0.5 10.42.0.30   | tail -2         # home over nebula — UDP on the wire
-ping -c 120 -i 0.5 192.168.1.1  | tail -2         # own link — must be 0%
-# the pin (kernel state only; reverts on reboot):
-ip rule show | rg 5150
-# PR #1865 after taking main in (the red is INHERITED, fixed on main by 811fa910):
-gh pr checks 1865 --repo innovation-upstream/devrc
-```
+- (carried) 🔴 NO routable address of ours in this doc — `<home-public-ip>` / `<laptop-wan-ip>` / `<hetzner-lighthouse-ip>` placeholders or runtime vars only; it recurred once already within 24 h.
+- (carried) The flap watcher is a plain background process, NOT a unit — suspend/reboot kills it; the old one died silently after 3.5 days and lost 09-27→09-30 coverage. Re-check `ps -p $(cat flap-watch.pid)` at every resume.
+- The old watcher's loss% fields are GARBAGE (parse bug) — read only its `longest_run` and trigger lines; v2 is fixed.
+- (carried) A 20-s poll cannot size an episodic fault; the discriminator (120 pkt @0.5 s concurrent) is the reading.
+- (carried) Laptop has NO systemd-resolved — never re-add `DNS` to the laptop wg conf.
 
+## How to verify
 ```bash
-# mesh stability after the fix (want 0% loss over 60 samples):
-ping -c 60 -i 1 10.42.0.30 | tail -1
-# ssh burst (want rc=0, no banner-exchange timeouts):
+S=/tmp/claude-1000/-home-zach-workspace-devrc/765865a3-5a34-4368-9c27-c442fd52106c/scratchpad
+ps -o pid=,etime= -p "$(cat $S/flap-watch.pid)"      # watcher alive?
+grep -A9 'EPISODE' $S/flap-watch2.log                # episodes caught
+ping -c 120 -i 0.5 10.42.0.30  | tail -2             # nebula loss — UDP
+ping -c 120 -i 0.5 192.168.1.1 | tail -2             # control — must be 0%
 for i in 1 2 3 4 5; do ssh -o ConnectTimeout=10 zach@10.42.0.30 'true'; echo rc=$?; sleep 2; done
-# lighthouse tunnels (want 0% loss — currently 100% from BOTH hosts):
-ping -c 5 -i 0.3 10.42.0.1; ping -c 5 -i 0.3 10.42.0.2
-# ship state (want both hosts at one sha):
-scripts/ship.sh
+ip rule show | grep 5150                              # pin still present
 ```
-🔴 **THE BLOCK BELOW IS THE ARC'S OWN CLOSING CONDITION and was DELETED WHOLESALE by the
-mesh-flap rewrite** — **seven** command lines plus the killswitch escape hatch. This is that
-block restored from `1c7ad1b9`, **plus two additions** (the `HOME_PUB` assignment, and the
-`journalctl` line that makes closing-condition item 4 runnable, and the `HOME_PUB`
-placeholder guard) — a restoration, not a transcription. ⚠ An earlier wording said "plus
-two additions" and undercounted by one: the guard is executable and was not in the
-original, so a reader auditing this fence against `1c7ad1b9` would find a line the
-manifest did not account for. One address literal is replaced by a runtime lookup; `<home-public-ip>` was
-ALREADY a placeholder at `1c7ad1b9`, which is what #1853 did.
-🔴 **RUN IT ALL WITH THE TUNNEL UP, and substitute `HOME_PUB` first.** With the tunnel down
-*several* lines go vacuously green — but not all: `ip link show airvpn` fails outright, the
-split-tunnel probe returns `dev wlp170s0` instead of `dev airvpn table 51820`, and the pill
-read returns `up`=false. Those three are the ones that catch you.
+## How to verify — CARRIED verbatim from the 09-24 doc (arc closing-condition)
+🔴 RUN IT ALL WITH THE TUNNEL UP, and substitute HOME_PUB first; with the tunnel down several lines go vacuously green (`ip link show airvpn` fails, split-tunnel probe returns `dev wlp170s0`, pill up=false — those three catch you).
 ```bash
 # tunnel + split-tunnel, with the tunnel UP:
-ip link show airvpn && ip rule | rg 500          # pin present: uidrange 991-991 lookup main
-HOME_PUB='<home-public-ip>'                      # set at run time; NEVER inline the value
-# Guard the mistake you will ACTUALLY make -- pasting this fence WITHOUT substituting.
-# 🔴 An earlier version of this guard was `: "${HOME_PUB:?...}"`, which fires only when the
-# variable is EMPTY. The block above never produces empty, so that guard was UNREACHABLE:
-# the unsubstituted paste walked straight past it into `ip route get '<home-public-ip>'`,
-# whose error is the SAME "any valid prefix is expected" the doc teaches means "you passed
-# a hostname". Match the placeholder, not the empty string.
-case "$HOME_PUB" in *'<'*) echo "substitute HOME_PUB first" >&2; return 2>/dev/null || exit 2;; esac
-ip route get "$HOME_PUB" uid 991                 # → via <gw> dev wlp170s0 (NOT airvpn)
-# the other half of the SPLIT: a non-LAN target must leave via the tunnel. `ip route get`
-# needs an ADDRESS, so resolve the resolver's NAME at run time rather than pinning a literal:
+ip link show airvpn && ip rule | grep 500         # pin present: uidrange 991-991 lookup main
+HOME_PUB='<home-public-ip>'                       # set at run time; NEVER inline the value
+case "$HOME_PUB" in *'<'*) echo "substitute HOME_PUB first" >&2; exit 2;; esac
+ip route get "$HOME_PUB" uid 991                  # → via <gw> dev wlp170s0 (NOT airvpn)
 ip route get "$(getent ahostsv4 one.one.one.one | awk '{print $1; exit}')" | head -1
-                                                 # → dev airvpn table 51820
+                                                  # → dev airvpn table 51820
 curl -s https://ipinfo.io/json | jq -r .country   # → US
 ssh zach@10.42.0.30 'echo nebula-ok'              # nebula path alive with tunnel up
-# pill (after ~60s post-connect) — this is closing-condition item 3:
 python3 -c "import json,os; d=json.load(open(os.path.expanduser('~/.cache/bar-status/airvpn.json'))); print(d['up'], d['verdict'], d['server'], d['country_code'])"
-# writer + timer:
 systemctl --user list-timers airvpn-status-poll.timer --no-pager | head -3
-# closing-condition item 4 — ONLY the IPv6-remote noise, no MTU/routing churn:
-SINCE='<up-time>'                                 # e.g. '2026-09-23 20:35'
-journalctl -u 'nebula@mesh' --since "$SINCE" | rg -c 'Failed to write outgoing packet|Failed to send handshake'
+# v6-remote noise only, no MTU/routing churn:
+journalctl -u 'nebula@mesh' --since '<up-time>' | grep -c 'Failed to write outgoing packet|Failed to send handshake'
 ```
-🔴 **Killswitch re-test protocol: `claude/skills/bar/reference/airvpn.md` (laptop section).**
-It is FAIL-CLOSED on this laptop's ONLY uplink. Instant bail that KEEPS the tunnel:
-`sudo nft delete table inet airvpn_ks`; full teardown:
-`sudo /etc/nixos/i3blocks-scripts/airvpn-sudo down`. ⚠ The original block's `python3 -c`
-passed a literal `~` to `open()`, which does not expand it — that line always raised
-`FileNotFoundError`. Fixed above with `os.path.expanduser`; it is a repair, not a
-transcription.
+🔴 Killswitch re-test protocol: `claude/skills/bar/reference/airvpn.md` (laptop section) — FAIL-CLOSED on this laptop's ONLY uplink. Instant bail keeping the tunnel: `sudo nft delete table inet airvpn_ks`; full teardown: `sudo /etc/nixos/i3blocks-scripts/airvpn-sudo down`.
