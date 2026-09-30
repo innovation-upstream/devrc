@@ -172,10 +172,10 @@
 # is the passive deadman for the same fleet and deliberately uses the same
 # vocabulary, so a number must not mean two things across the pair. It owns
 # 10, 14, 15, 16, 17, 18, 22, 23, 24 and 25 — DRIFT meanings this script does
-# not take — and reserves them here; this script owns 5, 7, 9, 11, 19, 20 and 21
-# and they are reserved there. Its header says "a new DRIFT code has nowhere to
+# not take — and reserves them here; this script owns 5, 7, 9, 11, 19, 20, 21 and
+# 26 and they are reserved there. Its header says "a new DRIFT code has nowhere to
 # go but upward", which points the next one at 19 unless the reservation is
-# written down on both sides: so the next free code for THIS script is 26, and so
+# written down on both sides: so the next free code for THIS script is 27, and so
 # is the next free code for that one.
 #
 # RESERVED-TO-DRIFT-CHECK: 10 14 15 16 17 18 22 23 24 25
@@ -282,6 +282,23 @@
 #      code by test_every_exit_code_ship_can_return_is_documented_in_the_header_
 #      and_the_legend, which cannot tell a printed line from an unprinted one.
 #      Saying so here is the honest version of "the test enforces dead prose".
+#   26 PRE-FLIGHT REFUSED — the two hosts' `~/workspace/homelab-talos/containers/
+#      clawgate/go.mod`+`go.sum` differ, so `nix/pkgs/tools/clawgatectl.nix`
+#      (which builds from that working TREE and pins ONE vendorHash, decided by
+#      those files) cannot build on both. 🔴 The unit is the CONTENT of those two
+#      files read off DISK, never the repo commit: the commit is blind to the
+#      uncommitted edits nix compiles, and it fires on documentation churn that
+#      cannot move the hash. A NEW code
+#      rather than a reuse of 9 (switch-failed) or 19 (hosts-disagree), because
+#      the operator action is neither of theirs: 9 says "look at this host's
+#      switch" and 19 says "re-run ship", while this one says "sync the OTHER
+#      repo on the host named, then re-run". 19 is also structurally wrong for
+#      it — 19 is a claim about devrc commits the hosts LANDED on, computed after
+#      both legs, and this fires before either leg exists. See PRE-FLIGHT below.
+#
+#      🔴 Like rc 2 and rc 20, the `rc26=` legend line is UNREACHABLE: the
+#      refusal exits before the verdict block that prints the legend. Ledgered
+#      anyway, for the reason stated under rc 20.
 #
 # Usage:
 #   scripts/ship.sh              # converge local host + the other (remote) host
@@ -835,10 +852,29 @@ no_switch="${SHIP_NO_SWITCH:-0}"
 # Max paths enumerated per dirty-classification bucket — see nr_list. Mirrors
 # drift-check.sh DRIFT_UNTRACKED_MAX/DRIFT_NIXDIRT_MAX; the counts beside each
 # heading are never capped.
-# 🔴 NO `''` LITERAL ANYWHERE IN THIS PAYLOAD. CONVERGE is a single-quoted shell
-# string, so an empty-string literal closes it and re-opens it — the file still
-# parses, and the payload silently becomes a different script. That is what a
-# first draft of this validation did, and it broke 76 tests at once.
+# 🔴 NOT ONE SINGLE QUOTE ANYWHERE IN THIS PAYLOAD — NOT IN THE CODE AND NOT IN
+# THE COMMENTS. CONVERGE is a single-quoted shell string, so any apostrophe closes
+# it: an even number re-opens it and the file still parses while the payload
+# silently becomes different text; an odd number turns the rest of the payload into
+# ordinary shell code. A first draft of this validation wrote an empty-string
+# literal and broke 76 tests at once.
+#
+# ⚠ THE RULE USED TO SAY "no empty-string literal", WHICH IS TOO NARROW, AND THE
+# NARROW WORDING COST BOTH FAILURES IN ONE SITTING while adding TALOS_PROBE below:
+#   * the sentence stating the rule SPELLED the forbidden pair, so the payload bash
+#     received was two bytes shorter than the source showed — silent, green under
+#     `bash -n` and green under the whole suite (measured on main at 01d30d10; it
+#     had been true since that comment was written);
+#   * then ONE possessive apostrophe in an ordinary English word, in a TALOS_PROBE
+#     comment, ended the string outright: `gate: command not found`,
+#     `m: unbound variable`, 102 tests red. 🔴 And writing THAT word here, to show
+#     which one it was, broke CONVERGE the same way on the next run — caught by the
+#     guard named below, on its first execution. Describe the character; never type
+#     it inside either payload.
+# Widest reading, then: an apostrophe is forbidden, not a pair of them. Pinned
+# mechanically by test_neither_single_quoted_payload_contains_an_apostrophe in
+# scripts/tests/test_ship_talos_preflight.py — prose describing this hazard has now
+# twice been the thing that triggered it, so it is a test, not a warning.
 SHIP_LIST_MAX="${SHIP_LIST_MAX:-10}"
 [ -n "$SHIP_LIST_MAX" ] || SHIP_LIST_MAX=10
 case "$SHIP_LIST_MAX" in *[!0-9]*) SHIP_LIST_MAX=10 ;; esac
@@ -1516,6 +1552,373 @@ else
 fi
 '
 
+# --- PRE-FLIGHT: the two hosts' ~/workspace/homelab-talos (rc 26) -------------
+# 🔴 A SWITCH CAN FAIL FOR A REASON THAT IS NOT IN THIS REPO AT ALL, and the
+# error nix prints for it names nothing. `nix/pkgs/tools/clawgatectl.nix` builds
+# clawgatectl from `${workspace}/homelab-talos/containers/clawgate` — the HOST'S
+# OWN WORKING TREE, deliberately (that file's header explains why: fetching a
+# private repo would put a GitHub credential in the store). Its `vendorHash` is
+# ONE literal pinning the OUTPUT of the vendor derivation, and that output is
+# decided by the module files — `containers/clawgate/go.mod` and `go.sum`. Two
+# hosts whose copies of those two files differ therefore cannot both build,
+# whichever hash is pinned, and the loser gets `Cannot build ... Reason: 1
+# dependency failed`, surfaced by this script as a bare rc 9 switch-failed.
+#
+# MEASURED 2026-09-29, BOTH DIRECTIONS IN ONE DAY, same pin, same devrc commit:
+#   workbench, before #1928, clawgatectl-0.8.65:
+#     specified: sha256-T2rgqEv5...  got: sha256-lzXHWLLS...
+#   laptop, after #1928, clawgatectl-0.8.64:
+#     specified: sha256-lzXHWLLS...  got: sha256-T2rgqEv5...   (the exact inverse)
+# The laptop's checkout was 58 commits behind, so it compiled pre-carve source
+# for which the OLD hash was right. That is not a devrc bug to fix by editing a
+# hash; it is a FLEET FACT to establish BEFORE either host is touched.
+#
+# PLACEMENT: immediately before the two legs, and nothing between here and there
+# touches a host — so on a refusal NEITHER host has been fetched, landed or
+# switched, which is the one property no rc-20 site can claim (they all sit
+# BETWEEN the two legs and leave the fleet in two states).
+#
+# 🔴 WITH ONE EXCEPTION, AND IT IS ANNOUNCED RATHER THAN GLOSSED: on a RE-EXEC
+# (SELF-SUPERSESSION in the header) pass 1 has already converged and — unless
+# --no-switch — switched the local host, and its rc was DISCARDED by the exec.
+# That includes the very first run to deliver this pre-flight, whose pass 1 ran
+# the copy that did not have it. The refusal therefore reads $SHIP_SELF_GEN and
+# says which of the two it is; that counter is normalised just above, which is
+# why this block sits after it rather than higher up. A refusal that claimed
+# "nothing was touched" on that path would be false in the one line an operator
+# reads to decide whether to worry.
+#
+# 🔴 IT RUNS EVEN UNDER --no-switch, deliberately. Gating it on
+# $SHIP_NO_SWITCH would put it outside the reach of the entire test suite, which
+# is no-switch in every fixture — the config-blind-suite shape, where a
+# structurally unreachable guard reads as coverage. It is also cheap and
+# read-only, and a dry run that reports the fleet fact is more useful than one
+# that hides it.
+#
+# 🔴 WHAT IT IS NOT: a currency check. `drift-check.sh` owns that (rc 17/18,
+# "SOURCE-REPO PARITY"), derives the covered set from nix/pkgs, and deliberately
+# sets NO code on its cross-host half because it is a PASSIVE deadman for which
+# that would be permanently red. This is the ACTIVE tool, at the one instant the
+# disagreement is about to break something, and refusing is the whole point.
+#
+# ── THE PREDICATE, AND WHY IT IS NOT THE COMMIT ───────────────────────────────
+# 🔴 THE FIRST VERSION OF THIS COMPARED `git rev-parse HEAD` AND WAS WRONG IN
+# BOTH DIRECTIONS. It is kept here as the reasoning, because both errors are the
+# same error — asking git a question about bytes nix reads off DISK.
+#
+#   * UNSOUND. The derivation reads the WORKING TREE, and both hosts'
+#     homelab-talos are routinely dirty (drift-check.sh reports DIRTY on every
+#     present one for exactly this reason). Two hosts on the SAME commit with a
+#     different UNCOMMITTED go.mod/go.sum hash differently — so the old check
+#     printed "2 hosts compared, both hold <sha>", proceeded, and the switch
+#     failed with the same nameless nix error this exists to prevent. A guard
+#     that can pass while the hazard is live is the failure mode, not a nit.
+#   * IMPRECISE. A `claudedocs/` edit or a cluster manifest moves HEAD and
+#     cannot move vendorHash, and the old check refused on it. homelab-talos
+#     took 98 commits in 14 days (drift-check's own measurement), of which only
+#     32 touched containers/clawgate — so most refusals would have been churn,
+#     and churn is what trains an operator to work around a gate.
+#
+# So the verdict is now the CONTENT OF THE FILES THAT DECIDE `vendorHash`, read
+# off disk with `sha256sum`: `containers/clawgate/go.mod` and `go.sum`. Dirty
+# edits are visible to it (sound) and irrelevant commits are not (precise).
+#
+# 🔴 WHY NOT THE SUBTREE TREE-OID, which drift-check.sh already computes for its
+# `FACT src-repos` line. Rejected on BOTH counts, not one: (a) a tree OID is a
+# GIT object, so it is blind to uncommitted edits — it reproduces the soundness
+# hole above exactly; (b) it covers every file in containers/clawgate, and a
+# `.go` change that does not alter the import set changes only the `src`
+# derivation, which makes nix REBUILD, not MISMATCH. Refusing on a rebuild is
+# the churn above with a smaller radius. Nothing is duplicated by not using it:
+# drift-check keeps deriving its own set for its own question.
+#
+# 🔴 HEAD IS DEMOTED TO CONTEXT, NOT DELETED. It is what supplies the ff-only
+# remedy's target and the behind/diverged classification, and it is what tells
+# the two refusal cases apart — see the remedy branch below. It never decides.
+#
+# 🔴 THE RESIDUAL, MEASURED FROM THE PINNED NIXPKGS RATHER THAN ASSUMED. The
+# vendor derivation's OUTPUT is what `vendorHash` pins, and clawgatectl.nix does
+# not set `proxyVendor`, which defaults to FALSE — so nixpkgs
+# (pkgs/build-support/go/module.nix in rev 42f17a57) runs `go mod vendor`, not
+# `go mod download`, and copies `vendor/` to $out. `go mod vendor` includes only
+# the packages the module actually IMPORTS, so a `.go` edit that adds an import
+# of an already-required module can change that output with go.mod and go.sum
+# BYTE-IDENTICAL. That case is NOT covered here and this is the only place it is
+# written down: covering it needs the import graph, which needs a Go toolchain
+# and a module cache on both hosts — i.e. the build. Both 2026-09-29 failures
+# were module-file carves, which is what this catches.
+#
+# 🔴 EXACTLY ONE PACKAGE CAN PRODUCE THIS FAILURE, and that is a fact with a
+# test rather than an assumption. A package needs BOTH a non-null `vendorHash`
+# (a fixed-output vendor derivation that can MISMATCH) AND a `${workspace}` src
+# (a per-host working tree that can DIFFER). Measured across nix/pkgs:
+# tmux-fuzzyclaw has the workspace src but `vendorHash = null`, so there is no
+# pinned output to be wrong; the other two Go packages under nix/pkgs/tools have
+# real vendorHashes but `src = ./src` INSIDE devrc, which ship.sh itself
+# converges, so their two hosts are identical by construction. clawgatectl is the
+# only intersection, which is why this probe names one path instead of deriving a
+# set.
+#
+# 🔴 THAT SET IS DERIVED BY A TEST, NOT RESTATED HERE — test_the_predicate_covers_
+# EVERY_package_that_can_produce_this_failure in scripts/tests/
+# test_ship_talos_preflight.py scans nix/pkgs for the intersection and fails when
+# it GROWS or SHRINKS. Naming the other two packages in this comment is what a
+# prose copy of a derived list looks like, and it also tripped
+# test_no_real_launchers.py's binary-name scan, which is a text scan.
+#
+# 🔴 NO `${VAR:-$HOME/...}` OVERRIDE FOR THE PATH. That spelling is the
+# set-but-EMPTY hazard this file already carries a guard for (rc 2), pinned
+# repo-wide by scripts/tests/test_repo_path_defaults.py — a second instance
+# would need a second guard, and the path is not a choice anyway:
+# clawgatectl.nix derives it from `${config.home.homeDirectory}/workspace`.
+# $HOME is what makes it testable; a fixture points HOME at a throwaway tree.
+TALOS_PROBE='
+set -uo pipefail
+d="$HOME/workspace/homelab-talos"
+m="$d/containers/clawgate"
+
+# HEAD: CONTEXT ONLY — it chooses the remedy wording, never the verdict.
+# A worktree checkout has .git as a FILE, a normal clone as a directory — the
+# same -e test drift-check.sh uses on these very repos.
+if [ ! -e "$d/.git" ]; then
+  echo "ship-talos-head ABSENT"
+else
+  h=$(git -C "$d" rev-parse HEAD 2>/dev/null) || h=
+  if [ -z "$h" ]; then echo "ship-talos-head UNREADABLE"; else echo "ship-talos-head $h"; fi
+fi
+
+# The VERDICT: the two files whose content decides vendorHash, digested OFF DISK
+# so an uncommitted edit is visible. ABSENT is NOT a failure — clawgatectl.nix
+# guards on pathExists precisely so a host without the checkout omits the binary
+# instead of failing its whole switch.
+#
+# 🔴 `sha256sum < file`, redirected rather than passed as an argument: that makes
+# the output `<hash>  -` with NO path in it, so the digest cannot pick up the
+# host-specific $HOME and the format is the same from GNU coreutils and from the
+# BusyBox applet the laptop resolves over ssh. sha256sum is not POSIX; if it is
+# missing the substitution fails, the value is not a digest, and the run degrades
+# to NOT COMPARED — never to a silent pass.
+#
+# 🔴 The hex test is the NEGATED class, matching ship_talos_is_digest in the
+# driver. `[0-9a-f][0-9a-f]*` reads like "two or more hex" and is not: in a shell
+# glob the `*` is the general wildcard, not a repetition of the preceding class,
+# so it accepts `ab!!!`. The driver would still reject that (its marker regex is
+# alnum-only and its own predicate is the negated class), but a loose pattern in
+# a guard is a finding whatever the second layer does. ⚠ NO TEST DEFENDS THIS
+# TIGHTENING and that is measured, not assumed: restoring the loose pattern leaves
+# the whole suite green, because the gate in the driver is the one that decides.
+# It is belt to that braces — do not read it as covered.
+#
+# 🔴 The empty case is a separate `-z` test rather than an empty-string case
+# branch, and that is NOT style: an EMPTY-STRING LITERAL (two adjacent single
+# quotes) cannot appear anywhere in this payload, because the payload IS a
+# single-quoted string — the pair would close it and reopen it, and the file
+# still parses while the payload silently becomes different text. Measured while
+# writing this very comment: spelling the forbidden token inside it dropped two
+# bytes from the payload, under a green `bash -n` and a green suite. CONVERGE
+# carries the same warning; this is the second place the rule applies.
+ship_talos_digest() {
+  if [ ! -f "$2" ]; then echo "ship-talos-$1 ABSENT"; return 0; fi
+  s=$(sha256sum < "$2" 2>/dev/null) || s=
+  s="${s%% *}"
+  if [ -z "$s" ]; then echo "ship-talos-$1 UNREADABLE"; return 0; fi
+  case "$s" in
+    *[!0-9a-f]*) echo "ship-talos-$1 UNREADABLE" ;;
+    *) echo "ship-talos-$1 $s" ;;
+  esac
+}
+ship_talos_digest gomod "$m/go.mod"
+ship_talos_digest gosum "$m/go.sum"
+'
+
+# ship_talos_marker <name> <output> — that marker value, or "" if it never spoke.
+# 🔴 Anchored on the WHOLE line, for the reason ship_landed_sha is: a long hex
+# string turns up in git prose too, and reading one of those as the answer gives
+# a confident WRONG verdict instead of a missing one. "" is meaningful — it is
+# how "the probe produced no answer at all" stays distinguishable from every
+# answer it can produce.
+ship_talos_marker() {
+  printf '%s\n' "$2" \
+    | sed -n "s/^ship-talos-$1 \\([A-Za-z0-9][A-Za-z0-9]*\\)\$/\\1/p" | tail -1
+}
+
+# ship_talos_is_digest <value> — true ONLY for a run of lowercase hex.
+#
+# 🔴 STRUCTURAL, NOT SPELLED: it asks "is this a digest", not "is this word one
+# of ABSENT/UNREADABLE/UNREACHABLE". A degraded spelling the probe grows tomorrow
+# is then handled correctly with no edit here, instead of falling through a word
+# list and being compared as though it were a hash.
+#
+# ⚠ AND THAT ADVANTAGE IS LATENT, NOT MEASURED — said plainly rather than left to
+# read as coverage. A mutation sweep replaced this body with exactly that word
+# list and NOTHING went red, because the probe emits only digests and those three
+# words, so the two forms are behaviourally identical TODAY (measured: the
+# word-list mutant and the structural original both survive, and both fail
+# identically once the probe is made to emit a fourth word). It is kept because it
+# cannot go wrong when the vocabulary grows, not because a test defends it.
+#
+# 🔴 What IS measured is the RELATIONSHIP between the two call sites: with BOTH
+# the local and the remote gate removed, two hosts that each reported ABSENT
+# compare EQUAL and the run prints an AGREEMENT computed from two absences.
+# Neither gate removed alone reaches that — the other still fires — so it is a
+# two-gate seam, pinned by test_BOTH_hosts_degraded_is_NOT_COMPARED_and_never_
+# reads_as_AGREEMENT.
+ship_talos_is_digest() {
+  case "${1:-}" in
+    ''|*[!0-9a-f]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# ship_talos_show <value> <fallback-when-empty> — what to PRINT for a marker.
+# A 64-hex digest shortened to 12 (a full one three times per line is noise an
+# operator scrolls past), a degraded word verbatim, and "" replaced by the
+# caller's fallback so "the host said nothing" never prints as a blank.
+ship_talos_show() {
+  if ship_talos_is_digest "${1:-}"; then printf '%s' "${1:0:12}"; else printf '%s' "${1:-$2}"; fi
+}
+
+# ship_talos_not_compared <reason> — degrade HONESTLY and CONTINUE.
+# 🔴 Reuses this script's existing vocabulary rather than minting a second
+# phrase for the same idea (see the four `cross-host agreement NOT COMPARED`
+# sites at the verdict). A pre-flight that blocked the legitimate one-host path,
+# a host without the checkout, or an unreachable host would be a permanently-red
+# gate — worse than no gate, because it trains everyone to work around it.
+ship_talos_not_compared() {
+  echo "ship: pre-flight — cross-host agreement NOT COMPARED for containers/clawgate go.mod+go.sum: $1."
+  echo "  clawgatectl builds from that tree per host, so this run cannot promise both"
+  echo "  switches compile the same source. Not a disagreement, and not a refusal — proceeding."
+}
+
+# ship_talos_preflight — 0 to proceed, 1 to refuse. Prints its own lines.
+ship_talos_preflight() {
+  local lh rh lmod rmod lsum rsum out rel talos diff
+
+  # 🔴 CHEAPEST REFUSAL-FREE EXIT FIRST, and it is also the correct short
+  # circuit: with one host in scope there is no second checkout, so there is
+  # nothing to compare and no reason to spend an ssh connection finding out.
+  if [ "$DO_LOCAL" != 1 ] || [ "$DO_REMOTE" != 1 ]; then
+    ship_talos_not_compared "1 of 2 hosts in scope"
+    return 0
+  fi
+
+  out=$(bash -c "$TALOS_PROBE" 2>&1)
+  lh=$(ship_talos_marker head "$out")
+  lmod=$(ship_talos_marker gomod "$out")
+  lsum=$(ship_talos_marker gosum "$out")
+  if ! ship_talos_is_digest "$lmod" || ! ship_talos_is_digest "$lsum"; then
+    # 🔴 AND NO REMOTE PROBE EITHER. One side missing already decides the
+    # outcome, so probing the far host would buy nothing and COST an extra ssh
+    # connection before the legs — the same objection the address probe is
+    # gated on above, where one measured run of it moved the very window
+    # test_a_merge_landing_between_the_two_fetches_is_not_convergence exists
+    # to detect.
+    ship_talos_not_compared "local ($SHIP_ROLE) reported go.mod=$(ship_talos_show "$lmod" NOANSWER) go.sum=$(ship_talos_show "$lsum" NOANSWER)"
+    return 0
+  fi
+
+  # `bash -s` with the payload on STDIN, never inlined in the ssh command
+  # string: `ssh host "<script>"` names no interpreter, so sshd runs the
+  # account's LOGIN SHELL, which is zsh on both hosts. Same rule, same reason as
+  # the remote CONVERGE leg below.
+  out=$(printf '%s\n' "$TALOS_PROBE" | ssh -o ConnectTimeout=10 "$REMOTE_SSH" bash -s 2>&1)
+  rh=$(ship_talos_marker head "$out")
+  rmod=$(ship_talos_marker gomod "$out")
+  rsum=$(ship_talos_marker gosum "$out")
+  if ! ship_talos_is_digest "$rmod" || ! ship_talos_is_digest "$rsum"; then
+    # An empty marker means the host never answered — ssh failed, or the probe
+    # did. THREE outcomes, three words: ABSENT (no such file there), UNREADABLE
+    # (present but no digest could be taken — unreadable, or no sha256sum on
+    # that host), UNREACHABLE (we never got a word back at all). None of them is
+    # a disagreement, and conflating any of them with one is how this becomes
+    # the gate nobody can pass.
+    ship_talos_not_compared "remote ($REMOTE_ROLE at $REMOTE_SSH) reported go.mod=$(ship_talos_show "$rmod" UNREACHABLE) go.sum=$(ship_talos_show "$rsum" UNREACHABLE)"
+    return 0
+  fi
+
+  if [ "$lmod" = "$rmod" ] && [ "$lsum" = "$rsum" ]; then
+    echo "ship: pre-flight — 2 hosts compared, identical containers/clawgate go.mod+go.sum (go.mod ${lmod:0:12})."
+    # 🔴 THE PRECISION HALF, SAID OUT LOUD. Different commits with identical
+    # module files is the NORMAL state of this fleet and is deliberately NOT
+    # refused — but an operator who has seen the old behaviour needs to be told
+    # that, or a silent pass here reads as the check having failed to run.
+    if [ "$lh" != "$rh" ]; then
+      echo "  the two checkouts are at DIFFERENT commits (local ${lh:0:12}, remote ${rh:0:12})."
+      echo "  NOT refused: a difference outside the Go module files cannot change vendorHash — it"
+      echo "  only makes the src derivation rebuild on one host. drift-check.sh rc 17 owns currency."
+    fi
+    return 0
+  fi
+
+  diff=""
+  [ "$lmod" != "$rmod" ] && diff="go.mod"
+  [ "$lsum" != "$rsum" ] && diff="${diff:+$diff and }go.sum"
+
+  echo "ship: PRE-FLIGHT REFUSED — the two hosts' containers/clawgate $diff differ." >&2
+  echo "  local  ($SHIP_ROLE) go.mod=${lmod:0:12} go.sum=${lsum:0:12} HEAD=$lh" >&2
+  echo "  remote ($REMOTE_ROLE) go.mod=${rmod:0:12} go.sum=${rsum:0:12} HEAD=$rh" >&2
+  echo "  nix/pkgs/tools/clawgatectl.nix builds clawgatectl from that working tree and pins ONE" >&2
+  echo "  vendorHash, which those files decide. The odd-one-out host fails its vendor derivation" >&2
+  echo "  with 'Cannot build ... Reason: 1 dependency failed' — naming nothing — and this script" >&2
+  echo "  would report it as a bare rc 9 switch-failed." >&2
+  # 🔴 TWO CASES, TWO REMEDIES, AND THE WRONG ONE CANNOT WORK. If both hosts are
+  # on the SAME commit, the difference is in no commit at all and `merge
+  # --ff-only` is a no-op — telling the operator to run it would send them to a
+  # command that reports success and changes nothing. HEAD is what tells the two
+  # apart, which is the whole reason it is still probed.
+  talos="$HOME/workspace/homelab-talos"
+  if ship_talos_is_digest "$lh" && [ "$lh" = "$rh" ]; then
+    echo "  both hosts are on the SAME commit $lh, so this difference is UNCOMMITTED" >&2
+    echo "  (or untracked) and a fetch + fast-forward CANNOT fix it. On each host:" >&2
+    echo "    git -C ~/workspace/homelab-talos status --porcelain -- containers/clawgate/go.mod containers/clawgate/go.sum" >&2
+    echo "  then commit the edit you want to keep, or discard it:" >&2
+    echo "    git -C ~/workspace/homelab-talos checkout -- containers/clawgate/go.mod containers/clawgate/go.sum" >&2
+  elif ship_talos_is_digest "$lh" && ship_talos_is_digest "$rh"; then
+    # 🔴 BEHIND AND DIVERGED ARE DIFFERENT PROBLEMS: one is a fast-forward, the
+    # other needs a decision. Tested with `merge-base --is-ancestor` in the LOCAL
+    # checkout — and only after `cat-file -e` proves the other host's commit is
+    # actually IN this object store, because a comparison against an absent
+    # operand does not report MISSING, it reports an answer. Nothing is fetched
+    # here: a pre-flight that mutated a repo to explain a refusal would be doing
+    # the remedy's job badly.
+    if ! git -C "$talos" cat-file -e "$rh^{commit}" 2>/dev/null; then
+      rel="which is behind: NOT DETERMINED — $rh is not in this host's object store, so ancestry cannot be tested here. Sync BOTH hosts."
+    elif git -C "$talos" merge-base --is-ancestor "$lh" "$rh" 2>/dev/null; then
+      rel="which is behind: LOCAL ($SHIP_ROLE) — its HEAD is an ancestor of the remote one."
+    elif git -C "$talos" merge-base --is-ancestor "$rh" "$lh" 2>/dev/null; then
+      rel="which is behind: REMOTE ($REMOTE_ROLE) — its HEAD is an ancestor of the local one."
+    else
+      rel="which is behind: NEITHER — the two have DIVERGED. A fast-forward cannot fix this one."
+    fi
+    echo "  $rel" >&2
+    echo "  remedy, on the host named above:" >&2
+    echo "    git -C ~/workspace/homelab-talos fetch origin && git -C ~/workspace/homelab-talos merge --ff-only origin/trunk" >&2
+    echo "  if it still differs afterwards the edit is UNCOMMITTED on one host; commit or discard it." >&2
+  else
+    echo "  which is behind: NOT DETERMINED — at least one host could not report a commit" >&2
+    echo "  (local HEAD=$lh, remote HEAD=$rh), so no sync can be recommended. Compare the two" >&2
+    echo "  containers/clawgate/go.mod files by hand." >&2
+  fi
+  echo "  then re-run ship." >&2
+  # 🔴 $SHIP_SELF_GEN is already normalised to a run of digits above — read, not
+  # re-normalised here, because a second copy of that predicate is the shape
+  # RULES.md says is wrong at N-1 sites.
+  if [ "$SHIP_SELF_GEN" = 0 ]; then
+    echo "  fleet state: NEITHER host was fetched, landed or switched by this run." >&2
+  else
+    echo "  fleet state: this is re-exec generation $SHIP_SELF_GEN — pass 1 ALREADY converged" >&2
+    echo "  local ($SHIP_ROLE) (and, unless --no-switch, switched it), and its rc was discarded" >&2
+    echo "  by the exec. The remote ($REMOTE_ROLE) was NOT visited: this refusal precedes both legs." >&2
+  fi
+  echo "  to proceed anyway, converge one host at a time: ship.sh --no-remote / --no-local." >&2
+  return 1
+}
+
+if ! ship_talos_preflight; then
+  exit 26
+fi
+echo
+
 rc=0
 LOCAL_SHA=""
 REMOTE_SHA=""
@@ -1692,6 +2095,9 @@ else
   echo "  rc13=consumer-stale(managed artifacts resolve but serve OLD content — re-switch that host)"
   echo "  rc19=hosts-disagree(the two hosts landed on DIFFERENT commits, or agreement was not compared)"
   echo "  rc20=superseded(this run replaced its own script and could not re-run it — re-run ship)"
+  echo "  rc26=pre-flight-refused(the two hosts' containers/clawgate go.mod/go.sum differ ON DISK;"
+  echo "       clawgatectl builds from that tree and pins one vendorHash those files decide —"
+  echo "       sync or un-dirty them on the host named, then re-run ship)"
 fi
 exit "$rc"
 }
