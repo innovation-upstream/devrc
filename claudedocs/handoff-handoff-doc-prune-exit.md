@@ -28,39 +28,32 @@ delete path. This arc builds that path and fixes one false claim found on the wa
   ranked item 2) and the arc cannot close without it.
 
 ## State now
-- **`devrc` `origin/main` @ `7f84306c`.** **#1919 MERGED** as `643fd0ef` (verified by content, not
-  by PR state). **#1926 OPEN at `c8d06ba5`, CI GREEN on all four Tekton statuses.**
-- **#1926 is the lever-1 answer the operator gave**, and it has run a **four-round audit ladder**
-  (0, 1, 2, 3 — round 4 dispatched). 🔴 **EVERY ROUND FOUND MY OWN PROSE ASSERTING SOMETHING
-  FALSE**, and none of them found a behaviour defect:
-  - **r0** — a guard docstring claimed the sibling would catch "a reword that keeps the denial";
-    measured FALSE, the reword passed both guards. Also: the standalone MOVE remedy was compliable
-    only by the hand edit rule (q) exists to remove, and rule (p)'s own docstring still carried the
-    falsified claim.
-  - **r1** — the refusal asserted eviction needed "its own run … its own commit". FALSE: `--prune`
-    COMBINES with `--update` (`--help`; and `main()` prunes `merged_text` before rule (p) reads it).
-    The instruction was harmful — a prune-only first commit cannot carry the pointer, so step 1 is
-    a pointerless deletion. Both retracted sentences were also still live in `write-gate.md` §I.
-  - **r2** — the "positive control" controlled nothing: gutting the sweep to `for label, path in ():`
-    left BOTH tests green. Plus `#`-wrapped copies invisible, and `"ENDED"` matching inside
-    **"appended"**.
-  - **r3** — rule (q)'s header still said, in the present tense, that no path could remove a line —
-    **two lines above my own note claiming the conversion was made.** And the r2 normaliser fix
-    covered `#` comments but not string literals, i.e. the copy nobody reads, not the copy an agent
-    does (916 lines of that module end in a bare closing quote).
-- 🔴 **THE FIX FOR A VACUOUS GUARD WAS ITSELF VACUOUS, BY THE SAME MUTATION.** My first r2 remedy
-  asserted `_rule_p_sites()` was non-empty — pinning the FUNCTION while the mutation is at the CALL
-  SITE. The mutant passed 4/4. What works is a positive control in the sweep's OWN body counting
-  files read and occurrences seen. **Report the pair, never the zero alone.**
-- **`--prune` (#1916) is now exercised end-to-end on a real document** — `jev-ui-demo` PR #14, one
-  run, `--update` + `--prune`, pointer appended and 42 lines removed, doc 65,495 → 63,821 B. That
-  is the evidence that #1926's corrected remedy text is FOLLOWABLE, which no test can assert.
-- 🔴 **The arc still cannot close.** Clause 2 wants `--prune` on `SKILL.md`'s `size-ratchet` line;
-  lever 1 deliberately does not touch that file. `SKILL.md` is **20,213 B** against a **20,300 B**
-  enforced budget — **87 B**.
-- 🔴 **No `clawgate-task:` field**: `clawgate_handoff.sh resolve` exited **5**. An unknown session
-  id answers 200 with an empty array, so that zero cannot distinguish "touched no task" from "wrong
-  id". **Not a clean bill of health.**
+- 🔴 **#1926 IS MERGED — `ed947e1a` (squash), 2026-09-30T17:17:35Z.** Verified three ways, not one:
+  by CONTENT on `origin/main` (a squash breaks ancestry, so ancestry is not the check); by the
+  four Tekton statuses all `success` with `completed_at` AFTER the final push; and by **rendering
+  the live refusal from the merged module** — `readlink -f scripts/lib/handoff_doc.py` terminates
+  in the repo, so that output is the shipped code, not a fixture. The sentence that started this
+  arc is gone, and remedy 2 now routes to `--prune` and states that it COMBINES with `--update`.
+- **The base clone is fast-forwarded.** `jev-ui-demo#14` (the eviction) is **still OPEN**.
+- 🔴 **THE ARC IS STILL OPEN, AND ONLY ON CLAUSE 2.** The closing condition wants `--prune` named
+  on `SKILL.md`'s `size-ratchet` line. `grep -n 'size-ratchet' | grep -c 'prune'` still returns
+  **0**. Clause 1 (merged to `origin/main`) is MET. Lever 1 deliberately does not touch that file,
+  so this cannot close without the operator's decision — see ranked item 1.
+- **The ladder ran FIVE rounds (0–4) and is CLOSED.** Round 4's verdict was merge-after-F1 and
+  explicitly **not** a round 5, because F1's fix is verified by a mechanical control rather than
+  another pass. 🔴 **Every round found my own PROSE asserting something false; none found a
+  behaviour defect.** The per-round record is in the `Gotchas` below and on the PR.
+- **Round 4 ran the SANDBOX tier — the one the merge gates on — for the first time in the ladder:**
+  `SCOPE: FULL (30 of 30 hermetic targets)`, `RESULT: PASS`. Every earlier round's green was the
+  dev-host pytest tier only, and nobody had checked.
+- **Filed, not fixed** (round 4's own recommendation, each with a closing condition, both on the
+  PR): **F6** a bare copy inserted adjacent to `_RETRACTION_MARKERS` is auto-cleared, because the
+  marker words sit there as literal definitions — pre-existing, predates the range. **F7** the
+  string-literal strip can fabricate a phrase across two unrelated literals; no instance in the
+  real corpus, and it errs toward blocking, which is the safe side.
+- 🔴 **No `clawgate-task:` field**: `clawgate_handoff.sh resolve` exited **5** (NOTHING RESOLVED).
+  An unknown session id answers 200 with an empty array, so that zero cannot distinguish "touched
+  no task" from "wrong id". **Not a clean bill of health.**
 
 ## Open investigations — live diagnosis state
 
@@ -98,21 +91,23 @@ delete path. This arc builds that path and fixes one false claim found on the wa
   reading of "main is green" is currently wrong.
 
 ## Next steps (ranked)
-1. **Merge devrc#1926 once round 4 reports**, regardless of whether it is clean — operator's
-   standing call. `IN FLIGHT: innovation-upstream/devrc#1926` @ `c8d06ba5`, CI green. Then
-   re-run the `/handoff` write on any doc to confirm the corrected refusal renders.
-    forcing: user — the operator directed the ladder and set merge-after-round-4.
-2. **Resolve the arc's clause 2: raise `MAX_BYTES`, or amend the closing condition to match
-   lever 1.** Unchanged and still the only two ways this arc closes. 87 B of headroom against
-   ~144 B of wiring. 🔴 The obvious trim is REFUTED — demoting the emphasis catalogue reds three
-   `TestSkillAndModuleAgree` guards, by mutation.
+1. **Close the arc: raise `MAX_BYTES`, or amend the closing condition to match lever 1.** The ONLY
+   thing keeping this arc open. `claude/skills/handoff/SKILL.md` is **20,213 B** against a
+   **20,300 B** enforced budget (`MAX_BYTES 21_200` − `MIN_HEADROOM_BYTES 900`) = **87 B**, against
+   ~144 B of wiring. 🔴 **Against the raise:** `scripts/tests/test_handoff_skill_size.py`'s own
+   ledger says the answer to the next round is *"lever 1 or 2, not another raise"*, and it last
+   ratcheted DOWN. 🔴 **The obvious trim is REFUTED — do not retry it:** demoting the emphasis /
+   near-miss catalogue out of `SKILL.md` reds **three** `TestSkillAndModuleAgree` guards, by
+   mutation, because the skill is the only copy an executor reads at step 5. Files: that test
+   (which owns the constant) and `claude/skills/handoff/SKILL.md`.
     forcing: none
-3. **Decide `jev-ui-demo`'s doc budget, then close PR #14.** Round 0 of that PR found
-   `handoff_budget.GRANDFATHERED` holds **71 foreign entries** at allowances up to **425,984 B**,
-   and that doc is bound by the bare 65,536 **only because `jev-ui-demo` is not in
+2. **Decide `jev-ui-demo`'s doc budget, then close `ZacxDev/jev-ui-demo#14`.** Round 0 of that PR
+   found `handoff_budget.GRANDFATHERED` holds **71 foreign entries** at allowances up to
+   **425,984 B**, and that doc is bound by the bare 65,536 **only because `jev-ui-demo` is not in
    `handoff_index.REPO_ENV_HANDLES`** — so it was never in the population that block was measured
    over. One ledger line would have been the precedented treatment and would have made #14
-   unnecessary. Files: `scripts/lib/handoff_budget.py`, `scripts/lib/handoff_index.py`.
+   unnecessary. `IN FLIGHT: ZacxDev/jev-ui-demo#14`. Files: `scripts/lib/handoff_budget.py`,
+   `scripts/lib/handoff_index.py`.
     forcing: none
 
 ## Defects (batched)
@@ -272,23 +267,63 @@ delete path. This arc builds that path and fixes one false claim found on the wa
   reproducible — a hand re-read gave 46 / 1,468 B against a blind round's 23). 🔴 **That quantity
   has been measured three times with three answers; never let any count of it become load-bearing.**
 
+- 🔴 **FIVE AUDIT ROUNDS, FIVE FINDINGS IN MY OWN PROSE, ZERO BEHAVIOUR DEFECTS — that ratio is the
+  arc's headline.** r0: a docstring claimed coverage its sibling guard did not have. r1: the
+  refusal said eviction needed its own run and commit — harmful, it prescribed a pointerless
+  deletion. r2: a "positive control" stayed green with the guard reading ZERO files. r3: a
+  present-tense claim sat **two lines above my own note saying it had been converted**. r4: both
+  behavioural fixes were UNGUARDED — mutants I had run by hand and never committed, so reverting
+  either left the suite green at 637 passed. **When a round rewrites an explanation, audit the
+  explanation at least as hard as the code.**
+- 🔴 **AN ANTI-VACUITY GUARD MUST PIN THE CALL SITE, AND ITS POSITIVE CONTROL BELONGS IN THE
+  GUARD'S OWN BODY.** My first fix asserted the site-list FUNCTION returned a full list; the
+  mutation is at the CALL SITE, so the mutant passed 4/4. What works is counting what the sweep
+  actually READ and asserting a floor before asserting no offenders. **Report the pair, never the
+  zero alone.** And a TOTAL floor is satisfiable by the files that cannot fail — a call site
+  filtered to `.md` cleared `files>=4, seen>=3` while never opening the payload module.
+- 🔴 **A GUARD THAT REQUIRES THE DEFECT TO PERSIST PUNISHES THE CLEANUP IT EXISTS TO CAUSE.** The
+  per-site floor first required ≥1 OCCURRENCE of the retracted phrase from two named files — so an
+  author who FINISHED a retraction was failed by the guard whose whole purpose is that state.
+  Assert the file was READ (bytes), never that it still contains the thing. Same shape as
+  RULES' *an EMPTY RESULT cannot distinguish two mechanisms*: a per-site zero means skipped OR
+  clean, and the message named only the first.
+- 🔴 **A MUTANT YOU RAN BY HAND IS NOT A GUARD.** r3's commit message listed "m5 … now RED" as a
+  control; that mutant was never committed as a test, so r4 measured both of r3's behavioural
+  changes revertible with the suite green. **If a fix's control is not in the tree, the fix can
+  revert silently.** Both are now assertions watched red against each reverted line.
+- 🔴 **A NUMBER WITHOUT ITS POPULATION IS NOT REPRODUCIBLE, EVEN WHEN IT IS RIGHT.** r4 could not
+  reproduce "885 passed across the six suites" and flagged it — correctly, because no commit
+  message said WHICH six. Re-run, it is exactly 885. The figure was right; naming the population
+  is what makes it a claim. The six are now listed in `How to verify`.
+- ⚠ **`gh pr merge` printed NOTHING on success** — no confirmation line, exit 0. Verify a merge by
+  `gh pr view --json state,mergedAt,mergeCommit` plus a CONTENT check on `origin/main`; a squash
+  makes `merge-base --is-ancestor` return false forever, so ancestry is never the check.
+
 ## How to verify
 ```bash
 D=/home/zach/workspace/devrc
-R=innovation-upstream/devrc
-# 1. the guards, in the CORRECT environment (another repo's venv reports failures that do not exist)
+# 1. the merge landed, by CONTENT (a squash breaks ancestry — never check ancestry)
+git -C $D show origin/main:scripts/lib/handoff_doc.py | grep -c 'It COMBINES with this update'   # 1
+git -C $D show origin/main:scripts/lib/handoff_doc.py | grep -c 'cannot shrink them for you'      # 0
+# 2. THE SYMPTOM ITSELF — render the live refusal from the merged module. `readlink -f` must
+#    terminate IN the repo, or you are reading a /nix/store copy and this proves nothing.
+readlink -f $D/scripts/lib/handoff_doc.py
+nix develop "$D" --command bash -c "cd $D && PYTHONDONTWRITEBYTECODE=1 python3 -c \"
+import sys; sys.path.insert(0,'scripts/lib')
+import handoff_doc as hd
+cap = hd.handoff_budget.MAX_BYTES
+print(hd.size_ratchet_report('claudedocs/handoff-x.md','a'*(cap+2),'a'*(cap+1)))\""
+# 3. the suites — EXACTLY these six sum to 885; naming them is the point
 nix develop "$D" --command bash -c "cd $D && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
-  scripts/tests/test_handoff_doc.py -k 'still_ASSERTS or actually_READS or DETECTOR_can_both' -q"
-# 2. the sweep is not vacuous — round 2's mutation must RED with the sweep's own message
-#    in a `cp -a` copy with .git removed:  for label, path in _rule_p_sites():  ->  in ():
-#    expect "scanned 0 file(s) and saw 0 occurrence(s)"
-# 3. the normaliser reaches STRING LITERALS, not just comments — plant the phrase split across
-#    two adjacent literals in handoff_doc.py; it must be caught (it was seen=0 before round 4)
-# 4. CI, SHA-pinned — never `gh pr checks`, which re-resolves the sha at call time
-SHA=$(gh pr view 1926 --repo $R --json headRefOid --jq .headRefOid)
-gh api "repos/$R/commits/$SHA/status" --jq '"n=\(.statuses|length) "+([.statuses[]|"\(.context)=\(.state)"]|sort|join("  "))'
-# 5. the arc's OPEN clause: --prune still absent from SKILL.md's size-ratchet line
+  scripts/tests/test_handoff_doc.py scripts/tests/test_handoff_skill_size.py \
+  scripts/tests/test_skill_audit.py scripts/tests/test_run_tests_targets.py \
+  scripts/tests/test_no_public_ips.py scripts/tests/test_doc_path_rot.py -q"
+# 4. the guard is not vacuous — in a `cp -a` copy with .git REMOVED, revert any ONE of:
+#      `for label, path in _rule_p_sites():`  ->  `in ():`          (expect: scanned 0 file(s))
+#      the two quote-strip lines in _scan                            (expect: DETECTOR control RED)
+#      `re.search(rf"\b...\b", window)` -> `m.lower() in window`     (expect: DETECTOR control RED)
+# 5. THE ARC'S ONLY OPEN CLAUSE — returns 0 while it is open
 git -C $D show origin/main:claude/skills/handoff/SKILL.md | grep -n 'size-ratchet' | grep -c 'prune'
 ```
-🔴 **Expect FOUR statuses at step 4** — `n=0` is an unregistered rollup, not a verdict. Step 5
-returning **0** is the arc's second clause still open.
+🔴 **Step 5 returning 0 is the arc still open.** Step 2 is the one that matters — a green suite
+proved nothing about this defect for four rounds; rendering the refusal is what shows it fixed.
