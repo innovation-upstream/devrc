@@ -21,16 +21,12 @@ unaffected while the tunnel is up.
   — no MTU/routing churn.
 
 ## State now
-- Branch / PR: devrc **PR #1937** (`handoff-laptop-airvpn-tunnel`), OPEN. Landed `a9bcf992` earlier this session; this is the follow-up correction.
+- Branch / PR: devrc **PR #1937** (`handoff-laptop-airvpn-tunnel`), OPEN. Commits this session: `a9bcf992` (correction), `9ab5dfd1` (retraction), plus this one.
 - No `clawgate-task:` field: `clawgate_handoff.sh resolve` exited **5 (NOTHING RESOLVED)** — cannot distinguish "touched no task" from "wrong id". Not a clean bill of health.
-- Done this session (2026-09-30):
-  - **flap-watch v2 → v3.** v2 (pid 2115782) stopped; **v3 running, pid 2309522**, log `<scratchpad>/flap-watch2.log`, script `flap-watch3.sh`. `loss_pct()` parse defect fixed + controlled.
-  - **Per-destination concurrent probe** (`probe2.sh`) — now run **four** times total, three of them showing the workbench/gateway asymmetry.
-  - **`tailscale set --accept-routes=false` experiment, run and REVERTED.** `RouteAll` confirmed back to `True`, route to `192.168.50.250` back via `tailscale0`.
-- 🔴 **The `ip rule` 5150 pin is NOT APPLIED** and has not been since the **2026-09-27 15:33 reboot** (`uptime -s`). Unchanged from the earlier commit — still the correction that matters.
-- 🔴 **AND THE PIN IS NOT THE LEVER.** It targeted `192.168.50.94`, which measures **0% in every round without it**.
-- Deploy/verify status: nothing deployed, nothing left changed. The one experiment run was reverted in the same command via a `trap`.
-- 🔴 **Sudoers reality, measured — this bounds what any session here can do:** `sudo -n -l` grants NOPASSWD for `airvpn-sudo`, the **whole `tailscale` binary**, and `systemctl restart|start|stop tailscaled` / `restart nebula@mesh`. It does **NOT** grant `ip` or `nft`. **So the fwmark/`ip rule` remedy cannot be applied by an agent here at all** — it needs an operator or a sudoers change. Do not plan around it without that.
+- 🔴 **WATCHER PID CORRECTED — the two earlier commits record `2309522`, which is DEAD and was never the watcher.** The live process is **`2309463`** (`ppid=1`, 9 h uptime, confirmed via `/proc/<pid>/cmdline`); `flap-watch.pid` has been corrected. Cause: I resolved the PID by scanning `pgrep -x bash` moments after `setsid` and caught a transient. **Resolve the watcher by `/proc` cmdline every time — do not trust the pid file or a remembered number**, this arc has now got it wrong twice in one day.
+- 🔴 **The `ip rule` 5150 pin is NOT APPLIED** and has not been since the **2026-09-27 15:33 reboot**. It also is not the lever: `192.168.50.94` measures 0% in every round without it.
+- 🔴 **Sudoers reality:** NOPASSWD covers `airvpn-sudo`, the **whole `tailscale` binary**, and `systemctl restart|start|stop tailscaled` / `restart nebula@mesh`. **`ip` and `nft` are NOT granted**, so the fwmark/`ip rule` remedy cannot be applied by an agent here at all.
+- Deploy/verify status: nothing deployed, nothing left changed. The one routing experiment was reverted in-run via a trap; `RouteAll = True` re-confirmed.
 - 🔴 CARRIED (still true): mosh DOES NOT WORK YET, deliberately — no host runs `mosh-server`; `programs.mosh.openFirewall` DEFAULTS TRUE (must be false or it opens 1001 UDP ports on every interface incl. WAN).
 
 ## Open investigations — live diagnosis state
@@ -258,11 +254,26 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - **Leading hypothesis:** NONE that is load-bearing. What survives is the *observation set*, which is now well constrained and still unexplained: (a) the workbench flaps and the homelab gateway does not, though both sit behind one home public IP — so it is **per-flow or per-port, not per-site and not per-destination-host**; (b) nebula and tailscale to the workbench lose **identically, to the second**, though they are separate flows to that same home IP; (c) every ICMP control (local gw, last hop before home, far box) is 0% throughout; (d) a third vantage reaches the workbench at 0% while the laptop cannot. CGNAT per-flow state eviction still fits (a), (c) and (d) — but (b) is what it does not explain, and (b) is the observation that keeps surviving.
 - **Next probe:** stop proposing remedies and characterise (b). The question is whether the nebula and tailscale flows to the workbench share a NAT binding — capture the laptop's actual source ports for both (needs root: `ss -unp` or `conntrack -L`, neither available to an agent here) and check whether the two flows die together because they share one mapping, or because something upstream drops both. Until (b) is explained, any "route around it" proposal is a guess — this session already shipped one and had to retract it inside an hour.
 
+### 🔴 THE CENTRAL FACT, now on a 9-hour dataset: the two overlays fail in LOCKSTEP, packet-for-packet, while ICMP on the same paths is clean
+- as-of: 2026-09-30
+- 🔴 **This is the observation every remedy proposed in this arc has failed to engage with, and it is now the best-evidenced thing in the document.** Both remedies proposed so far (the `ip rule` pin; the tailscale route exclusion) were aimed at mechanisms that would break the coupling — and the coupling survived both. **Do not propose another remedy before explaining this block.**
+- **Symptom + exact repro:** v3 watcher, 9 h unattended (`flap-watch3.sh`, pid `2309463`). On each ≥15% poll it fires a 60 s 5-way concurrent probe: nebula(UDP), tailscale(UDP), ICMP-local-gw, ICMP-last-hop-before-home, ICMP-far-box. Re-derive with the analysis one-liner in `How to verify`.
+- **Observed (with values), 2026-09-30 06:09Z→15:14Z:**
+  - **610 polls, 173 triggers (28.4% of polls).** `BADPARSE`: **0** — so the v2 defect that silently swallowed the worst polls is not operating.
+  - **169 episodes measured both overlays. In 167 (98.8%) the loss% AND the longest run were IDENTICAL.** The only two exceptions differ by a single packet with the *same* run length (`14.1667%` vs `15.0%`, run 15; `7.5%` vs `8.33333%`, run 7).
+  - **ICMP controls: 344 readings at 0%, 2 non-zero**, across the same episodes.
+  - **Worst episode: `2026-09-30T10:16:16Z` — 99.1667% loss, a contiguous 118-packet run = 59 SECONDS**, both overlays identical. Next worst 65% / 40 pkt, then 63.3% / 37 pkt.
+  - `via: measurement`
+- 🔴 **Ruled out — the "6.5–20 s blackout" size this doc has carried since 09-24.** The real distribution reaches **59 s**, and episodes fire on 28% of polls. Any plan sized against 6.5–20 s is sized against the wrong fault. `via: measurement`
+- **Ruled out — that the coupling is nebula riding tailscale.** See the retraction block: the subnet route was removed and the loss was unchanged. `via: measurement`
+- **Leading hypothesis:** NONE load-bearing, and the lockstep is why. Two *separate* UDP flows — different protocols, different local ports, different remote ports — to one destination host lose the *same packets* for the *same duration*, while ICMP to that host's own last hop stays at 0%. That is very hard to explain by anything per-flow, which is what the CGNAT story requires. It points instead at something that drops UDP to that destination wholesale for seconds at a time, and at nothing this laptop or this repo controls. ⚠ Explicitly untested.
+- **Next probe:** the discriminating question is whether the two flows share one NAT binding or are being dropped independently. Needs root on the laptop **during** an episode (the watcher's timestamps say when): `ss -unp` / `conntrack -L` for the two flows' source ports, and whether the mappings change across a blackout. Neither command is available to an agent here — operator-run.
+
 ## Next steps (ranked)
-1. **Characterise why the two overlays fail identically to the second** (open investigation above, item (b)) — operator-run, needs root for `ss -unp`/`conntrack -L` on the laptop during a live episode; the v3 watcher's episode timestamps say when to look. This is diagnosis, NOT a remedy: the arc has now produced two remedy proposals (the `ip rule` pin, the route exclusion) and measurement killed both.
-   forcing: incident — mesh loss re-measured live four times on 2026-09-30, worst 16% with an 8 s contiguous blackout, and five watcher episodes inside 20 minutes
-2. **Merge #1937 once its Tekton checks settle** — it now carries both the correction and this retraction.
-   forcing: incident — the same live recurrence; leaving it open leaves a refuted mechanism as the doc's leading hypothesis
+1. **Capture the two flows' NAT state during a live episode** (open investigation above) — operator-run, root, on the laptop; use the v3 watcher's episode timestamps to time it. This is DIAGNOSIS, not a remedy: this arc has now proposed two remedies and measurement killed both, and the lockstep observation engages neither.
+   forcing: incident — 173 episodes in 9 hours on 2026-09-30, worst 99.2% loss over a contiguous 59 s, both overlays identical in 98.8% of 169 episodes
+2. **Merge #1937 once its Tekton checks settle** — it carries the correction, the retraction and this dataset.
+   forcing: incident — the same live recurrence; leaving it open leaves a refuted mechanism standing as the doc's leading hypothesis
 
 ## Defects (batched)
 - Workbench stale `airvpn-updown` copy — operator, ON THE LAN: `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown`, pair with killswitch re-test per `claude/skills/bar/reference/airvpn.md`.
@@ -378,21 +389,31 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - ⚠ **`handoff_doc.py` reports `leakscan: NO SCANNER FOUND … PASS BY ABSENCE`** in devrc — it looks for `tests/leakscan.py`, which does not exist here. The real gate is `scripts/tests/test_no_public_ips.py`; run it yourself on a doc with a leak history.
 - 🔴 **`claim-work --release` is per-WORKTREE**: claiming from the base clone and releasing from elsewhere is refused. Release from the same checkout you claimed in.
 
+- 🔴 **A PID resolved immediately after `setsid` can be a transient — this arc recorded a dead one twice in one day.** `2309522` was written into two commits as "the running watcher"; the real process was `2309463` (`ppid=1`). Re-resolve from `/proc/<pid>/cmdline` at the moment you need it, and treat both the pid file and any number in this doc as a hint.
+- 🔴 **LET THE INSTRUMENT RUN BEFORE THEORISING — 9 hours of it changed the question.** Every hypothesis in this arc was built on single ad-hoc probes of 100–300 packets. The unattended dataset showed the blackouts reach **59 s** (not 6.5–20 s), fire on **28%** of polls, and couple the two overlays in **98.8%** of episodes. None of that was visible in the hand-run samples the remedies were designed against.
+- ⚠ **`grep -c TRIGGER` over the whole watcher log double-counts across watcher generations** — the log is appended across the v2→v3 handover. Slice from the `WATCHER HANDOVER` marker (`awk '/WATCHER HANDOVER/{f=1} f'`) before quoting any count.
+
 ## How to verify
 ```bash
 S=/tmp/claude-1000/-home-zach-workspace-devrc/765865a3-5a34-4368-9c27-c442fd52106c/scratchpad
-# watcher alive? -- resolve the PID, never `pgrep -f`
-for p in $(pgrep -x bash); do tr '\0' ' ' < /proc/$p/cmdline | grep -q flap-watch3 && ps -o pid=,etime= -p $p; done
-grep -cE 'EPISODE|BADPARSE' $S/flap-watch2.log            # episodes + any unreadable poll
-grep -A9 'EPISODE' $S/flap-watch2.log | tail -40
-# the discriminator that matters: home vs home, concurrently
-bash <this-session-scratchpad>/probe2.sh                   # home-gateway must be 0%; home-workbench is the one to watch
-ip rule show | grep 5150                                   # ABSENT since the 2026-09-27 reboot
-ip route get 192.168.50.250                                # `dev tailscale0 table 52` == nebula is riding tailscale
-# the mechanism, from the far end:
-ssh zach@10.42.0.30 "journalctl -u nebula@mesh --since '24 hours ago' --no-pager \
-  | grep -oP 'certName=zach-laptop.*?from=\"\K[0-9.]+(?=:)' | sort | uniq -c"
-#   100.64/10 addresses == arriving via tailscale (the fault); public == direct (healthy)
+# watcher alive? -- resolve from /proc, never `pgrep -f` and never the pid file alone
+for p in $(pgrep -x bash); do [ -r /proc/$p/cmdline ] && tr '\0' ' ' < /proc/$p/cmdline \
+  | grep -q flap-watch3 && ps -o pid=,etime= -p $p; done
+# v3's OWN record only -- the log spans both watcher generations
+awk '/WATCHER HANDOVER/{f=1} f' $S/flap-watch2.log > /tmp/v3.log
+grep -c 'poll:' /tmp/v3.log; grep -c TRIGGER /tmp/v3.log; grep -c BADPARSE /tmp/v3.log
+# the central fact: do the two overlays ever disagree?
+python3 - <<'PY'
+import re
+txt=open('/tmp/v3.log').read(); neb={}; ts={}
+for m in re.finditer(r'(\S+Z)\s+(nebula|tailscale)\(UDP-on-wire\)\s+loss=([\d.]+)%\s+longest_run=(\d+)',txt):
+    (neb if m.group(2)=='nebula' else ts)[m.group(1)]=(float(m.group(3)),int(m.group(4)))
+c=sorted(set(neb)&set(ts)); same=sum(1 for t in c if neb[t]==ts[t])
+print(f"{len(c)} episodes, {same} identical ({100*same/len(c):.1f}%), "
+      f"longest run {max(neb[t][1] for t in c)} pkt")
+PY
+ip rule show | grep 5150            # ABSENT since the 2026-09-27 reboot
+sudo -n -l                          # `ip`/`nft` are NOT granted; design remedies to this
 ```
 ## How to verify — CARRIED verbatim from the 09-24 doc (arc closing-condition)
 🔴 RUN IT ALL WITH THE TUNNEL UP, and substitute HOME_PUB first; with the tunnel down several lines go vacuously green (`ip link show airvpn` fails, split-tunnel probe returns `dev wlp170s0`, pill up=false — those three catch you).
