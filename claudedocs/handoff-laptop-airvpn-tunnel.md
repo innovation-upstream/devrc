@@ -178,6 +178,26 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - 🔴 **What it still does not explain, and what has outlived every hypothesis here:** tailscale reaches the workbench **directly** (`tailscale ping` → `direct …:41641`), so a nebula-only relay hop cannot account for both overlays losing identical packets in the same second in 167 of 169 episodes. **Any next mechanism must predict the lockstep or it is not the mechanism.**
 - **Next probe, in order:** (1) **re-run the 09-24 third-vantage measurement** (far box → `10.42.0.30` concurrent with laptop → same, epochs recorded) — it is the only result exonerating the home side and it is six days old; (2) re-derive which peer `:38552` is *now*, from live state not a stale journal line; (3) only then capture during a live episode.
 
+### ✅ THE 09-24 THIRD-VANTAGE RESULT REPRODUCES under proper controls — the home side stays exonerated, and the fault is isolated to the laptop↔workbench PAIRING
+- as-of: 2026-09-30
+- 🔴 **This was the single result keeping the home network out of scope, it was six days old, and it now holds under a re-run with the two controls the original lacked.** Three suspects die on one round, each on a CONCURRENT control rather than a separate run.
+- **Symptom + exact repro:** `bash <scratchpad>/third-vantage.sh` — warm-up, then the far box (`root@10.42.0.20`) pings `10.42.0.30` for 140 pkt while the laptop pings `10.42.0.30` AND `10.42.0.10` for 100 pkt each, all concurrent; both clocks recorded. Up to 6 rounds, stopping on the first round where the laptop sees ≥10% loss — a quiet round proves nothing.
+- **Observed (with values), round 1, 2026-09-30:**
+
+  | vantage | result |
+  |---|---|
+  | laptop → workbench `10.42.0.30` | **13 lost / 100**, one contiguous 13-pkt run |
+  | laptop → gateway `10.42.0.10` (control) | **0 / 100** |
+  | far box → workbench `10.42.0.30` | **0 lost / 140** |
+
+  Windows from the packets' own timestamps: far `1790784753.6..1790784823.3` **contains** laptop `1790784759.8..1790784809.5`. The laptop's blackout was **seqs 40–52, epoch 1790784778.9 → 1790784785.9 (7.1 s)**; inside that exact window the far box delivered **14 of 14**. `via: measurement`
+- **Ruled out — the workbench HOST.** It answered a third vantage flawlessly during the precise 7.1 s it was dropping the laptop's packets. `via: measurement`
+- **Ruled out — the laptop's uplink / its link generally.** The gateway control was 0% in the same window, on the same wifi, same router, same ISP. `via: measurement`
+- **Ruled out — the home site as a whole.** The gateway is at that site and shares the dominant underlay endpoint; untouched. `via: measurement`
+- **Leading hypothesis:** the fault belongs to the laptop↔workbench pairing specifically — not to either endpoint, not to the site, not to the laptop's access network. Combined with the shared-underlay-endpoint block, the failing segment is whatever is unique to that pairing beyond the shared endpoint. ⚠ Untested.
+- 🔴 **STILL does not explain the lockstep**, which remains the fact no hypothesis in this arc has predicted: both overlays lose identical packets in the same second in 167 of 169 episodes. A candidate — that both overlays funnel through the homelab node to reach the workbench, since that node also hosts the tailscale subnet router — is contradicted by `tailscale ping` reporting the workbench as `direct`, and is recorded as a question, NOT a finding. Three hypotheses were promoted on this kind of resemblance today and all three were retracted.
+- **Next probe:** determine whether the laptop's nebula path to the workbench traverses the homelab node. From the far box, `ssh root@10.42.0.20` and re-run the pairing matrix with the gateway as the *source* if possible; or on the workbench, compare the arrival source address of laptop traffic against far-box traffic during an episode.
+
 ## Next steps (ranked)
 1. **Capture the two flows' NAT state during a live episode** (open investigation above) — operator-run, root, on the laptop; use the v3 watcher's episode timestamps to time it. This is DIAGNOSIS, not a remedy: this arc has now proposed two remedies and measurement killed both, and the lockstep observation engages neither.
    forcing: incident — 173 episodes in 9 hours on 2026-09-30, worst 99.2% loss over a contiguous 59 s, both overlays identical in 98.8% of 169 episodes
@@ -306,6 +326,9 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - 🔴 **FIVE INSTRUMENT FAILURES IN ONE SESSION, EACH PRODUCING OUTPUT THAT LOOKED LIKE A FINDING.** (1) `pgrep -f` matched the agent's own wrapper shell → a dead PID in two commits. (2) A conntrack-timeout differential assumed idle flows decay; keepalives pin them near the 120 s max, so every peer read `NONE` — i.e. "all peers relayed". (3) `tcpdump -G` without `-w` is fatal, and with stderr to `/dev/null` it reported a clean-looking 0 packets. (4) A positive control tested `wc -l > 0` instead of "a packet matched", passing on a line tcpdump called `0 packets captured`. (5) The `:4242` filter. 🔴 **The pattern: every one was a ZERO or a UNIFORM result — a uniform result across all arms is the tell that the INSTRUMENT failed, not the system.** Never silence stderr on a capture tool; make a positive control assert the THING, never a proxy.
 - ⚠ **`tcpdump` arg errors fire BEFORE the permission check** — reaching "You don't have permission" proves the flags parsed. The FILTER cannot be validated that way (a malformed filter gives the same error), so filter correctness rests on the run's own positive control.
 - 🔴 **An outbound-port extractor must anchor on the LOCAL port** or it counts inbound replies as remotes: `> [0-9.]+\.\K[0-9]+` matched our own `51711` on reply lines. Use `\.<localport> > [0-9.]+\.\K[0-9]+`, and control it BOTH ways — reject the local port, and confirm a second genuine remote still counts.
+
+- 🔴 **VERIFY WINDOW CONTAINMENT FROM THE PACKETS' OWN TIMESTAMPS, not from a computed end time.** `third-vantage.sh` computed `F_END = F_START + count/2` and declared `NOT CONTAINED` on windows that plainly nest (`759..809` inside `753..823`) — instrument failure #6 of this session. The reliable derivation is `min`/`max` of the received packets' `ping -D` stamps on each side, which also lets you align the far box's packets against the laptop's blackout SECONDS rather than against the whole run. ⚠ This one failed SAFE — it refused a real result rather than manufacturing one — which is the direction a guard should fail.
+- ⚠ **A `nohup … &` launched from an agent Bash call dies when the call returns; `setsid` survives.** Cost one silently truncated measurement run here and one earlier in the session (a 120 s probe that produced short files).
 
 ## How to verify
 ```bash
