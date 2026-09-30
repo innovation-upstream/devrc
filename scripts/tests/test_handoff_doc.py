@@ -8271,8 +8271,9 @@ def test_a_heading_matching_BOTH_step1_detectors_is_not_double_counted():
 # 🔴 THE MECHANISM, MEASURED. `budget_warning` has printed on every over-budget
 # write since #1648 and the growth went on regardless, because it is STRUCTURAL:
 # the bucket rules forbid durable content in a REPLACE section, so the correct
-# remedy for a finding is "move it to `Gotchas`", which APPENDS. That section has
-# an entry rule and no exit rule. On the arc this rule was measured against, a
+# remedy for a finding is "move it to `Gotchas`", which APPENDS. ⚠ This comment
+# said that section had "an entry rule and no exit rule", and rule (q) falsified
+# it — `--prune` is that exit rule. On the arc this rule was measured against, a
 # prune landed the doc under the ceiling and it more than DOUBLED inside a week,
 # the growth landing in `Gotchas`. 🔴 THE BYTES ARE NOT RESTATED HERE:
 # `claude/skills/handoff/reference/write-gate.md` §I owns them and carries the
@@ -8374,6 +8375,376 @@ def _doc_bytes(repo: Path) -> int:
     return len(doc_of(repo).encode("utf-8"))
 
 
+def _normalised_remedy_two(refusal: str) -> str:
+    """Rule (p)'s remedy 2, whitespace-normalised to one line.
+
+    The refusal is emitted as hard-wrapped source strings, so the line breaks
+    are an artefact of how the module is typed and would make a whole-string
+    pin fail on a pure re-indent. Collapsing runs of whitespace pins the WORDS
+    and nothing else. Returns "" when no remedy 2 is present, which the caller
+    must treat as a failure rather than a match — see its docstring.
+    """
+    for line in refusal.splitlines():
+        if line.strip().startswith("2."):
+            return " ".join(line.split())
+    return ""
+
+
+#: The exact wording of rule (p)'s remedy 2, normalised by the helper above.
+#: 🔴 A WHOLE-STRING PIN, DELIBERATELY. A phrase pin on the retracted sentence
+#: was walkable by any reword that kept the denial — MEASURED in round 0 of
+#: #1926's audit, where "this tool is unable to shrink them on your behalf"
+#: passed both guards. `RULES.md`: when the artifact under test IS prose, pin
+#: the WHOLE normalised string and pay the cosmetic-reword cost.
+EXPECTED_REMEDY_TWO = (
+    "2. or EVICT what has closed out of an append-only section — ONE route "
+    "with two halves, not two alternatives. MOVE the text to the arc's "
+    "archive file, leaving a pointer, and remove the lines with "
+    "`--prune <file> --prune-count <n>`, which takes them VERBATIM from "
+    "`Open investigations`, `Findings` or `Gotchas` — rule (q), the exit rule "
+    "those sections used to lack. It COMBINES with this update: the prune "
+    "applies to the MERGE, so ONE run can add this round's findings, remove "
+    "what has closed, and clear this refusal honestly. It is never a SIDE "
+    "EFFECT — you name every line — but it needs no separate run and no "
+    "separate commit. 🔴 Moving the text WITHOUT rule (q) means hand-editing "
+    "the committed doc, which bypasses every gate in this module at once — "
+    "see rule (q)'s header for what that cost us."
+)
+
+#: The sentence rule (q) falsified, in the two spellings that have shipped.
+#: 🔴 A TREE-WIDE LEDGER, BECAUSE THE SITE-AT-A-TIME FIX FAILED TWICE ON ONE PR.
+#: #1926 removed the denial from the refusal and left an identical claim in rule
+#: (p)'s docstring (round 0 caught it); the round-0 fix swept the module and left
+#: BOTH sentences standing in `write-gate.md` §I — including under the
+#: prescriptive "How you clear it" heading, i.e. the copy an agent reads BEFORE
+#: running the tool (round 1 caught that). A retraction is a tree-wide sweep, and
+#: nothing was checking the tree.
+#: ⚠ THE INLINE MARKER BELOW IS BELT-AND-BRACES, NOT LOAD-BEARING — an earlier
+#: wording of this note claimed it was load-bearing and round 4 MEASURED that
+#: false: deleting that line leaves the suite green, and deleting it AND renaming
+#: the constant also leaves it green. What actually clears these two occurrences
+#: is this `#:` block, which contains `falsified` and `retracted` within the
+#: window. Recorded rather than deleted, because the reason the belt exists is
+#: real: these two literals ARE occurrences, they used to clear only because
+#: `retracted` matched INSIDE the constant's own name 25 chars away, and round 3
+#: measured a pure RENAME breaking the sweep on its own ledger. Markers are
+#: word-bounded now, which is the fix; the inline comment is redundancy.
+RETRACTED_BY_RULE_Q = (
+    # both falsified by rule (q); quoted here so they can be retracted elsewhere
+    "it cannot shrink them for you",
+    "an entry rule and no exit rule",
+)
+
+#: Words that mark an occurrence as a RETRACTION rather than an assertion.
+#: 🔴 KEPT DELIBERATELY NARROW. Round 2 measured that `"ENDED"` matches inside
+#: **"appended"** — the single most common word in this subject matter — so a
+#: brand-new bare assertion with "appended" one sentence away PASSED. `"used to"`
+#: subsumed `"this item used to"` (a dead entry) and was itself broad enough to
+#: mask a real site. All three are gone; the real tree stays green without them,
+#: which is the measurement that says they bought nothing.
+_RETRACTION_MARKERS = (
+    "falsified", "retracted", "said that", "this paragraph said",
+    "this comment said", "past tense",
+)
+
+
+def _rule_p_sites() -> tuple:
+    """The handoff SKILL and MODULE surfaces that state rule (p)'s remedies.
+
+    ⚠ NOT "every file in the repo that states them" — an earlier wording claimed
+    that and it was the same over-claim as the 3-tuple it replaced.
+
+    ⚠ AND THE LIST OF WHAT IS UNSWEPT IS ITSELF NOT EXHAUSTIVE — round 4 caught an
+    earlier version naming four files and missing at least three, including
+    `claudedocs/handoff-handoff-doc-prune-exit.md`, which quotes the retracted
+    refusal VERBATIM and states the remedies more strongly than any of the four.
+    A short list presented as "the gap, named" recreates the trap in miniature.
+    So: unswept and stating rule (p)'s remedies, at the time of writing —
+    `claudedocs/handoff-handoff-doc-prune-exit.md`, `claudedocs/handoff-evictable-note-ungated.md`,
+    `claudedocs/handoff-handoff-resume-prune.md`, `claudedocs/proposal-handoff-resume-prune.md`,
+    `scripts/lib/handoff_budget.py`, `scripts/tests/test_handoff_doc_size.py`,
+    `scripts/tests/mutants-handoff-cap.sh` — **and do not trust that enumeration
+    either**; re-derive it with `_scan` over the tracked corpus. None carried a
+    bare copy when last measured (all 1,573 tracked files, round 4), and
+    `claudedocs/` is transient by convention, which is why the sweep is scoped
+    here rather than widened.
+
+
+    🔴 GLOBBED, NOT HARDCODED. Round 2's F2: the docstring said "tree-wide"
+    while the implementation was a 3-path tuple, so a bare copy in a NEW
+    reference topic survived — and the test module itself, which carried one,
+    was not scanned at all. The skill directory is walked, so a topic added
+    later is covered without anyone remembering to add it.
+    """
+    sites = [
+        ("scripts/lib/handoff_doc.py",
+         REPO_ROOT / "scripts" / "lib" / "handoff_doc.py"),
+        # this module states the remedies in its own guard docstrings
+        ("scripts/tests/test_handoff_doc.py", Path(__file__).resolve()),
+    ]
+    for p in sorted(HANDOFF_SKILL.parent.rglob("*.md")):
+        sites.append((str(p.relative_to(REPO_ROOT)), p))
+    return tuple(sites)
+
+
+def _bare_assertions_in(text: str) -> list:
+    """Occurrences of a retracted phrase carrying NO retraction marker nearby.
+
+    🔴 COMMENT MARKERS ARE STRIPPED PER LINE BEFORE FLATTENING, and round 2's F1
+    is why. The old normaliser was `" ".join(text.split())`, which preserves the
+    `#` of a wrapped comment line: `…no exit\\n# rule` flattens to `…no exit #
+    rule`, so the phrase never matched and TWO live assertions in the payload
+    module were invisible to a guard written to find exactly them.
+
+    ⚠ A PROXIMITY HEURISTIC, NOT A PARSER. It cannot tell a marker belonging to a
+    neighbouring sentence from one belonging to this occurrence. That is the
+    loose direction on purpose: it still catches a NEW bare copy, which is the
+    failure that has now happened three times on one PR.
+    """
+    return _scan(text)[0]
+
+
+def _scan(text: str) -> tuple:
+    """`(bare_hits, total_occurrences)` for the retracted phrases.
+
+    🔴 THE SECOND NUMBER IS THE POSITIVE CONTROL, and it exists because the
+    obvious anti-vacuity guard did not work. Round 2 gutted the sweep's loop to
+    `for label, path in ():`. A guard that calls `_rule_p_sites()` DIRECTLY still
+    sees a full list and passes — it pins the FUNCTION while the mutation is at
+    the CALL SITE. Measured: that guard was written, and the same mutation passed
+    it. So the sweep counts what it actually SAW and asserts a floor; a scan that
+    read nothing reports 0 occurrences and cannot be mistaken for a clean tree.
+    """
+    stripped = []
+    for ln in text.splitlines():
+        ln = re.sub(r"^\s*(?:#+|//+|\*+|--)\s?", "", ln)
+        # 🔴 AND THE STRING-LITERAL BOUNDARY, which is where this module's
+        # AGENT-FACING prose actually lives. Round 3 measured it: the refusals
+        # and `--help` text are built from adjacent literals, 916 lines of this
+        # module end in a bare closing quote, and a phrase split across two of
+        # them was not merely unflagged — it was not COUNTED (`seen=0`). The
+        # round-2 fix closed the `#` comment case and left the strings, i.e. it
+        # covered the copy nobody reads and missed the copy an agent does.
+        ln = re.sub(r'^\s*["\']', "", ln)
+        ln = re.sub(r'["\']\s*(?:,|\+)?\s*$', "", ln)
+        stripped.append(ln)
+    flat = " ".join(" ".join(stripped).split())
+    low = flat.lower()
+    hits: list = []
+    seen = 0
+    for phrase in RETRACTED_BY_RULE_Q:
+        start = 0
+        while (i := low.find(phrase.lower(), start)) != -1:
+            seen += 1
+            window = low[max(0, i - 400): i + len(phrase) + 400]
+            # 🔴 WORD BOUNDARIES, because a marker matching INSIDE an identifier
+            # is the `ENDED`-in-`appended` accident again. Round 3 found the
+            # tuple's own literal cleared solely by `retracted` matching inside
+            # the constant name `RETRACTED_BY_RULE_Q` 25 chars away — so a pure
+            # RENAME of that constant made the sweep fail on its own ledger, and
+            # any new bare copy near a mention of it was auto-cleared.
+            if not any(re.search(rf"\b{re.escape(m.lower())}\b", window)
+                       for m in _RETRACTION_MARKERS):
+                hits.append(flat[max(0, i - 90): i + len(phrase) + 90])
+            start = i + len(phrase)
+    return hits, seen
+
+
+def test_no_site_still_ASSERTS_what_rule_q_falsified():
+    """🔴 A RETRACTION IS A TREE-WIDE SWEEP, AND NOTHING WAS CHECKING THE TREE.
+
+    #1926 exists because a refusal went on denying a capability rule (q) had
+    shipped. Fixing it site-by-site then failed TWICE on that same PR: the first
+    commit left an identical claim in rule (p)'s docstring, and the round-0 fix
+    swept the module and left BOTH sentences standing in `write-gate.md` §I —
+    one of them under the prescriptive "How you clear it" heading, i.e. the copy
+    an agent reads BEFORE running the tool, where the false remedy does exactly
+    the harm the PR names: it stops the reader looking.
+
+    🔴 THE PHRASE MAY STILL APPEAR — this asserts it appears only as a QUOTED
+    RETRACTION, never as a live claim. A bare absence test would forbid the
+    retraction notes themselves, and deleting the history is how the next writer
+    re-derives the claim. So every occurrence must carry a retraction marker
+    nearby; an occurrence with none is an assertion.
+
+    ⚠ This is a PROXIMITY heuristic over normalised text, not a parser. It
+    cannot tell a marker that belongs to a neighbouring sentence from one that
+    belongs to this occurrence. It is deliberately the loose direction: it
+    catches a NEW bare copy, which is the failure that actually happened twice.
+    """
+    offenders: list = []
+    per_site: dict = {}
+    per_site_bytes: dict = {}
+    files = 0
+    seen = 0
+    for label, path in _rule_p_sites():
+        assert path.is_file(), (
+            f"{label} is missing, so this guard would pass over a site it "
+            "claims to cover — the vacuity this repo forbids.")
+        files += 1
+        text = path.read_text(encoding="utf-8")
+        bare, total = _scan(text)
+        seen += total
+        per_site[label] = total
+        per_site_bytes[label] = len(text)
+        offenders.extend(f"{label}: ...{hit}..." for hit in bare)
+    # 🔴 POSITIVE CONTROL, IN THE GUARD'S OWN BODY. Report the pair — files read
+    # and phrase occurrences SEEN — never the zero alone. Round 2 gutted this
+    # exact loop to `for label, path in ():` and both this sweep and a separate
+    # guard over `_rule_p_sites()` stayed green; only counting what was actually
+    # scanned closes that, because the tree provably contains retraction notes.
+    assert files >= 4 and seen >= 3, (
+        f"the sweep scanned {files} file(s) and saw {seen} occurrence(s) of the "
+        "retracted phrases. The tree carries several retraction notes, so a "
+        "count this low means the scan did not run — and a zero offenders list "
+        "from a scan that read nothing is indistinguishable from a clean tree. "
+        "Check the loop above still iterates `_rule_p_sites()`.")
+    # 🔴 PER-SITE, NOT JUST A TOTAL. Round 3 measured that a filtered call site
+    # — `[s for s in _rule_p_sites() if s[0].endswith('.md')]` — clears the
+    # totals above (files=8, seen=3) while NEVER READING `handoff_doc.py`, the
+    # file that carried the two live assertions round 2 found. A total is
+    # satisfiable by the files that cannot fail.
+    # 🔴 ASSERT THE SITE WAS READ, NOT THAT IT STILL CONTAINS THE PHRASE. Round 4:
+    # the first version required >= 1 OCCURRENCE from these two files, which pins
+    # the continued existence of retraction prose — so an author who finishes the
+    # retraction (paraphrasing instead of quoting the dead sentence) is FAILED by
+    # the guard that exists to cause exactly that cleanup. Worse, a per-site zero
+    # has TWO mechanisms — site skipped, or site clean — and the message named
+    # only the first, sending the reader hunting a call-site mutation that is not
+    # there. Bytes read separates them: it is 0 only if the file was never read.
+    for required in ("scripts/lib/handoff_doc.py",
+                     "claude/skills/handoff/reference/write-gate.md"):
+        assert per_site_bytes.get(required, 0) > 0, (
+            f"{required} was never READ — 0 bytes scanned. Per-site bytes: "
+            f"{per_site_bytes}. A total floor is satisfiable by the files that "
+            "cannot fail: round 3 measured a call site filtered to `.md` "
+            "clearing files>=4/seen>=3 while never opening the payload module. "
+            "⚠ This says the file was not read. It does NOT mean the file still "
+            "has to contain a retracted phrase — finishing a retraction is the "
+            f"point. Occurrence counts, for context only: {per_site}")
+    assert not offenders, (
+        "a site still ASSERTS something rule (q) falsified, with no retraction "
+        "marker near it. `--prune` IS the exit rule, and it COMBINES with "
+        "--update. Retract the sentence where it stands — do not delete the "
+        "history, and do not fix only the site you were looking at:\n  "
+        + "\n  ".join(offenders))
+
+
+def test_the_sweep_actually_READS_the_files_it_claims_to_cover():
+    """🔴 THE ANTI-VACUITY GUARD, AND IT EXISTS BECAUSE THE LAST ONE WAS VACUOUS.
+
+    Round 2 of #1926 gutted the sweep's loop to `for label, path in ():` — so it
+    read ZERO files and could never produce an offender — and BOTH the sweep and
+    its so-called positive control stayed GREEN. The control re-implemented the
+    predicate inline over a hand-built string: it never read a file, never ran
+    the normalisation and never built `offenders`, so it controlled nothing. Its
+    own docstring claimed it ruled out "a probe wired to nothing", which is
+    precisely the state it left the guard in.
+
+    A detector control cannot catch that, because the detector is fine — the
+    SITE LIST is what gets emptied. So this pins the list itself: it must be
+    non-empty, every entry must exist, and the three surfaces that have each
+    carried a live copy of the retracted sentence must all be in it.
+    """
+    sites = _rule_p_sites()
+    assert len(sites) >= 4, (
+        "the rule (p) site list collapsed to "
+        f"{len(sites)} entr(ies). The sweep reads what this returns, so an "
+        "empty or truncated list makes it pass while checking nothing — the "
+        "exact mutation round 2 landed and both prior tests survived.")
+    labels = {label for label, _ in sites}
+    # 🔴 THREE surfaces have each carried a LIVE copy of the retracted sentence
+    # during this PR; `SKILL.md` has NOT (measured across all 10 revisions in and
+    # behind it: 0 occurrences at every sha). It is required here because the
+    # glob supplies it and it STATES rule (p)'s remedies at step 5 — a different
+    # reason, and the message used to assert the wrong one for it.
+    for required in ("scripts/lib/handoff_doc.py",
+                     "scripts/tests/test_handoff_doc.py",
+                     "claude/skills/handoff/reference/write-gate.md"):
+        assert required in labels, (
+            f"{required} is not in the sweep's site list, and each of these HAS "
+            "carried a live copy of the retracted sentence during this PR. "
+            f"Covered: {sorted(labels)}")
+    assert "claude/skills/handoff/SKILL.md" in labels, (
+        "claude/skills/handoff/SKILL.md is not in the sweep's site list. It has "
+        "never carried the phrase, but it is the only ALWAYS-LOADED surface at "
+        "step 5 — the reference topics it routes to, `write-gate.md` among them, "
+        "are read on demand — so a false remedy appearing there is the worst "
+        f"case. Covered: {sorted(labels)}")
+    for label, path in sites:
+        assert path.is_file(), f"{label} is listed but does not exist"
+
+
+def test_control_the_DETECTOR_can_both_fire_and_hold():
+    """Negative and positive control for `_bare_assertions_in` — the REAL
+    function the sweep calls, not a re-implementation of it.
+
+    🔴 Drives the actual detector, including the comment-marker stripping, so a
+    regression in the normalisation reds here. The `#`-wrapped case is the one
+    round 2 found live in the payload module and invisible to the old guard.
+    """
+    # 🔴 DERIVED FROM THE CONSTANT, NEVER RETYPED — two reasons, both measured.
+    # (1) The sweep now scans THIS FILE, so a contiguous literal here is itself a
+    #     bare assertion and the guard flags its own fixture. It did, immediately.
+    # (2) Deriving means the control follows the constant instead of drifting
+    #     from it, which is what a control is for.
+    phrase = RETRACTED_BY_RULE_Q[1]
+    bare = ("The bucket rules forbid durable content in a REPLACE section. "
+            f"That section has {phrase}; it is monotonic by construction.")
+    assert _bare_assertions_in(bare), (
+        "a BARE assertion is not detected, so the sweep is wired to nothing")
+
+    # the same text WRAPPED ACROSS A COMMENT LINE — round 2's F1 mechanism, with
+    # the phrase deliberately SPANNING the newline+`#` that used to hide it
+    head, tail = phrase.rsplit(" ", 1)
+    wrapped = (f"# The bucket rules forbid durable content. That section has {head}\n"
+               f"# {tail}; it is monotonic by construction.")
+    assert _bare_assertions_in(wrapped), (
+        "a bare assertion WRAPPED ACROSS A `#` COMMENT LINE is not detected. "
+        "That is exactly how two live copies hid in handoff_doc.py from a guard "
+        "written to find them: `\" \".join(text.split())` preserves the `#`.")
+
+    # and a properly retracted one must NOT fire, or every retraction note here
+    # would have to be deleted to make the sweep pass
+    assert not _bare_assertions_in(
+        bare + " This paragraph said that, and rule (q) falsified it."), (
+        "a properly-retracted occurrence IS flagged, so the guard would force "
+        "the deletion of the history it exists to preserve")
+
+    # 🔴 the `appended` regression: round 2 measured "ENDED" matching inside it
+    assert _bare_assertions_in(
+        bare + " Findings are appended to that section by every round."), (
+        "a bare assertion with the word `appended` nearby is NOT detected. "
+        "`ENDED` as a marker matches inside `appended` — the commonest word in "
+        "this subject matter — which let a brand-new bare copy through.")
+
+    # 🔴 SPLIT ACROSS ADJACENT PYTHON STRING LITERALS — round 3's F2, and round 4
+    # measured that deleting the two quote-strip lines left the WHOLE suite green
+    # (637 passed). The fix had no test that had ever been watched fail, so it
+    # could revert silently. This is that test. The refusals and `--help` in
+    # handoff_doc.py are built exactly this way; 916 of its lines end in a bare
+    # closing quote, and a phrase split across two of them used to score seen=0.
+    split_head, split_tail = phrase.split(" ", 1)
+    split_literals = (
+        f'    "Those sections have {split_head} "\n'
+        f'    "{split_tail}, so nothing helps.",\n')
+    assert _bare_assertions_in(split_literals), (
+        "a bare assertion SPLIT ACROSS ADJACENT STRING LITERALS is not "
+        "detected. `_scan` must strip the literal boundary as well as leading "
+        "comment markers — otherwise the sweep covers this module's comments "
+        "and misses its refusal text, which is the copy an agent reads.")
+
+    # 🔴 A MARKER MATCHING INSIDE AN IDENTIFIER — round 3's F5. Round 4 measured
+    # that reverting the `\b` search to a plain substring test also left the
+    # suite green (637 passed). Unguarded in exactly the same way.
+    assert _bare_assertions_in(
+        bare + " See RETRACTED_BY_RULE_Q for the two spellings."), (
+        "a bare assertion is cleared by a marker matching INSIDE an identifier "
+        "(`retracted` within `RETRACTED_BY_RULE_Q`). Markers must be matched "
+        "with word boundaries, or a rename of that constant flips the sweep's "
+        "verdict and any bare copy near a mention of it is auto-cleared.")
+
+
 class TestADocOverItsCeilingMayNotGrow:
     """Rule (p). 📖 `claude/skills/handoff/reference/write-gate.md` §I."""
 
@@ -8401,16 +8772,108 @@ class TestADocOverItsCeilingMayNotGrow:
         self, oversize_repo: Path, tmp_path: Path
     ) -> None:
         """A refusal nobody can comply with is the permanently-red gate this
-        repo forbids. Two routes to a net-<=-0 delta, and the prohibition that
-        stops the third — deleting a gotcha — from being the cheapest one."""
+        repo forbids. TWO routes to a net-<=-0 delta — shrink a REPLACE
+        section, or EVICT from an append-only one — and the prohibition that
+        stops the third, deleting a gotcha, from being the cheapest one.
+
+        🔴 THE PRUNE ROUTE IS LOAD-BEARING AND WAS ABSENT FOR AS LONG AS IT
+        EXISTED. Rule (q) shipped the exit in #1916; this refusal went on
+        telling authors the tool "cannot shrink them for you" — see
+        `test_the_refusal_does_not_deny_the_exit_rule_q_ships` below — so the
+        only remedy it named for bytes sitting in `Gotchas` was the override,
+        which SHIPS the over-ceiling doc.
+
+        🔴 EVICTION IS ONE ROUTE WITH TWO HALVES, NOT TWO ALTERNATIVES, and
+        round 0 of this PR's own audit is why. MOVE-to-the-archive used to be
+        its own numbered remedy beside the prune. But removing lines from an
+        append-only section is reachable only by rule (q) or by hand-editing
+        the committed doc — so a standalone MOVE remedy could be complied with
+        ONLY by the hand edit that rule (q)'s own header names as the measured
+        harm it exists to remove. The flags are read off the module so renaming
+        one moves this pin with it rather than quietly unpinning it.
+        """
         upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
         err = run_tool(oversize_repo, update=upd).stderr
         assert "over by" in err and "this update)" in err
         assert "net delta of 0 or less" in err
         assert "shrink a REPLACE section" in err
-        assert "arc's archive file" in err
+        assert hd.PRUNE_FLAG in err, (
+            "the rule (p) refusal does not name the rule (q) exit, so an author "
+            "whose overage sits in an append-only section is routed to "
+            f"{hd.SIZE_RATCHET_FLAG} — which SHIPS the over-ceiling doc — as "
+            f"the only way out:\n{err}")
+        assert hd.PRUNE_COUNT_FLAG in err, (
+            f"{hd.PRUNE_FLAG} is named without {hd.PRUNE_COUNT_FLAG}, which it "
+            "REQUIRES — so the fragment printed here omits a mandatory flag. "
+            "(It is a fragment either way: --repo, --topic and --advanced are "
+            f"required too and are deliberately not restated here.)\n{err}")
+        assert "arc's archive file" in err, (
+            "the eviction remedy no longer says where the text GOES, so it "
+            f"reads as a bare deletion:\n{err}")
         assert "Do NOT satisfy this by DELETING" in err
         assert hd.SIZE_RATCHET_FLAG in err
+        # 🔴 The remedy NAMES the prunable sections in prose while the truth is
+        # `APPEND_PREFIXES`. Without this, adding a fourth append-only section
+        # reddens nothing and the refusal silently under-reports where an
+        # author's bytes may be sitting. Pins the RELATIONSHIP, not the words.
+        # 🔴 BACKTICKED, not bare. Round 2 measured the bare form vacuous for
+        # `Findings`: this round's own sentence "add this round's findings"
+        # supplies the substring, so dropping `Findings` from the list SURVIVED.
+        # The guard and the text that defeated it shipped in one commit.
+        missing = [p for p in hd.APPEND_PREFIXES
+                   if f"`{p}`".lower() not in err.lower()]
+        assert not missing, (
+            "the refusal's prose list of prunable sections has drifted from "
+            f"`APPEND_PREFIXES`; these append-only sections are not named, so "
+            f"an author whose overage sits in one is not routed anywhere: "
+            f"{missing}\n{err}")
+
+    def test_the_refusal_does_not_deny_the_exit_rule_q_ships(
+        self, oversize_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 REGRESSION. The retracted sentence, verbatim as it shipped:
+        "`Gotchas` and `Open investigations` APPEND here, so this tool cannot
+        shrink them for you."
+
+        It was true when written and rule (q) falsified it, and a FALSE remedy
+        note is worse than a missing one because it stops the reader looking.
+
+        🔴 PINNED AS THE WHOLE NORMALISED REMEDY, NOT AS THE RETRACTED PHRASE,
+        and round 0 of this PR's own audit is why. This guard first asserted
+        only that the phrase was absent, and its docstring claimed a reword
+        keeping the denial "would be caught" by the sibling. That was MEASURED
+        FALSE: the sibling asserts only that the two flags appear, so
+        "this tool is unable to shrink them on your behalf" passed BOTH guards
+        — a coverage claim wider than its implementation, which is the exact
+        defect class this PR exists to fix, reintroduced in the fix's own
+        scaffolding. `RULES.md`: when the artifact under test IS prose, a guard
+        on WORDS is walkable by REWORDING — pin the WHOLE normalised string.
+
+        The cost is deliberate and is the one that rule names: a COSMETIC
+        reword of remedy 2 fails this test. Update the literal below in the
+        same commit; that is the price of a machine-readable claim.
+        """
+        upd = _ratchet_update(tmp_path, RATCHET_GROW_UPDATE, "grow.md")
+        err = run_tool(oversize_repo, update=upd).stderr
+        assert "status=size-ratchet" in err, (
+            f"the fixture did not trip rule (p), so every assertion below would "
+            f"pass vacuously against an unrelated string: {err!r}")
+        assert "this tool cannot shrink them for you" not in err, (
+            "the refusal still denies that the tool can shrink the append-only "
+            f"sections. {hd.PRUNE_FLAG} (rule (q)) does exactly that, and it "
+            "COMBINES with --update — one run both appends and shrinks. Do not "
+            "replace this with a denial about the RUN either; that was round "
+            "1's finding. Deny nothing rule (q) can do:\n" + err)
+        remedy = _normalised_remedy_two(err)
+        assert remedy == EXPECTED_REMEDY_TWO, (
+            "remedy 2's wording changed. This pin is the WHOLE normalised "
+            "string ON PURPOSE — a phrase pin is walkable by any reword that "
+            "keeps the denial, which is how the claim it replaced was measured "
+            "false. Re-read the new wording and ask whether it still (a) names "
+            f"{hd.PRUNE_FLAG}, (b) says where the moved text goes, and (c) "
+            "denies nothing rule (q) can do. Then update this literal.\n"
+            f"  expected: {EXPECTED_REMEDY_TWO!r}\n"
+            f"  actual:   {remedy!r}")
 
     # ---- criterion 2: a net-<=-0 delta LANDS, still over the ceiling --------
 

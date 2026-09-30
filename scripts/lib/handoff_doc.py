@@ -436,10 +436,20 @@ the source row, so §I now declines to publish one rather than pick.
 
 The growth is STRUCTURAL rather than careless: the bucket rules forbid durable
 content in a REPLACE section, so the correct remedy for a finding is "move it to
-`Gotchas`", which APPENDS. That section has an entry rule and no exit rule; it is
-monotonic by construction, and a warning is not a counterweight to a
-construction. A prose prune discipline was tried IN the document and the section
-regrew within seven days of being read.
+`Gotchas`", which APPENDS. A prose prune discipline was tried IN the document and
+the section regrew within seven days of being read. ⚠ THIS PARAGRAPH SAID THAT
+SECTION HAD "an entry rule and no exit rule; it is monotonic by construction",
+AND RULE (q) FALSIFIED IT — `--prune` is that exit rule. The sentence was true
+when written and survived the round that shipped its refutation, inside the very
+docstring that rule (q)'s header quotes as its evidence of the gap. What still
+holds is the asymmetry that motivates the refusal: entry is a side effect of an
+ordinary update, while the exit is a separate deliberate FLAG naming every line
+— so the section still grows on its own and shrinks only when someone acts.
+🔴 A SEPARATE FLAG IS NOT A SEPARATE RUN, and conflating the two is how round 1
+of #1926's audit found this docstring asserting a NEW false thing while
+retracting the old one: `--prune` combines with `--update` (see its own `--help`,
+and `main`, which prunes `merged_text` BEFORE rule (p) reads it), so one run both
+appends and shrinks.
 
 🔴 THE OVERRIDE IS NOT A CONVENIENCE, IT IS WHAT MAKES THE REFUSAL SAFE.
 `/handoff`'s write path is the ONLY step that records a session — see
@@ -3344,10 +3354,14 @@ def budget_warning(relpath: str, merged_text: str, base_text: str, *,
 # --- rule (p): a doc already over its ceiling may not GROW --------------------
 #
 # 🔴 THE MECHANISM THIS RULE INTERRUPTS, and it is the SAME SHAPE as rule (n)'s
-# self-extending rank queue one level down: a section with an ENTRY RULE AND NO
-# EXIT RULE. `Gotchas` and `Open investigations` APPEND by design, the bucket
-# rules forbid durable content anywhere else, so "move it to `Gotchas`" is the
-# CORRECT remedy for every finding and the section is monotonic by construction.
+# self-extending rank queue one level down: a section whose ENTRY is a side
+# effect of an ordinary update while its EXIT is a deliberate flag. `Gotchas` and
+# `Open investigations` APPEND by design, the bucket rules forbid durable content
+# anywhere else, so "move it to `Gotchas`" is the CORRECT remedy for every
+# finding and the section grows on its own. ⚠ THIS COMMENT SAID "an ENTRY RULE
+# AND NO EXIT RULE … monotonic by construction", AND RULE (q) FALSIFIED IT —
+# `--prune` is that exit rule. Retracted here rather than deleted, because the
+# asymmetry is still what motivates the refusal.
 # MEASURED on one arc: a prune landed the doc under the ceiling and it more than
 # DOUBLED inside a week, the growth landing in `Gotchas`. The figures, and the two
 # commands that re-measure them, are owned by
@@ -3563,10 +3577,19 @@ def size_ratchet_report(relpath: str, merged_text: str, base_text: str) -> str:
             "    1. shrink a REPLACE section in THIS delta. `State now`, `Next "
             "steps` and `How to verify` are rewritten wholesale, so what they "
             "no longer need to say costs nothing to drop.",
-            "    2. or MOVE what has closed out of the document first, in its "
-            "own commit, to the arc's archive file — then re-run this update "
-            "unchanged. `Gotchas` and `Open investigations` APPEND here, so "
-            "this tool cannot shrink them for you.",
+            "    2. or EVICT what has closed out of an append-only section — "
+            "ONE route with two halves, not two alternatives. MOVE the text to "
+            "the arc's archive file, leaving a pointer, and remove the lines "
+            f"with `{PRUNE_FLAG} <file> {PRUNE_COUNT_FLAG} <n>`, which takes "
+            "them VERBATIM from `Open investigations`, `Findings` or "
+            "`Gotchas` — rule (q), the exit rule those sections used to lack. "
+            "It COMBINES with this update: the prune applies to the MERGE, so "
+            "ONE run can add this round's findings, remove what has closed, "
+            "and clear this refusal honestly. It is never a SIDE EFFECT — you "
+            "name every line — but it needs no separate run and no separate "
+            "commit. 🔴 Moving the text WITHOUT rule (q) means hand-editing "
+            "the committed doc, which bypasses every gate in this module at "
+            "once — see rule (q)'s header for what that cost us.",
             "  🔴 Do NOT satisfy this by DELETING an open investigation, a "
             "gotcha or a ruled-out theory. Eviction means MOVE, leaving a "
             "pointer: those sections exist so a future session does not repeat "
@@ -3668,12 +3691,13 @@ def _clip(text: str, limit: int) -> str:
 # 🔴 THE GAP THIS CLOSES, AND IT IS THE MIRROR OF RULE (p) RATHER THAN A SECOND
 # HALF OF IT. Rule (c) makes `Open investigations`, `Findings` and `Gotchas`
 # APPEND-ONLY, and rule (p) refuses to grow a document already over its ceiling.
-# Between them a doc can reach a state in which the sanctioned writer cannot
-# write at all: the bytes are in the append-only sections, and no path in this
-# module could ever remove one. `--help` listed no prune mode; the module's own
-# rule (p) docstring says the appending sections have "an entry rule and no exit
-# rule", and `scripts/handoff-audit.py` measures the consequence (121 of 123
-# revisions grew or held) while its own header says it "makes no edits".
+# Between them a doc COULD reach a state in which the sanctioned writer COULD
+# NOT write at all: the bytes WERE in the append-only sections, and no path in
+# this module could remove one. `--help` listed no prune mode; rule (p)'s own
+# docstring SAID the appending sections HAD "an entry rule and no exit rule", and
+# `scripts/handoff-audit.py` measures the consequence (121 of 123 revisions grew
+# or held) while its own header says it "makes no edits". ⚠ PAST TENSE IS THE
+# POINT: that is the state THIS RULE ENDED, and the docstring now retracts it.
 #
 # 🔴 THE MEASURED COST OF HAVING NO EXIT RULE IS NOT THE BYTES, IT IS THE
 # HAND EDIT. With the only writer unable to remove a line, the remedy reached for
