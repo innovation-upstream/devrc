@@ -101,6 +101,43 @@ cd ~/workspace/auditloop
 ./deploy.sh          # go vet gate → docker build+push harbor main-<ts> (+:latest) → prints watch cmds
 # SKIP_VET=1 ./deploy.sh   # skip the vet gate (faster; use after you've tested)
 ```
+🔴 **SINCE `auditloop-private#83` (deployed 2026-09-30) A DEPLOY BEHIND A POSTGRES LOCK HOLDER
+FAILS FAST INSTEAD OF HANGING — so CHECK FOR ONE FIRST.** Migrations now run on one dedicated
+`*sql.Conn` with `SET lock_timeout='5s'` and give up with SQLSTATE **55P03**. Before #83 the boot
+`ALTER` queued forever: on 2026-09-29 an orphaned `pg_dump` held `ACCESS SHARE` for 3h03m, every
+pod hung inside `db.Open` without binding :8112, kubelet restarted it 15×, and it read as a crash
+loop when it was a **HANG**. Deploying into a live holder now makes the pod refuse to boot —
+correct, and still an outage you caused. **Immediately before deploying** (not in the survey that
+motivated it — re-check at the moment of acting):
+```bash
+KC=~/workspace/homelab-infra/workbench-kubeconfig
+PG=$(KUBECONFIG=$KC kubectl -n auditloop get pod -l app=auditloop-postgres -o jsonpath='{.items[0].metadata.name}')
+KUBECONFIG=$KC kubectl -n auditloop exec $PG -- psql -U auditloop -d auditloop -A -F'|' -c \
+ "SELECT pid,application_name,state,now()-xact_start FROM pg_stat_activity WHERE datname='auditloop' \
+  AND pid<>pg_backend_pid() AND (state='idle in transaction' OR now()-xact_start > interval '1 minute');"
+# want 0 rows — read a backend COUNT beside it as the positive control, or the zero is unproven
+```
+🔴 **Record the rollback target BEFORE building, and measure what the deploy ships.** Tag from
+`kubectl -n auditloop get deploy auditloop -o jsonpath='{...containers[0].image}'`, digest from the
+pod's `imageID` — **rollback = re-tag that digest as a NEWER `main-<ts>`** so Flux's newest-tag
+policy picks it up. Then `git log --since='<live tag ts>'` and count Go-ish files per commit, so
+you know whether it is one feature or a surprise batch.
+🔴 **VERIFY BY DIGEST AND BY WHO SERVES, NEVER BY THE TAG.** `deploy.sh` prints the pushed digest
+— compare it to the running pod's `imageID`, confirm that pod is the **Service endpoint**, and
+confirm predecessors are `Succeeded`: an orphan can hold the port and serve OLD code while every
+converge check reports success. Then `/healthz`+`/readyz` **with a control** (a bogus path must
+404, or the 200s prove nothing), `schema_migrations` still `count == count(DISTINCT id)`, and the
+boot log's **byte count** (~162 B on a healthy boot — an empty read is not a clean read).
+🔴 **Do NOT try to verify the `lock_timeout` reset from `pg_settings`** — it is SESSION-LOCAL, so
+joining it to `pg_stat_activity` prints the querying session's value against every backend row and
+reads `0` whether or not the setting leaked. That claim is test-verified only.
+⚠ **`kubectl` against workbench intermittently returns `net/http: TLS handshake timeout`** —
+flaky link; retry, and never read one timeout as evidence about the pod. ⚠ **`docker.service` dies
+mid-session and has no socket activation** (`docker.socket` inactive, unit `linked` not enabled),
+so `deploy.sh` fails at the build step *after* passing its vet gate — nothing partial is pushed,
+and only `sudo systemctl start docker` revives it (interactive password → hand it to the operator).
+Re-check docker immediately before building.
+
 Flux **image-automation** rolls it in ~1–2 min: the homelab ImageRepository/ImagePolicy
 `auditloop` (`^main-(?P<ts>[0-9]+)$`) picks the newest tag, and **`flux-system-workbench`
 ImageUpdateAutomation** bumps the `images:` setter on
