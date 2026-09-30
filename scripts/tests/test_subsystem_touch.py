@@ -4380,7 +4380,25 @@ class TestTemplateCollisionMutationKills:
     def test_kills_the_ITERDIR_choice(self, tmp_path: Path, capsys) -> None:
         """🔴 `glob` SWALLOWS the OSError and yields nothing, so an unreadable
         scope reports every slug free. The mutant is the one-word change a
-        maintainer would plausibly make."""
+        maintainer would plausibly make.
+
+        🔴 THE OBSERVABLE MOVED, AND THE DEFECT GOT *SHARPER* RATHER THAN GOING
+        AWAY. This used to assert `"COULD NOT CHECK" not in err` — that the mutant
+        is SILENT. It no longer is: one `chmod` breaks BOTH tiers, and the alias
+        tier now emits its own `COULD NOT CHECK`, so the old assertion failed on a
+        client where the code was working BETTER. That absence-of-any-caveat check
+        was a proxy; it could only ever have held while the filename tier was the
+        only tier that could speak.
+
+        What the mutant actually does is worse than silence, so that is what is
+        pinned now. It swallows the filename tier's *"could not be listed … is
+        UNKNOWN — not 'it has none'"* caveat and the surviving message instead
+        asserts *"The filename tier found no `collector` entry, which is a claim
+        about FILENAMES only"* — a POSITIVE claim about a tier that never ran. A
+        reader is told the filename tier answered when it did not.
+
+        ⚠ Both sentinels are checked in BOTH directions, so this cannot pass by
+        the mutant simply producing no output at all."""
         if os.geteuid() == 0:  # pragma: no cover — root ignores the mode bits
             pytest.skip("root can list a 0o000 directory")
         mod = _load_mutant(
@@ -4394,13 +4412,24 @@ class TestTemplateCollisionMutationKills:
             capsys.readouterr()
             assert mod.main(self._argv(store)) == 0
             leaked = capsys.readouterr()
-            assert "COULD NOT CHECK" not in leaked.err, (
-                "the mutant reported the slug free with no caveat — that is the "
-                "silent answer this decision exists to prevent"
+            # The filename tier's own UNKNOWN caveat is GONE — glob swallowed the
+            # error, so the tier believes it looked and found nothing.
+            assert "could not be listed" not in leaked.err, (
+                "the mutant still reported the filename tier as unchecked, so the "
+                "mutation did not reach the branch this test names"
+            )
+            # …and in its place, a false positive claim about that tier.
+            assert "claim about FILENAMES only" in leaked.err, (
+                "the mutant neither warned about the filename tier nor claimed an "
+                "answer from it — the observable has moved again; re-derive it "
+                "from `template_collision`'s two `unchecked` messages"
             )
             assert st.main(self._argv(store)) == 0
             real = capsys.readouterr()
-            assert "COULD NOT CHECK" in real.err
+            # The positive control: unmutated, the filename tier DOES report that
+            # it could not look. This is the sentence the mutant destroys.
+            assert "could not be listed" in real.err
+            assert "UNKNOWN" in real.err
         finally:
             (store / SCOPE).chmod(0o755)
 

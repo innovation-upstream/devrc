@@ -243,7 +243,14 @@ class TestTheRefGrammar:
         with pytest.raises(TaskRefError):
             format_task_refs(["hello world"])
         # …and a valid bare string still works, so the convenience is intact.
-        assert format_task_refs([CLICKUP]) == f"tasks: [{CLICKUP}]"
+        # 🔴 THE WRITER EMITS `refs:`, AND `tasks:` IS A READ-ONLY ALIAS. The key
+        # carries repos, PRs, docs and dashboards, so `tasks:` named a SUBSET of
+        # what it holds; this serializer is the only one in either language, so a
+        # writer emitting the old key was the one place a store could keep
+        # acquiring files written in it. Pinned as a LITERAL rather than read off
+        # the module under test — deriving it here would assert `a == a` and this
+        # spelling is the contract, not an implementation detail.
+        assert format_task_refs([CLICKUP]) == f"refs: [{CLICKUP}]"
 
     @pytest.mark.parametrize(
         "ident,why",
@@ -325,7 +332,12 @@ class TestTheHashRoundTripsThroughDisk:
         """
         store = tmp_path / "store"
         line = format_task_refs([parse_task_ref(GITHUB)])
-        assert line == f"tasks: [{GITHUB}]"
+        # The writer emits `refs:` (see the ref-grammar test above for why). The
+        # byte-identity claim this test exists for is the `#428` below, and it is
+        # unaffected by the key's spelling — but the line is asserted WHOLE rather
+        # than substring-matched, so the key has to be right for the round trip to
+        # be the one being measured.
+        assert line == f"refs: [{GITHUB}]"
         p = write_entry(store, "devrc", "thing", line + "\n")
         assert "#428" in p.read_text(encoding="utf-8"), "the fixture itself lost the #"
         entry = load(p, "devrc")

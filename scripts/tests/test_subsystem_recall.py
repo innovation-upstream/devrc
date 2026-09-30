@@ -344,6 +344,25 @@ class TestStatusIsTheDiscriminator:
     def test_recalled(self, store: Path) -> None:
         assert rc.recall(store, SCOPE).status == "recalled"
 
+    def test_ref_to_absent(self, store: Path) -> None:
+        """🔴 A WELL-FORMED REF NOTHING CARRIES — not a malformed one. A ref that
+        fails the grammar is refused upstream of the filter and never reaches this
+        status, so a malformed fixture here would assert the wrong branch and pass
+        for the wrong reason. `total_in_scope` is still reported, because the
+        narrowing is a filter over a scope that WAS read."""
+        rep = rc.recall(store, SCOPE, ref_to="clickup:no-such-task-id")
+        assert rep.status == "ref-to-absent"
+        assert rep.entries == ()
+        assert rep.total_in_scope == 4, "the scope size must still be reported"
+
+    def test_tag_absent(self, store: Path) -> None:
+        """The `tag` operand is SCALAR — one category, not a set — so this is the
+        whole absent case rather than one arm of it."""
+        rep = rc.recall(store, SCOPE, tag="no-such-category")
+        assert rep.status == "tag-absent"
+        assert rep.entries == ()
+        assert rep.total_in_scope == 4, "the scope size must still be reported"
+
     def test_every_declared_status_is_reachable(self, store: Path) -> None:
         """Derived from `STATUS_PRECEDENCE`, not hand-listed: a status added
         later cannot quietly go unreached.
@@ -365,6 +384,15 @@ class TestStatusIsTheDiscriminator:
             rc.recall(store, SCOPE, ref="no-such-subsystem").status,
             rc.recall(store, SCOPE, ref="weekly-digest").status,
             rc.recall(store, SCOPE).status,
+            # 🔴 THE TWO FILTER STATUSES, and this line is what the guard bought.
+            # `ref-to-absent` and `tag-absent` arrived upstream with the `refs:`
+            # and `tags:` features; nothing here reached them, and because the
+            # assertion is DERIVED from `STATUS_PRECEDENCE` rather than
+            # hand-listed, that showed up as a failure instead of as silence.
+            # Both operands must be WELL-FORMED — a malformed one is refused
+            # before the filter runs and reaches a different status entirely.
+            rc.recall(store, SCOPE, ref_to="clickup:no-such-task-id").status,
+            rc.recall(store, SCOPE, tag="no-such-category").status,
             rc.search(store, SCOPE, "readiness").status,
             rc.search(store, SCOPE, "kryptonite").status,
             rc.search(store, "all-broken", "readiness").status,
@@ -4392,16 +4420,37 @@ class TestMutationKillMatrix:
 
     def test_kills_the_unreadable_entry_wrap(self, tmp_path: Path) -> None:
         """Without it an OSError escapes unnamed, and a resuming session cannot
-        tell that the SUBSYSTEM STORE was the thing that failed."""
+        tell that the SUBSYSTEM STORE was the thing that failed.
+
+        🔴 UPSTREAM MOVED THE CONSTRUCTION INTO A FACTORY, so the anchor is a
+        `return` rather than a `raise`. `_store_unreadable(store, exc)` now BUILDS
+        the error and the call site does `raise _store_unreadable(...) from exc`.
+        The old anchor (an 8-space inline `raise` carrying `under {store}`) went
+        to `0x`.
+
+        🔴 MUTATING THE FACTORY IS STRICTLY WIDER THAN MUTATING THE OLD INLINE
+        RAISE — it covers every caller of it, not the one site that used to be
+        spelled here. Keep it on the factory rather than on the `raise` line: a
+        second caller added later is then covered without touching this test.
+
+        ⚠ Do NOT re-point this at the `{path}` site that
+        `test_kills_the_read_entry_wrap` uses. Measured: that mutates a DIFFERENT
+        error, this scenario never reaches it, and the mutant then raises the real
+        `EntryUnreadableError` — the test fails for the wrong reason and reads as
+        a broken fix rather than a wrong anchor.
+
+        ⚠ The old anchor going to `0x` made `_load_mutant` REFUSE loudly instead
+        of scoring the mutant SURVIVED. That refusal is the only reason this was
+        found."""
         mod = _load_mutant(
             tmp_path,
             "m_unreadable",
             [
                 (
-                    "        raise EntryUnreadableError(\n"
-                    '            f"index entry unreadable: under {store} ',
-                    "        raise RuntimeError(\n"
-                    '            f"neutered: under {store} ',
+                    "    return EntryUnreadableError(\n"
+                    '        f"index entry unreadable: under {store} ',
+                    "    return RuntimeError(\n"
+                    '        f"neutered: under {store} ',
                 )
             ],
         )
@@ -4454,14 +4503,22 @@ class TestMutationKillMatrix:
 
         ⚠ This mutation is the INVERSE of the one that used to live here: the
         anchor asserts the shipped source really carries the wider tuple, so the
-        test cannot pass by mutating a line that no longer exists."""
+        test cannot pass by mutating a line that no longer exists.
+
+        🔴 THE ANCHOR IS THE TUPLE'S *FIRST ELEMENT*, NOT THE WHOLE TUPLE LINE,
+        AND THAT IS DELIBERATE. Upstream added a FOURTH heading
+        (`REQUIREMENTS_HEADING`), which re-spelled the tuple across five physical
+        lines and took the old single-line anchor to `0x` — scoring nothing while
+        reading as coverage. A whole-tuple anchor has to be re-written on every
+        future heading addition; the first element is the narrowest expression
+        this mutation can be about, so a FIFTH heading will not break it."""
         mod = _load_mutant(
             tmp_path,
             "m_sections",
             [
                 (
-                    'SURFACED_HEADINGS: tuple[str, ...] = (WHAT_HEADING, POINTERS_HEADING, NUANCE_HEADING)',
-                    'SURFACED_HEADINGS: tuple[str, ...] = (POINTERS_HEADING, NUANCE_HEADING)',
+                    "SURFACED_HEADINGS: tuple[str, ...] = (\n    WHAT_HEADING,\n",
+                    "SURFACED_HEADINGS: tuple[str, ...] = (\n",
                 )
             ],
         )
@@ -5596,10 +5653,23 @@ class TestDegradationMutationKills:
         assert rc.recall(store, "every-entry-broken").status == "scope-unreadable"
 
     def test_kills_the_search_unreadable_discriminator(self, tmp_path: Path) -> None:
+        """⚠ THE DISCRIMINATOR GREW TWO TERMS UPSTREAM and the old anchor
+        (`if searched == 0 and bad`) went to `0x`. It is now
+        `searched == 0 and ref_to_skipped == 0 and tag_skipped == 0 and bad`: the
+        `ref-to` and `tag` filters sit UPSTREAM of `searched`, so without those
+        terms a filtered-to-zero query reported `search-unreadable` — a store
+        problem — when the store was fine. The mutation is unchanged in MEANING
+        (neuter the whole branch); only the text it anchors on moved."""
         mod = _load_mutant(
             tmp_path,
             "m_search_unreadable",
-            [('            if searched == 0 and bad', "            if False")],
+            [
+                (
+                    "            if searched == 0 and ref_to_skipped == 0 "
+                    "and tag_skipped == 0 and bad",
+                    "            if False",
+                )
+            ],
         )
         store = _make_store(tmp_path / "s")
         _all_broken_scope(store)
@@ -6227,6 +6297,51 @@ class TestBadgesPresent:
 class TestCaveatBadgeClausesAreConditional:
     SCOPE = "example-scope/"
 
+    # 🔴 THE BADGE SET IS DERIVED, NOT HAND-LISTED — AND THAT IS THIS CLASS'S OWN
+    # BUG FIX. It used to name three badges in three places and in two test NAMES.
+    # Upstream added a fourth (`BADGE_REQUIREMENTS`), which broke the
+    # "every badge reproduces the full prose" test and left the other two silently
+    # NARROWER THAN THEIR NAMES — they kept asserting "ALL THREE" over a set of
+    # four, which reads as coverage and provides none. Deriving the set is what
+    # makes a fifth badge a FAILURE here instead of silence.
+    ALL_BADGES = frozenset(
+        v for k, v in vars(rc).items() if k.startswith("BADGE_") and isinstance(v, str)
+    )
+
+    #: badge VALUE -> the sentinel its clause is recognised by. Pinned as LITERALS
+    #: on purpose: both halves are the contract and deriving either from the module
+    #: would assert `a == a`. The SET is derived, the STRINGS are not — so a new
+    #: badge with no sentinel mapped here fails `test_every_badge_has_a_mapped_clause`
+    #: rather than quietly escaping the two per-clause tests below.
+    #:
+    #: 🔴 KEYED ON THE VALUE (`"requirements"`), NOT ON `rc.BADGE_REQUIREMENTS`, AND
+    #: THAT IS NOT STYLE. A module attribute resolves at CLASS-DEFINITION time, so
+    #: naming a badge the installed client does not have raises `AttributeError`
+    #: during COLLECTION — measured: the whole file errored out as `1 error`, with
+    #: no per-test names and no counts, which is the opaque-failure shape these
+    #: guards exist to prevent. Keyed on the value, the file imports against either
+    #: client and the mismatch is reported BY NAME by the guard below.
+    CLAUSE = {
+        "near-miss": "N NEAR-MISS",
+        "unverifiable": "N UNVERIFIABLE",
+        "missing-heading": "NO <heading>",
+        "requirements": "N REQ OPEN",
+    }
+
+    def test_every_badge_has_a_mapped_clause(self) -> None:
+        """🔴 THE GUARD ON THE GUARDS. Without this, a badge added upstream is
+        absent from `CLAUSE` and the two per-clause tests below simply never ask
+        about it — the exact shape that let `ALL THREE` outlive a fourth badge."""
+        assert self.ALL_BADGES, (
+            "no BADGE_* constants were discovered — the derivation is wired to "
+            "nothing, which would make every test in this class vacuous"
+        )
+        assert set(self.CLAUSE) == self.ALL_BADGES, (
+            "a badge exists with no clause sentinel mapped (or vice versa): "
+            f"unmapped={self.ALL_BADGES - set(self.CLAUSE)} "
+            f"stale={set(self.CLAUSE) - self.ALL_BADGES}"
+        )
+
     # --- what must NEVER be gated -------------------------------------------------
 
     def test_the_UNCONDITIONAL_contract_survives_an_empty_badge_set(self) -> None:
@@ -6250,31 +6365,35 @@ class TestCaveatBadgeClausesAreConditional:
 
     # --- what must be gated -------------------------------------------------------
 
-    def test_an_empty_badge_set_drops_ALL_THREE_explanations(self) -> None:
+    def test_an_empty_badge_set_drops_EVERY_explanation(self) -> None:
+        """Was `..._ALL_THREE_...` and asserted over three of four badges. The set
+        is derived now, so it cannot fall behind the module again."""
         text = rc.caveat_text(self.SCOPE, frozenset())
-        for absent in ("N NEAR-MISS", "N UNVERIFIABLE", "NO <heading>"):
-            assert absent not in text, absent
+        for badge in sorted(self.ALL_BADGES):
+            assert self.CLAUSE[badge] not in text, badge
 
     def test_each_badge_brings_ONLY_its_own_clause(self) -> None:
         """Killed separately, so no clause can hide behind another."""
-        cases = {
-            rc.BADGE_NEAR_MISS: ("N NEAR-MISS", ("N UNVERIFIABLE", "NO <heading>")),
-            rc.BADGE_UNVERIFIABLE: ("N UNVERIFIABLE", ("N NEAR-MISS", "NO <heading>")),
-            rc.BADGE_MISSING_HEADING: ("NO <heading>", ("N NEAR-MISS", "N UNVERIFIABLE")),
-        }
-        for badge, (present, absent) in cases.items():
+        for badge in sorted(self.ALL_BADGES):
             text = rc.caveat_text(self.SCOPE, frozenset({badge}))
+            present = self.CLAUSE[badge]
             assert present in text, f"{badge} should explain {present}"
-            for a in absent:
-                assert a not in text, f"{badge} should NOT explain {a}"
+            for other in sorted(self.ALL_BADGES - {badge}):
+                assert self.CLAUSE[other] not in text, (
+                    f"{badge} should NOT explain {self.CLAUSE[other]}"
+                )
 
-    def test_all_three_badges_reproduce_the_FULL_prose(self) -> None:
+    def test_EVERY_badge_reproduces_the_FULL_prose(self) -> None:
         """The unconditional text is the ceiling, not a different text: with every
-        badge present the caveat must equal the `badges=None` rendering."""
-        every = frozenset(
-            {rc.BADGE_NEAR_MISS, rc.BADGE_UNVERIFIABLE, rc.BADGE_MISSING_HEADING}
+        badge present the caveat must equal the `badges=None` rendering.
+
+        ⚠ Was `test_all_three_badges_...` with the three hand-listed. A fourth
+        badge upstream made the two sides differ — `None` rendered four clauses
+        while `every` built three — so the failure was real and the NAME was the
+        stale part. Derived from `ALL_BADGES`, a fifth cannot break it."""
+        assert rc.caveat_text(self.SCOPE, self.ALL_BADGES) == rc.caveat_text(
+            self.SCOPE, None
         )
-        assert rc.caveat_text(self.SCOPE, every) == rc.caveat_text(self.SCOPE, None)
 
     def test_the_lead_phrase_AGREES_with_the_clause_count(self) -> None:
         """Prose that says "Three further badges" above one clause is the kind of
