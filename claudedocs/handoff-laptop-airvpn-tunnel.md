@@ -21,13 +21,13 @@ unaffected while the tunnel is up.
   — no MTU/routing churn.
 
 ## State now
-- Branch / PR: devrc **PR #1937** (`handoff-laptop-airvpn-tunnel`), OPEN. Commits this session: `a9bcf992` (correction), `9ab5dfd1` (retraction), plus this one.
-- No `clawgate-task:` field: `clawgate_handoff.sh resolve` exited **5 (NOTHING RESOLVED)** — cannot distinguish "touched no task" from "wrong id". Not a clean bill of health.
-- 🔴 **WATCHER PID CORRECTED — the two earlier commits record `2309522`, which is DEAD and was never the watcher.** The live process is **`2309463`** (`ppid=1`, 9 h uptime, confirmed via `/proc/<pid>/cmdline`); `flap-watch.pid` has been corrected. Cause: I resolved the PID by scanning `pgrep -x bash` moments after `setsid` and caught a transient. **Resolve the watcher by `/proc` cmdline every time — do not trust the pid file or a remembered number**, this arc has now got it wrong twice in one day.
-- 🔴 **The `ip rule` 5150 pin is NOT APPLIED** and has not been since the **2026-09-27 15:33 reboot**. It also is not the lever: `192.168.50.94` measures 0% in every round without it.
-- 🔴 **Sudoers reality:** NOPASSWD covers `airvpn-sudo`, the **whole `tailscale` binary**, and `systemctl restart|start|stop tailscaled` / `restart nebula@mesh`. **`ip` and `nft` are NOT granted**, so the fwmark/`ip rule` remedy cannot be applied by an agent here at all.
-- Deploy/verify status: nothing deployed, nothing left changed. The one routing experiment was reverted in-run via a trap; `RouteAll = True` re-confirmed.
-- 🔴 CARRIED (still true): mosh DOES NOT WORK YET, deliberately — no host runs `mosh-server`; `programs.mosh.openFirewall` DEFAULTS TRUE (must be false or it opens 1001 UDP ports on every interface incl. WAN).
+- Branch / PR: devrc **PR #1937** (`handoff-laptop-airvpn-tunnel`), OPEN. Commits: `a9bcf992`, `9ab5dfd1`, `a58d97ec`, + this.
+- No `clawgate-task:` field: `clawgate_handoff.sh resolve` → **5 (NOTHING RESOLVED)**; cannot distinguish "no task" from "wrong id".
+- Watcher: **v3, pid `2309463`** (`ppid=1`; earlier commits recorded `2309522`, which was a transient and is dead). Resolve it from `/proc/<pid>/cmdline`, never `pgrep -f`, never the pid file alone.
+- 🔴 `ip rule` 5150 pin **NOT applied** since the 2026-09-27 15:33 reboot — and not the lever: `10.42.0.10` measures 0% in every round without it.
+- 🔴 Sudoers: NOPASSWD covers `airvpn-sudo`, the whole `tailscale` binary, `systemctl restart|start|stop tailscaled` / `restart nebula@mesh`. **`ip`/`nft` are NOT granted**, so no agent here can apply an `ip rule`/fwmark remedy. `tcpdump` is absent but `nix-shell -p tcpdump` supplies it.
+- Deploy/verify: nothing deployed, nothing left changed. The one routing experiment (`accept-routes=false`) was reverted in-run via a trap; `RouteAll = True` re-confirmed.
+- 🔴 CARRIED: mosh DOES NOT WORK YET — no host runs `mosh-server`; `programs.mosh.openFirewall` DEFAULTS TRUE (must be false or it opens 1001 UDP ports on every interface incl. WAN).
 
 ## Open investigations — live diagnosis state
 <!-- as-of: 2026-09-21 -->
@@ -269,6 +269,23 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - **Leading hypothesis:** NONE load-bearing, and the lockstep is why. Two *separate* UDP flows — different protocols, different local ports, different remote ports — to one destination host lose the *same packets* for the *same duration*, while ICMP to that host's own last hop stays at 0%. That is very hard to explain by anything per-flow, which is what the CGNAT story requires. It points instead at something that drops UDP to that destination wholesale for seconds at a time, and at nothing this laptop or this repo controls. ⚠ Explicitly untested.
 - **Next probe:** the discriminating question is whether the two flows share one NAT binding or are being dropped independently. Needs root on the laptop **during** an episode (the watcher's timestamps say when): `ss -unp` / `conntrack -L` for the two flows' source ports, and whether the mappings change across a blackout. Neither command is available to an agent here — operator-run.
 
+### Both nebula peers egress to ONE shared underlay endpoint — so the differing segment is NOT on the internet path
+- as-of: 2026-09-30
+- 🔴 **Reframes the arc: it puts the 09-24 third-vantage exoneration of the home side back in play.** Everything here assumed the two home peers are reached independently. They are not — both are dominated by the same remote endpoint, so the segment where they differ lies BEYOND it, inside the home network, not on the carrier path probed all week.
+- **Symptom + exact repro:** capture nebula's own LOCAL socket while driving exactly one peer; count OUTBOUND remote ports. 🔴 Filter on the local ephemeral port, NOT `:4242` (see gotcha).
+  ```bash
+  TD=$(nix-shell -p tcpdump --run 'command -v tcpdump'); P=51711   # re-derive: listen.port is 0
+  sudo sh -c "timeout 12 $TD -i wlp170s0 -n -l 'udp port $P' > /tmp/c.txt 2>/dev/null & \
+    sleep 1; ping -c 20 -i 0.4 -W 2 <peer> | tail -2; wait; \
+    grep -oP '\.$P > [0-9.]+\.\K[0-9]+(?=:)' /tmp/c.txt | sort | uniq -c | sort -rn"
+  ```
+- **Observed, 2026-09-30 ~15:50Z (both peers 0% loss at the time):** driving workbench `10.42.0.30` → **`:38552` ×27**, `:4242` ×4, `:40155` ×2. Driving gateway `10.42.0.10` → **`:38552` ×80**, `:49527` ×7, `:4242` ×4, `:40155` ×2. `:38552` dominates for BOTH. `via: measurement`
+- ⚠ **Not airtight:** the runs were not background-controlled (93 vs 33 outbound packets), so it is not *proven* the workbench's 20 pings rode `:38552` — only that it is the sole destination with the volume to contain them. Quiesce and subtract a no-ping baseline for a clean version.
+- **Ruled out — that nebula reaches peers on `:4242`.** `listen.port: 0` ⇒ ONE ephemeral local socket; each peer is reached at the address:port the lighthouse observed (NAT-mapped for a peer behind NAT). The only `:4242` destinations are the **two lighthouses** — the config's only public `static_host_map` entries (verified: 2, both port 4242). `via: measurement`
+- **Leading hypothesis — NOT adopted:** consistent with the workbench being reached *through* the gateway, making the failing segment a home-network hop. ⚠ NOT established: `:38552` was tied to the gateway by a 2026-09-29 21:53 journal line and NAT mappings change; that attribution was never re-derived.
+- 🔴 **What it still does not explain, and what has outlived every hypothesis here:** tailscale reaches the workbench **directly** (`tailscale ping` → `direct …:41641`), so a nebula-only relay hop cannot account for both overlays losing identical packets in the same second in 167 of 169 episodes. **Any next mechanism must predict the lockstep or it is not the mechanism.**
+- **Next probe, in order:** (1) **re-run the 09-24 third-vantage measurement** (far box → `10.42.0.30` concurrent with laptop → same, epochs recorded) — it is the only result exonerating the home side and it is six days old; (2) re-derive which peer `:38552` is *now*, from live state not a stale journal line; (3) only then capture during a live episode.
+
 ## Next steps (ranked)
 1. **Capture the two flows' NAT state during a live episode** (open investigation above) — operator-run, root, on the laptop; use the v3 watcher's episode timestamps to time it. This is DIAGNOSIS, not a remedy: this arc has now proposed two remedies and measurement killed both, and the lockstep observation engages neither.
    forcing: incident — 173 episodes in 9 hours on 2026-09-30, worst 99.2% loss over a contiguous 59 s, both overlays identical in 98.8% of 169 episodes
@@ -393,28 +410,22 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - 🔴 **LET THE INSTRUMENT RUN BEFORE THEORISING — 9 hours of it changed the question.** Every hypothesis in this arc was built on single ad-hoc probes of 100–300 packets. The unattended dataset showed the blackouts reach **59 s** (not 6.5–20 s), fire on **28%** of polls, and couple the two overlays in **98.8%** of episodes. None of that was visible in the hand-run samples the remedies were designed against.
 - ⚠ **`grep -c TRIGGER` over the whole watcher log double-counts across watcher generations** — the log is appended across the v2→v3 handover. Slice from the `WATCHER HANDOVER` marker (`awk '/WATCHER HANDOVER/{f=1} f'`) before quoting any count.
 
+- 🔴 **NEBULA DOES NOT TALK TO PEERS ON `:4242` — filtering on it watches the LIGHTHOUSES.** `listen.port: 0` ⇒ one ephemeral local socket (`51711`); NATed peers are reached on their NAT-mapped port. A `udp port 4242` capture returns lighthouse keepalives while looking exactly like peer traffic. It produced a confident wrong reading: a conntrack flow `[ASSURED]` with a stable source port through a 75% episode was reported as "the peer's flow survived, the local stack is innocent" — it was a **lighthouse** flow; the peer's data path was never observed. **Filter on the LOCAL port.**
+- 🔴 **FIVE INSTRUMENT FAILURES IN ONE SESSION, EACH PRODUCING OUTPUT THAT LOOKED LIKE A FINDING.** (1) `pgrep -f` matched the agent's own wrapper shell → a dead PID in two commits. (2) A conntrack-timeout differential assumed idle flows decay; keepalives pin them near the 120 s max, so every peer read `NONE` — i.e. "all peers relayed". (3) `tcpdump -G` without `-w` is fatal, and with stderr to `/dev/null` it reported a clean-looking 0 packets. (4) A positive control tested `wc -l > 0` instead of "a packet matched", passing on a line tcpdump called `0 packets captured`. (5) The `:4242` filter. 🔴 **The pattern: every one was a ZERO or a UNIFORM result — a uniform result across all arms is the tell that the INSTRUMENT failed, not the system.** Never silence stderr on a capture tool; make a positive control assert the THING, never a proxy.
+- ⚠ **`tcpdump` arg errors fire BEFORE the permission check** — reaching "You don't have permission" proves the flags parsed. The FILTER cannot be validated that way (a malformed filter gives the same error), so filter correctness rests on the run's own positive control.
+- 🔴 **An outbound-port extractor must anchor on the LOCAL port** or it counts inbound replies as remotes: `> [0-9.]+\.\K[0-9]+` matched our own `51711` on reply lines. Use `\.<localport> > [0-9.]+\.\K[0-9]+`, and control it BOTH ways — reject the local port, and confirm a second genuine remote still counts.
+
 ## How to verify
 ```bash
 S=/tmp/claude-1000/-home-zach-workspace-devrc/765865a3-5a34-4368-9c27-c442fd52106c/scratchpad
-# watcher alive? -- resolve from /proc, never `pgrep -f` and never the pid file alone
 for p in $(pgrep -x bash); do [ -r /proc/$p/cmdline ] && tr '\0' ' ' < /proc/$p/cmdline \
-  | grep -q flap-watch3 && ps -o pid=,etime= -p $p; done
-# v3's OWN record only -- the log spans both watcher generations
-awk '/WATCHER HANDOVER/{f=1} f' $S/flap-watch2.log > /tmp/v3.log
+  | grep -q flap-watch3 && ps -o pid=,etime= -p $p; done        # watcher alive
+awk '/WATCHER HANDOVER/{f=1} f' $S/flap-watch2.log > /tmp/v3.log  # v3's OWN record only
 grep -c 'poll:' /tmp/v3.log; grep -c TRIGGER /tmp/v3.log; grep -c BADPARSE /tmp/v3.log
-# the central fact: do the two overlays ever disagree?
-python3 - <<'PY'
-import re
-txt=open('/tmp/v3.log').read(); neb={}; ts={}
-for m in re.finditer(r'(\S+Z)\s+(nebula|tailscale)\(UDP-on-wire\)\s+loss=([\d.]+)%\s+longest_run=(\d+)',txt):
-    (neb if m.group(2)=='nebula' else ts)[m.group(1)]=(float(m.group(3)),int(m.group(4)))
-c=sorted(set(neb)&set(ts)); same=sum(1 for t in c if neb[t]==ts[t])
-print(f"{len(c)} episodes, {same} identical ({100*same/len(c):.1f}%), "
-      f"longest run {max(neb[t][1] for t in c)} pkt")
-PY
-ip rule show | grep 5150            # ABSENT since the 2026-09-27 reboot
-sudo -n -l                          # `ip`/`nft` are NOT granted; design remedies to this
+ip rule show | grep 5150        # ABSENT since the 2026-09-27 reboot
+sudo -n -l                      # `ip`/`nft` NOT granted — design remedies to this
 ```
+Lockstep check (the central fact): parse `/tmp/v3.log` for paired `nebula(`/`tailscale(` loss+run per episode and count exact matches — was 167/169 on 2026-09-30.
 ## How to verify — CARRIED verbatim from the 09-24 doc (arc closing-condition)
 🔴 RUN IT ALL WITH THE TUNNEL UP, and substitute HOME_PUB first; with the tunnel down several lines go vacuously green (`ip link show airvpn` fails, split-tunnel probe returns `dev wlp170s0`, pill up=false — those three catch you).
 ```bash
