@@ -36,6 +36,7 @@ import cairn_pin  # noqa: E402
 # The one seam for tests that read PINNED module SOURCE — see
 # `scripts/testlib/cairn_lib.py`.
 from testlib.cairn_lib import pinned  # noqa: E402
+from testlib.mockbin import write_exec  # noqa: E402
 
 
 def _pin() -> Path:
@@ -247,9 +248,12 @@ def _fake_client(root: Path, name: str, *, with_lib: bool) -> Path:
     """
     pkg = root / f"pkg-{name}-{'py' if with_lib else 'go'}"
     (pkg / "bin").mkdir(parents=True)
-    exe = pkg / "bin" / name
-    exe.write_text("#!/usr/bin/env bash\nexit 0\n")
-    exe.chmod(0o755)
+    # ⚠ `write_exec`, NOT a hand-written shebang. `test_runtime_shebangs.py` bans a
+    # test writing its own `/usr/bin/env` line and names this helper as the remedy;
+    # it caught the first draft of this fixture. Nothing here is ever EXECUTED —
+    # route 2 only needs `shutil.which` to find it and `realpath` to resolve it — but
+    # the ban is about the whole class, not about whether one site happens to run.
+    exe = write_exec(pkg / "bin" / name, "exit 0\n")
     if with_lib:
         lib = pkg.joinpath("libexec", "cairn", "lib")
         lib.mkdir(parents=True)
