@@ -2959,6 +2959,11 @@ class TestSkillAndModuleAgree:
         # exact defect this test exists for — and the whole module passed,
         # 639 passed, rc 0. Closing presence without closing ORDER left the
         # central property unguarded.
+        # `index` takes the FIRST occurrence, so a field naming the override
+        # early in a warning reds even when it routes correctly. Accepted: this
+        # is a POSITIONAL guard, and the sort below only decides WHICH flag the
+        # message names (the earliest-positioned one), which keeps the message
+        # deterministic rather than dict-ordered. It changes no verdict.
         override_at = field.index("--override-size-ratchet")
         for flag, flag_at in sorted(at.items(), key=lambda kv: kv[1]):
             assert flag_at < override_at, (
@@ -2966,9 +2971,13 @@ class TestSkillAndModuleAgree:
                 f"the remedy. In claude/skills/handoff/SKILL.md's step-5 "
                 f"`size-ratchet` field, {flag} is at {flag_at} and "
                 f"--override-size-ratchet at {override_at}: {field!r}. Both "
-                f"{hd.PRUNE_FLAG} and {hd.PRUNE_COUNT_FLAG} must precede it — "
-                f"an executor reads the field in order and stops at the first "
-                f"remedy it can act on."
+                f"{hd.PRUNE_FLAG} and {hd.PRUNE_COUNT_FLAG} must precede it. "
+                f"⚠ POSITION IS NOT SEMANTICS: this pins order only. A field "
+                f"can place both flags first and still route to the override in "
+                f"PROSE (\"do not reach for --prune first; use …\") — measured, "
+                f"that passes. Every mechanical regression is caught (a flag "
+                f"dropped, moved past the override, or read off the other's "
+                f"prefix); deny-prose is not, and no positional guard can."
             )
 
     def test_the_size_ratchet_locator_reads_a_FIELD_not_the_whole_line(
@@ -2976,41 +2985,40 @@ class TestSkillAndModuleAgree:
     ) -> None:
         """NEGATIVE CONTROL, and it pins the exact false positive that shipped.
 
-        SIX assertions. Naming which does what — and IN WHAT ORDER THEY FIRE — is
-        the point: two successive versions of this docstring credited the wrong
-        one, and #1943 rounds 1 and 2 each measured that false. Source order
-        decides which failure a reader is shown, so it is part of the claim.
+        Naming which assertion does what — and IN WHAT ORDER THEY FIRE — is the
+        point: source order decides which failure a reader is shown, so it is
+        part of the claim.
 
-        Numbered in SOURCE ORDER, verified by AST rather than by reading:
+        FIVE assertions, in source order. 🔴 THIS LIST IS MACHINE-CHECKED —
+        `test_this_controls_docstring_numbering_matches_its_own_assertions`
+        walks the AST and fails if the count here disagrees with the code. It
+        exists because FOUR consecutive versions of this docstring mis-attributed
+        their own assertions, each corrected by the next audit round; prose was
+        the wrong medium for the claim.
 
         1. THE ANCHOR — `field.startswith("`size-ratchet`")`. First to fire for
-           BOTH mutant shapes discussed below: a locator returning the whole
-           LINE, and one returning the whole DOCUMENT. Measured for each — every
-           check after it never executes. It is not a formality.
+           BOTH mutant shapes below: a locator returning the whole LINE, and one
+           returning the whole DOCUMENT. Measured for each — every check after it
+           never executes. Not a formality.
         2. THE PREMISE for (3) — `neighbour in line_for_premise`. Asserted
            before (3) is relied on, so (3) cannot pass vacuously once
            `leak-refused` stops sharing step 5's line.
         3. THE SCOPE CONTROL — `neighbour not in field`. A field-scoped read
            cannot contain `leak-refused`, which lives in the next `·`-field
-           along. STRUCTURAL, and with the anchor removed it is what kills a
-           line-scoped locator.
-        4. THE LENGTH BOUND. 🔴 ITS CREDITED CASE WAS WRONG ONCE, SO READ THIS
-           ONE: it is NOT what catches a whole-document locator — the anchor
-           fires first, measured. What it alone catches, with the anchor and (3)
-           both gone, is a locator returning field-START to END-OF-LINE — the
-           shape that keeps the anchor happy and drags in no neighbour. Narrow,
-           and the reason to keep the bound rather than tidy it away.
-        5. AND 6. THE FALSE-POSITIVE PREMISE — `PRUNE_FLAG in line` with the
-           `·` count, then `any(PRUNE_FLAG in f for f in others)`. These pin
+           along. STRUCTURAL, and with the anchor removed it is what kills every
+           line-scoped locator shape measured so far.
+        4. AND 5. THE FALSE-POSITIVE PREMISE — `PRUNE_FLAG in line` with the `·`
+           count, then `any(PRUNE_FLAG in f for f in others)`. These pin
            something different and cannot see the locator at all: `others`
            derives from `line.split("·")` and never touches `field`. They assert
            the false positive this control exists for is still POSSIBLE, i.e.
            some OTHER field on the line still names the flag. Reword the trailing
-           pointer to drop `--prune` and (6) reds, correctly.
+           pointer to drop `--prune` and (5) reds, correctly.
 
-        ⚠ A seventh assertion once stood here — a typed "base text" fed to the
-        same predicate. It read no file and was probed vacuous by round 0; it is
-        gone, and the comment where it stood says why. Do not reinstate it."""
+        ⚠ TWO assertions have been deleted from this test, each for a measured
+        reason recorded at the site: a typed "base text" fed to the same
+        predicate (vacuous — round 0), and a length bound (dominated, no
+        reachable case of its own — round 3). Do not reinstate either."""
         field = self._size_ratchet_field()
         assert field.startswith("`size-ratchet`")
 
@@ -3040,9 +3048,29 @@ class TestSkillAndModuleAgree:
             f"reading the whole line, not one field. That is exactly the "
             f"line-vs-field confusion this control exists for: {field!r}"
         )
-        assert 0 < len(field) < 600, f"the locator returned {len(field)} bytes"
+        # 🔴 THE LENGTH BOUND THAT STOOD HERE IS DELETED, AND THIS IS THE FIFTH
+        # RATIONALE FOR IT — WHICH IS WHY IT IS GONE RATHER THAN RE-ARGUED. Four
+        # consecutive rounds credited it with a case, each measured false by the
+        # next. The last was "it alone catches a field-START-to-END-OF-LINE
+        # locator": measured, `size-ratchet` sits at offset 293 on step 5's line
+        # and `leak-refused` at 615, so that shape is 1,186 chars and CONTAINS the
+        # neighbour — the scope control above fires, not a length check. With the
+        # anchor and the neighbour check both present, reaching a length bound
+        # needs a field that starts with `size-ratchet`, excludes `leak-refused`
+        # and exceeds 600 chars, while the field-to-neighbour span is only 322.
+        # It was DOMINATED: no reachable case of its own.
+        #
+        # RULES: if a guard has lost its reason, write that it has none — do not
+        # go looking for a better one. Reaching for a fresh justification is what
+        # regenerated this error four times.
 
-        # A third assertion stood here: `PRUNE_FLAG not in base_field` against a
+        # ⚠ NO ORDINAL HERE, DELIBERATELY — one of the two DELETED assertions the
+        # docstring names, not a numbered live one. Calling it "the third" (its
+        # old position) made a reader think live item 3 had been removed, and
+        # every renumbering restaled the word. The docstring counts what EXISTS;
+        # this counts what does not.
+        #
+        # One of them was `PRUNE_FLAG not in base_field`, against a
         # literal spelled three lines above it. That reads no file and cannot
         # fail for any repo-state reason. Round 0 of #1943 probed it — DELETING
         # it left both these tests green — so it pinned nothing. It is recorded
@@ -3075,6 +3103,86 @@ class TestSkillAndModuleAgree:
             "the flag now appears ONLY inside the `size-ratchet` field, so a "
             "line-scoped grep would agree with the field-scoped one and this "
             "control no longer demonstrates the gap it was written for"
+        )
+
+    def test_this_controls_docstring_numbering_matches_its_own_assertions(
+        self,
+    ) -> None:
+        """🔴 NINE ROUNDS OF PROSE DRIFT, ENDED DETERMINISTICALLY RATHER THAN BY
+        A FIFTH CAREFUL REWRITE.
+
+        `test_the_size_ratchet_locator_reads_a_FIELD_not_the_whole_line`
+        enumerates its own assertions in its docstring. FOUR consecutive versions
+        of that list were wrong — "three assertions" against six, a credit given
+        to an assertion that cannot execute for the shape it named, an ordinal
+        pointing at a live assertion as if it were deleted — and every one was
+        caught only by a human-scale audit round reading the prose. A count in
+        prose is a claim; this makes it a checked one.
+
+        RULES: prefer a deterministic/structural fix over prose. The list will
+        still go stale — but now the suite says so instead of the next auditor.
+
+        ⚠ DELIBERATELY NARROW: this pins the COUNT and the presence of a
+        correspondingly-numbered item, not each item's semantic attribution. The
+        attributions are verified by mutation, recorded at the sites. A guard that
+        claimed to check attribution would be exactly the too-wide docstring this
+        test exists to prevent."""
+        import ast as _ast
+
+        target = "test_the_size_ratchet_locator_reads_a_FIELD_not_the_whole_line"
+        tree = _ast.parse(Path(__file__).resolve().read_text(encoding="utf-8"))
+        fn = next(
+            (
+                n
+                for n in _ast.walk(tree)
+                if isinstance(n, _ast.FunctionDef) and n.name == target
+            ),
+            None,
+        )
+        assert fn is not None, (
+            f"{target} is gone from {Path(__file__).name}, so this guard is "
+            f"pinning nothing. If it was renamed, rename it here too."
+        )
+
+        n_asserts = len([n for n in _ast.walk(fn) if isinstance(n, _ast.Assert)])
+        doc = _ast.get_docstring(fn) or ""
+        assert doc, f"{target} lost its docstring, which is what this guard reads"
+
+        words = {
+            "ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5,
+            "SIX": 6, "SEVEN": 7, "EIGHT": 8, "NINE": 9, "TEN": 10,
+        }
+        m = re.search(
+            rf"\b({'|'.join(words)}|\d+)\b\s+assertions", doc, re.IGNORECASE
+        )
+        assert m, (
+            f"{target}'s docstring no longer states how many assertions it has, "
+            f"in the form '<N> assertions'. That sentence is the claim this guard "
+            f"checks — keep it, or this test silently stops protecting anything."
+        )
+        token = m.group(1)
+        claimed = words.get(token.upper(), None)
+        if claimed is None:
+            claimed = int(token)
+
+        assert claimed == n_asserts, (
+            f"{target}'s docstring says {token} ({claimed}) assertions; the AST "
+            f"counts {n_asserts}. Four consecutive versions of that list were "
+            f"wrong in exactly this way, so fix the DOCSTRING to match the code "
+            f"(or the code, if an assertion was lost by accident) — and renumber "
+            f"its items, because a reader follows the numbers."
+        )
+
+        # The numbered list must reach the claimed count. `4. AND 5.` is a legal
+        # spelling of two items on one line, so match ordinals anywhere rather
+        # than requiring one per physical line.
+        ordinals = {int(x) for x in re.findall(r"(?m)^\s*(\d+)\.", doc)}
+        ordinals |= {int(x) for x in re.findall(r"\bAND (\d+)\.", doc)}
+        missing = sorted(set(range(1, n_asserts + 1)) - ordinals)
+        assert not missing, (
+            f"{target}'s docstring claims {n_asserts} assertions but numbers "
+            f"{sorted(ordinals)} — no item(s) {missing}. A reader follows the "
+            f"numbers, so a gap sends them to the wrong assertion."
         )
 
     def test_the_tool_is_tracked_by_git(self) -> None:
