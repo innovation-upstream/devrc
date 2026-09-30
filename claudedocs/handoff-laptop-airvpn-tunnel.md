@@ -21,15 +21,16 @@ unaffected while the tunnel is up.
   — no MTU/routing churn.
 
 ## State now
-- Branch / PR: devrc **PR #1937** (`handoff-laptop-airvpn-tunnel`), OPEN, `MERGEABLE`, four Tekton checks PENDING at last read. This update was made from a worktree at `/home/zach/workspace/devrc-handoff-tunnel` — **the devrc base clone sits on another session's branch** (`docs/auditloop-deploy-preconditions`, PR #1938); do not land this doc there.
-- No `clawgate-task:` field: `clawgate_handoff.sh resolve` exited **5 (NOTHING RESOLVED)**. That cannot distinguish "this session touched no task" from "the id is wrong", so none is recorded — it is not a clean bill of health.
-- Done this session (2026-09-30, no repo changes outside this doc):
-  - **flap-watch v2 → v3.** v2 (pid 2115782) stopped by resolved PID; **v3 running, pid 2309522**, same log `<scratchpad>/flap-watch2.log`, script `<scratchpad>/flap-watch3.sh`. Fixed `loss_pct()`.
-  - **Four-way concurrent probe** (`probe2.sh`, warm-up + 100 pkt @0.5 s), run twice.
-  - **Confirmed the underlay live from the workbench's own nebula journal.**
-- 🔴 **CORRECTION TO THE PREVIOUS `State now` — the `ip rule` 5150 pin is NOT APPLIED.** The 09-30 entry carried "still true: STILL APPLIED"; `ip rule show` has no 5150 entry and `ip route get 192.168.50.94` is back to `dev tailscale0 table 52`. **The laptop rebooted 2026-09-27 15:33** (`uptime -s`), three days *before* that line was written — it was carried forward without re-checking. The pin has been absent for three days.
-- 🔴 **And the pin is no longer the right lever anyway** — see the superseding investigation block. It targeted `192.168.50.94`, the peer that is now measured **clean without it**.
-- Deploy/verify status: nothing deployed. No sudo available this session (`sudo -n` → password required), so no routing change was applied.
+- Branch / PR: devrc **PR #1937** (`handoff-laptop-airvpn-tunnel`), OPEN. Landed `a9bcf992` earlier this session; this is the follow-up correction.
+- No `clawgate-task:` field: `clawgate_handoff.sh resolve` exited **5 (NOTHING RESOLVED)** — cannot distinguish "touched no task" from "wrong id". Not a clean bill of health.
+- Done this session (2026-09-30):
+  - **flap-watch v2 → v3.** v2 (pid 2115782) stopped; **v3 running, pid 2309522**, log `<scratchpad>/flap-watch2.log`, script `flap-watch3.sh`. `loss_pct()` parse defect fixed + controlled.
+  - **Per-destination concurrent probe** (`probe2.sh`) — now run **four** times total, three of them showing the workbench/gateway asymmetry.
+  - **`tailscale set --accept-routes=false` experiment, run and REVERTED.** `RouteAll` confirmed back to `True`, route to `192.168.50.250` back via `tailscale0`.
+- 🔴 **The `ip rule` 5150 pin is NOT APPLIED** and has not been since the **2026-09-27 15:33 reboot** (`uptime -s`). Unchanged from the earlier commit — still the correction that matters.
+- 🔴 **AND THE PIN IS NOT THE LEVER.** It targeted `192.168.50.94`, which measures **0% in every round without it**.
+- Deploy/verify status: nothing deployed, nothing left changed. The one experiment run was reverted in the same command via a `trap`.
+- 🔴 **Sudoers reality, measured — this bounds what any session here can do:** `sudo -n -l` grants NOPASSWD for `airvpn-sudo`, the **whole `tailscale` binary**, and `systemctl restart|start|stop tailscaled` / `restart nebula@mesh`. It does **NOT** grant `ip` or `nft`. **So the fwmark/`ip rule` remedy cannot be applied by an agent here at all** — it needs an operator or a sudoers change. Do not plan around it without that.
 - 🔴 CARRIED (still true): mosh DOES NOT WORK YET, deliberately — no host runs `mosh-server`; `programs.mosh.openFirewall` DEFAULTS TRUE (must be false or it opens 1001 UDP ports on every interface incl. WAN).
 
 ## Open investigations — live diagnosis state
@@ -246,11 +247,22 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - **Leading hypothesis:** unchanged and untested — likely ICMP handling on the lighthouse side rather than reachability, since discovery demonstrably works throughout (every data peer resolves and connects).
 - **Next probe:** from the far box (`ssh root@10.42.0.20`, works with `StrictHostKeyChecking=accept-new`), ping `10.42.0.1` and `10.42.0.2` — if they also fail from a host on a clean path, it is the lighthouses, not the laptop.
 
+### 🔴 RETRACTION — "nebula rides the tailscale subnet route, and that is the fault" is REFUTED (it was asserted earlier TODAY, in this same doc)
+- as-of: 2026-09-30
+- 🔴 **This retracts the causal claim in the block "SUPERSEDES 'only traffic to HOME dies' — the fault is ONE WIRE FLOW", committed in `a9bcf992` a few hours earlier.** That block's *measurements* stand. Its **mechanism does not**, and its `Next probe` — apply a UDP:4242 route exclusion and expect `home-workbench` to reach 0% — is now a **wrong instruction**: the experiment was run and the loss did not move.
+- **Symptom + exact repro:** `bash <scratchpad>/experiment.sh` — capture `tailscale debug prefs`, `sudo tailscale set --accept-routes=false`, settle 20 s, `probe2.sh` ×2, restore via an `EXIT` trap.
+- **Observed (with values):** with the subnet route **gone** (`ip route get 192.168.50.250` → `via 192.168.1.1 dev wlp170s0`, no `tailscale0`): round A all four targets 0%; **round B `home-workbench` 13%, one contiguous 13-pkt run**, `home-gateway` 0%, Hetzner 0%, control 0%. Identical in shape to the 16%/run-16 measured *with* the route present. `via: measurement`
+- **Ruled out — that the tailscale subnet route causes the loss.** Removing it changed nothing. `via: measurement`
+- 🔴 **Ruled out — that nebula's DATA path was ever using the LAN address.** The disproof is in the same run: nebula logged **no handshakes at all** during the window, yet stayed at 0–13% instead of 100%. Had its data path been sending to `192.168.50.250:4242`, deleting that route would have blackholed it entirely. It was already on the workbench's public endpoint. `via: measurement`
+- 🔴 **Ruled out — that the `from=` arrival address reports the data path.** It reports **handshake** packets only. "5 of 6 from `100.64/10`" was a true reading promoted to a claim it does not support; that promotion is what produced the refuted hypothesis. `via: measurement`
+- **Leading hypothesis:** NONE that is load-bearing. What survives is the *observation set*, which is now well constrained and still unexplained: (a) the workbench flaps and the homelab gateway does not, though both sit behind one home public IP — so it is **per-flow or per-port, not per-site and not per-destination-host**; (b) nebula and tailscale to the workbench lose **identically, to the second**, though they are separate flows to that same home IP; (c) every ICMP control (local gw, last hop before home, far box) is 0% throughout; (d) a third vantage reaches the workbench at 0% while the laptop cannot. CGNAT per-flow state eviction still fits (a), (c) and (d) — but (b) is what it does not explain, and (b) is the observation that keeps surviving.
+- **Next probe:** stop proposing remedies and characterise (b). The question is whether the nebula and tailscale flows to the workbench share a NAT binding — capture the laptop's actual source ports for both (needs root: `ss -unp` or `conntrack -L`, neither available to an agent here) and check whether the two flows die together because they share one mapping, or because something upstream drops both. Until (b) is explained, any "route around it" proposal is a guess — this session already shipped one and had to retract it inside an hour.
+
 ## Next steps (ranked)
-1. **Take nebula off the tailscale underlay for the home LAN, then re-measure** (laptop host config). Preferred form: mark outbound **UDP dport 4242** to `192.168.50.0/24` and route it off table 52, so remote LAN access over tailscale (`kubectl` against homelab) is preserved — a blanket `ip rule to 192.168.50.0/24 lookup main` would take that out. Nebula's own `lighthouse.remote_allow_list` excluding `192.168.50.0/24` is the config-level alternative, but it breaks when the laptop is physically at home (needs NAT hairpinning, which the gateway config says will not work). Verify with `probe2.sh` ×2: `home-workbench` must reach 0% alongside `home-gateway`. Requires sudo — operator-run.
-   forcing: incident — mesh loss re-measured live 2026-09-30 at 16% with an 8 s contiguous blackout, and five watcher episodes in 20 minutes
-2. **Merge #1937 once its Tekton checks settle**, carrying this correction — the doc currently on that branch asserts the pin is applied when it has not been for three days, and leads with a refuted framing.
-   forcing: incident — the same live recurrence; the open PR would publish two false claims about it
+1. **Characterise why the two overlays fail identically to the second** (open investigation above, item (b)) — operator-run, needs root for `ss -unp`/`conntrack -L` on the laptop during a live episode; the v3 watcher's episode timestamps say when to look. This is diagnosis, NOT a remedy: the arc has now produced two remedy proposals (the `ip rule` pin, the route exclusion) and measurement killed both.
+   forcing: incident — mesh loss re-measured live four times on 2026-09-30, worst 16% with an 8 s contiguous blackout, and five watcher episodes inside 20 minutes
+2. **Merge #1937 once its Tekton checks settle** — it now carries both the correction and this retraction.
+   forcing: incident — the same live recurrence; leaving it open leaves a refuted mechanism as the doc's leading hypothesis
 
 ## Defects (batched)
 - Workbench stale `airvpn-updown` copy — operator, ON THE LAN: `sudo install -m0755 ~/workspace/devrc/scripts/airvpn-updown /etc/nixos/i3blocks-scripts/airvpn-updown`, pair with killswitch re-test per `claude/skills/bar/reference/airvpn.md`.
@@ -354,6 +366,17 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - **The homelab gateway is clean because nebula ROAMED it to the public endpoint, not because of the pin** — the pin has been absent for three days and `10.42.0.10` measured 0% twice. Do not read its health as evidence the pin works.
 - **`ssh root@10.42.0.20` (far box, `diffsona`) works from the laptop over the mesh** — needs `-o StrictHostKeyChecking=accept-new` on first use. That is the third vantage; use it rather than re-deriving one.
 - ⚠ **A 120 s probe does not fit a 2-minute foreground command budget** — it gets truncated and silently yields short files. Keep concurrent probes at 100 pkt @0.5 s (50 s), or background them properly.
+
+- 🔴 **THIS SESSION SHIPPED A CONFIDENT MECHANISM AND RETRACTED IT WITHIN THE HOUR — the tell was there at write time and was read past.** The evidence was `from=` addresses on **handshake** log lines; the claim was about the **data path**. Those are different packet types, and nothing measured connected them. **A log field names the packets that produced it and nothing else.** The cheap disproof existed before the commit and cost one command: had nebula's data path used the LAN address, removing that route would have given 100% loss, not 13%.
+- 🔴 **`sudo -n -l` is worth reading BEFORE designing a remedy.** Two rounds of this arc specified `ip rule`/fwmark fixes that no agent on this host can apply — `ip` is not in the sudoers list, `tailscale` (entirely) is. Design to the privileges that exist, or hand the step over explicitly.
+- **A routing experiment must carry its own restore.** `experiment.sh` puts the revert in an `EXIT`/`INT`/`TERM` trap, so an interrupt or a probe failure still restores `accept-routes`. Verify the restore by re-reading `tailscale debug prefs` (`RouteAll`) **and** `ip route get`, not by assuming the command worked.
+- **`tailscale set` changes only the pref you name; `tailscale up` re-asserts a whole prefs set.** Use `set` for a single-pref experiment.
+- 🔴 **The v2 watcher under-reported the WORST episodes.** `loss_pct()` had no `tail -1`, so ping output matching `% packet loss` twice returned a MULTI-LINE value; `[ "$p" -ge N ]` then errored and fell to the else branch, logging it **quiet**. Seen at `2026-09-30T06:00:29Z` as `poll: 100\n100% quiet`. Reproduced with a `ping` shim. Old log "quiet" lines are not trustworthy at the high end.
+- ⚠ **The ping output producing that double match was NOT reproducible** — v3 fixes the CLASS (shape-validate, fail LOUD via `BADPARSE`) rather than a guessed cause. Do not write up a mechanism for it.
+- 🔴 **The first version of that fix contained an unreachable guard** — `1.2.3% packet loss` matched the tail `2.3`, so `BADPARSE` could never fire. The lookbehind `(?<![\d.])` is load-bearing; reachability was then proved.
+- 🔴 **`cairn-validate --validate <path>` fails a PRISTINE template with "missing or empty `scope:`"** when the file sits outside the store. Control it against `--template` output before believing a verdict about your own file; the authoritative check is the post-write `hygiene.sh validate --scope <scope>`.
+- ⚠ **`handoff_doc.py` reports `leakscan: NO SCANNER FOUND … PASS BY ABSENCE`** in devrc — it looks for `tests/leakscan.py`, which does not exist here. The real gate is `scripts/tests/test_no_public_ips.py`; run it yourself on a doc with a leak history.
+- 🔴 **`claim-work --release` is per-WORKTREE**: claiming from the base clone and releasing from elsewhere is refused. Release from the same checkout you claimed in.
 
 ## How to verify
 ```bash
