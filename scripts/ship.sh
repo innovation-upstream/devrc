@@ -1580,6 +1580,14 @@ fi
 # outside containers/clawgate are refused too. The remedy is the same two
 # commands either way, and `--no-remote` converges one host without comparing.
 #
+# 🔴 AND THE BLIND SPOT IN THE OTHER DIRECTION, named rather than left to be
+# found: HEAD EQUALITY IS NOT TREE EQUALITY. The derivation reads the working
+# TREE, and both hosts' homelab-talos are routinely dirty (drift-check.sh reports
+# DIRTY on every present one for exactly this reason). Two hosts at the SAME sha
+# with a different uncommitted `go.mod`/`go.sum` still hash differently, and this
+# pre-flight prints "2 hosts compared, both hold …" and proceeds. It is a check on
+# the COMMITS, and it says so; it is not a promise about the bytes nix will read.
+#
 # 🔴 NO `${VAR:-$HOME/...}` OVERRIDE FOR THE PATH. That spelling is the
 # set-but-EMPTY hazard this file already carries a guard for (rc 2), pinned
 # repo-wide by scripts/tests/test_repo_path_defaults.py — a second instance
