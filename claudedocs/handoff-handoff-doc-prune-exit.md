@@ -28,32 +28,51 @@ delete path. This arc builds that path and fixes one false claim found on the wa
   ranked item 2) and the arc cannot close without it.
 
 ## State now
-- 🔴 **#1926 IS MERGED — `ed947e1a` (squash), 2026-09-30T17:17:35Z.** Verified three ways, not one:
-  by CONTENT on `origin/main` (a squash breaks ancestry, so ancestry is not the check); by the
-  four Tekton statuses all `success` with `completed_at` AFTER the final push; and by **rendering
-  the live refusal from the merged module** — `readlink -f scripts/lib/handoff_doc.py` terminates
-  in the repo, so that output is the shipped code, not a fixture. The sentence that started this
-  arc is gone, and remedy 2 now routes to `--prune` and states that it COMBINES with `--update`.
-- **The base clone is fast-forwarded.** `jev-ui-demo#14` (the eviction) is **still OPEN**.
-- 🔴 **THE ARC IS STILL OPEN, AND ONLY ON CLAUSE 2.** The closing condition wants `--prune` named
-  on `SKILL.md`'s `size-ratchet` line. `grep -n 'size-ratchet' | grep -c 'prune'` still returns
-  **0**. Clause 1 (merged to `origin/main`) is MET. Lever 1 deliberately does not touch that file,
-  so this cannot close without the operator's decision — see ranked item 1.
-- **The ladder ran FIVE rounds (0–4) and is CLOSED.** Round 4's verdict was merge-after-F1 and
-  explicitly **not** a round 5, because F1's fix is verified by a mechanical control rather than
-  another pass. 🔴 **Every round found my own PROSE asserting something false; none found a
-  behaviour defect.** The per-round record is in the `Gotchas` below and on the PR.
-- **Round 4 ran the SANDBOX tier — the one the merge gates on — for the first time in the ladder:**
-  `SCOPE: FULL (30 of 30 hermetic targets)`, `RESULT: PASS`. Every earlier round's green was the
-  dev-host pytest tier only, and nobody had checked.
-- **Filed, not fixed** (round 4's own recommendation, each with a closing condition, both on the
-  PR): **F6** a bare copy inserted adjacent to `_RETRACTION_MARKERS` is auto-cleared, because the
-  marker words sit there as literal definitions — pre-existing, predates the range. **F7** the
-  string-literal strip can fabricate a phrase across two unrelated literals; no instance in the
-  real corpus, and it errs toward blocking, which is the safe side.
-- 🔴 **No `clawgate-task:` field**: `clawgate_handoff.sh resolve` exited **5** (NOTHING RESOLVED).
-  An unknown session id answers 200 with an empty array, so that zero cannot distinguish "touched
-  no task" from "wrong id". **Not a clean bill of health.**
+- 🔴 **CLAUSE 2 IS WIRED AND IN FLIGHT: `innovation-upstream/devrc#1943`**, branch
+  `zach/size-ratchet-names-prune`, commit `7f762c8d`. SKILL.md step 5's `size-ratchet`
+  field now names `--prune <file> --prune-count <n>` as the FIRST remedy, states the rule
+  it serves (an over-budget doc may be UPDATED, not GROWN), says it COMBINES with the same
+  run, and falls back to the override. **The arc closes when #1943 merges** — nothing else
+  is outstanding on it.
+- 🔴 **RANKED ITEM 1'S PREMISE WAS STALE AND THE FORK DISSOLVED — NO `MAX_BYTES` RAISE WAS
+  NEEDED, AND NO OPERATOR DECISION WAS NEEDED EITHER.** The previous list framed this as
+  *raise the constant, or amend the closing condition*, on **87 B** of headroom measured at
+  `dc159b07`. `f1801784` (#1925, the doc relocation) shrank `SKILL.md` to **20,031 B**
+  afterwards, so the real headroom was **269 B** against **150 B** of wiring. The file lands
+  at **20,181 B** with **119 B** of slack. `MAX_BYTES` (21,200), `MIN_HEADROOM_BYTES` (900)
+  and the ratchet-DOWN ledger in `scripts/tests/test_handoff_skill_size.py` are UNTOUCHED —
+  the refuted trim in the old item 1 was never attempted.
+- **Clause 1 was already met and is met under either reading of the condition.** The Goal's
+  condition names **#1919**; `State now` credited **#1926**. Both are merged (`#1919`
+  `643fd0ef` 2026-09-29T19:51Z, `#1926` `ed947e1a` 2026-09-30T17:17Z), so the ambiguity has
+  no effect.
+- ⚠ **The closing condition embeds the RETRACTED line-scoped check.** It is frozen at round
+  1, so it is left as written — but `How to verify` step 5 is the authoritative form. The
+  naive check returns **1 whether or not the clause is open**; see the Gotchas already in
+  this doc, and the guard #1943 adds to stop it recurring.
+- **Two guards shipped with the wiring, because it was otherwise unwatched** — the same
+  shape as the stale refusal that started this arc. In
+  `scripts/tests/test_handoff_doc.py::TestSkillAndModuleAgree`:
+  `test_the_size_ratchet_remedy_routes_to_the_prune_EXIT_not_the_override` (the field must
+  name `hd.PRUNE_FLAG`, read OFF the module so a flag rename reds the skill, and must name
+  it BEFORE the override) and
+  `test_the_size_ratchet_locator_reads_a_FIELD_not_the_whole_line` (the negative control).
+- **CI: all four `tekton/devrc-*` statuses REGISTERED and PENDING** at `19:32:2xZ` on
+  `7f762c8d`. 🔴 **NOT verified in CI.** Everything below was measured on the dev-host
+  devShell tier only; the sandbox `nix build` tier is still unverified for this branch, as
+  it was for #1926.
+- **Every local measurement, six suites: `887 passed`** = the 885 baseline population +
+  these 2 guards. Clean accounting, no test displaced.
+- 🔴 **No `clawgate-task:` field**: `clawgate_handoff.sh resolve` exited **5** (NOTHING
+  RESOLVED) again this session. An unknown session id answers 200 with an empty array, so
+  that zero cannot distinguish "touched no task" from "wrong id". **Not a clean bill of
+  health.**
+- **The claim `handoff-doc-prune-exit-1` is HELD** (`claim-work`, host nixos) while #1943 is
+  open. Release it on merge: `claim-work --release handoff-doc-prune-exit-1`.
+- **Worktree `/tmp/wt-prune-exit-clause2`** is retained on branch
+  `zach/size-ratchet-names-prune` until CI settles. `git -C /home/zach/workspace/devrc
+  worktree remove /tmp/wt-prune-exit-clause2` after merge — 🔴 the EXACT path, never a glob.
+- **`jev-ui-demo#14` (the eviction) is still OPEN**, untouched this session.
 
 ## Open investigations — live diagnosis state
 
@@ -91,22 +110,22 @@ delete path. This arc builds that path and fixes one false claim found on the wa
   reading of "main is green" is currently wrong.
 
 ## Next steps (ranked)
-1. **Close the arc: raise `MAX_BYTES`, or amend the closing condition to match lever 1.** The ONLY
-   thing keeping this arc open. `claude/skills/handoff/SKILL.md` is **20,213 B** against a
-   **20,300 B** enforced budget (`MAX_BYTES 21_200` − `MIN_HEADROOM_BYTES 900`) = **87 B**, against
-   ~144 B of wiring. 🔴 **Against the raise:** `scripts/tests/test_handoff_skill_size.py`'s own
-   ledger says the answer to the next round is *"lever 1 or 2, not another raise"*, and it last
-   ratcheted DOWN. 🔴 **The obvious trim is REFUTED — do not retry it:** demoting the emphasis /
-   near-miss catalogue out of `SKILL.md` reds **three** `TestSkillAndModuleAgree` guards, by
-   mutation, because the skill is the only copy an executor reads at step 5. Files: that test
-   (which owns the constant) and `claude/skills/handoff/SKILL.md`.
+1. **Merge `devrc#1943` once its four statuses are terminal, then close the arc.** This is
+   the ONLY thing between the arc and CLOSED. On merge: run `How to verify` step 5 (it must
+   return **1**; it returns 0 today), release the claim, remove the worktree. 🔴 **Do not
+   grade the merge by ancestry** — a squash makes `merge-base --is-ancestor` false forever;
+   check by CONTENT plus `gh pr view --json mergedAt,mergeCommit`. 🔴 **Read the four
+   statuses SHA-PINNED** (`gh api repos/.../commits/$SHA/status`) — `gh pr checks` re-resolves
+   the head at call time and can return the PREVIOUS commit's green rollup. Files:
+   `claude/skills/handoff/SKILL.md`, `scripts/tests/test_handoff_doc.py`.
     forcing: none
-2. **Decide `jev-ui-demo`'s doc budget, then close `ZacxDev/jev-ui-demo#14`.** Round 0 of that PR
-   found `handoff_budget.GRANDFATHERED` holds **71 foreign entries** at allowances up to
-   **425,984 B**, and that doc is bound by the bare 65,536 **only because `jev-ui-demo` is not in
-   `handoff_index.REPO_ENV_HANDLES`** — so it was never in the population that block was measured
-   over. One ledger line would have been the precedented treatment and would have made #14
-   unnecessary. `IN FLIGHT: ZacxDev/jev-ui-demo#14`. Files: `scripts/lib/handoff_budget.py`,
+2. **Decide `jev-ui-demo`'s doc budget, then close `ZacxDev/jev-ui-demo#14`.** Unchanged and
+   uninvestigated this session. Round 0 of that PR found `handoff_budget.GRANDFATHERED` holds
+   **71 foreign entries** at allowances up to **425,984 B**, and that doc is bound by the bare
+   65,536 **only because `jev-ui-demo` is not in `handoff_index.REPO_ENV_HANDLES`** — so it was
+   never in the population that block was measured over. One ledger line would have been the
+   precedented treatment and would have made #14 unnecessary.
+   `IN FLIGHT: ZacxDev/jev-ui-demo#14`. Files: `scripts/lib/handoff_budget.py`,
    `scripts/lib/handoff_index.py`.
     forcing: none
 
@@ -315,35 +334,115 @@ delete path. This arc builds that path and fixes one false claim found on the wa
   paragraphs, line scope is not statement scope.** Split to the real delimiter before counting, and
   when a check's answer flips without the thing it measures changing, suspect the check.
 
+- 🔴 **A RANKED ITEM'S BYTE BUDGET IS A MEASUREMENT WITH A SHELF LIFE, AND RE-MEASURING IT
+  DISSOLVED THE FORK IT WAS BLOCKING ON.** Item 1 was carried across sessions as an operator
+  decision — raise `MAX_BYTES` or amend the closing condition — because **87 B** of headroom
+  could not hold ~144 B of wiring. That figure was measured at `dc159b07` and was already
+  wrong when it was written down as a blocker: `f1801784` shrank `SKILL.md` by 182 B, leaving
+  **269 B**. The wiring cost 150 B and fit with 119 B to spare. **Nothing was decided, nothing
+  was raised, and the item was never actually blocked.** The general tell: a ranked item whose
+  forcing argument is a NUMBER, carried forward from a previous session. Re-derive the number
+  before accepting that it blocks anything — `git show <ref>:<path> | wc -c` costs one command
+  against an operator round-trip. Same family as this arc's own headline (a refusal is a claim
+  with a shelf life); here the stale claim was in the HANDOFF, not the code.
+- 🔴 **MY NEGATIVE CONTROL RED ITSELF ON A THRESHOLD I TOOK FROM PROSE, AND THAT IS THE
+  CONTROL WORKING.** The locator control asserted `len(line) > 2_000` to pin "step 5 is one
+  paragraph-line". The real line is **1,288** characters — I had lifted "2,000 characters"
+  from this doc's own approximate phrasing (*"a pointer 2,000 characters further along"*) and
+  hard-coded it as a bound. It failed with its own message on the first run. **The fix was not
+  to retune the number: it was to stop asserting a size at all.** The claim is STRUCTURAL —
+  many fields share one physical line, and the flag appears on it in a field OTHER than this
+  one — so it is now `line.count("·") >= 5` plus `any(PRUNE_FLAG in f for f in others)`, where
+  `others` is the raw `·` split minus the `size-ratchet` field. 🔴 **An intermediate draft was
+  worse than either: `PRUNE_FLAG in line.replace(field, "")` — `field` is whitespace-NORMALISED
+  and the line is not, so the `replace` is a no-op and the assertion passes vacuously in both
+  arms.** A control that compares normalised text against raw text is not a control. **When a
+  guard needs a magic number, ask whether the thing you mean is a shape.**
+- 🔴 **A LINE-SCOPED MUTANT PROVES THE TWO GUARDS COVER DIFFERENT PROPERTIES, AND IT IS THE
+  ONLY MUTATION THAT DOES.** Reverting `_size_ratchet_field` from the `·` split back to
+  `doc.splitlines()` — i.e. reinstating exactly the false positive that shipped as this arc's
+  closing condition — leaves the REMEDY test **GREEN** (the line contains `--prune` via the
+  trailing pointer) and reds only the locator control. Reverting the SKILL.md field reds only
+  the remedy test. **Neither guard subsumes the other, and a single mutation would have
+  "proved" whichever one it happened to hit.** Matrix, every mutation isolated to the narrowest
+  expression that can be wrong, each **1 failed / 1 passed**: field→base ⇒ remedy RED with its
+  own message · `--prune` moved AFTER the override ⇒ the ORDERING assert RED alone · locator→line
+  scope ⇒ control RED, remedy GREEN. Then six suites at HEAD ⇒ 887 passed.
+- ⚠ **I EDITED THE PRIMARY CLONE INSTEAD OF THE WORKTREE, AND THE DIFF STAT IS WHAT CAUGHT
+  IT.** The `Edit` call carried `/home/zach/workspace/devrc/...` rather than the worktree path —
+  an easy slip once the worktree exists, because every READ up to that point had legitimately
+  been from the primary clone. **The recovery is safe only because the clone was clean on that
+  path: `git diff --stat` showed `87 insertions(+)` and `git diff | grep -c '^-'` showed 1, i.e.
+  exactly my own block and nothing else.** Then `git diff -- <path> > patch`,
+  `git -C "$WT" apply --check` (it applies clean), apply, and `git -C $D restore -- <path>`.
+  🔴 **Check the diff is ONLY yours BEFORE restoring** — `restore` on a path carrying someone
+  else's WIP destroys it silently, and the primary clone is exactly where other sessions' WIP
+  lives. The tell that the edit went to the wrong tree at all was the post-tool hook naming a
+  file from an unrelated effort as newly staged.
+- ⚠ **A `grep -F` pattern with BACKSLASH-ESCAPED backticks inside single quotes matches
+  nothing, and the zero reads as a regression.** Verifying a restore, `grep -F
+  '\`size-ratchet\`'` returned **0** and briefly looked like the restore had failed. Inside
+  single quotes the backslashes are literal, so the pattern was `\`size-ratchet\`` — absent from
+  the file. `cmp -s` against the saved copy settled it in one command and cannot be spelled
+  wrong. **Prefer `cmp`/`sha256sum` over a grep count when the question is "is this file the
+  bytes I meant".** Same family as this repo's grep gotchas: the answer was a fact about the
+  pattern, not about the file.
+- ⚠ **`cairn-ops/write.sh append` BREAKS ITS OWN POST-WRITE CHECK ON A LARGE `--text`, and the
+  failure reads as a store problem.** A 1,926-character bullet (cap is 2,000) appended fine —
+  the revision came back and the text reads back — but the automatic verification then printed
+  `common.sh: line 131: .../sed: Argument list too long`, `.../head: Argument list too long`,
+  `the reader would not name a store for scope 'devrc'`, and `NOTHING WAS CHECKED … exit 22`,
+  which `write.sh` reports as **the write LANDED but is UNCONFIRMED**. The store was fine:
+  `cairn routes` resolves `devrc -> personal` and a direct `cairn validate --scope devrc` exits
+  **0** with `36 of 36 entry file(s) parse, 0 malformed`, clean entry shape, 0 dropped lines and
+  0 out-of-reach markers. So the exit 22 was the WRAPPER's own argv, inherited from the giant
+  `--text`, not a routing or format change. 🔴 **Follow the protocol anyway — do NOT retry the
+  append** (it is content-hashed, but the instruction exists because a retry after a real 8 is
+  a clobber); confirm by reading the entry back and running `cairn validate --scope <scope>`
+  directly. ⚠ **And my own `rc=` was a lie in the same breath**: `… | tail -20; echo rc=$?`
+  reports `tail`'s status, so a wrapper exiting 22 printed `rc=0`. Capture the status before
+  piping.
+- ⚠ **An adjacent present-tense byte figure was false by 17×.** `SKILL_PINS` in
+  `scripts/tests/test_handoff_doc.py` justified a pin with *"SKILL.md sits at 7 B of headroom"*
+  against a real 119 B. Converted to past tense with the reason stated, because that figure moves
+  on every edit to the file and no test watches it — the same claim-with-a-shelf-life class as the
+  refusal that opened the arc, sitting in the file that guards against it.
+
 ## How to verify
 ```bash
 D=/home/zach/workspace/devrc
-# 1. the merge landed, by CONTENT (a squash breaks ancestry — never check ancestry)
-git -C $D show origin/main:scripts/lib/handoff_doc.py | grep -c 'It COMBINES with this update'   # 1
-git -C $D show origin/main:scripts/lib/handoff_doc.py | grep -c 'cannot shrink them for you'      # 0
-# 2. THE SYMPTOM ITSELF — render the live refusal from the merged module. `readlink -f` must
-#    terminate IN the repo, or you are reading a /nix/store copy and this proves nothing.
-readlink -f $D/scripts/lib/handoff_doc.py
-nix develop "$D" --command bash -c "cd $D && PYTHONDONTWRITEBYTECODE=1 python3 -c \"
-import sys; sys.path.insert(0,'scripts/lib')
-import handoff_doc as hd
-cap = hd.handoff_budget.MAX_BYTES
-print(hd.size_ratchet_report('claudedocs/handoff-x.md','a'*(cap+2),'a'*(cap+1)))\""
-# 3. the suites — EXACTLY these six sum to 885; naming them is the point
+# 1. THE ARC'S ONLY OPEN CLAUSE. Returns 0 while open, 1 once #1943 merges.
+#    🔴 SPLIT ON `·` FIRST. SKILL.md step 5 is ONE physical line holding every status, and
+#    its trailing pointer names `--prune` — so a line-scoped grep returns 1 EITHER WAY. That
+#    false positive is the form embedded in the frozen closing condition; this is the real one.
+git -C $D show origin/main:claude/skills/handoff/SKILL.md \
+  | tr '·' '\n' | grep -F '`size-ratchet`' | grep -c -- '--prune'
+# 2. the wiring is GUARDED, not just present — both names must exist on origin/main
+git -C $D show origin/main:scripts/tests/test_handoff_doc.py \
+  | grep -c 'test_the_size_ratchet_remedy_routes_to_the_prune_EXIT_not_the_override'   # 1
+git -C $D show origin/main:scripts/tests/test_handoff_doc.py \
+  | grep -c 'test_the_size_ratchet_locator_reads_a_FIELD_not_the_whole_line'           # 1
+# 3. the byte claim — no MAX_BYTES raise happened
+git -C $D show origin/main:claude/skills/handoff/SKILL.md | wc -c                      # 20181
+git -C $D show origin/main:scripts/tests/test_handoff_skill_size.py \
+  | grep -E '^(MAX_BYTES|MIN_HEADROOM_BYTES) ='                                        # 21_200 / 900
+# 4. the suites — EXACTLY these six sum to 887 (885 baseline + the 2 new guards)
 nix develop "$D" --command bash -c "cd $D && PYTHONDONTWRITEBYTECODE=1 python3 -m pytest \
   scripts/tests/test_handoff_doc.py scripts/tests/test_handoff_skill_size.py \
   scripts/tests/test_skill_audit.py scripts/tests/test_run_tests_targets.py \
   scripts/tests/test_no_public_ips.py scripts/tests/test_doc_path_rot.py -q"
-# 4. the guard is not vacuous — in a `cp -a` copy with .git REMOVED, revert any ONE of:
-#      `for label, path in _rule_p_sites():`  ->  `in ():`          (expect: scanned 0 file(s))
-#      the two quote-strip lines in _scan                            (expect: DETECTOR control RED)
-#      `re.search(rf"\b...\b", window)` -> `m.lower() in window`     (expect: DETECTOR control RED)
-# 5. THE ARC'S ONLY OPEN CLAUSE — returns 0 while it is open.
-#    🔴 SPLIT ON `·` FIRST. SKILL.md step 5 is ONE physical line holding every status, and its
-#    trailing pointer names `--prune` — so a line-scoped grep returns 1 while the clause is OPEN.
-#    That false positive shipped in this doc and was caught minutes later; see Gotchas.
-git -C $D show origin/main:claude/skills/handoff/SKILL.md \
-  | tr '·' '\n' | grep -F '`size-ratchet`' | grep -c -- '--prune'
+# 5. the guards are not vacuous. In a worktree, revert ONE at a time — each is 1 failed/1 passed:
+#      SKILL.md's `size-ratchet` field -> its base text  (expect: REMEDY test red, control GREEN)
+#      `--prune` moved AFTER the override               (expect: the ORDERING assert red, alone)
+#      `doc.split("·")` -> `doc.splitlines()` in
+#      `_size_ratchet_field`                            (expect: CONTROL red, REMEDY test GREEN)
+#    🔴 the third is the one that matters: it is the shipped false positive, and the remedy
+#    test cannot see it.
+# 6. CI, SHA-PINNED — `gh pr checks` re-resolves the head and can serve the PREVIOUS commit.
+SHA=$(gh pr view 1943 --repo innovation-upstream/devrc --json headRefOid --jq .headRefOid)
+gh api "repos/innovation-upstream/devrc/commits/$SHA/status" \
+  --jq '.state, ([.statuses[] | "\(.context) \(.state) \(.updated_at)"] | .[])'   # expect 4, all success
 ```
-🔴 **Step 5 returning 0 is the arc still open.** Step 2 is the one that matters — a green suite
-proved nothing about this defect for four rounds; rendering the refusal is what shows it fixed.
+🔴 **Step 1 returning 0 is the arc still open.** Step 5 is the one that matters — a green
+suite proved nothing about this class for five rounds; watching each guard red for its OWN
+reason is what shows the wiring is watched rather than merely written.

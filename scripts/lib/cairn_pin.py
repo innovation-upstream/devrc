@@ -50,21 +50,39 @@ RESOLUTION ORDER
      PATH. Two exist today and both are real: the three `systemd` user units in
      `nix/home.nix` that run pin-importing code
      (`analyze-service-index-backup`, `handoff-index-sync`, `present-regen`) set
-     it from `${cairnPackage}`, because each declares a CLOSED `PATH=` with no
-     cairn in it; and the store-api pod image sets it, because a container has
-     no `cairn` on PATH at all.
+     it from `${cairnLibPackage}` — the PYTHON package, NOT `${cairnPackage}`,
+     which is now the Go client and has no `libexec` — because each declares a
+     CLOSED `PATH=` with no cairn in it; and the store-api pod image sets it,
+     because a container has no `cairn` on PATH at all.
      ⚠ THE HERMETIC `nix` CHECKS DO **NOT** SET IT. An earlier version of this
      paragraph said they did — measured false: `CAIRN_LIB` appears 0 times in
      `flake.nix` (positive control: `cairn` appears 42 times). They carry the
      package on `gateTools`, so they take route 2, which is the route the hosts
      use and therefore the better one for a gate to exercise.
-  2. The deployed client: `shutil.which("cairn")` → `os.path.realpath` →
-     `<store-path>/libexec/cairn/lib`. `bin/cairn` is a `makeWrapper` shell
-     wrapper; the real script and its siblings live under `libexec/cairn/`.
+  2. The deployed client, tried under EACH name in `CLIENT_NAMES` in order:
+     `shutil.which(<name>)` → `os.path.realpath` → `<store-path>/libexec/cairn/lib`.
+     `bin/cairn` is a `makeWrapper` shell wrapper; the real script and its
+     siblings live under `libexec/cairn/`.
      🔴 `realpath` is load-bearing — `~/.local/bin/cairn` is a home-manager
      symlink into `/nix/store`, and `parents[1]` of the SYMLINK is `~/.local`,
-     which has no `libexec` and would resolve to nothing.
-  3. Refuse.
+     which has no `libexec` and would resolve to nothing. It is equally
+     load-bearing for `cairn-py`, which is a symlink to the PYTHON package's
+     wrapper: `realpath` lands on that package, so `parents[1]` is the store path
+     holding the `libexec` (measured, not assumed).
+  3. Refuse, naming every name tried.
+
+🔴 WHY ROUTE 2 HAS MORE THAN ONE NAME, AND WHY THAT IS NOT THE FALL-THROUGH ROUTE 1
+FORBIDS. `~/.local/bin/cairn` is the GO client — a single binary with no sibling
+module directory at all — so the name the operator types can no longer answer
+"where are the reader modules". `cairn-py` is deployed beside it from the PYTHON
+package for exactly that question. The two cases are different in kind: route 1 is
+an EXPLICIT operator override, so a set-but-wrong value must refuse rather than
+silently resolve somewhere else; route 2's names are a CONTENT-VALIDATED search
+order, where a Go `cairn` failing the marker check is the ordinary, expected state
+on every switched host and not a mistake to report. `cairn-py` is tried FIRST so a
+host that has both is deterministic, and `cairn` stays in the list so an
+UNSWITCHED host — where `cairn` is still the Python package — keeps resolving with
+no flag day.
 
 🔴 A CANDIDATE IS ACCEPTED ON CONTENT, NEVER ON `is_dir()`. An empty or partial
 `libexec/cairn/lib` is exactly what a half-built or half-fetched store path looks
@@ -87,6 +105,7 @@ import sys
 from pathlib import Path
 
 __all__ = [
+    "CLIENT_NAMES",
     "CairnPinUnresolved",
     "MARKER_MODULES",
     "ensure",
@@ -107,6 +126,13 @@ CAIRN_LIB_ENV = "CAIRN_LIB"
 #: `bin/cairn` is a wrapper; `parents[1]` of the RESOLVED wrapper is the store
 #: path itself.
 LIBEXEC_SUBPATH = ("libexec", "cairn", "lib")
+
+#: Route 2's search order. `cairn-py` FIRST: on a switched host `cairn` is the GO
+#: client, which ships `bin/` and nothing else, so it can never answer this
+#: question — see the module docstring. `cairn` stays SECOND so an unswitched host,
+#: where it is still the Python package, resolves with no flag day. Order matters
+#: only when both exist; both are content-validated either way.
+CLIENT_NAMES: tuple[str, ...] = ("cairn-py", "cairn")
 
 
 class CairnPinUnresolved(RuntimeError):
@@ -140,29 +166,53 @@ def _from_env() -> tuple[Path | None, str]:
     return candidate, f"${CAIRN_LIB_ENV}='{raw}'"
 
 
-def _from_client() -> tuple[Path | None, str]:
-    found = shutil.which("cairn")
+def _from_one_client(name: str) -> tuple[Path | None, str]:
+    """Route 2 for ONE binary name. Never raises; the reason is always a sentence."""
+    found = shutil.which(name)
     if not found:
-        return None, "no `cairn` on PATH"
+        return None, f"no `{name}` on PATH"
     real = Path(os.path.realpath(found))
     # parents[0] is `<store>/bin`; parents[1] is the store path itself.
     try:
         root = real.parents[1]
-    except IndexError:  # pragma: no cover — a `cairn` at the filesystem root
-        return None, f"`cairn` resolves to '{real}', which has no parent package dir"
+    except IndexError:  # pragma: no cover — a client at the filesystem root
+        return None, f"`{name}` resolves to '{real}', which has no parent package dir"
     candidate = root.joinpath(*LIBEXEC_SUBPATH)
     if not candidate.is_dir():
         return None, (
-            f"`cairn` on PATH resolves to '{real}', but '{candidate}' is not a "
+            f"`{name}` on PATH resolves to '{real}', but '{candidate}' is not a "
             f"directory"
         )
     if not _accepts(candidate):
         missing = ", ".join(m for m in MARKER_MODULES if not (candidate / m).is_file())
         return None, (
-            f"`cairn` on PATH resolves to '{real}', but '{candidate}' does not hold "
+            f"`{name}` on PATH resolves to '{real}', but '{candidate}' does not hold "
             f"the pinned client's modules (missing: {missing})"
         )
-    return candidate, f"`cairn` on PATH → '{candidate}'"
+    return candidate, f"`{name}` on PATH → '{candidate}'"
+
+
+def _from_client() -> tuple[Path | None, str]:
+    """Route 2 over `CLIENT_NAMES`, first CONTENT-ACCEPTED name wins.
+
+    🔴 THE FALL-THROUGH IS BETWEEN CONTENT-VALIDATED CANDIDATES, WHICH IS WHY IT IS
+    NOT THE HAZARD ROUTE 1 REFUSES. On a switched host `cairn` is the Go client and
+    holds no `libexec` at all, so its rejection is the ORDINARY state rather than a
+    fault to stop on; `cairn-py` is the name that answers. Route 1, by contrast, is
+    something an operator typed, and there a wrong value resolving elsewhere is how
+    a check passes against the wrong client.
+
+    On failure the reason names EVERY name tried, one per line — a refusal that says
+    only "no client found" cannot distinguish "nothing is deployed" from "the Python
+    launcher is missing while the Go one is fine", and those have different remedies.
+    """
+    reasons: list[str] = []
+    for name in CLIENT_NAMES:
+        found, why = _from_one_client(name)
+        if found is not None:
+            return found, why
+        reasons.append(why)
+    return None, "; ".join(reasons)
 
 
 def pinned_lib_dir() -> Path:
@@ -212,8 +262,10 @@ def pinned_lib_dir() -> Path:
         "from the pinned `cairn` flake input, and neither resolution route "
         f"answered.\n  route 1 — {env_why}\n  route 2 — {client_why}\n"
         "  remedy: deploy the pin with `home-manager switch --flake "
-        "~/workspace/devrc --impure` (this puts the packaged client on PATH at "
-        f"~/.local/bin/cairn), or set {CAIRN_LIB_ENV} to the client's lib "
+        "~/workspace/devrc --impure` — that puts the PYTHON reader on PATH at "
+        "~/.local/bin/cairn-py, which is the name that answers this question; "
+        "~/.local/bin/cairn is the GO client and holds no lib/ by design — "
+        f"or set {CAIRN_LIB_ENV} to the client's lib "
         "directory — `nix build ~/workspace/devrc#checks.x86_64-linux."
         "cairn-client-runs` shows the shape. There is deliberately no local "
         "fallback: devrc's own copies of these modules were deleted when it "

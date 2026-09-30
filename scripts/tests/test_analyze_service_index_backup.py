@@ -58,7 +58,8 @@ sys.path.insert(0, str(SCRIPTS))
 
 import backup as B  # noqa: E402
 # 🔴 WHERE THE PINNED cairn LIB IS, resolved by the SHIPPED resolver rather than
-# spelled here. The unit sets `CAIRN_LIB=${cairnPackage}/libexec/cairn/lib`; the
+# spelled here. The unit sets `CAIRN_LIB=${cairnLibPackage}/libexec/cairn/lib` —
+# the PYTHON package, not the Go client `~/.local/bin/cairn` now points at; the
 # probes below model that, and taking the value from `cairn_pin` means this file
 # cannot model a directory layout the real resolver does not use.
 from testlib.cairn_lib import PINNED_LIB  # noqa: E402,F401
@@ -2511,7 +2512,7 @@ def _unit_shaped_env(home: Path, identity: Path, *, with_pin: bool = True) -> di
         "ASIB_HOST": "synthetic-host",
     }
     if with_pin:
-        # What `"CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"` resolves to at
+        # What `"CAIRN_LIB=${cairnLibPackage}/libexec/cairn/lib"` resolves to at
         # switch time. Taken from `cairn_pin` rather than spelled, so this cannot
         # model a directory layout the shipped resolver does not use.
         env["CAIRN_LIB"] = str(PINNED_LIB)
@@ -2572,13 +2573,22 @@ def test_the_backup_unit_DECLARES_the_cairn_lib_its_program_needs():
 
     🔴 A BEHAVIOURAL TEST ALONE WOULD NOT CATCH THE REGRESSION — it models the
     environment, so deleting the line from `nix/home.nix` leaves it green. This
-    reads what ships. `${cairnPackage}` is asserted rather than any store path:
-    the package is threaded in from `flake.nix`, so this spelling is the one that
-    cannot drift from the client `~/.local/bin/cairn` resolves to.
+    reads what ships. A threaded NAME is asserted rather than any store path,
+    because the package comes from `flake.nix` and the name is what cannot drift.
+
+    🔴 AND THE NAME IS `cairnLibPackage`, NOT `cairnPackage`, WHICH IS THE WHOLE
+    POINT OF THIS ASSERTION NOW. An earlier version of this docstring said the
+    asserted spelling "cannot drift from the client `~/.local/bin/cairn` resolves
+    to" — that reasoning DIED when the installed client became the Go port. The Go
+    package ships `bin/` and no `libexec`, so `${cairnPackage}/libexec/cairn/lib`
+    is a path that does not exist and this unit would fail to start with a
+    directory-not-found rather than anything naming cairn. The reader modules come
+    from the PYTHON package, threaded separately, and these two names being
+    DIFFERENT is now the invariant — not their being the same.
     """
     env = _environment_entries(_backup_block())
     hits = [e for e in env if e.startswith("CAIRN_LIB=")]
-    assert hits == ["CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"], (
+    assert hits == ["CAIRN_LIB=${cairnLibPackage}/libexec/cairn/lib"], (
         f"the backup unit's CAIRN_LIB entry is {hits!r}. Its program imports the "
         f"pinned cairn reader modules at module scope and the unit's PATH is a "
         f"closed list with no cairn in it, so without this exact entry the timer "

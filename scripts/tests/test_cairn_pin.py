@@ -36,6 +36,7 @@ import cairn_pin  # noqa: E402
 # The one seam for tests that read PINNED module SOURCE — see
 # `scripts/testlib/cairn_lib.py`.
 from testlib.cairn_lib import pinned  # noqa: E402
+from testlib.mockbin import write_exec  # noqa: E402
 
 
 def _pin() -> Path:
@@ -236,6 +237,142 @@ def test_a_candidate_is_REJECTED_on_CONTENT_not_on_being_a_directory(
             f"fault reported without naming what is missing is a fault report "
             f"nobody can act on."
         )
+
+
+def _fake_client(root: Path, name: str, *, with_lib: bool) -> Path:
+    """A store-shaped package holding `bin/<name>`, optionally with the reader lib.
+
+    Mirrors what route 2 actually walks: `realpath` of the binary, then
+    `parents[1]`, then `libexec/cairn/lib`. `with_lib=False` is the GO client's
+    shape — `bin/` and nothing else — which is the case the split exists for.
+    """
+    pkg = root / f"pkg-{name}-{'py' if with_lib else 'go'}"
+    (pkg / "bin").mkdir(parents=True)
+    # ⚠ `write_exec`, NOT a hand-written shebang. `test_runtime_shebangs.py` bans a
+    # test writing its own `/usr/bin/env` line and names this helper as the remedy;
+    # it caught the first draft of this fixture. Nothing here is ever EXECUTED —
+    # route 2 only needs `shutil.which` to find it and `realpath` to resolve it — but
+    # the ban is about the whole class, not about whether one site happens to run.
+    exe = write_exec(pkg / "bin" / name, "exit 0\n")
+    if with_lib:
+        lib = pkg.joinpath("libexec", "cairn", "lib")
+        lib.mkdir(parents=True)
+        for m in ("entry_shape.py", "subsystem_resolver.py"):
+            (lib / m).write_text("")
+    return exe
+
+
+def _path_with(*executables: Path) -> str:
+    """A PATH holding ONLY the given executables' directories, order preserved."""
+    return os.pathsep.join(dict.fromkeys(str(e.parent) for e in executables))
+
+
+def test_the_route_2_NAME_ORDER_is_declared_and_cairn_py_is_FIRST():
+    """🔴 SPELLED LITERALLY, NOT READ OFF THE MODULE — same reason as the marker set.
+
+    Iterating `cairn_pin.CLIENT_NAMES` to build the expectation would derive the
+    test from the implementation: reordering the tuple, or dropping `cairn-py`,
+    would take the expectation with it and survive a green run. The literal below is
+    the claim.
+
+    Order is load-bearing only when BOTH names exist, which is every switched host:
+    `cairn` is the Go binary there and holds no lib, so trying it first would work
+    only by falling through — and a fall-through that is load-bearing is a
+    fall-through that will one day be "tidied" into a refusal.
+    """
+    assert cairn_pin.CLIENT_NAMES == ("cairn-py", "cairn"), (
+        f"route 2's name order is {cairn_pin.CLIENT_NAMES!r}, not "
+        f"('cairn-py', 'cairn'). `cairn-py` must come FIRST: on a switched host "
+        f"`cairn` is the Go client and can never answer this question. If this is an "
+        f"intended change, change the literal here in the same commit and say which "
+        f"host shape the new order still resolves."
+    )
+
+
+def test_route_2_prefers_cairn_py_when_cairn_is_the_GO_client(tmp_path, monkeypatch):
+    """🔴 THE CASE THE WHOLE SPLIT EXISTS FOR, AND IT IS WATCHED BOTH DIRECTIONS.
+
+    A switched host has `cairn` = Go (bin only, no libexec) and `cairn-py` = Python.
+    Route 2 must return the PYTHON lib. The second half of the test is the control
+    that makes the first half mean something: with `cairn-py` REMOVED and nothing
+    else changed, the same PATH must REFUSE — so the pass above is attributable to
+    `cairn-py` being found rather than to anything ambient.
+    """
+    monkeypatch.delenv(cairn_pin.CAIRN_LIB_ENV, raising=False)
+    go = _fake_client(tmp_path, "cairn", with_lib=False)
+    py = _fake_client(tmp_path, "cairn-py", with_lib=True)
+
+    monkeypatch.setenv("PATH", _path_with(go, py))
+    got = cairn_pin.pinned_lib_dir()
+    expected = py.parents[1].joinpath("libexec", "cairn", "lib")
+    assert got == expected, (
+        f"route 2 resolved {got}, not the Python package's lib at {expected}. With a "
+        f"Go `cairn` on PATH the only name that can answer is `cairn-py`."
+    )
+
+    # The control: same world, minus `cairn-py`.
+    py.unlink()
+    with pytest.raises(cairn_pin.CairnPinUnresolved) as exc:
+        cairn_pin.pinned_lib_dir()
+    msg = str(exc.value)
+    assert "cairn-py" in msg and "cairn" in msg, (
+        f"the refusal must name every name tried so the remedy is obvious; got: {msg}"
+    )
+    assert "libexec" in msg, (
+        "the refusal does not say the Go client's package lacks the lib directory, "
+        f"which is the actual finding; got: {msg}"
+    )
+
+
+def test_route_2_still_resolves_an_UNSWITCHED_host(tmp_path, monkeypatch):
+    """⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE — measured, and labelled so nobody
+    counts it twice. It PASSES against pre-change `cairn_pin` (single-name route 2),
+    because the behaviour it pins is the behaviour that already existed. Its job is to
+    make a FUTURE edit that drops `cairn` from `CLIENT_NAMES` fail here.
+
+    🔴 NO FLAG DAY — `cairn` stays in the list for exactly this host.
+
+    Before a `home-manager switch` the only client on PATH is `cairn`, and it IS the
+    Python package. Dropping `cairn` from `CLIENT_NAMES` would break every such host
+    the moment this lands, which is a worse outcome than the problem being fixed.
+    """
+    monkeypatch.delenv(cairn_pin.CAIRN_LIB_ENV, raising=False)
+    py_as_cairn = _fake_client(tmp_path, "cairn", with_lib=True)
+    monkeypatch.setenv("PATH", _path_with(py_as_cairn))
+    expected = py_as_cairn.parents[1].joinpath("libexec", "cairn", "lib")
+    assert cairn_pin.pinned_lib_dir() == expected, (
+        "an unswitched host, where `cairn` is still the Python package, no longer "
+        "resolves — that is a flag day this change is not allowed to create."
+    )
+
+
+def test_route_1_STILL_refuses_rather_than_falling_through_to_the_names(
+    tmp_path, monkeypatch
+):
+    """⚠ INVARIANT GUARD, NOT REGRESSION COVERAGE — measured: it PASSES against
+    pre-change `cairn_pin`, because route 1 already refused rather than falling through.
+    It is here so that WIDENING route 2 into a search order cannot quietly widen route 1
+    as well; the hazard it names was never live, and it must not be counted as proof the
+    change was needed.
+
+    🔴 THE ASYMMETRY IS THE DESIGN, AND ADDING NAMES MUST NOT ERODE IT.
+
+    Route 2 now falls through between content-validated names. Route 1 must NOT: a
+    `CAIRN_LIB` an operator set and got wrong has to refuse, not quietly resolve via
+    PATH — everything that sets it does so because PATH cannot answer there, so
+    "somewhere else" is how a check passes against the wrong client.
+
+    The control is that a perfectly good `cairn-py` IS on PATH and is still not used.
+    """
+    good = _fake_client(tmp_path, "cairn-py", with_lib=True)
+    monkeypatch.setenv("PATH", _path_with(good))
+    monkeypatch.setenv(cairn_pin.CAIRN_LIB_ENV, str(tmp_path / "nope"))
+    with pytest.raises(cairn_pin.CairnPinUnresolved) as exc:
+        cairn_pin.pinned_lib_dir()
+    assert "was set" in str(exc.value) or "set \nexplicitly" in str(exc.value), (
+        f"the refusal does not explain that the env var was set explicitly and is "
+        f"therefore not ignored in favour of PATH; got: {exc.value}"
+    )
 
 
 def test_it_REFUSES_rather_than_falling_back(tmp_path, monkeypatch):
@@ -623,7 +760,12 @@ PIN_REQUIRING_UNITS = {
         "scripts/present/measure.py::m_index_store imports subsystem_recall",
 }
 
-CAIRN_LIB_ENTRY = "CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"
+# 🔴 `cairnLibPackage`, NOT `cairnPackage`. These units import the reader modules at
+# module scope with a CLOSED `PATH=` that has no cairn in it, so route 1 is their only
+# route — and the modules live in the PYTHON package. `${cairnPackage}` is the GO
+# client since the flip and ships no `libexec`, so that spelling would interpolate a
+# path that does not exist: nix builds it happily and the unit fails at start.
+CAIRN_LIB_ENTRY = "CAIRN_LIB=${cairnLibPackage}/libexec/cairn/lib"
 
 #: 🔴 WHAT ACTUALLY HAPPENS WITHOUT THE ENTRY, PER UNIT — and it is NOT the same
 #: for all three. An earlier version of this guard said "this unit will not

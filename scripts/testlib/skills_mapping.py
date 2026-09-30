@@ -53,7 +53,7 @@ TARGET = ".claude/skills"
 #: that IS forced fails closed. Every REQUIRED arg of home.nix must be listed
 #: or nix cannot apply it at all.
 _EXPR = """
-let fs = (import @PATH@ { config = {}; pkgs = {}; lib = {}; cairnPackage = {}; }).home.file or {};
+let fs = (import @PATH@ { config = {}; pkgs = {}; lib = {}; cairnPackage = {}; cairnLibPackage = {}; }).home.file or {};
     m = fs.".claude/skills" or {};
 in { declared = fs ? ".claude/skills";
      source = m ? source;
