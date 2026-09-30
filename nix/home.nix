@@ -1,4 +1,4 @@
-{ config, pkgs, lib, isNixOS ? false, cairnPackage, ... }:
+{ config, pkgs, lib, isNixOS ? false, cairnPackage, cairnLibPackage, ... }:
 let
   home = config.home.homeDirectory;
   workspace = "${home}/workspace";
@@ -1583,7 +1583,27 @@ in
   # adding a lock entry. `cairnPackage` is threaded in from flake.nix's `cairn`
   # input via `extraSpecialArgs` and is required (no default), so a broken thread
   # is an eval error rather than a symlink to `/bin/cairn`.
+  #
+  # 🔴 AND IT IS THE GO CLIENT NOW — a single binary, on an operator decision, not
+  # on a green gate. The pair of lines below is therefore NOT a duplicate to tidy:
+  # `cairn` is what a human types, `cairn-py` is where `scripts/lib/cairn_pin.py`
+  # finds the five consolidated reader modules. The Go package ships `bin/` and
+  # NOTHING else — no `libexec/cairn/lib` — so if `cairn-py` is removed, 22 files
+  # importing `cairn_pin`, both out-of-store launchers below and the writer all
+  # refuse with `CairnPinUnresolved`. That is a loud failure by design, but it is
+  # still a failure: the two lines move together or not at all.
   home.file.".local/bin/cairn".source = "${cairnPackage}/bin/cairn";
+  # 🔴 `cairn-py` — THE PYTHON CLIENT, DEPLOYED FOR ITS `lib/` RATHER THAN ITS CLI.
+  # In-store like `cairn` and for the same reason: its flake package installs the
+  # script and `lib/` together under `libexec`, and `cairn_pin` resolves the lib by
+  # `realpath`-ing this path and taking `parents[1]`. ⚠ A DIFFERENT NAME POINTING AT
+  # THE SAME KIND OF THING, so the `mkOutOfStoreSymlink` reasoning that governs
+  # `cairn-who` and `cairn-validate` does NOT apply here — those are devrc-only
+  # scripts nothing packages; this is a packaged client.
+  # ⚠ It stops being needed on the day `packages.cairn` is retired upstream (cairn's
+  # P8). On that day this line and the three `CAIRN_LIB=` units go together, and
+  # devrc must have stopped importing the reader modules first — not the reverse.
+  home.file.".local/bin/cairn-py".source = "${cairnLibPackage}/bin/cairn";
   # 🔴 `cairn-who` — the task -> sessions -> windows -> transcripts resolver, split
   # out of `cairn` because it is a different noun: it touches no store, no cache and
   # none of the store's flags. 🔴 NO LONGER THE SAME DEPLOY MODE AS THE LINE ABOVE,
@@ -3383,7 +3403,7 @@ in
         # no cairn in it (measured on the live unit). This unit runs the
         # WORKING-TREE copy, so without this entry it breaks on the operator's
         # next `git pull`, not on a switch.
-        "CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"
+        "CAIRN_LIB=${cairnLibPackage}/libexec/cairn/lib"
         "NIX_PATH=nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
         "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
         "HOME=%h"
@@ -4798,7 +4818,7 @@ in
         # client is not available. That is a silent-ish loss rather than a dead
         # timer, which makes this entry MORE worth having, not less: a failing
         # unit is noticed, a quietly unmeasured row is not.
-        "CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"
+        "CAIRN_LIB=${cairnLibPackage}/libexec/cairn/lib"
         "PRESENT_REPO=%h/workspace/devrc"
         # 🔴 The SAME directory present-serve reads. Two literals that must
         # agree is the seam neither file owns, so the test suite pins them
@@ -5458,7 +5478,7 @@ in
           # occurrence (a comment truncated the block, hiding the handle lines
           # from the check that they are derived rather than listed). Both went
           # red in the authoritative tier and green on the dev host.
-          "CAIRN_LIB=${cairnPackage}/libexec/cairn/lib"
+          "CAIRN_LIB=${cairnLibPackage}/libexec/cairn/lib"
           "HOME=%h"
           "KUBECONFIG=%h/workspace/homelab-talos/homelab-kubeconfig"
           # The identity this encrypts to: the operator's EXISTING SOPS age key,

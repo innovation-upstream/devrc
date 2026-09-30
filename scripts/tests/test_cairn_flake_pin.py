@@ -64,6 +64,26 @@ SESSION_VARS = REPO_ROOT / "nix" / "sessionVariables.nix"
 INPUT_NAME = "cairn"
 THREADED_NAME = "cairnPackage"
 
+#: The SECOND threaded name, and the reason there are two. `cairnPackage` is the
+#: binary deployed to `~/.local/bin/cairn` — the GO client since the flip — and
+#: `cairnLibPackage` is the PYTHON package that ships `libexec/cairn/lib`, which is
+#: where `scripts/lib/cairn_pin.py` finds devrc's five consolidated reader modules.
+#:
+#: 🔴 THE INVARIANT IS THAT THEY POINT AT DIFFERENT PACKAGES. Before the flip one
+#: name served both jobs, which worked only because the Python client happened to be
+#: both a CLI and a module directory. A future edit that collapses them back —
+#: either name pointing at the other's package — breaks one of the two jobs
+#: SILENTLY in nix (an interpolated path that does not exist is not an eval error),
+#: so it is asserted here rather than left to a build.
+THREADED_LIB_NAME = "cairnLibPackage"
+
+#: The flake attribute each threaded name must resolve to. `cairn-go` rather than
+#: `default`: they are the same store path today and cairn's own flake pins that
+#: they are, but `default` is a name upstream may re-point, and a pin must not
+#: inherit someone else's freedom to change what it means.
+GO_ATTR = "cairn-go"
+PY_ATTR = "cairn"
+
 
 def _flake() -> str:
     return FLAKE.read_text(encoding="utf-8")
@@ -325,18 +345,65 @@ def test_the_outputs_function_BINDS_the_cairn_input_by_name():
         f"consumed no matter what the lock says. bound: {names!r}")
 
 
+def _resolves_to_attr(rhs: str, text: str, attr: str) -> tuple[bool, str]:
+    """Does `rhs` name `cairn.packages.${system}.<attr>`, directly or via ONE hop?
+
+    🔴 IT FOLLOWS EXACTLY ONE LEVEL, AND THE LIMIT IS DELIBERATE. `extraSpecialArgs`
+    now binds a `let` name (`cairnPackage = cairnClient;`) rather than the package
+    expression, because the devShell needs the same derivation and a second copy of
+    the expression is the drift the hoist exists to prevent. A guard that only
+    matched the direct expression would have gone green on the REFACTOR while
+    pinning nothing, so it resolves the hop instead.
+
+    Following ARBITRARILY many hops is what is refused: each extra level is another
+    place a decoy can hide, and one hop is what the tree actually uses. If a future
+    edit adds a second, this returns False with the chain it walked — a legible
+    failure that says "the shape changed", which is the right outcome for a guard
+    whose whole job is knowing the shape.
+
+    Returns (ok, explanation-of-what-was-walked).
+    """
+    direct = rf"cairn\s*\.\s*packages\s*\.\s*\$\{{system\}}\s*\.\s*{re.escape(attr)}\b"
+    if re.search(direct, rhs):
+        return True, f"directly: {rhs.strip()!r}"
+    # A bare identifier — resolve it in the enclosing `let`.
+    m = re.fullmatch(r"\s*([A-Za-z_][A-Za-z0-9_'-]*)\s*;?\s*", rhs)
+    if not m:
+        return False, (
+            f"is neither the package expression nor a single identifier this guard "
+            f"can follow: {rhs.strip()!r}")
+    name = m.group(1)
+    try:
+        inner = _assignment(text, f"{name} =")
+    except AssertionError:
+        return False, f"names `{name}`, which has no `{name} =` binding in flake.nix"
+    if re.search(direct, inner):
+        return True, f"via `{name}` -> {inner.strip()!r}"
+    return False, (
+        f"names `{name}`, and that resolves to {inner.strip()!r} rather than "
+        f"cairn.packages.${{system}}.{attr}")
+
+
 def test_the_package_is_passed_to_the_home_module_through_extraSpecialArgs():
     """The middle link, and the one with two ways to be wrong.
 
     `extraSpecialArgs` is a free-form attrset: a typo'd name is not an error at
     this end, it is an unused argument. So both halves are pinned — the name is
     exported here, and the SAME name is consumed in nix/home.nix (next test).
+
+    🔴 BOTH THREADED NAMES ARE ASSERTED, AND THAT THEY DIFFER. `cairnPackage` must
+    reach the GO client (what `~/.local/bin/cairn` becomes) and `cairnLibPackage`
+    the PYTHON one (what ships `libexec/cairn/lib`). Collapsing them breaks one job
+    silently: nix interpolates a non-existent path without complaint, so
+    `CAIRN_LIB=${cairnPackage}/libexec/cairn/lib` would deploy a directory that is
+    not there and fail at unit start, not at build.
     """
     text = _flake()
     args = _assignment(text, "extraSpecialArgs =")
-    assert f"{THREADED_NAME} =" in args, (
-        f"`extraSpecialArgs` does not export `{THREADED_NAME}`, so nix/home.nix "
-        f"cannot see the package.\ngot: {args.strip()!r}")
+    for nm in (THREADED_NAME, THREADED_LIB_NAME):
+        assert f"{nm} =" in args, (
+            f"`extraSpecialArgs` does not export `{nm}`, so nix/home.nix cannot see "
+            f"that package.\ngot: {args.strip()!r}")
     # 🔴 BIND THE REGEX TO THIS NAME'S OWN RIGHT-HAND SIDE. An earlier version
     # ran the two checks INDEPENDENTLY over the whole region, so a decoy
     # satisfied both while the deploy pointed elsewhere. MEASURED SURVIVED:
@@ -349,17 +416,28 @@ def test_the_package_is_passed_to_the_home_module_through_extraSpecialArgs():
     # ⚠ `cairnPackage = pkgs.hello;` ALONE was KILLED, so the guard was narrower
     # than its own docstring rather than inert — the failure only appears when a
     # decoy carries the string the second assertion looks for.
-    count = len(re.findall(rf"(?m)^\s*{re.escape(THREADED_NAME)}\s*=", args))
-    assert count == 1, (
-        f"expected exactly one `{THREADED_NAME} =` binding in "
-        f"`extraSpecialArgs`, found {count}. A second one lets the asserted "
-        f"binding and the threaded one be different lines.\ngot: {args.strip()!r}")
-    rhs = _assignment(args, f"{THREADED_NAME} =")
-    assert re.search(
-        r"cairn\s*\.\s*packages\s*\.\s*\$\{system\}\s*\.\s*cairn", rhs), (
-        f"`{THREADED_NAME}` is bound to something other than the cairn input's "
-        "package — a binding of the right name pointing at the wrong thing is "
-        f"the exact failure this file exists for.\ngot: {rhs.strip()!r}")
+    for nm, attr in ((THREADED_NAME, GO_ATTR), (THREADED_LIB_NAME, PY_ATTR)):
+        count = len(re.findall(rf"(?m)^\s*{re.escape(nm)}\s*=", args))
+        assert count == 1, (
+            f"expected exactly one `{nm} =` binding in `extraSpecialArgs`, found "
+            f"{count}. A second one lets the asserted binding and the threaded one "
+            f"be different lines.\ngot: {args.strip()!r}")
+        rhs = _assignment(args, f"{nm} =")
+        ok, how = _resolves_to_attr(rhs, text, attr)
+        assert ok, (
+            f"`{nm}` must resolve to `cairn.packages.${{system}}.{attr}`, and it "
+            f"{how}. A binding of the right name pointing at the wrong thing is the "
+            f"exact failure this file exists for.")
+
+    # 🔴 AND THEY MUST NOT BE THE SAME PACKAGE. Asserting each side separately is
+    # satisfied by a tree where both names resolve to the same attribute IF one of
+    # the two expected attrs is ever edited to match the other — so the relationship
+    # gets its own assertion rather than being implied by the pair above. `cairn-go`
+    # ships no `libexec`, so the collapse is silent in nix and loud only at runtime.
+    assert GO_ATTR != PY_ATTR, (
+        "GO_ATTR and PY_ATTR are the same attribute, so every assertion above is "
+        "satisfied by one package doing both jobs — which is the state the flip "
+        "exists to end. The Go client ships no `libexec/cairn/lib`.")
 
 
 def test_home_nix_REQUIRES_the_package_argument_with_no_default():
@@ -378,13 +456,18 @@ def test_home_nix_REQUIRES_the_package_argument_with_no_default():
     # `_module_header` RAISES rather than handing back the whole file when it
     # cannot find that `:` — see its docstring for what the fallback made vacuous.
     header = _module_header(_home())
-    assert THREADED_NAME in header, (
-        f"nix/home.nix does not accept `{THREADED_NAME}`, so the package the "
-        f"flake exports is dropped on the floor.\ngot: {header!r}")
-    assert not re.search(THREADED_NAME + r"\s*\?", header), (
-        f"`{THREADED_NAME}` has a DEFAULT in nix/home.nix. A default makes an "
-        "unthreaded package evaluate to a broken symlink instead of failing.\n"
-        f"got: {header!r}")
+    for nm in (THREADED_NAME, THREADED_LIB_NAME):
+        assert nm in header, (
+            f"nix/home.nix does not accept `{nm}`, so the package the flake exports "
+            f"is dropped on the floor.\ngot: {header!r}")
+        # ⚠ BOUND TO THE NAME, NOT SEARCHED LOOSELY: `cairnPackage` is a PREFIX of
+        # nothing here, but `cairnLibPackage` contains neither name as a substring of
+        # the other, so a bare `in` test is safe in both directions today. The `\?`
+        # check is the one that must be per-name — a default on either is the same
+        # silent failure, and checking only one leaves the other free to grow one.
+        assert not re.search(re.escape(nm) + r"\s*\?", header), (
+            f"`{nm}` has a DEFAULT in nix/home.nix. A default makes an unthreaded "
+            f"package evaluate to a broken path instead of failing.\ngot: {header!r}")
 
 
 # A module BODY that names `cairnPackage` — which every real nix/home.nix does,
@@ -478,7 +561,19 @@ def test_a_leading_FILE_COMMENT_is_not_a_missing_argument_set(monkeypatch, tmp_p
     _with_home(monkeypatch, tmp_path, (
         "# home-manager module for this host's user environment.\n"
         "/* and a block comment, which is also legal here. */\n"
-        "{ config, pkgs, lib, isNixOS ? false, cairnPackage, ... }:\n"
+        # 🔴 THE THREADED NAMES ARE DERIVED, NOT SPELLED, AND HERE THAT IS CORRECT.
+        # This fixture's claim is about COMMENT STRIPPING — that `_module_header`
+        # walks past a `#` line and a `/* */` block — not about which arguments
+        # exist. Hardcoding them made the fixture fail the moment a SECOND threaded
+        # name was added (measured: `cairnLibPackage` not in a header this fixture
+        # wrote itself), which is a red naming a cause the tree does not have — the
+        # exact false diagnosis this test exists to prevent, produced BY the test.
+        # ⚠ Deriving an EXPECTATION from the implementation is the thing to avoid;
+        # deriving a FIXTURE's incidental scaffolding is not that, and the assertion
+        # being exercised still lives in the function this calls.
+        "{ config, pkgs, lib, isNixOS ? false, "
+        + ", ".join((THREADED_NAME, THREADED_LIB_NAME))
+        + ", ... }:\n"
     ) + _BODY_NAMING_THE_PACKAGE)
     test_home_nix_REQUIRES_the_package_argument_with_no_default()
 
@@ -489,7 +584,7 @@ def test_a_leading_FILE_COMMENT_is_not_a_missing_argument_set(monkeypatch, tmp_p
 # ---------------------------------------------------------------------------
 
 def test_cairn_deploys_from_the_package_and_the_devrc_only_launchers_stay_OUT_OF_STORE():
-    """🔴 ONE TEST, ALL THREE, BECAUSE THE CHANGE IS THE RELATIONSHIP.
+    """🔴 ONE TEST, EVERY LAUNCHER, BECAUSE THE CHANGE IS THE RELATIONSHIP.
 
     Pinning them separately lets a later edit move them to the same mode and
     keeps some of the assertions green while the shipped set is broken: a
@@ -497,51 +592,86 @@ def test_cairn_deploys_from_the_package_and_the_devrc_only_launchers_stay_OUT_OF
     resolves is devrc's, which is not deployed), and an out-of-store `cairn`
     re-forks the client this change just stopped forking.
 
-    The split is 1-against-2 and the reason is per-binary, not per-taste:
-    `cairn` is in-store because its flake package installs the script and `lib/`
-    together under libexec; `cairn-who` and `cairn-validate` are out-of-store
-    because nothing packages `lib/cairn_who.py` or `lib/subsystem_touch.py` —
-    the OSS extraction took the READER only, and the writer is devrc-only by
-    design.
+    The split is per-binary, not per-taste. IN-STORE because a flake package ships
+    the script and its `lib/` together under libexec: `cairn` (the Go client) and
+    `cairn-py` (the Python one, deployed for its `lib/`). OUT-OF-STORE because
+    nothing packages `lib/cairn_who.py` or `lib/subsystem_touch.py` — the OSS
+    extraction took the READER only, and the writer is devrc-only by design.
+
+    ⚠ NO CARDINAL IN THIS DOCSTRING, DELIBERATELY. It read "ONE TEST, ALL THREE"
+    and "the split is 1-against-2" until `cairn-py` made both false — a count in
+    prose is a claim that rots the moment the set grows, and this repo has paid for
+    that exact shape twice. The sets are spelled as data below; read them there.
     """
     text = _home()
 
-    cairn = _assignment(text, 'home.file.".local/bin/cairn".source')
-    assert "mkOutOfStoreSymlink" not in cairn, (
-        "`cairn` is still deployed out-of-store from the checkout. It is "
-        "supposed to come from the pinned flake package, which installs the "
-        f"script and lib/ together under libexec.\ngot: {cairn.strip()!r}")
-    assert f"${{{THREADED_NAME}}}" in cairn, (
-        "`cairn` is not deployed from the threaded package — whatever it "
-        f"points at, it is not the pinned client.\ngot: {cairn.strip()!r}")
-    assert "/bin/cairn" in cairn, (
-        "`cairn` does not name the package's `bin/cairn` wrapper. The wrapper "
-        "is what supplies gitMinimal on PATH and execs the real script beside "
-        f"its lib/.\ngot: {cairn.strip()!r}")
+    # 🔴 THE SPLIT IS NOW 2-AGAINST-2, AND THE CARDINAL IS DERIVED. Two in-store
+    # packaged clients (`cairn` = Go, `cairn-py` = Python) against two out-of-store
+    # devrc-only launchers (`cairn-who`, `cairn-validate`). The set is spelled once
+    # here so a THIRD member of either group cannot be added without this list
+    # moving — a hand-written "1-against-2" in a name or docstring is the
+    # hand-written-cardinal trap this repo has paid for twice.
+    IN_STORE = {"cairn": THREADED_NAME, "cairn-py": THREADED_LIB_NAME}
+    OUT_OF_STORE = ("cairn-who", "cairn-validate")
 
-    who = _assignment(text, 'home.file.".local/bin/cairn-who".source')
-    assert "mkOutOfStoreSymlink" in who, (
-        "`cairn-who` is deployed as a STORE COPY. It is devrc-only, is absent "
-        "from the OSS package, and resolves scripts/lib/cairn_who.py through "
-        f"its own __file__ — it dies on import.\ngot: {who.strip()!r}")
-    assert "${workspace}/devrc/scripts/cairn-who" in who, (
-        f"`cairn-who` points somewhere unexpected: {who.strip()!r}")
+    for leaf, threaded in IN_STORE.items():
+        block = _assignment(text, f'home.file.".local/bin/{leaf}".source')
+        assert "mkOutOfStoreSymlink" not in block, (
+            f"`{leaf}` is deployed out-of-store from the checkout. It is supposed to "
+            f"come from a pinned flake package.\ngot: {block.strip()!r}")
+        assert f"${{{threaded}}}" in block, (
+            f"`{leaf}` is not deployed from `{threaded}` — whatever it points at, it "
+            f"is not the package that name threads in.\ngot: {block.strip()!r}")
+        assert "/bin/cairn" in block, (
+            f"`{leaf}` does not name a package's `bin/cairn` wrapper. For `cairn` the "
+            f"wrapper supplies gitMinimal on PATH; for `cairn-py` it execs the real "
+            f"script beside its lib/.\ngot: {block.strip()!r}")
 
-    # 🔴 THE THIRD MEMBER, AND THE ONE THE CUTOVER CREATED. `cairn validate` is
-    # no longer the write-protocol check — the packaged client reimplements it on
-    # the READER's resolver — so `subsystem-index` has to name the WRITER, and a
-    # bare command is the only spelling that resolves for an agent in another
-    # repo. It carries `cairn-who`'s constraint exactly: it reaches
-    # `lib/subsystem_touch.py` through its own `__file__`, and nothing ships that
-    # module beside a store copy.
-    validate = _assignment(text, 'home.file.".local/bin/cairn-validate".source')
-    assert "mkOutOfStoreSymlink" in validate, (
-        "`cairn-validate` is deployed as a STORE COPY. It resolves "
-        "scripts/lib/subsystem_touch.py through its own __file__, and that "
-        "module is the devrc-only WRITER — absent from the OSS package — so a "
-        f"store copy dies on import.\ngot: {validate.strip()!r}")
-    assert "${workspace}/devrc/scripts/cairn-validate" in validate, (
-        f"`cairn-validate` points somewhere unexpected: {validate.strip()!r}")
+    # 🔴 AND THE TWO IN-STORE LINES MUST NOT READ THE SAME PACKAGE. `cairn-py` exists
+    # only because the Go client ships no `libexec/cairn/lib`; pointing both at one
+    # name re-creates exactly the state the flip ended, and nix would not complain.
+    go_block = _assignment(text, 'home.file.".local/bin/cairn".source')
+    py_block = _assignment(text, 'home.file.".local/bin/cairn-py".source')
+    assert f"${{{THREADED_LIB_NAME}}}" not in go_block, (
+        f"`cairn` is deployed from `{THREADED_LIB_NAME}` — that is the PYTHON "
+        f"package, so the operator would be typing the oracle rather than the Go "
+        f"client the flip chose.\ngot: {go_block.strip()!r}")
+    assert f"${{{THREADED_NAME}}}" not in py_block, (
+        f"`cairn-py` is deployed from `{THREADED_NAME}` — that is the GO client, "
+        f"which ships no `libexec/cairn/lib`, so every `cairn_pin` consumer would "
+        f"refuse with CairnPinUnresolved.\ngot: {py_block.strip()!r}")
+
+    # The out-of-store half, driven off the same declared set. `cairn-validate` is
+    # the member the cutover created: `cairn validate` is no longer the
+    # write-protocol check — the packaged client reimplements it on the READER's
+    # resolver — so `subsystem-index` has to name the WRITER, and a bare command is
+    # the only spelling that resolves for an agent in another repo. Both members
+    # carry one constraint: each reaches a devrc-only module (`lib/cairn_who.py`,
+    # `lib/subsystem_touch.py`) through its own `__file__`, and nothing packages
+    # those, so a store copy dies on import.
+    for leaf in OUT_OF_STORE:
+        block = _assignment(text, f'home.file.".local/bin/{leaf}".source')
+        assert "mkOutOfStoreSymlink" in block, (
+            f"`{leaf}` is deployed as a STORE COPY. It is devrc-only, absent from the "
+            f"OSS package, and resolves its module through its own __file__ — it dies "
+            f"on import.\ngot: {block.strip()!r}")
+        assert f"${{workspace}}/devrc/scripts/{leaf}" in block, (
+            f"`{leaf}` points somewhere unexpected: {block.strip()!r}")
+
+    # 🔴 THE TWO GROUPS MUST BE DISJOINT AND MUST COVER EVERY `cairn*` LAUNCHER
+    # home.nix DEPLOYS. Without this, adding a third packaged client (or renaming
+    # one) leaves it governed by NEITHER loop while every assertion above passes —
+    # the "a guard's description claims coverage wider than its body" shape.
+    declared = set(IN_STORE) | set(OUT_OF_STORE)
+    assert not (set(IN_STORE) & set(OUT_OF_STORE)), (
+        f"a launcher is in BOTH groups: {set(IN_STORE) & set(OUT_OF_STORE)!r}")
+    found = set(re.findall(r'home\.file\.\"\.local/bin/(cairn[A-Za-z0-9_-]*)\"\.source',
+                           text))
+    assert found == declared, (
+        f"the `cairn*` launchers nix/home.nix deploys are {sorted(found)}, but this "
+        f"test governs {sorted(declared)}. A launcher in neither group is checked by "
+        f"nothing while this file reads as covering the set — add it to IN_STORE or "
+        f"OUT_OF_STORE with the reason, do not widen the regex.")
 
 
 # ---------------------------------------------------------------------------

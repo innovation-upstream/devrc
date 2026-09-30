@@ -293,6 +293,36 @@
       # encrypt/decrypt round trip (it generates its own throwaway identity; the
       # operator's key is never touched), so without age here the whole file is an
       # import error inside the sandbox rather than a green-with-skips.
+      # 🔴 THE TWO CAIRN PACKAGES ARE DIFFERENT ANSWERS TO DIFFERENT QUESTIONS, AND
+      # ONE NAME USED TO SERVE BOTH. `cairnClient` is the binary the operator TYPES
+      # — the GO port, a single binary. `cairnReader` is where devrc's five
+      # consolidated reader modules COME FROM — the PYTHON package, which installs
+      # the script and `lib/` together under `libexec`. Before the Go flip these
+      # were one attribute, which worked only because the Python client happened to
+      # be both.
+      #
+      # 🔴 `cairn-go`, NOT `packages.default`. They resolve to the identical store
+      # path today and cairn's own flake pins that they do — but `default` is a
+      # name upstream may re-point, and a pin must not inherit someone else's
+      # freedom to change what it means. Naming the package is the whole value of
+      # pinning it.
+      cairnClient = cairn.packages.${system}.cairn-go;
+      cairnReader = cairn.packages.${system}.cairn;
+      # `cairn-py` on PATH, pointing at the PYTHON wrapper. This is what
+      # `scripts/lib/cairn_pin.py` route 2 finds once `cairn` is the Go binary; the
+      # name is deployed identically by `nix/home.nix`, so the devShell and a
+      # switched host agree rather than diverging into two tiers.
+      #
+      # 🔴 A SYMLINK IS SUFFICIENT AND THAT WAS MEASURED, NOT ASSUMED. `bin/cairn`
+      # is a `makeWrapper` script holding ABSOLUTE store paths, so running it
+      # through a differently-named symlink works; and `cairn_pin` resolves with
+      # `os.path.realpath`, which lands on the Python package itself, so
+      # `parents[1]` is the store path holding the `libexec`. Both halves checked
+      # against a real build before this was written.
+      cairnPyLauncher = pkgs.runCommandLocal "cairn-py-launcher" { } ''
+        mkdir -p "$out/bin"
+        ln -s ${cairnReader}/bin/cairn "$out/bin/cairn-py"
+      '';
       gateTools = [
         gatePyEnv pkgs.bash pkgs.ripgrep pkgs.git pkgs.util-linux pkgs.jq
         pkgs.gnugrep pkgs.curl pkgs.nodejs pkgs.nix pkgs.opencode pkgs.logrotate
@@ -320,19 +350,32 @@
         # makes `nix develop` and both check tiers satisfy that precondition
         # from one place.
         #
-        # 🔴 IT IS THE SAME PACKAGE `homeConfigurations.zach` DEPLOYS, resolved
-        # from the same `flake.lock` entry, so the gate exercises the exact
-        # client the hosts run rather than a second build of it. That is also
-        # the cost, stated as plainly as the nodejs/nix/opencode entries below
-        # are: a `nix flake lock --update-input cairn` now invalidates this
+        # 🔴 BOTH NAMES, AND THAT IS WHAT KEEPS THE SHELL FROM BECOMING A SECOND
+        # TIER. `cairnClient` puts the GO binary on PATH as `cairn` and
+        # `cairnPyLauncher` puts the PYTHON one there as `cairn-py` — exactly the
+        # pair `nix/home.nix` deploys, from the same `flake.lock` entry. So `nix
+        # develop`, both check tiers and a switched host resolve the SAME two
+        # things, and `cairn_pin` route 2 finds its reader modules here for the
+        # same reason it finds them on a host.
+        #
+        # ⚠ THIS COMMENT USED TO SAY "IT IS THE SAME PACKAGE
+        # `homeConfigurations.zach` DEPLOYS" — singular, and true only while one
+        # package answered both questions. Splitting them made that sentence false
+        # in a way no test would have caught, because it is a claim about
+        # AGREEMENT between two files. It is restated above as the pair.
+        #
+        # The cost is unchanged and stated as plainly as the nodejs/nix/opencode
+        # entries below: a `nix flake lock --update-input cairn` invalidates this
         # check's build cache AND can turn it red — which is the point, because
         # every other cairn guard in this repo reads text and stays green while
         # the pinned client is broken.
         #
         # ⚠ `cairn` is a PRIVATE flake input, absent from cache.nixos.org, so on
-        # a cold CI store this leg may pay a real build. Unmeasured here; the
-        # same caveat is recorded on `checks.cairn-client-runs` below.
-        cairn.packages.${system}.cairn
+        # a cold CI store this leg may pay a real build — and it is now TWO
+        # builds, the Go client and the Python one. Unmeasured here; the same
+        # caveat is recorded on `checks.cairn-client-runs` below.
+        cairnClient
+        cairnPyLauncher
         # 🔴 tmux, because two of tmux-reply-agent's guards CANNOT be written
         # against a stub. A stub tmux always exits 0, so it models neither the
         # session PREFIX-MATCH (`-t scratch2:` opening a window in `scratch20`)
@@ -411,7 +454,15 @@
         # package wired" are not the same substring to a grep or a guard.
         extraSpecialArgs = {
           isNixOS = true;
-          cairnPackage = cairn.packages.${system}.cairn;
+          # 🔴 TWO NAMES, TWO JOBS — see `cairnClient`/`cairnReader` in the outer
+          # `let`. `cairnPackage` keeps its name and changes its MEANING: it is the
+          # binary deployed to `~/.local/bin/cairn`, now the Go client.
+          # `cairnLibPackage` is the Python package, and it is what the three
+          # `CAIRN_LIB=` units and `~/.local/bin/cairn-py` must read — the Go client
+          # ships no `libexec`, so pointing either at `cairnPackage` would deploy a
+          # path that does not exist.
+          cairnPackage = cairnClient;
+          cairnLibPackage = cairnReader;
         };
         modules = [
           ./nix/home.nix
@@ -902,9 +953,17 @@
         pkgs.runCommandLocal "devrc-cairn-client-runs"
           {
             nativeBuildInputs = [
-              cairn.packages.${system}.cairn
+              # 🔴 BOTH CLIENTS, BECAUSE THIS IS THE ONLY CHECK THAT EXECUTES ONE.
+              # `cairn` is the Go binary the hosts deploy; `cairn-py` is the Python
+              # reader every `cairn_pin` consumer resolves its modules from. A gate
+              # that ran only one of them would leave the other's verbs unexercised
+              # while reading as "the pinned client runs".
+              cairnClient
+              cairnPyLauncher
               pkgs.coreutils
               pkgs.gnugrep
+              # `cmp` and `diff` for the two-client agreement assertion below.
+              pkgs.diffutils
             ];
           }
           ''
@@ -943,11 +1002,15 @@
             # parses as prose. (Measured: an indented `---` is not front matter.)
             sed -i 's/^            //' "$F/demo/widget.md"
 
+            # 🔴 EVERY ASSERTION BELOW RUNS FOR BOTH CLIENTS. The loop is the point:
+            # a per-client copy is how one of them silently stops being checked.
+            for CLIENT in cairn cairn-py; do
+
             # --- validate: the verb this gate exists to police -------------
             rc=0
-            cairn --cache "$F" validate --scope demo --no-sync > val.txt 2>&1 || rc=$?
+            "$CLIENT" --cache "$F" validate --scope demo --no-sync > val.txt 2>&1 || rc=$?
             if ! grep -q '1 of 1 entry file(s) parse' val.txt; then
-              echo "checks.cairn-client-runs: the pinned client's \`validate\` did not report" >&2
+              echo "checks.cairn-client-runs: $CLIENT's \`validate\` did not report" >&2
               echo "  parsing the one fixture entry. rc=$rc, output follows:" >&2
               sed 's/^/    /' val.txt >&2
               exit 1
@@ -956,12 +1019,34 @@
             # --- doctor: drives the deep import closure --------------------
             # `--help` would NOT do: the hazard packaging introduces is the
             # sibling-import mechanism, and only a verb that reaches the deep
-            # modules exercises it.
-            cairn --cache "$F" doctor --no-sync > doc.txt 2>&1 || true
+            # modules exercises it. ⚠ For `cairn-py` that closure is the whole
+            # reason this leg exists; for the Go `cairn` there is no sibling
+            # import to break, and the assertion is simply that the verb answers.
+            "$CLIENT" --cache "$F" doctor --no-sync > doc.txt 2>&1 || true
             if [ ! -s doc.txt ]; then
-              echo "checks.cairn-client-runs: \`doctor\` produced NO output at all." >&2
+              echo "checks.cairn-client-runs: $CLIENT's \`doctor\` produced NO output." >&2
               echo "  Its exit code is not asserted (no pod in a sandbox), but a" >&2
               echo "  client that cannot even report is not a working client." >&2
+              exit 1
+            fi
+
+            done
+
+            # --- the two clients must AGREE on `validate`, byte for byte ----
+            # 🔴 NOT REDUNDANT WITH THE LOOP, AND NOT A PARITY GATE EITHER. The loop
+            # asserts each client passes its own check; this asserts they produce the
+            # SAME answer, which is the property that makes the Go flip safe for the
+            # ops wrappers that PARSE this output. cairn's own parity harness is the
+            # broad comparison; this is the one line of it devrc depends on, measured
+            # where devrc can see it. Measured identical on a real build before this
+            # was written — so a divergence here is news, not a flaky expectation.
+            cairn    --cache "$F" validate --scope demo --no-sync > v-go.txt 2>&1 || true
+            cairn-py --cache "$F" validate --scope demo --no-sync > v-py.txt 2>&1 || true
+            if ! cmp -s v-go.txt v-py.txt; then
+              echo "checks.cairn-client-runs: the two clients DISAGREE on \`validate\`" >&2
+              echo "  output. devrc's ops wrappers parse this text, so a divergence" >&2
+              echo "  here is a real behaviour change, not a cosmetic one. diff:" >&2
+              diff v-py.txt v-go.txt >&2 || true
               exit 1
             fi
 
