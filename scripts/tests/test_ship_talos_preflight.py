@@ -99,8 +99,24 @@ vendor derivation with 'Cannot build ... Reason: 1 dependency failed' — naming
 and this script would report it as a bare rc 9 switch-failed.
 remedy, on the host named above:
 git -C ~/workspace/homelab-talos fetch origin && git -C ~/workspace/homelab-talos merge --ff-only origin/trunk
-then re-run ship. NEITHER host was fetched, landed or switched by this run.
+then re-run ship.
+{fleet}
 to proceed anyway, converge one host at a time: ship.sh --no-remote / --no-local."""
+
+#: Pass 1 — nothing has been touched, which is what makes rc 26 different from
+#: every rc-20 site (those all sit BETWEEN the two legs, so the fleet is provably
+#: in two states when one of those fires).
+FLEET_GEN0 = "fleet state: NEITHER host was fetched, landed or switched by this run."
+
+#: Pass 2+ — a RE-EXEC, where the claim above would be FALSE: pass 1 has already
+#: converged and switched the local host and its rc was discarded by the exec.
+#: Notably including the very first run that DELIVERS this pre-flight, whose pass
+#: 1 ran the copy of ship.sh that did not have it.
+FLEET_GEN1 = (
+    "fleet state: this is re-exec generation 1 — pass 1 ALREADY converged\n"
+    "local (workbench) (and, unless --no-switch, switched it), and its rc was discarded\n"
+    "by the exec. The remote (laptop) was NOT visited: this refusal precedes both legs."
+)
 
 REL_REMOTE_BEHIND = (
     "which is behind: REMOTE (laptop) — its HEAD is an ancestor of the local one."
@@ -288,7 +304,7 @@ class Fleet:
 
     # -- the run ------------------------------------------------------------ #
     def ship(self, *args, dead_remote: bool = False, trailer: str = "",
-             script: Path | None = None):
+             script: Path | None = None, **env_extra):
         """Run ship.sh with both fabricated hosts in scope. Returns (rc, out, err).
 
         `$SHIP_REPO` names a path that does not exist, so a run that gets past
@@ -311,6 +327,17 @@ class Fleet:
         env.pop("XDG_STATE_HOME", None)
         env.pop("LAPTOP_SSH", None)
         env.pop("SHIP_SELF_GEN", None)
+        # Applied AFTER the pops, so a test can deliberately SET one of them —
+        # $SHIP_SELF_GEN is how the re-exec wording branch is reached.
+        env.update(env_extra)
+        # 🔴 PATH IS COMPOSED HERE AND ONLY HERE, and `extra` may not override it:
+        # that spelling is what silently drops the refusing pair and re-opens the
+        # path to the operator's real laptop. Same rule as Repo.env in
+        # test_ship_converge, for the same measured reason.
+        assert "PATH" not in env_extra, (
+            "do not pass PATH= to Fleet.ship — it would place a stub AHEAD of the "
+            "refusing ssh/home-manager shims. Nothing here needs to."
+        )
         # The shim FIRST, then the refusing ssh/home-manager pair, then the real
         # PATH — the same composition Repo.env enforces in test_ship_converge.
         env["PATH"] = os.pathsep.join(
@@ -328,7 +355,7 @@ def fleet(tmp_path):
     return Fleet(tmp_path)
 
 
-def _assert_refusal(err, *, lh, rh, rel):
+def _assert_refusal(err, *, lh, rh, rel, fleet=FLEET_GEN0):
     """The refusal block, whole and normalised — not a keyword search."""
     lines = err.splitlines()
     starts = [i for i, ln in enumerate(lines) if "PRE-FLIGHT REFUSED" in ln]
@@ -336,10 +363,10 @@ def _assert_refusal(err, *, lh, rh, rel):
         f"expected exactly one refusal block on stderr, found {len(starts)}:\n{err}"
     )
     block = "\n".join(lines[starts[0]:])
-    assert _norm(block) == _norm(REFUSAL_TEMPLATE.format(lh=lh, rh=rh, rel=rel)), (
+    want = REFUSAL_TEMPLATE.format(lh=lh, rh=rh, rel=rel, fleet=fleet)
+    assert _norm(block) == _norm(want), (
         "the refusal text changed.\n"
-        f"--- got ---\n{_norm(block)}\n--- want ---\n"
-        f"{_norm(REFUSAL_TEMPLATE.format(lh=lh, rh=rh, rel=rel))}"
+        f"--- got ---\n{_norm(block)}\n--- want ---\n{_norm(want)}"
     )
 
 
@@ -421,6 +448,34 @@ def test_an_untestable_ancestry_says_NOT_DETERMINED_rather_than_guessing(fleet):
         rel=(f"which is behind: NOT DETERMINED — {unreachable_commit} is not in "
              "this host's object store, so ancestry cannot be tested here. "
              "Sync BOTH hosts."),
+    )
+
+
+def test_on_a_RE_EXEC_the_refusal_does_not_claim_nothing_was_touched(fleet):
+    """🔴 "NEITHER host was touched" is TRUE ON PASS 1 ONLY.
+
+    ship.sh re-execs itself when its own fast-forward replaced it, and by then
+    pass 1 has converged and — unless --no-switch — switched the local host,
+    with its rc DISCARDED by the exec. That includes the very first run to
+    deliver this pre-flight: its pass 1 ran the copy of ship.sh that did not
+    have one. Printing "nothing was touched" there would be a false claim in the
+    single line an operator reads to decide whether to worry, which is the shape
+    this file's whole rc-20 section exists to reject.
+
+    Driven through $SHIP_SELF_GEN — the same variable the re-exec sets and
+    exports — rather than by staging a real supersession, because the branch
+    under test is the WORDING, not the exec.
+    """
+    ahead = fleet.advance_origin()
+    fleet.pull(fleet.local)
+    behind = fleet.head(fleet.remote)
+
+    rc, out, err = fleet.ship(SHIP_SELF_GEN="1")
+    assert rc == RC_PREFLIGHT_REFUSED, f"rc={rc}\n{out}\n{err}"
+    _assert_refusal(err, lh=ahead, rh=behind, rel=REL_REMOTE_BEHIND,
+                    fleet=FLEET_GEN1)
+    assert "NEITHER host was fetched" not in err, (
+        "a re-exec generation still claimed nothing had been touched:\n" + err
     )
 
 

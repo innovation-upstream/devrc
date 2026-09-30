@@ -599,175 +599,6 @@ if [ "$SHIP_PRINT_REMOTE_TARGET" = 1 ]; then
   exit 0
 fi
 
-# --- PRE-FLIGHT: the two hosts' ~/workspace/homelab-talos (rc 26) -------------
-# 🔴 A SWITCH CAN FAIL FOR A REASON THAT IS NOT IN THIS REPO AT ALL, and the
-# error nix prints for it names nothing. `nix/pkgs/tools/clawgatectl.nix` builds
-# clawgatectl from `${workspace}/homelab-talos/containers/clawgate` — the HOST'S
-# OWN WORKING TREE, deliberately (that file's header explains why: fetching a
-# private repo would put a GitHub credential in the store). Its `vendorHash` is
-# ONE literal, so it can only be correct for ONE checkout of that repo. Two
-# hosts on two different commits therefore cannot both build, whichever hash is
-# pinned — and the loser gets `Cannot build ... Reason: 1 dependency failed`,
-# surfaced by this script as a bare rc 9 switch-failed.
-#
-# MEASURED 2026-09-29, BOTH DIRECTIONS IN ONE DAY, same pin, same devrc commit:
-#   workbench, before #1928, clawgatectl-0.8.65:
-#     specified: sha256-T2rgqEv5...  got: sha256-lzXHWLLS...
-#   laptop, after #1928, clawgatectl-0.8.64:
-#     specified: sha256-lzXHWLLS...  got: sha256-T2rgqEv5...   (the exact inverse)
-# The laptop's checkout was 58 commits behind, so it compiled pre-carve source
-# for which the OLD hash was right. That is not a devrc bug to fix by editing a
-# hash; it is a FLEET FACT to establish BEFORE either host is touched.
-#
-# So this runs FIRST — before the self-supersession fingerprint, before the
-# local fast-forward, before any switch. On a refusal NEITHER host has been
-# fetched, landed or switched, which is the one property no rc-20 site can claim
-# (they all sit between the two legs and leave the fleet in two states).
-#
-# 🔴 IT RUNS EVEN UNDER --no-switch, deliberately. Gating it on
-# $SHIP_NO_SWITCH would put it outside the reach of the entire test suite, which
-# is no-switch in every fixture — the config-blind-suite shape, where a
-# structurally unreachable guard reads as coverage. It is also cheap and
-# read-only, and a dry run that reports the fleet fact is more useful than one
-# that hides it.
-#
-# 🔴 WHAT IT IS NOT: a currency check. `drift-check.sh` owns that (rc 17/18,
-# "SOURCE-REPO PARITY"), derives the covered set from nix/pkgs, and deliberately
-# sets NO code on its cross-host half because it is a PASSIVE deadman for which
-# that would be permanently red. This is the ACTIVE tool, at the one instant the
-# disagreement is about to break something, and refusing is the whole point. The
-# stated cost: the unit here is the repo HEAD, so two checkouts that differ only
-# outside containers/clawgate are refused too. The remedy is the same two
-# commands either way, and `--no-remote` converges one host without comparing.
-#
-# 🔴 NO `${VAR:-$HOME/...}` OVERRIDE FOR THE PATH. That spelling is the
-# set-but-EMPTY hazard this file already carries a guard for (rc 2), pinned
-# repo-wide by scripts/tests/test_repo_path_defaults.py — a second instance
-# would need a second guard, and the path is not a choice anyway:
-# clawgatectl.nix derives it from `${config.home.homeDirectory}/workspace`.
-# $HOME is what makes it testable; a fixture points HOME at a throwaway tree.
-TALOS_PROBE='
-set -uo pipefail
-d="$HOME/workspace/homelab-talos"
-# A worktree checkout has .git as a FILE, a normal clone as a directory — the
-# same -e test drift-check.sh uses on these very repos. ABSENT is NOT a failure:
-# clawgatectl.nix guards on pathExists precisely so a host without the checkout
-# omits the binary instead of failing its whole switch.
-if [ ! -e "$d/.git" ]; then echo "ship-talos-head ABSENT"; exit 0; fi
-h=$(git -C "$d" rev-parse HEAD 2>/dev/null) || h=
-if [ -z "$h" ]; then echo "ship-talos-head UNREADABLE"; exit 0; fi
-echo "ship-talos-head $h"
-'
-
-# ship_talos_marker <output> — the marker value, or "" if the probe never spoke.
-# 🔴 Anchored on the WHOLE line, for the reason ship_landed_sha is: a 40-hex
-# string turns up in git prose too, and reading one of those as the answer gives
-# a confident WRONG verdict instead of a missing one. "" is meaningful — it is
-# how "the probe produced no answer at all" stays distinguishable from every
-# answer it can produce.
-ship_talos_marker() {
-  printf '%s\n' "$1" \
-    | sed -n 's/^ship-talos-head \([A-Za-z0-9][A-Za-z0-9]*\)$/\1/p' | tail -1
-}
-
-# ship_talos_not_compared <reason> — degrade HONESTLY and CONTINUE.
-# 🔴 Reuses this script's existing vocabulary rather than minting a second
-# phrase for the same idea (see the four `cross-host agreement NOT COMPARED`
-# sites at the verdict). A pre-flight that blocked the legitimate one-host path,
-# a host without the checkout, or an unreachable host would be a permanently-red
-# gate — worse than no gate, because it trains everyone to work around it.
-ship_talos_not_compared() {
-  echo "ship: pre-flight — cross-host agreement NOT COMPARED for ~/workspace/homelab-talos: $1."
-  echo "  clawgatectl builds from that tree per host, so this run cannot promise both"
-  echo "  switches compile the same source. Not a disagreement, and not a refusal — proceeding."
-}
-
-# ship_talos_preflight — 0 to proceed, 1 to refuse. Prints its own lines.
-ship_talos_preflight() {
-  local lh rh out rel talos
-
-  # 🔴 CHEAPEST REFUSAL-FREE EXIT FIRST, and it is also the correct short
-  # circuit: with one host in scope there is no second checkout, so there is
-  # nothing to compare and no reason to spend an ssh connection finding out.
-  if [ "$DO_LOCAL" != 1 ] || [ "$DO_REMOTE" != 1 ]; then
-    ship_talos_not_compared "1 of 2 hosts in scope"
-    return 0
-  fi
-
-  out=$(bash -c "$TALOS_PROBE" 2>&1)
-  lh=$(ship_talos_marker "$out")
-  case "${lh:-NOANSWER}" in
-    NOANSWER|ABSENT|UNREADABLE)
-      # 🔴 AND NO REMOTE PROBE EITHER. One side missing already decides the
-      # outcome, so probing the far host would buy nothing and COST an extra ssh
-      # connection before the legs — the same objection the address probe is
-      # gated on above, where one measured run of it moved the very window
-      # test_a_merge_landing_between_the_two_fetches_is_not_convergence exists
-      # to detect.
-      ship_talos_not_compared "local ($SHIP_ROLE) reported ${lh:-NOANSWER}"
-      return 0 ;;
-  esac
-
-  # `bash -s` with the payload on STDIN, never inlined in the ssh command
-  # string: `ssh host "<script>"` names no interpreter, so sshd runs the
-  # account's LOGIN SHELL, which is zsh on both hosts. Same rule, same reason as
-  # the remote CONVERGE leg below.
-  out=$(printf '%s\n' "$TALOS_PROBE" | ssh -o ConnectTimeout=10 "$REMOTE_SSH" bash -s 2>&1)
-  rh=$(ship_talos_marker "$out")
-  case "${rh:-UNREACHABLE}" in
-    UNREACHABLE|ABSENT|UNREADABLE)
-      # An empty marker means the host never answered — ssh failed, or the probe
-      # did. THREE outcomes, three words: ABSENT (no checkout there),
-      # UNREADABLE (a checkout git cannot read), UNREACHABLE (we never got a
-      # word back). None of them is a disagreement, and conflating any of them
-      # with one is how this becomes the gate nobody can pass.
-      ship_talos_not_compared "remote ($REMOTE_ROLE at $REMOTE_SSH) reported ${rh:-UNREACHABLE}"
-      return 0 ;;
-  esac
-
-  if [ "$lh" = "$rh" ]; then
-    echo "ship: pre-flight — 2 hosts compared, both hold homelab-talos at $lh."
-    return 0
-  fi
-
-  # 🔴 BEHIND AND DIVERGED ARE DIFFERENT PROBLEMS: one is a fast-forward, the
-  # other needs a decision. Tested with `merge-base --is-ancestor` in the LOCAL
-  # checkout — and only after `cat-file -e` proves the other host's commit is
-  # actually IN this object store, because a comparison against an absent
-  # operand does not report MISSING, it reports an answer. Nothing is fetched
-  # here: a pre-flight that mutated a repo to explain a refusal would be doing
-  # the remedy's job badly.
-  talos="$HOME/workspace/homelab-talos"
-  if ! git -C "$talos" cat-file -e "$rh^{commit}" 2>/dev/null; then
-    rel="which is behind: NOT DETERMINED — $rh is not in this host's object store, so ancestry cannot be tested here. Sync BOTH hosts."
-  elif git -C "$talos" merge-base --is-ancestor "$lh" "$rh" 2>/dev/null; then
-    rel="which is behind: LOCAL ($SHIP_ROLE) — its HEAD is an ancestor of the remote one."
-  elif git -C "$talos" merge-base --is-ancestor "$rh" "$lh" 2>/dev/null; then
-    rel="which is behind: REMOTE ($REMOTE_ROLE) — its HEAD is an ancestor of the local one."
-  else
-    rel="which is behind: NEITHER — the two have DIVERGED. A fast-forward cannot fix this one."
-  fi
-
-  echo "ship: PRE-FLIGHT REFUSED — the two hosts hold DIFFERENT ~/workspace/homelab-talos commits." >&2
-  echo "  local  ($SHIP_ROLE) HEAD=$lh" >&2
-  echo "  remote ($REMOTE_ROLE) HEAD=$rh" >&2
-  echo "  $rel" >&2
-  echo "  nix/pkgs/tools/clawgatectl.nix builds clawgatectl from that working tree and pins ONE" >&2
-  echo "  vendorHash, which can only be right for ONE checkout. The odd-one-out host fails its" >&2
-  echo "  vendor derivation with 'Cannot build ... Reason: 1 dependency failed' — naming nothing —" >&2
-  echo "  and this script would report it as a bare rc 9 switch-failed." >&2
-  echo "  remedy, on the host named above:" >&2
-  echo "    git -C ~/workspace/homelab-talos fetch origin && git -C ~/workspace/homelab-talos merge --ff-only origin/trunk" >&2
-  echo "  then re-run ship. NEITHER host was fetched, landed or switched by this run." >&2
-  echo "  to proceed anyway, converge one host at a time: ship.sh --no-remote / --no-local." >&2
-  return 1
-}
-
-if ! ship_talos_preflight; then
-  exit 26
-fi
-echo
-
 # --- Self-supersession fingerprint --------------------------------------------
 # See SELF-SUPERSESSION in the header. Watched: this script, and the lib it
 # sources. Both live inside the repo a local converge fast-forwards, so both can
@@ -1697,6 +1528,195 @@ else
   echo "[$host] ✅ VERIFIED — on branch main at origin/main (clean tree) + switched"
 fi
 '
+
+# --- PRE-FLIGHT: the two hosts' ~/workspace/homelab-talos (rc 26) -------------
+# 🔴 A SWITCH CAN FAIL FOR A REASON THAT IS NOT IN THIS REPO AT ALL, and the
+# error nix prints for it names nothing. `nix/pkgs/tools/clawgatectl.nix` builds
+# clawgatectl from `${workspace}/homelab-talos/containers/clawgate` — the HOST'S
+# OWN WORKING TREE, deliberately (that file's header explains why: fetching a
+# private repo would put a GitHub credential in the store). Its `vendorHash` is
+# ONE literal, so it can only be correct for ONE checkout of that repo. Two
+# hosts on two different commits therefore cannot both build, whichever hash is
+# pinned — and the loser gets `Cannot build ... Reason: 1 dependency failed`,
+# surfaced by this script as a bare rc 9 switch-failed.
+#
+# MEASURED 2026-09-29, BOTH DIRECTIONS IN ONE DAY, same pin, same devrc commit:
+#   workbench, before #1928, clawgatectl-0.8.65:
+#     specified: sha256-T2rgqEv5...  got: sha256-lzXHWLLS...
+#   laptop, after #1928, clawgatectl-0.8.64:
+#     specified: sha256-lzXHWLLS...  got: sha256-T2rgqEv5...   (the exact inverse)
+# The laptop's checkout was 58 commits behind, so it compiled pre-carve source
+# for which the OLD hash was right. That is not a devrc bug to fix by editing a
+# hash; it is a FLEET FACT to establish BEFORE either host is touched.
+#
+# PLACEMENT: immediately before the two legs, and nothing between here and there
+# touches a host — so on a refusal NEITHER host has been fetched, landed or
+# switched, which is the one property no rc-20 site can claim (they all sit
+# BETWEEN the two legs and leave the fleet in two states).
+#
+# 🔴 WITH ONE EXCEPTION, AND IT IS ANNOUNCED RATHER THAN GLOSSED: on a RE-EXEC
+# (SELF-SUPERSESSION in the header) pass 1 has already converged and — unless
+# --no-switch — switched the local host, and its rc was DISCARDED by the exec.
+# That includes the very first run to deliver this pre-flight, whose pass 1 ran
+# the copy that did not have it. The refusal therefore reads $SHIP_SELF_GEN and
+# says which of the two it is; that counter is normalised just above, which is
+# why this block sits after it rather than higher up. A refusal that claimed
+# "nothing was touched" on that path would be false in the one line an operator
+# reads to decide whether to worry.
+#
+# 🔴 IT RUNS EVEN UNDER --no-switch, deliberately. Gating it on
+# $SHIP_NO_SWITCH would put it outside the reach of the entire test suite, which
+# is no-switch in every fixture — the config-blind-suite shape, where a
+# structurally unreachable guard reads as coverage. It is also cheap and
+# read-only, and a dry run that reports the fleet fact is more useful than one
+# that hides it.
+#
+# 🔴 WHAT IT IS NOT: a currency check. `drift-check.sh` owns that (rc 17/18,
+# "SOURCE-REPO PARITY"), derives the covered set from nix/pkgs, and deliberately
+# sets NO code on its cross-host half because it is a PASSIVE deadman for which
+# that would be permanently red. This is the ACTIVE tool, at the one instant the
+# disagreement is about to break something, and refusing is the whole point. The
+# stated cost: the unit here is the repo HEAD, so two checkouts that differ only
+# outside containers/clawgate are refused too. The remedy is the same two
+# commands either way, and `--no-remote` converges one host without comparing.
+#
+# 🔴 NO `${VAR:-$HOME/...}` OVERRIDE FOR THE PATH. That spelling is the
+# set-but-EMPTY hazard this file already carries a guard for (rc 2), pinned
+# repo-wide by scripts/tests/test_repo_path_defaults.py — a second instance
+# would need a second guard, and the path is not a choice anyway:
+# clawgatectl.nix derives it from `${config.home.homeDirectory}/workspace`.
+# $HOME is what makes it testable; a fixture points HOME at a throwaway tree.
+TALOS_PROBE='
+set -uo pipefail
+d="$HOME/workspace/homelab-talos"
+# A worktree checkout has .git as a FILE, a normal clone as a directory — the
+# same -e test drift-check.sh uses on these very repos. ABSENT is NOT a failure:
+# clawgatectl.nix guards on pathExists precisely so a host without the checkout
+# omits the binary instead of failing its whole switch.
+if [ ! -e "$d/.git" ]; then echo "ship-talos-head ABSENT"; exit 0; fi
+h=$(git -C "$d" rev-parse HEAD 2>/dev/null) || h=
+if [ -z "$h" ]; then echo "ship-talos-head UNREADABLE"; exit 0; fi
+echo "ship-talos-head $h"
+'
+
+# ship_talos_marker <output> — the marker value, or "" if the probe never spoke.
+# 🔴 Anchored on the WHOLE line, for the reason ship_landed_sha is: a 40-hex
+# string turns up in git prose too, and reading one of those as the answer gives
+# a confident WRONG verdict instead of a missing one. "" is meaningful — it is
+# how "the probe produced no answer at all" stays distinguishable from every
+# answer it can produce.
+ship_talos_marker() {
+  printf '%s\n' "$1" \
+    | sed -n 's/^ship-talos-head \([A-Za-z0-9][A-Za-z0-9]*\)$/\1/p' | tail -1
+}
+
+# ship_talos_not_compared <reason> — degrade HONESTLY and CONTINUE.
+# 🔴 Reuses this script's existing vocabulary rather than minting a second
+# phrase for the same idea (see the four `cross-host agreement NOT COMPARED`
+# sites at the verdict). A pre-flight that blocked the legitimate one-host path,
+# a host without the checkout, or an unreachable host would be a permanently-red
+# gate — worse than no gate, because it trains everyone to work around it.
+ship_talos_not_compared() {
+  echo "ship: pre-flight — cross-host agreement NOT COMPARED for ~/workspace/homelab-talos: $1."
+  echo "  clawgatectl builds from that tree per host, so this run cannot promise both"
+  echo "  switches compile the same source. Not a disagreement, and not a refusal — proceeding."
+}
+
+# ship_talos_preflight — 0 to proceed, 1 to refuse. Prints its own lines.
+ship_talos_preflight() {
+  local lh rh out rel talos
+
+  # 🔴 CHEAPEST REFUSAL-FREE EXIT FIRST, and it is also the correct short
+  # circuit: with one host in scope there is no second checkout, so there is
+  # nothing to compare and no reason to spend an ssh connection finding out.
+  if [ "$DO_LOCAL" != 1 ] || [ "$DO_REMOTE" != 1 ]; then
+    ship_talos_not_compared "1 of 2 hosts in scope"
+    return 0
+  fi
+
+  out=$(bash -c "$TALOS_PROBE" 2>&1)
+  lh=$(ship_talos_marker "$out")
+  case "${lh:-NOANSWER}" in
+    NOANSWER|ABSENT|UNREADABLE)
+      # 🔴 AND NO REMOTE PROBE EITHER. One side missing already decides the
+      # outcome, so probing the far host would buy nothing and COST an extra ssh
+      # connection before the legs — the same objection the address probe is
+      # gated on above, where one measured run of it moved the very window
+      # test_a_merge_landing_between_the_two_fetches_is_not_convergence exists
+      # to detect.
+      ship_talos_not_compared "local ($SHIP_ROLE) reported ${lh:-NOANSWER}"
+      return 0 ;;
+  esac
+
+  # `bash -s` with the payload on STDIN, never inlined in the ssh command
+  # string: `ssh host "<script>"` names no interpreter, so sshd runs the
+  # account's LOGIN SHELL, which is zsh on both hosts. Same rule, same reason as
+  # the remote CONVERGE leg below.
+  out=$(printf '%s\n' "$TALOS_PROBE" | ssh -o ConnectTimeout=10 "$REMOTE_SSH" bash -s 2>&1)
+  rh=$(ship_talos_marker "$out")
+  case "${rh:-UNREACHABLE}" in
+    UNREACHABLE|ABSENT|UNREADABLE)
+      # An empty marker means the host never answered — ssh failed, or the probe
+      # did. THREE outcomes, three words: ABSENT (no checkout there),
+      # UNREADABLE (a checkout git cannot read), UNREACHABLE (we never got a
+      # word back). None of them is a disagreement, and conflating any of them
+      # with one is how this becomes the gate nobody can pass.
+      ship_talos_not_compared "remote ($REMOTE_ROLE at $REMOTE_SSH) reported ${rh:-UNREACHABLE}"
+      return 0 ;;
+  esac
+
+  if [ "$lh" = "$rh" ]; then
+    echo "ship: pre-flight — 2 hosts compared, both hold homelab-talos at $lh."
+    return 0
+  fi
+
+  # 🔴 BEHIND AND DIVERGED ARE DIFFERENT PROBLEMS: one is a fast-forward, the
+  # other needs a decision. Tested with `merge-base --is-ancestor` in the LOCAL
+  # checkout — and only after `cat-file -e` proves the other host's commit is
+  # actually IN this object store, because a comparison against an absent
+  # operand does not report MISSING, it reports an answer. Nothing is fetched
+  # here: a pre-flight that mutated a repo to explain a refusal would be doing
+  # the remedy's job badly.
+  talos="$HOME/workspace/homelab-talos"
+  if ! git -C "$talos" cat-file -e "$rh^{commit}" 2>/dev/null; then
+    rel="which is behind: NOT DETERMINED — $rh is not in this host's object store, so ancestry cannot be tested here. Sync BOTH hosts."
+  elif git -C "$talos" merge-base --is-ancestor "$lh" "$rh" 2>/dev/null; then
+    rel="which is behind: LOCAL ($SHIP_ROLE) — its HEAD is an ancestor of the remote one."
+  elif git -C "$talos" merge-base --is-ancestor "$rh" "$lh" 2>/dev/null; then
+    rel="which is behind: REMOTE ($REMOTE_ROLE) — its HEAD is an ancestor of the local one."
+  else
+    rel="which is behind: NEITHER — the two have DIVERGED. A fast-forward cannot fix this one."
+  fi
+
+  echo "ship: PRE-FLIGHT REFUSED — the two hosts hold DIFFERENT ~/workspace/homelab-talos commits." >&2
+  echo "  local  ($SHIP_ROLE) HEAD=$lh" >&2
+  echo "  remote ($REMOTE_ROLE) HEAD=$rh" >&2
+  echo "  $rel" >&2
+  echo "  nix/pkgs/tools/clawgatectl.nix builds clawgatectl from that working tree and pins ONE" >&2
+  echo "  vendorHash, which can only be right for ONE checkout. The odd-one-out host fails its" >&2
+  echo "  vendor derivation with 'Cannot build ... Reason: 1 dependency failed' — naming nothing —" >&2
+  echo "  and this script would report it as a bare rc 9 switch-failed." >&2
+  echo "  remedy, on the host named above:" >&2
+  echo "    git -C ~/workspace/homelab-talos fetch origin && git -C ~/workspace/homelab-talos merge --ff-only origin/trunk" >&2
+  echo "  then re-run ship." >&2
+  # 🔴 $SHIP_SELF_GEN is already normalised to a run of digits above — read, not
+  # re-normalised here, because a second copy of that predicate is the shape
+  # RULES.md says is wrong at N-1 sites.
+  if [ "$SHIP_SELF_GEN" = 0 ]; then
+    echo "  fleet state: NEITHER host was fetched, landed or switched by this run." >&2
+  else
+    echo "  fleet state: this is re-exec generation $SHIP_SELF_GEN — pass 1 ALREADY converged" >&2
+    echo "  local ($SHIP_ROLE) (and, unless --no-switch, switched it), and its rc was discarded" >&2
+    echo "  by the exec. The remote ($REMOTE_ROLE) was NOT visited: this refusal precedes both legs." >&2
+  fi
+  echo "  to proceed anyway, converge one host at a time: ship.sh --no-remote / --no-local." >&2
+  return 1
+}
+
+if ! ship_talos_preflight; then
+  exit 26
+fi
+echo
 
 rc=0
 LOCAL_SHA=""
