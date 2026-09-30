@@ -852,10 +852,29 @@ no_switch="${SHIP_NO_SWITCH:-0}"
 # Max paths enumerated per dirty-classification bucket — see nr_list. Mirrors
 # drift-check.sh DRIFT_UNTRACKED_MAX/DRIFT_NIXDIRT_MAX; the counts beside each
 # heading are never capped.
-# 🔴 NO `''` LITERAL ANYWHERE IN THIS PAYLOAD. CONVERGE is a single-quoted shell
-# string, so an empty-string literal closes it and re-opens it — the file still
-# parses, and the payload silently becomes a different script. That is what a
-# first draft of this validation did, and it broke 76 tests at once.
+# 🔴 NOT ONE SINGLE QUOTE ANYWHERE IN THIS PAYLOAD — NOT IN THE CODE AND NOT IN
+# THE COMMENTS. CONVERGE is a single-quoted shell string, so any apostrophe closes
+# it: an even number re-opens it and the file still parses while the payload
+# silently becomes different text; an odd number turns the rest of the payload into
+# ordinary shell code. A first draft of this validation wrote an empty-string
+# literal and broke 76 tests at once.
+#
+# ⚠ THE RULE USED TO SAY "no empty-string literal", WHICH IS TOO NARROW, AND THE
+# NARROW WORDING COST BOTH FAILURES IN ONE SITTING while adding TALOS_PROBE below:
+#   * the sentence stating the rule SPELLED the forbidden pair, so the payload bash
+#     received was two bytes shorter than the source showed — silent, green under
+#     `bash -n` and green under the whole suite (measured on main at 01d30d10; it
+#     had been true since that comment was written);
+#   * then ONE possessive apostrophe in an ordinary English word, in a TALOS_PROBE
+#     comment, ended the string outright: `gate: command not found`,
+#     `m: unbound variable`, 102 tests red. 🔴 And writing THAT word here, to show
+#     which one it was, broke CONVERGE the same way on the next run — caught by the
+#     guard named below, on its first execution. Describe the character; never type
+#     it inside either payload.
+# Widest reading, then: an apostrophe is forbidden, not a pair of them. Pinned
+# mechanically by test_neither_single_quoted_payload_contains_an_apostrophe in
+# scripts/tests/test_ship_talos_preflight.py — prose describing this hazard has now
+# twice been the thing that triggered it, so it is a test, not a warning.
 SHIP_LIST_MAX="${SHIP_LIST_MAX:-10}"
 [ -n "$SHIP_LIST_MAX" ] || SHIP_LIST_MAX=10
 case "$SHIP_LIST_MAX" in *[!0-9]*) SHIP_LIST_MAX=10 ;; esac
@@ -1679,13 +1698,33 @@ fi
 # BusyBox applet the laptop resolves over ssh. sha256sum is not POSIX; if it is
 # missing the substitution fails, the value is not a digest, and the run degrades
 # to NOT COMPARED — never to a silent pass.
+#
+# 🔴 The hex test is the NEGATED class, matching ship_talos_is_digest in the
+# driver. `[0-9a-f][0-9a-f]*` reads like "two or more hex" and is not: in a shell
+# glob the `*` is the general wildcard, not a repetition of the preceding class,
+# so it accepts `ab!!!`. The driver would still reject that (its marker regex is
+# alnum-only and its own predicate is the negated class), but a loose pattern in
+# a guard is a finding whatever the second layer does. ⚠ NO TEST DEFENDS THIS
+# TIGHTENING and that is measured, not assumed: restoring the loose pattern leaves
+# the whole suite green, because the gate in the driver is the one that decides.
+# It is belt to that braces — do not read it as covered.
+#
+# 🔴 The empty case is a separate `-z` test rather than an empty-string case
+# branch, and that is NOT style: an EMPTY-STRING LITERAL (two adjacent single
+# quotes) cannot appear anywhere in this payload, because the payload IS a
+# single-quoted string — the pair would close it and reopen it, and the file
+# still parses while the payload silently becomes different text. Measured while
+# writing this very comment: spelling the forbidden token inside it dropped two
+# bytes from the payload, under a green `bash -n` and a green suite. CONVERGE
+# carries the same warning; this is the second place the rule applies.
 ship_talos_digest() {
   if [ ! -f "$2" ]; then echo "ship-talos-$1 ABSENT"; return 0; fi
   s=$(sha256sum < "$2" 2>/dev/null) || s=
   s="${s%% *}"
+  if [ -z "$s" ]; then echo "ship-talos-$1 UNREADABLE"; return 0; fi
   case "$s" in
-    [0-9a-f][0-9a-f]*) echo "ship-talos-$1 $s" ;;
-    *) echo "ship-talos-$1 UNREADABLE" ;;
+    *[!0-9a-f]*) echo "ship-talos-$1 UNREADABLE" ;;
+    *) echo "ship-talos-$1 $s" ;;
   esac
 }
 ship_talos_digest gomod "$m/go.mod"

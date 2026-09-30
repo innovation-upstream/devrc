@@ -953,6 +953,74 @@ def test_the_predicate_covers_EVERY_package_that_can_produce_this_failure():
     )
 
 
+SINGLE_QUOTED_PAYLOADS = ("TALOS_PROBE", "CONVERGE")
+
+
+def _payload(src: str, name: str) -> str:
+    """The body of ship.sh's `NAME='…'` heredoc-style payload string."""
+    head = f"{name}='"
+    assert src.count(head) == 1, f"{head} is not unique in ship.sh"
+    return src.split(head, 1)[1].split("\n'\n", 1)[0]
+
+
+@pytest.mark.parametrize("name", SINGLE_QUOTED_PAYLOADS)
+def test_neither_single_quoted_payload_contains_an_apostrophe(name):
+    """🔴 A CLASS THAT HAS NOW FIRED TWICE, ONCE SILENTLY, ONCE LOUDLY.
+
+    `TALOS_PROBE` and `CONVERGE` are SINGLE-QUOTED shell strings, so an apostrophe
+    anywhere inside them — code or comment — ends the string. An even number
+    re-opens it and the file still parses while the payload becomes different text;
+    an odd number turns the remainder into ordinary shell code.
+
+    MEASURED while writing this module, both failures inside one sitting:
+
+      * ship.sh's own warning about the hazard SPELLED the forbidden pair, so the
+        payload bash received was two bytes shorter than the source showed. Green
+        under `bash -n`, green under the whole suite, and true on main since that
+        comment was written.
+      * then one `driver's` in a TALOS_PROBE comment ended the string outright:
+        `gate: command not found`, `m: unbound variable`, 102 tests red.
+
+    The first is why this is a TEST and not a comment: prose is exactly what the
+    reviewer's eye skips, `bash -n` cannot see it, and every behavioural test in
+    this repo passed straight through it. The second is why the rule is "no
+    apostrophe" rather than "no empty-string literal" — the narrow wording is what
+    let both through.
+
+    `'"'"'` is the sanctioned escape (close, quote an apostrophe, reopen) and
+    CONVERGE uses it deliberately, so it is allowed and nothing else is.
+    """
+    src = SHIP.read_text()
+    payload = _payload(src, name)
+    # The sanctioned escape, removed first so the scan can be absolute about the rest.
+    scrubbed = payload.replace("'\"'\"'", "")
+    offenders = [(i, ln) for i, ln in enumerate(scrubbed.splitlines(), 1) if "'" in ln]
+    assert not offenders, (
+        f"{name} contains {len(offenders)} apostrophe-bearing line(s), which end "
+        f"its single-quoted string and silently change the payload:\n"
+        + "\n".join(f"  line {i}: {ln}" for i, ln in offenders)
+        + "\n(the only legal spelling is the '\"'\"' escape; in prose, NAME the "
+          "token instead of writing it)"
+    )
+
+
+def test_the_apostrophe_scan_can_actually_go_red():
+    """🔴 POSITIVE CONTROL. The test above does its real work in a `for` over
+    whatever the split returned, so a parser wired to nothing passes it in silence —
+    and a reassuring zero is the exact shape this whole module is about. Both
+    historical spellings must be visible, and the sanctioned escape must not be.
+    """
+    assert [ln for ln in "a = ''\n".splitlines() if "'" in ln], "blind to the pair"
+    assert [ln for ln in "# the driver's gate\n".splitlines() if "'" in ln], (
+        "blind to a lone apostrophe"
+    )
+    escaped = "echo \"$HOME\"'\"'\"'s files\n".replace("'\"'\"'", "")
+    assert not [ln for ln in escaped.splitlines() if "'" in ln], (
+        "the sanctioned '\"'\"' escape is being reported as an offender, which "
+        "would make the guard unsatisfiable for CONVERGE"
+    )
+
+
 def test_rc26_is_documented_in_the_header_and_the_legend():
     """🔴 An undocumented rc is an operator staring at a bare number.
 
