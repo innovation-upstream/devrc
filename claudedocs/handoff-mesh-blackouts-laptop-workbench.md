@@ -22,18 +22,37 @@ they had accumulated in one document and pushed it to its 65,536 B ceiling.
   merely coexists with the lockstep does NOT satisfy this line.
 
 ## State now
-- Split from the tunnel arc at devrc `37cca5b7`; no code changes, measurement only.
-- Watcher: **flap-watch v3, pid `2309463`** (`ppid=1`). Resolve from `/proc/<pid>/cmdline`, never `pgrep -f`, never the pid file alone.
-- 🔴 **The `ip rule` 5150 pin is NOT APPLIED** and has not been since the **2026-09-27 15:33 reboot**
-  (`uptime -s`); a previous doc carried "still applied" for three days because the claim was
-  forwarded without re-checking. It is also not the lever: it targeted `192.168.50.94`, which
-  measures 0% in every round WITHOUT it. An `ip rule` is kernel state and a reboot reverts it
-  silently — any remedy written as a bare `ip rule add` needs a persistence story.
-- 🔴 **Every candidate mechanism has been ELIMINATED** — the `ip rule` pin, nebula riding the tailscale subnet route, and the homelab node as a shared hop. The lockstep is unexplained.
-- 🔴 Sudoers on the laptop: NOPASSWD covers `airvpn-sudo`, the whole `tailscale` binary, `systemctl restart|start|stop tailscaled` / `restart nebula@mesh`. **`ip`, `nft`, `tcpdump` are NOT passwordless**; `sudo -n` fails entirely on the workbench. This bounds every remedy an agent can apply here.
-- Arrival probe built and controlled at `<scratchpad>/agent-arrival-probe/` (`arrival-probe.sh`, `wb-sensor.sh`).
+- Doc split merged as `ad437b54`; this update lands on `docs/mesh-next-probe` (PR #1942), which has been brought up to date with `main` (it was 2 behind, missing the cairn pin-seam fix `aa01eb77`/#1939 — that, not this doc, was its CI failure).
+- 🔴 **Watcher is now v4, pid `1718650`** (`<scratchpad>/flap-watch4.sh`, same log). v4 adds a per-episode **`DIRECTION:`** line, so the directional evidence below accumulates unattended. ⚠ **Coverage gap 2026-09-30 19:42Z→20:15Z** while it was stopped for counter hygiene.
+- 🔴 **THE FAULT WENT QUIET ~18:00Z.** 26 measured rounds after that point (5,200 packets) produced **one** episode. This morning it was ~28% of polls. Any session resuming this must re-establish that the fault is live before concluding anything from a quiet run.
+- 🔴 `ip rule` 5150 pin still NOT applied (since the 2026-09-27 15:33 reboot) and still not the lever.
+- 🔴 Sudoers unchanged: `ip`, `nft`, `tcpdump` are NOT passwordless on the laptop; `sudo -n` fails entirely on the workbench.
+- AirVPN tunnel was brought UP for the tunnel arc's closing condition and has since been taken back DOWN; the laptop is at its designed default.
 
 ## Open investigations — live diagnosis state
+### 🔴 The "two internet sources, one router" comparison is STRUCTURALLY CONFOUNDED — do not spend a session on it
+- as-of: 2026-09-30
+- 🔴 **This retires the previous rank 1 of this document.** It read "capture at the workbench with the laptop and the far box driving concurrently and compare". That comparison cannot be made.
+- **Observed (with values):** the far box (`10.42.0.20`, `diffsona`) has **no tailscale installed at all**, and its only route to the workbench's LAN address is `via 172.31.1.1 dev eth0` — i.e. out to the internet, where the workbench is behind home NAT and unreachable. Its sole working path to the workbench is **nebula**, and it is simultaneously the nebula **relay** (`10.42.0.2`, on `nebula0`, same machine). `via: measurement`
+- **Ruled out — that a different probe design fixes it.** The confound is that the only available second vantage IS the relay; no re-run separates them. A genuinely independent arm needs a FOURTH host, or tailscale installed on the far box. `via: measurement`
+- **Leading hypothesis:** none. Superseded by the next-probe below, which needs no second vantage.
+- **Next probe:** the inbound-vs-return question in rank 1 — it uses one source and is unconfounded.
+
+### 🔴🔴 THE LOSS IS ON THE **RETURN** LEG — every mechanism proposed in this arc was aimed at the forward path
+- as-of: 2026-09-30
+- 🔴 **This is the first result that PREDICTS the lockstep, which is this arc's closing condition. It rests on ONE episode — treat it as a strong lead, not a settled mechanism, and let watcher v4 accumulate more.**
+- **Symptom + exact repro:** `bash <scratchpad>/direction.sh`. The laptop sends exactly N ICMP echo REQUESTS and records its own round-trip loss; the workbench's kernel counts how many requests actually ARRIVED, read unprivileged from `/proc/net/snmp` `Icmp:InEchos`. Comparing the two separates the directions, which **no round-trip measurement can**. Needs NO root on either host.
+- **Observed (with values), 2026-09-30, tunnel down:** one episode caught — **sent 200, arrived 200, round-trip lost 63, shortfall 0**. Every request reached the workbench; 63 replies never came back. Verdict `RETURN-LEG`. `via: measurement`
+- **Positive control (passed, twice):** a 20-ping burst moves `InEchos` by exactly 20, and a 12-ping burst by exactly 12 — so arrivals are attributable. Background ICMP over 20 s of genuine quiet is **0**.
+- 🔴 **Ruled out — the forward path as the site of the loss**, for this episode: 200 of 200 requests arrived while 31.5% of the round trips failed. `via: measurement`
+- **Leading hypothesis — and the reason it matters: it PREDICTS THE LOCKSTEP.** If the laptop's CGNAT mapping is evicted, **inbound** packets are dropped while **outbound** still works and re-creates the mapping. Both overlays' return traffic arrives at the same CGNAT for the same subscriber, so both die in the same second and both recover on the laptop's next outbound packet — which is exactly the 170-of-172 identical-loss signature. It also explains the far box reaching the workbench cleanly (nothing in that path touches the laptop's CGNAT) and fits the gateway peer staying clean if its flow is busy enough to keep its mapping warm. ⚠ **UNTESTED as a mechanism**; only the direction is measured.
+- **Next probe:** (a) let v4 accumulate `DIRECTION:` lines and require several episodes to agree; (b) if RETURN-LEG holds, test the mechanism by shortening the overlays' keepalive so the mapping cannot idle out — nebula `punchy` interval, tailscale's equivalent — which is a config change, not a network fix, and would be the first actionable remedy this arc has produced.
+
+### The AirVPN-tunnel correlation is NOT supported — recorded so it is not re-derived
+- as-of: 2026-09-30
+- **Observed:** 8 quiet rounds with the tunnel UP, then with it DOWN 4 quiet + 1 lossy + 14 quiet. A hypothesis that the tunnel suppressed the fault (by collapsing many NAT mappings into one) was raised and is **withdrawn**: loss appeared with the tunnel down, and so did 18 quiet rounds. The fault simply went quiet ~18:00Z. `via: measurement`
+- **Ruled out — that the tunnel changes either overlay's egress at all.** `ip rule 500 uidrange 991-991` exempts nebula and `ip rule 5210 fwmark 0x80000` exempts tailscale, by design. Verified `uid 991 → wlp170s0`, `uid 1000 → airvpn`. `via: measurement`
+- **Next probe:** none. Do not re-run this A/B unless the fault is demonstrably live in both arms.
 ## Open investigations — live diagnosis state
 <!-- as-of: 2026-09-21 -->
 ### Gateway IPv6-remote noise — "listener is IPv4, but writing to IPv6 remote" (homelab-gateway)
@@ -206,8 +225,8 @@ they had accumulated in one document and pushed it to its 65,536 B ceiling.
 
 
 ## Next steps (ranked)
-1. **Two internet sources, one router — compare them inside one episode.** Both the laptop (lossy) and the far box (clean) arrive at the workbench via the router. Capture at the workbench with both driving concurrently and compare inbound arrival gaps within a single episode window. The pcap tooling exists and is controlled. 🔴 Read a pcap with `tcpdump -r` — that needs NO privileges; only `-i` capture does.
-   forcing: incident — 173 episodes in 9 hours on 2026-09-30, worst 99.2% loss over a contiguous 59 s, and 170 of 172 episodes with the two overlays identical
+1. **Does the laptop's traffic ARRIVE at the workbench during a blackout?** Run the workbench sensor (operator `sudo`, one command — `ssh -t zach@10.42.0.30 'sudo TCPDUMP=<store-path>/bin/tcpdump /var/tmp/wb-sensor.sh'`), drive the laptop over tailscale with `ping -D`, then count inbound packets from the laptop bucketed per second and aligned to the laptop's blackout seconds taken from its OWN packet timestamps. 🔴 Analyse with `tcpdump -r` on the pulled pcap — that needs NO privileges; only `-i` capture does. **Arrivals continue ⇒ the loss is on the RETURN leg and every hypothesis so far has been looking the wrong way. Arrivals stop ⇒ inbound.** Neither answer has ever been measured; every mechanism proposed to date silently assumed inbound.
+   forcing: incident — 173 episodes in 9 hours on 2026-09-30, worst 99.2% loss over a contiguous 59 s, 170 of 172 episodes with both overlays identical
 2. **Check the workbench's own NIC/driver state**, which no round has examined: `ethtool -S eth0` rx drops/overruns across an episode, and any offload or power-saving setting the gateway lacks.
    forcing: incident — the same recurrence; the workbench is the only host that loses
 
@@ -279,6 +298,16 @@ they had accumulated in one document and pushed it to its 65,536 B ceiling.
 - 🔴 **An arrival analysis MUST filter by direction, or it counts the capture host's OWN EGRESS as arrivals.** The probe's table reported ~1,300–1,900 "arrivals" per episode whose source was `192.168.50.250` — the workbench itself. Add `ip dst <capture host>` to the filter.
 - 🔴 **A MAC address looks like an IPv6 address to an address scrubber.** The probe's own scrubber rewrote every `srcMAC` in its analysis output to an `ip6x:` token, destroying the primary discriminator, while the legend in the sensor meta file survived. If a scrubber is in the path, verify the field you are about to reason over is still readable.
 - ⚠ **Size-tagging arms by inner ICMP size worked for tailscale and NOT for nebula** (`LAP_NEB`/`FAR_NEB` both `UNLEARNED` — no distinct outer length appeared above the control slab). Do not assume a 1:1 inner→outer length mapping per overlay. The probe correctly refused to print rows for the unlearned arms rather than fabricate them.
+
+- 🔴 **AN AD-HOC LEAK CHECK THAT ALLOWLISTS ITS OWN CANONICAL EXAMPLE SCANS CLEAN WHILE THE REAL GATE FAILS.** The throwaway scanner used all session excluded a well-known public resolver address as "benign", so it reported NONE on a doc that contained it, and `tekton/devrc-pytests` failed on exactly that literal (`test_no_unallowlisted_public_ip_literal_is_committed`). The repo's allowlist is keyed on `(relpath, value)`, so that value being present-and-pinned in another file does NOT cover yours. **Run `scripts/tests/test_no_public_ips.py` itself; never a hand-rolled substitute.** Fixed by removing the literal, not by adding allowlist debt.
+- ⚠ **`test_tmux_reply_agent.py` fails on a PRISTINE `origin/main` worktree (93 failures) on this host** — it touches live tmux. A full local suite therefore reports ~200 reds that are environmental. Control any local red against a pristine main worktree before attributing it to your branch; measured twice on 2026-09-30, once in each direction.
+- 🔴 **Bringing the AirVPN tunnel UP does NOT change either overlay's egress** — `ip rule 500 uidrange 991-991` exempts nebula and `ip rule 5210 fwmark 0x80000` exempts tailscale, by design. Verified `uid 991 → wlp170s0`, `uid 1000 → airvpn`. A session proposed the tunnel as a way to test the laptop's outbound path; it cannot.
+
+- 🔴 **ASK WHICH DIRECTION BEFORE THEORISING ABOUT MECHANISM.** Six mechanisms were proposed and eliminated in this arc, every one of them about the forward path, before anyone measured whether the forward path was even where the packets died. The discriminating measurement needs no privileges, no capture and no second vantage: send N, count arrivals at the far end from `/proc/net/snmp`, compare. It should have been the first thing run.
+- 🔴 **A LONG-RUNNING WATCHER CONTAMINATES ANY COUNTER-BASED MEASUREMENT ON ITS TARGET.** flap-watch pings the workbench continuously, so the first directional run read `arrived=240` for `sent=200` — an impossible negative shortfall, which is the only reason it was caught. **Had the contamination been smaller than the real loss it would have produced a plausible INBOUND verdict.** Stop the watcher, measure background over ≥20 s of quiet (must be 0), then measure. ⚠ And note the control that MISSED it: a 20-ping burst is too short to overlap a watcher cycle, so a positive control run over a shorter window than the measurement can pass while the measurement is contaminated.
+- 🔴 **`/proc/net/snmp` `Icmp:InEchos` is an unprivileged arrival counter and it is exact.** Two independent bursts moved it by precisely 20 and 12. This is the cheapest directional instrument available and works on any Linux peer you can ssh to as a normal user.
+- 🔴 **A PR CUT BEFORE A FIX LANDS FAILS WHAT `main` PASSES.** #1942's pytests leg failed twice while `main` was green; the branch was 2 commits behind and missing `aa01eb77` (#1939), the cairn pin-seam fix — the same breakage that had been erroring every fresh worktree's `conftest` locally. `git rev-list --count HEAD..origin/main` before theorising about CI. Merging main took the local failures from 125 to 6, and those 6 fail identically on `main` itself (they need the live pod), i.e. environmental.
+- ⚠ **Nebula's firewall does not permit arbitrary UDP ports between these peers** — a one-way sequenced-UDP probe got 0 of 20 through while ICMP was at 0% loss in the same minute. The inbound rules allow `icmp` from any host, and any proto only from groups `lighthouse`/`admin`/`homelab`. Positive-control any new channel before reading a zero as loss.
 
 
 ## How to verify
