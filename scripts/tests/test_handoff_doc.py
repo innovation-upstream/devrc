@@ -1611,8 +1611,14 @@ SKILL_PINS: list[tuple[str, str]] = [
     # legend comment and `TestSkillAndModuleAgree`'s docstring both say "only ONE
     # of the four means 'add a field'" — so both stop being true the moment a
     # byte-pressure edit takes the word, and NOTHING saw it: MEASURED, deleting
-    # `only` leaves all 297 tests green. SKILL.md sits at 7 B of headroom, i.e.
-    # under exactly the pressure that removed it the first time.
+    # `only` leaves all 297 tests green. SKILL.md had 7 B of headroom when this
+    # pin was written, i.e. it was under exactly the pressure that removed the
+    # word the first time. ⚠ PAST TENSE DELIBERATELY: that figure moves with
+    # every edit to the file (119 B at the commit adding the `size-ratchet`
+    # prune remedy), and a present-tense byte count here is a claim with a
+    # shelf life that no test watches. The pressure is the RATIONALE for the
+    # pin, not a live reading — derive the current number from
+    # `test_handoff_skill_size.py`, which owns the constants.
     (
         "Read each row's marker — only one means \"add a field\"",
         "🔴 only ONE of the four markers means add-a-field; without `only` the "
@@ -2832,6 +2838,106 @@ class TestSkillAndModuleAgree:
         )
         assert 0 < len(clause) < 400, f"the locator returned {len(clause)} bytes"
         assert clause.startswith("`forcing function:`")
+
+    # --- the `size-ratchet` remedy, and the reason a LINE-scoped check cannot
+    #     guard it ---
+    #
+    # 🔴 SKILL.md's step 5 is ONE ENORMOUS PHYSICAL LINE holding every refusal
+    # status separated by `·`. So `grep 'size-ratchet' | grep -c -- '--prune'`
+    # returns 1 as soon as ANY field on that line names the flag — and the
+    # line's trailing pointer does, having gained it in `dc159b07`/`f1801784`
+    # for unrelated reasons. That check shipped as this arc's closing condition
+    # and was a FALSE POSITIVE: it read 1 while the remedy field still routed
+    # only to the override. A grep is scoped to a LINE; on a file whose lines
+    # are paragraphs, line scope is not statement scope. The locator below
+    # splits to the real delimiter first, and `..._can_report_absence` pins
+    # that distinction so the naive form cannot creep back in.
+
+    def _size_ratchet_field(self) -> str:
+        """Step 5's `size-ratchet` field, LOCATED not restated.
+
+        Split on the `·` the legend actually uses, so this reads ONE field
+        rather than the 2,000-character line it sits on."""
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        fields = [f for f in doc.split("·") if "`size-ratchet`" in f]
+        assert len(fields) == 1, (
+            f"expected exactly one `size-ratchet` field in step 5, found "
+            f"{len(fields)}"
+        )
+        return self._norm(fields[0])
+
+    def test_the_size_ratchet_remedy_routes_to_the_prune_EXIT_not_the_override(
+        self,
+    ) -> None:
+        """🔴 A REFUSAL'S REMEDY NOTE IS A CLAIM WITH A SHELF LIFE, AND THIS IS
+        THE HALF NOTHING WATCHED. `--prune` shipped in #1916 as rule (q) — the
+        exit the append-only sections had always lacked — and this field went on
+        naming ONLY `--override-size-ratchet`, which SHIPS the over-ceiling doc.
+        An executor reading step 5 at the ceiling was routed past the exit to
+        the override.
+
+        The flag is read off the module, so renaming `PRUNE_FLAG` reds this
+        rather than leaving the skill pointing at a flag nobody accepts — the
+        same derived seam as `_NO_PROMOTE` above.
+
+        ⚠ NOT regression coverage for a behaviour defect: the module's refusal
+        already named the exit. This guards the SKILL copy, which is the only
+        one an executor reads at step 5."""
+        field = self._size_ratchet_field()
+        assert hd.PRUNE_FLAG in field, (
+            f"claude/skills/handoff/SKILL.md's step-5 `size-ratchet` field is "
+            f"{field!r}. It must name {hd.PRUNE_FLAG} as the remedy BEFORE the "
+            f"override, or an executor at the byte ceiling is routed to "
+            f"--override-size-ratchet, which ships the over-ceiling doc instead "
+            f"of shrinking it."
+        )
+        assert field.index(hd.PRUNE_FLAG) < field.index("--override-size-ratchet"), (
+            "the exit must come FIRST; the override is the fallback, not the "
+            "remedy"
+        )
+
+    def test_the_size_ratchet_locator_reads_a_FIELD_not_the_whole_line(
+        self,
+    ) -> None:
+        """NEGATIVE CONTROL, and it pins the exact false positive that shipped.
+
+        Two halves. The LOCATOR half: bounded and anchored, so a locator that
+        silently returned the whole document would not make the assertion above
+        unfalsifiable. The PREDICATE half: the base text — the field as it read
+        before this change — is fed to the same predicate and shown to go
+        FALSE, while a LINE-scoped read of that same document returns TRUE
+        because of the trailing pointer. That gap is the defect; asserting both
+        is what stops the naive check being restored as 'equivalent'."""
+        field = self._size_ratchet_field()
+        assert 0 < len(field) < 600, f"the locator returned {len(field)} bytes"
+        assert field.startswith("`size-ratchet`")
+
+        base_field = (
+            "`size-ratchet` 14 — 🔴 **`--override-size-ratchet`: the AGENT may "
+            "pull it; the reason MUST say whether an operator approved it.**"
+        )
+        assert hd.PRUNE_FLAG not in base_field
+
+        doc = HANDOFF_SKILL.read_text(encoding="utf-8")
+        line = next(ln for ln in doc.splitlines() if "`size-ratchet`" in ln)
+        # STRUCTURAL, not a size threshold. The premise is "many fields share
+        # one physical line, and the flag appears on it somewhere other than
+        # this field" — a character count is a proxy for that and a brittle
+        # one: the first draft guessed >2,000 against a real 1,288 and reded
+        # itself. Assert the shape instead.
+        assert hd.PRUNE_FLAG in line and line.count("·") >= 5, (
+            f"the premise of this control is gone: step 5's `size-ratchet` "
+            f"line now holds {line.count('·') + 1} field(s) and "
+            f"{'names' if hd.PRUNE_FLAG in line else 'does not name'} "
+            f"{hd.PRUNE_FLAG}. A line-scoped grep may no longer be a false "
+            f"positive here. Re-derive before deleting."
+        )
+        others = [f for f in line.split("·") if "`size-ratchet`" not in f]
+        assert any(hd.PRUNE_FLAG in f for f in others), (
+            "the flag now appears ONLY inside the `size-ratchet` field, so a "
+            "line-scoped grep would agree with the field-scoped one and this "
+            "control no longer demonstrates the gap it was written for"
+        )
 
     def test_the_tool_is_tracked_by_git(self) -> None:
         """A new file the flake never sees deploys as an absence, silently.
