@@ -350,19 +350,38 @@
         # makes `nix develop` and both check tiers satisfy that precondition
         # from one place.
         #
-        # 🔴 BOTH NAMES, AND THAT IS WHAT KEEPS THE SHELL FROM BECOMING A SECOND
-        # TIER. `cairnClient` puts the GO binary on PATH as `cairn` and
-        # `cairnPyLauncher` puts the PYTHON one there as `cairn-py` — exactly the
-        # pair `nix/home.nix` deploys, from the same `flake.lock` entry. So `nix
-        # develop`, both check tiers and a switched host resolve the SAME two
-        # things, and `cairn_pin` route 2 finds its reader modules here for the
-        # same reason it finds them on a host.
+        # 🔴 THE PYTHON PACKAGE, PLUS `cairn-py` — AND DELIBERATELY *NOT* THE GO
+        # CLIENT, WHICH IS THE OPPOSITE OF WHAT THIS CHANGE FIRST DID. `cairnReader`
+        # supplies `bin/cairn`; `cairnPyLauncher` supplies `bin/cairn-py`, which is
+        # the name `cairn_pin` route 2 looks for first, so the resolution path the
+        # hosts use is the one exercised here.
+        #
+        # 🔴 WHY THE GO CLIENT IS NOT IN THIS LIST — MEASURED, NOT PRECAUTIONARY.
+        # `mkGoClient` sets `doCheck = true` and its `checkPhase` runs
+        # `go vet ./... && go test ./...` over 21 packages. `gateTools` backs the
+        # devShell AND `checks.pytests`, so adding it made devrc's *pytests gate*
+        # depend on that build — and devrc's CI pod cannot sandbox a nix build:
+        # PodSecurity `baseline` blocks the fixes, nix silently FALLS BACK to an
+        # unsandboxed build (`nix config show` still reports `sandbox = true`; the
+        # tell is that `/build` does not exist), and cairn's Go tests do not pass
+        # impure. Result on the first attempt: `cairn-client-runs` FAILED and
+        # `pytests` reported `BROKEN GATE … before a verdict` — it never ran at all.
+        # The same derivation builds green HERE, sandbox on, 21 ok / 0 FAIL, which is
+        # exactly why a local green was not evidence about CI.
+        # A permanently-red gate is worse than no gate, so the Go build stays out of
+        # devrc's critical path. It is still fully tested — by cairn's OWN `go` CI
+        # job, which is where that suite belongs — and it is still what the hosts
+        # install, because `extraSpecialArgs` takes the UNMODIFIED package and a
+        # `home-manager switch` runs on a host that CAN sandbox.
+        # ⚠ SO devrc's CI DOES NOT EXECUTE THE GO CLIENT. That gap is real and is
+        # stated again on `checks.cairn-client-runs` below rather than left implicit.
         #
         # ⚠ THIS COMMENT USED TO SAY "IT IS THE SAME PACKAGE
         # `homeConfigurations.zach` DEPLOYS" — singular, and true only while one
-        # package answered both questions. Splitting them made that sentence false
-        # in a way no test would have caught, because it is a claim about
-        # AGREEMENT between two files. It is restated above as the pair.
+        # package answered both questions. It is now false in the other direction:
+        # the shell carries the PYTHON one and the host installs the GO one. Said
+        # plainly here because it is a claim about AGREEMENT between two files, which
+        # no test in this repo checks.
         #
         # The cost is unchanged and stated as plainly as the nodejs/nix/opencode
         # entries below: a `nix flake lock --update-input cairn` invalidates this
@@ -371,10 +390,8 @@
         # the pinned client is broken.
         #
         # ⚠ `cairn` is a PRIVATE flake input, absent from cache.nixos.org, so on
-        # a cold CI store this leg may pay a real build — and it is now TWO
-        # builds, the Go client and the Python one. Unmeasured here; the same
-        # caveat is recorded on `checks.cairn-client-runs` below.
-        cairnClient
+        # a cold CI store this leg may pay a real build.
+        cairnReader
         cairnPyLauncher
         # 🔴 tmux, because two of tmux-reply-agent's guards CANNOT be written
         # against a stub. A stub tmux always exits 0, so it models neither the
@@ -953,17 +970,20 @@
         pkgs.runCommandLocal "devrc-cairn-client-runs"
           {
             nativeBuildInputs = [
-              # 🔴 BOTH CLIENTS, BECAUSE THIS IS THE ONLY CHECK THAT EXECUTES ONE.
-              # `cairn` is the Go binary the hosts deploy; `cairn-py` is the Python
-              # reader every `cairn_pin` consumer resolves its modules from. A gate
-              # that ran only one of them would leave the other's verbs unexercised
-              # while reading as "the pinned client runs".
-              cairnClient
+              # 🔴 THE PYTHON PACKAGE UNDER BOTH NAMES, AND THE GO CLIENT UNDER
+              # NEITHER — SEE `gateTools` ABOVE FOR THE MEASUREMENT. Building
+              # `cairn-go` here runs its 21-package Go suite, and devrc's CI pod
+              # cannot sandbox a nix build, so that suite fails impure and takes this
+              # check (and the pytests gate) red.
+              # ⚠ CONSEQUENCE, STATED RATHER THAN IMPLIED: **this check does not
+              # execute the client the hosts install.** It executes the PYTHON reader
+              # that every `cairn_pin` consumer resolves its modules from, under the
+              # name each is deployed as. cairn's own `go` CI job is what exercises
+              # the Go client; devrc's gate is not that place.
+              cairnReader
               cairnPyLauncher
               pkgs.coreutils
               pkgs.gnugrep
-              # `cmp` and `diff` for the two-client agreement assertion below.
-              pkgs.diffutils
             ];
           }
           ''
@@ -1032,24 +1052,18 @@
 
             done
 
-            # --- the two clients must AGREE on `validate`, byte for byte ----
-            # 🔴 NOT REDUNDANT WITH THE LOOP, AND NOT A PARITY GATE EITHER. The loop
-            # asserts each client passes its own check; this asserts they produce the
-            # SAME answer, which is the property that makes the Go flip safe for the
-            # ops wrappers that PARSE this output. cairn's own parity harness is the
-            # broad comparison; this is the one line of it devrc depends on, measured
-            # where devrc can see it. Measured identical on a real build before this
-            # was written — so a divergence here is news, not a flaky expectation.
-            cairn    --cache "$F" validate --scope demo --no-sync > v-go.txt 2>&1 || true
-            cairn-py --cache "$F" validate --scope demo --no-sync > v-py.txt 2>&1 || true
-            if ! cmp -s v-go.txt v-py.txt; then
-              echo "checks.cairn-client-runs: the two clients DISAGREE on \`validate\`" >&2
-              echo "  output. devrc's ops wrappers parse this text, so a divergence" >&2
-              echo "  here is a real behaviour change, not a cosmetic one. diff:" >&2
-              diff v-py.txt v-go.txt >&2 || true
-              exit 1
-            fi
-
+            # 🔴 A BYTE-FOR-BYTE AGREEMENT ASSERTION WAS HERE AND IS DELETED, NOT
+            # MOVED — BECAUSE IT WOULD NOW BE VACUOUS. It compared `cairn`'s and
+            # `cairn-py`'s `validate` output and demanded they match. With the Go
+            # client out of this check (see above) BOTH names resolve to the SAME
+            # Python package, so the comparison would diff a binary against ITSELF
+            # and pass unconditionally — a green that asserts nothing while reading
+            # like a parity gate, which is worse than its absence.
+            # It was real when written: the two clients' output WAS measured
+            # byte-identical (`cmp` rc 0) over this fixture, and the assertion was
+            # mutation-tested red with its own message. That measurement now lives in
+            # the commit that added it. The comparison it made belongs in cairn's own
+            # parity harness, which runs both clients over one cache root by design.
             touch "$out"
           '';
       };
