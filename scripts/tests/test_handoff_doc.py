@@ -1613,12 +1613,11 @@ SKILL_PINS: list[tuple[str, str]] = [
     # byte-pressure edit takes the word, and NOTHING saw it: MEASURED, deleting
     # `only` leaves all 297 tests green. SKILL.md had 7 B of headroom when this
     # pin was written, i.e. it was under exactly the pressure that removed the
-    # word the first time. ⚠ PAST TENSE DELIBERATELY: that figure moves with
-    # every edit to the file (119 B at the commit adding the `size-ratchet`
-    # prune remedy), and a present-tense byte count here is a claim with a
-    # shelf life that no test watches. The pressure is the RATIONALE for the
-    # pin, not a live reading — derive the current number from
-    # `test_handoff_skill_size.py`, which owns the constants.
+    # word the first time. ⚠ PAST TENSE DELIBERATELY, AND NO CURRENT FIGURE IS
+    # GIVEN: the pressure is the RATIONALE for this pin, not a live reading, and
+    # `test_handoff_skill_size.py` — which owns the constants — says three times
+    # over not to write the current size down, because a second hand-maintained
+    # copy of it is how the drift regrows. Derive it there.
     (
         "Read each row's marker — only one means \"add a field\"",
         "🔴 only ONE of the four markers means add-a-field; without `only` the "
@@ -2845,8 +2844,10 @@ class TestSkillAndModuleAgree:
     # 🔴 SKILL.md's step 5 is ONE ENORMOUS PHYSICAL LINE holding every refusal
     # status separated by `·`. So `grep 'size-ratchet' | grep -c -- '--prune'`
     # returns 1 as soon as ANY field on that line names the flag — and the
-    # line's trailing pointer does, having gained it in `dc159b07`/`f1801784`
-    # for unrelated reasons. That check shipped as this arc's closing condition
+    # line's trailing pointer does, having gained it in `3cdf8a8f` (#1916, the
+    # PR that shipped the flag) for a reason unrelated to this remedy field —
+    # measured, not recalled: that line names the flag at `3cdf8a8f` and does
+    # not at `b4233ea9`. That check shipped as this arc's closing condition
     # and was a FALSE POSITIVE: it read 1 while the remedy field still routed
     # only to the override. A grep is scoped to a LINE; on a file whose lines
     # are paragraphs, line scope is not statement scope. The locator below
@@ -2857,7 +2858,11 @@ class TestSkillAndModuleAgree:
         """Step 5's `size-ratchet` field, LOCATED not restated.
 
         Split on the `·` the legend actually uses, so this reads ONE field
-        rather than the 2,000-character line it sits on."""
+        rather than the whole paragraph-line it sits on. No length is stated
+        here on purpose: a byte figure for that line is a claim with a shelf
+        life, and an earlier draft of the control below hard-coded one and
+        reded itself. `..._reads_a_FIELD_not_the_whole_line` asserts the
+        SHAPE instead."""
         doc = HANDOFF_SKILL.read_text(encoding="utf-8")
         fields = [f for f in doc.split("·") if "`size-ratchet`" in f]
         assert len(fields) == 1, (
@@ -2891,6 +2896,20 @@ class TestSkillAndModuleAgree:
             f"--override-size-ratchet, which ships the over-ceiling doc instead "
             f"of shrinking it."
         )
+        # 🔴 ASSERT THE OVERRIDE IS PRESENT BEFORE ORDERING AGAINST IT. A bare
+        # `field.index("--override-size-ratchet")` raises ValueError — not an
+        # assertion — if the clause is ever dropped, which reads as a broken
+        # test rather than a failed guard. It cannot be dropped silently either:
+        # `test_the_SKILL_and_the_TOOL_agree_on_WHO_may_pull_the_ratchet_override`
+        # pins that sentence across FIVE sites, this file among them, because
+        # three of them once stated the opposite ruling. So this assertion is
+        # the ORDER only, and it says which guard owns the presence.
+        assert "--override-size-ratchet" in field, (
+            "the override clause is gone from the `size-ratchet` field, so there "
+            "is nothing to order the exit against. Its presence is pinned by "
+            "test_the_SKILL_and_the_TOOL_agree_on_WHO_may_pull_the_ratchet_"
+            "override — fix that first; this guard only checks the ORDER."
+        )
         assert field.index(hd.PRUNE_FLAG) < field.index("--override-size-ratchet"), (
             "the exit must come FIRST; the override is the fallback, not the "
             "remedy"
@@ -2903,28 +2922,42 @@ class TestSkillAndModuleAgree:
 
         Two halves. The LOCATOR half: bounded and anchored, so a locator that
         silently returned the whole document would not make the assertion above
-        unfalsifiable. The PREDICATE half: the base text — the field as it read
-        before this change — is fed to the same predicate and shown to go
-        FALSE, while a LINE-scoped read of that same document returns TRUE
-        because of the trailing pointer. That gap is the defect; asserting both
-        is what stops the naive check being restored as 'equivalent'."""
+        unfalsifiable. The PREDICATE half: a LINE-scoped read of this same
+        document finds the flag in a DIFFERENT field, while the field-scoped
+        read does not — that gap IS the defect, and asserting it is what stops
+        the naive check being restored as 'equivalent'.
+
+        ⚠ The predicate half used to be a typed "base text" fed to the same
+        predicate. That assertion read no file and was probed vacuous by round 0
+        of #1943; it is gone, and the comment where it stood says why. Do not
+        reinstate it — the `others` assertion below is the one doing the work."""
         field = self._size_ratchet_field()
         assert 0 < len(field) < 600, f"the locator returned {len(field)} bytes"
         assert field.startswith("`size-ratchet`")
 
-        base_field = (
-            "`size-ratchet` 14 — 🔴 **`--override-size-ratchet`: the AGENT may "
-            "pull it; the reason MUST say whether an operator approved it.**"
-        )
-        assert hd.PRUNE_FLAG not in base_field
-
+        # 🔴 THE PREDICATE CONTROL IS THE `others` ASSERTION AT THE BOTTOM, NOT A
+        # TYPED "base text". An earlier draft asserted `PRUNE_FLAG not in
+        # base_field` against a literal spelled three lines above it: that reads
+        # no file and cannot fail for any repo-state reason. Round 0 of #1943
+        # probed it — DELETING it left both these tests green — so it was pinning
+        # nothing. It is recorded here rather than repaired, because a derivation
+        # contrived to keep it alive would be circular (building the
+        # counterfactual out of the field under test asserts the same thing guard
+        # A already does). For the record, the field read exactly this before the
+        # wiring landed, and it names no exit:
+        #     `size-ratchet` 14 — 🔴 **`--override-size-ratchet`: the AGENT may
+        #     pull it; the reason MUST say whether an operator approved it.**
+        # The assertion that actually separates a field-scoped read from a
+        # line-scoped one is `any(PRUNE_FLAG in f for f in others)`, which reads
+        # the document and goes red when the premise changes.
         doc = HANDOFF_SKILL.read_text(encoding="utf-8")
         line = next(ln for ln in doc.splitlines() if "`size-ratchet`" in ln)
         # STRUCTURAL, not a size threshold. The premise is "many fields share
         # one physical line, and the flag appears on it somewhere other than
         # this field" — a character count is a proxy for that and a brittle
-        # one: the first draft guessed >2,000 against a real 1,288 and reded
-        # itself. Assert the shape instead.
+        # one: the first draft guessed >2,000 against a real 1,288 CHARACTERS
+        # (1,331 bytes — the two differ, which is itself a reason not to assert
+        # on either) and reded itself. Assert the shape instead.
         assert hd.PRUNE_FLAG in line and line.count("·") >= 5, (
             f"the premise of this control is gone: step 5's `size-ratchet` "
             f"line now holds {line.count('·') + 1} field(s) and "
