@@ -2913,8 +2913,10 @@ class TestSkillAndModuleAgree:
         # the pair — the SKILL body, the one copy an executor reads at step 5,
         # was the site left out. Match each flag with a right-hand boundary so
         # `--prune` cannot be read off `--prune-count`.
+        at = {}
         for flag in (hd.PRUNE_FLAG, hd.PRUNE_COUNT_FLAG):
-            assert re.search(rf"{re.escape(flag)}(?![-\w])", field), (
+            m = re.search(rf"{re.escape(flag)}(?![-\w])", field)
+            assert m, (
                 f"claude/skills/handoff/SKILL.md's step-5 `size-ratchet` field "
                 f"does not name {flag} as its own token: {field!r}. The field "
                 f"must name BOTH {hd.PRUNE_FLAG} and {hd.PRUNE_COUNT_FLAG} "
@@ -2926,6 +2928,7 @@ class TestSkillAndModuleAgree:
                 f"{hd.PRUNE_COUNT_FLAG!r}, so a bare `in` test passes on a "
                 f"field naming only the longer flag."
             )
+            at[flag] = m.start()
         # 🔴 ASSERT THE OVERRIDE IS PRESENT BEFORE ORDERING AGAINST IT. A bare
         # `field.index("--override-size-ratchet")` raises ValueError — not an
         # assertion — if the clause is ever dropped, which reads as a broken
@@ -2946,37 +2949,66 @@ class TestSkillAndModuleAgree:
             "delimiter short. Read the field in the assertion above before "
             "concluding which."
         )
-        assert field.index(hd.PRUNE_FLAG) < field.index("--override-size-ratchet"), (
-            "the exit must come FIRST; the override is the fallback, not the "
-            "remedy"
-        )
+        # 🔴 ORDER BOTH FLAGS, AND FROM THE BOUNDARY-MATCHED POSITIONS ABOVE —
+        # NOT `field.index()`. This is the same prefix trap one level deeper, and
+        # it is the one that survived the first fix: `field.index("--prune")`
+        # finds the `--prune` INSIDE `--prune-count`, so a field naming
+        # `--prune-count <n>` before the override and `--prune <file>` only
+        # INSIDE the override clause satisfies it. MEASURED on #1943 round 2:
+        # that field routes the executor to the override before the exit — the
+        # exact defect this test exists for — and the whole module passed,
+        # 639 passed, rc 0. Closing presence without closing ORDER left the
+        # central property unguarded.
+        override_at = field.index("--override-size-ratchet")
+        for flag, flag_at in sorted(at.items(), key=lambda kv: kv[1]):
+            assert flag_at < override_at, (
+                f"the exit must come FIRST; the override is the fallback, not "
+                f"the remedy. In claude/skills/handoff/SKILL.md's step-5 "
+                f"`size-ratchet` field, {flag} is at {flag_at} and "
+                f"--override-size-ratchet at {override_at}: {field!r}. Both "
+                f"{hd.PRUNE_FLAG} and {hd.PRUNE_COUNT_FLAG} must precede it — "
+                f"an executor reads the field in order and stops at the first "
+                f"remedy it can act on."
+            )
 
     def test_the_size_ratchet_locator_reads_a_FIELD_not_the_whole_line(
         self,
     ) -> None:
         """NEGATIVE CONTROL, and it pins the exact false positive that shipped.
 
-        Three assertions, each pinning a DIFFERENT property. Naming which does
-        what is the point: an earlier version of this docstring credited the
-        wrong one, and #1943 round 1 measured that false.
+        SIX assertions. Naming which does what — and IN WHAT ORDER THEY FIRE — is
+        the point: two successive versions of this docstring credited the wrong
+        one, and #1943 rounds 1 and 2 each measured that false. Source order
+        decides which failure a reader is shown, so it is part of the claim.
 
-        1. THE SCOPE CONTROL — `neighbour not in field`. A field-scoped read
+        Numbered in SOURCE ORDER, verified by AST rather than by reading:
+
+        1. THE ANCHOR — `field.startswith("`size-ratchet`")`. First to fire for
+           BOTH mutant shapes discussed below: a locator returning the whole
+           LINE, and one returning the whole DOCUMENT. Measured for each — every
+           check after it never executes. It is not a formality.
+        2. THE PREMISE for (3) — `neighbour in line_for_premise`. Asserted
+           before (3) is relied on, so (3) cannot pass vacuously once
+           `leak-refused` stops sharing step 5's line.
+        3. THE SCOPE CONTROL — `neighbour not in field`. A field-scoped read
            cannot contain `leak-refused`, which lives in the next `·`-field
-           along; a line-scoped locator drags it in. This is STRUCTURAL and
-           kills the line-scope mutant on its own.
-        2. THE LENGTH BOUND — a second, weaker reading of the same thing. It is
-           kept because it fails loudly on a locator that returns the whole
-           DOCUMENT rather than merely the whole line, which the neighbour check
-           would also catch but less legibly. 🔴 It was once the ONLY scope
-           control, and deleting it let the mutant survive — hence (1).
-        3. THE PREMISE — `any(PRUNE_FLAG in f for f in others)`. This pins
-           something different and cannot see the locator at all: it is derived
-           from `line.split("·")` and never touches `field`. It asserts the false
-           positive this control exists for is still POSSIBLE, i.e. some OTHER
-           field on the line still names the flag. Reword the trailing pointer to
-           drop `--prune` and it reds, correctly.
+           along. STRUCTURAL, and with the anchor removed it is what kills a
+           line-scoped locator.
+        4. THE LENGTH BOUND. 🔴 ITS CREDITED CASE WAS WRONG ONCE, SO READ THIS
+           ONE: it is NOT what catches a whole-document locator — the anchor
+           fires first, measured. What it alone catches, with the anchor and (3)
+           both gone, is a locator returning field-START to END-OF-LINE — the
+           shape that keeps the anchor happy and drags in no neighbour. Narrow,
+           and the reason to keep the bound rather than tidy it away.
+        5. AND 6. THE FALSE-POSITIVE PREMISE — `PRUNE_FLAG in line` with the
+           `·` count, then `any(PRUNE_FLAG in f for f in others)`. These pin
+           something different and cannot see the locator at all: `others`
+           derives from `line.split("·")` and never touches `field`. They assert
+           the false positive this control exists for is still POSSIBLE, i.e.
+           some OTHER field on the line still names the flag. Reword the trailing
+           pointer to drop `--prune` and (6) reds, correctly.
 
-        ⚠ A fourth assertion once stood here — a typed "base text" fed to the
+        ⚠ A seventh assertion once stood here — a typed "base text" fed to the
         same predicate. It read no file and was probed vacuous by round 0; it is
         gone, and the comment where it stood says why. Do not reinstate it."""
         field = self._size_ratchet_field()
@@ -2985,10 +3017,13 @@ class TestSkillAndModuleAgree:
         # 🔴 THE SCOPE CONTROL, AND IT IS STRUCTURAL RATHER THAN A SIZE. A
         # field-scoped read CANNOT contain a NEIGHBOURING status: `leak-refused`
         # sits in the next `·`-field along, so a line-scoped locator drags it in
-        # and this goes red on its own — no length figure involved. The earlier
-        # version of this control rested only on the length bound below, and
-        # MEASURED on #1943 round 1: deleting that bound let the line-scope
-        # mutant SURVIVE. A neighbour check cannot be tidied away as cosmetic.
+        # and this goes red — no length figure involved. The earlier version of
+        # this control rested only on the length bound below, and MEASURED on
+        # #1943 round 1: deleting that bound let a field-START-to-END-OF-LINE
+        # locator SURVIVE. ⚠ Be precise about which shape: for the plainer
+        # whole-line locator the ANCHOR above fires first, so that survival
+        # result is about the narrower shape only — round 2 measured the
+        # difference, and the docstring's item 4 records it.
         neighbour = "`leak-refused`"
         line_for_premise = next(
             ln for ln in HANDOFF_SKILL.read_text(encoding="utf-8").splitlines()
