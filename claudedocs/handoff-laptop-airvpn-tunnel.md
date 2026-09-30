@@ -219,6 +219,27 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - **Reading it — outcomes that mean INSTRUMENT BROKEN, not a finding:** sensor reports nebula port `4242` (you are watching lighthouses); rotation self-check FAIL or a single pcap (capture overwriting itself); nonzero "packets dropped by kernel" (counts unreliable); `total captured packets: 0`; any arm `UNLEARNED` (that vantage never saw it — row skipped, never fabricated); `distinct (srcMAC,srcIP) tokens < 2` ("all arms identical" is unproven). `NO EPISODE OBSERVED` is a null about the run, not the network.
 - **The finding, if it comes:** a *learned* arm with ≥2 distinct sources present, showing the laptop arms on the homelab node's MAC while the far-box arm shows the router's.
 
+### ✅ REFUTED — "both overlays funnel through the homelab node" was the last standing candidate for the lockstep, and it is measured FALSE
+- as-of: 2026-09-30
+- 🔴 **Read this before proposing the homelab node / tailscale subnet-router as a shared hop. It was the only mechanism left that predicted the lockstep, and packet capture at the workbench kills it.**
+- **Symptom + exact repro:** run the arrival probe to capture at the workbench, then attribute INBOUND packets by source MAC directly from the pcap — **no privileges needed to read a pcap**:
+  ```bash
+  tcpdump -r <wb.pcap> -n -e "ip dst 192.168.50.250 and udp port <port>" \
+    | grep -oP '^\S+ \K[0-9a-f:]{17}' | sort | uniq -c | sort -rn
+  ```
+  MAC legend: sensor's own `sensor-meta-*.txt` (`ip neigh`) — `192.168.50.1` router, `192.168.50.94` homelab node.
+- **Observed (with values), 2026-09-30, capture of 94,788 packets, 0 dropped by kernel, 3 episodes inside it:**
+
+  | overlay, inbound to workbench | via router | via homelab node |
+  |---|---|---|
+  | tailscale `:41641` | **14,021** | **0** |
+  | nebula `:49527` | 628 | 61 |
+
+  Not ONE tailscale packet arrived via the homelab node. The 61 nebula packets from it are the gateway peer's own on-LAN traffic (`10.42.0.10` shares that LAN with the workbench). `via: measurement`
+- **Ruled out — that the laptop's two overlays share the homelab node as a hop.** Both arrive from the router, i.e. off the internet. `via: measurement`
+- **Leading hypothesis:** none. What survives is that both overlays share the ROUTER hop into the workbench — but the far box reaches the workbench through that same router and was clean during a laptop blackout, so "the router drops inbound UDP" does not fit either. **The lockstep is now unexplained with every candidate mechanism eliminated.**
+- **Next probe:** the surviving asymmetry is between two INTERNET SOURCES arriving via the same router — the laptop (loses) and the far box (clean). Capture at the workbench with both driving concurrently and compare their inbound source addresses and arrival gaps inside one episode window. The pcap tooling for this now exists and is controlled.
+
 ## Next steps (ranked)
 1. **Capture the two flows' NAT state during a live episode** (open investigation above) — operator-run, root, on the laptop; use the v3 watcher's episode timestamps to time it. This is DIAGNOSIS, not a remedy: this arc has now proposed two remedies and measurement killed both, and the lockstep observation engages neither.
    forcing: incident — 173 episodes in 9 hours on 2026-09-30, worst 99.2% loss over a contiguous 59 s, both overlays identical in 98.8% of 169 episodes
@@ -356,6 +377,11 @@ append-bucket sections are touched — this arc's `State now`, `Next steps` and
 - ⚠ **`pgrep -x tailscaled` finds nothing on NixOS** — the wrapper makes `comm` = `.tailscaled-wra`. Use the unit's `MainPID`.
 - ⚠ **`tcpdump -G` makes `-w` a strftime TEMPLATE**: `%03d` expands to day-of-month, so every rotation overwrites one file while tcpdump still reports packets captured. `-G`+`-W` also does not wrap — it STOPS, so the capture is bounded, not a ring. And tcpdump drops privileges after the first rotation file (`-Z root` segfaulted on 4.99.4 under `-G`; a mode-1777 output dir is the workaround).
 - ⚠ **The homelab node is Talos — no ssh, no node-side capture.** The workbench-side `(srcMAC, srcIP)` is the only available discriminator for which path laptop traffic took.
+
+- 🔴 **READING A PCAP NEEDS NO PRIVILEGES — capture is the only privileged half.** Three rounds were spent handing capture-and-analyse scripts to the operator when only the `tcpdump -i` step needed root; `tcpdump -r` on the pulled file is an ordinary user operation. Pull the pcap, analyse it locally, iterate freely.
+- 🔴 **An arrival analysis MUST filter by direction, or it counts the capture host's OWN EGRESS as arrivals.** The probe's table reported ~1,300–1,900 "arrivals" per episode whose source was `192.168.50.250` — the workbench itself. Add `ip dst <capture host>` to the filter.
+- 🔴 **A MAC address looks like an IPv6 address to an address scrubber.** The probe's own scrubber rewrote every `srcMAC` in its analysis output to an `ip6x:` token, destroying the primary discriminator, while the legend in the sensor meta file survived. If a scrubber is in the path, verify the field you are about to reason over is still readable.
+- ⚠ **Size-tagging arms by inner ICMP size worked for tailscale and NOT for nebula** (`LAP_NEB`/`FAR_NEB` both `UNLEARNED` — no distinct outer length appeared above the control slab). Do not assume a 1:1 inner→outer length mapping per overlay. The probe correctly refused to print rows for the unlearned arms rather than fabricate them.
 
 ## How to verify
 ```bash
