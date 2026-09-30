@@ -37,7 +37,9 @@ renders `US`. It renders `CA`, because the laptop is on a Canadian server (`Korn
 not the `america3` endpoint the condition assumed. The INTENT — a verified country code with
 no `?` unverified marker — is met; the literal country string in the condition is stale.
 
-- **Split-tunnel verified while up:** `ip route get 1.1.1.1 uid 991` (nebula) → `dev wlp170s0`;
+- **Split-tunnel verified while up:** with `P` set at run time to any public address
+  (`P=$(getent ahostsv4 one.one.one.one | awk '{print $1; exit}')` — 🔴 `ip route get` needs an
+  ADDRESS, a hostname errors), `ip route get "$P" uid 991` (nebula) → `dev wlp170s0`;
   `uid 1000` → `dev airvpn`. `ip rule 500: uidrange 991-991 lookup main` is what exempts nebula,
   and `ip rule 5210: fwmark 0x80000` exempts tailscale. 🔴 **Consequence worth stating: bringing
   this tunnel up does NOT change either overlay's egress path, so it cannot be used to test any
