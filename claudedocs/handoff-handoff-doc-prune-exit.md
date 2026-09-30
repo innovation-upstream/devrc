@@ -299,6 +299,22 @@ delete path. This arc builds that path and fixes one false claim found on the wa
   `gh pr view --json state,mergedAt,mergeCommit` plus a CONTENT check on `origin/main`; a squash
   makes `merge-base --is-ancestor` return false forever, so ancestry is never the check.
 
+- 🔴 **THE CLAUSE-2 CHECK I SHIPPED IN THIS DOC WAS A FALSE POSITIVE, CAUGHT MINUTES AFTER PUSHING
+  IT — the arc's own lesson, walked into while writing the arc's closing handoff.** The check was
+  `grep -n 'size-ratchet' <SKILL.md> | grep -c 'prune'`, and it returns **1** while the clause is
+  **OPEN**. `SKILL.md` step 5 is ONE ENORMOUS PHYSICAL LINE holding every refusal status separated
+  by `·`, and its trailing pointer reads *"📖 every status, the bucket rules and `--prune`:
+  …/write-gate.md"*. So the line contains both tokens, and a line-scoped grep cannot tell the
+  `size-ratchet` REMEDY from a pointer 2,000 characters further along. It returned **0** earlier in
+  the same session only because that pointer had not yet gained `--prune` (added by `dc159b07` /
+  `f1801784`) — i.e. the check broke when an UNRELATED edit moved text onto the same line.
+  **The correct check splits the line into its fields first:**
+  `git show origin/main:claude/skills/handoff/SKILL.md | tr '·' '\n' | grep -F '`size-ratchet`' | grep -c -- '--prune'`
+  → **0 while the clause is open**, against the naive form's 1. 🔴 **The general rule, and it is
+  the same one this whole arc is about: a grep is scoped to a LINE, so on a file whose "lines" are
+  paragraphs, line scope is not statement scope.** Split to the real delimiter before counting, and
+  when a check's answer flips without the thing it measures changing, suspect the check.
+
 ## How to verify
 ```bash
 D=/home/zach/workspace/devrc
@@ -322,8 +338,12 @@ nix develop "$D" --command bash -c "cd $D && PYTHONDONTWRITEBYTECODE=1 python3 -
 #      `for label, path in _rule_p_sites():`  ->  `in ():`          (expect: scanned 0 file(s))
 #      the two quote-strip lines in _scan                            (expect: DETECTOR control RED)
 #      `re.search(rf"\b...\b", window)` -> `m.lower() in window`     (expect: DETECTOR control RED)
-# 5. THE ARC'S ONLY OPEN CLAUSE — returns 0 while it is open
-git -C $D show origin/main:claude/skills/handoff/SKILL.md | grep -n 'size-ratchet' | grep -c 'prune'
+# 5. THE ARC'S ONLY OPEN CLAUSE — returns 0 while it is open.
+#    🔴 SPLIT ON `·` FIRST. SKILL.md step 5 is ONE physical line holding every status, and its
+#    trailing pointer names `--prune` — so a line-scoped grep returns 1 while the clause is OPEN.
+#    That false positive shipped in this doc and was caught minutes later; see Gotchas.
+git -C $D show origin/main:claude/skills/handoff/SKILL.md \
+  | tr '·' '\n' | grep -F '`size-ratchet`' | grep -c -- '--prune'
 ```
 🔴 **Step 5 returning 0 is the arc still open.** Step 2 is the one that matters — a green suite
 proved nothing about this defect for four rounds; rendering the refusal is what shows it fixed.
