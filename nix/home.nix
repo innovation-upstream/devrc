@@ -1585,25 +1585,20 @@ in
   # is an eval error rather than a symlink to `/bin/cairn`.
   #
   # 🔴 AND IT IS THE GO CLIENT NOW — a single binary, on an operator decision, not
-  # on a green gate. The pair of lines below is therefore NOT a duplicate to tidy:
-  # `cairn` is what a human types, `cairn-py` is where `scripts/lib/cairn_pin.py`
-  # finds the five consolidated reader modules. The Go package ships `bin/` and
-  # NOTHING else — no `libexec/cairn/lib` — so if `cairn-py` is removed, 22 files
-  # importing `cairn_pin`, both out-of-store launchers below and the writer all
-  # refuse with `CairnPinUnresolved`. That is a loud failure by design, but it is
-  # still a failure: the two lines move together or not at all.
+  # on a green gate. It ships `bin/` and NOTHING else — no `libexec/cairn/lib` — so
+  # the reader modules `scripts/lib/cairn_pin.py` resolves come from a SECOND entry,
+  # `.local/bin/cairn-py`, which is deployed BELOW the trio rather than here.
+  # 🔴 WHY IT IS NOT NEXT TO THIS LINE, WHICH IS WHERE IT BELONGS BY MEANING: the
+  # three entries `cairn` / `cairn-who` / `cairn-validate` must stay CONTIGUOUS,
+  # because `cairn-validate`'s own comment refers to them positionally ("the pair
+  # above", "Read all three lines together") and `test_peer_host.py`'s
+  # `test_the_cairn_home_nix_entries_stay_ADJACENT` pins that — it is the ONLY pin on
+  # those phrases, and it caught `cairn-py` wedged in here. Putting `cairn-py` below
+  # keeps every positional phrase resolving to the line it names.
+  # ⚠ THE TWO STILL MOVE TOGETHER: delete `cairn-py` and 22 files importing
+  # `cairn_pin`, both out-of-store launchers below, and the writer all refuse with
+  # `CairnPinUnresolved`. Loud by design, still a failure.
   home.file.".local/bin/cairn".source = "${cairnPackage}/bin/cairn";
-  # 🔴 `cairn-py` — THE PYTHON CLIENT, DEPLOYED FOR ITS `lib/` RATHER THAN ITS CLI.
-  # In-store like `cairn` and for the same reason: its flake package installs the
-  # script and `lib/` together under `libexec`, and `cairn_pin` resolves the lib by
-  # `realpath`-ing this path and taking `parents[1]`. ⚠ A DIFFERENT NAME POINTING AT
-  # THE SAME KIND OF THING, so the `mkOutOfStoreSymlink` reasoning that governs
-  # `cairn-who` and `cairn-validate` does NOT apply here — those are devrc-only
-  # scripts nothing packages; this is a packaged client.
-  # ⚠ It stops being needed on the day `packages.cairn` is retired upstream (cairn's
-  # P8). On that day this line and the three `CAIRN_LIB=` units go together, and
-  # devrc must have stopped importing the reader modules first — not the reverse.
-  home.file.".local/bin/cairn-py".source = "${cairnLibPackage}/bin/cairn";
   # 🔴 `cairn-who` — the task -> sessions -> windows -> transcripts resolver, split
   # out of `cairn` because it is a different noun: it touches no store, no cache and
   # none of the store's flags. 🔴 NO LONGER THE SAME DEPLOY MODE AS THE LINE ABOVE,
@@ -1657,6 +1652,23 @@ in
   # ships and which `cairn-validate` still reaches by checkout-relative path.
   home.file.".local/bin/cairn-validate".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/cairn-validate";
+
+  # 🔴 `cairn-py` — THE PYTHON CLIENT, DEPLOYED FOR ITS `lib/` RATHER THAN ITS CLI,
+  # AND SITED HERE RATHER THAN BESIDE `cairn` ON PURPOSE. By meaning it pairs with
+  # `.local/bin/cairn` — both are packaged, in-store clients — but the trio above must
+  # stay CONTIGUOUS for the positional phrases in `cairn-validate`'s comment, so this
+  # goes after them. `test_peer_host.py::test_the_cairn_home_nix_entries_stay_ADJACENT`
+  # is what enforces that, and it is what caught this entry wedged into the middle.
+  #
+  # In-store for the same reason `cairn` is: the flake package installs the script and
+  # `lib/` together under `libexec`, and `cairn_pin` resolves the lib by `realpath`-ing
+  # this path and taking `parents[1]`. ⚠ So the `mkOutOfStoreSymlink` reasoning that
+  # governs `cairn-who` and `cairn-validate` does NOT apply — those are devrc-only
+  # scripts nothing packages; this is a packaged client.
+  # ⚠ It stops being needed on the day `packages.cairn` is retired upstream (cairn's
+  # P8). On that day this line and the three `CAIRN_LIB=` units go together, and devrc
+  # must have stopped importing the reader modules FIRST — not the reverse.
+  home.file.".local/bin/cairn-py".source = "${cairnLibPackage}/bin/cairn";
 
   # 🔴 THE CAIRN ROUTING TABLE — which INSTANCE each scope lives on. The pinned
   # client can be pointed at more than one store, and it deliberately ships NO
