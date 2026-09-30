@@ -678,6 +678,28 @@ and tear it down on exit — exactly like `mail-actions`.
 
 ## ⚠ Gotchas
 
+- 🔴 **THE DEPLOYED POD IS OLDER THAN THIS FILE — check a subcommand EXISTS before
+  planning around it.** This document describes the code it was written against, not the
+  image that is running. Measured **2026-09-30** against `deploy/signal-consumer` in prod:
+  **`--mention` and `unapprove` are BOTH absent.** `draft --mention "<name>"` exits **2**
+  with `unrecognized arguments`, and argparse's own usage line enumerates the real set —
+  which is the cheap check, because it comes free with the failure:
+
+  ```
+  {run,health,conversations,search,muted,mute,unmute,draft,drafts,approve,send,reconcile}
+  ```
+
+  🔴 **`unapprove` missing is the load-bearing one.** The send path above names it as the
+  **only** route out of a digest refusal, so on that image an approved draft that is then
+  edited is **unsendable, with no remedy in the CLI** — exactly the dead end `unapprove`
+  was added to remove. Consequence for how you work: **get the wording right BEFORE
+  `approve`**, because on the running pod there is no second bite. The mention feature
+  being absent is milder but changes an ask — you cannot ping one person in a group, so
+  address them by name in the body instead.
+
+  Generalisable beyond this skill: *a skill file is a claim about a codebase, and a pod
+  runs an image.* Where the two can drift, the parser's usage string, `--help`, or the
+  image tag is the arbiter — never the doc you just read, this one included.
 - **`UNIQUE` does not dedupe over NULL in Postgres.** `messages.source_contact_id` is
   `NOT NULL` and an unresolved sender gets a **deterministic placeholder contact**
   (uuid5 of the identifier). Never relax that column — every redelivery from an
