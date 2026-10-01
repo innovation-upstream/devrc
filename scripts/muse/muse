@@ -2,45 +2,57 @@
 # muse — one command surface over the user's Meta Muse personal agent.
 #
 # Channels (design: homelab-talos claudedocs/muse-agent-integration-design.md):
-#   B2  muse-cli  — programmatic (cookies -> HTTPS -> Noise-XX WS). PRIMARY.
-#   B1  browser   — browser-bridge flows/muse.ai.md. FALLBACK when B2 breaks
-#                   (internal-API churn, cookie expiry); `muse b1` prints it.
+#   B1  browser   — browser-bridge flows/muse.ai.md. PRIMARY (operator's call
+#                   2026-10-01: Brave's remote-debugging toggle is unavailable
+#                   for the muse-cli cookie export, and B1 is the design's
+#                   default channel anyway).
+#   B2  muse-cli  — programmatic (cookies -> HTTPS -> Noise-XX WS). Behind
+#                   --cli; blocked on the cookie-export step working on Brave.
 #   A   muse-bridge — READ-ONLY cluster status (public HTTPS + bearer token).
 #
 # Cookie handling is muse-cli's OWN storage only (~/.config/muse-cli/cookies.txt,
-# mode 600). This wrapper never reads, copies, echoes or logs cookies. Never
-# commit or send a cookie or the bridge token anywhere.
+# mode 600). This wrapper never reads, copies, echoes or logs cookies. The
+# browser-bridge deliberately has no cookie op — never add one. Never commit or
+# send a cookie or the bridge token anywhere.
 #
 # Pacing: sends are human-paced (a few/hour, design §4-B2). The wrapper refuses
 # a second send within $MUSE_MIN_SEND_GAP_MIN minutes (default 10) unless
 # --force; the guard is a reminder, not a rate limiter.
 #
-# Exit codes: 0 ok · 1 muse-cli failed (B1 hint printed) · 2 usage · 3 auth
-# needed · 4 bridge query failed.
+# Muse's per-host APPROVAL prompts are the OPERATOR's security gate: this
+# wrapper DETECTS a pending approval and stops (exit 5) rather than clicking
+# Allow on Muse's behalf.
+#
+# Exit codes: 0 ok · 1 dispatch failed (B1 detail printed) · 2 usage · 3
+# muse-cli auth needed · 4 bridge query failed · 5 operator approval pending.
 set -euo pipefail
 
 MUSE_CLI_BIN=${MUSE_CLI:-muse-cli}
+BB_BIN=${MUSE_BB:-$HOME/workspace/devrc/scripts/browser-bridge/browser}
 HOMELAB_REPO=${MUSE_HOMELAB_REPO:-$HOME/workspace/homelab-talos}
 BRIDGE_URL=${MUSE_BRIDGE_URL:-https://muse-bridge.zacx.dev}
 MIN_SEND_GAP_MIN=${MUSE_MIN_SEND_GAP_MIN:-10}
 STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/muse
 TOKEN_ENC_REL=clusters/homelab/apps/muse/muse-bridge-token.enc.yaml
+B1_INSTANCE=${MUSE_B1_INSTANCE:-personal}
 
 usage() {
   cat <<'EOF'
 muse — dispatch/poll the user's Muse agent; cluster status via muse-bridge.
 
-  muse send "<task>" [--wait N] [--thread ID] [--force]   dispatch (B2 muse-cli;
-                                   --wait default 120, 0 = fire-and-forget)
-  muse poll [--thread ID] [--limit N]                     latest chat events (B2)
-  muse status [ns|nodes|workloads <ns>|flux <ns>]         CLUSTER snapshot (A)
-  muse vm                                                 Muse VM/session status (B2)
-  muse auth [export|...]                                  muse-cli auth passthrough
-  muse b1                                                 the browser-flow fallback recipe
-  muse setup                                              runbook pointers
+  muse send "<task>" [--wait N] [--force] [--cli]   dispatch + await the reply
+                                   B1 browser flow by default (--wait default
+                                   180); --cli routes through muse-cli (needs
+                                   its one-time cookie export) with --thread
+  muse poll [--wait N] [--cli]                      latest assistant reply
+  muse status [ns|nodes|workloads <ns>|flux <ns>]   CLUSTER snapshot (A)
+  muse vm                                           Muse VM/session status (B2)
+  muse auth [export|...]                            muse-cli auth passthrough
+  muse b1                                           the browser-flow recipe
+  muse setup                                        runbook pointers
 
-Env: MUSE_CLI, MUSE_HOMELAB_REPO, MUSE_BRIDGE_URL, MUSE_MIN_SEND_GAP_MIN (0
-disables the pacing guard).
+Env: MUSE_CLI, MUSE_BB, MUSE_HOMELAB_REPO, MUSE_BRIDGE_URL,
+MUSE_MIN_SEND_GAP_MIN (0 disables the pacing guard), MUSE_B1_INSTANCE.
 EOF
 }
 
@@ -62,6 +74,54 @@ need_muse_cli() {
   command -v "$MUSE_CLI_BIN" >/dev/null 2>&1 || die "muse-cli not found. Install: uv tool install muse-cli (or pipx install muse-cli). Then 'muse auth export' — see 'muse setup'." 3
 }
 
+# --- B1 plumbing ------------------------------------------------------------
+# bb_js <expr>: run a js op on the B1 tab (wake'd) and print result.data.value.
+# Prints nothing and returns non-zero on an op failure.
+bb_js() {
+  "$BB_BIN" "$B1_REF" js "$1" --wake=3000 2>/dev/null \
+    | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+r=d.get("result") or {}
+print((r.get("data") or {}).get("value",""),end="")'
+}
+
+# b1_state: one read of the live chat state, as shell vars.
+# Sets: COMPOSER(yes/no) ASST USER LASTID LEN APPROVAL
+b1_state() {
+  local v
+  v=$(bb_js '(function(){var t=document.querySelector("textarea[placeholder=Message]");var a=document.querySelectorAll("[data-message-role=assistant]");var u=document.querySelectorAll("[data-message-role=user]");var l=a[a.length-1];var b=document.body.innerText;var na=b.indexOf("Needs approval")>=0||b.indexOf("Needs review")>=0;return JSON.stringify({c:!!t,tl:t?t.value.length:-1,a:a.length,u:u.length,id:l?l.getAttribute("data-message-id"):"none",len:l?(l.innerText||"").length:0,ap:na})})()') || return 1
+  [ -n "$v" ] || return 1
+  # Parse via argv (the value is never interpolated into code text); read the
+  # six fields from a HERESTRING — a pipe's read block would run in a subshell
+  # and lose every variable.
+  local parsed
+  parsed=$(python3 -c 'import json,sys
+d=json.loads(sys.argv[1])
+print("yes" if d["c"] else "no", d["tl"], d["a"], d["u"], d["id"], d["len"], "yes" if d["ap"] else "no")' "$v" 2>/dev/null) || return 1
+  read -r COMPOSER TALEN ASST USER LASTID LEN APPROVAL <<<"$parsed"
+}
+
+b1_open() {
+  local out rc=0 tab
+  # 🔴 `open` exits 3 when its --wake FOLLOW-UP fails — the tab still opened
+  # (rc 1 = the whole command failed; rc 2/4 = bridge/instance problems). Parse
+  # the JSON regardless; die only when there is no tabId.
+  out=$("$BB_BIN" --instance "$B1_INSTANCE" open https://muse.ai --wake=4000 2>/dev/null) || rc=$?
+  tab=$(printf '%s' "$out" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin)
+    print((d.get("result") or {}).get("data",{}).get("tabId",""))
+except Exception:
+    print("")') || tab=""
+  if [ -z "$tab" ]; then
+    die "browser-bridge could not open muse.ai on instance '$B1_INSTANCE' (\$BB whoami first). Is the bridge up? rc=${rc}" 1
+  fi
+  B1_REF="bw://laptop/$B1_INSTANCE/$tab"
+  B1_TAB=$tab
+}
+
+b1_close() { [ -n "${B1_TAB:-}" ] && "$BB_BIN" "$B1_REF" close >/dev/null 2>&1 || true; }
+
 # --- pacing guard -----------------------------------------------------------
 pace_check() {
   [ "$MIN_SEND_GAP_MIN" -eq 0 ] 2>/dev/null && return 0
@@ -82,6 +142,138 @@ pace_mark() { mkdir -p "$STATE_DIR"; date +%s > "$STATE_DIR/last-send"; }
 
 # --- verbs ------------------------------------------------------------------
 cmd_send() {
+  local wait=180 force=0 use_cli=0
+  local args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --wait)   wait="$2"; shift 2 ;;
+      --thread) use_cli=1; thread="$2"; shift 2 ;;
+      --force)  force=1; shift ;;
+      --cli)    use_cli=1; shift ;;
+      *)        args+=("$1"); shift ;;
+    esac
+  done
+  [ ${#args[@]} -gt 0 ] || die "send needs task text: muse send \"<task>\"" 2
+  [ "$force" -eq 1 ] || pace_check
+  if [ "$use_cli" -eq 1 ]; then cmd_send_cli "${args[@]}" --wait "$wait" ${thread:+--thread "$thread"}; return; fi
+  cmd_send_b1 "${args[@]}" "$wait"
+}
+
+# B1 send: open own tab -> gate checks -> type/assert -> Enter/confirm -> poll
+# the delta -> close. Never auto-approves: a pending Muse approval is the
+# operator's security gate and stops the wrapper (exit 5).
+cmd_send_b1() {
+  local task="$1"; shift
+  local wait="${1:-180}"
+  b1_open
+  trap 'b1_close' EXIT
+  # 🔴 The composer mounts BEFORE the feed hydrates: a fresh hidden tab can
+  # read composer=yes with a skeleton feed (measured 2026-10-01), and Enter
+  # into that shell does nothing. Gate the send on the FEED having nodes.
+  sleep 2
+  if ! b1_state; then
+    "$BB_BIN" "$B1_REF" wake --wait 4000 >/dev/null 2>&1 || true
+    b1_state || die "B1: cannot read the muse.ai chat state (composer/feed) in the new tab — see 'muse b1' to drive it by hand. Tab left open: $B1_REF" 1
+  fi
+  local hydrate_deadline=$((SECONDS + 20))
+  while [ "$ASST" -eq 0 ] && [ "$USER" -eq 0 ] && [ $SECONDS -lt $hydrate_deadline ]; do
+    sleep 3
+    "$BB_BIN" "$B1_REF" wake --wait 3000 >/dev/null 2>&1 || true
+    b1_state || true
+  done
+  if [ "$ASST" -eq 0 ] && [ "$USER" -eq 0 ]; then
+    trap - EXIT
+    die "B1: the feed never hydrated (0 messages after 20s) — the tab is stuck on a shell DOM. Tab left open: $B1_REF (wake it / reload, then re-run)." 1
+  fi
+  if ! b1_state; then
+    "$BB_BIN" "$B1_REF" wake --wait 4000 >/dev/null 2>&1 || true
+    b1_state || die "B1: cannot read the muse.ai chat state (composer/feed) in the new tab — see 'muse b1' to drive it by hand." 1
+  fi
+  if [ "$APPROVAL" = "yes" ]; then
+    trap - EXIT
+    die "B1: a Muse APPROVAL is pending (the chat shows 'Needs approval'). The composer is gated while it waits — review it in the Muse UI (your security gate; this wrapper never clicks Allow), then re-run. Tab left open: $B1_REF" 5
+  fi
+  if [ "$COMPOSER" != "yes" ]; then
+    "$BB_BIN" "$B1_REF" wake --wait 5000 >/dev/null 2>&1 || true
+    b1_state || true
+    trap - EXIT
+    [ "$COMPOSER" = "yes" ] || die "B1: no composer mounted (the app may be in an error state — reload https://muse.ai in tab $B1_REF and re-run)." 1
+  fi
+  local base_asst=$ASST base_user=$USER base_id=$LASTID base_len=$LEN
+  "$BB_BIN" "$B1_REF" type "$task" --selector 'textarea[placeholder="Message"]' >/dev/null 2>&1 || die "B1: the type op failed" 1
+  local got rc=1
+  for attempt in 1 2; do
+    got=$(bb_js '(function(){var t=document.querySelector("textarea[placeholder=Message]");return t?("len="+t.value.length):"gone"})()') || got="gone"
+    [ "$got" = "len=${#task}" ] && rc=0 && break
+    "$BB_BIN" "$B1_REF" wake --wait 3000 >/dev/null 2>&1 || true
+    "$BB_BIN" "$B1_REF" type "$task" --selector 'textarea[placeholder="Message"]' >/dev/null 2>&1 || true
+  done
+  trap - EXIT
+  [ "$rc" -eq 0 ] || die "B1: the composer did not take the typed text after retry (got '${got:-?}', wanted len=${#task}). Re-throttled tab or a UI change — see 'muse b1'." 1
+  "$BB_BIN" "$B1_REF" key Enter --selector 'textarea[placeholder="Message"]' >/dev/null 2>&1 || true
+  sleep 4
+  if ! b1_state; then "$BB_BIN" "$B1_REF" wake --wait 3000 >/dev/null 2>&1 || true; b1_state || die "B1: state unreadable right after submit" 1; fi
+  # "Cleared" = the composer VALUE is empty (the element itself always stays
+  # mounted — checking its existence is how Enter #1 was misread as inert,
+  # measured 2026-10-01) AND a new user node appeared.
+  if [ "$TALEN" -ne 0 ] || [ "$USER" -le "$base_user" ] 2>/dev/null; then
+    # Inert Enter (re-throttled tab) — re-wake and submit once more.
+    "$BB_BIN" "$B1_REF" wake --wait 3000 >/dev/null 2>&1 || true
+    "$BB_BIN" "$B1_REF" key Enter --selector 'textarea[placeholder="Message"]' >/dev/null 2>&1 || true
+    sleep 4
+    trap - EXIT
+    b1_state || die "B1: state unreadable after submit retry" 1
+    trap - EXIT
+    [ "$COMPOSER" = "no" ] || die "B1: the composer did not clear — Enter was inert twice. Check the tab by hand ($B1_REF); if an approval card is pending, review it in the Muse UI." 1
+  fi
+  # Poll the delta: lastId+len stable twice wins; cap at $wait.
+  local deadline=$((SECONDS + wait)) prev="" started=$SECONDS
+  while [ $SECONDS -lt $deadline ]; do
+    sleep 8
+    if ! b1_state; then continue; fi
+    if [ "$APPROVAL" = "yes" ]; then
+      printf 'muse: note — a Muse approval appeared mid-reply; Muse may pause. Still waiting (max %ss total).\n' "$wait" >&2
+    fi
+    if [ -n "$prev" ] && [ "$LASTID" = "${prev%%|*}" ] && [ "$LEN" = "${prev##*|}" ] && [ "$LASTID" != "$base_id" ]; then
+      break
+    fi
+    prev="$LASTID|$LEN"
+  done
+  if [ "$LASTID" = "$base_id" ]; then
+    trap - EXIT
+    die "B1: no reply within ${wait}s (submit WAS confirmed). The reply may still land — 'muse poll' re-reads the latest turn." 1
+  fi
+  local reply
+  reply=$(bb_js '(function(){var a=document.querySelectorAll("[data-message-role=assistant]");var l=a[a.length-1];var turn=l.getAttribute("data-message-turn-id");var p=[];for(var i=0;i<a.length;i++){if(a[i].getAttribute("data-message-turn-id")===turn)p.push((a[i].innerText||"").trim())}return p.join("\n---\n")})()') || reply=""
+  pace_mark
+  b1_close
+  trap - EXIT
+  python3 - "$reply" <<'PYEOF'
+import json, sys
+print(json.dumps({"sent": True, "channel": "b1", "reply": sys.argv[1]}))
+PYEOF
+}
+
+# B1 poll: open a fresh tab, read the LATEST assistant turn, close.
+cmd_poll_b1() {
+  b1_open
+  trap 'b1_close' EXIT
+  sleep 2
+  b1_state || { "$BB_BIN" "$B1_REF" wake --wait 4000 >/dev/null 2>&1 || true; b1_state || die "B1: cannot read the chat state for a poll" 1; }
+  if [ "$LASTID" = "none" ] || [ "$LEN" -eq 0 ] 2>/dev/null; then
+    die "B1: no assistant messages readable in the feed" 1
+  fi
+  local reply
+  reply=$(bb_js '(function(){var a=document.querySelectorAll("[data-message-role=assistant]");var l=a[a.length-1];var turn=l.getAttribute("data-message-turn-id");var p=[];for(var i=0;i<a.length;i++){if(a[i].getAttribute("data-message-turn-id")===turn)p.push((a[i].innerText||"").trim())}return p.join("\n---\n")})()') || reply=""
+  b1_close
+  trap - EXIT
+  python3 - "$LASTID" "$reply" <<'PYEOF'
+import json, sys
+print(json.dumps({"channel": "b1", "lastId": sys.argv[1], "reply": sys.argv[2]}))
+PYEOF
+}
+
+cmd_send_cli() {
   need_muse_cli
   local wait=120 thread="" force=0
   local args=()
@@ -107,19 +299,24 @@ cmd_send() {
 }
 
 cmd_poll() {
-  need_muse_cli
-  local thread="" limit=3
+  local use_cli=0 thread="" limit=3
   local args=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --thread) thread="$2"; shift 2 ;;
+      --thread) use_cli=1; thread="$2"; shift 2 ;;
       --limit)  limit="$2"; shift 2 ;;
+      --cli)    use_cli=1; shift ;;
       *)        args+=("$1"); shift ;;
     esac
   done
-  local rc=0
-  "$MUSE_CLI_BIN" history --limit "$limit" ${thread:+--thread "$thread"} || rc=$?
-  [ "$rc" -eq 0 ] || { b1_hint; exit 1; }
+  if [ "$use_cli" -eq 1 ]; then
+    need_muse_cli
+    local rc=0
+    "$MUSE_CLI_BIN" history --limit "$limit" ${thread:+--thread "$thread"} || rc=$?
+    [ "$rc" -eq 0 ] || { b1_hint; exit 1; }
+    return
+  fi
+  cmd_poll_b1
 }
 
 cmd_vm()   { need_muse_cli; exec "$MUSE_CLI_BIN" status; }
