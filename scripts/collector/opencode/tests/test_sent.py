@@ -64,11 +64,12 @@ def _build_db(path: Path, *, with_part_table: bool = True) -> sqlite3.Connection
     return db
 
 
-def _add_session(db, sid="s1", title="t", created=1000, updated=1000):
+def _add_session(db, sid="s1", title="t", created=1000, updated=1000,
+                 directory="/tmp/proj"):
     db.execute(
         "INSERT INTO session (id, project_id, directory, title, time_created,"
         " time_updated) VALUES (?,?,?,?,?,?)",
-        (sid, "p1", "/tmp/proj", title, created, updated),
+        (sid, "p1", directory, title, created, updated),
     )
 
 
@@ -349,6 +350,103 @@ def test_unreadable_store_is_not_reported_as_no_such_session(tmp_path, capsys):
     db.close()
     rc = SE.main(["show", "s1", "--db", str(tmp_path / "store.db")])
     assert rc == X.EXIT_STORE_UNREADABLE
+
+
+# --------------------------------------------------------------------------- #
+# here — the tmux-keybind entry point: cwd → session resolution
+# --------------------------------------------------------------------------- #
+def _user_msg_with_text(db, mid, sid, ts, text, agent="build"):
+    _add_message(db, mid, sid, ts, _user(mid, ts, agent))
+    _add_part(db, f"p-{mid}", mid, sid, ts, _text(text))
+
+
+def test_here_exact_directory_match(tmp_path, capsys):
+    db = _build_db(tmp_path / "store.db")
+    _add_session(db, sid="s1", title="devrc work", updated=5000,
+                 directory="/home/zach/workspace/devrc")
+    _add_session(db, sid="s2", title="other repo", updated=9000,
+                 directory="/home/zach/workspace/other")
+    _user_msg_with_text(db, "m1", "s1", 1700000001000, "typed in devrc")
+    _user_msg_with_text(db, "m2", "s2", 1700000002000, "typed in other")
+    db.commit()
+    rc = SE.main(["here", "/home/zach/workspace/devrc",
+                  "--db", str(tmp_path / "store.db")])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # newest session is s2 — the exact match must beat recency
+    assert out.startswith("# devrc work  s1\n")
+    assert "typed in devrc" in out
+    assert "typed in other" not in out
+
+
+def test_here_ancestor_match_prefers_the_longest(tmp_path, capsys):
+    db = _build_db(tmp_path / "store.db")
+    _add_session(db, sid="s-root", title="workspace root", updated=9000,
+                 directory="/home/zach/workspace")
+    _add_session(db, sid="s-proj", title="the project", updated=1000,
+                 directory="/home/zach/workspace/devrc")
+    _user_msg_with_text(db, "m1", "s-proj", 1700000001000, "project prompt")
+    _user_msg_with_text(db, "m2", "s-root", 1700000002000, "workspace prompt")
+    db.commit()
+    rc = SE.main(["here", "/home/zach/workspace/devrc/scripts/deep",
+                  "--db", str(tmp_path / "store.db")])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.startswith("# the project  s-proj\n")
+    assert "project prompt" in out
+    assert "workspace prompt" not in out
+
+
+def test_here_fallback_is_newest_with_a_stderr_note(tmp_path, capsys):
+    db = _build_db(tmp_path / "store.db")
+    _add_session(db, sid="s-old", title="old", created=1000, updated=1000,
+                 directory="/a")
+    _add_session(db, sid="s-new", title="new", created=5000, updated=9000,
+                 directory="/b")
+    _user_msg_with_text(db, "m1", "s-new", 1700000001000, "newest prompt")
+    db.commit()
+    rc = SE.main(["here", "/totally/elsewhere",
+                  "--db", str(tmp_path / "store.db")])
+    assert rc == 0
+    cap = capsys.readouterr()
+    assert cap.out.startswith("# new  s-new\n")
+    assert "newest prompt" in cap.out
+    assert "no session directory matches /totally/elsewhere" in cap.err
+
+
+def test_here_with_no_sessions_at_all_is_exit_3(tmp_path, capsys):
+    db = _build_db(tmp_path / "store.db")
+    db.commit()
+    rc = SE.main(["here", "/anywhere", "--db", str(tmp_path / "store.db")])
+    assert rc == X.EXIT_NO_SUCH_SESSION
+    assert "no opencode sessions found" in capsys.readouterr().err
+
+
+def test_here_session_with_no_messages_names_the_filter(tmp_path, capsys):
+    db = _build_db(tmp_path / "store.db")
+    _add_session(db, sid="s1", directory="/tmp/proj")
+    _user_msg_with_text(db, "m1", "s1", 1700000001000, "subagent brief",
+                        agent="explore")
+    db.commit()
+    rc = SE.main(["here", "/tmp/proj", "--db", str(tmp_path / "store.db")])
+    assert rc == X.EXIT_SESSION_EMPTY
+    cap = capsys.readouterr()
+    assert "--all-agents" in cap.err
+    # the header still names the session it resolved to
+    assert cap.out.startswith("# t  s1\n")
+
+
+def test_here_trailing_slashes_match_exactly(tmp_path, capsys):
+    """The keybind passes tmux's `#{pane_current_path}`, which can carry a
+    trailing slash depending on how the pane got there; the stored directory
+    may differ the same way. Both are normalised before comparison."""
+    db = _build_db(tmp_path / "store.db")
+    _add_session(db, sid="s1", directory="/tmp/proj/")
+    _user_msg_with_text(db, "m1", "s1", 1700000001000, "typed")
+    db.commit()
+    rc = SE.main(["here", "/tmp/proj", "--db", str(tmp_path / "store.db")])
+    assert rc == 0
+    assert "typed" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------- #

@@ -3,16 +3,25 @@
 
 Usage:
     oc-sent show <session-id> [--all-agents] [--db PATH]
+    oc-sent here [CWD] [--all-agents] [--db PATH]
 
 Session DISCOVERY is a solved problem — `opencode session list [-n N]
 [--format json]` prints full untruncated ids, titles and times newest-first —
 so this tool does not duplicate it: `show` takes the id straight from there.
 (round-0 audit candidate D1: an agent-invented `list` subcommand deleted as a
 built-in duplicate; disposition recorded on the PR.)
-`show` prints one line per user message, in send order: local timestamp,
-then the text (internal newlines rendered as " ⏎ ", so a message stays one
-greppable line). Local time, not UTC — the reader is a human scanning for
-"what did I ask around 3pm".
+
+`here` is the tmux-keybind entry point (prefix+S → display-popup): it resolves
+WHICH session is "current" from a working directory — exact `session.directory`
+match first, then the LONGEST ancestor directory of CWD, then the newest
+session overall with a note on stderr. It prints a `# <title>  <id>` header
+line first, so a reader of the popup knows which session the messages belong
+to without cross-referencing. CWD defaults to the process's cwd; the keybind
+passes `#{pane_current_path}`.
+`show` and `here` print user messages one line each, in send order: local
+timestamp, then the text (internal newlines rendered as " ⏎ ", so a message
+stays one greppable line). Local time, not UTC — the reader is a human
+scanning for "what did I ask around 3pm".
 
 This is the human-display sibling of `export.py` (machine artifact) and the
 telemetry `tailer.py` (events). It reads the store ONLY through `_shared` —
@@ -76,6 +85,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -173,17 +183,10 @@ def user_messages(
     return out, textless, other_agent
 
 
-def cmd_show(db, session_id: str, all_agents: bool) -> int:
-    if not _store_is_readable(db):
-        print(
-            "store is unreadable (missing tables or schema drift) — "
-            "this is NOT the same as an unknown session",
-            file=sys.stderr,
-        )
-        return EXIT_STORE_UNREADABLE
-
+def _print_messages(db, session_id: str, all_agents: bool) -> int:
+    """Render one session's user messages. Empty → EXIT_SESSION_EMPTY with
+    the filter wording; the caller owns the "is this session known" check."""
     try:
-        known = any(s.get("id") == session_id for s in S.iter_sessions(db))
         messages, textless, other_agent = user_messages(
             db, session_id, all_agents=all_agents
         )
@@ -192,9 +195,6 @@ def cmd_show(db, session_id: str, all_agents: bool) -> int:
         return EXIT_STORE_UNREADABLE
 
     if not messages:
-        if not known:
-            print(f"no such session: {session_id}", file=sys.stderr)
-            return EXIT_NO_SUCH_SESSION
         if other_agent:
             print(
                 f"no {HUMAN_AGENT}-agent user messages "
@@ -221,6 +221,90 @@ def cmd_show(db, session_id: str, all_agents: bool) -> int:
     return EXIT_OK
 
 
+def cmd_show(db, session_id: str, all_agents: bool) -> int:
+    if not _store_is_readable(db):
+        print(
+            "store is unreadable (missing tables or schema drift) — "
+            "this is NOT the same as an unknown session",
+            file=sys.stderr,
+        )
+        return EXIT_STORE_UNREADABLE
+
+    try:
+        known = any(s.get("id") == session_id for s in S.iter_sessions(db))
+    except (sqlite3.DatabaseError, IndexError) as exc:
+        print(f"store read failed: {exc}", file=sys.stderr)
+        return EXIT_STORE_UNREADABLE
+    if not known:
+        print(f"no such session: {session_id}", file=sys.stderr)
+        return EXIT_NO_SUCH_SESSION
+    return _print_messages(db, session_id, all_agents)
+
+
+def resolve_session_for_cwd(
+    db, cwd: str
+) -> tuple[dict | None, str]:
+    """Return (session, note) for "the current opencode session" at a cwd.
+
+    Exact `session.directory` match first; then the LONGEST ancestor
+    directory of cwd (an opencode TUI launched at the project root records
+    the root, while the pane may sit in a subdir); then the newest session
+    overall WITH a note — a wrong answer labelled beats a silent wrong
+    answer, and the newest session is the best guess available. Newest
+    means `time_updated` (fallback `time_created`), matching `opencode
+    session list`'s own ordering.
+    """
+    sessions = sorted(
+        S.iter_sessions(db),
+        key=lambda s: s.get("time_updated") or s.get("time_created") or 0,
+        reverse=True,
+    )
+    if not sessions:
+        return None, ""
+
+    def _norm(p: str | None) -> str:
+        return (p or "").rstrip("/")
+
+    cwd_n = _norm(cwd)
+    exact = [s for s in sessions if _norm(s.get("directory")) == cwd_n]
+    if exact:
+        return exact[0], ""
+    ancestors = [
+        s for s in sessions
+        if _norm(s.get("directory")) and (cwd_n + "/").startswith(_norm(s.get("directory")) + "/")
+    ]
+    if ancestors:
+        return max(ancestors, key=lambda s: len(_norm(s["directory"]))), ""
+    return sessions[0], (
+        f"(no session directory matches {cwd} — showing the most recently "
+        "active session)"
+    )
+
+
+def cmd_here(db, cwd: str, all_agents: bool) -> int:
+    if not _store_is_readable(db):
+        print(
+            "store is unreadable (missing tables or schema drift) — "
+            "this is NOT the same as an unknown session",
+            file=sys.stderr,
+        )
+        return EXIT_STORE_UNREADABLE
+
+    try:
+        session, note = resolve_session_for_cwd(db, cwd)
+    except (sqlite3.DatabaseError, IndexError) as exc:
+        print(f"store read failed: {exc}", file=sys.stderr)
+        return EXIT_STORE_UNREADABLE
+    if session is None:
+        print("no opencode sessions found", file=sys.stderr)
+        return EXIT_NO_SUCH_SESSION
+    if note:
+        print(note, file=sys.stderr)
+    title = (session.get("title") or "").strip() or "(untitled)"
+    print(f"# {title}  {session['id']}")
+    return _print_messages(db, session["id"], all_agents)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="oc-sent",
@@ -234,6 +318,18 @@ def main(argv: list[str] | None = None) -> int:
         help="include subagent-injected pseudo-user messages, tagged",
     )
     p_show.add_argument("--db", help="explicit store path (default: discovered)")
+    p_here = sub.add_parser(
+        "here", help="messages for the session matching a cwd (tmux keybind entry)"
+    )
+    p_here.add_argument(
+        "cwd", nargs="?", default=None,
+        help="directory to resolve against (default: the process's cwd)",
+    )
+    p_here.add_argument(
+        "--all-agents", action="store_true",
+        help="include subagent-injected pseudo-user messages, tagged",
+    )
+    p_here.add_argument("--db", help="explicit store path (default: discovered)")
     args = ap.parse_args(argv)
 
     try:
@@ -245,7 +341,9 @@ def main(argv: list[str] | None = None) -> int:
         print("no opencode database found", file=sys.stderr)
         return EXIT_NO_DB
     try:
-        return cmd_show(db, args.session_id, args.all_agents)
+        if args.cmd == "show":
+            return cmd_show(db, args.session_id, args.all_agents)
+        return cmd_here(db, args.cwd or os.getcwd(), args.all_agents)
     finally:
         db.close()
 
