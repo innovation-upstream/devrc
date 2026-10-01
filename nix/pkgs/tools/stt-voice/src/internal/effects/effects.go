@@ -63,7 +63,8 @@ func (Live) Copy(text string) error {
 // AFTER the TUI window is closed (the operator's window was captured at stop
 // time, so send-as-input can put focus back where the user was); with the
 // TUI gone there is no window left for i3's focus-follows-mouse to hand
-// focus back to.
+// focus back to. This aligns I3's model (workspace, raise, active window);
+// the X-server-level focus pin happens inside TypeInto.
 func (Live) Focus(containerID int) error {
 	out, err := exec.Command("i3-msg", fmt.Sprintf("[id=%d]", containerID), "focus").CombinedOutput()
 	if err != nil {
@@ -99,17 +100,38 @@ func (Live) SpawnSend(text string, target int) error {
 	return nil
 }
 
-// Type types text into the FOCUSED window (the `send` helper's final step,
-// after it has waited for the TUI to close and focused the captured target).
-// It types via xdotool reading STDIN (`type --file -`), so no shell
-// metacharacter in a transcript can ever be reinterpreted as a flag. --delay 1
-// keeps 1ms between keys. 🔴 THIS NEVER SENDS RETURN: the text is one line,
-// and Return would submit whatever form the operator is filling.
-func (Live) Type(text string) error {
-	cmd := exec.Command("xdotool", "type", "--delay", "1", "--file", "-")
+// TypeInto types text into window (0 = whatever is currently focused), as
+// the `send` helper's final step. It runs as ONE xdotool process —
+// `windowfocus N sleep 0.1 type --delay 1 --file -` — and each piece of that
+// shape is measured, not cosmetic (live probes 2026-09-30, catcher windows):
+//
+//   - ONE PROCESS: on a live desktop i3's focus_follows_mouse flips focus
+//     the moment the operator's mouse crosses a window boundary; a
+//     two-exec focus-then-type sequence leaves a 100ms+ hole for exactly
+//     that, and the transcript then goes into whatever the mouse touched.
+//     The chain's focus→type gap is sub-millisecond.
+//   - sleep 0.1: the client needs a beat after the focus transfer, or the
+//     first keystrokes of the burst are dropped entirely ('CHAINED' arrived
+//     as 'e CHAINED' without it, 'CH' landing nowhere).
+//   - ABORT ON A DEAD WINDOW: a failed windowfocus (BadWindow) kills the
+//     xdotool process before the chained type runs (rc=1, nothing typed) —
+//     a gone target refuses instead of leaking the transcript into
+//     whatever is focused.
+//
+// The text goes in via STDIN (`type --file -`), so no shell metacharacter in
+// a transcript can ever be reinterpreted as a flag; --delay 1 keeps 1ms
+// between keys. 🔴 THIS NEVER SENDS RETURN: the text is one line, and Return
+// would submit whatever form the operator is filling.
+func (Live) TypeInto(window int, text string) error {
+	args := make([]string, 0, 7)
+	if window > 0 {
+		args = append(args, "windowfocus", strconv.Itoa(window), "sleep", "0.1")
+	}
+	args = append(args, "type", "--delay", "1", "--file", "-")
+	cmd := exec.Command("xdotool", args...)
 	cmd.Stdin = strings.NewReader(text)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("xdotool type: %v: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("xdotool: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

@@ -41,21 +41,36 @@ func TestCopySurfacesXclipFailure(t *testing.T) {
 	}
 }
 
-func TestTypeUsesStdinAndNeverBuildsAShellString(t *testing.T) {
+func TestTypeIntoPinsTheWindowInTheSameProcess(t *testing.T) {
 	rec := filepath.Join(t.TempDir(), "typed.txt")
-	installShim(t, "xdotool", `cat > "$SHIM_OUT"; echo "ARGS:$*" >> "$SHIM_OUT"`)
+	installShim(t, "xdotool", `cat >> "$SHIM_OUT"; echo; echo "ARGS:$*" >> "$SHIM_OUT"`)
 	t.Setenv("SHIM_OUT", rec)
 	// a transcript that would be dangerous as an argv: flags, metachars, semicolons
 	text := "run --flag; rm -rf / ; $(dangerous)"
-	if err := (Live{}).Type(text); err != nil {
+	if err := (Live{}).TypeInto(4242, text); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(rec)
-	if !strings.Contains(string(got), text) {
-		t.Fatalf("xdotool received %q — the text must arrive via stdin verbatim", got)
+	s := string(got)
+	if !strings.Contains(s, text) {
+		t.Fatalf("xdotool received %q — the text must arrive via stdin verbatim", s)
 	}
-	if !strings.Contains(string(got), "--file -") {
-		t.Fatalf("xdotool was not invoked with --file - (args line: %s)", got)
+	if !strings.Contains(s, "--file -") {
+		t.Fatalf("xdotool was not invoked with --file - (args line: %s)", s)
+	}
+	// 🔴 the focus pin and the settle beat ride in the SAME process as the
+	// type: a two-exec focus-then-type gap is where i3's focus_follows_mouse
+	// steals the send to whatever window the operator's mouse is over.
+	if !strings.Contains(s, "ARGS:windowfocus 4242 sleep 0.1 type --delay 1 --file -") {
+		t.Fatalf("the chain lost its shape (args line: %s)", s)
+	}
+	// target 0 = type into the focused window: no pin, no settle
+	if err := (Live{}).TypeInto(0, text); err != nil {
+		t.Fatal(err)
+	}
+	got2, _ := os.ReadFile(rec)
+	if n := strings.Count(string(got2), "ARGS:windowfocus"); n != 1 {
+		t.Fatalf("target 0 must not pin a window: %d windowfocus invocations (args lines: %s)", n, string(got2))
 	}
 }
 
