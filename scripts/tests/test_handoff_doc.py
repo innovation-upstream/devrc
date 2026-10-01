@@ -1506,7 +1506,12 @@ class TestRuleFDidNotMoveTheExitCodes:
         # reading once more — the injectivity loop above ran FIRST and passed,
         # so this is a genuinely new code and not the #962/#1046 collision shape
         # wearing a count failure.
-        assert len(codes) == 15, f"the EXIT_* constant set changed: {codes}"
+        # 15 -> 16: rule (r) adds `EXIT_PRUNE_UNCONSERVED = 16`. Same reading
+        # again — the injectivity loop above ran FIRST and passed. 🔴 AND IT IS
+        # A SEPARATE CODE FROM 15 ON PURPOSE: rule (q)'s eight causes all mean
+        # "fix the prune file", while this one means "write the archive first",
+        # so a caller branching on the number can tell the two remedies apart.
+        assert len(codes) == 16, f"the EXIT_* constant set changed: {codes}"
 
     def test_the_exit_code_constants_did_not_move(self) -> None:
         """Their VALUES, not just their names — a caller reads the number."""
@@ -1537,6 +1542,10 @@ class TestRuleFDidNotMoveTheExitCodes:
         # the pair loop below as well, so the skill's spelling of it is checked
         # against THIS constant rather than against another string.
         assert hd.EXIT_PRUNE_REFUSED == 15
+        # Rule (r)'s code. Pinned for the identical reason, and pinned APART
+        # from 15 because the two refusals name different remedies: 15 says the
+        # prune file is wrong, 16 says the archive is.
+        assert hd.EXIT_PRUNE_UNCONSERVED == 16
 
     def test_the_prose_quotes_the_CONSTANT_not_a_stale_literal(self) -> None:
         """🔴 PROSE AGAINST THE CONSTANT, not prose against prose.
@@ -11265,7 +11274,15 @@ class TestAPruneRemovesExactlyWhatItNamed:
         self, prune_repo: Path, tmp_path: Path
     ) -> None:
         """Rule (q) reuses `durable_reason` rather than re-deciding; the count in
-        the disclosure is what makes a new signal there visible here."""
+        the disclosure is what makes a new signal there visible here.
+
+        ⚠ THE SECOND RUN GAINED AN `--archive`, AND THAT IS RULE (r) FIRING, NOT
+        A WORKAROUND. This test's own scenario — a durable removal, no archive —
+        is now exit 16, which is precisely the behaviour change rule (r) makes.
+        The disclosure is what a run prints when the conservation check PASSES,
+        so reaching it needs the archive; the claim under test (the count
+        reports only the durable removals) is unchanged.
+        """
         plain = run_prune(prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1)
         assert "look DURABLE" not in plain.stdout, (
             "the plain line was reported durable, so the flag says nothing"
@@ -11276,6 +11293,8 @@ class TestAPruneRemovesExactlyWhatItNamed:
                 tmp_path, PRUNE_PLAIN_LINE, PRUNE_DURABLE_LINE, name="two.md"
             ),
             2,
+            "--archive",
+            str(write_archive(tmp_path, PRUNE_PLAIN_LINE, PRUNE_DURABLE_LINE)),
         )
         head = both.stdout[: both.stdout.index("--- a/")]
         assert "🔴 1 of them look DURABLE" in head, head
@@ -11287,7 +11306,19 @@ class TestAPruneRemovesExactlyWhatItNamed:
         it is the biggest eviction `scripts/handoff-audit.py` reports. Measured
         on a scratch fixture: without the whole-block exception, naming a
         complete resolved block was refused ON ITS OWN STAMP, so the one prune
-        worth doing was the one prune impossible to do."""
+        worth doing was the one prune impossible to do.
+
+        🔴 AND IT NOW NEEDS AN `--archive`, WHICH IS THE MOST CONSEQUENTIAL
+        THING RULE (r) DOES — stated here rather than left to be discovered.
+        Rule (l) stamps every investigation block `as-of: <ISO date>`, and a
+        bare ISO date is `durable_reason`'s `dated claim`, so EVERY whole-block
+        eviction arms rule (r). The trigger is the stamp; the conservation check
+        is then over all three lines, so what the archive has to hold is the
+        whole block — including the `**Observed (with values):**` line, which
+        the predicate does NOT flag and which is the part actually worth
+        keeping. The outcome is the right one by a slightly indirect route, and
+        it is why rule (p)'s documented remedy says MOVE rather than delete.
+        """
         block = [
             "### the widget queue drains at 3/s",
             "- as-of: 2026-09-01",
@@ -11295,6 +11326,7 @@ class TestAPruneRemovesExactlyWhatItNamed:
         ]
         res = run_prune(
             prune_repo, write_prune(tmp_path, *block, name="block.md"), 3,
+            "--archive", str(write_archive(tmp_path, *block, name="block-arch.md")),
             "--confirm", advanced="the drain question is answered; block evicted",
         )
         assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
@@ -12049,3 +12081,668 @@ class TestApplyPruneIsByteExact:
         fenced = next(r for r in rows if r.line == "## State now")
         assert fenced.level == 0, "a `## ` inside a fence was read as a heading"
         assert hd.heading_text(rows[0].heading or "") == "Gotchas"
+
+
+# --------------------------------------------------------------------------
+# rule (r): a DURABLE prune must name where the content went
+#
+# 🔴 THE GAP, AND IT IS ONE COMMIT MESSAGE WIDE. Rule (q) made the append-only
+# sections shrinkable and REPORTS every removal that looks durable — then
+# removes it anyway. The only conservation check this repo has ever run is a
+# sentence in `af578a02`: "Verified mechanically: every non-blank line of the
+# previous revision is present in either the doc or the archive (0 missing)."
+# True, and unrepeatable: nothing re-runs a commit message.
+#
+# 🔴 HOW THESE WERE WATCHED TO FAIL, AND THE RED IS A BEHAVIOURAL ONE. Unlike
+# the rule (q) block above, a base run IS available and was taken: the whole
+# file was run against `origin/main`'s `scripts/lib/handoff_doc.py` with THIS
+# file unchanged, because nothing below reads a new module attribute at
+# class-body or decorator scope — deliberately, so the matrix exists at all.
+# The numbers are in the PR body rather than here, for the reason
+# `test_handoff_skill_size.py` gives about hand-copied counts.
+#
+# The headline red is simpler than any test: at `origin/main`, a `--confirm`
+# prune of `- MEASURED 2026-08-01: …` with NO `--archive` exits **0**, deletes
+# the line and commits it. There is no archive anywhere and no refusal.
+#
+# 🔴 WHY THE REFUSAL IS SCOPED TO DURABLE-LOOKING REMOVALS, pinned by
+# `test_a_NON_durable_prune_with_no_archive_is_still_ACCEPTED`. Without that
+# negative control every test here would pass over a tool that refused EVERY
+# prune, which is rule (f)'s own permanently-red gate wearing rule (r)'s name.
+# --------------------------------------------------------------------------
+
+#: A second durable Gotchas line, so the "every bad line is reported" and
+#: "several unconserved" cases are driven by two DISTINCT real signals rather
+#: than by one line named twice. Wording is pairwise distinct from
+#: `PRUNE_DURABLE_LINE` so a substring match cannot stand in for either.
+PRUNE_DURABLE_LINE_2 = (
+    "- The pool-size theory is RETRACTED; the ceiling is the shard map."
+)
+
+
+def write_archive(tmp_path: Path, *lines: str, name: str = "archive.md") -> Path:
+    """A file holding those lines — what `--archive` is pointed at.
+
+    🔴 WRITTEN BY THE TEST, NEVER BY THE TOOL. Rule (r) reads this file; the
+    module's one write and one path-limited commit are unchanged, and
+    `test_the_tool_neither_creates_nor_modifies_the_archive` is what pins it.
+    """
+    p = tmp_path / name
+    p.write_text("".join(f"{ln}\n" for ln in lines), encoding="utf-8")
+    return p
+
+
+def durable_repo_doc(repo: Path, extra: str = "") -> None:
+    """Commit a base doc carrying a SECOND durable Gotchas bullet."""
+    doc = PRUNE_BASE_DOC.replace(
+        f"{PRUNE_DURABLE_LINE}\n", f"{PRUNE_DURABLE_LINE}\n{PRUNE_DURABLE_LINE_2}\n"
+    ) + extra
+    (repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+        doc, encoding="utf-8"
+    )
+    _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=repo)
+    _sh("git", "commit", "-q", "-m", "a second durable bullet", cwd=repo)
+
+
+class TestTheConservationFixtureIsWhatItClaims:
+    """Guard the guards, the same way `TestThePruneFixtureIsWhatItClaims` does.
+    Every test below is scoped by a property of these lines, and a fixture that
+    stopped having one would move which branch runs WITHOUT failing."""
+
+    def test_the_second_durable_line_is_flagged_by_rule_f_s_own_predicate(
+        self,
+    ) -> None:
+        """POSITIVE CONTROL — it must be the REAL predicate arming the rule, not
+        a string chosen because it reads durable. `RETRACTED` is an evidence
+        verb; `PRUNE_DURABLE_LINE` is a dated claim, so the two also exercise
+        two DIFFERENT signals rather than one twice."""
+        assert hd.durable_reason(PRUNE_DURABLE_LINE_2) == hd.DURABLE_EVIDENCE
+        assert hd.durable_reason(PRUNE_DURABLE_LINE) == hd.DURABLE_DATED
+
+    def test_both_durable_lines_sit_in_an_APPEND_section_and_are_unguarded(
+        self,
+    ) -> None:
+        """🔴 REACHABILITY. Rule (q) runs first and refuses a load-bearing field,
+        a REPLACE-section line, an absent one and an ambiguous one. If these
+        lines tripped any of those, every test below would be green at exit 15
+        and rule (r) would never execute."""
+        for line in (PRUNE_DURABLE_LINE, PRUNE_DURABLE_LINE_2):
+            assert hd.load_bearing_field(line) is None, line
+        assert PRUNE_BASE_DOC.count(PRUNE_DURABLE_LINE) == 1
+        assert PRUNE_DURABLE_LINE_2 not in PRUNE_BASE_DOC, (
+            "the second durable line is already in the base, so "
+            "`durable_repo_doc` would plant a DUPLICATE and every prune naming "
+            "it would die at rule (q)'s [ambiguous] instead"
+        )
+        rows = hd._doc_rows(PRUNE_BASE_DOC)
+        row = next(r for r in rows if r.line == PRUNE_DURABLE_LINE)
+        assert row.heading is not None
+        assert hd.append_bucket(row.heading) is not None, (
+            "the durable fixture line is in a REPLACE section, so rule (q)'s "
+            "[replace section] refusal fires before rule (r) is ever asked"
+        )
+
+
+class TestADurablePruneWithNoArchiveIsRefused:
+    """🔴 THE RULE ITSELF. RED at `origin/main`: the identical run exits 0,
+    deletes the line and commits it."""
+
+    def test_it_is_refused_and_writes_NOTHING(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        before = tree_hash(prune_repo)
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm",
+            advanced="evicted the shard-map finding",
+        )
+        # 🔴 THE DAMAGE IS ASSERTED BEFORE THE EXIT CODE, for the reason
+        # `test_one_bad_line_refuses_the_WHOLE_prune` records: with rc first, a
+        # mutant that refuses-but-writes dies on "it did not refuse" and the
+        # fact that the line went anyway never reaches the output.
+        assert PRUNE_DURABLE_LINE in doc_text(prune_repo), (
+            "the durable line was removed with no archive anywhere — this is "
+            "exactly the `origin/main` behaviour rule (r) exists to end"
+        )
+        assert tree_hash(prune_repo) == before, "a refused prune wrote something"
+        assert res.returncode == hd.EXIT_PRUNE_UNCONSERVED, res.stdout + res.stderr
+        assert "status=prune-unconserved" in res.stderr, res.stderr
+        assert "NOTHING WRITTEN" in res.stderr, res.stderr
+
+    def test_the_refusal_names_the_LINE_and_the_predicate_s_own_reason(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 CHECKED ON THE MARKER, NOT THE CODE — the module now has two
+        prune refusals and a test reading only rc cannot tell them apart. The
+        reason string is `durable_reason`'s own, so the author is told WHICH
+        signal armed the rule rather than that something did."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            advanced="evicted the shard-map finding",
+        )
+        assert hd.ARCHIVE_MARKER_NONE in res.stderr, res.stderr
+        assert hd.PRUNE_MARKER_ABSENT not in res.stderr, (
+            f"rule (q) refused first, so rule (r) never ran: {res.stderr}"
+        )
+        assert hd.DURABLE_DATED in res.stderr, (
+            f"the refusal does not name the predicate's own reason "
+            f"({hd.DURABLE_DATED!r}), so the author cannot tell which signal "
+            f"armed it: {res.stderr}"
+        )
+        assert hd.ARCHIVE_FLAG in res.stderr, "the remedy names no flag"
+
+    def test_EVERY_unconserved_line_is_reported_not_just_the_first(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """Same argument `prune_plan` makes: a caller told about one bad line at
+        a time re-runs once per line and the middle runs teach nothing."""
+        durable_repo_doc(prune_repo)
+        res = run_prune(
+            prune_repo,
+            write_prune(
+                tmp_path, PRUNE_DURABLE_LINE, PRUNE_DURABLE_LINE_2, name="two.md"
+            ),
+            2,
+            advanced="evicted two findings",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_UNCONSERVED, res.stdout + res.stderr
+        assert PRUNE_DURABLE_LINE in res.stderr, res.stderr
+        assert PRUNE_DURABLE_LINE_2 in res.stderr, (
+            f"only the first unconserved line was reported: {res.stderr}"
+        )
+
+    def test_a_NON_durable_prune_with_no_archive_is_still_ACCEPTED(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE NEGATIVE CONTROL, AND WITHOUT IT NOTHING ABOVE MEANS ANYTHING.
+        A guard that refused every prune would pass every test in this class and
+        be rule (f)'s permanently-red gate with a new number on it. Rule (f)'s
+        own measurement is the scope argument: the predicate flags 2.4% of the
+        lines under REPLACE headings, so arming on all prunes would demand an
+        archive for the other ~97.6% — padding and stale status."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        after = doc_text(prune_repo)
+        assert after == _prune_expected_doc(PRUNE_PLAIN_LINE), (
+            "the ordinary prune of a non-durable line stopped working"
+        )
+        assert "status=prune-unconserved" not in res.stderr, res.stderr
+        assert hd.ARCHIVE_MARKER_NONE not in res.stderr, res.stderr
+
+
+class TestAnArchiveThatHoldsTheContentLetsThePruneLand:
+    def test_the_confirmed_doc_is_the_base_minus_the_durable_line(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """VERIFIED BY CONTENT. The whole-document comparison is the "and
+        nothing else moved" half — an exit-0 assertion alone would pass over a
+        prune that removed the wrong line or two."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", str(write_archive(tmp_path, PRUNE_DURABLE_LINE)),
+            "--confirm", advanced="moved the shard-map finding to the archive",
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert doc_text(prune_repo) == _prune_expected_doc(PRUNE_DURABLE_LINE)
+
+    def test_the_disclosure_RECORDS_the_archive_it_verified(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """Above the diff, beside rule (q)'s own disclosure and for its reason:
+        the reader is being asked to approve a deletion, so where the content
+        went belongs on the same screen as what is going."""
+        archive = write_archive(tmp_path, PRUNE_DURABLE_LINE)
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", str(archive),
+            advanced="moved the shard-map finding to the archive",
+        )
+        head = res.stdout[: res.stdout.index("--- a/")]
+        assert "conserved: all 1 removed line(s)" in head, head
+        assert str(archive) in head, (
+            f"the disclosure does not name the archive it read: {head}"
+        )
+
+    def test_whitespace_is_collapsed_and_NOTHING_ELSE_IS(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 ONE NORMALISATION, SHARED WITH THE PRUNE MATCHER. `prune_plan`
+        resolves a named line with whitespace collapsed; if this compared
+        verbatim, an author who re-indented the lines on the way into the
+        archive would be told the content is missing by the same tool that had
+        just accepted the same spelling. The second half is the control: a
+        REWORDED copy must NOT count, or the check is satisfied by anything."""
+        reindented = f"   {PRUNE_DURABLE_LINE.strip()}  "
+        ok = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", str(write_archive(tmp_path, reindented, name="ws.md")),
+            advanced="moved it, re-indented",
+        )
+        assert ok.returncode == hd.EXIT_OK, ok.stdout + ok.stderr
+
+        reworded = "- MEASURED 2026-08-01: the shard map was stale in some replicas."
+        assert reworded != PRUNE_DURABLE_LINE
+        bad = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", str(write_archive(tmp_path, reworded, name="rw.md")),
+            advanced="moved it, paraphrased",
+        )
+        assert bad.returncode == hd.EXIT_PRUNE_UNCONSERVED, bad.stdout + bad.stderr
+        assert hd.ARCHIVE_MARKER_NOT_CONSERVED in bad.stderr, bad.stderr
+
+
+class TestTheArchiveIsCheckedOverEVERYRemovedLine:
+    """🔴 THE ASYMMETRY, AND IT IS THE ANSWER TO THE PREDICATE'S KNOWN FLOOR.
+    `durable_reason` is what ARMS the rule; once an archive is supplied it is
+    not what the rule READS. A guard that only compared the durable half would
+    inherit the floor `prune_note` already declares — "a FLOOR, not a
+    classifier" — and conserve exactly the lines the predicate could see."""
+
+    def test_a_NON_durable_removal_missing_from_the_archive_refuses(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        res = run_prune(
+            prune_repo,
+            write_prune(
+                tmp_path, PRUNE_DURABLE_LINE, PRUNE_PLAIN_LINE, name="mixed.md"
+            ),
+            2,
+            # The archive holds ONLY the durable one. A rule reading just the
+            # durable half would accept this and silently drop the other line.
+            "--archive", str(write_archive(tmp_path, PRUNE_DURABLE_LINE)),
+            "--confirm", advanced="moved the finding; dropped the pool-size note",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_UNCONSERVED, res.stdout + res.stderr
+        assert hd.ARCHIVE_MARKER_NOT_CONSERVED in res.stderr, res.stderr
+        assert PRUNE_PLAIN_LINE in res.stderr, (
+            f"the refusal does not name the NON-durable line it fired on, so "
+            f"it cannot be distinguished from the durable arm: {res.stderr}"
+        )
+
+    def test_a_refused_conservation_check_applies_NONE_of_the_prune(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """All-or-nothing, inherited from rule (q) and for its reason: a run
+        that removed the conserved half would leave a transcript reading as a
+        decision nobody made."""
+        before = tree_hash(prune_repo)
+        res = run_prune(
+            prune_repo,
+            write_prune(
+                tmp_path, PRUNE_DURABLE_LINE, PRUNE_PLAIN_LINE, name="mixed.md"
+            ),
+            2,
+            "--archive", str(write_archive(tmp_path, PRUNE_DURABLE_LINE)),
+            "--confirm", advanced="moved the finding; dropped the pool-size note",
+        )
+        after = doc_text(prune_repo)
+        assert PRUNE_DURABLE_LINE in after, "the conserved half landed anyway"
+        assert PRUNE_PLAIN_LINE in after, "the unconserved half landed anyway"
+        assert tree_hash(prune_repo) == before
+        assert res.returncode == hd.EXIT_PRUNE_UNCONSERVED, res.stdout + res.stderr
+
+
+class TestTheArchiveIsNeverWrittenAndCannotBeTheDoc:
+    def test_the_tool_neither_creates_nor_modifies_the_archive(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE PROPERTY THAT KEEPS THE ONE-WRITE CONTRACT TRUE. This module
+        writes ONE file and commits ONE path; rule (r) must not make it a second
+        writer of a file nobody reviewed, in the same run that deletes the
+        original."""
+        archive = write_archive(tmp_path, PRUNE_DURABLE_LINE)
+        before = archive.read_bytes()
+        before_mtime = archive.stat().st_mtime_ns
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", str(archive), "--confirm",
+            advanced="moved the shard-map finding to the archive",
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert archive.read_bytes() == before, "the tool wrote to the archive"
+        assert archive.stat().st_mtime_ns == before_mtime, (
+            "the archive's mtime moved, so something opened it for writing"
+        )
+
+    def test_the_commit_is_still_path_limited_to_the_doc_alone(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """The archive lives INSIDE the repo here, which is the realistic case
+        and the one where a `git add` of the wrong thing would be invisible to
+        an archive-outside-the-tree test."""
+        before = _sh("git", "rev-parse", "HEAD", cwd=prune_repo).strip()
+        archive = prune_repo / "claudedocs" / "archive-sample-topic.md"
+        archive.write_text(f"{PRUNE_DURABLE_LINE}\n", encoding="utf-8")
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", str(archive), "--confirm",
+            advanced="moved the shard-map finding to the archive",
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        touched = _sh(
+            "git", "show", "--name-only", "--format=", "HEAD", cwd=prune_repo
+        ).split()
+        assert touched == ["claudedocs/handoff-sample-topic.md"], touched
+        assert _sh("git", "rev-parse", "HEAD~1", cwd=prune_repo).strip() == before
+        assert archive.exists(), "the tool deleted the archive"
+
+    def test_pointing_the_archive_AT_THE_DOC_is_refused(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE SPELLED-GUARD WALK, CLOSED. The containment test runs against
+        the doc as this process found it — BEFORE the prune is written — so
+        `--archive <the doc>` satisfies it for every line, trivially, and for
+        exactly as long as the lines are still there."""
+        before = tree_hash(prune_repo)
+        doc = prune_repo / "claudedocs" / "handoff-sample-topic.md"
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", str(doc), "--confirm",
+            advanced="archiving into the doc itself",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_UNCONSERVED, res.stdout + res.stderr
+        assert hd.ARCHIVE_MARKER_SELF in res.stderr, res.stderr
+        assert tree_hash(prune_repo) == before
+
+    def test_the_self_archive_refusal_is_on_IDENTITY_not_on_a_spelling(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """A guard on the NAME is walkable by renaming the path. A symlink to
+        the doc is the cheapest counter-spelling, and it must refuse too."""
+        link = tmp_path / "looks-like-an-archive.md"
+        link.symlink_to(prune_repo / "claudedocs" / "handoff-sample-topic.md")
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", str(link), "--confirm",
+            advanced="archiving into a symlink to the doc",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_UNCONSERVED, res.stdout + res.stderr
+        assert hd.ARCHIVE_MARKER_SELF in res.stderr, res.stderr
+
+    def test_an_EMPTY_archive_is_not_a_bypass(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """`--archive /dev/null` is the one-token way to make a conservation
+        gate inert, so it is checked rather than assumed: an empty readable
+        file holds nothing and must refuse like any other that does not."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", "/dev/null", "--confirm",
+            advanced="archiving into the void",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_UNCONSERVED, res.stdout + res.stderr
+        assert hd.ARCHIVE_MARKER_NOT_CONSERVED in res.stderr, res.stderr
+
+    def test_an_unreadable_archive_is_RULE_R_s_verdict_not_an_OPERATIONAL_one(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 16, NEVER 3, AND THE DISTINCTION IS NOT COSMETIC. `--update` and
+        `--prune` are inputs the tool needs to do the job, so an unreadable one
+        is operational. `--archive` is a CLAIM about where content went; a file
+        that is not there makes the claim false, which is a verdict about the
+        prune."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", str(tmp_path / "never-written.md"), "--confirm",
+            advanced="archiving into a file that does not exist",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_UNCONSERVED, res.stdout + res.stderr
+        assert res.returncode != hd.EXIT_FAIL
+        assert hd.ARCHIVE_MARKER_UNREADABLE in res.stderr, res.stderr
+
+
+class TestRuleRSharesRuleFsPredicateRatherThanRedecidingIt:
+    """🔴 ONE RULE, ONE PLACE. A second "looks durable" test here would be the
+    duplicated predicate `claude/RULES.md` says ends up wrong at N-1 of N sites,
+    and it would disagree with the disclosure printed three lines away."""
+
+    def test_durable_removals_is_exactly_the_targets_carrying_a_reason(
+        self,
+    ) -> None:
+        plan = hd.PrunePlan(
+            "",
+            (
+                hd.PruneTarget(1, PRUNE_PLAIN_LINE, "Gotchas", None),
+                hd.PruneTarget(2, PRUNE_DURABLE_LINE, "Gotchas", hd.DURABLE_DATED),
+            ),
+            (),
+        )
+        assert [t.line for t in hd.durable_removals(plan)] == [PRUNE_DURABLE_LINE]
+
+    def test_the_SAME_count_drives_the_disclosure_and_the_refusal(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """Two runs over one prune: with an archive it is a disclosure, without
+        one it is a refusal, and both must report the same durable count. A
+        second predicate would be free to disagree about exactly this number."""
+        durable_repo_doc(prune_repo)
+        prune = write_prune(
+            tmp_path, PRUNE_DURABLE_LINE, PRUNE_DURABLE_LINE_2, name="two.md"
+        )
+        archived = run_prune(
+            prune_repo, prune, 2,
+            "--archive", str(write_archive(
+                tmp_path, PRUNE_DURABLE_LINE, PRUNE_DURABLE_LINE_2
+            )),
+            advanced="moved both findings to the archive",
+        )
+        assert archived.returncode == hd.EXIT_OK, archived.stdout + archived.stderr
+        head = archived.stdout[: archived.stdout.index("--- a/")]
+        assert "🔴 2 of them look DURABLE" in head, head
+
+        refused = run_prune(prune_repo, prune, 2, advanced="dropped both findings")
+        assert refused.returncode == hd.EXIT_PRUNE_UNCONSERVED, refused.stderr
+        assert "2 of which look DURABLE" in refused.stderr, refused.stderr
+
+
+class TestEveryArchiveMarkerIsReachable:
+    """🔴 THE REACHABILITY LEDGER, the same instrument `TestEveryPruneMarkerIsReachable`
+    is. A guard an earlier check always preempts never executes and its test
+    passes vacuously — and rule (q) runs FIRST here, with eight refusals of its
+    own, so preemption is the live hazard rather than a hypothetical."""
+
+    def _scenarios(self, tmp_path: Path) -> dict[str, list[str]]:
+        """marker -> the extra argv that must produce THAT marker. Built in a
+        method body rather than at class scope so this file still COLLECTS
+        against a module that has none of these constants — which is what makes
+        the red-at-base matrix in the PR a measurement."""
+        return {
+            hd.ARCHIVE_MARKER_NONE: [],
+            hd.ARCHIVE_MARKER_UNREADABLE: [
+                "--archive", str(tmp_path / "absent.md")],
+            hd.ARCHIVE_MARKER_SELF: ["--archive", "DOC"],
+            hd.ARCHIVE_MARKER_NOT_CONSERVED: [
+                "--archive",
+                str(write_archive(tmp_path, "- unrelated", name="other.md")),
+            ],
+        }
+
+    def test_the_ledger_covers_every_marker_the_module_declares(
+        self, tmp_path: Path
+    ) -> None:
+        scenarios = self._scenarios(tmp_path)
+        assert set(scenarios) == set(hd.ARCHIVE_MARKERS), (
+            f"the archive-marker ledger and hd.ARCHIVE_MARKERS disagree. Only "
+            f"in the module: {set(hd.ARCHIVE_MARKERS) - set(scenarios)}; only "
+            f"in the ledger: {set(scenarios) - set(hd.ARCHIVE_MARKERS)}. A "
+            f"marker with no scenario is untested or unreachable."
+        )
+        assert len(set(hd.ARCHIVE_MARKERS)) == len(hd.ARCHIVE_MARKERS), (
+            "two markers collapsed onto one token, so their causes are "
+            "indistinguishable in the refusal"
+        )
+        assert not set(hd.ARCHIVE_MARKERS) & set(hd.PRUNE_MARKERS), (
+            "an archive marker reuses a rule (q) token, so a reader cannot "
+            "tell which refusal printed it"
+        )
+
+    def test_every_marker_is_reached_by_a_real_run(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        doc = prune_repo / "claudedocs" / "handoff-sample-topic.md"
+        for marker, extra in self._scenarios(tmp_path).items():
+            argv = [str(doc) if a == "DOC" else a for a in extra]
+            res = run_prune(
+                prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, *argv,
+                advanced="evicted the shard-map finding",
+            )
+            assert res.returncode == hd.EXIT_PRUNE_UNCONSERVED, (
+                f"{marker}: rc {res.returncode}\n{res.stdout}{res.stderr}"
+            )
+            assert marker in res.stderr, (
+                f"the scenario for {marker!r} refused for a DIFFERENT reason, "
+                f"so that marker is not shown reachable:\n{res.stderr}"
+            )
+
+
+class TestRuleRRoutesAroundNothing:
+    def test_rule_q_still_refuses_FIRST_when_both_would_fire(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 ORDER, PINNED. Rule (q) asks whether the lines can be removed at
+        all; rule (r) asks where they went. Answering the second first would
+        report a missing archive for a prune that was never going to run, i.e.
+        two unrelated remedies for one broken file."""
+        res = run_prune(
+            prune_repo,
+            write_prune(
+                tmp_path, PRUNE_DURABLE_LINE, "- never in this document",
+                name="bad.md",
+            ),
+            2,
+            advanced="evicting a finding and a line that is not there",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert hd.PRUNE_MARKER_ABSENT in res.stderr, res.stderr
+        assert hd.ARCHIVE_MARKER_NONE not in res.stderr, (
+            f"rule (r) also fired on a prune rule (q) had already refused: "
+            f"{res.stderr}"
+        )
+
+    def test_rule_p_is_still_satisfiable_by_an_ARCHIVED_durable_prune(
+        self, prune_repo: Path, new_doc_update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE WORKFLOW RULE (q) EXISTS FOR MUST SURVIVE RULE (r). An
+        over-ceiling doc is shrunk by evicting closed, durable investigation
+        text — which is precisely the content rule (r) arms on. If the archived
+        path did not clear rule (p), this change would have closed the only exit
+        the module has."""
+        pads = TestAPruneRoutesAroundNothing._oversize(prune_repo)
+        cut = pads[: len(pads) // 2] + [PRUNE_DURABLE_LINE]
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, *cut, name="big.md"), len(cut),
+            "--archive", str(write_archive(tmp_path, *cut, name="big-archive.md")),
+            "--confirm", update=new_doc_update_file,
+            advanced=f"archived and evicted {len(cut)} lines",
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        after = doc_text(prune_repo)
+        assert PRUNE_DURABLE_LINE not in after, "the durable eviction did not land"
+        assert "the at-max reading was misread" in after, "the update did not land"
+
+    def test_the_leak_scan_still_runs_on_an_ARCHIVED_prune(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """Rule (o) reads the file that is written, and rule (r) must not have
+        become a path that reaches the write ahead of it."""
+        scanner = prune_repo / "tests" / "leakscan.py"
+        scanner.parent.mkdir(parents=True, exist_ok=True)
+        write_exec(scanner, "exit 1\n")
+        _sh("git", "add", "--", "tests/leakscan.py", cwd=prune_repo)
+        _sh("git", "commit", "-q", "-m", "a scanner that refuses", cwd=prune_repo)
+        before = tree_hash(prune_repo)
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", str(write_archive(tmp_path, PRUNE_DURABLE_LINE)),
+            "--confirm", advanced="moved the shard-map finding to the archive",
+        )
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, res.stdout + res.stderr
+        assert tree_hash(prune_repo) == before
+
+
+class TestTheArchiveFlagUsageContract:
+    def test_an_archive_without_a_prune_is_a_USAGE_refusal(
+        self, prune_repo: Path, update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 EXIT 2, NEVER 16, for the reason `--prune-count` carries: 16 is the
+        RULE's verdict about what a prune removes, and this run removes none."""
+        res = run_tool(
+            prune_repo, "--archive",
+            str(write_archive(tmp_path, PRUNE_DURABLE_LINE)),
+            update=update_file,
+        )
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert hd.ARCHIVE_FLAG in res.stderr and hd.PRUNE_FLAG in res.stderr
+
+    def test_an_EMPTY_archive_path_is_a_USAGE_refusal(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """Same shape as the empty `--override-size-ratchet` reason: a flag that
+        reads on the run as a conservation claim while asserting nothing."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", "   ", advanced="x",
+        )
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert hd.ARCHIVE_FLAG in res.stderr
+
+    def test_the_ordinary_update_path_never_mentions_rule_r(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """THE REGRESSION GUARD. Rule (r) touches the argparse contract and the
+        prune block, so a run with neither flag must be byte-for-byte the run it
+        always was."""
+        res = run_tool(repo, update=update_file)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+        assert "conserved:" not in res.stdout, res.stdout
+        assert "prune-unconserved" not in res.stdout + res.stderr
+
+
+class TestRuleRReachesTheSkill:
+    def test_the_reference_topic_documents_the_markers_and_the_flag(self) -> None:
+        """DERIVED FROM THE MODULE — a pin catches deletion from the doc, only
+        derivation catches a RENAME in the module."""
+        topic = (
+            REPO_ROOT / "claude" / "skills" / "handoff" / "reference"
+            / "write-gate.md"
+        )
+        doc = topic.read_text(encoding="utf-8")
+        for marker in hd.ARCHIVE_MARKERS:
+            assert marker in doc, (
+                f"scripts/lib/handoff_doc.py prints a refused row marked "
+                f"{marker!r} and {topic.name} never mentions it. The "
+                f"executor's only map from a marker to what to do about it "
+                f"would be silent on this one."
+            )
+        assert f"`{hd.ARCHIVE_FLAG}" in doc, f"{topic.name} never names "\
+            f"{hd.ARCHIVE_FLAG}"
+
+    def test_the_marker_pin_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL on the loop above — it iterates a module constant,
+        so without this it cannot be told from a loop over an empty tuple."""
+        topic = (
+            REPO_ROOT / "claude" / "skills" / "handoff" / "reference"
+            / "write-gate.md"
+        )
+        assert "[archive declined by the operator]" not in topic.read_text(
+            encoding="utf-8"
+        )
+
+    def test_the_literal_marker_spellings_are_in_the_reference_topic(
+        self,
+    ) -> None:
+        """🔴 THE RENAME CATCHER. The loop above reads the CONSTANT, so renaming
+        `ARCHIVE_MARKER_NONE` to `[gone]` renames both sides and survives — the
+        measured survival `TestThePruneRuleReachesTheSkill`'s header records.
+        Only a literal can see it."""
+        doc = (
+            REPO_ROOT / "claude" / "skills" / "handoff" / "reference"
+            / "write-gate.md"
+        ).read_text(encoding="utf-8")
+        for literal in (
+            "[no archive]", "[archive unreadable]", "[archive is the doc]",
+            "[not conserved]", "`--archive",
+        ):
+            assert literal in doc, f"write-gate.md never spells {literal!r}"

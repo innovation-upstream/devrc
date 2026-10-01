@@ -1518,6 +1518,8 @@ python3 scripts/lib/handoff_doc.py --repo "$PWD" --topic "$TOPIC" \
 * `--update` is no longer required — but one of `--update` / `--prune` is (exit 2). A
   pure prune brings no sections, and forcing a no-op delta would mean REPLACING a
   section the author had to pick, i.e. the tool teaching the hand edit it replaces.
+* 🔴 `--archive FILE` is **required when any removal looks DURABLE** (rule (r), §K) and
+  is checked over every removed line when given. It is READ, never written.
 
 ### Refusal semantics — `status=prune-refused`, exit 15
 
@@ -1597,7 +1599,10 @@ The prune is computed into the merged text **before every rule that reads it**, 
   durable lines a REPLACE drops WITHOUT the author naming them, which is a different
   claim. A prune prints its own disclosure above the diff, listing every removal with its
   line number and flagging the ones `durable_reason` calls durable — the same predicate,
-  so "looks durable" means one thing in both places.
+  so "looks durable" means one thing in both places. ⚠ **That flag used to be the END of
+  it: the run named the durable removals and then made them.** Rule (r) below is what
+  turned the flag into a condition, and it reads the SAME `durable_removals` list the
+  disclosure counts, so the two cannot disagree about which removals are durable.
 * **rules (h) `stale-base`, (i) `doc-per-effort`, (d) `no-advance` and `behind` are
   untouched.** `--advanced` is still required: a prune IS an advance and the caller still
   has to say what changed, which is also what the commit subject is built from.
@@ -1608,7 +1613,128 @@ The prune is computed into the merged text **before every rule that reads it**, 
   alone. A prune that also normalised whitespace would put changes in the diff the caller
   did not name, which is the whole property the flag is built to have.
 * **No relocation.** `scripts/handoff-audit.py`'s `RELOCATE_DURABLE` report says which
-  bullets are candidates; acting on it is still a human read. If a removal carries a
-  finding worth keeping, its home is the owning skill or the subsystem store.
+  bullets are candidates, and the tool never moves one: it does not write, create or
+  commit `--archive`'s file. ⚠ **What rule (r) changed is that for a DURABLE removal the
+  relocation must already have HAPPENED** — the file is read and every removed line must
+  be in it. Doing the move is still a human read; skipping it is no longer silent.
 * **No judgement about whether the content deserved to go.** As with rules (j) and (k),
-  the guard is structural; the decision is the author's and is recorded in the diff.
+  the guard is structural; the decision is the author's and is recorded in the diff. ⚠
+  Rule (r) is structural in the same sense — it asks whether the content still exists
+  SOMEWHERE, never whether removing it was right.
+
+## §K rule (r) — a DURABLE prune must name where the content went
+
+### What it is for, and what was checking it before
+
+🔴 **One commit message.** Rule (q) made the append-only sections shrinkable and
+*reports* every removal that looks durable — then removes it anyway, with no archive
+required and nothing checking one. The only conservation check this repo has ever run is
+a sentence in `af578a02`: *"Verified mechanically: every non-blank line of the previous
+revision is present in either the doc or the archive (0 missing)."* That claim was right
+and it was true. It was also typed by a human after the fact, about one prune, and
+nothing re-runs a commit message. Rule (r) is that sentence as a refusal.
+
+Measured on `origin/main` before the rule: a `--confirm` prune of
+`- MEASURED 2026-08-01: …` with **no `--archive`** exits **0**, deletes the line and
+commits it. The run prints `🔴 1 of them look DURABLE` first — which is the point. The
+warning was the whole of the protection.
+
+### How to use it
+
+```bash
+TOPIC=queue-drain
+PRUNE=/tmp/prune-$TOPIC.md       # the VERBATIM lines to remove
+ARCHIVE=claudedocs/archive-$TOPIC.md   # YOU write and commit this, not the tool
+python3 scripts/lib/handoff_doc.py --repo "$PWD" --topic "$TOPIC" \
+  --prune "$PRUNE" --prune-count 3 --archive "$ARCHIVE" \
+  --advanced 'moved three closed findings to the archive'
+```
+
+* `--archive FILE` is **REQUIRED when any removal looks DURABLE** by rule (f)'s
+  predicate — a dated claim, an evidence verb (`MEASURED`, `RETRACTED`, `CLOSED`, …), or
+  an `OPEN:`/`RESOLVED <sha>:` marker. Otherwise it is optional.
+* 🔴 **It is READ, never written, and this run does not commit it.** The module still
+  makes ONE file write and ONE path-limited commit, of the handoff doc alone. Write the
+  archive and commit it yourself, in the same session.
+* 🔴 **When given it is checked over EVERY removed line, not only the durable ones.**
+  `durable_reason` is a FLOOR, not a classifier, so a rule that only compared the lines
+  it flagged would inherit that floor. Passing the flag by habit is therefore strictly
+  safer than not passing it, and the claim then verified is `af578a02`'s own.
+* Whitespace is collapsed before comparing — the same normalisation `--prune` resolves a
+  named line with, so re-indenting on the way into the archive is fine. **Nothing else
+  is**: a reworded copy does not count, because a line nobody can grep for afterwards is
+  a line that was deleted however carefully it was paraphrased.
+* `--archive` without `--prune` is **exit 2**, not 16: this run removes nothing, so there
+  is no verdict to give and an inert flag reads as a conservation claim.
+
+### Refusal semantics — `status=prune-unconserved`, exit 16
+
+**All-or-nothing**, inherited from rule (q) and for its reason. Nothing is written on any
+arm — not the doc, not a commit, not a ref. Every unconserved line is reported, not just
+the first:
+
+| marker | fires when | fix |
+|---|---|---|
+| `[no archive]` | a removal looks DURABLE and no `--archive` was given | move the content somewhere that outlives the doc, then name that file |
+| `[archive unreadable]` | `--archive` names a file that cannot be read | write the file FIRST — this tool never does |
+| `[archive is the doc]` | `--archive` resolves to the handoff doc being pruned | the archive has to be a DIFFERENT file; see below |
+| `[not conserved]` | a removed line is not present in the archive | add it verbatim, or drop it from the prune |
+
+🔴 **`[archive is the doc]` closes a walk, not a typo.** The containment check runs
+against the doc as the process found it — *before* the prune is written — so
+`--archive <the doc>` satisfies it for every line, trivially, and for exactly as long as
+the lines are still there. It is refused on resolved-path **identity**, so a symlink or
+a relative spelling does not walk it either. `--archive /dev/null` is not a bypass
+either: an empty readable file holds nothing and fails the containment check like any
+other file that does not.
+
+🔴 **16 and not 15, and 16 and not 3.** Rule (q)'s eight causes share one sentence — *this
+tool cannot identify, or may not touch, what you told it to remove* — and their remedy is
+always the prune file. Here the lines resolve exactly, sit in an append-only section, and
+MAY be removed; what is missing is a different artefact, so a caller branching on the
+number can tell "rewrite your prune file" from "write the archive first". And an
+unreadable `--archive` is **not** an operational failure (3) the way an unreadable
+`--update` is: that flag is an input the tool needs to do the job, while this one is a
+CLAIM, and a file that is not there makes the claim false.
+
+🔴 **Rule (q) runs FIRST when both would fire.** Whether the lines can be removed at all
+is answered before where they went, so a broken prune file gets one remedy rather than
+two unrelated ones.
+
+### 🔴 Every whole-block investigation eviction now needs an archive
+
+Stated here rather than left to be discovered, because it is the most
+consequential thing this rule does. Rule (l) stamps every investigation block
+`as-of: <ISO date>`, and a bare ISO date is `durable_reason`'s **dated claim** — so
+naming a complete `###` block ALWAYS arms rule (r), via the stamp. The conservation
+check is then over every line of that block, so what the archive has to hold is the
+whole thing, including the `**Observed (with values):**` line that the predicate does
+*not* flag and that is the part actually worth keeping.
+
+That is the right outcome by a slightly indirect route, and it is worth knowing which
+part is load-bearing: the stamp is what ARMS the rule, the all-lines comparison is what
+makes the whole block conserved. It is also exactly why rule (p)'s documented remedy
+says **MOVE** closed text out rather than delete it. Two measured consequences in this
+repo's own suite: `test_a_WHOLE_stamped_investigation_block_can_be_evicted` and
+`test_the_disclosure_counts_only_the_durable_removals` both needed an `--archive` added
+when rule (r) landed. Neither was a regression — each was asserting the behaviour the
+rule changes.
+
+### Why it is scoped to the durable half
+
+`durable_reason` flags **63 of the 2,626 lines** sitting under REPLACE headings in this
+repo's 44 real handoff docs — **2.4%**, the measurement rule (f) is built on. Arming this
+refusal on every prune would demand an archive for the other ~97.6%: padding, superseded
+status, a grafana row nobody reads. That is the permanently-red gate `claude/RULES.md`
+and rule (f)'s own header refuse by name, and it would be satisfied with an empty ritual
+file inside a week. Scoped to the durable half, every run that fires has something real
+at stake — and the comparison, once an archive IS supplied, is wide again, so the
+predicate's floor is not also the guard's.
+
+### What it does not check
+
+That the archive is tracked, committed, pushed, or will exist tomorrow; that its contents
+are under a heading that means anything; that the archive is not itself about to be
+deleted. It compares **content at the moment of the run**, which is the half a machine can
+do — the same kind of structural-only claim rule (j) declares about a cited forcing
+function.
