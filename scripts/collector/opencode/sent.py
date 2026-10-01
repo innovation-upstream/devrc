@@ -54,7 +54,7 @@ exact misdirection `export.py`'s EXIT_STORE_UNREADABLE exists to prevent.
 predicate does NOT cover — round-1 finding 1, measured:
 
   * the predicate probes only (id, time_created) on `session`, while the
-    `known` scan reads ~12 columns through `_shared.iter_sessions`. A store
+    `known` scan reads 16 columns through `_shared.iter_sessions`. A store
     whose session table carries exactly the probed columns PASSES the probe
     and then raises IndexError on the scan. The wrap below
     (`except (sqlite3.DatabaseError, IndexError)` → rc 5, mirroring
@@ -131,7 +131,7 @@ def _one_line(text: str) -> str:
 
 def user_messages(
     db, session_id: str, all_agents: bool = False
-) -> tuple[list[tuple[int, str, str]], int, int]:
+) -> tuple[list[tuple[str, str, str]], int, int]:
     """Return ([(ts_str, agent, text)], textless_hidden, other_agent_hidden).
 
     Ordered by `export._order_key` (total order), text joined from ALL text

@@ -161,15 +161,17 @@ def test_user_message_text_is_joined_across_all_text_parts(tmp_path, capsys):
 
     🔴 The assertion is the EXACT line, not membership: both parts share one
     `time_created`, so the output is a (time_created, id) tie resolved by
-    `_order_key`. A membership assertion cannot see part ORDER — the round-1
-    mutation battery showed deleting `key=_order_key` from the parts sort
-    passes such a test (18/18) while silently reintroducing run-to-run flips.
+    `_order_key`. 🔴 The parts are inserted p2 BEFORE p1 — insertion order
+    opposite to id order — so BOTH mutants die: deleting the re-sort (SQLite's
+    tie order = insertion order) and reversing it. The round-2 audit found
+    the previous fixture inserted p1 first, where deletion survives the whole
+    suite green; that prose claimed "pinned both directions" and was false.
     """
     db = _build_db(tmp_path / "store.db")
     _add_session(db)
     _add_message(db, "m1", "s1", 1700000001000, _user("m1", 1700000001000))
-    _add_part(db, "p1", "m1", "s1", 1700000001000, _text("typed instruction"))
     _add_part(db, "p2", "m1", "s1", 1700000001000, _text("attached brief"))
+    _add_part(db, "p1", "m1", "s1", 1700000001000, _text("typed instruction"))
     db.commit()
     rc = SE.main(["show", "s1", "--db", str(tmp_path / "store.db")])
     assert rc == 0
@@ -277,7 +279,7 @@ def test_only_non_build_session_names_the_filter_and_the_escape_hatch(
     assert rc == X.EXIT_SESSION_EMPTY
     err = capsys.readouterr().err
     assert "--all-agents" in err
-    assert "1" in err
+    assert "1 non-build hidden" in err
 
 
 def test_mixed_textless_and_non_build_counts_both_in_exit_4(tmp_path, capsys):
@@ -358,15 +360,24 @@ def _connect_callers(src: str) -> list[str]:
     Compact version of test_export.py's `_connect_offenders`. The MODULE may be
     imported — round 1's fixes need `sqlite3.DatabaseError` for the store-wrap
     exit codes, exactly export.py's own use — so the guard flags call SHAPES:
-    `sqlite3.connect(...)` / bare `connect(...)` calls and the assignment alias
-    (`_c = sqlite3.connect`). The reader connection comes from `_shared`.
+    `sqlite3.connect(...)` / bare `connect(...)` calls, the assignment alias
+    (`_c = sqlite3.connect`), importing the connect FUNCTION from any sqlite
+    module path (`from sqlite3 import connect`, `from sqlite3.dbapi2 import
+    connect` — the dbapi2 hole is round-2 finding 2's second half), and
+    `getattr(sqlite3, 'connect')` (round-2 finding 2). The reader connection
+    comes from `_shared`; `getattr(sqlite3, 'DatabaseError')` and friends must
+    NOT flag (positive control below).
     """
     tree = ast.parse(src)
     offenders = []
     for node in ast.walk(tree):
         # the MODULE import is legal (exception types, export.py's own use);
-        # importing the connect FUNCTION by any alias is not
-        if isinstance(node, ast.ImportFrom) and node.module == "sqlite3":
+        # importing the connect FUNCTION by any alias is not — from any path
+        # that resolves to the sqlite family, dbapi2 included
+        if isinstance(node, ast.ImportFrom) and (
+            node.module == "sqlite3" or
+            (node.module or "").startswith("sqlite3.")
+        ):
             offenders += [a.name for a in node.names if a.name == "connect"]
         if isinstance(node, ast.Call):
             f = node.func
@@ -374,6 +385,20 @@ def _connect_callers(src: str) -> list[str]:
                 offenders.append(ast.dump(f))
             elif isinstance(f, ast.Name) and f.id == "connect":
                 offenders.append(ast.dump(f))
+            # getattr(sqlite3, 'connect') — flagged on the LITERAL 'connect'
+            # attribute string only: getattr(sqlite3, 'DatabaseError') is the
+            # sanctioned exception-class use and must stay clean (the
+            # positive control below pins exactly that line)
+            elif isinstance(f, ast.Name) and f.id == "getattr" and len(node.args) >= 2:
+                a0, a1 = node.args[0], node.args[1]
+                if isinstance(a0, ast.Name) and a0.id.startswith("sqlite3") \
+                        and isinstance(a1, ast.Constant) and a1.value == "connect":
+                    offenders.append(ast.dump(node))
+            # partial(<anything>.connect) — deferring the call is opening it
+            elif isinstance(f, ast.Name) and f.id == "partial" and node.args:
+                a0 = node.args[0]
+                if isinstance(a0, ast.Attribute) and a0.attr == "connect":
+                    offenders.append(ast.dump(node))
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Attribute) \
                 and node.value.attr == "connect":
             offenders.append(ast.dump(node))
@@ -389,19 +414,27 @@ def test_sent_opens_no_connection_of_its_own():
     "import sqlite3\ndb = sqlite3.connect('x')\n",
     "from sqlite3 import connect as _c\ndb = _c('x')\n",
     "import sqlite3\n_c = sqlite3.connect\ndb = _c('x')\n",
+    "import sqlite3\nopen_db = getattr(sqlite3, 'connect')\ndb = open_db('x')\n",
+    "from sqlite3.dbapi2 import connect as _c\ndb = _c('x')\n",
+    "import sqlite3 as s3\nfrom functools import partial\ndb = partial(s3.connect)('x')\n",
 ])
 def test_connection_guard_flags_each_spelling(bad_src):
-    """Negative control for the guard above — it must actually fire."""
+    """Negative control for the guard above — it must actually fire. The last
+    two rows are the round-2 findings: getattr evasion and the dbapi2 path."""
     assert _connect_callers(bad_src), f"guard must flag: {bad_src!r}"
 
 
 def test_connection_guard_passes_the_shared_pattern():
     """Positive control — the sanctioned spelling must NOT be flagged, and a
-    bare module import (exception types only, export.py's own use) too."""
+    bare module import (exception types only, export.py's own use) too. The
+    getattr exemption is deliberate: getattr(sqlite3, 'DatabaseError') is the
+    exception-class use, not a connection."""
     ok_src = "import _shared as S\ndb = S.get_db(None)\n"
     assert not _connect_callers(ok_src)
     ok_import = "import sqlite3\nraise sqlite3.DatabaseError('x')\n"
     assert not _connect_callers(ok_import)
+    ok_getattr = "import sqlite3\nerr_cls = getattr(sqlite3, 'DatabaseError')\n"
+    assert not _connect_callers(ok_getattr)
 
 
 # --------------------------------------------------------------------------- #
