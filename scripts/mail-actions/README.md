@@ -47,9 +47,11 @@ cheap model).
 | `KUBECONFIG` | DB access (all stages) | `~/workspace/homelab-talos/homelab-kubeconfig` |
 | `OPENROUTER_API_KEY` | Stage 2 (LLM) | not needed for `--dry-run` or tests |
 | `MAIL_ACTIONS_MODEL` | optional | default `deepseek/deepseek-v4-flash` |
-| `CLAWGATE_HOOK_TOKEN` | optional Stage 4 | if unset, `--emit-clawgate` is a graceful no-op |
+| `CLAWGATE_HOOK_TOKEN` | optional Stage 4 | read from `~/.claude/clawgate.env` **first**, then this process layer on top — `clawgatectl`'s own precedence. If neither carries it, `--emit-clawgate` is a graceful no-op that names the skip on stderr |
 
-No secrets are hardcoded — keys are read from env only.
+No secrets are hardcoded. The clawgate hook token and base URL come from
+`~/.claude/clawgate.env` with the process environment as an override; everything
+else is read from the environment only.
 
 **Python deps** (`psycopg2`, `requests`): this is NixOS, so run under a nix-shell rather
 than assuming a global install:

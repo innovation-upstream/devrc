@@ -107,6 +107,12 @@ CLAWGATE_ENV_PATH = os.path.join("~", ".claude", "clawgate.env")
 #: Fallback base URL, matching what the consumers used before this module.
 DEFAULT_API_URL = "http://192.168.50.250:30302"
 
+#: The hook-token variable name, spelled ONCE. Every reader below looks it up
+#: through this constant, so the raising file-only read (`_token`) and the
+#: two-layer read (`hook_token`) cannot drift onto different spellings — and a
+#: test can name the key without re-typing the literal.
+HOOK_TOKEN_VAR = "CLAWGATE_HOOK_TOKEN"
+
 #: 🔴 The stuck reasons, ENUMERATED AND CLOSED. A consumer renders these
 #: verbatim, and the single-source test pins this tuple against the branches in
 #: `stuck_reasons` so a new disjunct cannot exist in the code and be missing
@@ -555,6 +561,17 @@ TASK_API_URL_VARS = ("CLAWGATE_TASK_API_URL", "CLAWGATE_API_URL")
 ROUTER_API_URL_VARS = ("CLAWGATE_API_URL",)
 
 
+def env_file_path(path=None) -> str:
+    """The env-file path this module reads, `~` expanded. ONE definition.
+
+    🔴 PUBLIC because a caller has to be able to NAME it in a human-readable
+    "I looked here and found nothing" line without re-spelling the path — the
+    producers' no-token warning does exactly that. It is a PATH and never a
+    value: nothing read out of the file passes through here.
+    """
+    return os.path.expanduser(path or CLAWGATE_ENV_PATH)
+
+
 def _read_env_file(path=None):
     """Parse `KEY=VALUE` out of the env file. The ONLY I/O in this module.
 
@@ -562,7 +579,7 @@ def _read_env_file(path=None):
     so it never leaves this module. Callers get the two derived strings they
     asked for and nothing else.
     """
-    path = os.path.expanduser(path or CLAWGATE_ENV_PATH)
+    path = env_file_path(path)
     env = {}
     with open(path) as fh:
         for line in fh:
@@ -591,10 +608,80 @@ def _base_from(env, names):
 
 
 def _token(env):
-    """The hook token, or a KeyError naming the VARIABLE and not its value."""
-    if "CLAWGATE_HOOK_TOKEN" not in env:
-        raise KeyError("CLAWGATE_HOOK_TOKEN")
-    return env["CLAWGATE_HOOK_TOKEN"]
+    """The hook token out of ONE mapping, or a KeyError naming the VARIABLE.
+
+    🔴 FILE-LAYER ONLY, and that is a property of its CALLERS rather than of this
+    function: `read_clawgate_env` / `read_clawgate_task_env` hand it the parsed
+    file and nothing else, because their contract is "the file must carry the
+    credential or this raises" (the bar poller turns the raise into a `stale`
+    marker). A caller that wants the FULL precedence — the file with the process
+    environment on top, which is what `clawgatectl` does — wants `hook_token`.
+    """
+    if HOOK_TOKEN_VAR not in env:
+        raise KeyError(HOOK_TOKEN_VAR)
+    return env[HOOK_TOKEN_VAR]
+
+
+def _merged_env(env=None, path=None):
+    """The env FILE as the base layer with the PROCESS ENVIRONMENT on top.
+
+    🔴 THE PRECEDENCE, SPELLED ONCE FOR EVERY KEY IT GOVERNS — the base URLs and
+    the hook token alike. It mirrors `clawgatectl`'s `resolveConfig`
+    (`containers/clawgate/cmd/clawgatectl/config.go`), which applies its sources
+    LOWEST to HIGHEST as `~/.claude/clawgate.env` -> process environment ->
+    flags, and only lets a later source override an earlier one when it actually
+    supplies a value. This function is the first two of those three; nothing here
+    takes flags.
+
+    🔴 WHY THE FILE IS THE BASE LAYER AND NOT AN AFTERTHOUGHT. It is the layer
+    that actually carries the answer. The env file on the operator's host holds
+    the token and both URL keys; the surfaces this serves are started by hand or
+    by a unit that sets no `CLAWGATE_*` at all, so a resolver reading only
+    `os.environ` resolves to nothing and the card is skipped in silence — the
+    exact defect this is here to close. `os.environ` stays an OVERRIDE because a
+    one-off `CLAWGATE_HOOK_TOKEN=… cmd` must still win over the file.
+
+    An EMPTY process value does not mask the file: empty means unset everywhere
+    (`_base_from`'s `${A:-$B}` rule), matching the Go side's "only overrides when
+    it actually supplies a value".
+
+    🔴 The returned mapping holds every credential in the file. It is freshly
+    built per call and callers in this module derive one string from it; it is
+    never returned past the module boundary.
+
+    `env` is any mapping and `path` any env-file path, so a test can drive both
+    layers without touching the process environment or the real file — and MUST
+    pass `path`, or it asserts against whatever the host happens to have.
+    """
+    merged = _read_env_file_or_empty(path)
+    process = os.environ if env is None else env
+    merged.update({k: v for k, v in process.items() if v})
+    return merged
+
+
+def hook_token(env=None, path=None):
+    """The clawgate hook token under the FULL precedence, or `None`.
+
+    🔴 THE ONE PLACE A PRODUCER READS THE TOKEN. Both card producers —
+    `scripts/signal/clawgate.py` and `scripts/mail-actions/clawgate.py` — called
+    `os.environ.get(HOOK_TOKEN_VAR)` directly until this existed, so on the host
+    that actually runs them (the token in ~/.claude/clawgate.env, nothing in the
+    process environment) both resolved `None` and skipped their card in SILENCE.
+    Open-coding the lookup at a call site is how that regenerates: N sites, wrong
+    at N-1 of them in the same direction.
+
+    🔴 `None` RATHER THAN A RAISE, unlike `_token`. A producer's contract is that
+    a missing token degrades NOTIFICATION and never the record, so "unset" has to
+    be a value it can branch on. An empty value is `None` too — empty means unset
+    (see `_merged_env`) — so `CLAWGATE_HOOK_TOKEN= cmd` is "no token", not a
+    bearer header reading `Bearer `.
+
+    🔴 The token is RETURNED and nothing else. It is never logged, never put in a
+    URL or in argv, and never formatted into an exception or a warning here;
+    `env_file_path` exists so a caller can name WHERE it looked without naming
+    WHAT it found.
+    """
+    return _merged_env(env, path).get(HOOK_TOKEN_VAR) or None
 
 
 def read_clawgate_env(path=None):
@@ -694,12 +781,12 @@ def task_base_url(env=None, path=None) -> str:
     layers without touching the process environment or the real file — and MUST
     pass `path`, or it asserts against whatever the host happens to have.
     """
-    merged = _read_env_file_or_empty(path)
-    # 🔴 `merged` holds every credential in the file (see `_read_env_file`). It
-    # is local and only the derived string leaves this function.
-    process = os.environ if env is None else env
-    merged.update({k: v for k, v in process.items() if v})
-    return _base_from(merged, TASK_API_URL_VARS)
+    # 🔴 THE LAYERING IS `_merged_env`'s, NOT A SECOND COPY OF IT. It used to be
+    # open-coded here, and when the hook token needed the SAME two layers
+    # (the producers' silent-skip defect) that would have been the second site —
+    # wrong at one of them in the same direction, which is precisely the shape
+    # `_base_from`'s docstring warns about one level down.
+    return _base_from(_merged_env(env, path), TASK_API_URL_VARS)
 
 
 def tasks_url(base: str) -> str:

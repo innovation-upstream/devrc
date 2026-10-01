@@ -2,9 +2,18 @@
 """Surface an outbound Signal DRAFT as a clawgate Task card (decision D3).
 
 A clone of `scripts/mail-actions/clawgate.py`, including its graceful no-op:
-with `CLAWGATE_HOOK_TOKEN` unset, `emit_draft_task` posts nothing and returns
-False rather than raising — the draft is already durably stored, so a missing
-token degrades notification, never the record.
+with no `CLAWGATE_HOOK_TOKEN` resolvable, `emit_draft_task` posts nothing, names
+the miss on stderr and returns False rather than raising — the draft is already
+durably stored, so a missing token degrades notification, never the record.
+
+🔴 AND "RESOLVABLE" MEANS BOTH LAYERS, NOT JUST `os.environ` (fixed, task #307).
+This module read the token with a bare `os.environ.get("CLAWGATE_HOOK_TOKEN")`
+while resolving its BASE URL through the file — so on the one host that runs
+`consumer.py draft`, where ~/.claude/clawgate.env carries the token and no unit
+exports any `CLAWGATE_*`, it resolved `None` and skipped the card with no output
+at all. The token now goes through `scripts/lib/clawgate_tasks.hook_token`,
+which layers the file under the process environment exactly as `clawgatectl`'s
+`resolveConfig` does — ONE definition for the token and the base URL alike.
 
 Contract note (inherited, verified in mail-actions): clawgate's
 `POST /api/tasks` handler decodes ONLY `directory, body, model, repo, branch,
@@ -47,6 +56,7 @@ demands a capability minted from an APPROVED draft row.
 from __future__ import annotations
 
 import os
+import sys
 
 import _mentions
 
@@ -120,6 +130,22 @@ def task_endpoint(env=None, path=None) -> str:
     """
     return _load_clawgate_tasks().task_base_url(env, path) + TASKS_PATH
 
+
+def hook_token(env=None, path=None):
+    """The clawgate hook token, or `None`. Resolved at CALL TIME, SHARED rule.
+
+    🔴 NOT `os.environ.get("CLAWGATE_HOOK_TOKEN")`, which is what this line was
+    until now. `consumer.py draft` is an OPERATOR command run from the workbench
+    CLI, where the token lives in ~/.claude/clawgate.env and no unit exports any
+    `CLAWGATE_*` — so an environment-only read resolved `None` on exactly the
+    host that has the credential, and every draft card was skipped in SILENCE.
+    Same direction, same file, same fix as the base URL above: the precedence is
+    `scripts/lib/clawgate_tasks.hook_token` and is NOT re-spelled here.
+
+    Both arguments are pass-through, as for `task_endpoint`.
+    """
+    return _load_clawgate_tasks().hook_token(env, path)
+
 # clawgate renders `directory` as the card title; trim to a sane label length.
 TITLE_MAX = 120
 # How much of the draft body goes on the card. The full text is in Postgres.
@@ -178,22 +204,49 @@ def build_draft_payload(*, draft_id: int, recipient: str, body: str,
 def emit_draft_task(*, draft_id: int, recipient: str, body: str,
                     mentions: list | None = None,
                     author_names: dict | None = None,
-                    timeout: float = 10.0) -> bool:
+                    timeout: float = 10.0,
+                    env=None, path=None) -> bool:
     """Post one clawgate Task card for a pending draft. True if posted.
 
-    Graceful no-op (returns False, posts nothing) when `CLAWGATE_HOOK_TOKEN` is
-    unset — mirroring `mail-actions/clawgate.py`.
+    🔴 DECISION D3 — graceful no-op, record intact. With no token resolvable
+    from EITHER source this posts nothing, names the miss on stderr and returns
+    False. It never raises on that path: the draft row is already durably stored
+    by `consumer.py draft` before this is called, and a missing token must
+    degrade NOTIFICATION, never the record.
 
-    The endpoint is resolved AFTER the token check, so the no-token no-op stays
-    exactly what it was: the shared module is not loaded, ~/.claude/clawgate.env
-    is not opened, nothing is posted.
+    🔴 THE WARNING IS NOT OPTIONAL. The no-token path used to `return False` in
+    total silence, so the operator saw a draft stored, no card, and no reason —
+    indistinguishable from a card that posted and a board that lost it. One line
+    naming the variable and the file it looked in is the whole remedy.
+
+    ⚠ THE SHARED MODULE IS NOW LOADED ON THE NO-TOKEN PATH TOO, and that is a
+    deliberate change. It could previously be skipped because the token came from
+    `os.environ`; the token lives in the file this module reads, so "is there a
+    token" can no longer be answered without it. An unloadable shared module
+    therefore still RAISES here rather than degrading (the NO-FALLBACK-COPY
+    policy in `_load_clawgate_tasks`) — on both paths now, not just the posting
+    one. Every host that runs this carries the module: the image COPYs it by
+    name (pinned by `tests/test_image_deps.py`) and the CLI finds it as a
+    sibling or under `$DEVRC_DIR`.
+
+    `env` / `path` are pass-through to the resolvers, so a test can drive both
+    configuration layers without touching the process environment or the real
+    ~/.claude/clawgate.env.
     """
-    token = os.environ.get("CLAWGATE_HOOK_TOKEN")
+    token = hook_token(env, path)
     if not token:
+        cg = _load_clawgate_tasks()
+        # 🔴 NAMES THE VARIABLE AND THE PATH, NEVER A VALUE. There is no token to
+        # leak on this branch, but the line is also the template the posting
+        # branch is read against — keep it that way.
+        print("clawgate: no %s in %s or the process environment — signal draft "
+              "#%s card NOT posted (the draft itself is stored)"
+              % (cg.HOOK_TOKEN_VAR, cg.env_file_path(path), draft_id),
+              file=sys.stderr)
         return False
     import requests
 
-    url = task_endpoint()
+    url = task_endpoint(env, path)
     payload = build_draft_payload(draft_id=draft_id, recipient=recipient,
                                   body=body, mentions=mentions,
                                   author_names=author_names)
