@@ -73,9 +73,18 @@ func (LiveRunner) Run(argv []string) (string, string, int, error) {
 	return out.String(), errb.String(), code, err
 }
 
-// Load runs `oc-sent here <cwd> --json` and parses the payload.
-func Load(cwd string, r Runner) (Data, error) {
-	out, errb, code, err := r.Run([]string{"oc-sent", "here", cwd, "--json"})
+// Load runs `oc-sent here <cwd> [title] --json` and parses the payload.
+//
+// title is tmux's `#{pane_title}` (the opencode TUI names its pane
+// "OC | <session title>"). It is the pane's OWN claim about which session it
+// is showing, and it is what makes resolution right when a directory hosts
+// several concurrent opencode processes — measured 2026-10-01, three in
+// devrc, where newest-by-update always picked the most ACTIVE one (an agent
+// session) over the operator's TUI. An empty title skips title matching
+// entirely.
+func Load(cwd string, title string, r Runner) (Data, error) {
+	argv := []string{"oc-sent", "here", cwd, title, "--json"}
+	out, errb, code, err := r.Run(argv)
 	if err != nil {
 		return Data{}, fmt.Errorf(
 			"oc-sent is not runnable (is it on PATH?): %v", err)
