@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -27,13 +28,17 @@ import (
 type Effects interface {
 	// Copy puts text on the CLIPBOARD selection.
 	Copy(text string) error
-	// Focus raises a window by i3 container id (the stop path captured the
-	// operator's window before the TUI opened, so send-as-input can put
-	// focus back where the user was).
-	Focus(containerID int) error
-	// Type types text into the FOCUSED window. Newlines are already stripped
-	// by the caller; this never sends Return (a Return submits forms).
-	Type(text string) error
+	// SpawnSend launches the DETACHED send helper (`stt-voice send --target
+	// N`, transcript on stdin) and returns without waiting for it. 🔴 THE TUI
+	// MUST CLOSE BEFORE ANYTHING IS TYPED: i3's defaults (mouse_warping
+	// middle + focus_follows_mouse) steal focus back to the still-open
+	// transcript window when the helper would focus the target, and
+	// xdotool then types the transcript INTO the TUI, where bubbletea
+	// interprets it as keypresses (measured live 2026-09-30: 7 of 44
+	// characters reached the target). The helper waits for the window to be
+	// gone, then focuses and types; its own failures surface as a critical
+	// toast from the helper. Only a failure to LAUNCH is reported here.
+	SpawnSend(text string, target int) error
 	// CaptureActive returns the id of the currently focused window, or an
 	// error when nothing answerable is focused.
 	CaptureActive() (int, error)
@@ -54,7 +59,11 @@ func (Live) Copy(text string) error {
 	return nil
 }
 
-// Focus asks i3 to focus the captured container.
+// Focus asks i3 to focus the captured container. Used by the `send` helper
+// AFTER the TUI window is closed (the operator's window was captured at stop
+// time, so send-as-input can put focus back where the user was); with the
+// TUI gone there is no window left for i3's focus-follows-mouse to hand
+// focus back to.
 func (Live) Focus(containerID int) error {
 	out, err := exec.Command("i3-msg", fmt.Sprintf("[id=%d]", containerID), "focus").CombinedOutput()
 	if err != nil {
@@ -70,7 +79,29 @@ func (Live) Focus(containerID int) error {
 	return nil
 }
 
-// Type types text via xdotool reading STDIN (`type --file -`), so no shell
+// SpawnSend launches `self send --target N` detached (own session, transcript
+// on stdin) and returns as soon as it is running. The helper outlives the TUI
+// process on purpose: the TUI quits the moment this returns, and only a
+// process that is not inside the closing terminal can wait for the window to
+// disappear and then focus + type.
+func (Live) SpawnSend(text string, target int) error {
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve self: %w", err)
+	}
+	cmd := exec.Command(self, "send", "--target", strconv.Itoa(target))
+	cmd.Stdin = strings.NewReader(text)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("spawn send helper: %w", err)
+	}
+	go func() { _ = cmd.Wait() }() // reap the detached child; its errors toast
+	return nil
+}
+
+// Type types text into the FOCUSED window (the `send` helper's final step,
+// after it has waited for the TUI to close and focused the captured target).
+// It types via xdotool reading STDIN (`type --file -`), so no shell
 // metacharacter in a transcript can ever be reinterpreted as a flag. --delay 1
 // keeps 1ms between keys. 🔴 THIS NEVER SENDS RETURN: the text is one line,
 // and Return would submit whatever form the operator is filling.

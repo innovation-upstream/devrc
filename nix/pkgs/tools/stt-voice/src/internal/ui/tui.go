@@ -9,11 +9,19 @@
 // no test here can reach X11, and none should.
 //
 // 🔴 SEND-AS-INPUT NEVER TYPES A RETURN. The transcript is stripped of every
-// newline before typing (effects.StripNewlines), because a Return submits
-// whatever form the operator's focused window is showing. The window focused
-// is the one CAPTURED AT STOP TIME — before the TUI opened — passed here as
-// Target; a Target of 0 (nothing answerable was focused) refuses in words
-// rather than typing into whatever happens to have focus.
+// newline before sending (effects.StripNewlines), because a Return submits
+// whatever form the operator's focused window is showing.
+//
+// 🔴 SEND CLOSES THE TUI FIRST. The send intent spawns a DETACHED helper
+// (`stt-voice send`) and the TUI quits as soon as the spawn succeeds; the
+// helper waits until the transcript window is GONE, then focuses the
+// captured target and types. Typing while the TUI is still open is measured
+// broken: i3's focus-follows-mouse hands focus back to the floating
+// transcript window the moment the helper focuses the target, and the
+// transcript is typed into the TUI itself. The window captured is the one
+// CAPTURED AT STOP TIME — before the TUI opened — passed here as Target; a
+// Target of 0 (nothing answerable was focused) refuses in words rather than
+// typing into whatever happens to have focus.
 package ui
 
 import (
@@ -129,9 +137,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case Sent:
-		// 🔴 THE TUI CLOSES AFTER THE TYPING, NOT BEFORE: focus and type ran
-		// inside the Cmd while the window was still up; quitting now closes
-		// alacritty and leaves the operator's window focused.
+		// 🔴 THE TUI CLOSES AS SOON AS THE HELPER IS SPAWNED — the typing
+		// itself happens after this window is gone (see the header). A spawn
+		// FAILURE is the one case where staying open is right: nothing was
+		// launched, so this window is still the only surface that can say why.
 		if v.Err != nil {
 			m.notice = "send failed: " + v.Err.Error()
 			return m, nil
@@ -177,9 +186,11 @@ func (m Model) Step(msg tea.KeyPressMsg) (Model, []Intent) {
 			return m, nil
 		}
 		// 🔴 quitting is NOT set here: Update(Sent) closes the TUI only when
-		// the effects SUCCEEDED — a failed send must stay open, with the
+		// the helper was SPAWNED — a failed spawn must stay open, with the
 		// failure in words on screen, or the operator never learns why
-		// nothing was typed.
+		// nothing was typed. (Failures inside the helper — focus gone, a
+		// wedged xdotool — surface as a critical toast after this window
+		// has closed; the transcript stays in history either way.)
 		return m, []Intent{SendText{
 			Text:   effects.StripNewlines(e.Text),
 			Target: m.target,
@@ -295,15 +306,7 @@ func Run(i Intent, fx effects.Effects) tea.Cmd {
 		}
 	case SendText:
 		return func() tea.Msg {
-			// 🔴 FOCUS FIRST, THEN TYPE: the captured window may have been
-			// closed while the operator was in the TUI, and typing into
-			// "whatever now has focus" after a failed focus is exactly the
-			// wrong-window leak this feature must never do. A failed focus
-			// aborts the send (the transcript stays in history either way).
-			if err := fx.Focus(v.Target); err != nil {
-				return Sent{Err: fmt.Errorf("focus: %w", err)}
-			}
-			return Sent{Err: fx.Type(v.Text)}
+			return Sent{Err: fx.SpawnSend(v.Text, v.Target)}
 		}
 	}
 	panic("ui.Run: unhandled intent " + i.intentName())

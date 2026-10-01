@@ -51,7 +51,7 @@ func TestCachePathsAreUnderSttVoice(t *testing.T) {
 func TestUsageRejectsAnUnknownCommand(t *testing.T) {
 	// usage(): exercised through the dispatch contract below — main() itself
 	// os.Exits, so the switch is pinned by spelling the command set here
-	for _, cmd := range []string{"start", "stop", "cancel", "toggle", "tui"} {
+	for _, cmd := range []string{"start", "stop", "cancel", "toggle", "tui", "send"} {
 		if !isKnownCommand(cmd) {
 			t.Errorf("%s is not dispatchable", cmd)
 		}
@@ -63,7 +63,7 @@ func TestUsageRejectsAnUnknownCommand(t *testing.T) {
 
 func isKnownCommand(s string) bool {
 	switch s {
-	case "start", "stop", "cancel", "toggle", "tui":
+	case "start", "stop", "cancel", "toggle", "tui", "send":
 		return true
 	}
 	return false
