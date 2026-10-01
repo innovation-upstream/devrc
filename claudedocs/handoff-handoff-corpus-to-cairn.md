@@ -211,6 +211,21 @@ cairn-overlap comparison nobody has run.
   arc owns whether a delete path exists; this one owns where the deleted text goes. Its
   closing condition is untouched by anything here.
 
+- 🔴 **RETRACTED, MINE, SAME SESSION, AND IT WAS SELF-INFLICTED TWICE OVER: "the `activity`
+  skill's SOPS reader-cred recipe is broken on this host" IS FALSE.** The recipe works and
+  returns the password. My invocation put `--input-type yaml` **after** the `<(git show …)`
+  positional argument; `sops` then ignores it, tries to parse the ciphertext as JSON, and
+  fails with `Could not unmarshal input data: invalid character 'a'`. It also prints the
+  diagnosis in as many words — *"Flags must always be provided before the first positional
+  argument!"* — and **I had sent that to `2>/dev/null`**, which turned a named, self-describing
+  error into an empty string indistinguishable from a dead credential. A/B measured: flag
+  AFTER the positional ⇒ unmarshal error; flag BEFORE ⇒ 30-character secret. **So the
+  reusable lesson is the opposite of the one first written here: do NOT reach for the
+  collector's `activity_writer` file as a workaround, and do not "fix" the skill — put the
+  flag before the positional.** The wider rule, which is what actually failed: `2>/dev/null`
+  on a command whose failure mode you have not yet seen converts a diagnosis into an absence,
+  and an absence cannot distinguish two mechanisms.
+
 ## How to verify
 ```bash
 # the corpus and section weights (re-derives every number in the first block)
