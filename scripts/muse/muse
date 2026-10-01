@@ -165,7 +165,9 @@ bridge_token() {
   local key_file="$HOMELAB_REPO/.secrets/age.key"
   [ -f "$key_file" ] || die "age key not found at $key_file" 4
   local sb; sb=$(sops_bin)
-  "$sb" -d --extract '["stringData"]["token"]' "$enc" 2>/dev/null
+  # The age key must reach sops as an env var — a bare sops call fails with
+  # "no key" even though the key file exists (measured 2026-10-01).
+  SOPS_AGE_KEY_FILE="$key_file" "$sb" -d --extract '["stringData"]["token"]' "$enc" 2>/dev/null
 }
 
 cmd_status() {
