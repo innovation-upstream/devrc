@@ -425,10 +425,9 @@ const (
 	// the poll cadence of that wait
 	sendPollEvery = 50 * time.Millisecond
 	// after the window is gone, i3 still has to land its refocus before the
-	// helper's own focus command; a beat of settle, then a beat after focus
-	// (and its mouse warp) before the first keystroke
+	// helper re-asserts it and types (the type chain itself adds its own
+	// 0.1s client-settle beat)
 	sendRefocusSettle = 150 * time.Millisecond
-	sendFocusSettle   = 100 * time.Millisecond
 )
 
 // runSend types stdin into the operator's window. The TUI already stripped
@@ -462,10 +461,9 @@ func runSend(args []string) int {
 			effects.Toast("send: " + err.Error() + " — the transcript stays in history")
 			return 1
 		}
-		time.Sleep(sendFocusSettle)
 	}
-	if err := (effects.Live{}).Type(string(text)); err != nil {
-		effects.Toast("send: " + err.Error())
+	if err := (effects.Live{}).TypeInto(target, string(text)); err != nil {
+		effects.Toast("send: " + err.Error() + " — the transcript stays in history")
 		return 1
 	}
 	return 0
