@@ -1,6 +1,6 @@
 ---
 name: cairn-read
-description: "The READ door onto the cairn subsystem store: recall, search, ls-entries. The store and client themselves are `cairn`."
+description: The READ door onto the cairn store: recall, search, ls-entries.
 allowed-tools: Bash, Read, Grep, Glob
 ---
 

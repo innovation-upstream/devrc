@@ -1,6 +1,6 @@
 ---
 name: verify-agent
-description: "Deterministic post-agent verification gate: re-run the AUTHORITATIVE build/typecheck/test/vet gate + git-completeness + stale-deps checks against a repo/worktree, and READ that verdict instead of trusting an agent's 'done' claim."
+description: Deterministic post-agent verification gate: re-run the authoritative build/test/vet gate yourself.
 argument-hint: "[TARGET path] [--strict] — default: cwd. e.g. '~/workspace/civitai', '. --strict'"
 allowed-tools: Bash, Read
 ---

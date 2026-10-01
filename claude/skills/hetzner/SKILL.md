@@ -1,6 +1,6 @@
 ---
 name: hetzner
-description: "Hetzner Cloud fleet, spend and pricing across accounts."
+description: Hetzner Cloud fleet, spend and pricing across accounts.
 ---
 
 # Hetzner Cloud fleet + pricing

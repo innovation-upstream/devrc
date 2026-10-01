@@ -1,6 +1,6 @@
 ---
 name: subsystem-index
-description: "Record what a session touched in the analyze-service index store, and write or validate an entry. The protocol /handoff follows at end of session; rarely run directly."
+description: Record what a session touched in the analyze-service index store; the /handoff protocol step.
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 ---
 
