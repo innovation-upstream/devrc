@@ -164,6 +164,38 @@ Lift it out with `2>&1 >/dev/null | grep -v '^browser:'`. It is deliberately
 **not** proxied across hosts: that would mean a non-loopback listener and a
 second per-host token, which is the property the loopback binding exists to keep.
 
+## 🔴 NEVER pipe an op through `2>&1` into a JSON parser — stdout is the envelope, stderr is prose
+
+Advisories go to **stderr on a SUCCESSFUL op** — most commonly the multi-line
+*"tab is hidden — background tabs are throttled…"* note, which `open` makes the
+normal case because it creates tabs backgrounded. Merge the streams and the
+parser sees prose first:
+
+```
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+```
+
+🔴 **That is indistinguishable from a dead bridge, and the op SUCCEEDED.**
+Measured 2026-09-30 driving `yt-thumbnail`: three reads in a batch "failed" this
+way while every one of them had returned a valid envelope, and the cost was a
+BEFORE snapshot that could not be retaken — the `click` the batch was measuring
+had already fired. A read is cheap to repeat; **a read that was supposed to
+bracket a mutation is not.**
+
+```bash
+# WRONG — the advisory lands in the parser
+$BB --instance work --tab $T --frame $F js "$EXPR" 2>&1 | python3 -c '…'
+# RIGHT — separate streams, parse stdout, keep stderr readable
+$BB --instance work --tab $T --frame $F js "$EXPR" 2>/tmp/bb.err | python3 -c '…'
+```
+
+Generalises two ways. **Never infer a stream from redirection order** — zsh
+`MULTIOS` copies stdout into a pipe as well, so `… 2>&1 >/dev/null | c` hands the
+consumer **stdout**, not stderr. And when an op must cross `ssh`, write the
+expression to a file and feed it in (`ssh host 'bash -s' < script.sh`) rather than
+nesting quotes through zsh → ssh → the CLI → a JS IIFE; a mis-closed quote there
+returns `null`, which `js` also returns for a legitimately multi-statement body.
+
 ## ⚠ The extension can DROP mid-session — and ↻ is PER-PROFILE
 
 Distinct from a stale build: this is a bridge that was **working in this very

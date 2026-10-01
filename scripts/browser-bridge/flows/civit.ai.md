@@ -59,12 +59,22 @@ RETRACTED — it DOES, and it SPENDS REAL BUZZ.** Measured 2026-09-28 on
 submitted two workflows and debited **6 Buzz** from the operator's Blue account,
 returning two real generated images.
 
-**How the false claim survived a reproducible observation:** the button is
-`disabled` until the form validates, and this app's prompt field renders a
+**How the false claim survived a reproducible observation:** the button was
+`disabled` until the form validated, and this app's prompt field renders a
 *placeholder* that reads exactly like a filled-in value. A `click` on a disabled
 button still reports `ok: true` and changes nothing — indistinguishable from
-"the platform swallowed my untrusted event". **Read `.disabled` before drawing
-any conclusion about trust from a dead click.**
+"the platform swallowed my untrusted event". Never draw a conclusion about trust
+from a dead click.
+
+🔴 **Do NOT carry "read `.disabled` first" forward as the safeguard — it is
+app-specific and it has already stopped working on the app it came from.**
+Measured 2026-09-30 on `yt-thumbnail` 0.1.7: `pm-generate` reads
+`disabled: false` on a bare load with an **empty** prompt box, because a
+pre-selected *format* supplies the prompt text. A disabled control is a
+**coincidence of one app's validation rules at one version**, never a guard you
+are entitled to — and here the coincidence reversed within four versions.
+**The rule that does not rot: never click a money control unless you intend to
+spend.** Per-app cost and state detail → `flows/<slug>.civit.ai.md`.
 
 Treat every in-frame click on a money control as LIVE. Never fire one to "test
 whether it works".
