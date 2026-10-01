@@ -12743,3 +12743,879 @@ class TestRuleRReachesTheSkill:
         assert "[archive declined by the operator]" not in topic.read_text(
             encoding="utf-8"
         )
+
+
+# --------------------------------------------------------------------------
+# rule (r)'s WRITER half — `--archive-write`
+#
+# 🔴 THE RED, AND IT IS AVAILABLE AT `origin/main` RATHER THAN RECONSTRUCTED.
+# The whole class below is red at the base ref in the strongest way a test can
+# be: `--archive-write` and `--archive-note` do not exist there, so argparse
+# exits 2 on every run in it. The behavioural red is sharper and is the one
+# worth quoting, because it is a measurement of the GAP rather than of a missing
+# flag: at the base ref, `--prune --archive <a path that does not exist>` over a
+# durable removal exits **16** `[archive unreadable]` and writes nothing, and
+# there is NOTHING in the module that can create that file —
+# `test_the_tool_neither_creates_nor_modifies_the_archive` pins that it does not.
+# So the sanctioned exit from an over-ceiling doc (rule (p): "move closed text
+# out and --prune it") required the operator to hand-build the archive first,
+# byte-exact, and rule (r) then refused the prune until they had.
+#
+# 🔴 THE NEGATIVE CONTROL IS `test_without_the_write_flag_the_SAME_RUN_is_still_
+# REFUSED`, AND WITHOUT IT NOTHING HERE MEANS ANYTHING. Every test below could
+# pass over a module that had simply DELETED rule (r)'s refusal, which is the
+# opposite of what this change is for: #1960's measurement is that a durable
+# prune with no archive must still be refused, and the flag is what the operator
+# passes to say "write it", never something a run acquires by default.
+#
+# ⚠ WHAT exit 16 CAN AND CANNOT MEAN ONCE THE WRITE FLAG IS SET, stated here
+# because it is not obvious and it bounds what these tests can assert. With the
+# flag, the caller is no longer responsible for the archive's CONTENT, so
+# `[not conserved]` and `[no archive]` are unreachable by any caller error —
+# `archive_append` puts every removal in. The three ways 16 still fires are
+# `[archive is the doc]` (refused before anything is written),
+# `[archive unreadable]` for a file that EXISTS and cannot be read, and the
+# read-back check catching a defect in the WRITER. Each has its own test, and the
+# third one has to break the writer on purpose to reach it.
+# --------------------------------------------------------------------------
+
+#: Where the write flag is pointed. INSIDE the repo, because `--archive-write`
+#: refuses an archive outside `--repo` — see
+#: `test_an_archive_OUTSIDE_the_repo_is_a_USAGE_refusal` for the two silent
+#: failures that refusal exists for.
+ARCHIVE_REL = "claudedocs/archive/handoff-sample-topic.md"
+
+#: The caller's editorial sentence. 🔴 IT IS A REAL JUDGEMENT, not "moved from
+#: X", and that is the whole argument for requiring the flag: the generated
+#: alternative reads as a complete description of the content's status and so
+#: stops the next reader looking for the caveat. Taken in shape from a real
+#: archive header in this repo.
+ARCHIVE_NOTE = (
+    "these are NOT merely superseded — the shard-map number rests on a "
+    "measurement artifact, so read it for the raw value and do NOT adopt its "
+    "conclusion"
+)
+
+
+def run_write(
+    repo: Path, prune: Path, count: int, *extra: str,
+    archive: str | Path = ARCHIVE_REL,
+    note: str | None = ARCHIVE_NOTE,
+    advanced: str = "moved the shard-map finding into the archive",
+    update: Path | None = None,
+):
+    """`run_prune` with the writer flags attached.
+
+    `archive` is resolved against `repo` when it is a bare relative string, which
+    is what keeps every call site from spelling the repo path out; a `Path` is
+    used as given, so the out-of-repo and symlink cases can still be expressed.
+    """
+    target = archive if isinstance(archive, Path) else repo / archive
+    argv = ["--archive", str(target), hd.ARCHIVE_WRITE_FLAG]
+    if note is not None:
+        argv += [hd.ARCHIVE_NOTE_FLAG, note]
+    return run_prune(
+        repo, prune, count, *argv, *extra, advanced=advanced, update=update
+    )
+
+
+def archive_at(repo: Path, rel: str = ARCHIVE_REL) -> Path:
+    return repo / rel
+
+
+class TestTheWriteFlagFixtureIsWhatItClaims:
+    """Guard the guards, as `TestTheConservationFixtureIsWhatItClaims` does. Each
+    test below is scoped by a property of this fixture, and one that quietly
+    stopped holding would move which branch runs WITHOUT failing."""
+
+    def test_the_archive_path_is_inside_the_repo_and_absent(
+        self, prune_repo: Path
+    ) -> None:
+        """🔴 REACHABILITY, TWO WAYS. An out-of-repo path would make every test
+        here green at exit 2 on the containment refusal; an archive that already
+        existed would exercise the APPEND branch while the name says CREATE."""
+        assert not archive_at(prune_repo).exists()
+        assert hd._within(prune_repo, archive_at(prune_repo)), (
+            "the fixture archive is outside the repo, so --archive-write refuses "
+            "with exit 2 and nothing below reaches the writer"
+        )
+
+    def test_the_note_is_a_JUDGEMENT_and_not_a_restatement(self) -> None:
+        """The flag exists because a generated header is worse than none. A
+        fixture note reading 'moved from the doc' would be exactly the generated
+        header this refuses to synthesise, and every assertion about the note
+        would then be satisfied by the thing the design rejects."""
+        assert "NOT merely superseded" in ARCHIVE_NOTE
+        assert ARCHIVE_NOTE.strip() == ARCHIVE_NOTE
+        assert len(ARCHIVE_NOTE) > 60, "too short to be a judgement about anything"
+
+    def test_the_write_flags_are_REFUSED_by_the_base_ref_s_parser(self) -> None:
+        """POSITIVE CONTROL ON THE RED CLAIM, read from the module rather than
+        asserted about a ref this process cannot check out: the flags exist HERE,
+        so a run at a ref without them cannot be anything but a parse error. If
+        this ever fails, the red matrix in the PR body is about a different
+        module than the one under test."""
+        actions = {a.option_strings[0]: a for a in hd.build_parser()._actions
+                   if a.option_strings}
+        assert hd.ARCHIVE_WRITE_FLAG in actions
+        assert hd.ARCHIVE_NOTE_FLAG in actions
+        assert actions[hd.ARCHIVE_WRITE_FLAG].default is False, (
+            "the writer is not an OPT-IN, so a run that never asked for it gets "
+            "a second written file — which is the whole hazard #1960 named"
+        )
+
+
+class TestTheWriteFlagCreatesTheArchive:
+    def test_a_durable_prune_CREATES_the_archive_and_LANDS(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE FEATURE, AND IT IS THE RUN THAT WAS IMPOSSIBLE. The same argv
+        minus the write flag is the refusal below."""
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        archive = archive_at(prune_repo)
+        assert archive.exists(), (
+            f"the archive was not created:\n{res.stdout}{res.stderr}"
+        )
+        text = archive.read_text(encoding="utf-8")
+        assert PRUNE_DURABLE_LINE in text, (
+            f"the evicted line is not in the archive the run wrote:\n{text}"
+        )
+        assert PRUNE_DURABLE_LINE not in doc_text(prune_repo), (
+            "the prune did not land, so the archive holds content the document "
+            "still has — the one state this feature must never produce"
+        )
+
+    def test_without_the_write_flag_the_SAME_RUN_is_still_REFUSED(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE NEGATIVE CONTROL, AND IT IS #1960's REFUSAL UNCHANGED. Byte for
+        byte the same argv as the test above minus `--archive-write`: a durable
+        prune naming an archive that does not exist is still exit 16, and still
+        writes nothing. Without this, every test in this file would pass over a
+        module that had deleted rule (r) instead of giving it a writer."""
+        before = tree_hash(prune_repo)
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", str(archive_at(prune_repo)), "--confirm",
+            advanced="moved the shard-map finding into the archive",
+        )
+        assert PRUNE_DURABLE_LINE in doc_text(prune_repo), (
+            "the durable line was removed with no archive and no write flag"
+        )
+        assert not archive_at(prune_repo).exists(), (
+            "the archive was created WITHOUT --archive-write, so the writer is "
+            "not an opt-in and a run that never asked for it writes two files"
+        )
+        assert tree_hash(prune_repo) == before, "a refused prune wrote something"
+        assert res.returncode == hd.EXIT_PRUNE_UNCONSERVED, res.stdout + res.stderr
+        assert hd.ARCHIVE_MARKER_UNREADABLE in res.stderr, res.stderr
+
+    def test_the_block_names_the_DOC_the_DATE_and_the_SECTION(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """The machine-derivable half of the header, which the tool DOES write.
+        Provenance is what makes an archived line findable afterwards; the
+        judgement beside it is the half that may not be synthesised."""
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        text = archive_at(prune_repo).read_text(encoding="utf-8")
+        assert hd.ARCHIVE_BLOCK_PREFIX in text, text
+        assert "claudedocs/handoff-sample-topic.md" in text, text
+        assert hd._today() in text, text
+        assert "Gotchas / decisions / dead-ends" in text, (
+            f"the block does not say which section the line came from:\n{text}"
+        )
+
+    def test_the_note_lands_VERBATIM_and_is_not_paraphrased(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 PINNED AS A WHOLE STRING, not on a keyword. The note is the one part
+        of the archive no machine can regenerate, so a writer that reflowed,
+        truncated or re-cased it would have destroyed the only thing the flag
+        exists to carry — and a keyword assertion would not notice."""
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        text = archive_at(prune_repo).read_text(encoding="utf-8")
+        assert ARCHIVE_NOTE in text, (
+            f"the caller's note is not in the archive verbatim:\n{text}"
+        )
+        assert text.index(ARCHIVE_NOTE) < text.index(PRUNE_DURABLE_LINE), (
+            "the note is BELOW the content it is a caveat about, so a reader "
+            "meets the numbers before the warning not to adopt them"
+        )
+
+    def test_the_disclosure_says_the_archive_was_WRITTEN_not_merely_read(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 A COMMENT IS A CLAIM, AND SO IS stdout. The read-only disclosure says
+        the file is "READ, never written … committing it is yours", which on this
+        path would tell the operator to go and do work the tool had just done —
+        and to commit a path already in the commit."""
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        head = res.stdout[: res.stdout.index("--- a/")]
+        assert "CREATED" in head, head
+        assert "READ, never written" not in head, (
+            f"the read-only sentence was printed on a run that WROTE the "
+            f"archive:\n{head}"
+        )
+        assert "committing it is yours" not in head, head
+
+
+class TestTheWriteFlagCommitsExactlyTwoPaths:
+    def test_the_WRITE_flag_commits_the_doc_AND_the_archive(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE PAIRED PIN FOR `test_it_makes_exactly_one_path_limited_commit`,
+        AND BOTH ARE EXACT SETS. That test passes NEITHER archive flag, so it is a
+        claim about the DEFAULT path and stays true unchanged; this one is the
+        claim about the writer path. Neither is loosened to "any paths": an
+        archive that is written and not committed is content that exists only in
+        one working tree, and a commit wider than these two paths is the
+        sweep-in defect the path limit exists for."""
+        before = _sh("git", "rev-parse", "HEAD", cwd=prune_repo).strip()
+        (prune_repo / "unrelated.txt").write_text("other work\n", encoding="utf-8")
+        _sh("git", "add", "--", "unrelated.txt", cwd=prune_repo)
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        touched = sorted(_sh(
+            "git", "show", "--name-only", "--format=", "HEAD", cwd=prune_repo
+        ).split())
+        assert touched == sorted([
+            "claudedocs/handoff-sample-topic.md", ARCHIVE_REL
+        ]), touched
+        assert _sh("git", "rev-parse", "HEAD~1", cwd=prune_repo).strip() == before, (
+            "more than one commit was made"
+        )
+
+    def test_the_archive_is_TRACKED_afterwards_not_merely_present(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """An untracked archive is the half of the old hand workflow people
+        forgot: the doc's commit lands, the archive sits in one working tree, and
+        the content is gone for everyone else."""
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        tracked = _sh("git", "ls-files", "--", ARCHIVE_REL, cwd=prune_repo).split()
+        assert tracked == [ARCHIVE_REL], tracked
+
+
+class TestTheArchiveWriteIsIdempotent:
+    """🔴 TWO LAYERS, NEITHER A DEDUPE HEURISTIC, and they catch different
+    re-runs. Rule (q) refuses the second run of ONE prune because the lines are
+    no longer in the document; the writer's set difference catches the case rule
+    (q) cannot see, where the lines ARE in the document and the archive already
+    holds them."""
+
+    def test_re_running_the_IDENTICAL_prune_is_refused_by_RULE_Q(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """LAYER ONE, and it is pre-existing behaviour rather than something this
+        change adds — which is why it is asserted on the MARKER and not only on
+        the exit code: `[absent]` is rule (q) saying the document no longer has
+        the line, and that is the honest account of a re-run."""
+        prune = write_prune(tmp_path, PRUNE_DURABLE_LINE)
+        first = run_write(prune_repo, prune, 1, "--confirm")
+        assert first.returncode == hd.EXIT_OK, first.stdout + first.stderr
+        archive = archive_at(prune_repo)
+        after_first = archive.read_bytes()
+        mtime = archive.stat().st_mtime_ns
+
+        second = run_write(prune_repo, prune, 1, "--confirm")
+        assert second.returncode == hd.EXIT_PRUNE_REFUSED, (
+            second.stdout + second.stderr
+        )
+        assert hd.PRUNE_MARKER_ABSENT in second.stderr, second.stderr
+        assert archive.read_bytes() == after_first, (
+            "the second run appended the block again, so the archive now holds "
+            "two copies of one eviction"
+        )
+        assert archive.stat().st_mtime_ns == mtime, (
+            "the archive's mtime moved on a refused run, so it was opened for "
+            "writing before the refusal"
+        )
+
+    def test_an_archive_that_ALREADY_HOLDS_every_line_is_not_opened(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """LAYER TWO. The lines are still in the document, so rule (q) is happy;
+        the archive was hand-authored earlier and already holds them. The write
+        must be a no-op, and the commit must then be of the doc ALONE — including
+        the archive would sweep in whatever else had been done to that path."""
+        archive = archive_at(prune_repo)
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_text(
+            f"# Archive\n\nhand-written header.\n\n{PRUNE_DURABLE_LINE}\n",
+            encoding="utf-8",
+        )
+        _sh("git", "add", "--", ARCHIVE_REL, cwd=prune_repo)
+        _sh("git", "commit", "-q", "-m", "a hand-written archive", cwd=prune_repo)
+        before = archive.read_bytes()
+        mtime = archive.stat().st_mtime_ns
+
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert archive.read_bytes() == before, "the already-held line was appended"
+        assert archive.stat().st_mtime_ns == mtime, (
+            "the archive was opened for writing although nothing needed appending"
+        )
+        touched = _sh(
+            "git", "show", "--name-only", "--format=", "HEAD", cwd=prune_repo
+        ).split()
+        assert touched == ["claudedocs/handoff-sample-topic.md"], touched
+        head = res.stdout[: res.stdout.index("--- a/")]
+        assert "ALREADY in" in head, head
+
+    def test_a_PARTIALLY_held_archive_gains_only_the_MISSING_lines(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """The realistic middle case the set difference exists for, and the one a
+        block-level dedupe would get wrong in both directions."""
+        durable_repo_doc(prune_repo)
+        archive = archive_at(prune_repo)
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_text(
+            f"# Archive\n\nhand-written header.\n\n{PRUNE_DURABLE_LINE}\n",
+            encoding="utf-8",
+        )
+        res = run_write(
+            prune_repo,
+            write_prune(
+                tmp_path, PRUNE_DURABLE_LINE, PRUNE_DURABLE_LINE_2, name="two.md"
+            ),
+            2, "--confirm", advanced="archived two findings",
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        text = archive.read_text(encoding="utf-8")
+        assert text.count(PRUNE_DURABLE_LINE) == 1, (
+            f"the already-held line was appended a second time:\n{text}"
+        )
+        assert text.count(PRUNE_DURABLE_LINE_2) == 1, (
+            f"the missing line was not appended:\n{text}"
+        )
+
+    def test_whitespace_is_collapsed_when_deciding_ALREADY_HELD(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 ONE NORMALISATION. `archive_lines` is the set rule (r) verifies with,
+        so "already held" here and "conserved" there cannot disagree. A re-indented
+        copy in the archive must count as held, or a run would append a duplicate
+        that rule (r) was already satisfied by."""
+        archive = archive_at(prune_repo)
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_text(
+            f"# Archive\n\nnote.\n\n   {PRUNE_DURABLE_LINE.strip()}  \n",
+            encoding="utf-8",
+        )
+        before = archive.read_bytes()
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert archive.read_bytes() == before, (
+            "a re-indented copy was not recognised as held, so the archive now "
+            "carries the line twice in two spellings"
+        )
+
+
+class TestAnExistingEditorialHeaderIsPreserved:
+    """🔴 THE HEADER DECISION, BOTH HALVES. The note is REQUIRED because a
+    generated header is worse than none; an existing file's header is PRESERVED
+    because appending never rewrites a byte above the insertion point. Neither
+    alone is the answer: a preserved header is a judgement about the blocks that
+    were there when it was written, and says nothing about a new one."""
+
+    def test_the_existing_header_bytes_survive_the_append(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        header = (
+            "# Archive — queue-drain\n\n"
+            "🔴 These are NOT merely superseded. Read them for the raw numbers "
+            "and do NOT adopt their conclusions.\n"
+        )
+        archive = archive_at(prune_repo)
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_text(header, encoding="utf-8")
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        text = archive.read_text(encoding="utf-8")
+        assert text.startswith(header), (
+            f"the hand-authored header was rewritten or moved:\n{text}"
+        )
+        assert ARCHIVE_NOTE in text, "this block's own note is missing"
+        assert text.index(header.rstrip()) < text.index(ARCHIVE_NOTE)
+        head = res.stdout[: res.stdout.index("--- a/")]
+        assert "APPENDED TO" in head, head
+
+    def test_a_SECOND_eviction_appends_a_SECOND_block_and_keeps_the_first(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """Two blocks, two notes. The first block's judgement must not be read as
+        covering the second — which is the whole reason the note is per-block
+        rather than per-file."""
+        durable_repo_doc(prune_repo)
+        first = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm"
+        )
+        assert first.returncode == hd.EXIT_OK, first.stdout + first.stderr
+        second_note = "this one is a straightforward retraction; nothing rests on it"
+        second = run_write(
+            prune_repo,
+            write_prune(tmp_path, PRUNE_DURABLE_LINE_2, name="two.md"), 1,
+            "--confirm", note=second_note, advanced="archived the retraction too",
+        )
+        assert second.returncode == hd.EXIT_OK, second.stdout + second.stderr
+        text = archive_at(prune_repo).read_text(encoding="utf-8")
+        assert text.count(hd.ARCHIVE_BLOCK_PREFIX) == 2, text
+        assert ARCHIVE_NOTE in text and second_note in text, text
+        assert PRUNE_DURABLE_LINE in text and PRUNE_DURABLE_LINE_2 in text, text
+
+
+class TestTheConservationCheckRunsAFTERTheWriteNotInsteadOfIt:
+    """🔴 CONSTRAINT (3), AND IT IS WHAT MAKES RULE (r) A POSITIVE CONTROL ON THE
+    WRITER. The check is not branched around when the write flag is set; it is
+    re-run over the bytes read back off disk, so a writer that dropped a line
+    refuses rather than lands. Reaching that arm means BREAKING THE WRITER on
+    purpose, which is what the first test does — nothing a caller can pass gets
+    there, because with the flag the caller no longer owns the content."""
+
+    def _argv(self, prune_repo: Path, prune: Path) -> list[str]:
+        return [
+            "--repo", str(prune_repo), "--topic", "sample-topic",
+            "--prune", str(prune), "--prune-count", "1",
+            "--archive", str(archive_at(prune_repo)), hd.ARCHIVE_WRITE_FLAG,
+            hd.ARCHIVE_NOTE_FLAG, ARCHIVE_NOTE, "--confirm",
+            "--advanced", "archiving with a broken writer",
+        ]
+
+    def test_a_WRITER_that_drops_a_line_is_caught_BEFORE_anything_is_written(
+        self, prune_repo: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    ) -> None:
+        """ARM ONE — the PROJECTION. Driven in-process for
+        `test_worktree_only_failure_does_NOT_print_index_advice`'s reason: no argv
+        can make `archive_append` lose a line, so the only way to show this guard
+        reachable is to break the writer and watch THIS guard's exit code and
+        marker come back — not a neighbour's.
+
+        🔴 AND THE REFUSAL MUST *NOT* CLAIM THE ARCHIVE WAS WRITTEN. This arm runs
+        in the prune block, before the write window, so nothing has been appended
+        yet and the read-only closing sentence is the TRUE one. The pair of this
+        test and the next is what proves the two arms are distinguishable in the
+        output rather than only in the code.
+        """
+        real = hd.archive_append
+
+        def drops_everything(existing, plan, note, relpath, today):
+            whole = real(existing, plan, note, relpath, today)
+            # `appended` stays non-empty, or the caller would skip the write
+            # entirely and the refusal would prove nothing about the check.
+            return hd.ArchiveAppend(
+                f"{hd.ARCHIVE_BLOCK_PREFIX} nothing at all\n",
+                whole.appended, whole.created,
+            )
+
+        monkeypatch.setattr(hd, "archive_append", drops_everything)
+        before = tree_hash(prune_repo)
+        rc = hd.main(self._argv(prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE)))
+        out = capsys.readouterr()
+        assert rc == hd.EXIT_PRUNE_UNCONSERVED, out.out + out.err
+        assert hd.ARCHIVE_MARKER_NOT_CONSERVED in out.err, out.err
+        assert "THIS RUN DID APPEND" not in out.err, (
+            f"a refusal taken BEFORE the write window claimed the archive had "
+            f"been appended to and rolled back:\n{out.err}"
+        )
+        assert tree_hash(prune_repo) == before
+        assert not archive_at(prune_repo).exists()
+
+    def test_a_lossy_WRITE_is_caught_by_the_READ_BACK_and_rolls_BOTH_back(
+        self, prune_repo: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    ) -> None:
+        """ARM TWO — the READ-BACK, and this is constraint (3) proven REACHABLE
+        rather than asserted.
+
+        🔴 THE PROJECTION ARM ABOVE SHADOWS THE OBVIOUS SABOTAGE, which is the
+        whole reason this test exists and is written against a different lever. A
+        broken `archive_append` never reaches the write window at all — measured,
+        not assumed: that sabotage refuses in the prune block with
+        `archive_was_written=False`. So a battery row that deleted the read-back
+        check and watched the `archive_append` sabotage would score KILLED by the
+        PROJECTION and vouch for nothing. What this arm uniquely covers is the
+        bytes on disk not being what the writer produced — a truncated write, a
+        write to the wrong path, an encoding loss — so the sabotage is on
+        `write_text` and not on the writer.
+        """
+        real_write = Path.write_text
+
+        def lossy(self, data, *a, **kw):  # noqa: ANN001, ANN202
+            if self.name == Path(ARCHIVE_REL).name:
+                data = data.splitlines(keepends=True)[0]
+            return real_write(self, data, *a, **kw)
+
+        monkeypatch.setattr(Path, "write_text", lossy)
+        before = tree_hash(prune_repo)
+        rc = hd.main(self._argv(prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE)))
+        out = capsys.readouterr()
+        assert rc == hd.EXIT_PRUNE_UNCONSERVED, out.out + out.err
+        assert hd.ARCHIVE_MARKER_NOT_CONSERVED in out.err, out.err
+        assert "THIS RUN DID APPEND" in out.err, (
+            f"the refusal printed the READ-ONLY sentence on a run that had "
+            f"already written to the archive:\n{out.err}"
+        )
+        monkeypatch.undo()
+        assert not archive_at(prune_repo).exists(), (
+            "the archive this run CREATED survived a refusal that says NOTHING "
+            "WRITTEN — the rollback did not unlink it"
+        )
+        assert tree_hash(prune_repo) == before, (
+            "the read-back refusal left something behind — the doc, the archive, "
+            "a staged path or a commit"
+        )
+
+    def test_the_projection_the_proposal_run_checks_is_what_the_writer_WRITES(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """The two inputs to one check, tied together. The proposal run checks the
+        PROJECTED text and the confirmed run checks the bytes on disk; if those
+        two could differ, the proposal run would be vouching for something else."""
+        prune = write_prune(tmp_path, PRUNE_DURABLE_LINE)
+        proposal = run_write(prune_repo, prune, 1)
+        assert proposal.returncode == hd.EXIT_OK, proposal.stdout + proposal.stderr
+        assert not archive_at(prune_repo).exists(), (
+            "the PROPOSAL run created the archive — the two-run shape is broken "
+            "on the one artefact that holds the only copy of the evicted text"
+        )
+        confirmed = run_write(prune_repo, prune, 1, "--confirm")
+        assert confirmed.returncode == hd.EXIT_OK, (
+            confirmed.stdout + confirmed.stderr
+        )
+        plan = hd.prune_plan(
+            PRUNE_BASE_DOC, f"{PRUNE_DURABLE_LINE}\n", 1
+        )
+        projected = hd.archive_append(
+            None, plan, ARCHIVE_NOTE, "claudedocs/handoff-sample-topic.md",
+            hd._today(),
+        )
+        assert archive_at(prune_repo).read_text(encoding="utf-8") == projected.text
+
+    def test_the_writer_s_output_SATISFIES_the_verifier_by_construction(
+        self,
+    ) -> None:
+        """A unit pin on the pair, and the mirror of the sabotage above: the
+        writer's text must leave `conservation_problems` empty over the SAME plan,
+        for a created file and for an append alike. A writer and a verifier that
+        disagreed about normalisation would make every confirmed run exit 16."""
+        plan = hd.prune_plan(
+            PRUNE_BASE_DOC,
+            f"{PRUNE_DURABLE_LINE}\n{PRUNE_PLAIN_LINE}\n",
+            2,
+        )
+        assert not plan.problems and len(plan.removed) == 2, plan.problems
+        for existing in (None, "", "# Archive\n\nnote.\n"):
+            built = hd.archive_append(
+                existing, plan, ARCHIVE_NOTE, "claudedocs/x.md", "2000-01-01"
+            )
+            assert not hd.conservation_problems(
+                plan, "claudedocs/archive/x.md", built.text, "", False
+            ), existing
+
+
+class TestTheWriteFlagRoutesAroundNothing:
+    def test_the_leak_scanner_SEES_the_archive_block(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 CONSTRAINT (2), AS A BEHAVIOURAL TEST RATHER THAN AN ORDERING
+        COMMENT. The scanner refuses ONLY on the archive's content, so a run that
+        wrote the archive after the gate — or outside the tree — would pass it.
+        An evicted block that leaks is still a leak."""
+        scanner = prune_repo / "tests" / "leakscan.py"
+        scanner.parent.mkdir(parents=True, exist_ok=True)
+        write_exec(scanner, (
+            "import pathlib, sys\n"
+            "p = pathlib.Path(__file__).resolve().parents[1] / "
+            f"{ARCHIVE_REL!r}\n"
+            "if p.is_file() and 'shard map' in p.read_text():\n"
+            "    print('leak: the archive block'); sys.exit(1)\n"
+            "sys.exit(0)\n"
+        ))
+        _sh("git", "add", "--", "tests/leakscan.py", cwd=prune_repo)
+        _sh("git", "commit", "-q", "-m", "a scanner that reads the archive",
+            cwd=prune_repo)
+        before = tree_hash(prune_repo)
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm"
+        )
+        assert res.returncode == hd.EXIT_LEAK_REFUSED, res.stdout + res.stderr
+        assert tree_hash(prune_repo) == before, (
+            "the leak refusal left the archive, the doc, a staged path or a "
+            "commit behind"
+        )
+        assert not archive_at(prune_repo).exists(), (
+            "the archive the run created survived a leak refusal that says "
+            "NOTHING WRITTEN"
+        )
+
+    def test_the_PROPOSAL_run_writes_nothing_at_all(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """`tree_hash` sees a written doc, a written archive, a new commit, a
+        moved ref and a stray lockfile alike."""
+        before = tree_hash(prune_repo)
+        res = run_write(prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+        assert tree_hash(prune_repo) == before
+
+    def test_rule_q_still_refuses_FIRST_when_both_would_fire(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """The write flag must not become a path that reaches the writer ahead of
+        the rule deciding whether the lines may be removed at all."""
+        before = tree_hash(prune_repo)
+        res = run_write(
+            prune_repo,
+            write_prune(
+                tmp_path, PRUNE_DURABLE_LINE, "- never in this document",
+                name="bad.md",
+            ),
+            2, "--confirm",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert hd.PRUNE_MARKER_ABSENT in res.stderr, res.stderr
+        assert tree_hash(prune_repo) == before
+        assert not archive_at(prune_repo).exists(), (
+            "the writer ran on a prune rule (q) had already refused"
+        )
+
+    def test_pointing_the_WRITE_flag_at_the_DOC_is_still_refused(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE SELF-ARCHIVE WALK MUST NOT REOPEN, and the write flag is the
+        shape that could reopen it: "create it for me" pointed at the doc would
+        append the evicted lines back into the document they were removed from,
+        satisfying containment and conserving nothing."""
+        before = tree_hash(prune_repo)
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm",
+            archive=prune_repo / "claudedocs" / "handoff-sample-topic.md",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_UNCONSERVED, res.stdout + res.stderr
+        assert hd.ARCHIVE_MARKER_SELF in res.stderr, res.stderr
+        assert tree_hash(prune_repo) == before
+
+    def test_an_EXISTING_but_unreadable_archive_is_still_refused(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE ONE ARM THE WRITE FLAG DOES *NOT* FORGIVE, and it is the arm
+        where appending would lose data: something we could not read is something
+        whose header we cannot preserve and whose contents we would be writing
+        past blind. `[archive unreadable]` therefore still fires — the flag
+        forgives ABSENT, never UNREADABLE.
+
+        🔴 A DIRECTORY RATHER THAN A `chmod 0o000` FILE, AND THE CHOICE IS ABOUT
+        THE INSTRUMENT, NOT CONVENIENCE. Mode bits do not stop root, so that
+        version would have had to `pytest.skip` when the suite runs privileged —
+        and an unpinned conditional skip is a GUARD 2 failure reported as
+        `failed=0`, which is the exact trap #1960 paid a CI round for. A directory
+        is unreadable-as-a-file for every uid, so this test has no environment
+        dimension and introduces no skip. It is also the realistic typo:
+        `--archive claudedocs/archive` names the directory, not the file."""
+        archive = archive_at(prune_repo)
+        archive.mkdir(parents=True, exist_ok=True)
+        assert archive.is_dir() and archive.exists(), (
+            "the fixture is not a directory, so the EXISTS-but-unreadable arm is "
+            "not the one being exercised"
+        )
+        before = tree_hash(prune_repo)
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_UNCONSERVED, res.stdout + res.stderr
+        assert hd.ARCHIVE_MARKER_UNREADABLE in res.stderr, res.stderr
+        assert tree_hash(prune_repo) == before
+
+    def test_rule_p_is_still_CLEARED_by_a_written_archive(
+        self, prune_repo: Path, new_doc_update_file: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE WHOLE POINT, END TO END. An over-ceiling doc is what makes
+        `/handoff` refuse with exit 14, its remedy is to move closed text out, and
+        this is that remedy in ONE command instead of a hand-built file plus a
+        prune. If this did not clear rule (p) the feature would have no purpose."""
+        pads = TestAPruneRoutesAroundNothing._oversize(prune_repo)
+        cut = pads[: len(pads) // 2] + [PRUNE_DURABLE_LINE]
+        res = run_write(
+            prune_repo, write_prune(tmp_path, *cut, name="big.md"), len(cut),
+            "--confirm", update=new_doc_update_file,
+            advanced=f"archived and evicted {len(cut)} lines",
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        after = doc_text(prune_repo)
+        assert PRUNE_DURABLE_LINE not in after, "the durable eviction did not land"
+        assert "the at-max reading was misread" in after, "the update did not land"
+        text = archive_at(prune_repo).read_text(encoding="utf-8")
+        for line in cut:
+            assert line in text, f"{line!r} is in neither the doc nor the archive"
+
+    def test_the_ordinary_update_path_never_mentions_the_write_flag(
+        self, repo: Path, update_file: Path
+    ) -> None:
+        """THE REGRESSION GUARD. The writer touches the argparse contract, the
+        prune block, the write window and the rollback, so a run with none of
+        those flags must be the run it always was."""
+        res = run_tool(repo, update=update_file)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "status=proposed" in res.stdout
+        assert "CREATED" not in res.stdout, res.stdout
+        assert "APPENDED TO" not in res.stdout, res.stdout
+        assert hd.ARCHIVE_BLOCK_PREFIX not in res.stdout, res.stdout
+
+
+class TestTheWriteFlagUsageContract:
+    """🔴 EVERY ARM IS EXIT 2, NEVER 16. 16 is the RULE's verdict about what a
+    prune removes; a flag combination that names no file, or no judgement,
+    conserves nothing to have a verdict about."""
+
+    def test_the_write_flag_without_an_archive_is_a_USAGE_refusal(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            hd.ARCHIVE_WRITE_FLAG, hd.ARCHIVE_NOTE_FLAG, ARCHIVE_NOTE,
+            advanced="x",
+        )
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert hd.ARCHIVE_WRITE_FLAG in res.stderr
+        assert hd.ARCHIVE_FLAG in res.stderr
+
+    def test_the_write_flag_without_a_NOTE_is_a_USAGE_refusal(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE HEADER DECISION, ENFORCED. A generated editorial header reads as
+        a complete description of what the evicted content is now worth, which is
+        worse than none — so the judgement is REQUIRED rather than defaulted."""
+        before = tree_hash(prune_repo)
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm",
+            note=None,
+        )
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert hd.ARCHIVE_NOTE_FLAG in res.stderr
+        assert "worse than none" in res.stderr, res.stderr
+        assert tree_hash(prune_repo) == before
+        assert not archive_at(prune_repo).exists()
+
+    def test_an_EMPTY_note_is_a_USAGE_refusal(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """Same shape as the empty `--override-size-ratchet` reason: a flag that
+        reads on the run as a recorded judgement while recording nothing."""
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            note="   ",
+        )
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert hd.ARCHIVE_NOTE_FLAG in res.stderr
+
+    def test_a_NOTE_without_the_write_flag_is_a_USAGE_refusal(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """An inert flag is worth refusing rather than ignoring — a caller who
+        passed it believes their sentence was recorded somewhere."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", str(archive_at(prune_repo)),
+            hd.ARCHIVE_NOTE_FLAG, ARCHIVE_NOTE, advanced="x",
+        )
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert hd.ARCHIVE_NOTE_FLAG in res.stderr
+        assert hd.ARCHIVE_WRITE_FLAG in res.stderr
+
+    def test_an_archive_OUTSIDE_the_repo_is_a_USAGE_refusal(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 TWO SILENT FAILURES, WHICH IS WHY THIS IS A REFUSAL AND NOT A
+        WARNING. (1) rule (o)'s scanner enumerates the repo from its own
+        location, so an archive written outside it is never scanned — and an
+        evicted block that leaks is still a leak. (2) `git commit -- <paths>`
+        cannot carry a path outside the repository. Both end in
+        `status=written` with the archive neither scanned nor committed."""
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm",
+            archive=tmp_path / "outside.md",
+        )
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert "INSIDE --repo" in res.stderr, res.stderr
+        assert not (tmp_path / "outside.md").exists()
+
+    def test_reading_an_out_of_repo_archive_is_STILL_fine(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """NEGATIVE CONTROL on the containment refusal. It is scoped to the WRITE
+        flag; widening it to `--archive` would break #1960's own tests and refuse
+        a legitimate read of an archive kept elsewhere."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1,
+            "--archive", str(write_archive(tmp_path, PRUNE_DURABLE_LINE)),
+            "--confirm", advanced="read an archive kept outside the repo",
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+
+    def test_the_containment_check_is_on_IDENTITY_not_on_a_spelling(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """A guard on the SPELLING is walkable by a symlink inside the tree that
+        points out of it — the same argument the self-archive guard makes."""
+        link = prune_repo / "claudedocs" / "looks-inside.md"
+        link.symlink_to(tmp_path / "outside.md")
+        res = run_write(
+            prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, "--confirm",
+            archive=link,
+        )
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert "INSIDE --repo" in res.stderr, res.stderr
+
+
+class TestTheWriteFlagReachesTheSkill:
+    """DERIVED FROM THE MODULE, for `TestRuleRReachesTheSkill`'s reason: a hand
+    list cannot see a flag renamed, and the executor's only map from a flag to
+    what it does is the reference topic."""
+
+    def _topic(self) -> Path:
+        return (
+            REPO_ROOT / "claude" / "skills" / "handoff" / "reference"
+            / "write-gate.md"
+        )
+
+    def test_the_reference_topic_names_both_writer_flags(self) -> None:
+        doc = self._topic().read_text(encoding="utf-8")
+        for flag in (hd.ARCHIVE_WRITE_FLAG, hd.ARCHIVE_NOTE_FLAG):
+            assert f"`{flag}" in doc, (
+                f"scripts/lib/handoff_doc.py accepts {flag} and "
+                f"{self._topic().name} never names it, so the executor has no "
+                f"map from the flag to what it does"
+            )
+
+    def test_the_flag_pin_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL on the loop above — without it, it cannot be told
+        from a loop over an empty tuple."""
+        assert "`--archive-rewrite" not in self._topic().read_text(
+            encoding="utf-8"
+        )

@@ -66,6 +66,38 @@ non-kill was a defect in the battery:
     "a lesson recorded for a sibling guard applies here too" is a hypothesis, not
     a measurement.
 
+WHAT THE `--archive-write` ROWS FOUND, kept for the same reason
+---------------------------------------------------------------
+The writer half's first subset run scored `killed=8 survived=1 not-applied=1 of 10`,
+and NEITHER non-kill was noise:
+
+  * 🔴 **R14 SURVIVED, AND THE CONJUNCT IT MUTATED WAS DEAD — R2 ALL OVER AGAIN.**
+    The write branch opened `if args.archive_write and not archive_is_the_doc and
+    (...)`, reading as its "never append into the doc itself" decision. Mutating
+    that conjunct to `True` left the whole suite green, because
+    `conservation_problems`' FIRST branch refuses `archive_is_the_doc`
+    unconditionally and the call site passes the flag straight through — so the
+    conjunct could only make `archive_append` run one pointless time before a
+    refusal that was already certain, and nothing is written on that path. The
+    conjunct is deleted with the measurement recorded beside its absence, and R14
+    is deleted as a DUPLICATE of R7, which mutates the guard that does the
+    deciding.
+    THE REUSABLE PART: this is the second time in one rule that a row filed as
+    "the guard" SURVIVED and the finding was about the CODE. When a new branch's
+    condition repeats a test the callee already makes unconditionally, the repeat
+    is not defence in depth — it is a second copy of one predicate.
+  * 🔴 **R20 WAS `NOT-APPLIED (no summary line)`, AND THAT IS THE HARNESS CONTROL
+    EARNING ITS PLACE.** Its mutant spliced `*(() and (` into the path-limited
+    commit call, which leaves the opening `git(` unclosed — a SyntaxError, so
+    pytest printed no summary at all. It scored as a NON-KILL rather than a kill,
+    which is the whole point of reading the CONTENT instead of the exit code: a
+    malformed mutant that stops the suite COLLECTING would otherwise look exactly
+    like a mutant every test caught, and vouch for nothing. Re-written as a
+    well-formed one-site edit of a single complete expression.
+    THE REUSABLE PART: a mutant spliced into a multi-line call's argument list can
+    balance its own parentheses while unbalancing the CALL's. Mutate a complete
+    expression on one line.
+
 WHAT THE ROWS COVER, as a ledger rather than a count
 ----------------------------------------------------
     R1/R2   the ARMING expression, both directions (never arm / arm on
@@ -185,10 +217,18 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
     ),
     (
         'R10-exit-code-collapses-onto-rule-q',
-        "16 collapsed onto rule (q)'s 15, so the two remedies become indistinguishable to a caller branching on the number",
+        "16 collapsed onto rule (q)'s 15, so the two remedies become "
+        "indistinguishable to a caller branching on the number. 🔴 ITS ANCHOR WAS "
+        "WIDENED BY ONE LINE WHEN `--archive-write` LANDED, AND THE GUARD IS WHAT "
+        "CAUGHT IT. That change added a SECOND `return EXIT_PRUNE_UNCONSERVED` (the "
+        "read-back arm), indented four deeper — and `str.count` matches SUBSTRINGS, "
+        "so the 16-space line CONTAINS the 12-space anchor and the row went to 2x. "
+        "`test_mutation_battery_anchors.py` failed on it in the same commit. The "
+        "lesson is the reusable part: a bare `return <CONST>` line is never a "
+        "stable anchor, because any deeper-indented copy of it matches.",
         'TestADurablePruneWithNoArchiveIsRefused::test_it_is_refused_and_writes_NOTHING',
-        '            return EXIT_PRUNE_UNCONSERVED\n',
-        '            return EXIT_PRUNE_REFUSED\n',
+        '            )\n            return EXIT_PRUNE_UNCONSERVED\n',
+        '            )\n            return EXIT_PRUNE_REFUSED\n',
     ),
     (
         'R11-inert-archive-flag-accepted',
@@ -196,6 +236,211 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
         'TestTheArchiveFlagUsageContract::test_an_archive_without_a_prune_is_a_USAGE_refusal',
         '    if args.archive is not None and args.prune is None:\n',
         '    if False and args.prune is None:\n',
+    ),
+    # ---- rule (r)'s WRITER half: `--archive-write` --------------------------
+    # 🔴 ROWS ADDED TO *THIS* BATTERY RATHER THAN A NEW ONE, AND THAT IS A GATE
+    # DECISION AS MUCH AS A TIDINESS ONE. A new single-site battery is a new
+    # SKIP GROUP in `test_mutation_battery_anchors.py` (its multi-site negative
+    # control has nothing to truncate), and an unpinned skip group is a GUARD 2
+    # failure reported as `failed=0` — the trap the SIXTH `EXPECTED_SKIPS` entry
+    # in `scripts/run-tests.sh` records this battery itself paying a CI round for.
+    # Extending the existing file creates no new skip group, so that ledger is
+    # untouched. It is also the honest shape: these rows mutate the same file, for
+    # the same rule, and the reader half's rows are the ones that have to stay
+    # green beside them.
+    (
+        'R13-write-flag-not-an-opt-in',
+        'the writer armed on EVERY `--archive` run, so a caller who never asked '
+        'for it gets a SECOND written and committed file. 🔴 THE HAZARD #1960 '
+        'NAMED BY NAME, inverted: that change argued the tool must not become a '
+        'second writer of a file nobody reviewed, and the answer here is an '
+        'explicit flag rather than a default. This row is what makes "opt-in" a '
+        'measured property instead of a sentence in a help string.',
+        'TestTheWriteFlagCreatesTheArchive::test_without_the_write_flag_the_SAME_RUN_is_still_REFUSED',
+        '        if args.archive_write and (archive_text is not None or archive_missing):\n',
+        '        if True and (archive_text is not None or archive_missing):\n',
+    ),
+    (
+        'R15-write-flag-forgives-an-UNREADABLE-archive',
+        'the flag made to forgive UNREADABLE as well as ABSENT, so this run would '
+        'append past a file it could not read — losing whatever is in it and '
+        'unable to preserve the header, which is half of why the note exists.',
+        'TestTheWriteFlagRoutesAroundNothing::test_an_EXISTING_but_unreadable_archive_is_still_refused',
+        '        if args.archive_write and (archive_text is not None or archive_missing):\n',
+        '        if args.archive_write and (archive_text is not None or True):\n',
+    ),
+    (
+        'R16-the-READ-BACK-check-deleted',
+        'the read-back conservation check removed, so rule (r) no longer validates '
+        'the bytes the writer actually put on disk — constraint (3) inverted into '
+        '"the writer gets to skip the guard it feeds". 🔴 ITS KILLER IS THE '
+        '`write_text` SABOTAGE AND NOT THE `archive_append` ONE, measured: '
+        'breaking the writer is caught by the PROJECTION check one block earlier '
+        'and never reaches this arm at all, so a row aimed at the obvious '
+        'sabotage would have scored KILLED by a different guard and vouched for '
+        'this one not at all.',
+        'TestTheConservationCheckRunsAFTERTheWriteNotInsteadOfIt::test_a_lossy_WRITE_is_caught_by_the_READ_BACK_and_rolls_BOTH_back',
+        '                plan, args.archive, readback, "", False\n',
+        '                plan, args.archive, "", "", True\n',
+    ),
+    (
+        'R17-the-READ-BACK-reads-the-PROJECTION-not-the-disk',
+        'the read-back fed the projected text instead of the file, which is the '
+        'SUBTLE version of R16: the check still runs, still refuses on a broken '
+        'writer, and is blind to the one thing it exists for — the bytes on disk '
+        'not being what the writer produced. A guard that reads its own input '
+        'back from memory is the "verified in isolation" shape.',
+        'TestTheConservationCheckRunsAFTERTheWriteNotInsteadOfIt::test_a_lossy_WRITE_is_caught_by_the_READ_BACK_and_rolls_BOTH_back',
+        '            readback = archive_write.path.read_text(encoding="utf-8")\n',
+        '            readback = appended.text\n',
+    ),
+    (
+        'R18-the-PROJECTION-check-deleted',
+        'the projection check fed an archive that conserves everything, so the '
+        'PROPOSAL run can no longer refuse a broken writer and the two-run shape '
+        'stops covering the writer at all. The mirror of R16 — one arm per input, '
+        'and each has a killer the other cannot have.',
+        'TestTheConservationCheckRunsAFTERTheWriteNotInsteadOfIt::test_a_WRITER_that_drops_a_line_is_caught_BEFORE_anything_is_written',
+        '                plan, args.archive, appended.text, "", archive_is_the_doc\n',
+        '                plan, args.archive, "", "", True\n',
+    ),
+    (
+        'R19-the-archive-is-written-AFTER-the-leak-gate',
+        'the archive write moved BELOW rule (o), so an evicted block is committed '
+        'without ever being scanned — constraint (2). 🔴 MUTATED AS A DELETION OF '
+        'THE WRITE AT ITS CURRENT POSITION rather than as a move, because a move '
+        'is not expressible as a one-site substitution and a two-site mutant here '
+        'would mutate the guard together with its enclosing condition.',
+        'TestTheWriteFlagRoutesAroundNothing::test_the_leak_scanner_SEES_the_archive_block',
+        '            archive_write.path.write_text(appended.text, encoding="utf-8")\n',
+        '            pass  # the write moved below the leak gate\n',
+    ),
+    (
+        'R20-the-commit-drops-the-archive-path',
+        'the archive written but NOT committed — the exact half of the old hand '
+        'workflow people forgot: the doc lands, the archive sits in one working '
+        'tree, and the evicted content is gone for everyone else.',
+        'TestTheWriteFlagCommitsExactlyTwoPaths::test_the_WRITE_flag_commits_the_doc_AND_the_archive',
+        '            [archive_write.relpath] if archive_write is not None else []\n        ))\n        committed = True\n',
+        '            [] if archive_write is not None else []\n        ))\n        committed = True\n',
+    ),
+    (
+        'R21-the-rollback-forgets-the-archive',
+        'the leak-refusal rollback handed only the doc, so a run printing NOTHING '
+        'WRITTEN leaves behind an archive it created — and in the leak case, one '
+        'holding the content the scanner just refused.',
+        'TestTheWriteFlagRoutesAroundNothing::test_the_leak_scanner_SEES_the_archive_block',
+        'staged, archive_write if archive_written else None)}",\n',
+        'staged, None)}",\n',
+    ),
+    (
+        'R22-idempotence-off-every-line-re-appended',
+        'the "already held" set difference switched OFF, so every re-run appends '
+        'the whole block again and an archive hand-authored earlier gains a '
+        'duplicate of every line it already had.',
+        'TestTheArchiveWriteIsIdempotent::test_an_archive_that_ALREADY_HOLDS_every_line_is_not_opened',
+        '    fresh = [t for t in plan.removed if _norm_line(t.line) not in held]\n',
+        '    fresh = [t for t in plan.removed]\n',
+    ),
+    (
+        'R23-idempotence-normalisation-dropped',
+        'the "already held" test made VERBATIM, so a re-indented copy in the '
+        'archive stops counting as held and the line is appended a second time — '
+        'while rule (r), which DOES normalise, was already satisfied by the '
+        'first. Two spellings of one predicate, one function apart.',
+        'TestTheArchiveWriteIsIdempotent::test_whitespace_is_collapsed_when_deciding_ALREADY_HELD',
+        '    fresh = [t for t in plan.removed if _norm_line(t.line) not in held]\n',
+        '    fresh = [t for t in plan.removed if t.line not in held]\n',
+    ),
+    (
+        'R24-the-note-becomes-optional',
+        'the required-note refusal switched off, so a run with no judgement writes '
+        'a block carrying only the generated provenance line — the header that '
+        'reads as a complete description of the content\'s status and so stops the '
+        'next reader looking for the caveat.',
+        'TestTheWriteFlagUsageContract::test_the_write_flag_without_a_NOTE_is_a_USAGE_refusal',
+        '    if args.archive_write and not (args.archive_note or "").strip():\n',
+        '    if False and not (args.archive_note or "").strip():\n',
+    ),
+    (
+        'R25-an-EMPTY-note-accepted',
+        'the emptiness half of the note refusal dropped while presence is still '
+        'required — the `--override-size-ratchet` shape: a flag that reads on the '
+        'run as a recorded judgement while recording nothing.',
+        'TestTheWriteFlagUsageContract::test_an_EMPTY_note_is_a_USAGE_refusal',
+        '    if args.archive_write and not (args.archive_note or "").strip():\n',
+        '    if args.archive_write and args.archive_note is None:\n',
+    ),
+    (
+        'R26-the-repo-containment-refusal-off',
+        'the INSIDE--repo refusal switched off, so an archive written outside the '
+        'tree is neither scanned by rule (o) nor carryable by a path-limited '
+        'commit — and the run still reports `status=written`.',
+        'TestTheWriteFlagUsageContract::test_an_archive_OUTSIDE_the_repo_is_a_USAGE_refusal',
+        '    if args.archive_write and not _within(repo, Path(args.archive)):\n',
+        '    if False and not _within(repo, Path(args.archive)):\n',
+    ),
+    (
+        'R27-containment-by-SPELLING-not-identity',
+        'the containment check made a prefix test on the spelling instead of an '
+        'identity test on the resolved path — walkable by a symlink inside the '
+        'tree pointing out of it, the same spelled-guard shape R8 covers for the '
+        'self-archive walk.',
+        'TestTheWriteFlagUsageContract::test_the_containment_check_is_on_IDENTITY_not_on_a_spelling',
+        '    return path.resolve().is_relative_to(repo.resolve())\n',
+        '    return str(path).startswith(str(repo))\n',
+    ),
+    (
+        'R28-the-write-disclosure-claims-the-file-was-only-READ',
+        'the disclosure\'s read-only branch widened to cover the write path, so a '
+        'run that CREATED and COMMITTED the archive tells the operator the file is '
+        '"READ, never written" and that "committing it is yours". 🔴 A COMMENT IS A '
+        'CLAIM AND SO IS stdout: this is the one line an operator reads to decide '
+        'whether there is still hand work to do.',
+        'TestTheWriteFlagCreatesTheArchive::test_the_disclosure_says_the_archive_was_WRITTEN_not_merely_read',
+        '    if archive_path is not None and appended is None:\n',
+        '    if archive_path is not None:\n',
+    ),
+    (
+        'R29-the-refusal-claims-nothing-was-written',
+        'the read-back refusal\'s own disclosure flipped, so a run that appended to '
+        'the archive and rolled the append back prints "this tool does NOT write '
+        '--archive\'s file". The operator believes a file holding the only copy of '
+        'evicted text is untouched, on the one path where it was not.',
+        'TestTheConservationCheckRunsAFTERTheWriteNotInsteadOfIt::test_a_lossy_WRITE_is_caught_by_the_READ_BACK_and_rolls_BOTH_back',
+        '                        regression, plan, relpath, archive_was_written=True\n',
+        '                        regression, plan, relpath, archive_was_written=False\n',
+    ),
+    (
+        'R30-the-note-is-reflowed-rather-than-written-verbatim',
+        'the caller\'s sentence truncated on the way into the block. It is the one '
+        'part of the archive no machine can regenerate, so a writer that reflowed '
+        'or clipped it destroys the only thing the flag exists to carry — and a '
+        'keyword assertion would not notice.',
+        'TestTheWriteFlagCreatesTheArchive::test_the_note_lands_VERBATIM_and_is_not_paraphrased',
+        '    rows = [f"{ARCHIVE_BLOCK_PREFIX} `{relpath}` — {today}", "", note.strip(), ""]\n',
+        '    rows = [f"{ARCHIVE_BLOCK_PREFIX} `{relpath}` — {today}", "", note.strip()[:20], ""]\n',
+    ),
+    (
+        'R31-the-existing-header-is-CLOBBERED-rather-than-appended-to',
+        'the append turned into a whole-file rewrite, so a hand-authored editorial '
+        'header is destroyed by the run that adds a block under it — the half of '
+        'the header decision that "preserve an existing header" is supposed to '
+        'cover.',
+        'TestAnExistingEditorialHeaderIsPreserved::test_the_existing_header_bytes_survive_the_append',
+        '        f"{existing.rstrip(chr(10))}\\n\\n{block}",\n',
+        '        block,\n',
+    ),
+    (
+        'R32-marker-rename-must-red-the-skill-seam-for-the-writer-flags',
+        'the WRITER flag renamed in the module only. The reference topic is the '
+        'executor\'s single map from a flag to what it does, and `--archive-write` '
+        'is the flag that makes this tool write a second file — a rename that does '
+        'not reach the doc leaves the only documentation pointing at a flag that '
+        'no longer exists.',
+        'TestTheWriteFlagReachesTheSkill::test_the_reference_topic_names_both_writer_flags',
+        'ARCHIVE_WRITE_FLAG = "--archive-write"\n',
+        'ARCHIVE_WRITE_FLAG = "--archive-append"\n',
     ),
     (
         'R12-marker-rename-must-red-the-skill-seam',
