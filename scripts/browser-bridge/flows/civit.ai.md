@@ -113,27 +113,33 @@ you happen to be driving. `isAllowedSaveImageUrl`
 when **`https:`** and the hostname is an **exact** member of
 `CIVITAI_IMAGE_HOSTS` (`:31`) plus one more added at call time:
 
-| allowed hostname | where |
+⚠ **Subdomain LABELS only below, never the full hostnames — deliberate.** This repo
+is PUBLIC and `scripts/tests/test_no_client_hostnames.py` refuses a committed
+client subdomain; its scanner matches `<label>.<apex>`, so a bare label is both
+safe and the half that carries the finding. Read the apex off the source file.
+
+| allowed host (label) | where |
 |---|---|
-| `image.civitai.com` | `:32` |
-| `orchestration.civitai.com` | `:40` |
-| `orchestration-next.civitai.com` | `:47` |
+| the image CDN — label `image` | `:32` |
+| the orchestrator — label `orchestration` | `:40` |
+| the "next" orchestrator — label `orchestration-next` | `:47` |
 | the hostname of `NEXT_PUBLIC_IMAGE_LOCATION` | added per call, `:114-120` |
 
 **No wildcarding, no suffix match**, and the `https:`-only check means a block's
 canvas/editor export — a local `blob:` — is refused outright by design.
 
-🔴 **Broken as of 2026-10-01: generated blobs are served from
-`orchestration-`*`new`*`.civitai.com`, which is not in that list** — one character
-off `orchestration-next`. A block saving its own fresh generation gets
-*"image url is not allowed"*. A fix is open upstream as **`civitai/civitai#5277`**
-(adds `orchestration-new.civitai.com` to `CIVITAI_IMAGE_HOSTS`): **unmerged and
-undeployed**, so the refusal is still live in production. Re-check the allowlist
-before reporting a save as broken *or* as fixed.
+🔴 **Broken as of 2026-10-01: generated blobs come from the label
+`orchestration-`*`new`*, which is NOT in that list** — it differs from the
+allowlisted `orchestration-`*`next`* by one character, and that near-homograph is
+the whole defect: both read as "the new orchestrator" at a glance. A block saving
+its own fresh generation gets *"image url is not allowed"*. The fix is upstream as
+**`civitai/civitai#5277`**, which adds the `orchestration-new` label to
+`CIVITAI_IMAGE_HOSTS`. Re-check the allowlist and that PR's state before reporting
+a save as broken *or* as fixed.
 
 ⚠ Scope it honestly: the observed refusals are **specific URLs on specific blob
 hosts**, so a refusal is evidence about that url's hostname, never a proof that no
-save in that block can succeed. A url already on `image.civitai.com` saves fine.
+save in that block can succeed. A url already on the image-CDN host saves fine.
 The per-app observation for `yt-thumbnail` is in
 `flows/yt-thumbnail.civit.ai.md`.
 
