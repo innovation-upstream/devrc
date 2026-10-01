@@ -35,6 +35,31 @@ defect it exists to catch.
 ⚠ `--no-verify` skips it, for a caller running its own. Say so when you use it: the
 rc 0 is then about the write only.
 
+## `tags:` — a CLOSED set of three
+
+🔴 **Front matter carries an optional `tags:` key, and the vocabulary is exactly
+`infra`, `product`, `tooling`.** The axis is **what kind of work**, not *whose* — the
+scope name already answers whose. A fourth term naming the customer was tried and
+removed for exactly that reason.
+
+🔴 **A term outside the set is a defect in BOTH directions, and the second is the
+dangerous one.** Once the write-time gate ships, the pod REFUSES it — 422,
+`X-Store-Status: entry-shape`. Before that it is accepted silently and creates a
+category of one that no `--tag` query will ever find.
+
+🔴 **One unwrapped flow list: `tags: [tooling]`.** Front matter is parsed LINE BY
+LINE, so a wrapped list makes the whole entry MALFORMED — out of the index, out of
+`--ref` and `--search`, and unwritable.
+
+⚠ **Changing front matter is a `put`, never an `append`** — an `append` adds a
+journal bullet and cannot touch front matter.
+
+🔴 **WHICH tag a given scope takes is NOT in this repo, and that is deliberate: this
+repo is PUBLIC and the scope names are not.** The per-scope table is a store entry,
+`cairn/tag-vocabulary`; reach it with the read door —
+`recall --scope cairn --ref tag-vocabulary`. It matches a scope name **EXACTLY,
+never by prefix**, so a tag cannot be inferred from a scope's shape. Do not guess one.
+
 ## What the door does not decide
 
 Which instance a write lands on is **not** obvious from the scope — read the
