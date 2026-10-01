@@ -245,6 +245,15 @@ class MinioSignal:
         except S3Error:
             return False
 
+    def get_attachment(self, key: str, bucket: str | None = None) -> bytes:
+        """Read one stored object's bytes back (recordings: grab/transcribe)."""
+        resp = self._c.get_object(bucket or self.bucket, key)
+        try:
+            return resp.read()
+        finally:
+            resp.close()
+            resp.release_conn()
+
     def put_attachment(self, *, conversation: str, timestamp_ms: int, filename: str,
                        data: bytes, content_type: str, attachment_id: str,
                        sidecar: dict | None = None) -> str:

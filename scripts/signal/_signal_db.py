@@ -310,6 +310,31 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
 
+    # 🔧 #9 NEW (call recordings). One row per AUDIO attachment the operator
+    # intends to transcribe — recordings arrive as note-to-self attachments
+    # from the phone's recorder app, so they are ordinary `signal.attachments`
+    # rows already (bytes in MinIO via the normal ingest path); this table
+    # carries only the PROCESSING state keyed on that attachment row.
+    #
+    # 🔴 Epoch-ms BIGINT for the stamps, like consumer_health — NOT
+    # timestamptz/now(): the sqlite substrate cannot translate those, and an
+    # untestable statement is how the first consumer_health cut shipped broken.
+    # `status` walks `new -> transcribed -> tasked`; the text/JSON columns hold
+    # exactly what the operator can re-serve without re-running the pipeline.
+    """
+    CREATE TABLE IF NOT EXISTS signal.call_recordings (
+        attachment_row_id BIGINT PRIMARY KEY REFERENCES signal.attachments(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'new',
+        transcript_text TEXT,
+        transcript_json JSONB,
+        transcript_at BIGINT,
+        items_json JSONB,
+        items_at BIGINT,
+        tasked_at BIGINT,
+        task_ref TEXT
+    )
+    """,
+
     # 🔴 A MIGRATION, NOT A COLUMN IN THE `CREATE TABLE` ABOVE. Every other
     # statement here is `CREATE … IF NOT EXISTS`, which is a no-op against an
     # EXISTING table — so adding `mentions` to `signal.messages`'s CREATE body
@@ -682,6 +707,22 @@ def _decode_mentions(value) -> list:
         decoded = json.loads(value)
         return list(decoded) if decoded else []
     raise ValueError(f"unreadable mentions column: {value!r}")
+
+
+def _decode_json_column(value):
+    """A stored JSONB blob → the Python object, on BOTH engines.
+
+    Same shape problem `_decode_mentions` solves: psycopg2 decodes JSONB and
+    hands back a dict/list; the sqlite substrate returns the raw TEXT. Callers
+    get one Python shape whichever engine ran.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        value = bytes(value).decode("utf-8")
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
 
 
 # `message_type` of a row whose sender retracted it. The row is KEPT (its
@@ -1281,6 +1322,132 @@ class SignalDB:
                 (bucket, key, message_id, attachment_id),
             )
             return cur.rowcount
+
+    # -- call recordings ----------------------------------------------------
+    #
+    # 🔴 EVERY method here is a READ of message content, so both reading
+    # methods carry `not_excluded()` — the same ONE predicate every other read
+    # uses (see the ledger in tests/test_group_exclusions.py, which fails when
+    # this set grows without it). A recording shared into a muted group's
+    # conversation must not surface through `recordings` any more than its
+    # message body does.
+    #
+    # 🔴 `LIKE 'audio/%'`, not `ILIKE`: sqlite has no ILIKE, and MIME types are
+    # lowercase by RFC 2045, so the case-sensitive form is correct on BOTH
+    # substrates. The wrinkle it must NOT match is `audio` content that is a
+    # VOICE NOTE someone sent in a chat — those still list (the operator picks
+    # by date/filename/conversation); classification is deliberately not
+    # attempted in SQL.
+
+    def list_recordings(self, limit: int = 50) -> list:
+        """Audio attachments newest-first, with their processing state.
+
+        Unprocessed recordings read `status: null` — the operator's queue is
+        the rows with no transcript yet, and `null` is how `recordings` marks
+        them. This is a READ surface: muted groups stay hidden.
+        """
+        with self._c.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT a.id AS row_id, a.signal_attachment_id, a.content_type,
+                       a.filename, a.size_bytes, a.is_voice_note,
+                       a.minio_bucket, a.minio_key,
+                       m.message_timestamp, m.is_outbound,
+                       c.display_name, c.phone_number,
+                       g.name AS group_name,
+                       r.status, r.transcript_at, r.tasked_at
+                FROM signal.attachments a
+                JOIN signal.messages m ON m.id = a.message_id
+                JOIN signal.contacts c ON c.id = m.source_contact_id
+                LEFT JOIN signal.groups g ON g.id = m.group_id
+                LEFT JOIN signal.call_recordings r ON r.attachment_row_id = a.id
+                WHERE a.content_type LIKE 'audio/%%'
+                  AND {not_excluded('m')}
+                ORDER BY m.message_timestamp DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def get_recording(self, attachment_row_id: int) -> dict | None:
+        """One recording by its `signal.attachments` row id, or None.
+
+        Returns the MinIO coordinates (`minio_bucket`/`minio_key`) the callers
+        need to fetch bytes, plus the conversation context the task card
+        should carry. Muted by the same predicate as `list_recordings`.
+        """
+        with self._c.cursor(
+                cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT a.id AS row_id, a.signal_attachment_id, a.content_type,
+                       a.filename, a.size_bytes, a.is_voice_note,
+                       a.minio_bucket, a.minio_key,
+                       m.message_timestamp, m.is_outbound,
+                       c.display_name, c.phone_number,
+                       g.name AS group_name,
+                       r.status, r.transcript_text, r.transcript_json,
+                       r.transcript_at, r.items_json, r.items_at,
+                       r.tasked_at, r.task_ref
+                FROM signal.attachments a
+                JOIN signal.messages m ON m.id = a.message_id
+                JOIN signal.contacts c ON c.id = m.source_contact_id
+                LEFT JOIN signal.groups g ON g.id = m.group_id
+                LEFT JOIN signal.call_recordings r ON r.attachment_row_id = a.id
+                WHERE a.id = %s
+                  AND {not_excluded('m')}
+                """,
+                (attachment_row_id,),
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        row = rows[0] if rows else None
+        if row is not None:
+            # JSONB comes back as TEXT on the substrate; decode to the same
+            # Python shape psycopg2 produces on Postgres.
+            row["transcript_json"] = _decode_json_column(row.get("transcript_json"))
+            row["items_json"] = _decode_json_column(row.get("items_json"))
+        return row
+
+    def record_transcription(self, attachment_row_id: int, *, text: str,
+                             transcript_json: dict, ts: int) -> dict:
+        """Store one transcript; upsert, so a --force redo overwrites in place."""
+        with self._c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO signal.call_recordings
+                    (attachment_row_id, status, transcript_text,
+                     transcript_json, transcript_at)
+                VALUES (%s, 'transcribed', %s, %s, %s)
+                ON CONFLICT (attachment_row_id) DO UPDATE SET
+                    status = 'transcribed',
+                    transcript_text = EXCLUDED.transcript_text,
+                    transcript_json = EXCLUDED.transcript_json,
+                    transcript_at = EXCLUDED.transcript_at
+                """,
+                (attachment_row_id, text, json.dumps(transcript_json), ts),
+            )
+        return self.get_recording(attachment_row_id)
+
+    def record_tasked(self, attachment_row_id: int, *, items_json: list,
+                      task_ref: str, ts: int) -> dict:
+        """Stamp that task cards were generated (and to which task service)."""
+        with self._c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE signal.call_recordings SET
+                    status = 'tasked',
+                    items_json = %s,
+                    items_at = %s,
+                    tasked_at = %s,
+                    task_ref = %s
+                WHERE attachment_row_id = %s
+                """,
+                (items_json if items_json is None else json.dumps(items_json),
+                 ts, ts, task_ref, attachment_row_id),
+            )
+        return self.get_recording(attachment_row_id)
 
     # -- reactions ---------------------------------------------------------
     def upsert_reaction(self, rx: dict) -> int:

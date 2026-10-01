@@ -51,6 +51,8 @@ COPY scripts/signal/_signal_db.py  /app/scripts/signal/
 COPY scripts/signal/_minio.py      /app/scripts/signal/
 COPY scripts/signal/clawgate.py    /app/scripts/signal/
 COPY scripts/signal/_mentions.py   /app/scripts/signal/
+COPY scripts/signal/_stt.py        /app/scripts/signal/
+COPY scripts/signal/_extract.py    /app/scripts/signal/
 
 # 🔴 THE ONE FILE FROM OUTSIDE scripts/signal/, AND WHY IT IS HERE.
 # `clawgate.py` resolves the Task API's base URL from

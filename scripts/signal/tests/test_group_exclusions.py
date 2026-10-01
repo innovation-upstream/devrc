@@ -147,6 +147,55 @@ def test_get_message_hides_a_muted_message_by_id(db):
     assert db.get_message(ids["dm"])["body"] == "quarterly kestrel invoice"
 
 
+# --- call recordings: the audio surfaces filter like every other read ------- #
+# One behavioural case per surface, with positive controls, because the ledger
+# above only proves the method was CLASSIFIED as filtered — it cannot prove the
+# filter actually reaches the rows.
+def _seed_recordings(db):
+    """One audio attachment in each of keep/mute/DM. Returns attachment row ids."""
+    ids = _seed(db)
+    atts = {}
+    for key, msg_id in (("keep", ids["keep"]), ("mute", ids["mute"]),
+                        ("dm", ids["dm"])):
+        signal_att_id = f"att-{key}-0000"
+        db.upsert_attachment(msg_id, {
+            "id": signal_att_id, "content_type": "audio/mp4",
+            "filename": f"call-{key}.m4a", "size": 1234 + len(key),
+        })
+        atts[key] = db.conn.rows(
+            "SELECT id FROM signal.attachments WHERE signal_attachment_id = ?",
+            (signal_att_id,))[0]["id"]
+    return atts
+
+
+def test_recordings_hides_a_muted_groups_audio(db):
+    atts = _seed_recordings(db)
+
+    # POSITIVE CONTROL: all three visible BEFORE the mute.
+    before = {r["row_id"] for r in db.list_recordings()}
+    assert before == set(atts.values())
+
+    db.exclude_group(GROUP_MUTE)
+    after = {r["row_id"] for r in db.list_recordings()}
+    assert atts["mute"] not in after, (
+        "a recording shared into a muted group's conversation must hide like "
+        "that group's message bodies")
+    assert {atts["keep"], atts["dm"]} <= after, (
+        "the filter hides exactly the muted conversation, not audio at large")
+
+
+def test_get_recording_hides_a_muted_groups_audio_by_row_id(db):
+    atts = _seed_recordings(db)
+    assert db.get_recording(atts["mute"])["filename"] == "call-mute.m4a"
+
+    db.exclude_group(GROUP_MUTE)
+    assert db.get_recording(atts["mute"]) is None, (
+        "the row_id route must be filtered too — a known attachment id is "
+        "exactly the shape the get_message guard exists to close")
+    assert db.get_recording(atts["keep"])["filename"] == "call-keep.m4a"
+    assert db.get_recording(atts["dm"])["filename"] == "call-dm.m4a"
+
+
 def test_muting_deletes_nothing_and_unmute_restores_exactly(db):
     ids = _seed(db)
     before_rows = db.conn.count("messages")
@@ -303,7 +352,8 @@ def test_the_predicate_is_composable_with_AND():
 # The partition below is checked against what the CODE does (an AST scan for a
 # real call to `not_excluded`), so the ledger cannot disagree with the
 # implementation in either direction.
-FILTERED_READS = {"list_conversations", "search", "get_message"}
+FILTERED_READS = {"list_conversations", "search", "get_message",
+                  "list_recordings", "get_recording"}
 
 # 🔴 THE REASON LIVES HERE, AT THE POINT OF DECISION — not in a comment
 # elsewhere that can rot on its own. This ledger's justification has ALREADY gone
@@ -1115,7 +1165,26 @@ _MUTE_PROBES = {
         r for r in db.search(body) if r["id"] == draft["id"]],
     "get_message": lambda db, draft, body: [
         r for r in [db.get_message(draft["id"])] if r],
+    "list_recordings": lambda db, draft, body: [
+        r for r in db.list_recordings()
+        if r["message_timestamp"] == draft["message_timestamp"]],
+    "get_recording": lambda db, draft, body: [
+        r for r in [db.get_recording(_draft_recording_row(db, draft))] if r],
 }
+
+
+def _draft_recording_row(db, draft) -> int:
+    """The attachment row id carried by the probe draft, or -1 when none.
+
+    `get_recording` is keyed on `signal.attachments` id, not the message id, so
+    the probes seed one audio attachment onto the draft (the mute test does;
+    the pinning test runs this against an unattached draft and only asserts
+    WHICH read was called, so None there is fine).
+    """
+    row = db.conn.rows(
+        "SELECT id FROM signal.attachments WHERE message_id = ?",
+        (draft["id"],))
+    return row[0]["id"] if row else -1
 
 
 class _RecordingReads:
@@ -1199,6 +1268,13 @@ def test_the_probe_pinning_guard_can_go_red(db):
     draft = db.draft_message(recipient=_group_address(GROUP_KEEP),
                              body="negative control fixture",
                              self_number=SELF_NUMBER)
+    # The recording probes read through `signal.attachments` — same seeding the
+    # mute test does, or the get_recording probe would return [] here and the
+    # "probe still works" control below would fail on its own terms.
+    db.upsert_attachment(draft["id"], {
+        "id": "att-blind-recording", "content_type": "audio/mp4",
+        "filename": "blind-call.m4a", "size": 1,
+    })
 
     for name, probe in sorted(_MUTE_PROBES.items()):
         blind = _BlindRecordingReads(db)
@@ -1279,6 +1355,14 @@ def test_a_muted_group_draft_is_hidden_from_every_filtered_read(db):
         "SELECT count(*) AS n FROM signal.messages")[0]["n"] == 1, (
         "the probe below reads max(message_timestamp) per conversation and this "
         "draft's is NEGATIVE — another message in this group would mask it")
+
+    # The recording probes read through `signal.attachments`: give the draft an
+    # audio attachment so `get_recording` has a row to find (and `list_recordings`
+    # a row to list) BEFORE the mute — the positive controls below demand it.
+    db.upsert_attachment(draft["id"], {
+        "id": "att-probe-recording", "content_type": "audio/mp4",
+        "filename": "probe-call.m4a", "size": 1,
+    })
 
     def probe() -> dict:
         return {name: fn(db, draft, body) for name, fn in _MUTE_PROBES.items()}
