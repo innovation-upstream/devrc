@@ -232,10 +232,22 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
     ),
     (
         'R11-inert-archive-flag-accepted',
-        'the usage refusal for an `--archive` with no `--prune` switched off, so an inert flag reads on the run as a conservation claim',
+        "the usage refusal for an `--archive` with no removal switched off, so "
+        "an inert flag reads on the run as a conservation claim. 🔴 ITS ANCHOR "
+        "WAS WIDENED BY A THIRD CONJUNCT WHEN RULE (s) LANDED, AND THE GUARD IS "
+        "WHAT CAUGHT IT — `--autoevict` also removes lines, so an archive beside "
+        "it is not inert and the predicate had to grow `and not args.autoevict`. "
+        "The anchor went to 0x, i.e. the row would have reported "
+        "`!! PATTERN OCCURS 0x — NOT APPLIED` and scored a SURVIVOR while "
+        "testing nothing; `test_mutation_battery_anchors.py` failed on it in CI "
+        "the same hour. Same lesson R10 records one row up, in its other shape: "
+        "an anchor on a CONDITION is only as stable as the predicate, so a rule "
+        "that widens one owes this file a re-anchor. The mutation now kills the "
+        "FIRST conjunct alone — the narrowest expression that can be wrong — "
+        "rather than the whole line.",
         'TestTheArchiveFlagUsageContract::test_an_archive_without_a_prune_is_a_USAGE_refusal',
-        '    if args.archive is not None and args.prune is None:\n',
-        '    if False and args.prune is None:\n',
+        '    if args.archive is not None and args.prune is None and not args.autoevict:\n',
+        '    if False and args.prune is None and not args.autoevict:\n',
     ),
     # ---- rule (r)'s WRITER half: `--archive-write` --------------------------
     # 🔴 ROWS ADDED TO *THIS* BATTERY RATHER THAN A NEW ONE, AND THAT IS A GATE
