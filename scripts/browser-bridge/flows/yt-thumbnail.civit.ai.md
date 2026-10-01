@@ -42,7 +42,11 @@ end up reading the host page while believing you are in the block.
 `pm-generate` is the right anchor because it is present the moment the form
 renders and it does not exist in the boot skeleton (`index.html` paints only
 `[data-boot-shape]` divs). `pm-model-label` works too and additionally proves the
-model list resolved — it reads `SD XL 1.0 (SDXL 1.0)` by default. Do not anchor
+model list resolved — but ⚠ **do not pin its TEXT as a readiness probe.** It read
+`SD XL 1.0 (SDXL 1.0)` at 0.1.0 and reads `ChatGPT Images (OpenAI)` at 0.1.7: the
+default model is exactly the kind of thing that moves between versions, and the
+0.1.0 spelling sat here stale until an audit caught it. Assert the element EXISTS;
+read its text as data, never as an expected value. Do not anchor
 on `pm-nav-balance`: it is **absent** in the host-embedded run page (measured
 `null`), so waiting on it hangs forever on a perfectly healthy app.
 
@@ -191,10 +195,8 @@ storage   yt-storage-anon yt-board-toggle yt-published-board
 
 🔴 **The `yt-*` ids are the HISTORY, FORMATS and STORAGE surfaces, all of which
 shipped after this file was first written at 0.1.0 — a read that only knows the
-`pm-*` set will report most of the app as absent.** ⚠ `yt-format-*` selected via
-a prefix match also catches **layout** nodes (`yt-format-grid`, `-card`,
-`-check`), so never assert a count over `[data-testid^=yt-format-]`; name the six
-real slugs.
+`pm-*` set will report most of the app as absent.** The six real format slugs are
+named in the block above; address them by name.
 
 🔴 **`pm-nav-*` and `pm-setup-*` are defined in `src/main.tsx`, the dev-harness
 bootstrap — NOT in `App.tsx`.** They do not exist in the host-embedded app at
@@ -206,19 +208,14 @@ not have told you *why*.
 absent here only because the session is logged IN. Treat its presence as the
 logged-out tell, exactly as the table at the top says.
 
-Measured live on the run page, 2026-09-27, on the `remix` state at 0.1.0:
+🔴 **ONE inventory, for the CURRENT version only.** An earlier revision of this
+file kept its 0.1.0 inventory *and* appended the 0.1.7 one, so the file asserted
+`pm-lora-add` both present and absent-by-design with nothing saying which applied —
+the same version-pinned rot this file exists to warn about, reproduced inside the
+commit that warned about it. When you re-measure, **replace** the block below;
+never append a second.
 
-```
-present  pm-generate pm-model-label pm-model-row pm-change-model pm-lora-add
-         pm-remix-upload pm-remix-hint
-absent   pm-result-img pm-editor pm-editor-canvas pm-export-note pm-spent
-         pm-insufficient pm-signin  + every pm-nav-* / pm-setup-*
-```
-
-The `pm-result-img` / `pm-editor*` / `pm-spent` absences are the **two gates**
-above, not defects — nothing has been generated.
-
-Re-measured live 2026-09-30 on **0.1.7** (`index-BQ7kpc1g.js`), default
+Measured live 2026-09-30 on **0.1.7** (`index-BQ7kpc1g.js`), default
 `generate` state, signed in, **with three completed generations in history**:
 
 ```

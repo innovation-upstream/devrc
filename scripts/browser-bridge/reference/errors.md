@@ -189,12 +189,18 @@ $BB --instance work --tab $T --frame $F js "$EXPR" 2>&1 | python3 -c '…'
 $BB --instance work --tab $T --frame $F js "$EXPR" 2>/tmp/bb.err | python3 -c '…'
 ```
 
-Generalises two ways. **Never infer a stream from redirection order** — zsh
-`MULTIOS` copies stdout into a pipe as well, so `… 2>&1 >/dev/null | c` hands the
-consumer **stdout**, not stderr. And when an op must cross `ssh`, write the
-expression to a file and feed it in (`ssh host 'bash -s' < script.sh`) rather than
-nesting quotes through zsh → ssh → the CLI → a JS IIFE; a mis-closed quote there
-returns `null`, which `js` also returns for a legitimately multi-statement body.
+⚠ **This does NOT retract the `rc 4` recipe above**, which routes the handoff line
+with `2>&1 >/dev/null | grep -v '^browser:'`. That one works for a reason specific
+to `rc 4`: stdout is **empty** there, so it does not matter that zsh's `MULTIOS`
+copies stdout into the pipe too. On a SUCCESSFUL op stdout holds the envelope, and
+the same construct then feeds it to the consumer. The stream-order rule itself is
+`claude/RULES.md` → "Shell & Tooling Gotchas" (d), which loads every session — read
+it there rather than from a second copy here.
+
+And when an op must cross `ssh`, write the expression to a file and feed it in
+(`ssh host 'bash -s' < script.sh`) rather than nesting quotes through
+zsh → ssh → the CLI → a JS IIFE; a mis-closed quote there returns `null`, which
+`js` also returns for a legitimately multi-statement body.
 
 ## ⚠ The extension can DROP mid-session — and ↻ is PER-PROFILE
 

@@ -66,15 +66,11 @@ button still reports `ok: true` and changes nothing — indistinguishable from
 "the platform swallowed my untrusted event". Never draw a conclusion about trust
 from a dead click.
 
-🔴 **Do NOT carry "read `.disabled` first" forward as the safeguard — it is
-app-specific and it has already stopped working on the app it came from.**
-Measured 2026-09-30 on `yt-thumbnail` 0.1.7: `pm-generate` reads
-`disabled: false` on a bare load with an **empty** prompt box, because a
-pre-selected *format* supplies the prompt text. A disabled control is a
-**coincidence of one app's validation rules at one version**, never a guard you
-are entitled to — and here the coincidence reversed within four versions.
-**The rule that does not rot: never click a money control unless you intend to
-spend.** Per-app cost and state detail → `flows/<slug>.civit.ai.md`.
+🔴 **Do NOT carry "read `.disabled` first" forward as the safeguard.** A disabled
+control is a **coincidence of one app's validation rules at one version**, never a
+guard you are entitled to — on the app this retraction came from the coincidence
+reversed within four versions, in the reassuring direction. Per-app state and the
+measurement → `flows/<slug>.civit.ai.md`.
 
 Treat every in-frame click on a money control as LIVE. Never fire one to "test
 whether it works".
