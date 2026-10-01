@@ -67,6 +67,26 @@ they had accumulated in one document and pushed it to its 65,536 B ceiling.
 - **Leading hypothesis:** two mechanisms, not one. The forward mode is consistent with CGNAT dropping the laptop's outbound flows; the return mode with the laptop's inbound mapping being gone while outbound still re-creates it. ⚠ Both untested; what is established is the SPLIT, not either mechanism. 🔴 Note the forward mode still has to explain the lockstep (both overlays identical to the packet), which a per-flow story does not obviously do.
 - **Next probe:** classify more episodes — the split is 4:2 on six, far too few to say whether the modes alternate, correlate with severity, or with time of day. ⚠ The 01:44–01:53 forward episodes are **four in nine minutes**, i.e. one burst, so they may be a single event rather than four independent samples; weight them as such until a second forward burst lands.
 - **3 episodes returned `DIRECTION: UNAVAILABLE`** (counter read failed — ssh during an episode). Those are honest nulls, not readings, and are excluded above.
+
+### 🔴🔴🔴 RETRACTED — THE LOCKSTEP IS AN INSTRUMENT ARTIFACT. The "tailscale" arm was pinging the NEBULA address for 14 hours
+- as-of: 2026-10-01
+- 🔴 **This retracts the central fact of this arc, its closing-condition, and part of the reasoning used to ELIMINATE earlier hypotheses.** Several candidates were dismissed on the grounds that they "do not predict the lockstep". That argument is void.
+- **Symptom + exact repro:** `flap-watch` resolves `TS_PEER` at startup via `tailscale status | awk '/nixos[^-]/ && /direct/ {print $1; exit}'`. When that returns empty the discriminator falls back to `"tailscale(UDP-on-wire)|${TS_PEER:-$HOME_PEER}"` — **the NEBULA address**. Two concurrent pings to the same host lose near-identically by construction. Check: `grep 'resolved:' <log>` for `tailscale-peer=UNRESOLVED`.
+- **Observed (with values), per watcher generation:**
+
+  | watcher pid | tailscale peer | episodes | identical | rate |
+  |---|---|---|---|---|
+  | `2115782` (v2) | valid | 4 | 4 | 100% |
+  | **`2309463` (v3)** | **UNRESOLVED** | **207** | **205** | **99.0%** |
+  | `1718624` (v4) | valid | 8 | 1 (a 0.0%/0.0% vacuous row) | 12.5% |
+  | `2427455` (v4) | valid | 2 | 0 | 0% |
+
+  Recent valid-peer episodes are plainly NOT identical: `54.17 vs 27.50`, `50.00 vs 40.00`, `33.33 vs 41.67`, `45.00 vs 35.83`, `39.17 vs 32.50`. `via: measurement`
+- 🔴 **Ruled out — "the two overlays lose identical packets in the same second", as a general property.** The 167/169 and 170/172 figures previously recorded in this doc came from the contaminated generation and are WITHDRAWN. `via: measurement`
+- ⚠ **NOT ruled out — that a genuine lockstep sometimes occurs.** v2 produced 4 identical episodes in 16 minutes with a VALID peer (`7.5/7.5`, `20/20`, `10.8333/10.8333`, `15.8333/15.8333`). n=4, adjacent in time, so it may be a real but intermittent phenomenon or a small-sample coincidence — **it is not evidence for the 99% claim and must not be quoted as such.**
+- **Leading hypothesis:** none. The constraint that shaped this entire arc was largely manufactured by the instrument.
+- **Next probe:** re-run the elimination reasoning WITHOUT the lockstep premise. Candidates dismissed only because they failed to predict it deserve re-examination — the nebula-relay path in particular.
+- 🔴 **UNAFFECTED:** the two-mode (forward vs return) finding. It comes from v4 with a valid peer and from the hand-run `direction.sh`, and its arithmetic (`expected = 2 × PROBE_N`) holds whether both arms target the same host or two hosts on the same box.
 ## Open investigations — live diagnosis state
 <!-- as-of: 2026-09-21 -->
 ### Gateway IPv6-remote noise — "listener is IPv4, but writing to IPv6 remote" (homelab-gateway)
@@ -313,6 +333,10 @@ they had accumulated in one document and pushed it to its 65,536 B ceiling.
 - 🔴 **A DIRECTION VERDICT NEEDS LOSS TO ATTRIBUTE — v4 printed one where there was none.** Episode `2026-09-30T20:16:11Z` triggered on a 15% poll but its discriminator measured **0.0% on both arms**; shortfall was therefore 0, which the classifier read as `RETURN-LEG`. A zero-loss episode cannot have a direction. Fixed by gating the verdict on derived loss > 0 and emitting `VACUOUS` otherwise (guard controlled over all four lost/shortfall combinations). **Same family as "a quiet poll proves nothing": any classifier whose default branch is a real verdict will manufacture findings from null input.**
 - ⚠ **Four episodes inside nine minutes are one burst, not four samples.** Recorded because the raw count (4 forward vs 2 return) overstates the evidence for a forward majority.
 - 🔴 **Reading a CI check without checking WHICH HEAD it ran against produces a confident wrong conclusion.** On devrc#1942 a `FAILURE` was read from the previous head's run while the new head's run was still pending, and a CORRECT diagnosis ("the branch is behind main and missing the cairn pin-seam fix `aa01eb77`") was abandoned on the strength of it. The local evidence had already moved 125 → 6 failures after merging main. Compare `statusCheckRollup[].startedAt` against `headRefOid`, or read the per-head timeline: `gh api repos/<r>/commits/<sha>/statuses`.
+
+- 🔴 **A FALLBACK THAT SILENTLY RETARGETS AN ARM TURNS AN INDEPENDENT CONTROL INTO A DUPLICATE OF THE THING IT CONTROLS.** `${TS_PEER:-$HOME_PEER}` was written as a convenience; it converted the tailscale arm into a second nebula arm and manufactured a 99% "lockstep" that became this arc's central fact for a full day. **A control arm must FAIL LOUD when its target cannot be resolved, never fall back to another arm's target.** The watcher did print `tailscale-peer=UNRESOLVED` at startup — one line, 2,500 lines above the data, never read. 🔴 **An instrument's startup banner is part of its output: re-read it when you read its results, not when you launch it.**
+- 🔴 **`icmp-last-hop-before-home` has been UNRESOLVED in three of four watcher generations** (the mtr-based discovery at startup fails), so the discriminator has been running 4 arms, not 5 — and the missing one is the closest ICMP proxy for the path to home, i.e. the most relevant control for a path hypothesis. It resolves fine when run by hand. Check `grep 'resolved:' <log>` before trusting any arm's absence.
+- ⚠ **Per-generation aggregation is the control that caught this.** A pooled rate across the whole log reads 98.8% and hides it; splitting by watcher pid AND by whether that generation resolved its peers is what exposed a 99.0% arm sitting beside a 0–12.5% one. **When an instrument restarts, its generations are not one population.**
 
 
 ## How to verify
