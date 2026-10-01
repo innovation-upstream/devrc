@@ -12701,9 +12701,23 @@ class TestTheArchiveFlagUsageContract:
 
 
 class TestRuleRReachesTheSkill:
+    """🔴 DERIVED ONLY, AND THE LITERAL PIN BESIDE IT WAS DELETED ON A
+    MEASUREMENT. `TestThePruneRuleReachesTheSkill`'s header records a marker
+    RENAME surviving its derived loop, so one was written here too — a second
+    test asserting `"[no archive]"` and the other three spellings as hardcoded
+    strings. Row R12 of `mutation_battery_prune_conservation.py` measured what it
+    actually covers: renaming `ARCHIVE_MARKER_NONE` to `[gone]` reds the DERIVED
+    loop below (the new value is not in the doc) and leaves the literal pin
+    GREEN. The only case the literal uniquely catches is a rename PROPAGATED to
+    the doc — a coordinated edit, not a defect — so it was reading as coverage
+    while adding a third place to edit. Deleted; this loop plus
+    `test_the_marker_pin_can_report_absence` is the whole claim.
+    """
+
     def test_the_reference_topic_documents_the_markers_and_the_flag(self) -> None:
-        """DERIVED FROM THE MODULE — a pin catches deletion from the doc, only
-        derivation catches a RENAME in the module."""
+        """DERIVED FROM THE MODULE — a hand list cannot see a marker added to
+        `ARCHIVE_MARKERS`, and this loop reds on a rename as well as a deletion
+        (measured: battery row R12)."""
         topic = (
             REPO_ROOT / "claude" / "skills" / "handoff" / "reference"
             / "write-gate.md"
@@ -12729,20 +12743,3 @@ class TestRuleRReachesTheSkill:
         assert "[archive declined by the operator]" not in topic.read_text(
             encoding="utf-8"
         )
-
-    def test_the_literal_marker_spellings_are_in_the_reference_topic(
-        self,
-    ) -> None:
-        """🔴 THE RENAME CATCHER. The loop above reads the CONSTANT, so renaming
-        `ARCHIVE_MARKER_NONE` to `[gone]` renames both sides and survives — the
-        measured survival `TestThePruneRuleReachesTheSkill`'s header records.
-        Only a literal can see it."""
-        doc = (
-            REPO_ROOT / "claude" / "skills" / "handoff" / "reference"
-            / "write-gate.md"
-        ).read_text(encoding="utf-8")
-        for literal in (
-            "[no archive]", "[archive unreadable]", "[archive is the doc]",
-            "[not conserved]", "`--archive",
-        ):
-            assert literal in doc, f"write-gate.md never spells {literal!r}"

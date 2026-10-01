@@ -35,20 +35,43 @@ READ BEFORE TRUSTING A VERDICT
     same-length edit landing in the same second as the last import is invisible:
     the test would import the ORIGINAL bytecode and the mutant would score
     SURVIVED without ever executing. Several rows below are same-length edits.
-  * `positive-control-marker-rename` IS A MUTANT THIS BATTERY MUST CATCH, and it
-    is here as the battery's own control. Renaming `ARCHIVE_MARKER_NONE` moves
-    the module AND every test that reads the constant, so only the LITERAL pin
-    in `TestRuleRReachesTheSkill` can see it. If that row ever reports SURVIVED,
-    the literal pin has been deleted and the marker ledger is self-referential —
-    exactly the measured survival the rule (q) block's header records.
   * Sources are restored in a `finally`. Check `git status` anyway if it dies
     hard.
 
+WHAT THE FIRST RUN FOUND, kept because it is the reusable part
+--------------------------------------------------------------
+Run 1 scored `killed=10 killed-wrong-reason=1 survived=1 of 12`, and NEITHER
+non-kill was a defect in the battery:
+
+  * 🔴 **R2 SURVIVED, AND THE LINE IT MUTATED WAS DEAD.**
+    `conservation_problems` opened with `if not durable: return ()` as the rule's
+    apparent arming decision. Inverting it left the whole suite green — because
+    the branch below is a comprehension over `durable`, so an empty `durable`
+    already yields `()`. That fast path decided nothing it had not already
+    decided. It is deleted, with the measurement recorded beside its absence, and
+    R1/R2 now mutate `for target in durable`, which is where the arming actually
+    lives: mirrors on ONE expression (empty it / widen it to every removal).
+    THE REUSABLE PART: a row filed as "the guard" that SURVIVES is evidence about
+    the CODE first. Re-anchoring it on a line that does decide something is the
+    fix; re-labelling the row is not.
+  * 🔴 **R12 WAS FILED AGAINST THE WRONG TEST, AND ITS PREMISE WAS REFUTED.** It
+    was written believing a marker RENAME can only be seen by a LITERAL pin — the
+    survival `TestThePruneRuleReachesTheSkill`'s header records — so a literal pin
+    was written here too. Measured: renaming `ARCHIVE_MARKER_NONE` reds the
+    DERIVED loop (the new value is not in the doc) and leaves the literal pin
+    GREEN. The only case the literal uniquely caught was a rename PROPAGATED to
+    the doc, which is a coordinated edit rather than a defect, so that test was
+    deleted and the row re-aimed at the derived loop.
+    THE REUSABLE PART: `KILLED-WRONG-REASON` is a finding about the LEDGER, and
+    "a lesson recorded for a sibling guard applies here too" is a hypothesis, not
+    a measurement.
+
 WHAT THE ROWS COVER, as a ledger rather than a count
 ----------------------------------------------------
-    R1/R2   the ARMING predicate, both directions (never arm / always arm).
-            R2 is what the negative control test exists for: a guard that
-            refuses every prune passes every refusal test in the suite.
+    R1/R2   the ARMING expression, both directions (never arm / arm on
+            everything). R2 is what the negative control test exists for: a
+            guard that refuses every prune passes every refusal test in the
+            suite.
     R3      the SHARED predicate — `durable_removals` is what arms the rule and
             what the disclosure counts; breaking it must not be silent.
     R4      the COMPARISON's width: narrowed to the durable half, which is the
@@ -60,7 +83,7 @@ WHAT THE ROWS COVER, as a ledger rather than a count
     R9      the unreadable arm's code — 16 (a verdict) vs 3 (operational).
     R10     the refusal's own exit code, 16 vs rule (q)'s 15.
     R11     the usage refusal for an inert `--archive`.
-    R12     the positive control described above.
+    R12     the doc seam: a renamed marker must red it.
 """
 from __future__ import annotations
 
@@ -71,91 +94,122 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-MOD = ROOT / "scripts/lib/handoff_doc.py"
+
+#: 🔴 NAMED `SCRIPT`, SINGULAR, BECAUSE `test_mutation_battery_anchors.py`
+#: READS IT. That module statically pins every `old` anchor at exactly-once
+#: in `SCRIPT`, so a reformatted line is caught at the moment it lands rather
+#: than by whoever next runs the sweep and reads a NOT-APPLIED row. Every row
+#: here targets this one file, so there is no `TARGETS` map.
+SCRIPT = ROOT / "scripts/lib/handoff_doc.py"
 SUITE = "scripts/tests/test_handoff_doc.py"
 
-#: (id, file, old, new, the test whose OWN assertion must go red)
-MUTANTS: list[tuple[str, pathlib.Path, str, str, str]] = [
+#: 🔴 ROW SHAPE IS `(id, why, killer, old, new)` AND THE ORDER IS NOT FREE —
+#: `test_mutation_battery_anchors.py::_anchors` reads `row[0]` and `row[3]`,
+#: so a table with `old` anywhere but the 4th field is one that module cannot
+#: parse, and its exactly-once check then passes over a battery it never
+#: read. `mutants-round0-attribution-rate.py` had to be reshaped for exactly
+#: this reason; this one is born in the convention.
+MUTANTS: list[tuple[str, str, str, str, str]] = [
     (
-        "R1-never-arm", MOD,
-        "        if not durable:\n",
-        "        if True:\n",
-        "TestADurablePruneWithNoArchiveIsRefused::test_it_is_refused_and_writes_NOTHING",
+        'R1-never-arm',
+        'the ARMING predicate switched OFF: a durable removal no longer needs an '
+        'archive, i.e. `origin/main`\'s behaviour restored. 🔴 THE MIRROR OF R2 '
+        'ON THE SAME EXPRESSION, which is what makes the pair a measurement of '
+        'the arming rather than of a fast path: one empties the set rule (r) '
+        'refuses on, the other widens it to every removal.',
+        'TestADurablePruneWithNoArchiveIsRefused::test_it_is_refused_and_writes_NOTHING',
+        '            for target in durable\n',
+        '            for target in ()\n',
     ),
     (
-        "R2-always-arm", MOD,
-        "        if not durable:\n",
-        "        if False:\n",
-        "TestADurablePruneWithNoArchiveIsRefused::"
-        "test_a_NON_durable_prune_with_no_archive_is_still_ACCEPTED",
+        'R2-always-arm',
+        'the ARMING predicate switched ON for EVERYTHING: every removal needs an '
+        'archive, which is the permanently-red gate the negative control exists '
+        'for. 🔴 ITS FIRST SPELLING WAS `if not durable: return ()` -> `if '
+        'False:` AND IT SURVIVED A GREEN SUITE — the comprehension iterates '
+        '`durable`, so an empty one already yields `()` and that fast path '
+        'decided nothing. The dead line is deleted and the arming is now '
+        'mutated where it actually lives.',
+        'TestADurablePruneWithNoArchiveIsRefused::test_a_NON_durable_prune_with_no_archive_is_still_ACCEPTED',
+        '            for target in durable\n',
+        '            for target in plan.removed\n',
     ),
     (
-        "R3-shared-predicate-empty", MOD,
-        "    return tuple(t for t in plan.removed if t.reason)\n",
-        "    return tuple(t for t in plan.removed if False)\n",
-        "TestADurablePruneWithNoArchiveIsRefused::test_it_is_refused_and_writes_NOTHING",
+        'R3-shared-predicate-empty',
+        "`durable_removals` — the ONE list rule (f)'s disclosure and rule (r)'s trigger both read — made empty",
+        'TestADurablePruneWithNoArchiveIsRefused::test_it_is_refused_and_writes_NOTHING',
+        '    return tuple(t for t in plan.removed if t.reason)\n',
+        '    return tuple(t for t in plan.removed if False)\n',
     ),
     (
-        "R4-compare-only-the-durable-half", MOD,
-        "        for target in plan.removed\n",
-        "        for target in durable\n",
-        "TestTheArchiveIsCheckedOverEVERYRemovedLine::"
-        "test_a_NON_durable_removal_missing_from_the_archive_refuses",
+        'R4-compare-only-the-durable-half',
+        "the COMPARISON narrowed to the durable half — the design error the asymmetry exists to prevent, inheriting the predicate's floor",
+        'TestTheArchiveIsCheckedOverEVERYRemovedLine::test_a_NON_durable_removal_missing_from_the_archive_refuses',
+        '        for target in plan.removed\n',
+        '        for target in durable\n',
     ),
     (
-        "R5-archive-compared-verbatim", MOD,
-        "    return {_norm_line(ln) for ln in archive_text.splitlines() if ln.strip()}\n",
-        "    return {ln for ln in archive_text.splitlines() if ln.strip()}\n",
-        "TestAnArchiveThatHoldsTheContentLetsThePruneLand::"
-        "test_whitespace_is_collapsed_and_NOTHING_ELSE_IS",
+        'R5-archive-compared-verbatim',
+        'the archive read WITHOUT `_norm_line`, so a re-indented copy stops counting — too strict, and disagrees with the prune matcher one function away',
+        'TestAnArchiveThatHoldsTheContentLetsThePruneLand::test_whitespace_is_collapsed_and_NOTHING_ELSE_IS',
+        '    return {_norm_line(ln) for ln in archive_text.splitlines() if ln.strip()}\n',
+        '    return {ln for ln in archive_text.splitlines() if ln.strip()}\n',
     ),
     (
-        "R6-containment-always-satisfied", MOD,
-        "        if _norm_line(target.line) not in held\n",
-        "        if False\n",
-        "TestTheArchiveIsNeverWrittenAndCannotBeTheDoc::"
-        "test_an_EMPTY_archive_is_not_a_bypass",
+        'R6-containment-always-satisfied',
+        'the containment test made unconditionally true — any file, empty included, conserves everything',
+        'TestTheArchiveIsNeverWrittenAndCannotBeTheDoc::test_an_EMPTY_archive_is_not_a_bypass',
+        '        if _norm_line(target.line) not in held\n',
+        '        if False\n',
     ),
     (
-        "R7-self-archive-guard-off", MOD,
-        "    if archive_is_the_doc:\n",
-        "    if False:\n",
-        "TestTheArchiveIsNeverWrittenAndCannotBeTheDoc::"
-        "test_pointing_the_archive_AT_THE_DOC_is_refused",
+        'R7-self-archive-guard-off',
+        'the self-archive walk reopened: `--archive <the doc>` satisfies containment trivially, because the check runs before the prune is written',
+        'TestTheArchiveIsNeverWrittenAndCannotBeTheDoc::test_pointing_the_archive_AT_THE_DOC_is_refused',
+        '    if archive_is_the_doc:\n',
+        '    if False:\n',
     ),
     (
-        "R8-self-archive-by-NAME-not-identity", MOD,
-        "            archive_is_the_doc = archive.resolve() == doc.resolve()\n",
-        "            archive_is_the_doc = archive == doc\n",
-        "TestTheArchiveIsNeverWrittenAndCannotBeTheDoc::"
-        "test_the_self_archive_refusal_is_on_IDENTITY_not_on_a_spelling",
+        'R8-self-archive-by-NAME-not-identity',
+        'the self-archive guard made a NAME check instead of an IDENTITY one — the spelled-guard shape, walkable by a symlink',
+        'TestTheArchiveIsNeverWrittenAndCannotBeTheDoc::test_the_self_archive_refusal_is_on_IDENTITY_not_on_a_spelling',
+        '            archive_is_the_doc = archive.resolve() == doc.resolve()\n',
+        '            archive_is_the_doc = archive == doc\n',
     ),
     (
-        "R9-unreadable-archive-is-operational", MOD,
-        "                archive_error = str(exc)\n",
-        "                return EXIT_FAIL\n",
-        "TestTheArchiveIsNeverWrittenAndCannotBeTheDoc::"
-        "test_an_unreadable_archive_is_RULE_R_s_verdict_not_an_OPERATIONAL_one",
+        'R9-unreadable-archive-is-operational',
+        "an unreadable archive reported as an OPERATIONAL failure (3) rather than as rule (r)'s verdict (16) — a false conservation claim is about the prune",
+        'TestTheArchiveIsNeverWrittenAndCannotBeTheDoc::test_an_unreadable_archive_is_RULE_R_s_verdict_not_an_OPERATIONAL_one',
+        '                archive_error = str(exc)\n',
+        '                return EXIT_FAIL\n',
     ),
     (
-        "R10-exit-code-collapses-onto-rule-q", MOD,
-        "            return EXIT_PRUNE_UNCONSERVED\n",
-        "            return EXIT_PRUNE_REFUSED\n",
-        "TestADurablePruneWithNoArchiveIsRefused::test_it_is_refused_and_writes_NOTHING",
+        'R10-exit-code-collapses-onto-rule-q',
+        "16 collapsed onto rule (q)'s 15, so the two remedies become indistinguishable to a caller branching on the number",
+        'TestADurablePruneWithNoArchiveIsRefused::test_it_is_refused_and_writes_NOTHING',
+        '            return EXIT_PRUNE_UNCONSERVED\n',
+        '            return EXIT_PRUNE_REFUSED\n',
     ),
     (
-        "R11-inert-archive-flag-accepted", MOD,
-        "    if args.archive is not None and args.prune is None:\n",
-        "    if False and args.prune is None:\n",
-        "TestTheArchiveFlagUsageContract::"
-        "test_an_archive_without_a_prune_is_a_USAGE_refusal",
+        'R11-inert-archive-flag-accepted',
+        'the usage refusal for an `--archive` with no `--prune` switched off, so an inert flag reads on the run as a conservation claim',
+        'TestTheArchiveFlagUsageContract::test_an_archive_without_a_prune_is_a_USAGE_refusal',
+        '    if args.archive is not None and args.prune is None:\n',
+        '    if False and args.prune is None:\n',
     ),
     (
-        "R12-positive-control-marker-rename", MOD,
+        'R12-marker-rename-must-red-the-skill-seam',
+        'a marker RENAME must red the doc seam, because the reference topic is '
+        'the executor\'s only map from a printed marker to what to do about it. '
+        '🔴 THIS ROW WAS FILED AS "the literal pin is the only thing that can '
+        'see a rename" AND THE MEASUREMENT REFUTED IT: the DERIVED loop reds '
+        '(the new value is not in the doc) and the literal pin stays GREEN. The '
+        'only case the literal uniquely caught was a rename PROPAGATED to the '
+        'doc — a coordinated edit, not a defect — so that test was deleted and '
+        'this row keeps the seam honest on its own.',
+        'TestRuleRReachesTheSkill::test_the_reference_topic_documents_the_markers_and_the_flag',
         'ARCHIVE_MARKER_NONE = "[no archive]"\n',
         'ARCHIVE_MARKER_NONE = "[gone]"\n',
-        "TestRuleRReachesTheSkill::"
-        "test_the_literal_marker_spellings_are_in_the_reference_topic",
     ),
 ]
 
@@ -183,9 +237,14 @@ def failed_tests(out: str) -> set[str]:
 
 
 def main() -> int:
-    originals = {MOD: MOD.read_text(encoding="utf-8")}
+    # 🔴 LINE-BUFFERED, because a battery you cannot WATCH is one you cannot
+    # tell from a hang. Redirect stdout to a file and Python block-buffers it,
+    # so a half-hour sweep shows nothing at all until it exits — and the first
+    # thing a reader does with silence is kill it.
+    sys.stdout.reconfigure(line_buffering=True)
+    originals = {SCRIPT: SCRIPT.read_text(encoding="utf-8")}
     try:
-        print("baseline (no mutation) …", flush=True)
+        print("baseline (no mutation) …")
         out, _rc = run_suite()
         if not _SUMMARY.search(out):
             print("ABORT: the baseline run printed no summary line. A battery "
@@ -202,7 +261,8 @@ def main() -> int:
         print(f"  baseline GREEN — {out.strip().splitlines()[-1]}")
 
         killed, wrong, survived, not_applied = [], [], [], []
-        for mid, path, old, new, named in MUTANTS:
+        for mid, _why, named, old, new in MUTANTS:
+            path = SCRIPT
             src = originals[path]
             hits = src.count(old)
             if hits != 1:

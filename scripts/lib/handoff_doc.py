@@ -4526,11 +4526,20 @@ def conservation_problems(
             ),
         )
     if archive_path is None:
-        if not durable:
-            # The ordinary prune: nothing here looks durable, so there is nothing
-            # for an archive to conserve and the flag is not required. This is
-            # the ~97.6% branch, and it must stay silent.
-            return ()
+        # The ordinary prune — nothing here looks durable, so there is nothing for
+        # an archive to conserve and the flag is not required — falls out of the
+        # comprehension below as `()`. That is the ~97.6% branch and it must stay
+        # silent.
+        #
+        # 🔴 AND IT HAS NO `if not durable: return ()` FAST PATH, WHICH IS A
+        # MEASURED DELETION RATHER THAN AN OMISSION. One was written first and
+        # row R2 of `mutation_battery_prune_conservation.py` proved it DEAD:
+        # inverting its condition left the whole suite green, because a
+        # comprehension over an empty `durable` already yields `()`. Keeping it
+        # would have kept a line that reads as the rule's ARMING decision while
+        # deciding nothing — the shape this module kills by mutation elsewhere
+        # (see `base_readable`). The arming lives in `for target in durable`,
+        # one line down, and R2 now mutates THAT.
         return tuple(
             PruneProblem(
                 ARCHIVE_MARKER_NONE,
