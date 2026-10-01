@@ -207,6 +207,17 @@
       };
 
       # ---------------------------------------------------------------------
+      # oc-sent-tui — the popup TUI behind tmux's Alt+S ("what did I send in
+      # the current opencode session"). Same overlay pattern as its two
+      # siblings: the derivation is LOCAL to this repo and CAN evaluate to
+      # null (version read out of the Go source; the consumer in
+      # tools/default.nix filters nulls).
+      # ---------------------------------------------------------------------
+      ocSentTuiOverlay = final: _prev: {
+        oc-sent-tui = import ./nix/pkgs/tools/oc-sent-tui { pkgs = final; };
+      };
+
+      # ---------------------------------------------------------------------
       # opencode held at 1.18.29 because 1.18.30 cannot run a prompt at all.
       # The full measurement, the upstream issue and the removal recipe are on
       # the `nixpkgs-opencode-1_18_29` input above — read that before touching
@@ -232,7 +243,7 @@
       pkgs = import nixpkgs {
         inherit system;
         config.allowUnfree = true;
-        overlays = [ mentionReviewOverlay sttVoiceOverlay opencodePinOverlay ];
+        overlays = [ mentionReviewOverlay sttVoiceOverlay ocSentTuiOverlay opencodePinOverlay ];
       };
       # Same allowUnfree treatment for the frozen 1.57 nixpkgs — the browser
       # bundle is unfree there too, and an --impure fallback would make the
@@ -897,6 +908,8 @@
             chmod -R u+w src/nix/pkgs/tools/mention-review/src/vendor
             cp -r ${pkgs.stt-voice.goModules} src/nix/pkgs/tools/stt-voice/src/vendor
             chmod -R u+w src/nix/pkgs/tools/stt-voice/src/vendor
+            cp -r ${pkgs.oc-sent-tui.goModules} src/nix/pkgs/tools/oc-sent-tui/src/vendor
+            chmod -R u+w src/nix/pkgs/tools/oc-sent-tui/src/vendor
             export GOFLAGS="-mod=vendor"
             export GOPROXY=off
             cd src
