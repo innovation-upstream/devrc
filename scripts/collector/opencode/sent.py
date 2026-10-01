@@ -80,11 +80,33 @@ Exit family (as export.py): 0 ok, 2 no store, 3 no such session, 4 no
 DISPLAYABLE user messages under the current filter, 5 store unreadable.
 Message/part ordering re-uses `export._order_key`, because `_shared`'s
 `ORDER BY time_created` is not a total order and two runs must agree.
+
+🔴 `--json` IS THE MACHINE CONTRACT, AND THE TUI (`oc-sent-tui`) IS ITS
+CONSUMER. Stdout carries exactly one JSON object and nothing else — the
+human text renderer must never leak into it (errors and notes stay on
+stderr; in json mode the notes ride INSIDE the payload so a TUI can display
+them without stderr plumbing). rc 0 and rc 4 both emit a payload (an empty
+session is a renderable state, not a failure to parse); rc 2/3/5 emit
+NOTHING on stdout. Shape:
+
+    {"session": {"id": ..., "title": ...},
+     "messages": [{"epoch_ms": int, "ts": "YYYY-MM-DD HH:MM",
+                   "agent": "build", "text": "raw, newlines intact"}...],
+     "textless_hidden": int, "other_agent_hidden": int,
+     "resolved_from": "exact"|"ancestor"|"fallback"|null,
+     "notes": [str...]}
+
+`resolved_from`/`notes` are null/[] for `show --json` (nothing was
+resolved); `ts` is duplicated as `epoch_ms` so the TUI can re-format for
+width without parsing the display string. This contract is pinned by
+test_sent.py's json-shape tests — change the shape and the tests change in
+the same commit.
 """
 from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
 import sqlite3
 import sys
@@ -141,22 +163,24 @@ def _one_line(text: str) -> str:
 
 def user_messages(
     db, session_id: str, all_agents: bool = False
-) -> tuple[list[tuple[str, str, str]], int, int]:
-    """Return ([(ts_str, agent, text)], textless_hidden, other_agent_hidden).
+) -> tuple[list[tuple[int, str, str, str]], int, int]:
+    """Return ([(epoch_ms, ts_str, agent, text)], textless, other_agent).
 
-    Ordered by `export._order_key` (total order), text joined from ALL text
-    parts of the message — `tailer.extract_text` takes only the first part,
-    which is the telemetry view; a dispatch brief attached as a second part is
-    part of what the user sent. Empty-text parts contribute nothing, and a
-    message whose text parts are all empty is dropped from the list and
-    counted in textless_hidden instead. Non-build user messages are likewise
-    counted in other_agent_hidden — round-1 finding 2: 60 of 223
+    epoch_ms rides along beside the display string because the `--json`
+    contract carries both (a TUI re-formats for width without parsing the
+    display form). Ordered by `export._order_key` (total order), text joined
+    from ALL text parts of the message — `tailer.extract_text` takes only the
+    first part, which is the telemetry view; a dispatch brief attached as a
+    second part is part of what the user sent. Empty-text parts contribute
+    nothing, and a message whose text parts are all empty is dropped from the
+    list and counted in textless_hidden instead. Non-build user messages are
+    likewise counted in other_agent_hidden — round-1 finding 2: 60 of 223
     sessions-with-user-messages measured 2026-10-01 are ALL non-build (every
     dispatched-subagent session, 0 mixed), so "no user messages" would be a
     false sentence for 27% of the population unless the count names what the
     filter did.
     """
-    out: list[tuple[str, str, str]] = []
+    out: list[tuple[int, str, str, str]] = []
     textless = 0
     other_agent = 0
     for message in sorted(S.iter_messages(db, session_id), key=_order_key):
@@ -176,6 +200,7 @@ def user_messages(
             textless += 1
             continue
         out.append((
+            int(message.get("time_created") or 0),
             _fmt_ts(message.get("time_created")),
             agent,
             joined,
@@ -183,15 +208,47 @@ def user_messages(
     return out, textless, other_agent
 
 
+def _collect(db, session_id: str, all_agents: bool) -> tuple[list, int, int]:
+    """user_messages behind the store-read wrap every consumer shares."""
+    try:
+        return user_messages(db, session_id, all_agents=all_agents)
+    except (sqlite3.DatabaseError, IndexError) as exc:
+        print(f"store read failed: {exc}", file=sys.stderr)
+        raise _StoreUnreadable() from exc
+
+
+class _StoreUnreadable(Exception):
+    """Raised by _collect; callers turn it into EXIT_STORE_UNREADABLE."""
+
+
+def _payload(
+    db, session_id: str, all_agents: bool, session: dict | None,
+    resolved_from: str | None = None, notes: list[str] | None = None,
+) -> dict:
+    """The `--json` machine contract — see the module docstring's shape."""
+    messages, textless, other_agent = _collect(db, session_id, all_agents)
+    return {
+        "session": {
+            "id": (session or {}).get("id", session_id),
+            "title": ((session or {}).get("title") or "").strip() or "(untitled)",
+        },
+        "messages": [
+            {"epoch_ms": epoch, "ts": ts, "agent": agent, "text": text}
+            for (epoch, ts, agent, text) in messages
+        ],
+        "textless_hidden": textless,
+        "other_agent_hidden": other_agent,
+        "resolved_from": resolved_from,
+        "notes": notes or [],
+    }
+
+
 def _print_messages(db, session_id: str, all_agents: bool) -> int:
     """Render one session's user messages. Empty → EXIT_SESSION_EMPTY with
     the filter wording; the caller owns the "is this session known" check."""
     try:
-        messages, textless, other_agent = user_messages(
-            db, session_id, all_agents=all_agents
-        )
-    except (sqlite3.DatabaseError, IndexError) as exc:
-        print(f"store read failed: {exc}", file=sys.stderr)
+        messages, textless, other_agent = _collect(db, session_id, all_agents)
+    except _StoreUnreadable:
         return EXIT_STORE_UNREADABLE
 
     if not messages:
@@ -210,7 +267,7 @@ def _print_messages(db, session_id: str, all_agents: bool) -> int:
             )
         return EXIT_SESSION_EMPTY
 
-    for ts, agent, text in messages:
+    for epoch, ts, agent, text in messages:
         tag = "" if agent == HUMAN_AGENT else f"[{agent}] "
         print(f"{ts}  {tag}{_one_line(text)}".rstrip())
     if textless:
@@ -221,7 +278,7 @@ def _print_messages(db, session_id: str, all_agents: bool) -> int:
     return EXIT_OK
 
 
-def cmd_show(db, session_id: str, all_agents: bool) -> int:
+def cmd_show(db, session_id: str, all_agents: bool, as_json: bool) -> int:
     if not _store_is_readable(db):
         print(
             "store is unreadable (missing tables or schema drift) — "
@@ -231,20 +288,34 @@ def cmd_show(db, session_id: str, all_agents: bool) -> int:
         return EXIT_STORE_UNREADABLE
 
     try:
-        known = any(s.get("id") == session_id for s in S.iter_sessions(db))
+        rows = list(S.iter_sessions(db))
     except (sqlite3.DatabaseError, IndexError) as exc:
         print(f"store read failed: {exc}", file=sys.stderr)
         return EXIT_STORE_UNREADABLE
-    if not known:
+    session = next((s for s in rows if s.get("id") == session_id), None)
+    if session is None:
         print(f"no such session: {session_id}", file=sys.stderr)
         return EXIT_NO_SUCH_SESSION
+    if as_json:
+        try:
+            payload = _payload(db, session_id, all_agents, session)
+        except _StoreUnreadable:
+            return EXIT_STORE_UNREADABLE
+        print(json.dumps(payload))
+        # json mode keeps the text mode's exit semantics: rc 4 is still
+        # "no displayable user messages" — the payload is emitted (an empty
+        # session is a renderable state), the STATUS is unchanged
+        return EXIT_SESSION_EMPTY if not payload["messages"] else EXIT_OK
     return _print_messages(db, session_id, all_agents)
 
 
 def resolve_session_for_cwd(
     db, cwd: str
-) -> tuple[dict | None, str]:
-    """Return (session, note) for "the current opencode session" at a cwd.
+) -> tuple[dict | None, str, str]:
+    """Return (session, note, kind) for "the current opencode session" at a
+    cwd. kind is "exact", "ancestor" or "fallback" — the --json contract
+    carries it, so it is decided HERE, never re-derived from the note's
+    wording.
 
     Exact `session.directory` match first; then the LONGEST ancestor
     directory of cwd (an opencode TUI launched at the project root records
@@ -260,7 +331,7 @@ def resolve_session_for_cwd(
         reverse=True,
     )
     if not sessions:
-        return None, ""
+        return None, "", "fallback"
 
     def _norm(p: str | None) -> str:
         return (p or "").rstrip("/")
@@ -268,20 +339,22 @@ def resolve_session_for_cwd(
     cwd_n = _norm(cwd)
     exact = [s for s in sessions if _norm(s.get("directory")) == cwd_n]
     if exact:
-        return exact[0], ""
+        return exact[0], "", "exact"
     ancestors = [
         s for s in sessions
         if _norm(s.get("directory")) and (cwd_n + "/").startswith(_norm(s.get("directory")) + "/")
     ]
     if ancestors:
-        return max(ancestors, key=lambda s: len(_norm(s["directory"]))), ""
+        return (
+            max(ancestors, key=lambda s: len(_norm(s["directory"]))), "", "ancestor"
+        )
     return sessions[0], (
         f"(no session directory matches {cwd} — showing the most recently "
         "active session)"
-    )
+    ), "fallback"
 
 
-def cmd_here(db, cwd: str, all_agents: bool) -> int:
+def cmd_here(db, cwd: str, all_agents: bool, as_json: bool) -> int:
     if not _store_is_readable(db):
         print(
             "store is unreadable (missing tables or schema drift) — "
@@ -291,13 +364,24 @@ def cmd_here(db, cwd: str, all_agents: bool) -> int:
         return EXIT_STORE_UNREADABLE
 
     try:
-        session, note = resolve_session_for_cwd(db, cwd)
+        session, note, kind = resolve_session_for_cwd(db, cwd)
     except (sqlite3.DatabaseError, IndexError) as exc:
         print(f"store read failed: {exc}", file=sys.stderr)
         return EXIT_STORE_UNREADABLE
     if session is None:
         print("no opencode sessions found", file=sys.stderr)
         return EXIT_NO_SUCH_SESSION
+    if as_json:
+        try:
+            payload = _payload(
+                db, session["id"], all_agents, session,
+                resolved_from=kind,
+                notes=[note] if note else [],
+            )
+        except _StoreUnreadable:
+            return EXIT_STORE_UNREADABLE
+        print(json.dumps(payload))
+        return EXIT_SESSION_EMPTY if not payload["messages"] else EXIT_OK
     if note:
         print(note, file=sys.stderr)
     title = (session.get("title") or "").strip() or "(untitled)"
@@ -317,6 +401,10 @@ def main(argv: list[str] | None = None) -> int:
         "--all-agents", action="store_true",
         help="include subagent-injected pseudo-user messages, tagged",
     )
+    p_show.add_argument(
+        "--json", action="store_true",
+        help="machine contract on stdout (see the module docstring)",
+    )
     p_show.add_argument("--db", help="explicit store path (default: discovered)")
     p_here = sub.add_parser(
         "here", help="messages for the session matching a cwd (tmux keybind entry)"
@@ -328,6 +416,10 @@ def main(argv: list[str] | None = None) -> int:
     p_here.add_argument(
         "--all-agents", action="store_true",
         help="include subagent-injected pseudo-user messages, tagged",
+    )
+    p_here.add_argument(
+        "--json", action="store_true",
+        help="machine contract on stdout (see the module docstring)",
     )
     p_here.add_argument("--db", help="explicit store path (default: discovered)")
     args = ap.parse_args(argv)
@@ -342,8 +434,8 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_NO_DB
     try:
         if args.cmd == "show":
-            return cmd_show(db, args.session_id, args.all_agents)
-        return cmd_here(db, args.cwd or os.getcwd(), args.all_agents)
+            return cmd_show(db, args.session_id, args.all_agents, args.json)
+        return cmd_here(db, args.cwd or os.getcwd(), args.all_agents, args.json)
     finally:
         db.close()
 

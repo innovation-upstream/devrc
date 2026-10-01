@@ -111,3 +111,13 @@ with pkgs; [
 # in `home.packages` would fail the SWITCH (ship.sh reports that as a
 # SKIPPED host).
 ++ (pkgs.lib.optional (pkgs.stt-voice != null) pkgs.stt-voice)
+# oc-sent-tui — the popup TUI behind tmux's Alt+S ("what did I send in the
+# current opencode session"). ON PATH as a bare name because the tmux
+# binding execs it that way, exactly as stt-voice's hotkey chain does.
+#
+# 🔴 THE NULL FILTER IS LOAD-BEARING, NOT DEFENSIVE — same mechanism as
+# mention-review/stt-voice above: the derivation evaluates to `null` when it
+# cannot read exactly one `var buildVersion` line out of the Go source, and
+# a null in `home.packages` would fail the SWITCH (ship.sh reports that as a
+# SKIPPED host).
+++ (pkgs.lib.optional (pkgs.oc-sent-tui != null) pkgs.oc-sent-tui)

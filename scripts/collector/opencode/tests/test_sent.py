@@ -450,6 +450,88 @@ def test_here_trailing_slashes_match_exactly(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------- #
+# --json — the machine contract the TUI consumes; the shape is pinned, a
+# shape change and these tests change in the same commit
+# --------------------------------------------------------------------------- #
+def _json_of(tmp_path, capsys, *argv):
+    import json as _json
+    rc = SE.main([*argv, "--json", "--db", str(tmp_path / "store.db")])
+    cap = capsys.readouterr()
+    return rc, _json.loads(cap.out), cap
+
+
+def test_show_json_contract_shape(tmp_path, capsys):
+    db = _build_db(tmp_path / "store.db")
+    _add_session(db)
+    _add_message(db, "m1", "s1", 1700000001000, _user("m1", 1700000001000))
+    _add_part(db, "p1", "m1", "s1", 1700000001000,
+              _text("first line\nsecond line"))
+    _add_message(db, "m2", "s1", 1700000002000, _user("m2", 1700000002000, "explore"))
+    _add_part(db, "p2", "m2", "s1", 1700000002000, _text("injected"))
+    db.commit()
+    rc, payload, cap = _json_of(tmp_path, capsys, "show", "s1")
+    assert rc == 0
+    assert set(payload) == {
+        "session", "messages", "textless_hidden", "other_agent_hidden",
+        "resolved_from", "notes",
+    }
+    assert payload["session"] == {"id": "s1", "title": "t"}
+    (m,) = payload["messages"]
+    # epoch and display ts BOTH carried; text raw, newlines intact; the
+    # explore message counts as hidden, it is not in the list
+    assert m == {
+        "epoch_ms": 1700000001000,
+        "ts": _expected_local(1700000001000),
+        "agent": "build",
+        "text": "first line\nsecond line",
+    }
+    assert payload["other_agent_hidden"] == 1
+    assert payload["resolved_from"] is None and payload["notes"] == []
+
+
+def test_show_json_empty_session_is_a_payload_not_a_failure(tmp_path, capsys):
+    db = _build_db(tmp_path / "store.db")
+    _add_session(db)
+    db.commit()
+    rc, payload, cap = _json_of(tmp_path, capsys, "show", "s1")
+    assert rc == X.EXIT_SESSION_EMPTY
+    assert payload["messages"] == []
+    assert payload["textless_hidden"] == 0 and payload["other_agent_hidden"] == 0
+
+
+def test_here_json_carries_the_resolution_kind_and_notes(tmp_path, capsys):
+    db = _build_db(tmp_path / "store.db")
+    _add_session(db, sid="s1", directory="/tmp/proj")
+    _user_msg_with_text(db, "m1", "s1", 1700000001000, "typed")
+    _add_session(db, sid="s2", directory="/elsewhere", created=5000, updated=9000)
+    _user_msg_with_text(db, "m2", "s2", 1700000002000, "newest")
+    db.commit()
+    rc, payload, cap = _json_of(tmp_path, capsys, "here", "/tmp/proj")
+    assert rc == 0
+    assert payload["session"] == {"id": "s1", "title": "t"}
+    assert payload["resolved_from"] == "exact" and payload["notes"] == []
+
+    rc, payload, cap = _json_of(tmp_path, capsys, "here", "/nowhere")
+    assert rc == 0
+    assert payload["session"]["id"] == "s2"
+    assert payload["resolved_from"] == "fallback"
+    assert any("no session directory matches /nowhere" in n for n in payload["notes"])
+
+
+def test_json_stdout_never_leaks_human_rendering(tmp_path, capsys):
+    """The human renderer's header line must not appear beside the JSON —
+    one stdout, one consumer, one format."""
+    db = _build_db(tmp_path / "store.db")
+    _add_session(db)
+    _user_msg_with_text(db, "m1", "s1", 1700000001000, "typed")
+    db.commit()
+    rc, payload, cap = _json_of(tmp_path, capsys, "here", "/tmp/proj")
+    assert rc == 0
+    assert cap.out.startswith("{") and cap.out.rstrip().endswith("}")
+    assert "\n" not in cap.out.strip()
+
+
+# --------------------------------------------------------------------------- #
 # the guard: sent.py opens NO connection of its own
 # --------------------------------------------------------------------------- #
 def _connect_callers(src: str) -> list[str]:

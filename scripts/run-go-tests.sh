@@ -209,6 +209,9 @@ PACKAGES=(
   "nix/pkgs/tools/stt-voice/src|internal/history|5"
   "nix/pkgs/tools/stt-voice/src|internal/effects|9"
   "nix/pkgs/tools/stt-voice/src|internal/ui|17"
+  "nix/pkgs/tools/oc-sent-tui/src|cmd/oc-sent-tui|1"
+  "nix/pkgs/tools/oc-sent-tui/src|internal/sent|4"
+  "nix/pkgs/tools/oc-sent-tui/src|internal/ui|11"
 )
 
 # The MODULES set is derived, not spelled: a package row naming a module dir
