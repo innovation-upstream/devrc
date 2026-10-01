@@ -364,23 +364,37 @@ def _connect_callers(src: str) -> list[str]:
     (`_c = sqlite3.connect`), importing the connect FUNCTION from any sqlite
     module path (`from sqlite3 import connect`, `from sqlite3.dbapi2 import
     connect`), `getattr(<sqlite3-thing>, 'connect')` under any alias or
-    attribute chain (round-3 finding 1), and `partial(...connect)`. The reader
-    connection comes from `_shared`; `getattr(sqlite3, 'DatabaseError')` and
-    friends must NOT flag (positive controls below). Two disclosed holes, both
-    statically undecidable for a source AST: getattr with a VARIABLE second
-    argument, and a local shim module re-exporting connect.
+    attribute chain and via a from-imported submodule binding (round-3/4
+    findings), and `partial(...connect)`. The reader connection comes from
+    `_shared`; `getattr(sqlite3, 'DatabaseError')` and friends must NOT flag
+    (positive controls below). Disclosed holes, each statically undecidable
+    for a source AST: a VARIABLE second argument; a local shim module
+    re-exporting connect; a receiver that is not lexically a sqlite name
+    (`sys.modules['sqlite3']` — `_dotted` returns "" for Subscript receivers
+    and the guard passes it).
     """
     tree = ast.parse(src)
     offenders = []
-    # names that REFER to the sqlite3 module, under any alias or attribute
-    # chain: `import sqlite3 as s3` makes `s3` one; `sqlite3.dbapi2.connect`
-    # is an Attribute whose dotted name starts with the real name
-    sqlite_names = {
-        (a.asname or a.name)
-        for node in ast.walk(tree) if isinstance(node, ast.Import)
-        for a in node.names
-        if a.name == "sqlite3" or a.name.startswith("sqlite3.")
-    }
+    # names that REFER to a sqlite-family module. From `import sqlite3 [as X]`
+    # and `import sqlite3.dbapi2 [as X]`: the bound name (X or the full path).
+    # From `from sqlite3 import dbapi2`: the bound name is a SUBMODULE of
+    # sqlite3, so its root is a sqlite-thing too (round-4 finding: the map
+    # previously walked ast.Import only, and `from sqlite3 import dbapi2`
+    # bound `dbapi2` past it).
+    sqlite_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name == "sqlite3" or a.name.startswith("sqlite3."):
+                    sqlite_names.add(a.asname or a.name)
+        elif isinstance(node, ast.ImportFrom) and (
+            node.module == "sqlite3" or (node.module or "").startswith("sqlite3.")
+        ):
+            # a name bound FROM a sqlite-family module is treated as a sqlite
+            # thing even when it is the DatabaseError class: getattr over it
+            # asking for 'connect' is contrived, and over-flagging is the
+            # fail-open direction for this guard
+            sqlite_names.update(a.asname or a.name for a in node.names)
 
     def _dotted(node) -> str:
         """`sqlite3.dbapi2` from Attribute(Name('sqlite3'), 'dbapi2')."""
@@ -389,6 +403,18 @@ def _connect_callers(src: str) -> list[str]:
         if isinstance(node, ast.Attribute):
             return _dotted(node.value) + "." + node.attr
         return ""
+
+    def _is_sqlite_receiver(node) -> bool:
+        """Does the dotted receiver's ROOT name refer to a sqlite thing?
+
+        The ROOT, not the whole dotted string: round-4's survivor
+        `getattr(s3.dbapi2, 'connect')` after `import sqlite3 as s3` has
+        dotted root `s3` — the previous whole-string match missed it.
+        """
+        dotted = _dotted(node)
+        if not dotted:
+            return False
+        return dotted.split(".")[0] in sqlite_names or dotted.startswith("sqlite3.")
 
     for node in ast.walk(tree):
         # the MODULE import is legal (exception types, export.py's own use);
@@ -412,8 +438,7 @@ def _connect_callers(src: str) -> list[str]:
             # (sqlite3.dbapi2) — round-3 finding 1's two survivors.
             elif isinstance(f, ast.Name) and f.id == "getattr" and len(node.args) >= 2:
                 a0, a1 = node.args[0], node.args[1]
-                dotted = _dotted(a0)
-                if (dotted in sqlite_names or dotted.startswith("sqlite3")) \
+                if _is_sqlite_receiver(a0) \
                         and isinstance(a1, ast.Constant) and a1.value == "connect":
                     offenders.append(ast.dump(node))
             # partial(<anything>.connect) — deferring the call is opening it
@@ -441,12 +466,16 @@ def test_sent_opens_no_connection_of_its_own():
     "import sqlite3 as s3\nfrom functools import partial\ndb = partial(s3.connect)('x')\n",
     "import sqlite3 as s3\nopen_db = getattr(s3, 'connect')\ndb = open_db('x')\n",
     "import sqlite3\nopen_db = getattr(sqlite3.dbapi2, 'connect')\ndb = open_db('x')\n",
+    "import sqlite3 as s3\nopen_db = getattr(s3.dbapi2, 'connect')\ndb = open_db('x')\n",
+    "from sqlite3 import dbapi2\nopen_db = getattr(dbapi2, 'connect')\ndb = open_db('x')\n",
 ])
 def test_connection_guard_flags_each_spelling(bad_src):
     """Negative control for the guard above — it must actually fire. Rows 4-6
     are the round-2 finds (getattr, the dbapi2 path, the partial deferral);
-    rows 7-8 are round-3 finding 1's survivors: the aliased and
-    attribute-chain getattr receivers."""
+    rows 7-8 are round-3 finding 1's survivors (aliased and attribute-chain
+    getattr receivers); rows 9-10 are round-4 finding's survivors: the
+    dotted-root miss (s3.dbapi2 after `import sqlite3 as s3`) and the
+    from-imported submodule binding the map previously never walked."""
     assert _connect_callers(bad_src), f"guard must flag: {bad_src!r}"
 
 
@@ -468,6 +497,9 @@ def test_connection_guard_passes_the_shared_pattern():
     assert not _connect_callers(ok_dbapi2)
     ok_partial = "from functools import partial\ndoubler = partial(print, 'x')\n"
     assert not _connect_callers(ok_partial)
+    ok_assign = "import sqlite3\nerr_cls = sqlite3.DatabaseError\n" \
+                "raise err_cls('x')\n"
+    assert not _connect_callers(ok_assign)
 
 
 # --------------------------------------------------------------------------- #
