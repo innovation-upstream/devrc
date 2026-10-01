@@ -116,6 +116,18 @@ BATTERIES = (
     # MEASURED after that fix, 39 rows, two runs minutes apart: 36.5s and 74.2s
     # wall. The argument does not rest on the duration, so no number replaces it.
     "mutants-round0-attribution-rate.py",
+    # Single-target (`scripts/lib/handoff_doc.py`), so no `TARGETS`. Rule (r) —
+    # `--prune` conservation. Committed for the reason the `operator_asks` row
+    # gives, and BORN in the `(id, why, killer, old, new)` convention rather
+    # than reshaped into it: the round that wrote it read this module first,
+    # which is the outcome the two-way pin is for.
+    # 🔴 Its own control row is the one worth knowing about —
+    # `R12-positive-control-marker-rename` renames `ARCHIVE_MARKER_NONE`, which
+    # moves the module AND every test that reads the constant, so only a LITERAL
+    # pin in the reference-topic test can see it. That is the measured survival
+    # the rule (q) block's header in `test_handoff_doc.py` records, kept here as
+    # the battery's own instrument check.
+    "mutation_battery_prune_conservation.py",
 )
 
 # 🔴 PYTHON MUTATION INSTRUMENTS THIS MODULE CANNOT PIN, each with its reason.

@@ -244,6 +244,8 @@ EXIT CODES
      this update would make it BIGGER
  15  prune-refused   — rule (q): a `--prune` named content this tool will not
      remove — absent, ambiguous, load-bearing, or outside an append-only section
+ 16  prune-unconserved — rule (r): a `--prune` would delete DURABLE-looking text
+     and no `--archive` holds it. Nothing written
 """
 
 from __future__ import annotations
@@ -496,6 +498,64 @@ SILENT rather than loud in the consumer: a dropped `closing-condition:` makes
 `### ` heading re-attributes its body to the block above. Rule (i-a)'s argument
 applies unchanged: a bypass for a refusal whose damage is invisible would be
 taken every time.
+"""
+
+
+EXIT_PRUNE_UNCONSERVED = 16
+"""Rule (r). A `--prune` would delete DURABLE-looking text no archive holds.
+
+🔴 WHY A SEPARATE CODE RATHER THAN A NINTH CAUSE OF 15. Rule (q)'s eight causes
+share one sentence — *this tool cannot identify, or may not touch, what you told
+it to remove* — and their remedy is always the same artefact, the prune file.
+Here the named lines resolve to exactly one document line each, they sit in an
+append-only section, and the tool MAY remove them. What is missing is anywhere
+the content went. The remedy is therefore a DIFFERENT artefact (`--archive
+<file>`), so a caller branching on the number can tell "rewrite your prune file"
+from "write the archive first".
+
+🔴 WHAT WAS CHECKING THIS BEFORE: ONE COMMIT MESSAGE. `af578a02` asserted by hand
+that "every non-blank line of the previous revision is present in either the doc
+or the archive (0 missing)". That is the right claim and it was true — of one
+prune, typed by a human after the fact, with nothing that re-runs it. Prose an
+agent can read and then not follow is what this module exists to replace, the
+same argument rules (j), (k) and (o) are made of. This is that sentence,
+mechanised.
+
+🔴 IT IS SCOPED TO DURABLE-LOOKING REMOVALS, AND THE NARROW READING IS THE
+DEFENSIBLE ONE. Rule (f)'s own measurement is the argument: `durable_reason`
+flags 63 of the 2,626 lines sitting under REPLACE headings in this repo's 44
+real handoff docs (2.4%). Arming this refusal on EVERY prune would demand an
+archive for the ~97.6% of removals that carry nothing durable — padding,
+superseded status, a grafana row nobody reads — which is the permanently-red
+gate `claude/RULES.md` and rule (f)'s header both refuse by name, and which
+would be satisfied by an empty ritual file within a week. Scoped to the durable
+half, every run that fires has something real at stake.
+
+🔴 BUT THE PREDICATE DECIDES WHETHER AN ARCHIVE IS *REQUIRED*, NEVER WHETHER ONE
+IS *CHECKED*. `durable_reason` is a FLOOR, not a classifier — `prune_note`
+already says so in as many words — so a rule that only ever looked at the lines
+it flagged would inherit that floor whole. So whenever `--archive` IS given,
+EVERY removed line must be in it, durable-looking or not. A caller who passes
+the flag by habit gets conservation checked over the whole prune, which is
+strictly more than the predicate can see, and the claim then verified is
+`af578a02`'s own.
+
+🔴 AND THE FILE IS READ, NEVER WRITTEN. This module makes ONE path-limited commit
+of ONE path and `test_it_makes_exactly_one_path_limited_commit` pins it. Writing
+the archive here would make the tool a second writer of a file nobody reviewed,
+in the same run that deletes the original — the shape where one silent failure
+loses the content twice. The caller writes the archive; this verifies it. So an
+`--archive` naming a file that cannot be READ is this rule's verdict (16) and
+NOT an operational failure (3): the claim the flag was passed to make is false,
+which is a statement about the prune, not about the tool's ability to run.
+
+⚠ WHAT IT DOES NOT CHECK, STATED HERE RATHER THAN DISCOVERED LATER. That the
+archive is tracked, committed, pushed, or will exist tomorrow; that the lines in
+it are in a sensible order or under a heading that means anything; that the
+archive is not itself about to be deleted. It compares CONTENT at the moment of
+the run, which is the half a machine can do. The rest is the same kind of
+unverifiable-beside-the-structure that rule (j)'s header declares about a cited
+forcing function.
 """
 
 
@@ -4295,7 +4355,7 @@ def prune_refusal_report(plan: PrunePlan, relpath: str) -> str:
     return "\n".join(rows)
 
 
-def prune_note(plan: PrunePlan) -> str:
+def prune_note(plan: PrunePlan, archive_path: str | None = None) -> str:
     """Rule (q)'s disclosure, printed ABOVE the diff, or "" when nothing pruned.
 
     🔴 ABOVE THE DIFF, beside rule (f)'s warning and for its reason: it is a
@@ -4305,11 +4365,16 @@ def prune_note(plan: PrunePlan) -> str:
     lines a REPLACE dropped WITHOUT the author naming them, which is a different
     claim from this one, where every line was typed out on purpose. What the two
     share is `durable_reason`, so "looks durable" means one thing here.
+
+    `archive_path` is named when rule (r) verified one, so the disclosure records
+    WHERE the removals went rather than only that they are going. It is reached
+    only after `conservation_problems` returned nothing, so the sentence is a
+    report of a check that passed, never a promise about one.
     """
     if not plan.removed:
         return ""
     total = sum(len(t.line) + 1 for t in plan.removed)
-    durable = [t for t in plan.removed if t.reason]
+    durable = durable_removals(plan)
     out = [
         f"prune: REMOVING {len(plan.removed)} line(s) / ~{total:,} B that you "
         f"named. Every one is an explicit, verbatim removal:"
@@ -4330,7 +4395,219 @@ def prune_note(plan: PrunePlan) -> str:
             f"carries a finding worth keeping, its home is the owning skill or "
             f"the subsystem store, not this document."
         )
+    if archive_path is not None:
+        out.append(
+            f"  conserved: all {len(plan.removed)} removed line(s) were found in "
+            f"`{archive_path}` (rule (r)). That file is READ, never written, and "
+            f"this run does not commit it — committing it is yours."
+        )
     return "\n".join(out)
+
+
+# --- rule (r): a DURABLE prune must name where the content went ---------------
+#
+# 🔴 THE GAP THIS CLOSES, AND IT IS ONE COMMIT MESSAGE WIDE. Rule (q) made the
+# append-only sections shrinkable and reports every removal that looks durable —
+# and then removes it anyway. The only conservation check this repo has ever run
+# is a sentence in `af578a02`: "Verified mechanically: every non-blank line of
+# the previous revision is present in either the doc or the archive (0
+# missing)." True, correct, and unrepeatable — nothing re-runs a commit message.
+#
+# SO THIS IS THAT SENTENCE AS A REFUSAL, WITH THE SAME POSTURE AS RULE (q):
+#
+#   * IT IS NEVER A SIDE EFFECT. The archive is named by a flag, and the tool
+#     never writes it. One file write and one path-limited commit, unchanged.
+#   * IT REUSES RULE (f)'s PREDICATE RATHER THAN ASKING THE QUESTION TWICE.
+#     `durable_removals` is the ONE list; `prune_note`'s durable count and this
+#     refusal's trigger read the same tuple, so a signal added to
+#     `durable_reason` arms this rule and shows up in the disclosure together.
+#     A second "looks durable" test here would be the duplicated predicate
+#     `claude/RULES.md` says ends up wrong at N-1 of N sites.
+#   * IT ARMS ON THE DURABLE HALF AND CHECKS THE WHOLE. The trigger is narrow so
+#     the gate is not permanently red (see `EXIT_PRUNE_UNCONSERVED`); the
+#     comparison is wide so the predicate's floor is not also the guard's.
+#   * IT REFUSES ALL OR NOTHING, like rule (q), and for the same reason: a prune
+#     that landed the conserved half would leave a transcript that reads as a
+#     decision.
+
+#: Rule (r)'s flag, named once so the refusals and `--help` cannot disagree.
+ARCHIVE_FLAG = "--archive"
+
+#: 🔴 ONE MARKER PER CAUSE, and each names a DIFFERENT remedy — pass the flag,
+#: fix the path, or add the missing lines to the file. A single `[unconserved]`
+#: marker would collapse three different next actions into one word, which is
+#: the misattribution `PRUNE_MARKERS`' own header records being caught by a
+#: marker assertion and missed by an rc assertion.
+ARCHIVE_MARKER_NONE = "[no archive]"
+ARCHIVE_MARKER_UNREADABLE = "[archive unreadable]"
+ARCHIVE_MARKER_SELF = "[archive is the doc]"
+ARCHIVE_MARKER_NOT_CONSERVED = "[not conserved]"
+
+ARCHIVE_MARKERS: tuple[str, ...] = (
+    ARCHIVE_MARKER_NONE,
+    ARCHIVE_MARKER_UNREADABLE,
+    ARCHIVE_MARKER_SELF,
+    ARCHIVE_MARKER_NOT_CONSERVED,
+)
+
+
+def durable_removals(plan: PrunePlan) -> tuple[PruneTarget, ...]:
+    """The removals rule (f)'s predicate flags — the ONE list both consumers read.
+
+    `PruneTarget.reason` IS `durable_reason(line)`, computed once in
+    `prune_plan`. Both the disclosure's durable count and rule (r)'s trigger read
+    THIS function, so they cannot disagree about which removals are durable: a
+    run that prints "2 of them look DURABLE" is a run rule (r) armed on, and a
+    signal added upstream moves both at once.
+    """
+    return tuple(t for t in plan.removed if t.reason)
+
+
+def archive_lines(archive_text: str) -> set[str]:
+    """The non-blank lines an archive conserves, normalised as a prune matches.
+
+    🔴 `_norm_line`, THE SAME NORMALISATION `prune_plan` RESOLVES NAMES WITH, and
+    sharing it is the point. A prune file matches a document line with whitespace
+    collapsed; if this compared verbatim, an author who re-indented the lines
+    while moving them into the archive would be told the content is not there
+    when it is, by the same tool that accepted the same spelling one check
+    earlier. Two spellings of "is this the same line?" is the duplicated
+    predicate again, one function apart.
+
+    Blank lines are dropped because `prune_naming_lines` cannot name one, so no
+    removal can ever need a blank conserved.
+    """
+    return {_norm_line(ln) for ln in archive_text.splitlines() if ln.strip()}
+
+
+def conservation_problems(
+    plan: PrunePlan,
+    archive_path: str | None,
+    archive_text: str | None,
+    archive_error: str = "",
+    archive_is_the_doc: bool = False,
+) -> tuple[PruneProblem, ...]:
+    """Rule (r): every reason this prune's content has nowhere to have gone.
+
+    `archive_path is None` means the flag was not passed. A non-None path with
+    `archive_text is None` means it was passed and the file could not be read —
+    `archive_error` carries the OS message, because "it is not there" and "it is
+    there and unreadable" need different fixes and the exception already knows
+    which. `archive_is_the_doc` is resolved by the CALLER, which is the only
+    place that knows the doc's path; deciding it here would need an argument
+    this function deliberately does not take.
+
+    🔴 THE TWO HALVES ARE DELIBERATELY ASYMMETRIC. The REQUIREMENT is armed by
+    `durable_removals` — narrow, so the ordinary prune of padding and stale
+    status is untouched. The COMPARISON, once an archive is supplied, is over
+    `plan.removed` entire — wide, so the predicate's known floor is not also
+    this guard's. Collapsing them either way loses something: arming on every
+    prune makes a gate nobody reads, comparing only the durable half makes a
+    gate that cannot see what the predicate missed.
+    """
+    durable = durable_removals(plan)
+    # 🔴 THE SELF-ARCHIVE WALK, CLOSED BEFORE IT IS TAKEN. The containment test
+    # below is run against the doc as this process FOUND it, i.e. before the
+    # prune is written — so `--archive <the doc being pruned>` satisfies it for
+    # every line, trivially and for exactly as long as the lines are still
+    # there. It is the spelled-guard shape: a check that passes while the hazard
+    # exists in another form. Refused on IDENTITY (resolved paths), not on a
+    # name, so a symlink or a relative spelling does not walk it either.
+    if archive_is_the_doc:
+        return (
+            PruneProblem(
+                ARCHIVE_MARKER_SELF,
+                archive_path or "",
+                f"{ARCHIVE_FLAG} names the handoff doc this prune is removing "
+                f"lines FROM. Every named line is in it right now and in none "
+                f"of it a moment later, so the check would pass and conserve "
+                f"nothing. The archive has to be a DIFFERENT file that still "
+                f"holds the content once this run lands.",
+            ),
+        )
+    if archive_path is None:
+        # The ordinary prune — nothing here looks durable, so there is nothing for
+        # an archive to conserve and the flag is not required — falls out of the
+        # comprehension below as `()`. That is the ~97.6% branch and it must stay
+        # silent.
+        #
+        # 🔴 AND IT HAS NO `if not durable: return ()` FAST PATH, WHICH IS A
+        # MEASURED DELETION RATHER THAN AN OMISSION. One was written first and
+        # row R2 of `mutation_battery_prune_conservation.py` proved it DEAD:
+        # inverting its condition left the whole suite green, because a
+        # comprehension over an empty `durable` already yields `()`. Keeping it
+        # would have kept a line that reads as the rule's ARMING decision while
+        # deciding nothing — the shape this module kills by mutation elsewhere
+        # (see `base_readable`). The arming lives in `for target in durable`,
+        # one line down, and R2 now mutates THAT.
+        return tuple(
+            PruneProblem(
+                ARCHIVE_MARKER_NONE,
+                target.line,
+                f"this removal looks DURABLE ({target.reason}) and no "
+                f"{ARCHIVE_FLAG} was given, so the only record of it would be "
+                f"the diff in one transcript. Move the content somewhere that "
+                f"outlives this document — the owning skill, the subsystem "
+                f"store, or a `claudedocs/` archive — and pass "
+                f"`{ARCHIVE_FLAG} <that file>`. The file is READ, never "
+                f"written, and every line this prune removes must be in it.",
+            )
+            for target in durable
+        )
+    if archive_text is None:
+        return (
+            PruneProblem(
+                ARCHIVE_MARKER_UNREADABLE,
+                archive_path,
+                f"{ARCHIVE_FLAG} names a file that cannot be read "
+                f"({archive_error}). An archive that is not there conserves "
+                f"nothing, so this is rule (r)'s verdict and not an "
+                f"operational failure: the claim the flag was passed to make "
+                f"is false. Write the file FIRST — this tool never does.",
+            ),
+        )
+    held = archive_lines(archive_text)
+    return tuple(
+        PruneProblem(
+            ARCHIVE_MARKER_NOT_CONSERVED,
+            target.line,
+            f"line {target.line_no}, under `{target.heading}`, is not present "
+            f"in {archive_path}. Whitespace is collapsed before comparing; "
+            f"everything else must be verbatim, so a reworded copy does not "
+            f"count — a line nobody can grep for afterwards is a line that was "
+            f"deleted, however carefully it was paraphrased.",
+        )
+        for target in plan.removed
+        if _norm_line(target.line) not in held
+    )
+
+
+def prune_unconserved_report(
+    problems: typing.Sequence[PruneProblem], plan: PrunePlan, relpath: str
+) -> str:
+    """Rule (r)'s refusal. Nothing is written on any arm of it."""
+    durable = durable_removals(plan)
+    rows = [
+        f"status=prune-unconserved path={relpath}",
+        "NOTHING WRITTEN — not the doc, not a commit, not a ref.",
+        f"  This prune removes {len(plan.removed)} line(s), {len(durable)} of "
+        f"which look DURABLE by rule (f)'s predicate, and "
+        f"{len(problems)} of them have nowhere to have gone. A durable line "
+        f"removed with no archive exists afterwards only in the diff in one "
+        f"transcript, which is not a place anyone can read it from.",
+    ]
+    for problem in problems[:PRUNE_SHOWN_MAX]:
+        rows.append(f"  {problem.marker} {_clip(problem.named, PRUNE_LINE_MAX)}")
+        rows.append(f"      {problem.detail}")
+    if len(problems) > PRUNE_SHOWN_MAX:
+        rows.append(f"  … and {len(problems) - PRUNE_SHOWN_MAX} more not shown.")
+    rows.append(
+        f"  Fix the archive and re-run. Nothing about this run has to be "
+        f"undone; re-running after a fix is safe. 🔴 This tool does NOT write "
+        f"{ARCHIVE_FLAG}'s file and does not commit it — it reads it, and the "
+        f"one commit it makes is still of {relpath} alone."
+    )
+    return "\n".join(rows)
 
 
 # --- rule (h): is the BASE the document this update was written against? ------
@@ -5853,6 +6130,19 @@ def build_parser() -> argparse.ArgumentParser:
         "lost a line to a bad heredoc removes something you did not name.",
     )
     p.add_argument(
+        ARCHIVE_FLAG,
+        metavar="FILE",
+        help="rule (r): a file that already holds the content this prune "
+        f"removes. REQUIRED when a removal looks DURABLE by rule (f)'s "
+        f"predicate (a dated claim, an evidence verb, an OPEN/RESOLVED "
+        f"marker) — exit 16 otherwise. 🔴 It is READ, never written, and this "
+        f"run does not commit it: write and commit the archive yourself. When "
+        f"given it is checked over EVERY removed line, not only the durable "
+        f"ones, so passing it by habit is strictly safer than not. Whitespace "
+        f"is collapsed before comparing; everything else must be verbatim. "
+        f"Requires {PRUNE_FLAG}.",
+    )
+    p.add_argument(
         "--advanced",
         help="one line: what changed since the doc was written. Required — "
         "without it, or with a value that means nothing changed, no diff is "
@@ -6088,6 +6378,28 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return EXIT_USAGE
+    # ---- rule (r)'s argument shape, EXIT_USAGE for the same reason -----------
+    # 16 is the RULE's verdict about what a prune removes; an archive with no
+    # prune removes nothing, so there is no verdict to give. An inert flag is
+    # worth refusing rather than ignoring: a caller who passed it believes
+    # something is being conserved.
+    if args.archive is not None and args.prune is None:
+        print(
+            f"{ARCHIVE_FLAG} needs {PRUNE_FLAG}: it names where the lines a "
+            f"prune removes have gone, and this run removes none.\n"
+            f"  Drop it, or add `{PRUNE_FLAG} <file> {PRUNE_COUNT_FLAG} <n>`.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if args.archive is not None and not args.archive.strip():
+        print(
+            f"{ARCHIVE_FLAG} was given an EMPTY path ({args.archive!r}).\n"
+            f"  The flag asserts that a FILE holds what this prune removes, so "
+            f"an empty path asserts nothing while still reading as a "
+            f"conservation claim on the run.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     if args.size_ratchet_override is not None and not args.size_ratchet_override.strip():
         print(
             f"{SIZE_RATCHET_FLAG} was given an EMPTY reason "
@@ -6320,8 +6632,47 @@ def main(argv: list[str] | None = None) -> int:
         if plan.problems:
             print(prune_refusal_report(plan, relpath), file=sys.stderr)
             return EXIT_PRUNE_REFUSED
+        # ---- rule (r): has the durable half of this prune got anywhere to go?
+        # 🔴 AFTER RULE (q) AND BEFORE THE ASSIGNMENT TO `merged_text`, and both
+        # halves of the position are load-bearing. After, because
+        # `conservation_problems` reads `plan.removed`, which only exists once
+        # the prune RESOLVED — asking first would be asking about lines that may
+        # not be removable at all, and would report two unrelated remedies for
+        # one broken prune file. Before, because every rule below reads
+        # `merged_text` and this one writes nothing: a refusal here must leave
+        # the merge exactly as rule (q) found it.
+        #
+        # 🔴 THE ARCHIVE IS READ HERE AND NOWHERE ELSE, AND IT IS NEVER OPENED
+        # FOR WRITING. The module's one write and one path-limited commit are
+        # unchanged by this rule, which is what
+        # `test_it_makes_exactly_one_path_limited_commit` pins.
+        archive_text: str | None = None
+        archive_error = ""
+        archive_is_the_doc = False
+        if args.archive is not None:
+            archive = Path(args.archive)
+            # `strict=False`, so a path that does not exist still resolves and
+            # the comparison below is answered rather than raising — the
+            # unreadable arm is what reports that case, with the OS's own words.
+            archive_is_the_doc = archive.resolve() == doc.resolve()
+            try:
+                archive_text = archive.read_text(encoding="utf-8")
+            except OSError as exc:
+                # Deliberately NOT EXIT_FAIL. See `EXIT_PRUNE_UNCONSERVED`: an
+                # unreadable archive is a false conservation claim, which is a
+                # verdict about the prune, not about the tool's ability to run.
+                archive_error = str(exc)
+        unconserved = conservation_problems(
+            plan, args.archive, archive_text, archive_error, archive_is_the_doc
+        )
+        if unconserved:
+            print(
+                prune_unconserved_report(unconserved, plan, relpath),
+                file=sys.stderr,
+            )
+            return EXIT_PRUNE_UNCONSERVED
         merged_text = plan.text
-        pruned_note = prune_note(plan)
+        pruned_note = prune_note(plan, args.archive)
 
     if _canon(merged_text) == _canon(base_text):
         print(

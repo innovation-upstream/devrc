@@ -4012,6 +4012,20 @@ EXPECTED_SKIPS=(
   # subset run, and "999 tests green" was true of a selection that could not
   # contain it. Land the battery and this line in the SAME commit.
   "scripts/tests|mutation_battery_operator_asks[.]py has no multi-site row"
+  # The SIXTH, added with `mutation_battery_prune_conservation.py` (#1960 — rule (r),
+  # the `--prune` conservation refusal). 🔴 THE "LOOK HERE FIRST" PAID OFF A THIRD TIME,
+  # AND THE FIFTH ENTRY'S OWN CLOSING INSTRUCTION — "Land the battery and this line in
+  # the SAME commit" — IS THE ONE THAT WAS MISSED. CI read
+  # `FAILED … collected=24778 passed=24770 skipped=8 failed=0` against #1954's
+  # `skipped=7 … SUCCESS`: the whole signal was the skip count, 7 -> 8, with the
+  # verdict contradicting its own `failed=0` for the third time on this shape.
+  # ⚠ AND THE SAME BLIND SPOT PRODUCED IT AGAIN: the implementing run's local
+  # evidence was `python3 -m pytest <paths>` plus a dev-host gate that TIMED OUT at
+  # 3600s, so nothing it ran could fire this guard; the step's own log is what named
+  # it (`1 UNPINNED skip group(s) — coverage silently collapsed`). Reading the status
+  # DESCRIPTION alone is not enough either — it truncates at 140 chars and shows
+  # `failed=0` with no reason, which reads as a flake.
+  "scripts/tests|mutation_battery_prune_conservation[.]py has no multi-site row"
 )
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
 # carried two regression pins against the LIVE datapacket-talos skill corpus, a
