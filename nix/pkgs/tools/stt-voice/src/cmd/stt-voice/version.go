@@ -26,4 +26,4 @@ package main
 // happens: ship.sh reports a failed switch as a SKIPPED host, which this
 // repo's CLAUDE.md documents as silently stopping all future delivery to that
 // machine. `stt-voice: command not found` is the loud failure instead.
-var buildVersion = "0.1.0"
+var buildVersion = "0.1.1"

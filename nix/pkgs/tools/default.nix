@@ -98,7 +98,7 @@ with pkgs; [
 # CLAUDE.md documents as silently stopping all future delivery to that machine.
 # The whole point of the null is to be quieter than that.
 ++ (pkgs.lib.optional (pkgs.mention-review != null) pkgs.mention-review)
-# stt-voice — hold-to-talk voice input. `$mod+m` press records the default
+# stt-voice — hold-to-talk voice input. `$mod+equal` press records the default
 # mic, release transcribes + opens the transcript TUI; the bar pill
 # (scripts/i3status-stt, wired in nix/graphical.nix) is the second trigger
 # source. The hotkey chain execs it BY BARE NAME, so this list is what puts

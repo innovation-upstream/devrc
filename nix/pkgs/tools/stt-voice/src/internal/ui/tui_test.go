@@ -15,12 +15,17 @@ import (
 // fakeFX records every call — the interface the TUI acts through, so no test
 // can reach a real X server.
 type fakeFX struct {
-	copied   []string
-	focused  []int
-	typed    []string
-	failCopy bool
-	failType bool
-	failFoc  bool
+	copied    []string
+	sent      []fakeSend
+	failCopy  bool
+	failSpawn bool
+}
+
+// fakeSend records one SpawnSend call: the text the helper will type and the
+// captured window it will focus and type into after the TUI is gone.
+type fakeSend struct {
+	text   string
+	target int
 }
 
 func (f *fakeFX) Copy(text string) error {
@@ -30,18 +35,11 @@ func (f *fakeFX) Copy(text string) error {
 	f.copied = append(f.copied, text)
 	return nil
 }
-func (f *fakeFX) Focus(id int) error {
-	if f.failFoc {
-		return errors.New("window gone")
+func (f *fakeFX) SpawnSend(text string, target int) error {
+	if f.failSpawn {
+		return errors.New("fork dead")
 	}
-	f.focused = append(f.focused, id)
-	return nil
-}
-func (f *fakeFX) Type(text string) error {
-	if f.failType {
-		return errors.New("xdotool dead")
-	}
-	f.typed = append(f.typed, text)
+	f.sent = append(f.sent, fakeSend{text: text, target: target})
 	return nil
 }
 func (f *fakeFX) CaptureActive() (int, error) { return 0, errors.New("never called in tests") }
@@ -151,7 +149,7 @@ func TestCopyProducesACopyIntentAndStaysOpen(t *testing.T) {
 func TestSendStripsNewlinesAndUsesTheCapturedTarget(t *testing.T) {
 	m, fx := model(t)
 	for _, spelling := range []string{"t", "ctrl+enter"} {
-		fx.typed, fx.focused = nil, nil
+		fx.sent = nil
 		next, intents := step(m, spelling)
 		if len(intents) != 1 {
 			t.Fatalf("%s produced %d intents", spelling, len(intents))
@@ -171,16 +169,19 @@ func TestSendStripsNewlinesAndUsesTheCapturedTarget(t *testing.T) {
 		if msg := Run(intents[0], fx)(); msg != (Sent{}) {
 			t.Fatalf("%s cmd returned %+v", spelling, msg)
 		}
-		if len(fx.focused) != 1 || fx.focused[0] != 9465926 {
-			t.Fatalf("%s focus calls: %v", spelling, fx.focused)
+		// one detached helper, carrying the stripped text and the captured
+		// target — the helper focuses and types AFTER the TUI is gone
+		if len(fx.sent) != 1 {
+			t.Fatalf("%s spawn calls: %v", spelling, fx.sent)
 		}
-		if len(fx.typed) != 1 || fx.typed[0] != "newest transcript with a line" {
-			t.Fatalf("%s type calls: %v", spelling, fx.typed)
+		if fx.sent[0].text != "newest transcript with a line" || fx.sent[0].target != 9465926 {
+			t.Fatalf("%s spawn = %+v", spelling, fx.sent[0])
 		}
-		// closing happens in Update(Sent), after the effects, not in Step
+		// closing happens in Update(Sent), right after the spawn — the TUI
+		// must be gone before the helper types anything
 		after, _ := next.Update(msgOf(intents[0], fx))
 		if !after.(Model).quitting {
-			t.Fatalf("%s did not close the TUI after a successful send", spelling)
+			t.Fatalf("%s did not close the TUI after spawning the send helper", spelling)
 		}
 	}
 }
@@ -212,7 +213,7 @@ func TestEscClosesWithoutActing(t *testing.T) {
 	if !next.quitting {
 		t.Fatal("esc did not close")
 	}
-	if len(fx.copied) != 0 || len(fx.typed) != 0 || len(fx.focused) != 0 {
+	if len(fx.copied) != 0 || len(fx.sent) != 0 {
 		t.Fatal("esc acted on the world")
 	}
 }
@@ -331,13 +332,13 @@ func TestUpdateCarriesTheEffectsOutcomeIntoTheView(t *testing.T) {
 
 func TestUpdateReportsAFailedSendInsteadOfQuitting(t *testing.T) {
 	m, fx := model(t)
-	fx.failType = true
+	fx.failSpawn = true
 	next, intents := step(m, "t")
 	cmd := RunAll(intents, fx)[0]
 	after, _ := next.Update(cmd())
 	am := after.(Model)
 	if am.quitting {
-		t.Fatal("a FAILED send quit the TUI — the operator would never learn why nothing was typed")
+		t.Fatal("a FAILED spawn quit the TUI — the operator would never learn why nothing was typed")
 	}
 	if !strings.Contains(am.View().Content, "send failed") {
 		t.Fatalf("the view does not report the failure\n%s", am.View().Content)

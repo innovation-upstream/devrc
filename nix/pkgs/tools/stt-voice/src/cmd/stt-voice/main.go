@@ -1,4 +1,4 @@
-// Command stt-voice is hold-to-talk voice input: i3's $mod+m press starts
+// Command stt-voice is hold-to-talk voice input: i3's $mod+equal press starts
 // recording the default mic, the release stops it, POSTs the audio to the
 // self-hosted ASR endpoint, and opens the transcript TUI (class stt-voice,
 // matched by i3's for_window rule). The bar pill (scripts/i3status-stt) is
@@ -11,6 +11,7 @@
 //	stt-voice cancel    discard the in-flight recording, go idle
 //	stt-voice toggle    the bar pill's click: start when idle, stop when recording
 //	stt-voice tui       the transcript TUI (spawned by stop; not run by hand)
+//	stt-voice send      the TUI's send-as-input helper (spawned by the TUI)
 //
 // Exit codes: 0 success/no-op; 1 a real failure (config, HTTP, recorder) —
 // accompanied by a dunst toast, NEVER a silent fail; 2 usage.
@@ -20,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -101,6 +103,8 @@ func main() {
 		os.Exit(runToggle())
 	case "tui":
 		os.Exit(runTUI(args[1:]))
+	case "send":
+		os.Exit(runSend(args[1:]))
 	case "-h", "--help":
 		usage()
 	default:
@@ -111,12 +115,13 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `usage: stt-voice start|stop|cancel|toggle|tui
+	fmt.Fprint(os.Stderr, `usage: stt-voice start|stop|cancel|toggle|tui|send
   start   hold-to-talk: begin recording the default mic
   stop    stop recording, transcribe, open the transcript TUI
   cancel  discard the in-flight recording
   toggle  the bar pill's click: start when idle, stop when recording
   tui     the transcript TUI (spawned by stop; --entry ID --target WIN)
+  send    the send-as-input helper (spawned by the TUI; --target WIN, text on stdin)
 `)
 }
 
@@ -402,6 +407,90 @@ func runTUI(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// --- send: the TUI's send-as-input helper ------------------------------------
+
+// The send helper runs DETACHED, outliving the TUI that spawned it. Its whole
+// job is to type the transcript into the operator's window AFTER the
+// transcript TUI has closed — measured broken in the other order (2026-09-30):
+// with the TUI still open, i3's focus-follows-mouse hands focus back to the
+// floating transcript window the moment the helper focuses the target, and
+// the transcript is typed into the TUI itself (7 of 44 characters reached the
+// target). Hence the wait-gone gate below is LOAD-BEARING, not cosmetic.
+const (
+	// how long the helper waits for the TUI window to disappear before
+	// giving up with a toast rather than typing into a possibly-open TUI
+	sendTuiGoneTimeout = 2 * time.Second
+	// the poll cadence of that wait
+	sendPollEvery = 50 * time.Millisecond
+	// after the window is gone, i3 still has to land its refocus before the
+	// helper's own focus command; a beat of settle, then a beat after focus
+	// (and its mouse warp) before the first keystroke
+	sendRefocusSettle = 150 * time.Millisecond
+	sendFocusSettle   = 100 * time.Millisecond
+)
+
+// runSend types stdin into the operator's window. The TUI already stripped
+// newlines; the helper never sends Return regardless (a Return submits
+// forms). Every failure toasts — the TUI that spawned this process is gone,
+// so a toast is the only surface that can say why nothing was typed.
+func runSend(args []string) int {
+	target := 0
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--target" && i+1 < len(args) {
+			target, _ = strconv.Atoi(args[i+1])
+			i++
+		}
+	}
+	text, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		effects.Toast("send: read transcript: " + err.Error())
+		return 1
+	}
+	if !waitTuiGone() {
+		effects.Toast("send: the transcript window never closed — nothing typed")
+		return 1
+	}
+	time.Sleep(sendRefocusSettle)
+	if target > 0 {
+		// 🔴 FOCUS THE CAPTURED TARGET, AND REFUSE ON FAILURE. The operator's
+		// window was captured at stop time; if it is gone by now, typing into
+		// "whatever now has focus" is exactly the wrong-window leak this
+		// feature must never do. The transcript stays in history either way.
+		if err := (effects.Live{}).Focus(target); err != nil {
+			effects.Toast("send: " + err.Error() + " — the transcript stays in history")
+			return 1
+		}
+		time.Sleep(sendFocusSettle)
+	}
+	if err := (effects.Live{}).Type(string(text)); err != nil {
+		effects.Toast("send: " + err.Error())
+		return 1
+	}
+	return 0
+}
+
+// waitTuiGone polls until no window carries the TUI class. xdotool search
+// exits 1 on NO match (the TUI is gone — success); any other error means the
+// CHECK itself failed (no DISPLAY, a wedged xdotool), which must NOT read as
+// "gone" — the helper keeps polling and the timeout aborts with a toast,
+// because typing into a window that may still be open is the failure mode
+// this helper exists to prevent.
+func waitTuiGone() bool {
+	deadline := time.Now().Add(sendTuiGoneTimeout)
+	for {
+		err := exec.Command("xdotool", "search", "--class", "^"+tuiClass+"$").Run()
+		if err == nil {
+			// a window still matches: keep waiting
+		} else if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(sendPollEvery)
+	}
 }
 
 // --- shared helpers -----------------------------------------------------------
