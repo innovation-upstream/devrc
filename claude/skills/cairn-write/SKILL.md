@@ -1,6 +1,6 @@
 ---
 name: cairn-write
-description: "The WRITE door onto the cairn subsystem store: append, put, create. WHAT to write is `subsystem-index`."
+description: The WRITE door onto the cairn store: append, put, create.
 allowed-tools: Bash, Read, Grep, Glob
 ---
 

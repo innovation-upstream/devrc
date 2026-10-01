@@ -1,6 +1,6 @@
 ---
 name: syshealth
-description: "One-shot deep system sweep: zombies (traced to the parent not reaping them), CPU/mem hogs, sustained runaways, load, swap. Use for: check procs, zombie processes, what's eating my CPU/memory, why is load so high, runaway process, is the box thrashing."
+description: One-shot deep system sweep: zombies (traced to the parent not reaping them), CPU/mem hogs, sustained runaways, load, swap. Use for: check procs, zombie processes, what's eating my CPU/memory, why is load so high, runaway process, is the box thrashing.
 argument-hint: "[--systemd] [--fds] [--json] [--cpu-threshold N] [--mem-threshold GIB]"
 allowed-tools: Bash, Read
 ---

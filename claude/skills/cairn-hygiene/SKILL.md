@@ -1,6 +1,6 @@
 ---
 name: cairn-hygiene
-description: "The HYGIENE door onto the cairn subsystem store: validate, audit, prune. The lifecycle rules are `prune-index`."
+description: The HYGIENE door onto the cairn store: validate, audit, prune.
 allowed-tools: Bash, Read, Grep, Glob
 ---
 

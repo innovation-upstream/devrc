@@ -51,7 +51,8 @@
       "tier": "A"
     },
     "audit-pr": {
-      "tier": "A"
+      "tier": "B",
+      "why": "invoked by name ('audit this PR', /audit-pr) as a deliberate pre-merge ritual; 'before merging' is a workflow cue the operator types, not a described symptom"
     },
     "auditloop": {
       "tier": "B",
@@ -83,7 +84,8 @@
       "tier": "A"
     },
     "civitai-app-fleet": {
-      "tier": "A"
+      "tier": "B",
+      "why": "asked for by name ('the civitai fleet', 'bump/submit the civitai apps'); the platform-side half already lives in talos-infra's app-blocks skill"
     },
     "clawgate": {
       "tier": "A"
@@ -119,6 +121,9 @@
       "why": "CLOSEST CALL in this ledger -- 'what's stalled' IS a symptom, but the mis-route lands on `initiatives` (the durable board), a degraded answer rather than a wrong action; flip to A the first time that costs anything"
     },
     "mailbox": {
+      "tier": "A"
+    },
+    "muse": {
       "tier": "A"
     },
     "muster": {

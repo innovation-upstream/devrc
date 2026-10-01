@@ -1,6 +1,6 @@
 ---
 name: prune-memory
-description: "Audit and aggressively shrink a project's auto-memory index (MEMORY.md) — it costs tokens EVERY session and silently drops content past its cap. Runs scripts/memory-audit.py, classifies every bullet, rewrites atomically, re-measures. Use when MEMORY.md is near or over its cap, or when asked to prune/shrink memory."
+description: Audit and aggressively shrink a project's auto-memory index (MEMORY.md) — it costs tokens EVERY session and silently drops content past its cap. Runs scripts/memory-audit.py, classifies every bullet, rewrites atomically, re-measures. Use when MEMORY.md is near or over its cap, or when asked to prune/shrink memory.
 argument-hint: "[MEMORY_DIR | path/to/MEMORY.md] — optional; defaults to the current project's memory dir"
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, Agent
 ---

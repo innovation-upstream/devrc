@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+# muse — one command surface over the user's Meta Muse personal agent.
+#
+# Channels (design: homelab-talos claudedocs/muse-agent-integration-design.md):
+#   B2  muse-cli  — programmatic (cookies -> HTTPS -> Noise-XX WS). PRIMARY.
+#   B1  browser   — browser-bridge flows/muse.ai.md. FALLBACK when B2 breaks
+#                   (internal-API churn, cookie expiry); `muse b1` prints it.
+#   A   muse-bridge — READ-ONLY cluster status (public HTTPS + bearer token).
+#
+# Cookie handling is muse-cli's OWN storage only (~/.config/muse-cli/cookies.txt,
+# mode 600). This wrapper never reads, copies, echoes or logs cookies. Never
+# commit or send a cookie or the bridge token anywhere.
+#
+# Pacing: sends are human-paced (a few/hour, design §4-B2). The wrapper refuses
+# a second send within $MUSE_MIN_SEND_GAP_MIN minutes (default 10) unless
+# --force; the guard is a reminder, not a rate limiter.
+#
+# Exit codes: 0 ok · 1 muse-cli failed (B1 hint printed) · 2 usage · 3 auth
+# needed · 4 bridge query failed.
+set -euo pipefail
+
+MUSE_CLI_BIN=${MUSE_CLI:-muse-cli}
+HOMELAB_REPO=${MUSE_HOMELAB_REPO:-$HOME/workspace/homelab-talos}
+BRIDGE_URL=${MUSE_BRIDGE_URL:-https://muse-bridge.zacx.dev}
+MIN_SEND_GAP_MIN=${MUSE_MIN_SEND_GAP_MIN:-10}
+STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/muse
+TOKEN_ENC_REL=clusters/homelab/apps/muse/muse-bridge-token.enc.yaml
+
+usage() {
+  cat <<'EOF'
+muse — dispatch/poll the user's Muse agent; cluster status via muse-bridge.
+
+  muse send "<task>" [--wait N] [--thread ID] [--force]   dispatch (B2 muse-cli;
+                                   --wait default 120, 0 = fire-and-forget)
+  muse poll [--thread ID] [--limit N]                     latest chat events (B2)
+  muse status [ns|nodes|workloads <ns>|flux <ns>]         CLUSTER snapshot (A)
+  muse vm                                                 Muse VM/session status (B2)
+  muse auth [export|...]                                  muse-cli auth passthrough
+  muse b1                                                 the browser-flow fallback recipe
+  muse setup                                              runbook pointers
+
+Env: MUSE_CLI, MUSE_HOMELAB_REPO, MUSE_BRIDGE_URL, MUSE_MIN_SEND_GAP_MIN (0
+disables the pacing guard).
+EOF
+}
+
+die() { printf 'muse: %s\n' "$1" >&2; exit "${2:-2}"; }
+
+b1_hint() {
+  cat >&2 <<'EOF'
+muse: muse-cli failed — falling back to the B1 browser flow:
+  BB=~/workspace/devrc/scripts/browser-bridge/browser
+  $BB --instance personal open https://muse.ai   # your OWN tab; never the user's
+  then follow $DEVRC/scripts/browser-bridge/flows/muse.ai.md exactly
+  (snapshot -> type -> assert len -> Enter -> confirm -> poll the DELTA).
+  Run `muse b1` for the full recipe. If the failure was 403/API churn, the
+  internal APIs moved: re-derive per muse-cli docs, do NOT debug the bridge.
+EOF
+}
+
+need_muse_cli() {
+  command -v "$MUSE_CLI_BIN" >/dev/null 2>&1 || die "muse-cli not found. Install: uv tool install muse-cli (or pipx install muse-cli). Then 'muse auth export' — see 'muse setup'." 3
+}
+
+# --- pacing guard -----------------------------------------------------------
+pace_check() {
+  [ "$MIN_SEND_GAP_MIN" -eq 0 ] 2>/dev/null && return 0
+  mkdir -p "$STATE_DIR"
+  local stamp="$STATE_DIR/last-send"
+  if [ -f "$stamp" ]; then
+    local last now diff_min
+    last=$(stat -c %Y "$stamp" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    diff_min=$(( (now - last) / 60 ))
+    if [ "$diff_min" -lt "$MIN_SEND_GAP_MIN" ]; then
+      die "last send was ${diff_min}m ago (pacing: >=${MIN_SEND_GAP_MIN}m between sends, human-paced per design §4-B2). Use --force to override deliberately." 2
+    fi
+  fi
+}
+
+pace_mark() { mkdir -p "$STATE_DIR"; date +%s > "$STATE_DIR/last-send"; }
+
+# --- verbs ------------------------------------------------------------------
+cmd_send() {
+  need_muse_cli
+  local wait=120 thread="" force=0
+  local args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --wait)   wait="$2"; shift 2 ;;
+      --thread) thread="$2"; shift 2 ;;
+      --force)  force=1; shift ;;
+      *)        args+=("$1"); shift ;;
+    esac
+  done
+  [ ${#args[@]} -gt 0 ] || die "send needs task text: muse send \"<task>\"" 2
+  [ "$force" -eq 1 ] || pace_check
+  local task
+  task=$(printf '%s ' "${args[@]}")
+  local rc=0
+  "$MUSE_CLI_BIN" send "$task" --wait "$wait" ${thread:+--thread "$thread"} || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    b1_hint
+    case $rc in 3) exit 3 ;; *) exit 1 ;; esac
+  fi
+  pace_mark
+}
+
+cmd_poll() {
+  need_muse_cli
+  local thread="" limit=3
+  local args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --thread) thread="$2"; shift 2 ;;
+      --limit)  limit="$2"; shift 2 ;;
+      *)        args+=("$1"); shift ;;
+    esac
+  done
+  local rc=0
+  "$MUSE_CLI_BIN" history --limit "$limit" ${thread:+--thread "$thread"} || rc=$?
+  [ "$rc" -eq 0 ] || { b1_hint; exit 1; }
+}
+
+cmd_vm()   { need_muse_cli; exec "$MUSE_CLI_BIN" status; }
+
+cmd_auth() {
+  need_muse_cli
+  local rc=0
+  "$MUSE_CLI_BIN" auth "$@" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    cat >&2 <<'EOF'
+muse: auth export failed. The one-time steps (muse-cli README "Log in once"):
+  1. In the browser profile that holds the muse.ai login, enable remote
+     debugging: open chrome://inspect/#remote-debugging (Brave honours the
+     same switch) and tick "Allow remote debugging for this browser instance".
+  2. In THAT window, open https://muse.ai/ and leave the tab focused.
+  3. Run: muse-cli auth export   (cookies land in ~/.config/muse-cli/cookies.txt,
+     mode 600 — muse-cli's own storage; nothing is echoed).
+  4. Verify: muse vm   (JSON with your VM id == auth works).
+  No-Node fallback: copy hatch_sess by hand from DevTools -> Application ->
+  Cookies -> https://muse.ai into ~/.config/muse-cli/cookies.txt as
+  "hatch_sess=<value>" (one line). Never paste it into chat, logs or a commit.
+EOF
+    exit 3
+  fi
+}
+
+# --- cluster status (channel A) ---------------------------------------------
+sops_bin() {
+  if command -v sops >/dev/null 2>&1; then echo sops; return; fi
+  mkdir -p "$STATE_DIR"
+  local cache="$STATE_DIR/sops-bin"
+  if [ ! -x "$cache" ]; then
+    local out
+    out=$(nix build nixpkgs#sops --print-out-paths 2>/dev/null | tail -1) || die "sops unavailable: install it or set SOPS_AGE_KEY_FILE with a sops on PATH" 4
+    ln -sf "$out/bin/sops" "$cache"
+  fi
+  echo "$cache"
+}
+
+bridge_token() {
+  local enc="$HOMELAB_REPO/$TOKEN_ENC_REL"
+  [ -f "$enc" ] || die "bridge token secret not found at $enc (set MUSE_HOMELAB_REPO)" 4
+  local key_file="$HOMELAB_REPO/.secrets/age.key"
+  [ -f "$key_file" ] || die "age key not found at $key_file" 4
+  local sb; sb=$(sops_bin)
+  "$sb" -d --extract '["stringData"]["token"]' "$enc" 2>/dev/null
+}
+
+cmd_status() {
+  local what="health" ns="muse"
+  if [ $# -gt 0 ]; then
+    case "$1" in
+      health)    what="health" ;;
+      nodes)     what="nodes" ;;
+      pods)      what="pods"; [ $# -gt 1 ] && ns="$2" ;;
+      workloads) what="workloads"; [ $# -gt 1 ] && ns="$2" ;;
+      flux)      what="flux"; [ $# -gt 1 ] && ns="$2" ;;
+      *)         what="pods"; ns="$1" ;;
+    esac
+  fi
+  local url="$BRIDGE_URL/v1/$what"
+  case "$what" in pods|workloads|flux) url="$url?ns=$ns" ;; esac
+  local token; token=$(bridge_token) || die "could not decrypt bridge token" 4
+  [ -n "$token" ] || die "bridge token decrypted empty" 4
+  local rc=0
+  curl -sS -m 15 -H "Authorization: Bearer $token" "$url" -w '\n[%{http_code}]' || rc=$?
+  echo >&2
+  [ "$rc" -eq 0 ] || die "bridge query failed (network)" 4
+  # 401 = token rejected; 404 = route gone (API churn); both are answers, not outages.
+}
+
+cmd_setup() {
+  cat <<'EOF'
+muse setup — runbook pointers
+  design + phases ........ $MUSE_HOMELAB_REPO/claudedocs/muse-agent-integration-design.md
+  current state .......... $MUSE_HOMELAB_REPO/claudedocs/handoff-muse-agent-integration.md
+  public path + DNS ...... $MUSE_HOMELAB_REPO/claudedocs/nebula-production-to-homelab-routing.md
+  B1 browser flow ........ $DEVRC/scripts/browser-bridge/flows/muse.ai.md
+  B2 install ............. uv tool install muse-cli   (command is `muse-cli`)
+  B2 auth (one-time) ..... muse auth export  (steps in `muse auth` failure output)
+  bridge token ........... sops in $MUSE_HOMELAB_REPO/$TOKEN_ENC_REL (never echo)
+  connector (Muse side) .. wired 2026-10-01: custom.homelab-bridge, live test passed
+EOF
+}
+
+cmd_b1() {
+  cat <<'EOF'
+muse B1 — browser-flow fallback (when muse-cli is broken: 403, API churn, cookie expiry)
+
+BB=~/workspace/devrc/scripts/browser-bridge/browser
+$BB --instance personal open https://muse.ai      # OWN tab; close it when done
+REF=bw://laptop/personal/<tabId>
+
+# 0. baseline (delta discriminator: id + len, NEVER the node count alone —
+#    the feed re-keys nodes and keeps counts flat)
+$BB $REF js '(function(){var a=document.querySelectorAll("[data-message-role=assistant]");var l=a[a.length-1];return "asst="+a.length+" lastId="+(l?l.getAttribute("data-message-id"):"none")})()' --wake=3000
+
+# 1. type + ASSERT it took
+$BB $REF type "<task>" --selector 'textarea[placeholder="Message"]'
+$BB $REF js '(function(){var t=document.querySelector("textarea[placeholder=Message]");return "len="+(t?t.value.length:"gone")})()' --wake=3000
+
+# 2. submit + confirm (no form/button exists — Enter only)
+$BB $REF key Enter --selector 'textarea[placeholder="Message"]'
+sleep 4
+$BB $REF js '(function(){var t=document.querySelector("textarea[placeholder=Message]");return "taLen="+(t?t.value.length:"gone")})()' --wake=3000
+
+# 3. poll the newest TURN only; stable (same id+len) twice = done
+# 4. extract delta: assistant nodes sharing the last data-message-turn-id
+
+🔴 Gotchas measured 2026-10-01:
+- Muse's per-host APPROVAL GATES block the composer: while a "Needs approval"
+  card is pending, Enter is INERT (toast: "Review the approval request in
+  chat to continue"). Open the review panel / inline card and Allow first,
+  or the send will silently not happen. "Always allow this site" covers the
+  host's subdomains.
+- A re-throttled background tab reads exactly like silence: re-wake, re-type,
+  re-Enter before concluding Muse failed.
+- Full details + re-map procedure: flows/muse.ai.md.
+EOF
+}
+
+case "${1:-}" in
+  send)   shift; cmd_send "$@" ;;
+  poll)   shift; cmd_poll "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  vm)     shift; cmd_vm ;;
+  auth)   shift; cmd_auth "$@" ;;
+  b1)     cmd_b1 ;;
+  setup)  cmd_setup ;;
+  help|--help|-h) usage ;;
+  "")     usage ;;
+  *)      die "unknown verb: $1 (see: muse help)" 2 ;;
+esac

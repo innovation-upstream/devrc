@@ -1,6 +1,6 @@
 ---
 name: espanso-audit
-description: "Re-run the espanso snippet usage audit — cross real keylog fire counts against transcript demand for a per-snippet keep/retune/prune VERDICT, then tune the snippets in nix/home.nix."
+description: Re-run the espanso snippet usage audit and tune the snippets in nix/home.nix.
 argument-hint: "[--since YYYY-MM-DD]   (default: since the last config change)"
 allowed-tools: Bash, Read, Edit, Write
 ---

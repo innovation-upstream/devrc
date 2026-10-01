@@ -1,6 +1,6 @@
 ---
 name: audit-pr
-description: "Dispatch a subagent to adversarially audit a PR (or the current diff) for risks, regressions, assumptions, gaps, bugs, issues, behaviour changes, leaks, and second-order consequences. Use before merging."
+description: Dispatch a subagent to adversarially audit a PR (or the current diff) for risks, regressions, assumptions, gaps, bugs, issues, behaviour changes, leaks, and second-order consequences. Use before merging.
 argument-hint: "[PR number | 'current' | empty] — defaults to the current branch's diff vs base"
 allowed-tools: Bash, Read, Grep, Glob, Agent
 ---

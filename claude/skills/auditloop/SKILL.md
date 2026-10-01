@@ -1,6 +1,6 @@
 ---
 name: auditloop
-description: "Operate auditloop — the hosted UX-audit crawler at auditloop.zacx.dev. Deploy it, manage targets/runs/plugin tokens, read the cost dashboard. Use for: auditloop, auditloop.zacx.dev, deploying or operating it, the plugin push API, the read API, the auditloop self-harness."
+description: Operate auditloop — the hosted UX-audit crawler at auditloop.zacx.dev. Deploy it, manage targets/runs/plugin tokens, read the cost dashboard. Use for: auditloop, auditloop.zacx.dev, deploying or operating it, the plugin push API, the read API, the auditloop self-harness.
 ---
 
 # auditloop operations
