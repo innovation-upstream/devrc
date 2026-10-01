@@ -2,13 +2,13 @@
 """oc-sent — show the messages the user SENT in an opencode session.
 
 Usage:
-    oc-sent list [-n N]                    recent sessions, newest first
-    oc-sent show <session-id> [--all-agents]
+    oc-sent show <session-id> [--all-agents] [--db PATH]
 
-    both subcommands accept --db PATH (default: the discovered store)
-
-`list` prints one line per session: local time of last activity, the FULL
-session id (copy-pasteable as the `show` argument), the title.
+Session DISCOVERY is a solved problem — `opencode session list [-n N]
+[--format json]` prints full untruncated ids, titles and times newest-first —
+so this tool does not duplicate it: `show` takes the id straight from there.
+(round-0 audit candidate D1: an agent-invented `list` subcommand deleted as a
+built-in duplicate; disposition recorded on the PR.)
 `show` prints one line per user message, in send order: local timestamp,
 then the text (internal newlines rendered as " ⏎ ", so a message stays one
 greppable line). Local time, not UTC — the reader is a human scanning for
@@ -151,19 +151,6 @@ def user_messages(
     return out, hidden
 
 
-def cmd_list(db, limit: int) -> int:
-    sessions = sorted(
-        S.iter_sessions(db),
-        key=lambda s: s.get("time_updated") or s.get("time_created") or 0,
-        reverse=True,
-    )
-    for s in sessions[: max(limit, 0)]:
-        ts = _fmt_ts(s.get("time_updated") or s.get("time_created"))
-        title = (s.get("title") or "").strip() or "(untitled)"
-        print(f"{ts}  {s['id']}  {title}")
-    return EXIT_OK
-
-
 def cmd_show(db, session_id: str, all_agents: bool) -> int:
     if not _store_is_readable(db):
         print(
@@ -200,16 +187,13 @@ def main(argv: list[str] | None = None) -> int:
         description="Show the messages the user sent in opencode sessions.",
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p_list = sub.add_parser("list", help="recent sessions, newest first")
-    p_list.add_argument("-n", "--limit", type=int, default=25)
     p_show = sub.add_parser("show", help="one session's user messages")
     p_show.add_argument("session_id")
     p_show.add_argument(
         "--all-agents", action="store_true",
         help="include subagent-injected pseudo-user messages, tagged",
     )
-    for p in (p_list, p_show):
-        p.add_argument("--db", help="explicit store path (default: discovered)")
+    p_show.add_argument("--db", help="explicit store path (default: discovered)")
     args = ap.parse_args(argv)
 
     db = S.get_db(Path(args.db) if args.db else None)
@@ -217,8 +201,6 @@ def main(argv: list[str] | None = None) -> int:
         print("no opencode database found", file=sys.stderr)
         return EXIT_NO_DB
     try:
-        if args.cmd == "list":
-            return cmd_list(db, args.limit)
         return cmd_show(db, args.session_id, args.all_agents)
     finally:
         db.close()

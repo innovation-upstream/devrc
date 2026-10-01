@@ -269,44 +269,6 @@ def test_unreadable_store_is_not_reported_as_no_such_session(tmp_path, capsys):
 
 
 # --------------------------------------------------------------------------- #
-# list
-# --------------------------------------------------------------------------- #
-def test_list_is_newest_first_and_honours_limit(tmp_path, capsys):
-    db = _build_db(tmp_path / "store.db")
-    _add_session(db, sid="s-old", title="old", created=1000, updated=1000)
-    _add_session(db, sid="s-new", title="new", created=5000, updated=9000)
-    _add_session(db, sid="s-mid", title="mid", created=3000, updated=3000)
-    db.commit()
-    rc = SE.main(["list", "--db", str(tmp_path / "store.db")])
-    assert rc == 0
-    ids = [ln.split("  ")[1] for ln in capsys.readouterr().out.splitlines()]
-    assert ids == ["s-new", "s-mid", "s-old"]
-
-    rc = SE.main(["list", "-n", "1", "--db", str(tmp_path / "store.db")])
-    assert rc == 0
-    assert len(capsys.readouterr().out.splitlines()) == 1
-
-
-def test_list_prints_full_copy_pasteable_id(tmp_path, capsys):
-    sid = "ses_" + "a" * 20
-    db = _build_db(tmp_path / "store.db")
-    _add_session(db, sid=sid, title="a session")
-    db.commit()
-    rc = SE.main(["list", "--db", str(tmp_path / "store.db")])
-    assert rc == 0
-    assert sid in capsys.readouterr().out
-
-
-def test_list_renders_untitled_sessions(tmp_path, capsys):
-    db = _build_db(tmp_path / "store.db")
-    _add_session(db, sid="s1", title=None)
-    db.commit()
-    rc = SE.main(["list", "--db", str(tmp_path / "store.db")])
-    assert rc == 0
-    assert "(untitled)" in capsys.readouterr().out
-
-
-# --------------------------------------------------------------------------- #
 # the guard: sent.py opens NO connection of its own
 # --------------------------------------------------------------------------- #
 def _connect_callers(src: str) -> list[str]:
