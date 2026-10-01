@@ -34,16 +34,41 @@ cairn-overlap comparison nobody has run.
   add a reader, never move the text out of reach). ADDRESSED ⇒ arc CLOSED.
 
 ## State now
-- **Analysis COMPLETE and this doc is its only durable home.** No repo file was changed; the
-  five measurement scripts live in a session scratchpad and are not durable. Nothing shipped.
-- **No clawgate task.** `clawgate_handoff.sh resolve` exited **5**, `NOTHING RESOLVED — 0
-  tasks`. An unknown session id answers 200 with an empty array, so that zero cannot separate
-  "touched no task" from "wrong id". No field written, none created.
-- **Measured corpus: 187 handoff docs, 7,514,989 B** (cairn 5, devrc 104, homelab-talos 78).
-  **28 are over the 65,536 B base ceiling**, the largest at **6.1×** (402,767 B, 114
-  investigation blocks).
-- **Measured store: 331 entry files, 3,527,479 B, 3,129 dated journal bullets**, intake
-  19–80 bullets/day sustained through 2026-09-30. The store is actively written, NOT starved.
+- ✅ **THIS DOC IS MERGED.** devrc#1950 squashed as `6c317f7b0c2a` (2026-10-01T05:43:07Z), branch
+  deleted, base clone re-synced. Verified **by content, not ancestry** — a squash never makes the
+  branch head an ancestor: the doc is present on `origin/main` at 16,624 B and carries the SOPS
+  retraction, with an absent-path negative control confirming the check can report absent. All
+  four Tekton legs were green BEFORE the merge, read from the runners' own counts rather than
+  from `mergeStateStatus` (`CLEAN` only ever meant "no conflict"): pytests
+  **collected=24744 passed=24737 failed=0** against a 21,193 floor, gotests **461/0**,
+  nodetests **1720/0**, plus the pinned-cairn-client leg.
+- 🔴 **FOUR SCOPING AGENTS ARE IN FLIGHT AND THEIR RESULTS ARE NOT IN THIS DOC.** Dispatched
+  read-only, one per ranked item, 2026-10-01 ~05:45Z. **If this doc is read before they are
+  recorded, the briefs below are what was asked — not what was found:**
+  - **rank 1** — the `--prune` insertion point in `handoff_doc.py`, add-vs-replace, the RED
+    proof, and the crux: **how an arc-scoped evicted block acquires a per-subsystem
+    `<scope>/<slug>`**, plus which eviction directions the public/confidential split forbids.
+  - **ranks 2+4 paired** (they pull opposite ways, so splitting them yields two half-answers):
+    is the one-bullet cap prose or code; does the "~14 tokens per index row" cost claim survive
+    measurement; where is the `recall` readability cliff; **and is the binding constraint the cap
+    at all, or `nominate()`'s ≥2-path requirement.**
+  - **rank 3** — is `## Requirements` failed, never-shipped or redundant; decisive test is
+    whether it appears in `--template` at all, and whether the `OPEN:` journal markers already won.
+  - **rank 5** — a falsifiable design for the value claim, or an honest "not measurable with
+    these surfaces"; the hard part is an observable separating *read and used* from *printed and
+    ignored*.
+- ⚠ **NO `claim-work` CLAIM IS HELD.** Nothing is being implemented — these are scoping reads.
+  A claim belongs on whichever item is actually worked, and the ranked list is a shared queue.
+- **Carried forward — a REPLACE heading would drop these values.** 187 docs / 7,514,989 B, 28
+  over the 65,536 B base ceiling, largest 6.1× (402,767 B, 114 investigation blocks); 69.9% of
+  bytes in the two APPEND-only sections; **store 331 entry files / 3,527,479 B / 3,129 dated
+  journal bullets, intake 19–80 bullets/day sustained through 2026-09-30 — the store is actively
+  written, NOT starved** (that measurement is what inverted this arc's original hypothesis, so it
+  must not be compressed away); 83–98% of durable handoff content unrepresented in cairn;
+  **366 CLOSED investigation blocks / 700,630 B** as the eviction candidate; devrc's
+  `claudedocs/archive/` at **37 files / 311,415 B** against homelab-talos's 0.
+- **No clawgate task** — `resolve` exited 5 (`0 tasks`), and an unknown session id answers 200
+  with an empty array, so that zero cannot separate "touched no task" from "wrong id".
 
 ## Open investigations — live diagnosis state
 
@@ -225,6 +250,21 @@ cairn-overlap comparison nobody has run.
   flag before the positional.** The wider rule, which is what actually failed: `2>/dev/null`
   on a command whose failure mode you have not yet seen converts a diagnosis into an absence,
   and an absence cannot distinguish two mechanisms.
+
+- 🔴 **THE HANDOFF WRITE-BACK GUARD COUNTS A NEGATIVE-CONTROL PATH AS A DOC READ, AND RE-ARMS
+  ON IT AFTER THE SESSION HAS ALREADY WRITTEN ITS HANDOFF.** Measured here: this session wrote
+  and merged its handoff, then ran `git cat-file -e origin/main:claudedocs/handoff-no-such-doc-xyz.md`
+  as the **negative control** proving an absent path reports absent — a filename invented to
+  not exist. The guard recorded that as "this session read `handoff-no-such-doc-xyz.md`" at a
+  timestamp POSTDATING the real handoff write, and stopped the turn demanding a handoff for it.
+  **Two separate defects:** (a) a path that `cat-file -e` proves ABSENT is counted as a read, so
+  verifying a doc is missing is indistinguishable from reading it; (b) the satisfied-ness is
+  keyed per-doc-read rather than per-session, so a later read re-arms a guard the session has
+  already discharged — which is how a correct `--dismiss` becomes routine, and a guard whose
+  dismissal is routine has stopped being read. ⚠ **Do not "fix" this by dropping the control** —
+  the control is the right practice; the guard's read-detection is what is wrong. The honest
+  response this time was an UPDATE (the doc's `State now` had genuinely gone stale on the merge),
+  not a dismissal, so the false positive cost nothing here and will not always.
 
 ## How to verify
 ```bash
