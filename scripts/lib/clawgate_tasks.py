@@ -561,6 +561,82 @@ TASK_API_URL_VARS = ("CLAWGATE_TASK_API_URL", "CLAWGATE_API_URL")
 ROUTER_API_URL_VARS = ("CLAWGATE_API_URL",)
 
 
+# --------------------------------------------------------------------------- #
+# WHICH BINARY SERVES THE TASK HALF
+# --------------------------------------------------------------------------- #
+#: 🔴 ORDERED. FIRST ENTRY WINS. This is the preference, not an inventory, and the
+#: order is the whole content of the ledger — `("clawgatectl", "muster")` and
+#: `("muster", "clawgatectl")` are two different deployments, not two spellings of
+#: one.
+#:
+#: WHY `muster` IS FIRST. The task/agent/chief API is served by `muster`, and until
+#: 2026-10 the only client anyone had for it was `clawgatectl` — built from a
+#: DIFFERENT and PRIVATE repository, with its own release cadence and no way for
+#: muster's own gates to see it. The two drifted on the provenance headers: the
+#: client sent `X-Clawgate-{Source,Session-Id,Host}` while muster read `X-Muster-*`,
+#: so for six days every task comment was attributed to the generic `api` caller and
+#: the task↔session thread recorded NOTHING — 798 rows, then zero. muster #26 made
+#: the server accept both spellings, which fixes the symptom; the CAUSE was that the
+#: client lived somewhere its server could not gate it. muster's own CLI is the
+#: client muster's suites DO gate (a cobra-tree test plus `tests/verb-ledger.sh`
+#: against the built binary), so it is the one to prefer.
+#:
+#: 🔴 WHY `clawgatectl` STAYS IN THE LIST AT ALL — IT IS A FALLBACK, NOT A LEFTOVER,
+#: AND IT IS REQUIRED. Two of this ledger's consumers are ENFORCEMENT HOOKS that run
+#: on every task pickup and every Stop in every session on two machines, and two more
+#: run at the start of every `/resume`. If `muster` is absent for ANY reason — a
+#: host that has not switched yet, a switch that failed, a `nix profile` collision,
+#: a PATH that predates the generation — the right behaviour is to degrade to the
+#: client that is there, not to lose the measurement. The hosts' hooks and the
+#: package arrive in ONE `home-manager switch` (both are nix-store copies, so there
+#: is no window where a hook calls a binary that is not installed), so this is
+#: belt-and-braces by design rather than a transition hack.
+#:
+#: 🔴 AND THE SPLIT IS NOT A REPLACEMENT. `clawgatectl` is the ONLY client for the
+#: ROUTER half — `health attention view panel term tmux transcript` plus
+#: `chief write`/`chief launch` — and muster's CLI does not have those verbs and must
+#: not grow them (its `tests/verb-ledger.sh` asserts the 12-verb task set by EXACT
+#: equality and fails when it GROWS). So this tuple governs the TASK half only.
+#: Nothing that routes an approval, raises attention or writes to a tmux pane may
+#: resolve through it.
+TASK_CLI_NAMES = ("muster", "clawgatectl")
+
+
+def resolve_task_cli(which=None, names=None):
+    """The first task-half CLI on PATH, in `TASK_CLI_NAMES` order. `None` if neither.
+
+    🔴 ONE IMPLEMENTATION, FOR FOUR CALL SITES IN TWO LANGUAGES. The predicate
+    "prefer muster, fall back to clawgatectl" open-coded at N sites is wrong at N-1
+    of them eventually, and here every staleness is silent: the write-back guard
+    would measure the wrong board or reach no verdict, `/resume` would report a task
+    as unchecked, `cairn-who` would raise `ClawgateUnreachable` on a host that has a
+    perfectly good client. The shell half mirrors this as
+    `CLAWGATE_TASK_CLI_NAMES` + `clawgate_task_cli()` in `scripts/lib/clawgate_handoff.sh`
+    — a shell script cannot import Python — and the two are pinned two-way by
+    `scripts/tests/test_resume_state_clawgate.py`, exactly as the URL ledger above
+    already is.
+
+    `which` is injectable so a test can drive both legs without mutating PATH; it
+    defaults to `shutil.which`, imported HERE rather than at module scope because
+    every other consumer of this module (the bar poller runs every few seconds) pays
+    that import otherwise and needs none of it.
+
+    ⚠ IT ANSWERS "WHICH BINARY", NEVER "DOES IT WORK". A client that is on PATH and
+    exits non-zero still resolves here; deciding what to do about that belongs to the
+    caller, which is the only place that knows whether a second client is worth
+    trying (the write-back guard walks the whole tuple and then curl; `/resume`
+    reports a gap). Reading this as a health check is how a reachable-but-broken
+    client becomes a clean bill.
+    """
+    if which is None:
+        import shutil
+        which = shutil.which
+    for name in (TASK_CLI_NAMES if names is None else names):
+        if which(name):
+            return name
+    return None
+
+
 def env_file_path(path=None) -> str:
     """The env-file path this module reads, `~` expanded. ONE definition.
 

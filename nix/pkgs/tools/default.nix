@@ -79,7 +79,34 @@ with pkgs; [
 # homelab-talos working tree; the file itself explains why that is a local path
 # and not fetchFromGitHub, and it yields [] on a host without that checkout
 # rather than failing the switch.
+#
+# 🔴 IT IS STILL HERE, AND THAT IS A SPLIT RATHER THAN A LEFTOVER. `muster` below
+# took the TASK/agent/chief verbs; the ROUTER verbs — `send attention term tmux
+# transcript view panel panels add-panel windows raise launch write query health`
+# — exist ONLY in this binary, muster's CLI does not have them and must not grow
+# them. Both binaries are installed and both are used. Removing this entry would
+# break every approval/attention/tmux path in the repo.
 ++ (import ./clawgatectl.nix { inherit pkgs workspace; })
+# muster — the machine client for the TASK/agent/chief half of what clawgatectl
+# used to serve alone. The binary is `muster`; the package attribute is
+# `muster-cli`, injected by `musterCliOverlay` in flake.nix, which is where the
+# reasoning for the overlay and for the PINNED FETCH (as against clawgatectl's
+# local path) is written down. Twelve verbs, no more:
+#
+#     task ls · task get · task create · task comment · task status
+#     agent ls · agent resolve · agent messages
+#     agent task get · agent task comment · agent task status
+#     chief ask
+#
+# — upstream's `tests/verb-ledger.sh` asserts that set by EXACT EQUALITY against
+# the built binary, failing when it grows OR shrinks, and it runs as this
+# derivation's `installCheckPhase`. So "the artefact has exactly these verbs" is
+# a property of the package, not of a comment here.
+#
+# ⚠ NO NULL FILTER, unlike the three local Go packages below: muster's flake
+# derives its version from the git revision, so there is no
+# unparseable-source-version state for a `null` to model.
+++ [ pkgs.muster-cli ]
 # mention-review — the nvim-octo replacement. Phase 2: it can also write.
 #
 # 🔴 ON PATH FOR TWO REASONS NOW. It is still run by hand

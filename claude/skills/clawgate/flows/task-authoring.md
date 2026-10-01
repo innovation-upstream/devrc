@@ -1,10 +1,11 @@
 # flow: authoring a task — the alignment interview
 
 ⚠ **The board is `muster`'s** (`http://192.168.50.250:30306`, env `CLAWGATE_TASK_API_URL`), not the
-permission router's — see `SKILL.md` → "TWO SERVICES". `clawgatectl task …` resolves that itself;
+permission router's — see `SKILL.md` → "TWO SERVICES". `muster task …` resolves that itself;
 any raw `curl` in this flow must not.
 
-**Run this BEFORE `clawgatectl task create`.** It is enforced:
+**Run this BEFORE `muster task create`.** It is enforced (the gate recognises BOTH client
+spellings, so renaming the binary does not walk it):
 `~/.claude/hooks/clawgate-task-interview-guard.py` (PreToolUse on Bash) DENIES a
 create whose body carries no `## Acceptance criteria` heading, and denies one whose
 body it cannot read at all. The block message names this file, because a `flows/`
@@ -47,7 +48,7 @@ Arrive at Phase 1 with findings, not a blank form.
 | question | how you answer it |
 |---|---|
 | Is it already done? | `git log --oneline -20 -- <path>` in the repo; `gh pr list --search "<keyword>" --state all` |
-| Does a task already exist? | `clawgatectl task ls --summary --status open` (filters SERVER-side), then `--status in_progress` |
+| Does a task already exist? | `muster task ls --summary --status open` (filters SERVER-side), then `--status in_progress` |
 | Is it deliberately off / suspended? | read the config or manifest — a suspended kustomization, a `enabled: false`, a commented-out timer. **This is the meili-cron lesson: a task to "fix" something that is off ON PURPOSE is worse than no task.** |
 | Which repo / directory does it land in? | resolve it now — `--repo` / `--directory` are dispatch inputs, not prose |
 | Is there a verifier already? | an existing test target, a gate script, a `drift-check` rc — cheaper than inventing one |
@@ -195,7 +196,7 @@ if set. Ask once. Apply the edits. Do not re-ask.
 ## Phase 5 — CREATE
 
 ```bash
-clawgatectl task create --title "<title>" --body-file /tmp/task-body.md \
+muster task create --title "<title>" --body-file /tmp/task-body.md \
   --repo <repo> --directory <dir>            # --tag/--branch/--model as settled
 ```
 
@@ -214,7 +215,7 @@ readable).
 
 - **A body that already carries `## Acceptance criteria` passes the gate silently.**
   Zach's one-liner still works; it just has to say what "done" means.
-- **`CLAWGATE_NO_INTERVIEW=1 clawgatectl task create …`** skips the gate for one
+- **`CLAWGATE_NO_INTERVIEW=1 muster task create …`** skips the gate for one
   call. One spelling, on purpose (`true`/`yes`/`0` do nothing), so "when did we skip
   the interview" is a `grep`-able question.
 

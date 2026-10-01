@@ -125,6 +125,22 @@ EXPECTED_IMPORTERS = {
     # hook runs after every tool call) and its deployed copy gets the module as a
     # nix-store sibling; both are pinned by its own suite.
     "scripts/claude-hooks/clawgate-writeback-guard.py",
+    # 🔴 JOINED 2026-10-01, AND FOR A THIRD KIND OF LEDGER — not the pending predicate,
+    # not the base URL, but `TASK_CLI_NAMES`: WHICH BINARY serves the task half, now
+    # that muster ships its own CLI (`muster`) beside the older `clawgatectl`. It
+    # renders none of this queue, so "its output was never reviewed here" does not
+    # apply; it is here because the ledger is two-way and it genuinely loads the module.
+    # It open-coded `["clawgatectl", "task", "get", …]` before, which on a host carrying
+    # only `muster` raised `WhoError: clawgatectl is not on PATH` — a diagnosis naming
+    # the subsystem that was never missing.
+    #
+    # ⚠ THE ONLY IMPORTER THAT IS ITSELF IN `scripts/lib/`, which is why the two
+    # follow-on guards below read differently for it: a `$DEVRC_DIR` arm would be
+    # unreachable code (it is deployed by `mkOutOfStoreSymlink` into the working tree,
+    # never as a lone store copy), and it is admitted by those guards' lenient arm
+    # rather than by their intent. It DOES load by explicit path, which is the half
+    # that matters — see its own header.
+    "scripts/lib/cairn_who.py",
 }
 # `scripts/agent-ops` — the mission-control TUI — was the third importer until it
 # was RETIRED. It is not "one fewer surface to keep in sync": it read this

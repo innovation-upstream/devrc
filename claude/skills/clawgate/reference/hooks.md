@@ -43,7 +43,12 @@ because they are the only structural enforcement of the task rituals, and both u
 | `clawgate-task-interview-guard.py` | `PreToolUse` (Bash) | denies a `task create` whose body has no `## Acceptance criteria` heading. Pure argv analysis, no network. Override: `CLAWGATE_NO_INTERVIEW=1`. |
 | `clawgate-writeback-guard.py` | `PostToolUse` + `Stop` | arms on a read of a specific task id, and at Stop does a LIVE re-read to check a `claude-code` comment landed after the last work event. |
 
-🔴 **Both accept TWO CLI spellings — `clawgatectl` and `muster`.** The tasks+dispatch half of
+🔴 **Both accept TWO CLI spellings — `muster` and `clawgatectl`, in that PREFERENCE order.**
+The ledger is `scripts/lib/clawgate_tasks.TASK_CLI_NAMES` (`resolve_task_cli()` for python,
+`clawgate_task_cli()` / `$CLAWGATE_TASK_CLI_NAMES` in `scripts/lib/clawgate_handoff.sh` for shell,
+pinned two-way). The write-back guard's live read TRIES `muster` first and falls back, so a host
+whose switch has not landed still MEASURES instead of reaching no verdict; the interview gate
+resolves nothing — it only RECOGNISES both names in an argv. The tasks+dispatch half of
 clawgate **has been extracted** into `muster` (`github.com/ZacxDev/muster`), same verbs — live on
 `http://192.168.50.250:30306` (muster `0.2.0`) since 2026-09; the router keeps `:30302`. Each guard
 keyed on the literal string `clawgatectl`, so the rename alone would have made both match

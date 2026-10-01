@@ -5,20 +5,23 @@ WHY THIS EXISTS
 ---------------
 `claude/skills/clawgate/SKILL.md` documents the task API wire contract and the
 task PICKUP ritual in detail and says NOTHING about task AUTHORING. Creating a
-task is one line — `clawgatectl task create --body …` — so the cheapest thing an
+task is one line — `muster task create --body …` — so the cheapest thing an
 agent can do is post whatever the operator said, unverified and unspecified.
 
-🔴 TWO CLI SPELLINGS, AND THE SECOND ONE IS HERE BEFORE IT EXISTS, ON PURPOSE.
-The tasks+dispatch half of clawgate is being extracted into `muster`
-(`github.com/ZacxDev/muster`), whose CLI binary is `muster` and whose task verbs
-are the same words (`muster task create --body …`). This gate keyed on the
-literal string `clawgatectl` — a PREFILTER on the name and a `basename(argv[0])`
-comparison — so the rename alone would have made it match nothing: every
-criteria-less create ALLOWED, fail-open, with no diagnostic anywhere. The
-widening therefore lands BEFORE the rename rather than with it, so there is
-never a window in which this file is inert. `TASK_CLI_NAMES` is the one place
-both spellings are written down, and every predicate below is derived from it —
-the regex, the basename check and the help exemption cannot drift apart.
+🔴 TWO CLI SPELLINGS, AND BOTH ARE LIVE. The task+dispatch half of clawgate was
+extracted into `muster` (`github.com/ZacxDev/muster`), whose own CLI binary is
+`muster` and whose task verbs are the same words. `clawgatectl` — a client built
+from a DIFFERENT and PRIVATE repo — still speaks them, is still installed, and is
+still the ONLY client for the ROUTER half, so it is not going away. This gate once
+keyed on the literal string `clawgatectl` — a PREFILTER on the name and a
+`basename(argv[0])` comparison — so the rename alone would have made it match
+nothing: every criteria-less create ALLOWED, fail-open, with no diagnostic
+anywhere. `TASK_CLI_NAMES` is the one place both spellings are written down, and
+every predicate below is derived from it — the regex, the basename check and the
+help exemption cannot drift apart. It mirrors
+`scripts/lib/clawgate_tasks.TASK_CLI_NAMES` and is pinned two-way to it; see that
+constant's header for why this file keeps a frozen copy rather than importing it,
+and why it calls no resolver.
 
 That is expensive twice over:
 
@@ -72,7 +75,7 @@ Bash call that LAUNCHES a producer (`drafter.sh`, `send_digest.py`) is likewise
 invisible to this hook: the argv it sees is the launcher's, not the POST's.
 
 🔴 WHEN THE BODY CANNOT BE SEEN, THIS BLOCKS. IT DOES NOT PASS.
-`clawgatectl task create --body "$(generate-spec.sh)"` hands the gate an argument
+`muster task create --body "$(generate-spec.sh)"` hands the gate an argument
 it cannot evaluate. Passing that through would make the guard walkable by
 changing the SHAPE of the call rather than its content — the "spelled, not
 structural" failure RULES.md names. So an unreadable body is a BLOCK with a
@@ -99,8 +102,8 @@ FAIL-CLOSED IS SCOPED, NOT GLOBAL
 ---------------------------------
 `bash-guard.py` denies on ANY internal failure because it guards irreversible
 actions and every Bash call is in scope. This hook is in scope for a much smaller
-family, so a blanket deny-on-crash would block `clawgatectl health` on an
-unrelated bug. Instead: a crash (including a failed `guard_core` import) denies
+family, so a blanket deny-on-crash would block an unrelated `clawgatectl health`
+on an unrelated bug. Instead: a crash (including a failed `guard_core` import) denies
 ONLY when the raw command text still looks like a task create by a pure regex
 that cannot itself fail. Everything else exits 0.
 """
@@ -155,15 +158,35 @@ OVERRIDE_INLINE = re.compile(
 FLOW_DEPLOYED = "~/.claude/skills/clawgate/flows/task-authoring.md"
 FLOW_REPO = "devrc/claude/skills/clawgate/flows/task-authoring.md"
 
-# 🔴 EVERY CLI BINARY THAT CAN CREATE A TASK, SPELLED ONCE. `clawgatectl` today;
-# `muster` once the extraction lands (see the module docstring). Every predicate
-# in this file derives from this tuple rather than repeating a name, because a
-# name repeated at N sites is the shape that goes stale at N-1 of them — and the
-# failure direction here is a SILENT ALLOW, which nothing observes.
+# 🔴 EVERY CLI BINARY THAT CAN CREATE A TASK, SPELLED ONCE. `muster` is the one the
+# skills now teach; `clawgatectl` still speaks the same verbs and is still installed,
+# so BOTH must be recognised. Every predicate in this file derives from this tuple
+# rather than repeating a name, because a name repeated at N sites is the shape that
+# goes stale at N-1 of them — and the failure direction here is a SILENT ALLOW, which
+# nothing observes.
+#
+# 🔴 THIS IS A MEMBERSHIP SET THAT HAPPENS TO BE WRITTEN IN THE SHARED LEDGER'S ORDER
+# — IT IS NOT A PREFERENCE, AND THIS FILE RESOLVES NOTHING. A PreToolUse gate reads an
+# argv the model is ABOUT to run; it never picks a binary, never runs one, and has
+# nothing to fall back to. So there is deliberately no `resolve_task_cli` call here:
+# the shared resolver answers "which client should I invoke", a question this file
+# never asks. What it DOES share is the inventory, and that is pinned two-way as a
+# SEQUENCE against `scripts/lib/clawgate_tasks.TASK_CLI_NAMES` by
+# `test_the_interview_guard_cli_ledger_is_the_SHARED_one_in_ORDER`, so a third
+# spelling added there cannot leave this gate blind to it. Order is asserted even
+# though membership is all this file uses, because a mirror allowed to disagree about
+# order is a mirror a reader cannot trust.
+#
+# 🔴 IT IS A FROZEN MIRROR RATHER THAN AN IMPORT, AND THAT IS THIS FILE'S OWN DESIGN
+# RULE, NOT AN OVERSIGHT: `PREFILTER` below is built at IMPORT and exists precisely so
+# that a Bash call naming neither binary "returns before anything is imported or
+# parsed" (see the module docstring's I/O contract). Loading the shared module here
+# would put a 40 KB source compile — from a read-only nix-store path where no
+# `__pycache__` can be written — in front of EVERY Bash tool call in every session.
 #
 # 🔴 Membership is by `os.path.basename(argv[0])`, so `/nix/store/…/bin/muster`
 # counts and a command that merely CONTAINS the word does not.
-TASK_CLI_NAMES = ("clawgatectl", "muster")
+TASK_CLI_NAMES = ("muster", "clawgatectl")
 _TASK_CLI_ALT = "|".join(TASK_CLI_NAMES)
 
 # 🔴 EVERY PATH THAT CREATES A TASK OVER HTTP, SPELLED ONCE. `/api/tasks/<id>` is
@@ -270,7 +293,7 @@ def heredoc_bodies(text):
     🔴 DELIBERATELY QUOTE-BLIND, unlike `guard_core._scan`. The dominant real
     shape is
 
-        clawgatectl task create --body "$(cat <<'EOF'
+        muster task create --body "$(cat <<'EOF'
         ## Acceptance criteria
         …
         EOF
@@ -425,7 +448,7 @@ def is_task_cli_create(argv):
     """True for a `<task CLI> … task create …` argv — either spelling.
 
     Keyed on `task` and `create` being ADJACENT OPERANDS rather than on argv[1:3]:
-    a global flag can precede the verb (`clawgatectl --env-file /x task create`),
+    a global flag can precede the verb (`muster --env-file /x task create`),
     and `task` is also a legal value of some other flag. Adjacency in the operand
     list is what distinguishes the verb from a coincidence — and because the
     tokens come from a real lexer, a quoted `"task create"` is ONE token and never
@@ -454,8 +477,8 @@ def is_help_invocation(argv):
     nothing: help still wins and nothing is created.
 
     Both spellings cobra accepts are covered:
-      * a `--help`/`-h` FLAG anywhere (`clawgatectl task create --help`)
-      * the `help` SUBCOMMAND leading the operands (`clawgatectl help task create`)
+      * a `--help`/`-h` FLAG anywhere (`muster task create --help`)
+      * the `help` SUBCOMMAND leading the operands (`muster help task create`)
 
     The flag scan skips value-flag values with the same rule `_operands` uses, so
     `--token --help` reads `--help` as the token's VALUE and does NOT exempt —

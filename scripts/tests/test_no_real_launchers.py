@@ -2039,6 +2039,38 @@ PINNED_PATH_CLOBBERS = {
         "`os.environ[\"PATH\"]` — a pass-through this scanner correctly did not "
         "count as a clobber, and the reason the suite could not see that the "
         "unit's PATH has no cairn in it."),
+    "test_task_cli_resolver.py": (
+        'env["PATH"]' + " = str(bindir)",
+        "a clobber justified by CONSTRUCTION, and it is the strongest form of "
+        "that: the replacement is a `tmp_path / \"bin\"` the test creates on the "
+        "line above and then writes its OWN fixtures into — at most three "
+        "two-line `#!/bin/sh` stubs named `muster`, `clawgatectl` and "
+        "`zzz-not-a-real-client`, each of which does nothing but `exit 0`. "
+        "Nothing else can be in a freshly-minted tmp dir, so no "
+        "HAZARD_VOCABULARY name is reachable through it: no systemd-run, "
+        "systemctl, notify-send, rofi, yad, alacritty, xdotool, i3-msg, "
+        "openrgb, espanso, home-manager or nixos-rebuild. The subprocess leg "
+        "runs `bash -c` by an ABSOLUTE path resolved from the ambient PATH "
+        "before the clobber, and the shell code it sources uses only builtins "
+        "(`command -v`, `printf`), so an impoverished PATH is not merely "
+        "survivable there, it is the condition under test. "
+        "🔴 REPLACING IS THE POINT AND PREPENDING COULD NOT WORK. The property "
+        "measured is the resolver's SECOND leg — `muster` ABSENT, so "
+        "`clawgatectl` must be chosen — and the dev host has `clawgatectl` "
+        "installed today and gets `muster` with the very `home-manager switch` "
+        "that deploys this change. Prepending would leave the real binaries "
+        "findable, the absent-`muster` leg would silently become a second copy "
+        "of the first leg, and the fallback that keeps two enforcement hooks "
+        "working on a half-switched host would be pinned by nothing. The file "
+        "carries its own positive control for that: a `names=` case feeds a "
+        "one-entry ledger naming a binary neither real client uses and asserts "
+        "the resolver returns IT, which a hardcoded spelling could not do. "
+        "⚠ THIS NEEDLE MATCHES THE SUBPROCESS SPELLING ONLY. The in-process "
+        "legs use `monkeypatch.setenv(\"PATH\", ...)`, which "
+        "`launcher_scan.path_clobbers` does not classify as a clobber — the "
+        "same caveat `test_cairn_pin.py` records below. Both forms replace the "
+        "same freshly-minted directory and the justification covers each; do "
+        "not read this entry as evidence the monkeypatch form is scanned."),
     "test_cairn_pin.py": (
         "dict(os.environ, PATH=" + "str(tmp_path))",
         "a clobber justified by EMPTINESS, and the emptiness is CONSTRUCTED "

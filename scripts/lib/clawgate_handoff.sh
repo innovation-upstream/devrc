@@ -120,6 +120,26 @@ CLAWGATE_DEFAULT_API_URL="http://192.168.50.250:30302"
 #: Space-separated to match the two vocabularies below; split by the shell.
 CLAWGATE_TASK_API_URL_VARS="CLAWGATE_TASK_API_URL CLAWGATE_API_URL"
 
+#: 🔴 THE TASK-SIDE CLI LEDGER — ORDERED, PREFERRED FIRST, AND A DELIBERATE
+#: DUPLICATE OF `TASK_CLI_NAMES` IN scripts/lib/clawgate_tasks.py, for exactly the
+#: reason the URL ledger above is duplicated: the authority is python, this is bash,
+#: and importing it would put `python3` in the preflight ledger of a file that is
+#: SOURCED by `scripts/resume-state.sh` in order to read one string this file can
+#: read itself. The duplicate is not left to a comment to hold —
+#: `test_the_shell_task_cli_ledger_matches_PYTHON` reads `TASK_CLI_NAMES` out of
+#: `clawgate_tasks.py` and fails if these two names, or their ORDER, drift.
+#:
+#: WHY `muster` IS FIRST, and why `clawgatectl` is still here: the long version is
+#: on `TASK_CLI_NAMES` in that module. The short version is that the task/agent API
+#: is muster's and muster's own CLI is the client muster's gates can see, while
+#: `clawgatectl` — built from a private repo on its own cadence — is the client that
+#: drifted on the provenance headers and silently de-attributed six days of
+#: comments. 🔴 `clawgatectl` stays because it is the ONLY client for the ROUTER
+#: half and because a host whose switch has not landed must still be able to
+#: MEASURE. This ledger governs the TASK half and nothing else.
+#: Space-separated like the vocabularies below; split by the shell, never by `eval`.
+CLAWGATE_TASK_CLI_NAMES="muster clawgatectl"
+
 #: Where the hook token and base URL live, RELATIVE to $HOME. Expanded at call
 #: time, never at source time — a caller may set HOME after sourcing.
 CLAWGATE_ENV_REL=".claude/clawgate.env"
@@ -749,6 +769,40 @@ clawgate_rank_rows(){
 # --------------------------------------------------------------------------- #
 # I/O — everything below this line touches the filesystem or the network
 # --------------------------------------------------------------------------- #
+
+# `clawgate_task_cli` — the first task-half CLI on PATH, in `$CLAWGATE_TASK_CLI_NAMES`
+# order. Prints the resolved NAME and returns 0; prints nothing and returns 1 when
+# neither is installed.
+#
+# 🔴 THE SHELL HALF OF ONE PREDICATE. `resolve_task_cli` in
+# scripts/lib/clawgate_tasks.py is the python half; the ledger they share and the
+# reason it is duplicated rather than imported are on `$CLAWGATE_TASK_CLI_NAMES`
+# above. A caller that spells a binary name itself is the bug this exists to delete:
+# `resume-state.sh` had exactly such a site, hardcoded to `clawgatectl`, which on a
+# host carrying only `muster` would have reported a task as NOT CHECKED — a gap that
+# is honest about being a gap and still costs the reconciliation the whole block
+# exists for.
+#
+# ⚠ IT ANSWERS "WHICH BINARY", NEVER "DOES IT WORK" — same contract as the python
+# half. A client that is on PATH and exits 6 resolves here; the caller is what turns
+# a non-zero rc into a `!` gap, and it must, because "the board is unreachable" and
+# "no client is installed" are different facts.
+#
+# ⚠ `command -v`, not `which`: `which` is not guaranteed present and is not a
+# builtin. The loop is over an UNQUOTED expansion deliberately — the ledger is
+# space-separated and word-splitting is the split. (This file is bash, and `$IFS` is
+# never reassigned above this point; it is NOT zsh, where that expansion would
+# iterate once over the whole string.)
+clawgate_task_cli(){
+  local name
+  for name in $CLAWGATE_TASK_CLI_NAMES; do
+    if command -v "$name" >/dev/null 2>&1; then
+      printf '%s\n' "$name"
+      return 0
+    fi
+  done
+  return 1
+}
 
 # `clawgate_env_get <KEY> [path]` — one value out of ~/.claude/clawgate.env.
 # Same parse as scripts/lib/clawgate_tasks.py's read_clawgate_env: skip blanks

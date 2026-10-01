@@ -68,7 +68,8 @@ trap 'rm -rf "$T"' EXIT
 ROOT="$T/tree"
 
 mkdir -p "$ROOT/scripts/claude-hooks/tests" "$ROOT/scripts/testlib" \
-         "$ROOT/scripts/lib" "$ROOT/nix" "$ROOT/claude/skills/clawgate"
+         "$ROOT/scripts/lib" "$ROOT/nix" "$ROOT/claude/skills/clawgate" \
+         "$ROOT/claude/skills/muster"
 # The hooks themselves plus every module they or their suites import
 # (`guard_core`, `hook_telemetry`, the registrar the suites read as a ledger).
 cp -a "$SRC"/scripts/claude-hooks/*.py "$ROOT/scripts/claude-hooks/"
@@ -91,6 +92,14 @@ cp -a "$SRC/scripts/lib/clawgate_tasks.py" "$ROOT/scripts/lib/"
 # registration in home.nix and the skill/flow text it routes to.
 cp -a "$SRC/nix/home.nix" "$ROOT/nix/"
 cp -a "$SRC"/claude/skills/clawgate/. "$ROOT/claude/skills/clawgate/"
+# 🔴 AND THE `muster` SKILL, WHICH THIS SCRIPT WAS MISSING SINCE THE 2026-09-29 SPLIT.
+# The writeback suite's three seam pins read `claude/skills/muster/SKILL.md` (the
+# always-loaded surface that routes to the pickup flow, and the status-gate table the
+# interview gate cites) — not clawgate's. Without it the BASELINE was dirty with three
+# failures, which the script correctly refuses to run on; found 2026-10-01 when this
+# battery was next used. The flow FILES still live under `clawgate/`, which is why both
+# trees are needed.
+cp -a "$SRC"/claude/skills/muster/. "$ROOT/claude/skills/muster/"
 
 if [ -e "$ROOT/.git" ]; then
   echo "🔴 the copy carries a .git — refusing to run"; exit 2
@@ -100,9 +109,18 @@ WB="$ROOT/scripts/claude-hooks/clawgate-writeback-guard.py"
 IV="$ROOT/scripts/claude-hooks/clawgate-task-interview-guard.py"
 WB_SUITE="$ROOT/scripts/claude-hooks/tests/test_clawgate_writeback_guard.py"
 IV_SUITE="$ROOT/scripts/claude-hooks/tests/test_clawgate_task_interview_guard.py"
+# 🔴 THE SHARED LEDGER IS A MUTATION TARGET TOO, NOT JUST A DEPENDENCY. The
+# task-CLI PREFERENCE (`TASK_CLI_NAMES`) lives in that module, and the hook reads it
+# through `task_cli_names()` — so the one mutant that matters most for the repoint
+# (invert the order) cannot be expressed on either hook file. Mutating the module in
+# the COPY is what lets the hook suites see it.
+CT="$ROOT/scripts/lib/clawgate_tasks.py"
 cp -a "$WB" "$T/wb.orig"
 cp -a "$IV" "$T/iv.orig"
-restore() { cp -a "$T/wb.orig" "$WB"; cp -a "$T/iv.orig" "$IV"; }
+cp -a "$CT" "$T/ct.orig"
+restore() {
+  cp -a "$T/wb.orig" "$WB"; cp -a "$T/iv.orig" "$IV"; cp -a "$T/ct.orig" "$CT"
+}
 
 FAILURES=0
 ROWS=0
@@ -114,8 +132,13 @@ ROWS=0
 # Measured 2026-09-25: writeback 383, interview 361 (re-derived with
 # `--collect-only`, not carried over — the writeback suite grew by the
 # shared-ledger cases W17-W19 exercise).
-WB_FLOOR=364
-IV_FLOOR=343
+# RE-MEASURED 2026-10-01 after the task-half repoint onto muster's own CLI, with
+# `--collect-only` on this tree and NOT by adding the new cases to the old numbers:
+# writeback 390, interview 364.
+#   _suggested_floor 390 = 390 - min(50, max(1, 390/20 = 19)) = 371
+#   _suggested_floor 364 = 364 - min(50, max(1, 364/20 = 18)) = 346
+WB_FLOOR=371
+IV_FLOOR=346
 
 failing() { # failing <suite> <floor>
   local suite="$1" floor="$2" out n f total
@@ -206,7 +229,7 @@ run "W0 the arming regex matches no CLI at all" \
 run "W1 TASK_CLI_NAMES loses 'muster'" \
     test_THE_SILENT_NO_VERDICT_CASE_a_muster_read_plus_work_still_reaches_a_verdict \
     "$WB" "$WB_SUITE" "$WB_FLOOR" \
-    'TASK_CLI_NAMES = ("clawgatectl", "muster")' \
+    'TASK_CLI_NAMES = ("muster", "clawgatectl")' \
     'TASK_CLI_NAMES = ("clawgatectl",)'
 # W2 the versioned path tolerance, mutated on its own so the CLI half stays intact.
 run "W2 the task API path drops the version group" \
@@ -246,12 +269,16 @@ run "W7 --api-url is invented from the generic url" \
     test_WITHOUT_the_tasks_url_no_api_url_flag_is_invented "$WB" "$WB_SUITE" "$WB_FLOOR" \
     '    api_url = _env_file(env_path).get(task_api_url_vars()[0])' \
     '    api_url = _first_set(_env_file(env_path), task_api_url_vars())[0]'
-# W8 the second client is never reached.
+# W8 the second client is never reached. 🔴 ITS NAMED KILLER MOVED WITH THE
+# PREFERENCE. It used to be `…falls_through_to_muster_when_clawgatectl_is_ABSENT`,
+# which after the reorder is satisfied by the FIRST entry answering — i.e. that test
+# could no longer see this mutant at all. The fall-through case that survives the
+# reorder is the one where the PREFERRED client fails.
 run "W8 only the FIRST task CLI is ever tried" \
-    test_live_task_falls_through_to_muster_when_clawgatectl_is_ABSENT \
+    test_live_task_falls_through_to_clawgatectl_when_MUSTER_EXITS_NONZERO \
     "$WB" "$WB_SUITE" "$WB_FLOOR" \
-    '    for binary in TASK_CLI_NAMES:' \
-    '    for binary in TASK_CLI_NAMES[:1]:'
+    '    for binary in clis:' \
+    '    for binary in clis[:1]:'
 # W9 the endpoint is not bound onto the error.
 run "W9 LiveReadError carries no endpoint" \
     test_every_LiveReadError_carries_the_endpoint_it_could_not_reach \
@@ -368,6 +395,48 @@ run "W19 comment-only edit in the loader (control)" SURVIVES \
     '    """The shared module, imported on first use — see `_load_clawgate_tasks`."""' \
     '    """The shared module, imported on first use (see `_load_clawgate_tasks`)."""'
 
+# --------------------------------------------------------------------------- #
+# W20-W23 🔴 THE REPOINT ITSELF: WHICH CLIENT, AND WHICH CLIENT IS PRESCRIBED.
+# The task/agent API is muster's, and the only client anyone had for it was built
+# from a DIFFERENT and PRIVATE repo that muster's gates could not see. The two
+# drifted on the provenance headers, and for six days every task comment was
+# attributed to the generic `api` caller while the task<->session thread recorded
+# NOTHING. "Prefer muster" is therefore a behavioural claim, not a cosmetic one, and
+# these rows are what prove the tests can see it break.
+# --------------------------------------------------------------------------- #
+# W20 🔴 THE PREFERENCE, INVERTED AT ITS ONE DEFINITION — in the SHARED module, not
+# in the hook, because that is where it lives. Its named killer must be the
+# BEHAVIOURAL case (two stubs returning DIFFERENT ids, so the id identifies which
+# binary ran); the two ledger pins beside it also die here, and a row scored only by
+# a pin would prove nothing about what the hook actually RUNS.
+run "W20 the shared CLI ledger is INVERTED" \
+    test_live_task_PREFERS_MUSTER_when_BOTH_clients_are_on_PATH \
+    "$CT" "$WB_SUITE" "$WB_FLOOR" \
+    'TASK_CLI_NAMES = ("muster", "clawgatectl")' \
+    'TASK_CLI_NAMES = ("clawgatectl", "muster")'
+# W21 the PRESCRIBED command — the only product of this hook a model ever reads —
+# hardcodes a client instead of deriving it. The guard would keep working and keep
+# teaching the wrong binary, which is the silent half of this migration.
+run "W21 the block text hardcodes the old client" \
+    test_the_block_reason_names_the_id_the_timestamp_and_BOTH_fix_commands \
+    "$WB" "$WB_SUITE" "$WB_FLOOR" \
+    '           "cli": prescribed_cli(),' \
+    '           "cli": "clawgatectl",'
+# W22 the same derivation reading the LAST entry instead of the head — i.e.
+# prescribing the FALLBACK. Semantically subtle, which is exactly the shape a "it
+# says muster today" spot check cannot see.
+run "W22 prescribed_cli returns the fallback, not the head" \
+    test_the_prescribed_command_is_DERIVED_from_the_ledger_head \
+    "$WB" "$WB_SUITE" "$WB_FLOOR" \
+    '        return task_cli_names()[0]' \
+    '        return task_cli_names()[-1]'
+# W23 SURVIVES: a comment-only edit INSIDE the shared module, so "every row that
+# mutates $CT is red for any edit to it" is excluded rather than assumed.
+run "W23 comment-only edit in the shared ledger (control)" SURVIVES \
+    "$CT" "$WB_SUITE" "$WB_FLOOR" \
+    '#: 🔴 ORDERED. FIRST ENTRY WINS.' \
+    '#: 🔴 ORDERED; the FIRST ENTRY WINS.'
+
 echo
 echo "== clawgate-task-interview-guard.py =="
 # I0 POSITIVE CONTROL. 🔴 ITS NAMED KILLER IS THE *ALLOW* CASE, AND THAT IS THE
@@ -383,7 +452,7 @@ run "I0 the acceptance-criteria detector never matches" \
 run "I1 TASK_CLI_NAMES loses 'muster'" \
     test_a_criteria_less_create_is_DENIED_for_every_cli_spelling "$IV" "$IV_SUITE" \
     "$IV_FLOOR" \
-    'TASK_CLI_NAMES = ("clawgatectl", "muster")' \
+    'TASK_CLI_NAMES = ("muster", "clawgatectl")' \
     'TASK_CLI_NAMES = ("clawgatectl",)'
 # I2 the PREFILTER alone — TASK_CLI_NAMES intact, so only the seam can see it.
 # 🔴 Its killer must be the SEAM guard, not the deny cases: this is the row that

@@ -239,6 +239,17 @@
 # limited to each package's own srcDir (`HEAD..@{u} -- <subtree>`, and the reverse
 # for ahead), and the repo-wide numbers are printed beside it as INFORMATION.
 #
+# 🔴 A PACKAGE BUILT FROM A PINNED FETCH IS NOT IN THIS SET, AND THAT IS THE WAY OUT
+# OF THIS WHOLE LADDER RATHER THAN A GAP IN IT. `nix/pkgs/tools/clawgatectl.nix` builds
+# from a local working tree only because its source repo is PRIVATE — a fetch would put
+# a credential in the nix store — and the staleness this block exists to notice is the
+# price of that. `pkgs.muster-cli` (the TASK-half CLI, binary `muster`) comes from a
+# flake input pinned by `flake.lock` instead: its version IS its revision, there is no
+# working tree on this host for it to be behind, and it carries no `${workspace}/` src
+# for the scan below to find. So its absence from `examined=` is CORRECT, not a hole.
+# ⚠ The consequence for a reader of a clean run: "0 stale" says nothing about a pinned
+# input being OLD — that is a `flake.lock` question and `git parity` already answers it.
+#
 # 🔴 THE COVERED SET IS DERIVED, NEVER LISTED. The payload reads `nix/pkgs/**.nix`
 # out of the checkout it is examining and collects every `${workspace}/<path>` it
 # finds outside a comment — the WHOLE path, so the repo and the subtree both fall

@@ -902,8 +902,14 @@ def test_the_block_reason_names_the_id_the_timestamp_and_BOTH_fix_commands(home)
     # 🔴 Pinned as the WHOLE literal command line, not as the presence of the words
     # "comment" and "status" — a guard on words is walkable by rewording, and this
     # text is the entire product of the hook.
-    assert "clawgatectl task comment 193 --body" in text
-    assert "clawgatectl task status 193 ready_for_review" in text
+    #
+    # 🔴 `muster`, NOT `clawgatectl`, AND THE LITERAL IS DELIBERATE. The binary is
+    # DERIVED at runtime from the shared ledger's head (`prescribed_cli`), so
+    # interpolating `guard.prescribed_cli()` here would assert only that the hook
+    # agrees with itself — the vacuous shape this module's CLI-ledger test warns
+    # about. The separate seam test below is what ties this literal to the ledger.
+    assert "muster task comment 193 --body" in text
+    assert "muster task status 193 ready_for_review" in text
     assert READ_TS in text
     assert "MISSING" in text
 
@@ -941,8 +947,8 @@ def test_several_offending_tasks_are_reported_in_one_decision(home):
     r = Reader(result=task(comments=[]))
     kind, text = guard.stop_decision(payload("Stop"), reader=r)
     assert kind == "block"
-    assert "clawgatectl task status 193 ready_for_review" in text
-    assert "clawgatectl task status 194 ready_for_review" in text
+    assert "muster task status 193 ready_for_review" in text
+    assert "muster task status 194 ready_for_review" in text
     assert [c[0] for c in r.calls] == [193, 194]
 
 
@@ -1323,7 +1329,7 @@ def test_the_positive_control_for_that_backstop(home, monkeypatch, capsys):
     assert e.value.code == 0
     out = json.loads(capsys.readouterr().out)
     assert out["decision"] == "block"
-    assert "clawgatectl task comment 193 --body" in out["reason"]
+    assert "muster task comment 193 --body" in out["reason"]
 
 
 # =========================================================================== #
@@ -1397,17 +1403,75 @@ def _sh_capture_stdin(path):
             % json.dumps(str(path)))
 
 
-def test_live_task_prefers_clawgatectl(tmp_path, monkeypatch):
+def test_live_task_uses_a_task_CLI_when_one_is_present(tmp_path, monkeypatch):
     b = _bin(tmp_path)
     mockbin.write_exec(b / "clawgatectl", _sh_json(task(comments=[])))
     _isolated_path(monkeypatch, b)
     assert guard.live_task(193, timeout=5)["id"] == 193
 
 
-def test_live_task_falls_back_to_curl_when_clawgatectl_is_ABSENT(tmp_path,
-                                                                monkeypatch):
-    """🔴 The laptop today: its homelab-talos checkout predates cmd/clawgatectl, so
-    nix does not build the binary and the hook must still be able to measure."""
+#: Two ids no other fixture in this file uses, so "which client answered" is readable
+#: off the RESULT rather than inferred. 193/194 are the incident ids; 7xx is the muster
+#: section's range; MAX_TASKS is 5, MAX_FIRES 3, MAX_BLOCKS 1 — none of these collides.
+MUSTER_ANSWERED_ID = 811
+CLAWGATECTL_ANSWERED_ID = 812
+
+
+def test_live_task_PREFERS_MUSTER_when_BOTH_clients_are_on_PATH(tmp_path, monkeypatch):
+    """🔴 LEG 1 OF THE PREFERENCE, AND IT IS THE WHOLE POINT OF THE REPOINT. The two
+    stubs return DIFFERENT task ids, so this cannot pass by "some client answered": the
+    id identifies which binary ran.
+
+    Why it matters rather than being a tidiness: the client that answers is the one
+    whose provenance headers the board records. `clawgatectl` sent `X-Clawgate-*` while
+    muster read `X-Muster-*`, and for six days every task comment came back authored
+    `api` with the task<->session thread recording nothing — 798 rows, then zero.
+    """
+    b = _bin(tmp_path)
+    mockbin.write_exec(b / "muster", _sh_json(task(task_id=MUSTER_ANSWERED_ID)))
+    mockbin.write_exec(b / "clawgatectl",
+                       _sh_json(task(task_id=CLAWGATECTL_ANSWERED_ID)))
+    _isolated_path(monkeypatch, b)
+    got = guard.live_task(999, timeout=5, env_path=str(tmp_path / "absent.env"))
+    assert got["id"] == MUSTER_ANSWERED_ID, (
+        "the live read did not prefer `muster`: it came back with id %r, which is the "
+        "CLAWGATECTL stub's. Inverting the preference in "
+        "scripts/lib/clawgate_tasks.TASK_CLI_NAMES fails exactly here."
+        % (got.get("id"),))
+
+
+def test_live_task_FALLS_BACK_to_clawgatectl_when_muster_is_ABSENT(tmp_path,
+                                                                  monkeypatch):
+    """🔴 LEG 2, AND IT IS REQUIRED, NOT A COURTESY. This hook gates Stop in every
+    session on two machines. A host whose `home-manager switch` has not landed, or
+    failed, has no `muster` — and if the preference were a REQUIREMENT this hook would
+    reach no verdict there, which is the same observable as a session that wrote back
+    correctly. Degrading to the client that IS installed keeps the measurement."""
+    b = _bin(tmp_path)
+    mockbin.write_exec(b / "clawgatectl",
+                       _sh_json(task(task_id=CLAWGATECTL_ANSWERED_ID)))
+    _isolated_path(monkeypatch, b)
+    got = guard.live_task(999, timeout=5, env_path=str(tmp_path / "absent.env"))
+    assert got["id"] == CLAWGATECTL_ANSWERED_ID, got
+
+
+def test_the_NEGATIVE_CONTROL_the_muster_stub_really_is_the_one_that_answers(
+        tmp_path, monkeypatch):
+    """Without this, leg 1 is satisfied by a `muster` stub that is never executed and a
+    `clawgatectl` stub that happens to return the same thing. Here ONLY `muster` is on
+    PATH, so its id is the only one obtainable at all."""
+    b = _bin(tmp_path)
+    mockbin.write_exec(b / "muster", _sh_json(task(task_id=MUSTER_ANSWERED_ID)))
+    _isolated_path(monkeypatch, b)
+    got = guard.live_task(999, timeout=5, env_path=str(tmp_path / "absent.env"))
+    assert got["id"] == MUSTER_ANSWERED_ID, got
+
+
+def test_live_task_falls_back_to_curl_when_NO_task_CLI_is_present(tmp_path,
+                                                                 monkeypatch):
+    """🔴 Neither client on PATH — a host that has switched neither package. The hook
+    must still be able to MEASURE, because "could not measure" and "the card is clean"
+    must never share an observable."""
     b = _bin(tmp_path)
     argv_log = tmp_path / "curl-argv.log"
     cfg_log = tmp_path / "curl-cfg.log"
@@ -1432,7 +1496,8 @@ def test_live_task_falls_back_to_curl_when_clawgatectl_is_ABSENT(tmp_path,
     assert "-K -" in argv_log.read_text()
 
 
-def test_live_task_falls_back_when_clawgatectl_EXITS_NONZERO(tmp_path, monkeypatch):
+def test_live_task_falls_back_when_the_only_task_CLI_EXITS_NONZERO(tmp_path,
+                                                                  monkeypatch):
     b = _bin(tmp_path)
     mockbin.write_exec(b / "clawgatectl", "echo 'boom' >&2\nexit 6\n")
     mockbin.write_exec(b / "curl",
@@ -1485,10 +1550,11 @@ def test_live_task_raises_when_the_env_file_has_no_credentials(tmp_path,
     with pytest.raises(guard.LiveReadError) as e:
         guard.live_task(197, timeout=5, env_path=str(tmp_path / "nope.env"))
     assert "has no API url/token" in str(e.value)
-    # 🔴 ...and it names WHICH client failed first. A `clawgatectl` that exists but
+    # 🔴 ...and it names EVERY client that failed, in order. A client that exists but
     # exits non-zero must not be reported as "not on PATH" — a diagnosis pointing at
     # the wrong subsystem. Found by a LIVE probe, not by a stub.
-    assert "clawgatectl not on PATH" in str(e.value)
+    for binary in guard.TASK_CLI_NAMES:
+        assert "%s not on PATH" % binary in str(e.value), binary
 
 
 def test_a_FAILING_clawgatectl_is_not_reported_as_an_ABSENT_one(tmp_path,
@@ -1545,7 +1611,7 @@ def test_the_measured_failure_reproduced_end_to_end(home, tmp_path):
     assert p.returncode == 0
     out = json.loads(p.stdout)
     assert out["decision"] == "block"
-    assert "clawgatectl task comment 193 --body" in out["reason"]
+    assert "muster task comment 193 --body" in out["reason"]
 
 
 def test_the_same_session_goes_quiet_once_the_comment_exists(home, tmp_path):
@@ -3153,7 +3219,12 @@ MOVED_CLAIMS = (
     "**Exactly TWO comments per pickup — start and finish, never per turn.**",
     "**Comments author as `claude-code`** via `X-Clawgate-Source`; no `--author` flag",
     "⚠ **A comment/status write also refreshes the task's idle clock**",
-    "clawgatectl task status <id> in_progress          # 3c. THEN flip, and work",
+    # 🔴 RE-PINNED 2026-10-01 — the flow's bash block is the thing a pickup COPIES,
+    # and it now teaches muster's own CLI. The whole normalised line is pinned (column
+    # alignment included) rather than the words, exactly as the constant above demands;
+    # this is the cosmetic-reword cost RULES.md says to pay for a machine-readable
+    # claim, and it was paid deliberately here.
+    "muster task status <id> in_progress               # 3c. THEN flip, and work",
 )
 
 
@@ -3577,7 +3648,7 @@ def test_the_INVARIANT_GUARD_fire_1_still_blocks_on_every_path_it_blocked_before
     out = emitted(capsys, guard.stop_decision(
         payload("Stop"), reader=Reader(result=FIRE_1_MUST_BLOCK[label])))
     assert forces_a_continuation(out), (label, out)
-    assert "clawgatectl task comment 193 --body" in out["reason"], label
+    assert "muster task comment 193 --body" in out["reason"], label
 
 
 def test_the_NEGATIVE_CONTROL_a_real_write_back_still_silences_fire_1(home):
@@ -3696,7 +3767,7 @@ def test_the_cli_name_ledger_is_pinned_in_BOTH_directions():
     answers the same routes with a right-looking 200. This assertion is what made
     that load-bearing: it pinned the wrong name, so fixing it failed the suite.
     """
-    assert guard.TASK_CLI_NAMES == ("clawgatectl", "muster")
+    assert guard.TASK_CLI_NAMES == ("muster", "clawgatectl")
     assert guard.task_api_url_vars() == ("CLAWGATE_TASK_API_URL", "CLAWGATE_API_URL")
     assert guard.TASK_TOKEN_VARS == ("CLAWGATE_TASKS_HOOK_TOKEN",
                                      "CLAWGATE_HOOK_TOKEN")
@@ -3748,6 +3819,94 @@ def test_the_url_ledger_is_the_SHARED_one_and_this_hook_keeps_no_copy():
         "the hook re-spells %s in CODE — take the ledger from "
         "scripts/lib/clawgate_tasks.TASK_API_URL_VARS instead, or the two drift "
         "again" % (sorted(set(offenders)),))
+
+
+def test_the_cli_ledger_is_the_SHARED_one_in_ORDER():
+    """🔴 THE OTHER SEAM, AND THE REASON THE HOOK IS ALLOWED TO KEEP A COPY AT ALL.
+
+    `TASK_CLI_NAMES` here is a MIRROR of `scripts/lib/clawgate_tasks.TASK_CLI_NAMES`,
+    kept because `TASK_GET_RX` is built at IMPORT and `task_read_ids` runs on the
+    PostToolUse hot path — loading the shared module there would recompile 40 KB of
+    python from a read-only store path on every single tool call. The URL ledger above
+    forbids a copy outright; this one permits a copy and pins it instead, which is only
+    a defensible trade while something compares the two.
+
+    🔴 PINNED AS A SEQUENCE, NOT A SET. Order is the whole content of the preference,
+    and `task_cli_names()` — what `_read_task` actually walks — reads the SHARED tuple,
+    so a mirror allowed to disagree about order would tell a reader the opposite of what
+    runs. Both halves fail on GROW, SHRINK and REORDER.
+    """
+    cg = _load("clawgate_tasks_cli_undertest",
+               str(ROOT / "scripts" / "lib" / "clawgate_tasks.py"))
+    assert guard.task_cli_names() == tuple(cg.TASK_CLI_NAMES), (
+        "the hook resolves clients in %r while the shared ledger says %r"
+        % (guard.task_cli_names(), tuple(cg.TASK_CLI_NAMES)))
+    assert guard.TASK_CLI_NAMES == tuple(cg.TASK_CLI_NAMES), (
+        "the hook's arming MIRROR is %r and the shared ledger is %r. They are the same "
+        "decision: a name that ARMS but is never TRIED yields an endless UNVERIFIED, a "
+        "name that is TRIED but never ARMS yields silence."
+        % (guard.TASK_CLI_NAMES, tuple(cg.TASK_CLI_NAMES)))
+
+
+def test_the_prescribed_command_is_DERIVED_from_the_ledger_head():
+    """🔴 THE TEXT A MODEL IS HANDED IS THE ONLY PRODUCT OF THIS HOOK, so the binary it
+    names must follow the preference rather than a literal somebody forgets. Asserted
+    from the SHARED module's head, not from the hook's own constant."""
+    cg = _load("clawgate_tasks_prescribe_undertest",
+               str(ROOT / "scripts" / "lib" / "clawgate_tasks.py"))
+    head = cg.TASK_CLI_NAMES[0]
+    assert guard.prescribed_cli() == head
+    text = guard.missing_text(207, READ_TS, SESSION)
+    assert "%s task comment 207 --body" % head in text, text
+    assert "%s task status 207 ready_for_review" % head in text, text
+    # ...and the DEPRECATED client must not be what a model is told to run.
+    deprecated = [n for n in cg.TASK_CLI_NAMES[1:]]
+    for name in deprecated:
+        assert "%s task comment" % name not in text, (name, text)
+    # The same for the UNVERIFIED notice and the FILED notice — three texts, one rule.
+    unknown = guard.unknown_text(207, READ_TS, "boom", SESSION, endpoint="http://x/1")
+    assert "%s task comment 207" % head in unknown, unknown
+    authored = guard.authored_text(207, SESSION)
+    assert "%s task comment 207" % head in authored, authored
+
+
+def test_the_POSITIVE_CONTROL_for_prescribed_cli_it_follows_a_CHANGED_ledger(
+        monkeypatch):
+    """🔴 Without this, the assertion above is indistinguishable from a literal that
+    happens to equal the ledger's head today. Point the hook's loader at a ledger whose
+    head is a name NEITHER real client uses, and the prescribed command must move."""
+    class _Fake:
+        TASK_CLI_NAMES = ("zzz-decoy-client", "clawgatectl")
+        TASK_API_URL_VARS = ("CLAWGATE_TASK_API_URL", "CLAWGATE_API_URL")
+
+    monkeypatch.setattr(guard, "_clawgate_tasks", _Fake)
+    assert guard.prescribed_cli() == "zzz-decoy-client"
+    assert "zzz-decoy-client task comment 207 --body" in guard.missing_text(
+        207, READ_TS, SESSION)
+
+
+def test_a_ROUTER_verb_is_NEVER_prescribed_or_resolved_through_the_task_ledger():
+    """🔴 THE SPLIT, GUARDED AT THIS HOOK. muster's CLI has 12 verbs and every one is
+    task-side; the router half (`health attention view panel term tmux transcript`,
+    plus `chief write`/`chief launch`) exists ONLY in `clawgatectl`. This hook must
+    never put a router verb in front of a model and must never build one, or a session
+    would run a command the preferred binary cannot have.
+
+    The repo-wide call-site scan lives in
+    `scripts/tests/test_task_cli_resolver.py::test_no_router_verb_is_ever_INVOKED_through_muster`;
+    this is the same claim narrowed to the three texts THIS file emits, which is where
+    a model would actually read one.
+    """
+    router = ("health", "attention", "view", "panel", "term", "tmux", "transcript")
+    texts = (guard.missing_text(207, READ_TS, SESSION),
+             guard.authored_text(207, SESSION),
+             guard.unknown_text(207, READ_TS, "boom", SESSION, endpoint="http://x/1"))
+    for text in texts:
+        for verb in router:
+            for binary in guard.TASK_CLI_NAMES:
+                assert ("%s %s" % (binary, verb)) not in text, (binary, verb)
+    # Anti-vacuity: the texts really do contain CLI invocations to be wrong about.
+    assert any("task comment 207" in t for t in texts)
 
 
 def test_the_positive_control_for_that_structural_half(tmp_path):
@@ -4113,11 +4272,17 @@ def test_the_curl_fallback_still_works_with_ONLY_the_generic_keys(tmp_path,
     assert CLAWGATE_TOKEN in cfg, cfg
 
 
-def test_live_task_falls_through_to_muster_when_clawgatectl_is_ABSENT(tmp_path,
-                                                                     monkeypatch):
-    """After the rename `clawgatectl` may not exist at all. The chain must reach the
-    second CLI before it reaches curl — otherwise a host with `muster` installed and no
-    credentials in the env file could never measure anything."""
+def test_live_task_reaches_muster_when_it_is_the_ONLY_client(tmp_path, monkeypatch):
+    """`clawgatectl` may not exist at all — a fresh host, or one that dropped the
+    private checkout its package is built from. A host with only `muster` installed and
+    no credentials in the env file must still be able to measure.
+
+    ⚠ THE NAME CHANGED WITH THE PREFERENCE, AND THE OLD ONE WOULD HAVE LIED. It read
+    `…falls_through_to_muster_when_clawgatectl_is_ABSENT`, which described a chain that
+    tried `clawgatectl` first. `muster` is now tried FIRST, so nothing "falls through"
+    here and the surviving claim is narrower: muster alone is sufficient. The
+    fall-through case that IS still real is the test below.
+    """
     b = _bin(tmp_path)
     mockbin.write_exec(b / "muster", _sh_json(task(task_id=708)))
     _isolated_path(monkeypatch, b)
@@ -4125,13 +4290,22 @@ def test_live_task_falls_through_to_muster_when_clawgatectl_is_ABSENT(tmp_path,
                            env_path=str(tmp_path / "absent.env"))["id"] == 708
 
 
-def test_live_task_falls_through_to_muster_when_clawgatectl_EXITS_NONZERO(tmp_path,
+def test_live_task_falls_through_to_clawgatectl_when_MUSTER_EXITS_NONZERO(tmp_path,
                                                                          monkeypatch):
-    """The mid-cutover shape: `clawgatectl` is still installed but its board no longer
-    holds the task, so it 404s. `muster` answers."""
+    """🔴 THE FALL-THROUGH, IN THE DIRECTION THE PREFERENCE MAKES REAL. `muster` is
+    installed but answers non-zero — a wrong base URL, a 404, an auth failure — and the
+    older client is still there and can answer. Reaching the SECOND entry is what makes
+    the ledger a chain rather than a single choice with a spare name written beside it.
+
+    ⚠ THIS TEST USED TO BE ITS MIRROR IMAGE (`clawgatectl` 404s, `muster` answers), and
+    after the reorder that shape no longer exercised the chain at all: `muster` is tried
+    first and answers, so the failing client was never reached and the test would have
+    passed with the loop truncated to one entry. Inverted deliberately rather than
+    deleted — the property is worth pinning, it just moved which client has to fail.
+    """
     b = _bin(tmp_path)
-    mockbin.write_exec(b / "clawgatectl", "echo 'task not found' >&2\nexit 4\n")
-    mockbin.write_exec(b / "muster", _sh_json(task(task_id=709)))
+    mockbin.write_exec(b / "muster", "echo 'task not found' >&2\nexit 4\n")
+    mockbin.write_exec(b / "clawgatectl", _sh_json(task(task_id=709)))
     _isolated_path(monkeypatch, b)
     assert guard.live_task(709, timeout=5,
                            env_path=str(tmp_path / "absent.env"))["id"] == 709
