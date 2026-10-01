@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# oc-sent — PATH shim for scripts/collector/opencode/sent.py.
+#
+# The nix symlink (~/.local/bin/oc-sent → this file) is out-of-store on
+# purpose (same reasoning as the claim-work symlink in nix/home.nix): an
+# agent reaches for the bare command from any cwd, and it must serve the
+# LIVE repo copy, not the last-switched store copy. readlink -f resolves the
+# symlink to the real repo path; sent.py's own __file__-relative import then
+# finds its siblings beside it. sent.py deliberately does NOT resolve()
+# itself — this shim is the only place resolution happens.
+set -euo pipefail
+SELF=$(readlink -f "$0")
+HERE=$(dirname "$SELF")
+exec python3 "$HERE/collector/opencode/sent.py" "$@"
