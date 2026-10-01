@@ -53,6 +53,27 @@ they had accumulated in one document and pushed it to its 65,536 B ceiling.
 - **Observed:** 8 quiet rounds with the tunnel UP, then with it DOWN 4 quiet + 1 lossy + 14 quiet. A hypothesis that the tunnel suppressed the fault (by collapsing many NAT mappings into one) was raised and is **withdrawn**: loss appeared with the tunnel down, and so did 18 quiet rounds. The fault simply went quiet ~18:00Z. `via: measurement`
 - **Ruled out — that the tunnel changes either overlay's egress at all.** `ip rule 500 uidrange 991-991` exempts nebula and `ip rule 5210 fwmark 0x80000` exempts tailscale, by design. Verified `uid 991 → wlp170s0`, `uid 1000 → airvpn`. `via: measurement`
 - **Next probe:** none. Do not re-run this A/B unless the fault is demonstrably live in both arms.
+
+### 🔴🔴 THE FAULT HAS **TWO DISTINCT MODES** — forward-loss and return-loss — and each episode is PURELY one or the other
+- as-of: 2026-10-01
+- 🔴 **This QUALIFIES the "THE LOSS IS ON THE RETURN LEG" block above, which rested on N=1.** Return-leg loss is real but it is the MINORITY mode. Overnight accumulation shows forward-loss dominating. 🔴 **Any mechanism that explains only one mode explains at most half the data — which is very likely why six single mechanisms were each eliminated in this arc.**
+- **Symptom + exact repro:** watcher v4 (`<scratchpad>/flap-watch4.sh`) emits a `DIRECTION:` line per episode: it reads the workbench's `/proc/net/snmp` `Icmp:InEchos` either side of the 5-way discriminator and compares arrivals against `2 × PROBE_N` (both the nebula and tailscale arms ICMP the same host). Unprivileged on both ends. Re-derive with `grep DIRECTION <log>`.
+- **Observed (with values), 2026-09-30T20:15Z → 2026-10-01T01:56Z, 772 polls / 9 triggers / 0 BADPARSE:**
+
+  | episode | nebula loss | tailscale loss | lost (derived) | shortfall | forward share |
+  |---|---|---|---|---|---|
+  | 01:07:17Z | 21.67% | 25.83% | 57 | **0** | **0% — all RETURN** |
+  | 01:44:52Z | 18.33% | 17.50% | 43 | **43** | **100% — all FORWARD** |
+  | 01:48:01Z | 33.33% | 41.67% | 90 | **90** | **100% — all FORWARD** |
+  | 01:50:26Z | 45.00% | 35.83% | 97 | **97** | **100% — all FORWARD** |
+  | 01:53:02Z | 39.17% | 32.50% | 86 | **86** | **100% — all FORWARD** |
+
+  🔴 **The shortfall matches the derived packet loss EXACTLY in all four forward episodes, and is exactly zero in the return episode. There are no mixed episodes.** Plus one earlier return-leg episode measured by hand 2026-09-30 (`direction.sh`: sent 200, arrived 200, 63 lost). `via: measurement`
+- **Ruled out — that the loss has a single direction.** Both modes are measured, each cleanly. `via: measurement`
+- **Ruled out — that the modes blend within an episode.** Every episode is 0% or 100% forward; nothing in between. `via: measurement`
+- **Leading hypothesis:** two mechanisms, not one. The forward mode is consistent with CGNAT dropping the laptop's outbound flows; the return mode with the laptop's inbound mapping being gone while outbound still re-creates it. ⚠ Both untested; what is established is the SPLIT, not either mechanism. 🔴 Note the forward mode still has to explain the lockstep (both overlays identical to the packet), which a per-flow story does not obviously do.
+- **Next probe:** classify more episodes — the split is 4:2 on six, far too few to say whether the modes alternate, correlate with severity, or with time of day. ⚠ The 01:44–01:53 forward episodes are **four in nine minutes**, i.e. one burst, so they may be a single event rather than four independent samples; weight them as such until a second forward burst lands.
+- **3 episodes returned `DIRECTION: UNAVAILABLE`** (counter read failed — ssh during an episode). Those are honest nulls, not readings, and are excluded above.
 ## Open investigations — live diagnosis state
 <!-- as-of: 2026-09-21 -->
 ### Gateway IPv6-remote noise — "listener is IPv4, but writing to IPv6 remote" (homelab-gateway)
@@ -308,6 +329,10 @@ they had accumulated in one document and pushed it to its 65,536 B ceiling.
 - 🔴 **`/proc/net/snmp` `Icmp:InEchos` is an unprivileged arrival counter and it is exact.** Two independent bursts moved it by precisely 20 and 12. This is the cheapest directional instrument available and works on any Linux peer you can ssh to as a normal user.
 - 🔴 **A PR CUT BEFORE A FIX LANDS FAILS WHAT `main` PASSES.** #1942's pytests leg failed twice while `main` was green; the branch was 2 commits behind and missing `aa01eb77` (#1939), the cairn pin-seam fix — the same breakage that had been erroring every fresh worktree's `conftest` locally. `git rev-list --count HEAD..origin/main` before theorising about CI. Merging main took the local failures from 125 to 6, and those 6 fail identically on `main` itself (they need the live pod), i.e. environmental.
 - ⚠ **Nebula's firewall does not permit arbitrary UDP ports between these peers** — a one-way sequenced-UDP probe got 0 of 20 through while ICMP was at 0% loss in the same minute. The inbound rules allow `icmp` from any host, and any proto only from groups `lighthouse`/`admin`/`homelab`. Positive-control any new channel before reading a zero as loss.
+
+- 🔴 **A DIRECTION VERDICT NEEDS LOSS TO ATTRIBUTE — v4 printed one where there was none.** Episode `2026-09-30T20:16:11Z` triggered on a 15% poll but its discriminator measured **0.0% on both arms**; shortfall was therefore 0, which the classifier read as `RETURN-LEG`. A zero-loss episode cannot have a direction. Fixed by gating the verdict on derived loss > 0 and emitting `VACUOUS` otherwise (guard controlled over all four lost/shortfall combinations). **Same family as "a quiet poll proves nothing": any classifier whose default branch is a real verdict will manufacture findings from null input.**
+- ⚠ **Four episodes inside nine minutes are one burst, not four samples.** Recorded because the raw count (4 forward vs 2 return) overstates the evidence for a forward majority.
+- 🔴 **Reading a CI check without checking WHICH HEAD it ran against produces a confident wrong conclusion.** On devrc#1942 a `FAILURE` was read from the previous head's run while the new head's run was still pending, and a CORRECT diagnosis ("the branch is behind main and missing the cairn pin-seam fix `aa01eb77`") was abandoned on the strength of it. The local evidence had already moved 125 → 6 failures after merging main. Compare `statusCheckRollup[].startedAt` against `headRefOid`, or read the per-head timeline: `gh api repos/<r>/commits/<sha>/statuses`.
 
 
 ## How to verify
