@@ -172,11 +172,12 @@
 # is the passive deadman for the same fleet and deliberately uses the same
 # vocabulary, so a number must not mean two things across the pair. It owns
 # 10, 14, 15, 16, 17, 18, 22, 23, 24 and 25 — DRIFT meanings this script does
-# not take — and reserves them here; this script owns 5, 7, 9, 11, 19, 20, 21 and
-# 26 and they are reserved there. Its header says "a new DRIFT code has nowhere to
-# go but upward", which points the next one at 19 unless the reservation is
-# written down on both sides: so the next free code for THIS script is 27, and so
-# is the next free code for that one.
+# not take — and reserves them here; this script owns 5, 7, 9, 11, 19, 20, 21, 26
+# and 27 and they are reserved there. Its header says "a new DRIFT code has nowhere
+# to go but upward", which points the next one at 19 unless the reservation is
+# written down on both sides: so the next free code for THIS script is 28, and so
+# is the next free code for that one. (27 was taken by THIS script on 2026-10-01 —
+# remote-NEVER-REACHED, devrc #686 — which is why both "next free" numbers moved.)
 #
 # RESERVED-TO-DRIFT-CHECK: 10 14 15 16 17 18 22 23 24 25
 #
@@ -299,6 +300,21 @@
 #      🔴 Like rc 2 and rc 20, the `rc26=` legend line is UNREACHABLE: the
 #      refusal exits before the verdict block that prints the legend. Ledgered
 #      anyway, for the reason stated under rc 20.
+#
+#   27 THE REMOTE HOST WAS NEVER REACHED — no candidate address answered the ssh
+#      probe, so the run converged ONE host of two and nothing was compared. A
+#      NON-OBSERVATION, not a failure of that host: it is not "the laptop is
+#      broken", it is "the laptop was never looked at". 🔴 It OVERRIDES whatever
+#      per-host code the local leg produced, which every other code does not —
+#      "first non-zero wins" is correct for per-host claims and wrong for this
+#      one. MEASURED 2026-10-01 (devrc #686): a run in exactly this state reported
+#      `incomplete (rc=13) consumer-stale … re-switch that host` while the laptop
+#      leg had exited 255 having never connected, so the verdict's only actionable
+#      sentence was advice about the OTHER machine, and the local leg's `✅
+#      VERIFIED` was the loudest thing on screen. Distinct from 19 (which means
+#      two hosts were compared and disagreed, or a leg exited 0 without a sha) and
+#      from 21 (--no-remote, where one host is the scope the OPERATOR asked for;
+#      here the scope was halved without anyone choosing it).
 #
 # Usage:
 #   scripts/ship.sh              # converge local host + the other (remote) host
@@ -547,6 +563,12 @@ fi
 # one-element list by construction (see remote_ssh_candidates_of), so this never
 # redirects a run the operator addressed by hand.
 mapfile -t _cand_arr <<<"$_cands"   # $_cands was captured ABOVE, before REMOTE_SSH was derived
+# 🔴 A PLAIN ASSIGNMENT, never `${SHIP_REMOTE_NO_CANDIDATE:-0}`. This decides the
+# verdict, and an inheritable spelling lets an exported value from a debugging
+# shell declare the remote host unreachable in every later run — or, worse, a
+# STALE 1 survive into a run whose probe succeeded. It is set by the probe below
+# and read exactly once, at the verdict.
+SHIP_REMOTE_NO_CANDIDATE=0
 # 🔴 PROBE ONLY WHEN THERE IS SOMETHING TO CHOOSE BETWEEN. With one candidate
 # there is no alternative to fall back to, so a probe buys nothing and COSTS: it
 # is an extra ssh connection before the legs run, and anything downstream that
@@ -569,6 +591,7 @@ if [ "$DO_REMOTE" = 1 ] && [ "${#_cand_arr[@]}" -gt 1 ] \
     # Every candidate was tried and none answered. Say so explicitly rather than
     # proceeding into a 255 that reads as a broken converge: this is a
     # reachability fact about the host, and the run below will report it as one.
+    SHIP_REMOTE_NO_CANDIDATE=1
     echo "ship: NO candidate address answered for $REMOTE_ROLE — tried:" >&2
     printf '  %s\n' $_cands >&2
     echo "  the remote leg will fail; pass REMOTE_SSH=user@host if it lives elsewhere," >&2
@@ -2074,6 +2097,34 @@ else
   agreed_sha="$LOCAL_SHA"
 fi
 
+# --- A host that was NEVER CONTACTED outranks every per-host code (rc 27) ------
+# 🔴 WHY THIS OVERRIDES: devrc #686. A run whose probe found no candidate address
+# printed its diagnosis FIRST — ten lines before a local leg that went on to print
+# `✅ VERIFIED` — and then ended on whatever code the LOCAL host happened to
+# produce. Measured on 2026-10-01: the laptop leg exited 255 (never reached, the
+# `ssh` never completed) and the run's verdict was `incomplete (rc=13)
+# consumer-stale … re-switch that host` — an actionable instruction about a
+# DIFFERENT machine than the one that was broken. "First non-zero code wins" is
+# right for per-host claims, which are all still printed above; it is wrong here,
+# because this is not a claim about a host, it is the fact that HALF THE FLEET WAS
+# NEVER LOOKED AT. A cold read of the tail has to land on that.
+#
+# Deliberately placed AFTER the agreement block (so `NOT COMPARED` is already on
+# the record) and BEFORE the verdict (so the verdict cannot say `converged +
+# verified`). rc 0 is unreachable from here by construction: $DO_REMOTE was 1 and
+# the leg could not have landed a sha, so the agreement block has already fired.
+if [ "$SHIP_REMOTE_NO_CANDIDATE" = 1 ]; then
+  echo "ship: ❌ $REMOTE_ROLE WAS NEVER REACHED — no candidate address answered, so this run converged 1 host of 2."
+  echo "  every ✅ above is about THIS host ($SHIP_ROLE) alone. The $REMOTE_ROLE is in UNKNOWN state:"
+  echo "  not converged, not verified, not refused — never contacted. Read the probe's own"
+  echo "  'reason:' lines at the TOP of this run for why each address failed."
+  if [ "$rc" != 0 ] && [ "$rc" != 27 ]; then
+    echo "  (this host additionally reported rc=$rc — its own lines above still stand; rc 27 is"
+    echo "   about SCOPE and outranks it, because rc=$rc is advice about the host that DID answer.)"
+  fi
+  rc=27
+fi
+
 if [ "$rc" = 0 ]; then
   # 🔴 The verdict names the SHA and the number of hosts compared. "converged +
   # verified at origin/main" was true of each host separately on 2026-08-19 and
@@ -2084,6 +2135,17 @@ if [ "$rc" = 0 ]; then
   else
     echo "ship: converged + verified at ${LOCAL_SHA:-$REMOTE_SHA} — 1 host ($scope_label); cross-host agreement NOT COMPARED."
   fi
+elif [ "$rc" = 27 ]; then
+  # 🔴 THE HEADLINE CARRIES THE FACT, NOT JUST THE CODE. `ship.sh`'s exit status
+  # does not survive a pipe — `bash ship.sh | tail -40; echo $?` prints tail's 0
+  # over a real non-zero, which is how a run with an untouched host was read as a
+  # pass (measured, devrc #686). So the one line a `tail` read is guaranteed to
+  # see has to SAY it in words. Capture the status without a pipe:
+  #     bash scripts/ship.sh > out 2>&1; echo $?
+  echo "ship: ❌ INCOMPLETE (rc=27) — 1 of 2 hosts converged; $REMOTE_ROLE NEVER REACHED and cross-host agreement NOT COMPARED."
+  echo "  this is NOT a pass and NOT a failure of the $REMOTE_ROLE — it is a NON-OBSERVATION of it."
+  echo "  next: pass REMOTE_SSH=user@host if it lives at an address this list does not carry,"
+  echo "  or re-run once it is back; --no-remote makes the one-host scope EXPLICIT instead of accidental."
 else
   echo "ship: incomplete (rc=$rc) — see per-host lines above."
   echo "  rc2=ship-repo-set-but-empty(caller bug — refused rather than defaulting to \$HOME/workspace/devrc)"
@@ -2095,6 +2157,10 @@ else
   echo "  rc13=consumer-stale(managed artifacts resolve but serve OLD content — re-switch that host)"
   echo "  rc19=hosts-disagree(the two hosts landed on DIFFERENT commits, or agreement was not compared)"
   echo "  rc20=superseded(this run replaced its own script and could not re-run it — re-run ship)"
+  echo "  rc27=remote-NEVER-REACHED(no candidate address answered — that host was not converged,"
+  echo "       not verified and not compared; it was never contacted. Printed with its own"
+  echo "       headline instead of this legend when it fires, so seeing it HERE means another"
+  echo "       code won the verdict — read the probe's 'reason:' lines at the top of the run)"
   echo "  rc26=pre-flight-refused(the two hosts' containers/clawgate go.mod/go.sum differ ON DISK;"
   echo "       clawgatectl builds from that tree and pins one vendorHash those files decide —"
   echo "       sync or un-dirty them on the host named, then re-run ship)"

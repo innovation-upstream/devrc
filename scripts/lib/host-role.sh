@@ -71,6 +71,27 @@ LAPTOP_SSH_DEFAULT="${SSH_USER_DEFAULT}@${LAPTOP_IP_PRIMARY}"
 # as a DEAD HOST, so the laptop silently stopped receiving deploys while looking
 # merely unreachable. Derived from the IP constants above rather than spelled
 # again: one address, one place.
+#
+# 🔴 DECIDED 2026-10-01 (devrc #686): `192.168.50.155` STAYS a candidate, and here
+# is the measurement, because "is it still a real address for the laptop" is a
+# question this comment has now been asked twice.
+#   * 10/10 probes: `ssh: connect to host 192.168.50.155 port 22: Connection
+#     refused`, in 0.01s — NOT the 5s timeout of the 2026-09-09 incident above.
+#   * It PINGS, 3ms, with an ARP entry: lladdr 90:f4:21:00:66:a5.
+#   * The laptop's wlan MAC is e8:84:a5:2c:23:ab and its addresses that day were
+#     192.168.1.4/24 + nebula 10.42.0.100 — a DIFFERENT LAN. So .155 is not the
+#     laptop at all right now; a third-party device holds that DHCP lease.
+# KEPT anyway, on three grounds: (1) `LAPTOP_IP_PRIMARY` is ALSO the role-detection
+# constant two blocks down, so dropping it from the candidate list alone would
+# leave two disagreeing definitions of "the laptop's LAN address" — the duplicated
+# predicate RULES.md says is wrong at N-1 sites; (2) the measured cost of keeping
+# it is 0.01s, not a timeout, because a refusal returns instantly — the whole
+# two-candidate probe completes in 1.7s; (3) LAN-first is the right preference
+# whenever the laptop IS home. What made the 2026-09-09 failure dangerous was not
+# the address, it was that the reason was unreadable — which is what the
+# `reason:` line in `first_reachable_ssh` now fixes. ⚠ OPEN for the operator: if
+# the laptop never returns to 192.168.50.x, this constant should be retired from
+# BOTH roles together; that is a fleet-topology call, not a script change.
 WORKBENCH_SSH_SECONDARY="${SSH_USER_DEFAULT}@${WORKBENCH_IP_SECONDARY}"
 LAPTOP_SSH_SECONDARY="${SSH_USER_DEFAULT}@${LAPTOP_IP_SECONDARY}"
 
@@ -196,7 +217,7 @@ probe_failure_state() {
 # `untrusted-key` the same way ssh does, by PRINTING the refusal to stderr, so
 # that state is reachable in tests without a real changed key.
 first_reachable_ssh() {
-  local timeout="${SSH_PROBE_TIMEOUT:-5}" target err
+  local timeout="${SSH_PROBE_TIMEOUT:-5}" target err _reason
   for target in "$@"; do
     if [ -z "$target" ]; then
       echo "${SSH_PROBE_LOG_PREFIX:-ship}: no address configured for this path (not-configured)" >&2
@@ -257,6 +278,48 @@ first_reachable_ssh() {
       echo "${SSH_PROBE_LOG_PREFIX:-ship}: $target answered but ssh refused its HOST KEY — not trusting it (untrusted-key)" >&2
     else
       echo "${SSH_PROBE_LOG_PREFIX:-ship}: $target did not answer (unreachable)" >&2
+    fi
+    # 🔴 ssh's OWN stderr, or the probe is UNDIAGNOSABLE. `$err` was captured here
+    # from the very first version of this function and used for ONE bit —
+    # untrusted-key or not — then thrown away. So `unreachable` collapsed every
+    # remaining mechanism into one sentence an operator cannot act on:
+    #   * `Connection refused`     — something IS at that address and it is not
+    #                                sshd. On 2026-10-01 that is literally the
+    #                                case for 192.168.50.155 (see the SECONDARY
+    #                                note above): the laptop is on another LAN and
+    #                                a THIRD-PARTY device holds its old DHCP
+    #                                lease. "did not answer" reads as "laptop off".
+    #   * `Operation timed out` / no SYN-ACK — off-network, asleep, or the path
+    #                                dropped packets. The only one that is
+    #                                genuinely "the host is unreachable".
+    #   * `Too many open files`, `Permission denied`, a bad option — a LOCAL
+    #                                failure of the client, nothing to do with the
+    #                                far host at all, and indistinguishable from
+    #                                the two above without this line.
+    # 🔴 MEASURED COST OF NOT HAVING IT (devrc #686): a run on 2026-10-01 reported
+    # both candidates `unreachable`; the laptop's own sshd journal shows NO
+    # connection attempt at that timestamp while a 2-minute background poller from
+    # this same source IP succeeded on both sides of it, and the laptop's sshd
+    # logged ZERO MaxStartups/PerSourcePenalties drops in three days. So the two
+    # surviving rival mechanisms — a sub-2-minute path blip and a client-side ssh
+    # failure — could NOT be separated, because the one string that names which
+    # had been discarded here. An empty result cannot distinguish two mechanisms;
+    # this line is the upstream signal they disagree about.
+    #
+    # Prefixed with the CALLER's own prefix, not two spaces: that satisfies
+    # drift-check.sh's journal hygiene rule (`drift-check: ` is an accepted
+    # opener) AND attributes the line to the right program, which a bare indent
+    # does not. It deliberately does NOT contain the words "did not answer", so
+    # `test_drift_checks_probe_output_is_journal_clean`'s line selection and
+    # `test_a_failing_real_probe_moves_to_the_next_address` still see exactly one
+    # verdict line per candidate.
+    # Newlines become spaces (a multi-line refusal must stay ONE log line); the
+    # carriage returns are DELETED, not spaced — ssh terminates with CRLF, so
+    # spacing them leaves a trailing blank on every single-line reason.
+    _reason="${err//$'\n'/ }"
+    _reason="${_reason//$'\r'/}"
+    if [ -n "$_reason" ]; then
+      echo "${SSH_PROBE_LOG_PREFIX:-ship}:   reason: ${_reason:0:300}" >&2
     fi
   done
   return 1

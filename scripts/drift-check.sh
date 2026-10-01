@@ -100,12 +100,18 @@
 #     branch-protection arm, and 25 by the stale-protection-declaration arm, and
 #     26 by ship.sh — its homelab-talos cross-host PRE-FLIGHT, which refuses
 #     before either host is touched; see SOURCE-REPO PARITY below for why the
-#     PASSIVE half here deliberately sets no code on that same fact. So
-#     the next free code for this script is 27.
+#     PASSIVE half here deliberately sets no code on that same fact — and 27 ALSO
+#     by ship.sh (2026-10-01, devrc #686): remote-NEVER-REACHED, a run whose ssh
+#     probe found no candidate address, so one of the two hosts was never
+#     contacted. This script's own unreachable-host handling is deliberately NOT
+#     that code — see "unreachable != drift" below; an address that does not answer
+#     is a MEASUREMENT GAP here, not a drift finding, and ship.sh needs a code only
+#     because it was about to CONVERGE that host. So the next free code for this
+#     script is 28.
 #   * anything this script adds above 21 is reserved back the other way; ship.sh
 #     documents this in its own header for the same reason.
 #
-# RESERVED-TO-SHIP: 5 7 9 11 19 20 21 26
+# RESERVED-TO-SHIP: 5 7 9 11 19 20 21 26 27
 #
 # That line is a LEDGER, machine-read, not a comment: it must equal exactly the
 # set of codes ship.sh can return and this script cannot, so it fails when the
