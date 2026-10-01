@@ -129,10 +129,6 @@ cairn-overlap comparison nobody has run.
   **0.0%** at every setting but the loosest (2.8%), so the matcher reads content, not shared
   vocabulary. Honest bound: **83–98% unrepresented**, and the measure is near-verbatim reuse
   rather than semantic coverage. `via: measurement`
-- **Best-defined subset:** **366 CLOSED investigation blocks, 700,630 B** (34.5% of all
-  investigation bytes; 692 blocks / 1,329,279 B remain open). Already resolved, already
-  durable, nothing live depends on them, and they are the exact shape of a `RESOLVED:`
-  bullet. `via: measurement`
 
 ### 🔴 OPEN — the eviction route works and is used, and its destination has LESS readership than its source
 - as-of: 2026-10-01
@@ -159,9 +155,6 @@ cairn-overlap comparison nobody has run.
   `foreign:` handles for repos other than the one holding the gate file (only devrc carries
   `scripts/tests/test_handoff_doc_size.py`). Raising one doc's ceiling costs the writer
   nothing; routing a lesson to cairn costs a decision. `via: code`
-- **Next probe:** read `handoff_doc.py`'s `--prune` implementation around the archive-path
-  construction and decide whether the cairn write is a second destination or a replacement —
-  then watch it go RED on a prune that writes only the archive file.
 
 ### The asymmetry that makes the doc the default sink is written into the two skills
 - as-of: 2026-10-01
@@ -185,9 +178,6 @@ cairn-overlap comparison nobody has run.
 - **What is NOT established:** whether anyone has ever READ a cairn bullet they would
   otherwise have re-derived. Every number above is about the corpora and the tooling; the
   value claim ("routing to cairn saves re-derivation") is **unmeasured**. `via: assumed`
-- **Next probe:** `find-session --skill resume` over sessions that ran step 4, then ask
-  whether the recalled bullet changed what the session did. That is the only measurement that
-  could falsify the whole arc.
 
 ### ❌ REFUTED — "`--prune` evicts closed text to `claudedocs/archive/`, which is read by nothing". BOTH HALVES ARE FALSE
 - as-of: 2026-10-01
@@ -322,20 +312,23 @@ cairn-overlap comparison nobody has run.
   writer to use the section, and `validate.go:161` + `ShapeHeadings` **exclude** it — so a
   mis-spelled marker there gets **no signal from any surface**, silently, on the deployed pod.
   Filed as cairn finding #9. `via: code`
-- **Next probe:** land finding #9, or declare the section operator-hand-written-only in one
-  sentence of the write protocol. Do not build a new open-business surface beside it.
 
 ## Next steps (ranked)
 
-🔴 **NUMBERING RESTARTS HERE BECAUSE ROUND 1's RANKS WERE BUILT ON REFUTED PREMISES.** Old
-rank 1 is now item 6; old ranks 2/3/4/5 are items 5/7/4/2. `claim-work` slugs derived against
-round 1's numbering are STALE — re-derive before claiming.
+🔴 **SEVEN ITEMS BECAME THREE, ON ROUND 0's DELETION PASS — and the numbering moved AGAIN,
+which is a real cost paid deliberately.** `claim-work --list` carried no claim on this arc's
+slug when the cut was made, so nothing live was re-pointed; re-derive any slug before claiming.
+Four items were deleted as ranks because a rank is work a session DRAWS FROM, and none of them
+was that: their substance is preserved under `## Gotchas / decisions / dead-ends` below.
+**Every remaining item carries an external forcing function — `forcing: none` is now 0.**
 
-1. **FIX THIS DOC'S OWN CORRECTIONS — the closing condition cannot be run and the headline
-   population cannot be re-derived.** The `search`-verb fix is in `## Goal` above; what remains
-   is the operator's verbatim-vs-pointer ruling, without which **nobody can close this arc**.
-   forcing: gate — a close-check against the round-1 command exits 2 and reads as "no hit", so
-   the arc's own gate is currently broken rather than merely unmet.
+1. **ANSWER THE FROZEN CLOSING CONDITION AND CLOSE THIS ARC.** The round-1 condition is
+   unsatisfiable as conceived (see `## Goal`), so the honest verdict is **NOT ADDRESSED — the
+   one item: the evicted block's own text cannot reach cairn**. Closing it is the operator's
+   call, not a later session's. Re-home ONLY items 2 and 3 into a narrowly-scoped successor arc.
+   forcing: user — the verbatim-vs-pointer ruling is an operator decision, and the arc cannot be
+   closed by anyone without it. ⚠ This was `forcing: gate` for one round; round 0 corrected it,
+   and the correction is the honest one — half of the old item was already done in its own PR.
 2. **INSTRUMENT the value claim instead of measuring it — a recall receipt and opaque per-bullet
    citation ids.** Have `read.sh recall` emit one `source='tool'` row (`{status, scope, entries,
    bullets_printed, output_bytes, session}`) — that table holds **0** cairn rows against 1,425
@@ -343,34 +336,13 @@ round 1's numbering are STALE — re-derive before claiming.
    used" becomes a match on a token existing nowhere else in the corpus: a STRUCTURAL guard
    where every proxy available today is a spelled one walkable by rewording.
    forcing: deadline — the transcript corpus rolls at 30 days (2026-09-01 → 2026-10-01, nothing
-   older), so the only existing evidence is being deleted daily and waiting does not grow `n`.
+   older), so the only existing evidence is deleted daily and waiting does not grow `n`.
 3. **MAKE `--prune` VERIFY RATHER THAN WRITE.** Refuse (exit 16) a prune of durable lines
    unless `--archive <path>` is given, the file exists, and **every pruned non-blank line is
    present in it** — mechanising the hand check `af578a02` performed in prose. No pod, no slug,
    no network; clean RED proof (a prune with no archive is accepted today). ~120 lines + tests.
    forcing: gate — `--prune` can today drop durable text with no archive anywhere, and the only
    thing that has ever checked conservation is one commit message.
-4. **Record the no-backfill decision with the CORRECTED reason, and the per-entry bullet badge
-   with it.** A bullet backfill adds **zero index rows**; the cost is the featured body
-   (+21 bullets/entry ≈ +4,700 tokens/read). Round 1's "14 rows for one scope" was cairn's
-   scope; live today devrc 36, civitai 44, homelab-talos 46, datapacket-talos 77.
-   forcing: none
-5. **Drop ONLY the new-ENTRY half of the intake cap.** That is the one place the ~17-token cost
-   sentence genuinely applies and the cap genuinely contradicts it; zero effect on the featured
-   read. Hold the per-bullet cap at 1→3 until the nomination floor is measured — landing it as
-   *"the cap was the throughput valve"* would write a refuted diagnosis into the protocol.
-   forcing: none
-6. **DEMOTED — the cairn write destination.** Blocked on item 1's ruling, on the slug problem
-   (95.8% resolve to 0 entries at the real threshold), and on `append`'s newline/2000-char
-   refusal. If ever built: **advisory and non-blocking**, running last, printing `cairn: NOT
-   RECORDED` with the manual command on rc 6/7/8/21/24 at exit 0 — otherwise an outage blocks
-   `/handoff`'s only landing step. Exactly ONE `append` per run, never a `put` (no `If-Match`
-   to lose). Scope from `scope_for_repo(args.repo)`, **never an override** — client-repo →
-   `devrc` scope is the one real leak path and the protocol actively instructs it.
-   forcing: none
-7. **Close cairn finding #9 or declare `## Requirements` hand-written-only.** A mis-spelled
-   marker there is silent on the deployed pod.
-   forcing: none
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A GLOB'S ZERO IS A CLAIM ABOUT THE GLOB, NOT ABOUT THE TREE, AND IT COST A WRONG
@@ -463,6 +435,54 @@ round 1's numbering are STALE — re-derive before claiming.
   `handoff_doc.py:3582` — prose telling a human to move text to an archive — and recorded it as
   what the tool DOES. **A remedy string describes work that is not done; a comment is a claim,
   and so is a help text.**
+
+- 🔴 **I OBEYED HALF OF `supersede.md` AND THE HALF I SKIPPED IS THE ONE IT CALLS A LANDMINE.**
+  Round 0 found it: the round-3 delta appended six refutations and retired **nothing**, so five
+  earlier blocks kept asserting refuted readings in the present tense — including **two `Next
+  probe` instructions the new blocks had just ruled out** (one sent the next session to read
+  `handoff_doc.py`'s archive-path construction, which the same delta proves does not exist) and
+  the `366 / 700,630 B` figure this doc's own `State now` says not to quote. **Twelve lines
+  pruned in this round: the three instruction bullets and the stale figure.** The rule's own
+  words are the lesson — *"Preserving a corrected READING is the point; preserving a corrected
+  INSTRUCTION is arming a landmine."* An append is not a retraction.
+- 🔴 **AND THE TOOL CANNOT DO THE OTHER HALF — the strikethrough is UNAVAILABLE, not skipped.**
+  `supersede.md` says to rewrite the stale heading to `~~…~~ SUPERSEDED <date>`, but
+  `Open investigations` is an APPEND section and `handoff_doc.py` has no edit-in-place path for
+  one: its rule (c) *"keeps a superseding block AND the block it superseded"* by design
+  (`handoff_doc.py:4123`). `--prune` removes lines; it cannot replace one. So the six
+  `❌ REFUTED` / `✅ HALF-RESOLVED` headings carry the retirement instead — and they are
+  **invisible to `handoff-audit.py`'s `RESOLVED_HEAD` regex** (`✅|CLOSED|RESOLVED|ANSWERED|~~`),
+  which is why none of that text was machine-evictable. **Two follow-ons, neither taken here:**
+  teach the regex `REFUTED`, or give the writer a supersede verb. Recorded because the rule as
+  written cannot be fully obeyed with the shipped tooling, and a reader should not assume the
+  gap was laziness.
+- 🔴 **`cairn finding #9` IS A DANGLING REFERENCE AND I PROPAGATED IT WITHOUT CHECKING.** There
+  is no issue #9 in `ZacxDev/cairn` — the issues are #51/#109/#111/#138/#145 — and the string
+  appears **nowhere outside this document** (grep positive-controlled). It came from a scoping
+  agent's report and went into a ranked item pointing at nothing. The underlying hazard is real
+  and was measured (`validate.go:161` + `ShapeHeadings` exclude `## Requirements`, so a
+  mis-spelled marker there is silent on the deployed pod); only the tracker id was invented.
+  **A reference is a claim: resolve the id before quoting it.** The ranked item it supported is
+  deleted; the hazard stays recorded in its investigation block.
+- **Decision (round 0's deletion pass): four ranks deleted, substance kept here.** (a) The
+  no-backfill call is a DECISION already taken, and had worn a rank for two rounds — a bullet
+  backfill adds **zero index rows**; the cost is the featured body (+21 bullets/entry ≈ +4,700
+  tokens/read), and round 1's "14 rows for one scope" was cairn's scope, against devrc 36,
+  civitai 44, homelab-talos 46, datapacket-talos 77 live. (b) Dropping only the new-ENTRY half
+  of the intake cap — substance already preserved in the REFUTED block above. (c) The cairn
+  write destination: its durable design constraints are **advisory and non-blocking, running
+  last, printing `cairn: NOT RECORDED` on rc 6/7/8/21/24 at exit 0**; exactly ONE `append` per
+  run and never a `put` (no `If-Match` to lose); scope from `scope_for_repo(args.repo)` and
+  **never an override**, because client-repo → `devrc` scope is the one real leak path and the
+  protocol actively instructs it. (d) The dangling `#9` item, above.
+- ⚠ **THIS DOC GREW 77% IN ONE ROUND — 20,223 → 35,864 B — ON THE SUBJECT OF DOCS BEING TOO
+  BIG, AND THE RATCHET WAS SILENT BY DESIGN.** Round 0 measured it at **87.6% of the 40,960 B
+  advisory hard cap** and **2.9× the 12,288 B reference target**. Rule (n) permits it because
+  `forcing: none` did not grow — and `write-gate.md` §G says exactly why that is not absolution:
+  *"an author who wants a 55th rank can type `forcing: gate` and the ratchet is silent. The
+  ratchet's real binding force is on an HONEST author."* I used external kinds four times in one
+  round and one of them was wrong (item 1). **A gate that cannot fire is not a verdict that
+  nothing is wrong.**
 
 ## How to verify
 ```bash
