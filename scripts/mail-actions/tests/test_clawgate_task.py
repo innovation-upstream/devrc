@@ -5,6 +5,8 @@ handler reads `directory` (which it renders as the card title) and IGNORES any
 `title` key. These tests assert the built payload carries the action title in
 `directory` (NOT `title`), and that `emit_task` POSTs exactly that body with the
 bearer token — with the HTTP layer mocked (no live clawgate)."""
+import ast
+import json as json_mod
 import sys
 import types
 from pathlib import Path
@@ -86,11 +88,18 @@ def _install_fake_requests(monkeypatch):
     return fake
 
 
-def test_emit_task_noop_without_token(monkeypatch):
+def test_emit_task_noop_without_token(monkeypatch, tmp_path):
+    """🔴 `path=` IS NOT DECORATION HERE. Deleting the variable from the process
+    environment stopped being enough the moment the token started resolving
+    through ~/.claude/clawgate.env as well: without an absent env-file path this
+    test read the DEVELOPER'S real file, found a real token, and posted a card.
+    It failed exactly that way against the fix and is the reason the fix is not
+    vacuous — the file layer is genuinely being read."""
     monkeypatch.delenv("CLAWGATE_HOOK_TOKEN", raising=False)
     fake = _install_fake_requests(monkeypatch)
     assert clawgate.emit_task(
         who="X", ask="a", deadline=None, amount=None, source_ref="mail#1 a@b.com",
+        path=str(tmp_path / "absent" / "clawgate.env"),
     ) is False
     assert fake.calls == []  # graceful no-op — nothing posted
 
@@ -324,12 +333,17 @@ def test_emit_task_posts_to_the_task_service_NAMED_BY_THE_ENV_FILE(monkeypatch,
         "~/.claude/clawgate.env (%s)" % (fake.calls[0]["url"], FILE_TASK_BASE))
 
 
-def test_emit_task_without_a_token_reads_NOTHING(monkeypatch, tmp_path):
-    """The no-op must stay a no-op: no shared-module load, no env-file read.
+def test_emit_task_without_a_token_resolves_NO_ENDPOINT(monkeypatch, tmp_path):
+    """The no-op must not resolve a base URL it has no credential to use.
 
-    Pinned because resolving the endpoint before the token check would turn a
-    benign "no token configured" into an ImportError on any host whose lib/ is
-    not where this module expects it.
+    🔴 THIS DOCSTRING USED TO CLAIM MORE THAN THE CODE NOW DOES, and the weaker
+    claim is the honest one. It read "no shared-module load, no env-file read",
+    which held only while the token came from `os.environ`. The token lives in
+    ~/.claude/clawgate.env, so "is there a token" cannot be answered without
+    reading that file through that module — the load and the read moved AHEAD of
+    the token check deliberately (see `emit_task`). What survives, and is what
+    this asserts, is that the ENDPOINT is not resolved on a path that posts
+    nothing.
     """
     monkeypatch.delenv("CLAWGATE_HOOK_TOKEN", raising=False)
     _env_file(monkeypatch, tmp_path)
@@ -405,3 +419,340 @@ def test_the_hardcoded_endpoint_needle_can_actually_fire():
     assert not _reintroduced_endpoint_constant(
         '# ENDPOINT = "http://host:1/api/tasks" (removed)')
     assert not _reintroduced_endpoint_constant('TASKS_PATH = "/api/tasks"')
+
+
+# --------------------------------------------------------------------------- #
+# 🔴 THE HOOK TOKEN IS CONFIGURATION TOO — task #307
+#
+# The base URL was fixed in #1878 and the token was left behind, explicitly:
+# this module's own header carried "⚠ THE TOKEN IS STILL TAKEN FROM `os.environ`
+# ONLY … the subject of its own open PR". That asymmetry WAS the remaining
+# defect. `--emit-clawgate` is manual/on-demand, no unit exports any
+# `CLAWGATE_*`, and the host it runs on keeps the token in
+# ~/.claude/clawgate.env — so the module resolved the right base URL and then
+# skipped every card for want of a credential it was not looking in the right
+# place for, and said nothing.
+#
+# The precedence is `clawgatectl`'s, LOWEST to HIGHEST
+# (`containers/clawgate/cmd/clawgatectl/config.go` `resolveConfig`):
+#
+#     ~/.claude/clawgate.env  ->  process environment
+#
+# ...with a later source overriding an earlier one ONLY when it supplies a
+# value. Both directions are pinned below: the file alone decides (the defect),
+# and the process environment wins when it has something (the precedence).
+#
+# 🔴 EVERY TEST BELOW PINS THE ENV-FILE PATH, by `path=` or by the HOME
+# redirect. `hook_token()` reads the real ~/.claude/clawgate.env by default and
+# this host HAS one, carrying a real token — a test that does not pin the path
+# is green or red for reasons that have nothing to do with this code. That is
+# not hypothetical: `test_emit_task_noop_without_token` above failed exactly
+# that way against the fix until it was given an absent `path=`.
+#
+# Fixture tokens are PAIRWISE DISTINCT and distinct from every other literal in
+# this module, so a mutant that collapses the two layers onto each other, or
+# onto a URL key, cannot pass by returning a coincidentally equal value.
+# --------------------------------------------------------------------------- #
+FILE_TOKEN = "tok-env-file-9fd1"
+ENV_TOKEN = "tok-process-env-4c7e"
+
+
+def _absent(tmp_path):
+    """An env-file path that cannot exist, so a result is decided by `env` alone."""
+    return str(tmp_path / "absent-dir" / "clawgate.env")
+
+
+def _token_file(tmp_path, token=FILE_TOKEN, extra=""):
+    """Write an env file carrying `token`; return its path. No HOME involved."""
+    path = tmp_path / "clawgate.env"
+    body = "" if token is None else "CLAWGATE_HOOK_TOKEN=%s\n" % token
+    path.write_text(body + extra, encoding="utf-8")
+    return str(path)
+
+
+# -- the resolver, both layers ------------------------------------------------ #
+
+def test_the_env_file_ALONE_supplies_the_token(monkeypatch, tmp_path):
+    """🔴 THE DEFECT THIS FIX CLOSES, in the live configuration of the host that
+    runs `--emit-clawgate`: the token is in the file and the process environment
+    has none. An `os.environ`-only read answers `None` here and the card is
+    skipped in silence."""
+    assert clawgate.hook_token({}, _token_file(tmp_path)) == FILE_TOKEN, (
+        "the env-file layer did not supply the token: ~/.claude/clawgate.env "
+        "carries CLAWGATE_HOOK_TOKEN and nothing is exported, which is the "
+        "exact state in which every card was being skipped")
+
+
+def test_the_process_environment_OVERRIDES_the_env_file_token(monkeypatch,
+                                                              tmp_path):
+    """🔴 THE PRECEDENCE, NOT JUST THE SOURCE. Both layers carry a token and the
+    process one wins — `clawgatectl` applies the file FIRST and the environment
+    ON TOP (`resolveConfig`), so a one-off `CLAWGATE_HOOK_TOKEN=… cmd` must beat
+    a stale value in the file. A resolver with the two layers SWAPPED passes
+    every file-alone assertion above and fails here."""
+    got = clawgate.hook_token({"CLAWGATE_HOOK_TOKEN": ENV_TOKEN},
+                              _token_file(tmp_path))
+    assert got == ENV_TOKEN, (
+        "the process environment must OVERRIDE the env file: expected %r, got "
+        "%r — and %r would mean the two layers are applied in the wrong order"
+        % (ENV_TOKEN, got, FILE_TOKEN))
+
+
+def test_an_empty_process_token_does_not_MASK_the_file(tmp_path):
+    """Empty means UNSET everywhere, matching the Go side's "only overrides when
+    it actually supplies a value". `CLAWGATE_HOOK_TOKEN= cmd` must fall THROUGH
+    to the file rather than erase it."""
+    got = clawgate.hook_token({"CLAWGATE_HOOK_TOKEN": ""},
+                              _token_file(tmp_path))
+    assert got == FILE_TOKEN, (
+        "an empty process variable masked the file's token (got %r)" % (got,))
+
+
+def test_an_empty_token_in_the_FILE_is_unset_not_a_bare_bearer(tmp_path):
+    """An empty value is "no token" on the file layer too — otherwise the header
+    goes out as `Bearer ` and the server answers 401 instead of the producer
+    saying it had no credential."""
+    assert clawgate.hook_token({}, _token_file(tmp_path, token="")) is None
+
+
+def test_no_token_in_either_layer_is_None(tmp_path):
+    assert clawgate.hook_token({}, _absent(tmp_path)) is None
+    assert clawgate.hook_token({}, _token_file(tmp_path, token=None)) is None
+
+
+def test_an_UNOPENABLE_env_file_resolves_to_None_rather_than_raising(tmp_path):
+    """A producer must degrade, never raise, on a file it cannot read — a
+    missing token degrades notification and never the record.
+
+    🔴 A DIRECTORY, not `chmod 000`: a mode-based test is decided by the uid the
+    suite runs under (root opens an 0o000 file happily), while
+    `IsADirectoryError` is the same `OSError` family and uid-independent."""
+    path = tmp_path / "clawgate.env"
+    path.mkdir()
+    assert clawgate.hook_token({}, str(path)) is None
+
+
+def test_the_DEFAULT_env_file_path_is_the_one_under_HOME(monkeypatch, tmp_path):
+    """🔴 HARNESS CONTROL for the `path=`-less default. Everything above pins the
+    path explicitly, which proves the LAYERING but not that the layer it reads
+    by default is `~/.claude/clawgate.env`. Prove the default path is the HOME
+    one — a value only this file can supply comes back — and that removing the
+    file changes the answer."""
+    _clear_env(monkeypatch)
+    monkeypatch.delenv("CLAWGATE_HOOK_TOKEN", raising=False)
+    path = _env_file(monkeypatch, tmp_path,
+                     "CLAWGATE_HOOK_TOKEN=%s\n" % FILE_TOKEN)
+    assert clawgate.hook_token() == FILE_TOKEN, (
+        "hook_token() did not read ~/.claude/clawgate.env by default — HOME "
+        "redirect inert, so this assertion would be vacuous")
+    path.unlink()
+    assert clawgate.hook_token() is None, (
+        "deleting the redirected file changed nothing — the resolver is not "
+        "reading the path this harness controls")
+
+
+# -- criterion 2: the card actually posts off the file-only token ------------- #
+
+def test_emit_task_POSTS_when_the_TOKEN_IS_ONLY_IN_THE_ENV_FILE(monkeypatch,
+                                                                tmp_path):
+    """🔴 THE HEADLINE ASSERTION. The exact condition that failed: token present
+    only in ~/.claude/clawgate.env, absent from the process environment. The
+    card must post, with that token as the bearer."""
+    monkeypatch.delenv("CLAWGATE_HOOK_TOKEN", raising=False)
+    fake = _install_fake_requests(monkeypatch)
+    path = _token_file(tmp_path,
+                       extra="CLAWGATE_TASK_API_URL=%s\n" % FILE_TASK_BASE)
+
+    ok = clawgate.emit_task(who="Acme", ask="Pay invoice", deadline=None,
+                            amount=None, source_ref="mail#307 x@acme.com",
+                            env={}, path=path)
+    assert ok is True, (
+        "the card was NOT posted with the token present in the env file and "
+        "absent from the environment — that is the defect, unfixed")
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert call["headers"]["Authorization"] == "Bearer " + FILE_TOKEN, (
+        "the bearer was %r; the env file's token (%r) must be the credential"
+        % (call["headers"]["Authorization"], FILE_TOKEN))
+    assert call["url"] == FILE_TASK_BASE + TASKS
+
+
+# -- criterion 3: one clear stderr line, no raise, record intact -------------- #
+
+def test_no_token_anywhere_WARNS_ON_STDERR_and_returns_False(monkeypatch,
+                                                             tmp_path, capsys):
+    """One line, on stderr, naming WHAT was skipped and WHERE it looked — and no
+    raise. Silence was the actual operator-visible symptom: a draft stored, no
+    card, and nothing to read."""
+    monkeypatch.delenv("CLAWGATE_HOOK_TOKEN", raising=False)
+    fake = _install_fake_requests(monkeypatch)
+    path = _absent(tmp_path)
+
+    assert clawgate.emit_task(who="X", ask="a", deadline=None, amount=None,
+                              source_ref="mail#1 a@b.com",
+                              env={}, path=path) is False
+    assert fake.calls == []
+    err = capsys.readouterr().err
+    lines = [ln for ln in err.strip().splitlines() if ln.strip()]
+    assert len(lines) == 1, (
+        "expected exactly ONE stderr line, got %d:\n%s" % (len(lines), err))
+    line = lines[0]
+    assert "CLAWGATE_HOOK_TOKEN" in line, (
+        "the warning must NAME the variable; got %r" % line)
+    assert path in line, (
+        "the warning must name WHERE it looked (%s); got %r" % (path, line))
+    assert "mail#1 a@b.com" in line, (
+        "the warning must name WHAT was skipped; got %r" % line)
+
+
+def test_the_warning_never_carries_the_TOKEN_itself(monkeypatch, tmp_path,
+                                                    capsys):
+    """🔴 CRITERION 7, driven rather than asserted about. A warning built by
+    formatting the resolved config would leak the credential into a log the
+    moment one layer had a token and the resolver still refused. Feed a token
+    the resolver MUST reject — empty on top of empty — and confirm no secret
+    reaches either stream."""
+    monkeypatch.delenv("CLAWGATE_HOOK_TOKEN", raising=False)
+    _install_fake_requests(monkeypatch)
+    path = _token_file(tmp_path, token="")       # present but EMPTY => unset
+
+    assert clawgate.emit_task(who="X", ask="a", deadline=None, amount=None,
+                              source_ref="mail#2 a@b.com",
+                              env={"CLAWGATE_HOOK_TOKEN": ""},
+                              path=path) is False
+    cap = capsys.readouterr()
+    for stream, text in (("stderr", cap.err), ("stdout", cap.out)):
+        assert FILE_TOKEN not in text and ENV_TOKEN not in text, \
+            "a token reached %s: %r" % (stream, text)
+
+
+def test_the_POSTED_card_carries_the_token_ONLY_in_the_bearer_header(
+        monkeypatch, tmp_path, capsys):
+    """🔴 CRITERION 7 on the SUCCESS path. The token goes in one place: the
+    Authorization header. Never in the URL, never in the JSON body, never on
+    stdout or stderr."""
+    monkeypatch.delenv("CLAWGATE_HOOK_TOKEN", raising=False)
+    fake = _install_fake_requests(monkeypatch)
+
+    assert clawgate.emit_task(who="Acme", ask="a", deadline=None, amount=None,
+                              source_ref="mail#3 a@b.com",
+                              env={}, path=_token_file(tmp_path)) is True
+    call = fake.calls[0]
+    assert FILE_TOKEN not in call["url"], "the token is in the URL: %r" % call["url"]
+    assert FILE_TOKEN not in json_mod.dumps(call["json"]), \
+        "the token is in the POSTed body"
+    assert call["headers"]["Authorization"] == "Bearer " + FILE_TOKEN
+    cap = capsys.readouterr()
+    assert FILE_TOKEN not in cap.err and FILE_TOKEN not in cap.out
+
+
+# -- criterion 1: ONE definition, and this module is not a second one --------- #
+
+def test_the_token_precedence_is_the_SHARED_one_not_a_local_respelling(tmp_path):
+    """🔴 THE SEAM. Every test above would also pass over a private copy of the
+    rule living in this module — the exact regrowth the shared definition exists
+    to prevent. This pins that the module RESOLVES THROUGH the shared module:
+    the variable name comes from the shared constant, and this producer's
+    resolver and the shared one agree on the same inputs."""
+    cg = clawgate._load_clawgate_tasks()
+    assert cg.HOOK_TOKEN_VAR == "CLAWGATE_HOOK_TOKEN"
+    path = _token_file(tmp_path)
+    assert clawgate.hook_token({}, path) == cg.hook_token({}, path)
+    assert clawgate.hook_token({cg.HOOK_TOKEN_VAR: ENV_TOKEN}, path) \
+        == cg.hook_token({cg.HOOK_TOKEN_VAR: ENV_TOKEN}, path) == ENV_TOKEN
+    assert clawgate.hook_token({}, _absent(tmp_path)) \
+        is cg.hook_token({}, _absent(tmp_path)) is None
+
+
+def _os_environ_token_reads(src: str) -> list:
+    """Line numbers where `src` reads the hook token straight out of the process
+    environment — `os.environ[...]`, `os.environ.get(...)` or `os.getenv(...)`.
+
+    🔴 AN AST WALK, NOT A TEXTUAL NEEDLE, and the difference is load-bearing:
+    every docstring in these producers QUOTES
+    `os.environ.get("CLAWGATE_HOOK_TOKEN")` to record why it is gone, so a grep
+    fires on the prose that documents the fix and the guard becomes noise
+    somebody deletes. A parse sees a Call or a Subscript, or nothing.
+    """
+    hits = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call):
+            target = node.func
+            names = [a.value for a in node.args
+                     if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+        elif isinstance(node, ast.Subscript):
+            target = node.value
+            s = node.slice
+            names = ([s.value] if isinstance(s, ast.Constant)
+                     and isinstance(s.value, str) else [])
+        else:
+            continue
+        if "CLAWGATE_HOOK_TOKEN" not in names:
+            continue
+        dumped = ast.dump(target)
+        if "environ" in dumped or "getenv" in dumped:
+            hits.append(node.lineno)
+    return hits
+
+
+def test_the_producer_reads_the_token_through_the_SHARED_resolver_ONLY():
+    """🔴 CRITERION 1, structurally. One shared helper is the ONLY place this
+    producer reads the token — so a re-grown `os.environ.get(...)` beside it,
+    which would pass every behavioural test above by shadowing nothing, fails
+    here instead."""
+    src = Path(clawgate.__file__).read_text(encoding="utf-8")
+    hits = _os_environ_token_reads(src)
+    assert hits == [], (
+        "%s reads CLAWGATE_HOOK_TOKEN out of the process environment at line(s) "
+        "%s. Resolve it through scripts/lib/clawgate_tasks.hook_token instead — "
+        "an environment-only read is blind to ~/.claude/clawgate.env, which is "
+        "where the token actually lives." % (clawgate.__file__, hits))
+
+
+def test_the_token_read_needle_can_actually_fire():
+    """POSITIVE AND NEGATIVE CONTROL for the scan above. A guard reporting zero
+    on a clean tree is indistinguishable from one wired to nothing — and this
+    one in particular must NOT fire on the three near-misses, or it reports a
+    finding on its own documentation."""
+    assert _os_environ_token_reads(
+        'import os\nt = os.environ.get("CLAWGATE_HOOK_TOKEN")\n') == [2]
+    assert _os_environ_token_reads(
+        'import os\nt = os.environ["CLAWGATE_HOOK_TOKEN"]\n') == [2]
+    assert _os_environ_token_reads(
+        'import os\nt = os.getenv("CLAWGATE_HOOK_TOKEN")\n') == [2]
+    # the prose that documents the fix is NOT a finding
+    assert _os_environ_token_reads(
+        '"""Not os.environ.get("CLAWGATE_HOOK_TOKEN") any more."""\n') == []
+    # a DIFFERENT variable read from the environment is not this guard's business
+    assert _os_environ_token_reads(
+        'import os\nu = os.environ.get("CLAWGATE_API_URL")\n') == []
+    # the shared resolver, reached by name, is the thing we WANT
+    assert _os_environ_token_reads(
+        'x = cg.hook_token(env, path)  # CLAWGATE_HOOK_TOKEN\n') == []
+
+
+# -- criterion 6: the record survives a missing token ------------------------- #
+
+def test_extract_counts_a_tokenless_card_as_NOT_EMITTED_without_raising(
+        monkeypatch, tmp_path, capsys):
+    """🔴 D3 FOR THIS PRODUCER. `_emit_clawgate` must come back 0 — not an
+    exception, not a failed run — when no token resolves. The mail row and its
+    extraction are already stored; a missing token degrades NOTIFICATION, never
+    the record."""
+    import extract
+
+    monkeypatch.delenv("CLAWGATE_HOOK_TOKEN", raising=False)
+    _env_file(monkeypatch, tmp_path)                 # no file under HOME either
+    _clear_env(monkeypatch)
+    fake = _install_fake_requests(monkeypatch)
+
+    ex = types.SimpleNamespace(who="Acme", ask="Pay invoice", deadline=None,
+                               amount=None)
+    assert extract._emit_clawgate({"id": 42, "from_addr": "x@acme.com"}, ex) == 0
+    assert fake.calls == []
+    err = capsys.readouterr().err
+    assert "CLAWGATE_HOOK_TOKEN" in err, (
+        "the skip must be NAMED on stderr, not silent; got %r" % err)
+    assert "clawgate emit failed" not in err, (
+        "a missing token must not be reported as a FAILURE — it is a graceful "
+        "no-op: %r" % err)

@@ -32,16 +32,20 @@ carrying both the token and the task base. So it resolved through the one
 channel that carries nothing. `task_base_url` now layers the file under the
 process environment; see its docstring for the five-step precedence.
 
-⚠ THE TOKEN IS STILL TAKEN FROM `os.environ` ONLY, and that asymmetry is known
-rather than overlooked. It is the subject of its own open PR
-(`fix/307-clawgate-token-resolver`) and is deliberately not folded in here:
-until it lands, this module is a graceful no-op unless the operator's shell
-carries `CLAWGATE_HOOK_TOKEN` — and when it does, the base URL it posts at is
-now the configured one rather than a guess.
+🔴 AND THE TOKEN GOES THROUGH THE SAME TWO LAYERS (fixed, task #307). This
+paragraph used to read "THE TOKEN IS STILL TAKEN FROM `os.environ` ONLY, and
+that asymmetry is known rather than overlooked … the subject of its own open PR
+(`fix/307-clawgate-token-resolver`)". The asymmetry was the whole remaining
+defect: on this host the token is in ~/.claude/clawgate.env and nothing exports
+it, so the module resolved the right base URL and then skipped every card in
+silence for want of a credential it was not looking in the right place for. The
+token now comes from `scripts/lib/clawgate_tasks.hook_token` — the SAME file,
+the SAME layering, ONE definition shared with the base URL.
 """
 from __future__ import annotations
 
 import os
+import sys
 
 #: Where scripts/lib/ is looked for when this module does not run beside it.
 #: Same idiom (and the same variable) as scripts/bar-status-poll.
@@ -101,6 +105,23 @@ def task_endpoint(env=None, path=None) -> str:
     return _load_clawgate_tasks().task_base_url(env, path) + TASKS_PATH
 
 
+def hook_token(env=None, path=None):
+    """The clawgate hook token, or `None`. Resolved at CALL TIME, SHARED rule.
+
+    🔴 NOT `os.environ.get("CLAWGATE_HOOK_TOKEN")`, which is what this line was
+    until now. `--emit-clawgate` is manual/on-demand, no unit exports any
+    `CLAWGATE_*`, and the host it runs on keeps the token in
+    ~/.claude/clawgate.env — so an environment-only read resolved `None` on
+    exactly the host that has the credential, and every card was skipped in
+    SILENCE. Same direction, same file, same fix as the base URL above: the
+    precedence is `scripts/lib/clawgate_tasks.hook_token` and is NOT re-spelled
+    here.
+
+    Both arguments are pass-through, as for `task_endpoint`.
+    """
+    return _load_clawgate_tasks().hook_token(env, path)
+
+
 # clawgate renders `directory` as the Task card's title; trim to a sane label length.
 TITLE_MAX = 120
 
@@ -126,19 +147,46 @@ def build_task_payload(*, who: str, ask: str, deadline: str | None,
 
 
 def emit_task(*, who: str, ask: str, deadline: str | None, amount: str | None,
-              source_ref: str, timeout: float = 10.0) -> bool:
+              source_ref: str, timeout: float = 10.0,
+              env=None, path=None) -> bool:
     """Emit one clawgate Task card for an action item. Returns True if posted.
 
-    The endpoint is resolved AFTER the token check, so the no-token no-op stays
-    exactly what it was: the shared module is not loaded, ~/.claude/clawgate.env
-    is not opened, nothing is posted.
+    🔴 GRACEFUL NO-OP, RECORD INTACT. With no token resolvable from EITHER
+    source this posts nothing, names the miss on stderr and returns False. It
+    never raises on that path: the mail row and its extraction are already
+    stored, and `extract.py` counts the card as not-emitted rather than failing
+    the run — a missing token degrades NOTIFICATION, never the record.
+
+    🔴 THE WARNING IS NOT OPTIONAL. The no-token path used to `return False` in
+    total silence, so `clawgate_emitted: 0` in the run summary was
+    indistinguishable from "there was nothing to emit". One line naming the
+    variable and the file it looked in is the whole remedy.
+
+    ⚠ THE SHARED MODULE IS NOW LOADED ON THE NO-TOKEN PATH TOO, and that is a
+    deliberate change. It could previously be skipped because the token came
+    from `os.environ`; the token lives in the file this module reads, so "is
+    there a token" can no longer be answered without it. An unloadable shared
+    module therefore still RAISES here rather than degrading (the
+    NO-FALLBACK-COPY policy in `_load_clawgate_tasks`) — on both paths now, not
+    just the posting one — and `_emit_clawgate` in extract.py already turns that
+    into a named stderr line plus a skipped card.
+
+    `env` / `path` are pass-through to the resolvers, so a test can drive both
+    configuration layers without touching the process environment or the real
+    ~/.claude/clawgate.env.
     """
-    token = os.environ.get("CLAWGATE_HOOK_TOKEN")
+    token = hook_token(env, path)
     if not token:
+        cg = _load_clawgate_tasks()
+        # 🔴 NAMES THE VARIABLE AND THE PATH, NEVER A VALUE.
+        print("clawgate: no %s in %s or the process environment — action-item "
+              "card NOT posted for %s (the extraction itself is stored)"
+              % (cg.HOOK_TOKEN_VAR, cg.env_file_path(path), source_ref),
+              file=sys.stderr)
         return False
     import requests
 
-    url = task_endpoint()
+    url = task_endpoint(env, path)
     body = build_task_payload(
         who=who, ask=ask, deadline=deadline, amount=amount, source_ref=source_ref,
     )
