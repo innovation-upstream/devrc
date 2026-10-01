@@ -1549,6 +1549,15 @@ in
   home.file.".local/bin/claim-work".source =
     config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/claim-work.sh";
 
+  # `oc-sent` — "what did I send in that opencode session", ON PATH as a bare
+  # command for the same reason as `claim-work` above: agents reach for it from
+  # any cwd, in either runtime. Out-of-store symlink → the shim resolves itself
+  # by readlink -f and execs the LIVE repo copy (sent.py must not resolve() its
+  # own __file__: it also ships as store symlinks under activity-collector,
+  # and the shim is the only place resolution happens).
+  home.file.".local/bin/oc-sent".source =
+    config.lib.file.mkOutOfStoreSymlink "${workspace}/devrc/scripts/oc-sent";
+
   # 🔴 `cairn` — the read-through client for the hosted subsystem store, ON PATH
   # for the same reason as `claim-work` above: the handoff/resume flow names it as
   # a bare command, and an agent running in another repo cannot resolve an absolute
