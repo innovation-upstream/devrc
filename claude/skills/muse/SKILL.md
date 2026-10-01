@@ -11,14 +11,19 @@ the reply, read goals/feed, and query cluster status through the **muse-bridge**
 (read-only). No official API exists (design: the homelab repo's
 `$MUSE_HOMELAB_REPO/claudedocs/muse-agent-integration-design.md`). Two channels:
 
-- **B2 `muse-cli`** — programmatic (cookies → HTTPS → Noise-XX WebSocket).
-  PRIMARY. Installed `uv tool install muse-cli`; the command is **`muse-cli`**,
-  never bare `muse` (that belongs to Muse Code).
-- **B1 browser flow** — browser-bridge `flows/muse.ai.md`. FALLBACK when B2
-  breaks (internal-API churn, cookie expiry).
+- **B1 browser flow** — browser-bridge `flows/muse.ai.md`. PRIMARY (operator's
+  call 2026-10-01): the wrapper drives it end-to-end — open own tab, type +
+  assert, Enter + confirm, poll the delta by id+len, close the tab. It
+  **detects Muse's pending approval prompts and stops (exit 5)** rather than
+  clicking Allow — approving is the operator's security gate.
+- **B2 `muse-cli`** — programmatic (cookies → HTTPS → Noise-XX WebSocket),
+  behind `--cli`. Installed `uv tool install muse-cli`; the command is
+  **`muse-cli`**, never bare `muse` (that belongs to Muse Code). Blocked for
+  now: its cookie export needs Brave's remote-debugging toggle, which does
+  not expose a port on this host; revisit if that changes.
 
-The wrapper `$DEVRC/scripts/muse/muse` implements the verbs below on B2 and
-prints the B1 recipe on failure (`muse b1` for it verbatim).
+The wrapper `$DEVRC/scripts/muse/muse` implements the verbs below on B1 by
+default (`muse b1` prints the recipe verbatim).
 
 ## 🔴 Safety preamble — before the first dispatch
 
@@ -42,21 +47,21 @@ prints the B1 recipe on failure (`muse b1` for it verbatim).
 
 ```bash
 M=$DEVRC/scripts/muse/muse
-$M send "<task>" [--wait 120] [--thread ID] [--force]   # dispatch + await reply (JSON)
-$M poll [--thread ID] [--limit 3]                        # latest chat events
-$M status [ns|nodes|workloads <ns>|flux <ns>]            # CLUSTER snapshot (bridge; default ns muse)
-$M vm                                                    # Muse VM/session status (muse-cli)
-$M auth export                                           # one-time cookie export (steps on failure)
-$M b1                                                    # the full B1 fallback recipe
-$M setup                                                 # runbook pointers
+$M send "<task>" [--wait 180] [--force] [--cli]   # dispatch + await reply (JSON)
+$M poll [--cli]                                    # latest assistant turn
+$M status [ns|nodes|workloads <ns>|flux <ns>]      # CLUSTER snapshot (bridge; default ns muse)
+$M vm                                              # Muse VM/session status (muse-cli)
+$M auth export                                     # B2 one-time cookie export (steps on failure)
+$M b1                                              # the full B1 recipe
+$M setup                                           # runbook pointers
 ```
 
-`send --wait` returns `{sent, stream, reply|note}` — muse-cli discriminates
-genuine replies from proactive pushes via the history baseline + `reply_to`, so
-trust its `reply` field; `note: no assistant reply within Ns` is a timeout, not
-a silence-verdict — re-check with `poll`.
+`send` returns `{"sent": true, "channel": "b1", "reply": "…"}` — the reply is
+the newest assistant TURN only. `note`-style timeouts are a timeout, not a
+silence-verdict — re-check with `poll`. On B1 (`--cli`), muse-cli's
+`{sent, stream, reply|note}` shape comes back instead.
 
-## First-time auth (B2, one-time, USER hands)
+## First-time auth (B2 ONLY, one-time, USER hands — currently blocked on Brave)
 
 `muse-cli` borrows the muse.ai session cookie from the browser once:
 
@@ -70,7 +75,7 @@ a silence-verdict — re-check with `poll`.
 Expiry repeats this section. There is deliberately **no cookie op in the
 browser-bridge** — do not try to extract `hatch_sess` through it.
 
-## B1 fallback (when muse-cli 403s / API churns)
+## B1 — the browser flow (the primary channel; also the fallback for B2)
 
 Run `$M b1` and follow it. Core: `$BB --instance personal open https://muse.ai`
 (own tab), then `flows/muse.ai.md` — snapshot → type → **assert length** →
