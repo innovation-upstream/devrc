@@ -105,6 +105,41 @@ The likely source of the false belief: `openBuzzPurchaseGate.ts` and
 `allow-top-navigation-by-user-activation` sandbox token — all *about* user
 activation, none an `isTrusted` check, none on the spend path.
 
+## 🔴 `SAVE_IMAGE` is allowlisted by EXACT hostname — a block's own output can be refused
+
+This is the **HOST's** gate, so it applies to **every** App Block, not to the one
+you happen to be driving. `isAllowedSaveImageUrl`
+(`civitai/src/components/AppBlocks/saveImageDownload.ts:103`) accepts a url only
+when **`https:`** and the hostname is an **exact** member of
+`CIVITAI_IMAGE_HOSTS` (`:31`) plus one more added at call time:
+
+| allowed hostname | where |
+|---|---|
+| `image.civitai.com` | `:32` |
+| `orchestration.civitai.com` | `:40` |
+| `orchestration-next.civitai.com` | `:47` |
+| the hostname of `NEXT_PUBLIC_IMAGE_LOCATION` | added per call, `:113-118` |
+
+**No wildcarding, no suffix match**, and the `https:`-only check means a block's
+canvas/editor export — a local `blob:` — is refused outright by design.
+
+🔴 **Broken as of 2026-10-01: generated blobs are served from
+`orchestration-`*`new`*`.civitai.com`, which is not in that list** — one character
+off `orchestration-next`. A block saving its own fresh generation gets
+*"image url is not allowed"*. A fix is open upstream as **`civitai/civitai#5277`**
+(adds `orchestration-new.civitai.com` to `CIVITAI_IMAGE_HOSTS`): **unmerged and
+undeployed**, so the refusal is still live in production. Re-check the allowlist
+before reporting a save as broken *or* as fixed.
+
+⚠ Scope it honestly: the observed refusals are **specific URLs on specific blob
+hosts**, so a refusal is evidence about that url's hostname, never a proof that no
+save in that block can succeed. A url already on `image.civitai.com` saves fine.
+The per-app observation for `yt-thumbnail` is in
+`flows/yt-thumbnail.civit.ai.md`.
+
+⚠ All of the above is **cross-repo and gated by nothing here** — line numbers and
+the list's contents move with the civitai repo. Re-read the file before quoting it.
+
 ## 🔴 The frame id changes on EVERY load — re-poll `frames` after any nav
 
 Five distinct ids in one session (819, 821, 828, 830, 832). A frame id captured

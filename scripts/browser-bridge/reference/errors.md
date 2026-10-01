@@ -166,10 +166,12 @@ second per-host token, which is the property the loopback binding exists to keep
 
 ## 🔴 NEVER pipe an op through `2>&1` into a JSON parser — stdout is the envelope, stderr is prose
 
-Advisories go to **stderr on a SUCCESSFUL op** — most commonly the multi-line
+Advisories go to **stderr on a SUCCESSFUL op** — most commonly the
 *"tab is hidden — background tabs are throttled…"* note, which `open` makes the
-normal case because it creates tabs backgrounded. Merge the streams and the
-parser sees prose first:
+normal case because it creates tabs backgrounded. (`HIDDEN_TAB_NOTE` in
+`protocol.js` is **one long single-line string** — concatenated across source
+lines, but the value carries no newline. Do not expect to strip it by dropping a
+first line.) Merge the streams and the parser sees prose first:
 
 ```
 json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
@@ -186,7 +188,10 @@ bracket a mutation is not.**
 # WRONG — the advisory lands in the parser
 $BB --instance work --tab $T --frame $F js "$EXPR" 2>&1 | python3 -c '…'
 # RIGHT — separate streams, parse stdout, keep stderr readable
-$BB --instance work --tab $T --frame $F js "$EXPR" 2>/tmp/bb.err | python3 -c '…'
+# 🔴 PER-AGENT stderr path. A hardcoded /tmp/bb.err is shared: concurrent agents
+#    then overwrite and read each OTHER'S advisories, which reads as a bridge fault.
+ERR=$(mktemp -t bb.$$.XXXXXX.err)
+$BB --instance work --tab $T --frame $F js "$EXPR" 2>"$ERR" | python3 -c '…'
 ```
 
 ⚠ **This does NOT retract the `rc 4` recipe above**, which routes the handoff line
