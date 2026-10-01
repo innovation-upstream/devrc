@@ -32,7 +32,9 @@ Scope + action come from `$ARGUMENTS` (default `all analyze`).
   the fuzzyclaw task-management wiring, file ownership, the tmux idle-fade scale.
 - `verification.md` — per-category check snippets (only when the one-shot block FAILs).
 - `gotchas.md` — the traps that have actually bitten (popup `-S` vs `-s`, `rename-window`
-  freezing tabs, picom vs NVIDIA, sed-based apply scripts, PATH duplication).
+  freezing tabs, picom vs NVIDIA, sed-based apply scripts, PATH duplication, the
+  Playwright/Chromium revision skew that makes a client repo's browser tests run zero
+  tests and report it as a broken suite).
 
 ## 1. Discover configuration
 Read the config sources — do NOT assume locations, discover them.
