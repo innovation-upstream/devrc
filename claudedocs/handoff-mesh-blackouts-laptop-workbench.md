@@ -22,12 +22,13 @@ they had accumulated in one document and pushed it to its 65,536 B ceiling.
   merely coexists with the lockstep does NOT satisfy this line.
 
 ## State now
-- Doc split merged as `ad437b54`; this update lands on `docs/mesh-next-probe` (PR #1942), which has been brought up to date with `main` (it was 2 behind, missing the cairn pin-seam fix `aa01eb77`/#1939 — that, not this doc, was its CI failure).
-- 🔴 **Watcher is now v4, pid `1718650`** (`<scratchpad>/flap-watch4.sh`, same log). v4 adds a per-episode **`DIRECTION:`** line, so the directional evidence below accumulates unattended. ⚠ **Coverage gap 2026-09-30 19:42Z→20:15Z** while it was stopped for counter hygiene.
-- 🔴 **THE FAULT WENT QUIET ~18:00Z.** 26 measured rounds after that point (5,200 packets) produced **one** episode. This morning it was ~28% of polls. Any session resuming this must re-establish that the fault is live before concluding anything from a quiet run.
-- 🔴 `ip rule` 5150 pin still NOT applied (since the 2026-09-27 15:33 reboot) and still not the lever.
-- 🔴 Sudoers unchanged: `ip`, `nft`, `tcpdump` are NOT passwordless on the laptop; `sudo -n` fails entirely on the workbench.
-- AirVPN tunnel was brought UP for the tunnel arc's closing condition and has since been taken back DOWN; the laptop is at its designed default.
+- Merged to `main` (all verified by CONTENT, not ancestry): #1937 `37cca5b7`, #1941 `ad437b54` (arc split; tunnel arc CLOSED), #1942 `d7cba0be`, #1944 `af578a02`.
+- 🔴 **WATCHER v4, pid `2581344` — first trustworthy generation.** `<scratchpad>/flap-watch4.sh`, log `flap-watch2.log`. 🔴 **`=== CLEAN BASELINE ===` sits in that log at `2026-10-01T02:48:12Z` — SLICE FROM IT** (`awk '/CLEAN BASELINE/{f=1} f'`); earlier data carries ≥1 of the five defects below.
+- **Post-baseline: 89 polls, 0 triggers, 0 BADPARSE, 0 UNAVAILABLE** — the fault went quiet right after the instrument was fixed. Live at handoff: workbench 0%, gateway 0%.
+- Laptop at defaults: AirVPN tunnel **down**, `ip rule 5150` **absent** (and not the lever).
+- 🔴 `ip`/`nft`/`tcpdump` NOT passwordless on the laptop; `sudo -n` fails entirely on the workbench.
+- No `clawgate-task:` field: `resolve` → **rc 5**, which cannot distinguish "touched no task" from "wrong id".
+- ⚠ Operator cleanup: `sudo rm -rf /var/tmp/{arrival-probe,wb-sensor.sh}` on the workbench.
 
 ## Open investigations — live diagnosis state
 ### 🔴 The "two internet sources, one router" comparison is STRUCTURALLY CONFOUNDED — do not spend a session on it
@@ -87,6 +88,23 @@ they had accumulated in one document and pushed it to its 65,536 B ceiling.
 - **Leading hypothesis:** none. The constraint that shaped this entire arc was largely manufactured by the instrument.
 - **Next probe:** re-run the elimination reasoning WITHOUT the lockstep premise. Candidates dismissed only because they failed to predict it deserve re-examination — the nebula-relay path in particular.
 - 🔴 **UNAFFECTED:** the two-mode (forward vs return) finding. It comes from v4 with a valid peer and from the hand-run `direction.sh`, and its arithmetic (`expected = 2 × PROBE_N`) holds whether both arms target the same host or two hosts on the same box.
+
+### 🔴 FIVE INSTRUMENT DEFECTS IN ONE CHAIN — read before trusting any pre-baseline number
+- as-of: 2026-10-01
+- **Observed (each measured, each fixed):** (1) **Aliased control arm** — `"tailscale|${TS_PEER:-$HOME_PEER}"` retargeted the tailscale arm onto the NEBULA address when discovery failed; watcher `2309463` ran 14 h that way giving **207 episodes at 99.0% "identical"** vs **10 valid-peer episodes at 0–12.5%**. This MANUFACTURED the lockstep that had become the arc's central fact and closing-condition. (2) **`EP_LOST` read after `rm -f "$f"` deleted its inputs** — always 0, so every real episode read `VACUOUS`, including four with shortfalls 65–103. (3) **Counter read censored at the severe end** — the `InEchos` ssh rode the lossy path: reads succeeded at median 33.3% loss (max **45.0%**), failed at median 58.3% — **zero overlap**, so every severe episode went unmeasured. (4) **`icmp-last-hop` silently absent in 3 of 4 generations** (mtr discovery fails on a lossy link) — the arm. (5) **Duplicate watchers** — killing one resolved PID left a sibling; two double-polled one log ~11 min (cadence 3/min → 5.3/min); no DIRECTION fell in that window, which was luck. `via: measurement`
+- **Ruled out — that any remain active.** Post-baseline: 1 watcher (`ppid=1`), 5 arms, 0 BADPARSE, 0 UNAVAILABLE over 89 polls. `via: measurement`
+- **Leading hypothesis:** n/a — a record.
+- **Next probe:** slice at the baseline first.
+
+### What survives the retractions
+- as-of: 2026-10-01
+- **Observed — the host asymmetry is the one solid result:** the workbench loses while the homelab gateway (same LAN, same overlay, same window) is 0%. Reproduced in every generation; unaffected by all five defects. `via: measurement`
+- **Observed — direction, valid-peer only: 9 forward-loss, 1 return-loss** (+1 return hand-measured: sent 200, arrived 200, 63 lost). Forward shortfalls matched derived loss to the packet; the return one was exactly 0. No mixed episodes. ⚠ NOT a clean population — the 9 are three bursts, and the sample is censored above 45% loss by defect 3, so it describes MILD episodes only. `via: measurement`
+- **Ruled out — the lockstep as a general property.** Artifact of defect 1; the 167/169 and 170/172 figures are WITHDRAWN. Four genuine identical episodes exist (watcher `2115782`, 16 min) — intermittent at most, never 99%. `via: measurement`
+- 🔴 **Ruled out — six single mechanisms** (the `ip rule` pin, nebula riding the tailscale subnet route, the homelab node as a shared hop, the workbench host, the laptop's uplink, the home site) — **but SOME were eliminated partly BECAUSE they failed to predict the lockstep. That argument is now void; re-examine them, the nebula relay first.** `via: measurement`
+- ⚠ **Suggestive but CONFOUNDED:** in the one full 5-arm episode (`02:11:15Z`) bare ICMP to the last hop before home was 0% while nebula/tailscale UDP lost 36.7%/41.7% — a different PROTOCOL *and* a different DESTINATION at once. The clean control (bare ICMP to the workbench's public endpoint) cannot exist; it is behind NAT.
+- **Leading hypothesis:** none load-bearing.
+- **Next probe:** collect ≥5 post-baseline DIRECTION verdicts, then test the split against severity and time.
 ## Open investigations — live diagnosis state
 <!-- as-of: 2026-09-21 -->
 ### Gateway IPv6-remote noise — "listener is IPv4, but writing to IPv6 remote" (homelab-gateway)
@@ -246,10 +264,10 @@ they had accumulated in one document and pushed it to its 65,536 B ceiling.
 
 
 ## Next steps (ranked)
-1. **Does the laptop's traffic ARRIVE at the workbench during a blackout?** Run the workbench sensor (operator `sudo`, one command — `ssh -t zach@10.42.0.30 'sudo TCPDUMP=<store-path>/bin/tcpdump /var/tmp/wb-sensor.sh'`), drive the laptop over tailscale with `ping -D`, then count inbound packets from the laptop bucketed per second and aligned to the laptop's blackout seconds taken from its OWN packet timestamps. 🔴 Analyse with `tcpdump -r` on the pulled pcap — that needs NO privileges; only `-i` capture does. **Arrivals continue ⇒ the loss is on the RETURN leg and every hypothesis so far has been looking the wrong way. Arrivals stop ⇒ inbound.** Neither answer has ever been measured; every mechanism proposed to date silently assumed inbound.
-   forcing: incident — 173 episodes in 9 hours on 2026-09-30, worst 99.2% loss over a contiguous 59 s, 170 of 172 episodes with both overlays identical
-2. **Check the workbench's own NIC/driver state**, which no round has examined: `ethtool -S eth0` rx drops/overruns across an episode, and any offload or power-saving setting the gateway lacks.
-   forcing: incident — the same recurrence; the workbench is the only host that loses
+1. **Analyse post-baseline episodes only** (slice at `CLEAN BASELINE`); need ≥5 DIRECTION verdicts before re-stating any forward/return ratio. 🔴 Confirm the fault is LIVE first (`ping -c 30 -i 0.3 10.42.0.30` vs `10.42.0.10`) — this arc has twice mistaken a lull for a change.
+   forcing: incident — recurred live 2026-10-01 at ~30% loss to the workbench with the gateway at 0%, and all prior direction data is censored above 45% loss
+2. **Re-examine candidates eliminated on the lockstep argument**, nebula-relay first.
+   forcing: incident — same recurrence; no elimination citing the lockstep is still sound
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **NO ROUTABLE ADDRESS OF OURS GOES IN THIS DOC — AND ONE OF THEM CAME BACK 24 HOURS
@@ -337,6 +355,11 @@ they had accumulated in one document and pushed it to its 65,536 B ceiling.
 - 🔴 **A FALLBACK THAT SILENTLY RETARGETS AN ARM TURNS AN INDEPENDENT CONTROL INTO A DUPLICATE OF THE THING IT CONTROLS.** `${TS_PEER:-$HOME_PEER}` was written as a convenience; it converted the tailscale arm into a second nebula arm and manufactured a 99% "lockstep" that became this arc's central fact for a full day. **A control arm must FAIL LOUD when its target cannot be resolved, never fall back to another arm's target.** The watcher did print `tailscale-peer=UNRESOLVED` at startup — one line, 2,500 lines above the data, never read. 🔴 **An instrument's startup banner is part of its output: re-read it when you read its results, not when you launch it.**
 - 🔴 **`icmp-last-hop-before-home` has been UNRESOLVED in three of four watcher generations** (the mtr-based discovery at startup fails), so the discriminator has been running 4 arms, not 5 — and the missing one is the closest ICMP proxy for the path to home, i.e. the most relevant control for a path hypothesis. It resolves fine when run by hand. Check `grep 'resolved:' <log>` before trusting any arm's absence.
 - ⚠ **Per-generation aggregation is the control that caught this.** A pooled rate across the whole log reads 98.8% and hides it; splitting by watcher pid AND by whether that generation resolved its peers is what exposed a 99.0% arm sitting beside a 0–12.5% one. **When an instrument restarts, its generations are not one population.**
+
+- 🔴 **AGGREGATE PER INSTRUMENT GENERATION.** Pooled over the whole log the lockstep reads 98.8% and the artifact is invisible; split by watcher pid AND by whether that generation resolved its peers, a 99.0% arm sits beside a 0–12.5% one. When an instrument restarts, its generations are not one population.
+- 🔴 **`pgrep -x bash` + cmdline match OVER-COUNTS — a watcher's forked subshells inherit its cmdline.** Distinguish by `ppid`: a setsid'd watcher has `ppid=1`, subshells have the watcher's pid. A "kill the duplicates" sweep without that check kills the watcher's own children.
+- 🔴 **A MEASUREMENT THAT TRAVELS THE PATH IT MEASURES IS CENSORED BY ITS OWN SUBJECT**, worst exactly where the data matters. Test it by comparing the severity distribution of successful vs failed reads — here they did not overlap at all. Remedy: persistent ssh `ControlMaster`, or an out-of-band path.
+- 🔴 **`/proc/net/snmp` `Icmp:InEchos` is an exact, unprivileged arrival counter** (20 pings → +20; 12 → +12) — the cheapest way to separate FORWARD from RETURN loss without root or capture.
 
 
 ## How to verify
