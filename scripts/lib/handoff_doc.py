@@ -540,14 +540,24 @@ the flag by habit gets conservation checked over the whole prune, which is
 strictly more than the predicate can see, and the claim then verified is
 `af578a02`'s own.
 
-🔴 AND THE FILE IS READ, NEVER WRITTEN. This module makes ONE path-limited commit
-of ONE path and `test_it_makes_exactly_one_path_limited_commit` pins it. Writing
-the archive here would make the tool a second writer of a file nobody reviewed,
-in the same run that deletes the original — the shape where one silent failure
-loses the content twice. The caller writes the archive; this verifies it. So an
-`--archive` naming a file that cannot be READ is this rule's verdict (16) and
-NOT an operational failure (3): the claim the flag was passed to make is false,
-which is a statement about the prune, not about the tool's ability to run.
+🔴 AND BY DEFAULT THE FILE IS READ, NEVER WRITTEN. On that path this module makes
+ONE path-limited commit of ONE path and
+`test_it_makes_exactly_one_path_limited_commit` pins it. So an `--archive` naming
+a file that cannot be READ is this rule's verdict (16) and NOT an operational
+failure (3): the claim the flag was passed to make is false, which is a statement
+about the prune, not about the tool's ability to run.
+
+🔴 ⚠ AND THE ARGUMENT THAT ONCE CLOSED THE WRITER QUESTION IS RETRACTED, WHICH IS
+WHY IT IS STILL HERE. It read: *writing the archive here would make the tool a
+second writer of a file nobody reviewed, in the same run that deletes the
+original — the shape where one silent failure loses the content twice.* The
+premise is sound and the conclusion did not follow: refusing to write left the
+tool's own sanctioned remedy for exit 14 `size-ratchet` — "move closed text into
+the archive, then `--prune` it out" — with NO writer at all, so every blocked
+session hand-built the file and this rule then refused the prune until the hand
+work was byte-exact. What actually answers the "one silent failure loses it twice"
+worry is not declining to write; it is this very check RE-RUN over the bytes the
+writer produced, which is what `--archive-write` does. See its block below.
 
 ⚠ WHAT IT DOES NOT CHECK, STATED HERE RATHER THAN DISCOVERED LATER. That the
 archive is tracked, committed, pushed, or will exist tomorrow; that the lines in
@@ -4355,7 +4365,11 @@ def prune_refusal_report(plan: PrunePlan, relpath: str) -> str:
     return "\n".join(rows)
 
 
-def prune_note(plan: PrunePlan, archive_path: str | None = None) -> str:
+def prune_note(
+    plan: PrunePlan,
+    archive_path: str | None = None,
+    appended: ArchiveAppend | None = None,
+) -> str:
     """Rule (q)'s disclosure, printed ABOVE the diff, or "" when nothing pruned.
 
     🔴 ABOVE THE DIFF, beside rule (f)'s warning and for its reason: it is a
@@ -4370,6 +4384,14 @@ def prune_note(plan: PrunePlan, archive_path: str | None = None) -> str:
     WHERE the removals went rather than only that they are going. It is reached
     only after `conservation_problems` returned nothing, so the sentence is a
     report of a check that passed, never a promise about one.
+
+    🔴 `appended` IS NOT `archive_path is not None` AND THE TWO MUST NOT BE
+    COLLAPSED. The first says an archive was NAMED and verified; the second says
+    THIS RUN wrote to it. Reporting the read-only sentence on a run that appended
+    would be the comment-is-a-claim defect in the one place an operator reads to
+    decide whether they still have to go and write a file. `None` is therefore the
+    read-only run, and an `ArchiveAppend` with an EMPTY `appended` is its own
+    third case — asked to write, and the archive already held everything.
     """
     if not plan.removed:
         return ""
@@ -4395,11 +4417,31 @@ def prune_note(plan: PrunePlan, archive_path: str | None = None) -> str:
             f"carries a finding worth keeping, its home is the owning skill or "
             f"the subsystem store, not this document."
         )
-    if archive_path is not None:
+    if archive_path is not None and appended is None:
         out.append(
             f"  conserved: all {len(plan.removed)} removed line(s) were found in "
             f"`{archive_path}` (rule (r)). That file is READ, never written, and "
             f"this run does not commit it — committing it is yours."
+        )
+    elif archive_path is not None and appended.appended:
+        verb = "CREATED" if appended.created else "APPENDED TO"
+        out.append(
+            f"  conserved: all {len(plan.removed)} removed line(s) are in "
+            f"`{archive_path}` (rule (r)), and {ARCHIVE_WRITE_FLAG} {verb} that "
+            f"file with {len(appended.appended)} of them under the "
+            f"{ARCHIVE_NOTE_FLAG} you supplied. 🔴 BOTH PATHS ARE IN THIS RUN'S "
+            f"ONE COMMIT — the check that passed ran over the bytes this tool "
+            f"wrote, so it is the writer that was verified, not a file you had "
+            f"already prepared."
+        )
+    elif archive_path is not None:
+        out.append(
+            f"  conserved: all {len(plan.removed)} removed line(s) were ALREADY in "
+            f"`{archive_path}` (rule (r)), so {ARCHIVE_WRITE_FLAG} appended "
+            f"NOTHING and the file was not opened for writing. It is therefore NOT "
+            f"in this run's commit — this run's one commit is of the doc alone. "
+            f"That is the re-run case: a prune whose content the archive already "
+            f"holds cannot duplicate it."
         )
     return "\n".join(out)
 
@@ -4415,8 +4457,13 @@ def prune_note(plan: PrunePlan, archive_path: str | None = None) -> str:
 #
 # SO THIS IS THAT SENTENCE AS A REFUSAL, WITH THE SAME POSTURE AS RULE (q):
 #
-#   * IT IS NEVER A SIDE EFFECT. The archive is named by a flag, and the tool
-#     never writes it. One file write and one path-limited commit, unchanged.
+#   * IT IS NEVER A SIDE EFFECT. The archive is named by a flag, and BY DEFAULT
+#     the tool never writes it: one file write and one path-limited commit.
+#     ⚠ `--archive-write` is a second, explicit flag that DOES write it — see its
+#     own block below. This bullet is scoped to its absence, and the scoping is
+#     the point: the sentence "the tool never writes the archive" was true of
+#     every arm #1960 shipped and is the claim five other comments in this module
+#     used to make unconditionally.
 #   * IT REUSES RULE (f)'s PREDICATE RATHER THAN ASKING THE QUESTION TWICE.
 #     `durable_removals` is the ONE list; `prune_note`'s durable count and this
 #     refusal's trigger read the same tuple, so a signal added to
@@ -4432,6 +4479,17 @@ def prune_note(plan: PrunePlan, archive_path: str | None = None) -> str:
 
 #: Rule (r)'s flag, named once so the refusals and `--help` cannot disagree.
 ARCHIVE_FLAG = "--archive"
+
+#: 🔴 RULE (r)'s WRITER HALF, AND IT IS AN OPT-IN RATHER THAN A WIDENING OF
+#: `ARCHIVE_FLAG`. Without it the archive is READ and nothing else, which is the
+#: behaviour every claim above describes and `#1960` shipped. See the
+#: `--archive-write` block below for why the default could not simply move.
+ARCHIVE_WRITE_FLAG = "--archive-write"
+
+#: The editorial sentence the appended block carries. REQUIRED with
+#: `ARCHIVE_WRITE_FLAG` — see `archive_append`'s header for the measurement that
+#: makes a generated one worse than none.
+ARCHIVE_NOTE_FLAG = "--archive-note"
 
 #: 🔴 ONE MARKER PER CAUSE, and each names a DIFFERENT remedy — pass the flag,
 #: fix the path, or add the missing lines to the file. A single `[unconserved]`
@@ -4549,8 +4607,11 @@ def conservation_problems(
                 f"the diff in one transcript. Move the content somewhere that "
                 f"outlives this document — the owning skill, the subsystem "
                 f"store, or a `claudedocs/` archive — and pass "
-                f"`{ARCHIVE_FLAG} <that file>`. The file is READ, never "
-                f"written, and every line this prune removes must be in it.",
+                f"`{ARCHIVE_FLAG} <that file>`. By DEFAULT that file is READ and "
+                f"never written, and every line this prune removes must be in "
+                f"it; pass `{ARCHIVE_WRITE_FLAG} {ARCHIVE_NOTE_FLAG} '<why these "
+                f"are worth keeping>'` and this run creates or appends to it "
+                f"instead.",
             )
             for target in durable
         )
@@ -4563,7 +4624,11 @@ def conservation_problems(
                 f"({archive_error}). An archive that is not there conserves "
                 f"nothing, so this is rule (r)'s verdict and not an "
                 f"operational failure: the claim the flag was passed to make "
-                f"is false. Write the file FIRST — this tool never does.",
+                f"is false. Write the file FIRST, or pass "
+                f"`{ARCHIVE_WRITE_FLAG} {ARCHIVE_NOTE_FLAG} '<why>'` and this "
+                f"run will. ⚠ A file that EXISTS and cannot be READ is refused "
+                f"either way: appending blind would lose whatever is in it, and "
+                f"a header nobody could read cannot be preserved.",
             ),
         )
     held = archive_lines(archive_text)
@@ -4582,10 +4647,172 @@ def conservation_problems(
     )
 
 
+# --- rule (r)'s WRITER half: `--archive-write` ---------------------------------
+#
+# 🔴 THE GAP, AND IT IS THE MIRROR OF THE ONE RULE (r) CLOSED. #1960 built the
+# VERIFIER and said, in five places, that the tool never writes the archive. The
+# consequence shipped with it: `/handoff` refuses an over-ceiling doc with exit 14
+# `size-ratchet`, its own remedy is "move closed text into the archive and
+# `--prune` it out", and NOTHING IN THIS MODULE WRITES THAT ARCHIVE. Measured on
+# this tree at the time: `handoff_doc.py` had exactly ONE file write (the doc),
+# and every `claudedocs/archive/*` file in the repo was produced by a one-off bulk
+# `git mv` plus hand authoring. So the sanctioned exit from a blocked session was
+# "hand-build a file, get every line byte-exact, then prune" — and rule (r) then
+# refuses the prune until you have.
+#
+# THIS IS THAT HAND STEP, AS A FLAG, AND THE POSTURE IS RULE (r)'s OWN:
+#
+#   * IT IS NEVER A SIDE EFFECT. `--archive-write` is its own opt-in. Without it
+#     `--archive` is READ and nothing else, byte for byte as before, which is what
+#     keeps every refusal #1960 measured intact — including the one that matters:
+#     a durable prune naming a MISSING archive is still exit 16.
+#   * IT DOES NOT BRANCH AROUND THE CHECK IT FEEDS. `conservation_problems` runs
+#     AFTER the write, over the bytes read back off disk, so the guard validates
+#     THIS FUNCTION's output. That makes rule (r) a positive control on the
+#     writer rather than a gate the writer was allowed to skip. The proposal run
+#     has no bytes to read back, so it runs the identical check over the
+#     PROJECTED text — the same function, one input earlier.
+#   * IT WRITES INSIDE RULE (o)'s WINDOW. The leak scanner reads the WORKING TREE
+#     after the doc write and before the `git add`; an evicted block that leaks is
+#     still a leak, so the archive has to be on disk by then. That is also why
+#     `--archive-write` REFUSES an archive outside the repo: the scanner
+#     enumerates the repo from its own location and cannot see one, and a
+#     path-limited commit cannot carry one either.
+#   * IT IS IDEMPOTENT AT TWO LEVELS, neither of them a dedupe heuristic. Rule (q)
+#     refuses the second run of one prune outright (`[absent]`, exit 15 — the
+#     lines are no longer in the document), and the writer below appends only the
+#     removals the archive does not already hold, so an archive that already holds
+#     them all is not opened for writing at all.
+#
+# 🔴 AND THE HEADER IS THE CALLER'S SENTENCE, NOT A GENERATED ONE. See
+# `archive_append`.
+
+
+#: 🔴 THE EDITORIAL HEADER IS HUMAN JUDGEMENT AND A GENERATED ONE IS WORSE THAN
+#: NONE — which is why `ARCHIVE_NOTE_FLAG` is REQUIRED rather than defaulted.
+#: A real archive header in this repo reads: *"these are NOT merely superseded —
+#: one rests on a MEASUREMENT ARTIFACT … read them for the raw numbers, do NOT
+#: adopt their conclusions."* Nothing this module can compute says that. What it
+#: CAN compute — "N blocks moved out of <doc> on <date>" — is strictly worse than
+#: silence, because it reads as a complete description of the content's status
+#: and so stops the next reader looking for the caveat. The machine-derivable
+#: half (which doc, which date, which section) is still written, directly above
+#: the caller's sentence; it is the JUDGEMENT that may not be synthesised.
+#:
+#: ⚠ THE OTHER OPTION WAS "PRESERVE AN EXISTING FILE'S HEADER WHEN APPENDING",
+#: AND IT IS DONE TOO — BUT IT CANNOT BE THE WHOLE ANSWER. Appending never
+#: rewrites a byte above the insertion point, so a hand-authored header always
+#: survives. It just does not DESCRIBE the new block: the quoted header above is
+#: a judgement about three specific findings, and a fourth arriving under it
+#: inherits a caveat nobody made about it. So: the file's header is preserved,
+#: and every appended block carries its own note.
+ARCHIVE_BLOCK_PREFIX = "## Evicted from"
+
+
+class ArchiveAppend(typing.NamedTuple):
+    """What `--archive-write` will do to the archive, decided before it does it."""
+
+    text: str
+    """The WHOLE file content afterwards — `existing` unchanged when nothing is
+    appended, so a caller can compare it against the file and skip the write."""
+    appended: tuple[str, ...]
+    """The document lines this run adds, in document order. EMPTY means the
+    archive already holds every removal and must not be opened for writing."""
+    created: bool
+    """The archive did not exist. Only the disclosure reads this; the rollback
+    uses the bytes it captured itself, because `created` is a claim about a
+    moment that has passed by then."""
+
+
+def archive_append(
+    existing: str | None,
+    plan: PrunePlan,
+    note: str,
+    relpath: str,
+    today: str,
+) -> ArchiveAppend:
+    """Rule (r)'s writer: the archive with this prune's removals appended.
+
+    `existing is None` means the file does not exist and is being CREATED.
+
+    🔴 APPEND-ONLY, AND THE BYTES ABOVE THE INSERTION POINT ARE NEVER TOUCHED.
+    That is what preserves a hand-authored editorial header — see
+    `ARCHIVE_BLOCK_PREFIX` — and it is also what makes the write recoverable: the
+    rollback restores the bytes this process read, and a rewrite of the whole file
+    would have nothing to restore if the read-back check below fired.
+
+    🔴 THE IDEMPOTENCE IS A SET DIFFERENCE OVER `_norm_line`, NOT A BLOCK-LEVEL
+    DEDUPE. `archive_lines` is the SAME containment set rule (r) verifies with, so
+    "already held" here and "conserved" there cannot disagree — a block-shaped
+    dedupe (match on the heading, or on a hash of the block) would be a second
+    spelling of one predicate, free to answer differently, and it would also miss
+    the realistic case: an archive hand-authored EARLIER that holds some of these
+    lines already. A removal the file already holds is not appended, so re-running
+    cannot duplicate it. An archive holding ALL of them yields `appended=()` and
+    the caller writes nothing at all.
+
+    🔴 EXTRA LINES ARE SAFE AND MISSING ONES ARE NOT, which is why the provenance
+    rows below are allowed to exist. Rule (r)'s containment is one-directional —
+    every REMOVED line must be in the archive, and the archive may hold anything
+    else — so the heading rows and the note cannot make a conserved prune
+    unconserved. They are written because the prune disclosure prints each
+    removal's source section and the archive would otherwise be the one artefact
+    that loses it.
+    """
+    held = archive_lines(existing or "")
+    fresh = [t for t in plan.removed if _norm_line(t.line) not in held]
+    if not fresh:
+        return ArchiveAppend(existing or "", (), existing is None)
+    rows = [f"{ARCHIVE_BLOCK_PREFIX} `{relpath}` — {today}", "", note.strip(), ""]
+    last_heading: str | None = None
+    for target in fresh:
+        if target.heading != last_heading:
+            if last_heading is not None:
+                rows.append("")
+            rows.append(f"From `{target.heading}`:")
+            rows.append("")
+            last_heading = target.heading
+        rows.append(target.line)
+    block = "\n".join(rows) + "\n"
+    # A file that exists but holds nothing (or only whitespace) is shaped like a
+    # creation: prefixing a blank line to an empty file would make the archive
+    # open on one, which no reader would attribute to this tool.
+    if existing is None or not existing.strip():
+        return ArchiveAppend(block, tuple(t.line for t in fresh), existing is None)
+    return ArchiveAppend(
+        f"{existing.rstrip(chr(10))}\n\n{block}",
+        tuple(t.line for t in fresh),
+        False,
+    )
+
+
+def _within(repo: Path, path: Path) -> bool:
+    """Is `path` inside `repo` once BOTH sides are resolved?
+
+    🔴 RESOLVED ON BOTH SIDES, which is the self-archive guard's identity-not-a-
+    spelling argument one function up: a symlink inside the tree pointing out of
+    it would pass a prefix test on the spelling and fail this one. `resolve()` is
+    non-strict by default, so a path that does not exist yet still answers —
+    which is the whole CREATE case for `--archive-write`.
+    """
+    return path.resolve().is_relative_to(repo.resolve())
+
+
 def prune_unconserved_report(
-    problems: typing.Sequence[PruneProblem], plan: PrunePlan, relpath: str
+    problems: typing.Sequence[PruneProblem], plan: PrunePlan, relpath: str,
+    archive_was_written: bool = False,
 ) -> str:
-    """Rule (r)'s refusal. Nothing is written on any arm of it."""
+    """Rule (r)'s refusal. Nothing is written on any arm of it.
+
+    🔴 `archive_was_written` IS NOT COSMETIC, AND IT EXISTS BECAUSE A COMMENT IS A
+    CLAIM. The default closing paragraph asserts "this tool does NOT write
+    `--archive`'s file", which is true of every arm rule (r) shipped with and FALSE
+    of the one `--archive-write` adds — the read-back arm, which can only fire
+    AFTER this module appended to that file. Printing the default sentence there
+    would tell an operator their archive is untouched while this run had just
+    written to it and rolled it back, which is the wrong thing to believe about a
+    file holding the only copy of evicted text.
+    """
     durable = durable_removals(plan)
     rows = [
         f"status=prune-unconserved path={relpath}",
@@ -4601,12 +4828,27 @@ def prune_unconserved_report(
         rows.append(f"      {problem.detail}")
     if len(problems) > PRUNE_SHOWN_MAX:
         rows.append(f"  … and {len(problems) - PRUNE_SHOWN_MAX} more not shown.")
-    rows.append(
-        f"  Fix the archive and re-run. Nothing about this run has to be "
-        f"undone; re-running after a fix is safe. 🔴 This tool does NOT write "
-        f"{ARCHIVE_FLAG}'s file and does not commit it — it reads it, and the "
-        f"one commit it makes is still of {relpath} alone."
-    )
+    if archive_was_written:
+        rows.append(
+            f"  🔴 THIS RUN DID APPEND TO {ARCHIVE_FLAG}'s FILE AND THE APPEND WAS "
+            f"ROLLED BACK — {ARCHIVE_WRITE_FLAG} was passed, so rule (r) ran over "
+            f"the bytes this module had just written and they still do not conserve "
+            f"the prune. That is a defect in THIS TOOL's writer, not in your "
+            f"archive: the run it describes is one where the tool was asked to "
+            f"write the content and then could not find it. Report it rather than "
+            f"working around it. Nothing is left behind — not the doc, not the "
+            f"archive, not a commit."
+        )
+    else:
+        rows.append(
+            f"  Fix the archive and re-run. Nothing about this run has to be "
+            f"undone; re-running after a fix is safe. 🔴 This tool does NOT write "
+            f"{ARCHIVE_FLAG}'s file and does not commit it — it reads it, and the "
+            f"one commit it makes is still of {relpath} alone. (Pass "
+            f"{ARCHIVE_WRITE_FLAG} with {ARCHIVE_NOTE_FLAG} '<why these are "
+            f"kept>' and it writes the file instead; that flag is an opt-in, and "
+            f"this refusal is what you get without it.)"
+        )
     return "\n".join(rows)
 
 
@@ -5268,10 +5510,37 @@ def restore_doc_bytes(doc: Path, original: bytes | None) -> bool:
     return True
 
 
+class _WrittenPath(typing.NamedTuple):
+    """One path this run wrote, and enough to put it back.
+
+    🔴 IT EXISTS BECAUSE `--archive-write` MAKES "the write" PLURAL. Every arm of
+    this module that prints NOTHING WRITTEN now has two files to make that true
+    of, and the one that matters most is rule (r)'s own read-back refusal — which
+    fires precisely because this module wrote a file and could not then find the
+    content in it. `original is None` means "did not exist", the unlink
+    convention `restore_doc_bytes` owns.
+    """
+
+    path: Path
+    relpath: str
+    original: bytes | None
+
+
 def _undo_write(
-    repo: Path, doc: Path, relpath: str, original: bytes | None, staged: bool
+    repo: Path, doc: Path, relpath: str, original: bytes | None, staged: bool,
+    extra: _WrittenPath | None = None,
 ) -> str:
     """Undo the doc write, and the `git add` IF THIS RUN MADE ONE.
+
+    🔴 `extra` IS THE ARCHIVE `--archive-write` APPENDED TO, AND IT IS A PARAMETER
+    RATHER THAN A SECOND FUNCTION ON PURPOSE. A parallel `_undo_archive_write`
+    would be a second copy of the unstage-then-restore sequence, and the two
+    halves of that sequence are exactly where this function's own header records
+    being wrong twice — a blanket `git reset`, and a `restore --staged` of an index
+    entry this run never wrote. `claude/RULES.md`: one rule, one place; a
+    predicate open-coded at two sites ends up wrong at one of them.
+    `extra is None` reproduces this function's previous output byte for byte,
+    which is what keeps `TestBlockedCommitLeavesNoTrace`'s pins meaningful.
 
     🔴 PATH-LIMITED, exactly like the commit it is undoing. A blanket
     `git reset` would unstage a co-worker's staged files as a side effect of OUR
@@ -5295,21 +5564,27 @@ def _undo_write(
     would be the same defect one level down.
     """
     left: list[str] = []
-    if staged:
-        try:
-            # Unstage first: if restoring the bytes fails we still want the index
-            # clean, because a staged path is the half that another session's
-            # `git commit` picks up.
-            git(repo, "restore", "--staged", "--", relpath)
-        except (GitError, OSError):
-            # `git restore` predates nothing we support, but a very old git or a
-            # path git no longer knows about can still refuse.
+    # The doc FIRST and `extra` second, so with `extra is None` the loop is the
+    # single-path sequence this function has always run, in the same order.
+    written = [_WrittenPath(doc, relpath, original)] + (
+        [extra] if extra is not None else []
+    )
+    for item in written:
+        if staged:
             try:
-                git(repo, "reset", "--quiet", "HEAD", "--", relpath)
+                # Unstage first: if restoring the bytes fails we still want the
+                # index clean, because a staged path is the half that another
+                # session's `git commit` picks up.
+                git(repo, "restore", "--staged", "--", item.relpath)
             except (GitError, OSError):
-                left.append(f"still STAGED: {relpath}")
-    if not restore_doc_bytes(doc, original):
-        left.append(f"still MODIFIED: {relpath}")
+                # `git restore` predates nothing we support, but a very old git or
+                # a path git no longer knows about can still refuse.
+                try:
+                    git(repo, "reset", "--quiet", "HEAD", "--", item.relpath)
+                except (GitError, OSError):
+                    left.append(f"still STAGED: {item.relpath}")
+        if not restore_doc_bytes(item.path, item.original):
+            left.append(f"still MODIFIED: {item.relpath}")
     if left:
         # 🔴 EMIT ADVICE ONLY FOR THE HALF THAT ACTUALLY FAILED. The two halves
         # fail independently, and printing both was measured to produce a message
@@ -5324,20 +5599,34 @@ def _undo_write(
         # HEAD. Advice printed on an already-degraded path must not be the thing
         # that loses the work.
         fixes: list[str] = []
-        if any(s.startswith("still STAGED") for s in left):
-            # 🔴 CONTRACT: the index arm is ONE bare command line, no comment
-            # lines. The worktree arm is comment lines in every wording it has
-            # had, so "no comment lines present" is how the test proves the
-            # worktree half was NOT advised — a check that survives rewording
-            # AND reindenting. Adding a comment here will fail that test; that
-            # is deliberate (a loud false failure beats a silent false pass),
-            # so move any explanation into the message body above instead.
-            fixes.append(f"    git -C {repo} restore --staged -- {relpath}")
-        if any(s.startswith("still MODIFIED") for s in left):
-            if original is None:
+        # 🔴 PER FAILED PATH, NOT PER FAILED HALF, and the distinction only
+        # appeared with `--archive-write`. The two advice arms key on `original is
+        # None` and on `staged`, both of which are properties of ONE path — so a
+        # run where the ARCHIVE failed to restore and the doc did not would
+        # otherwise have printed the doc's advice about the archive's problem, i.e.
+        # named the wrong file in a message whose whole job is naming the file.
+        # With one written path this produces the previous output unchanged.
+        for item in written:
+            if f"still STAGED: {item.relpath}" in left:
+                # 🔴 CONTRACT: the index arm is ONE bare command line PER PATH, no
+                # comment lines. The worktree arm is comment lines in every
+                # wording it has had, so "no comment lines present" is how the
+                # test proves the worktree half was NOT advised — a check that
+                # survives rewording AND reindenting. Adding a comment here will
+                # fail that test; that is deliberate (a loud false failure beats a
+                # silent false pass), so move any explanation into the message
+                # body above instead.
                 fixes.append(
-                    f"    # the doc did not exist before this run — delete it:\n"
-                    f"    rm -f -- {doc}"
+                    f"    git -C {repo} restore --staged -- {item.relpath}"
+                )
+        for item in written:
+            if f"still MODIFIED: {item.relpath}" not in left:
+                continue
+            if item.original is None:
+                fixes.append(
+                    f"    # {item.relpath} did not exist before this run — "
+                    f"delete it:\n"
+                    f"    rm -f -- {item.path}"
                 )
             elif staged:
                 fixes.append(
@@ -5374,24 +5663,34 @@ def _undo_write(
     # 🔴 Deliberately NOT "byte-identical": two measured exceptions. If the doc
     # was STAGED-modified before the run AND this run staged it too,
     # `restore --staged` resets its index entry to HEAD rather than to that
-    # staged content; and a `claudedocs/` directory this run created is not
-    # removed. Both are harmless, and neither is what the sentence would be
-    # claiming. A comment is a claim — say the thing that is true, which is the
-    # thing the caller actually needs.
+    # staged content; and a DIRECTORY this run created is not removed —
+    # `claudedocs/` for the doc, and `claudedocs/archive/` for an
+    # `--archive-write` target whose parent did not exist. One exception, two
+    # instances; `tree_hash` in the tests hashes files only, which is why the
+    # NOTHING-WRITTEN pins stay true across it. Both are harmless, and neither
+    # is what the sentence would be claiming. A comment is a claim — say the
+    # thing that is true, which is the thing the caller actually needs.
     #
     # 🔴 AND THE SENTENCE SPLITS ON `staged` FOR THE SAME REASON THE CODE DOES.
     # "restored and unstaged … nothing from this run is left staged" was printed
     # on a run that staged nothing — literally true, and it read as a report that
     # the index had been cleaned, which is how a silent unstage of ANOTHER
     # session's entry went unnoticed. Claim only the half that happened.
+    # 🔴 NAME EVERY PATH THAT WAS PUT BACK, not just the doc. `--archive-write`
+    # makes this plural, and the archive is the path where an operator most needs
+    # to know: it holds the only copy of the text the doc is losing, so "the doc
+    # was restored" read beside a created-and-unlinked archive is an under-claim
+    # about the file they would go looking for. With `extra is None` the two
+    # sentences below are byte-identical to what they always were.
+    subject = "the doc and the archive were" if extra is not None else "the doc was"
     if staged:
         return (
-            "\n(rolled back: the doc was restored and unstaged, so nothing from "
+            f"\n(rolled back: {subject} restored and unstaged, so nothing from "
             "this run is left staged or written — re-running is safe and will "
             "not append the update twice.)"
         )
     return (
-        "\n(rolled back: the doc was restored to the bytes this run found. This "
+        f"\n(rolled back: {subject} restored to the bytes this run found. This "
         "run staged nothing, so the index was not touched — any staged change to "
         "this path is someone else's and is still there. Re-running is safe and "
         "will not append the update twice.)"
@@ -6135,12 +6434,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="rule (r): a file that already holds the content this prune "
         f"removes. REQUIRED when a removal looks DURABLE by rule (f)'s "
         f"predicate (a dated claim, an evidence verb, an OPEN/RESOLVED "
-        f"marker) — exit 16 otherwise. 🔴 It is READ, never written, and this "
-        f"run does not commit it: write and commit the archive yourself. When "
+        f"marker) — exit 16 otherwise. 🔴 By DEFAULT it is READ, never written, "
+        f"and this run does not commit it: write and commit the archive "
+        f"yourself, or pass {ARCHIVE_WRITE_FLAG} and this run writes it. When "
         f"given it is checked over EVERY removed line, not only the durable "
         f"ones, so passing it by habit is strictly safer than not. Whitespace "
         f"is collapsed before comparing; everything else must be verbatim. "
         f"Requires {PRUNE_FLAG}.",
+    )
+    p.add_argument(
+        ARCHIVE_WRITE_FLAG,
+        action="store_true",
+        dest="archive_write",
+        help=f"CREATE or APPEND to {ARCHIVE_FLAG}'s file with the lines this "
+        f"prune removes, instead of requiring it to already hold them. This is "
+        f"the writer half of rule (r), and it is an OPT-IN: without it a durable "
+        f"prune naming a missing archive is still refused (exit 16), which is "
+        f"the behaviour the rule shipped with. Requires {ARCHIVE_FLAG} and "
+        f"{ARCHIVE_NOTE_FLAG}, and the archive must be INSIDE --repo — the leak "
+        f"scanner enumerates the repo from its own location and a path-limited "
+        f"commit cannot carry a file outside it. The append is checked by rule "
+        f"(r) over the bytes read back off disk, so a writer that lost a line "
+        f"refuses rather than lands. Nothing is duplicated on a re-run: "
+        f"removals the archive already holds are not appended, and rule (q) "
+        f"refuses a second prune of lines already gone.",
+    )
+    p.add_argument(
+        ARCHIVE_NOTE_FLAG,
+        metavar="TEXT",
+        dest="archive_note",
+        help=f"the editorial sentence the appended block carries. REQUIRED with "
+        f"{ARCHIVE_WRITE_FLAG} and REFUSED without it. 🔴 It is required because "
+        f"a GENERATED header is worse than none: 'N blocks moved out of <doc>' "
+        f"reads as a complete description of the content's status and stops the "
+        f"next reader looking for the caveat. Write what you would have written "
+        f"by hand — e.g. 'these are NOT merely superseded; one rests on a "
+        f"measurement artifact, so read them for the raw numbers and do NOT "
+        f"adopt their conclusions'. An existing file's own header is never "
+        f"rewritten; this note describes THIS block.",
     )
     p.add_argument(
         "--advanced",
@@ -6400,6 +6731,73 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return EXIT_USAGE
+    # ---- rule (r)'s WRITER argument shape, EXIT_USAGE for rule (r)'s reason ---
+    # 🔴 EVERY ARM IS EXIT 2, NEVER 16, and the argument is the one three blocks
+    # above make: 16 is the RULE's verdict about what a prune removes, and a flag
+    # combination that cannot name a file conserves nothing to have a verdict
+    # about. The `--repo` containment arm is the one that is NOT merely an inert
+    # flag: it is the only place the two ORDERING constraints this writer has to
+    # satisfy can be checked at all — rule (o)'s scanner enumerates the repo from
+    # its own location, and `git commit -- <path>` cannot carry a path outside it,
+    # so an archive written outside --repo is both unscanned and uncommittable
+    # while the run reports `status=written`.
+    if args.archive_write and args.archive is None:
+        print(
+            f"{ARCHIVE_WRITE_FLAG} needs {ARCHIVE_FLAG}: it says to WRITE the "
+            f"archive, and nothing names which file.\n"
+            f"  Add `{ARCHIVE_FLAG} <path> {ARCHIVE_NOTE_FLAG} '<why these are "
+            f"worth keeping>'`.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if args.archive_write and not (args.archive_note or "").strip():
+        print(
+            f"{ARCHIVE_WRITE_FLAG} needs {ARCHIVE_NOTE_FLAG}, and the note may "
+            f"not be empty.\n"
+            f"  🔴 The archive's editorial header is human judgement and a "
+            f"GENERATED one is worse than none: a header saying only 'N blocks "
+            f"moved out of <doc> on <date>' reads as a complete description of "
+            f"what those blocks are now worth, and so stops the next reader "
+            f"looking for the caveat. This tool writes the machine-derivable "
+            f"half — which doc, which date, which section — and refuses to "
+            f"invent the rest.\n"
+            f"  Pass what you would have typed above the block by hand: "
+            f"`{ARCHIVE_NOTE_FLAG} \"these are NOT merely superseded — one rests "
+            f"on a measurement artifact; read them for the raw numbers, do NOT "
+            f"adopt their conclusions\"`.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if args.archive_note is not None and not args.archive_write:
+        print(
+            f"{ARCHIVE_NOTE_FLAG} needs {ARCHIVE_WRITE_FLAG}: the note is the "
+            f"header of a block this run would APPEND, and without that flag "
+            f"this run appends nothing.\n"
+            f"  An inert flag is worth refusing rather than ignoring — a caller "
+            f"who passed it believes their sentence was recorded somewhere.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if args.archive_write and not _within(repo, Path(args.archive)):
+        print(
+            f"{ARCHIVE_WRITE_FLAG} needs an archive INSIDE --repo, and "
+            f"{Path(args.archive).resolve()} is outside {repo}.\n"
+            f"  🔴 TWO ORDERING CONSTRAINTS MAKE THIS A REFUSAL RATHER THAN A "
+            f"WARNING, and both fail SILENTLY. (1) Rule (o) runs the target "
+            f"repo's own leak scanner over the WORKING TREE between the write "
+            f"and the `git add`, and that scanner enumerates the repo from its "
+            f"own location — an evicted block written outside it is never "
+            f"scanned, and an evicted block that leaks is still a leak. "
+            f"(2) `git commit -- <paths>` cannot carry a path outside the "
+            f"repository, so the one commit this run makes could not include "
+            f"it. Both would end in `status=written` with the archive neither "
+            f"scanned nor committed.\n"
+            f"  Point it at a path under {repo} — `claudedocs/archive/"
+            f"handoff-<topic>.md` is where this repo keeps them. Reading an "
+            f"out-of-repo archive is still fine: drop {ARCHIVE_WRITE_FLAG}.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     if args.size_ratchet_override is not None and not args.size_ratchet_override.strip():
         print(
             f"{SIZE_RATCHET_FLAG} was given an EMPTY reason "
@@ -6627,6 +7025,11 @@ def main(argv: list[str] | None = None) -> int:
     # floor it ratchets against. `## Next steps` is a REPLACE heading, which
     # `prune_plan` refuses outright — belt and braces on the same property.
     pruned_note = ""
+    # 🔴 BOUND BEFORE THE BRANCH, because the write window far below reads it on
+    # EVERY run — including runs with no `--prune` at all — and a name bound only
+    # inside the branch would be a `NameError` on the ordinary update path, the
+    # one path this whole change is supposed to leave byte-identical.
+    appended: ArchiveAppend | None = None
     if args.prune is not None:
         plan = prune_plan(merged_text, prune_text, args.prune_count)
         if plan.problems:
@@ -6642,13 +7045,22 @@ def main(argv: list[str] | None = None) -> int:
         # `merged_text` and this one writes nothing: a refusal here must leave
         # the merge exactly as rule (q) found it.
         #
-        # 🔴 THE ARCHIVE IS READ HERE AND NOWHERE ELSE, AND IT IS NEVER OPENED
-        # FOR WRITING. The module's one write and one path-limited commit are
-        # unchanged by this rule, which is what
-        # `test_it_makes_exactly_one_path_limited_commit` pins.
+        # 🔴 THE ARCHIVE IS READ HERE, AND WITHOUT `--archive-write` IT IS NEVER
+        # OPENED FOR WRITING. The module's one write and one path-limited commit
+        # are unchanged by this rule on that path, which is what
+        # `test_it_makes_exactly_one_path_limited_commit` pins — that test passes
+        # neither archive flag, so it is a claim about the DEFAULT and stays
+        # exactly true. `--archive-write` adds a SECOND written path and a second
+        # committed one; `test_the_WRITE_flag_commits_the_doc_AND_the_archive` is
+        # that path's own pin, and the two together are the whole claim.
         archive_text: str | None = None
         archive_error = ""
         archive_is_the_doc = False
+        # 🔴 INITIALISED FALSE RATHER THAN SET ONLY IN THE `except`, because
+        # "absent" is the arm `--archive-write` FORGIVES and an unbound name there
+        # would be a `NameError` on the ordinary success path — a crash, not a
+        # refusal, in the middle of the write window.
+        archive_missing = False
         if args.archive is not None:
             archive = Path(args.archive)
             # `strict=False`, so a path that does not exist still resolves and
@@ -6662,9 +7074,50 @@ def main(argv: list[str] | None = None) -> int:
                 # unreadable archive is a false conservation claim, which is a
                 # verdict about the prune, not about the tool's ability to run.
                 archive_error = str(exc)
-        unconserved = conservation_problems(
-            plan, args.archive, archive_text, archive_error, archive_is_the_doc
-        )
+                archive_missing = not archive.exists()
+        # ---- `--archive-write`: PROJECT the append, then check the PROJECTION --
+        # 🔴 THE CHECK IS NOT SKIPPED AND IT IS NOT MOVED — IT IS RUN TWICE, ON
+        # TWO DIFFERENT INPUTS, AND BOTH ARE `conservation_problems`. Here it runs
+        # over the text the writer WOULD produce, because the proposal run — the
+        # default first half of every `/handoff` — has no bytes on disk to read
+        # and must still be able to refuse. The confirmed run then runs the
+        # IDENTICAL function over the bytes read back off disk after the append
+        # (see the write window below), which is what makes rule (r) a positive
+        # control on this writer instead of a gate the writer was let past.
+        #
+        # 🔴 AND IT IS A PROJECTION, NEVER A WRITE. A proposal run that created the
+        # archive would break the two-run shape on the one artefact where it
+        # matters most: the archive holds the ONLY copy of what the doc is losing.
+        #
+        # ⚠ AN ARCHIVE THAT EXISTS AND CANNOT BE READ IS STILL REFUSED HERE, write
+        # flag or not — `archive_missing` is the only arm the flag forgives.
+        # Appending to a file we could not read would lose whatever is in it and
+        # could not preserve a header, which is half of why the note is required.
+        # 🔴 NO `and not archive_is_the_doc` CONJUNCT, AND THAT IS A MEASURED
+        # DELETION RATHER THAN AN OMISSION — the same finding and the same remedy
+        # as rule (r)'s own R2. One was written first, reading as this branch's
+        # "never append into the doc itself" decision; battery row R14
+        # (`args.archive_write and True`) then SURVIVED a green suite, because
+        # `conservation_problems`' FIRST branch refuses `archive_is_the_doc`
+        # unconditionally and this call site passes that flag straight through. So
+        # the conjunct could only ever make `archive_append` run one pointless time
+        # before a refusal that was going to happen anyway: it decided NOTHING,
+        # while reading as the guard against appending evicted lines back into the
+        # document they came from. That guard is real and it is R7's, one function
+        # away — and nothing is written on this path, because the refusal returns
+        # before the write window. R14 is deleted with the conjunct, as a duplicate
+        # of R7; keeping either would be a second copy of one predicate.
+        if args.archive_write and (archive_text is not None or archive_missing):
+            appended = archive_append(
+                archive_text, plan, args.archive_note, relpath, _today()
+            )
+            unconserved = conservation_problems(
+                plan, args.archive, appended.text, "", archive_is_the_doc
+            )
+        else:
+            unconserved = conservation_problems(
+                plan, args.archive, archive_text, archive_error, archive_is_the_doc
+            )
         if unconserved:
             print(
                 prune_unconserved_report(unconserved, plan, relpath),
@@ -6672,7 +7125,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return EXIT_PRUNE_UNCONSERVED
         merged_text = plan.text
-        pruned_note = prune_note(plan, args.archive)
+        pruned_note = prune_note(plan, args.archive, appended)
 
     if _canon(merged_text) == _canon(base_text):
         print(
@@ -7130,6 +7583,27 @@ def main(argv: list[str] | None = None) -> int:
     # read the error and the merge appended the same block a SECOND time.
     # `status=failed` reads as "nothing happened"; it must therefore BE that.
     original: bytes | None = doc.read_bytes() if doc.exists() else None
+    # 🔴 THE ARCHIVE'S OWN "nothing happened" STATE, CAPTURED BESIDE THE DOC'S AND
+    # FOR THE IDENTICAL REASON. `--archive-write` makes this run write a SECOND
+    # path, so every arm that says NOTHING WRITTEN has a second thing to make true
+    # — and one of those arms is rule (r) itself, firing on the bytes this module
+    # had just appended. `None` means "did not exist", which `restore_doc_bytes`
+    # reads as "unlink"; it is resolved HERE rather than from `archive_missing`
+    # above, because that was a claim about a moment several refusals ago and
+    # `claude/RULES.md` says re-check immediately before the destructive step.
+    archive_write: _WrittenPath | None = None
+    if appended is not None and appended.appended:
+        # 🔴 THE RELPATH IS DERIVED FROM THE RESOLVED PATH, which is what the
+        # `--repo` containment refusal above checked. Deriving it from the
+        # caller's spelling would let `../repo/claudedocs/x.md` reach `git add`
+        # as a string git resolves differently from the check that vouched for it.
+        archive_rel = str(Path(args.archive).resolve().relative_to(repo))
+        archive_abs = repo / archive_rel
+        archive_write = _WrittenPath(
+            archive_abs,
+            archive_rel,
+            archive_abs.read_bytes() if archive_abs.exists() else None,
+        )
     committed = False
     # 🔴 THIS RUN'S OWN STAGING, TRACKED RATHER THAN ASSUMED. `_undo_write` used
     # to unstage unconditionally, which on the rule (o) path reset an index entry
@@ -7137,6 +7611,14 @@ def main(argv: list[str] | None = None) -> int:
     # on the line AFTER `git add` returns, so an `add` that itself failed leaves
     # it False.
     staged = False
+    # 🔴 THE ARCHIVE'S OWN VERSION OF `staged`, AND IT IS NOT REDUNDANT WITH
+    # `archive_write is not None`. That name says a write was PLANNED; this one
+    # says it HAPPENED. The failure arm below unlinks an archive whose `original`
+    # is `None`, so an `OSError` raised by the DOC write — one line before the
+    # archive is touched — must not reach a rollback that deletes a file this run
+    # never opened. Flips on the line AFTER `write_text` returns, exactly as
+    # `staged` does after `git add`.
+    archive_written = False
     # 🔴 RESOLVED BEFORE THE WRITE so a repo with no scanner costs nothing but a
     # `Path.is_file()`, and so the refusal below cannot be a surprise about where
     # the scanner was expected to be.
@@ -7144,6 +7626,46 @@ def main(argv: list[str] | None = None) -> int:
     try:
         doc.parent.mkdir(parents=True, exist_ok=True)
         doc.write_text(merged_text, encoding="utf-8")
+        # ---- rule (r)'s WRITER half: the archive, INSIDE rule (o)'s window ----
+        # 🔴 AFTER THE DOC WRITE AND BEFORE THE LEAK GATE, and that position is
+        # the whole of constraint (2) on this feature. The scanner below reads the
+        # WORKING TREE, so an evicted block written after it would never be
+        # scanned — and an evicted block that leaks is still a leak, in a file
+        # this run is about to commit. Written before the gate, it is covered by
+        # the same refusal the doc is, and rolled back by the same rollback.
+        if archive_write is not None:
+            assert appended is not None  # implied by `archive_write is not None`
+            archive_write.path.parent.mkdir(parents=True, exist_ok=True)
+            archive_write.path.write_text(appended.text, encoding="utf-8")
+            archive_written = True
+            # ---- rule (r), AGAIN, OVER THE BYTES ON DISK --------------------
+            # 🔴 THIS IS CONSTRAINT (3) AND IT IS THE POINT OF THE DESIGN: the
+            # conservation check is NOT branched around when the write flag is
+            # set, it is RE-RUN over what the writer produced. `conservation_
+            # problems` is the same function the proposal run called over the
+            # PROJECTED text; here its input is `read_text` of the file, so the
+            # guard is a positive control on `archive_append` — a writer that
+            # dropped a line, normalised one, or wrote to the wrong path refuses
+            # here rather than landing. A `return` on this arm leaves NEITHER
+            # file changed: `_undo_write` is handed both.
+            # ⚠ `archive_is_the_doc` is passed as False deliberately — it was
+            # already refused far above, before anything was written, and
+            # re-deciding it from paths here would be the duplicated predicate.
+            readback = archive_write.path.read_text(encoding="utf-8")
+            regression = conservation_problems(
+                plan, args.archive, readback, "", False
+            )
+            if regression:
+                print(
+                    prune_unconserved_report(
+                        regression, plan, relpath, archive_was_written=True
+                    )
+                    + _undo_write(
+                        repo, doc, relpath, original, staged, archive_write
+                    ),
+                    file=sys.stderr,
+                )
+                return EXIT_PRUNE_UNCONSERVED
         # ---- rule (o): the repo's own leak scanner reads the delta ----------
         # 🔴 AFTER THE WRITE AND BEFORE THE `git add`, because the scanner reads
         # the WORKING TREE — `tests/leakscan.py` enumerates `--cached --others`
@@ -7157,12 +7679,18 @@ def main(argv: list[str] | None = None) -> int:
         if verdict.refusal:
             print(
                 f"{verdict.refusal}"
-                f"{_undo_write(repo, doc, relpath, original, staged)}",
+                f"{_undo_write(repo, doc, relpath, original, staged, archive_write if archive_written else None)}",
                 file=sys.stderr,
             )
             return EXIT_LEAK_REFUSED
         print(verdict.notes)
-        git(repo, "add", "--", relpath)
+        # 🔴 ONE `git add`, SO ONE `staged` FLAG COVERS BOTH PATHS. Splitting it
+        # would invent a state — doc staged, archive not — that this code cannot
+        # reach, and `_undo_write`'s own header records what a `staged` flag that
+        # does not match reality costs: an unstage of another session's entry.
+        git(repo, "add", "--", relpath, *(
+            [archive_write.relpath] if archive_write is not None else []
+        ))
         staged = True
         subject = f"docs(handoff): {args.advanced.strip().splitlines()[0]}"[:100]
         # 🔴 THE TRUNCATION IS ON THE SUBJECT, AND THE TRAILERS ARE ADDED AFTER
@@ -7182,7 +7710,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         # Path-limited on purpose: exactly one commit, carrying exactly the
         # diff that was shown, even if the caller had other work staged.
-        git(repo, "commit", "-m", message, "--", relpath)
+        # 🔴 STILL PATH-LIMITED, TO AN EXPLICIT SET, NOT WIDENED. With
+        # `--archive-write` the set is the doc PLUS the archive and nothing else —
+        # never `git commit -a`, never a bare `git commit`. The archive is in the
+        # set only when `archive_write is not None`, i.e. only when THIS RUN wrote
+        # bytes to it; an archive that already held every removal is left out,
+        # because committing an unchanged path would sweep in whatever else had
+        # been done to it.
+        git(repo, "commit", "-m", message, "--", relpath, *(
+            [archive_write.relpath] if archive_write is not None else []
+        ))
         committed = True
         sha = git(repo, "rev-parse", "HEAD").strip()
     except (GitError, OSError) as exc:
@@ -7191,7 +7728,15 @@ def main(argv: list[str] | None = None) -> int:
         # would DISCARD a committed change — the opposite of the fix.
         note = (
             COMMIT_LANDED_NOTE if committed
-            else _undo_write(repo, doc, relpath, original, staged)
+            else _undo_write(
+                repo, doc, relpath, original, staged,
+                # 🔴 ONLY IF THE WRITE ACTUALLY HAPPENED. `archive_written` flips
+                # on the line AFTER `write_text` returns, exactly as `staged` does
+                # after `git add`: an `OSError` from the doc write must not make
+                # the rollback unlink an archive this run never touched — in a
+                # shared checkout that archive is somebody's only copy.
+                archive_write if archive_written else None,
+            )
         )
         print(f"status=failed\n{exc}{note}", file=sys.stderr)
         return EXIT_FAIL

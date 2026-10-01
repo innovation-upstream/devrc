@@ -1519,7 +1519,9 @@ python3 scripts/lib/handoff_doc.py --repo "$PWD" --topic "$TOPIC" \
   pure prune brings no sections, and forcing a no-op delta would mean REPLACING a
   section the author had to pick, i.e. the tool teaching the hand edit it replaces.
 * 🔴 `--archive FILE` is **required when any removal looks DURABLE** (rule (r), §K) and
-  is checked over every removed line when given. It is READ, never written.
+  is checked over every removed line when given. By default it is READ, never written;
+  `--archive-write --archive-note '<why these are kept>'` makes this run create or append
+  to it — see §K.
 
 ### Refusal semantics — `status=prune-refused`, exit 15
 
@@ -1653,9 +1655,10 @@ python3 scripts/lib/handoff_doc.py --repo "$PWD" --topic "$TOPIC" \
 * `--archive FILE` is **REQUIRED when any removal looks DURABLE** by rule (f)'s
   predicate — a dated claim, an evidence verb (`MEASURED`, `RETRACTED`, `CLOSED`, …), or
   an `OPEN:`/`RESOLVED <sha>:` marker. Otherwise it is optional.
-* 🔴 **It is READ, never written, and this run does not commit it.** The module still
-  makes ONE file write and ONE path-limited commit, of the handoff doc alone. Write the
-  archive and commit it yourself, in the same session.
+* 🔴 **By default it is READ, never written, and this run does not commit it.** On that
+  path the module makes ONE file write and ONE path-limited commit, of the handoff doc
+  alone. Write the archive and commit it yourself, in the same session — **or pass
+  `--archive-write` and this run does both** (§K-W below).
 * 🔴 **When given it is checked over EVERY removed line, not only the durable ones.**
   `durable_reason` is a FLOOR, not a classifier, so a rule that only compared the lines
   it flagged would inherit that floor. Passing the flag by habit is therefore strictly
@@ -1676,7 +1679,7 @@ the first:
 | marker | fires when | fix |
 |---|---|---|
 | `[no archive]` | a removal looks DURABLE and no `--archive` was given | move the content somewhere that outlives the doc, then name that file |
-| `[archive unreadable]` | `--archive` names a file that cannot be read | write the file FIRST — this tool never does |
+| `[archive unreadable]` | `--archive` names a file that cannot be read | write the file FIRST, or pass `--archive-write` and this run will — but see §K-W: that flag forgives ABSENT, never UNREADABLE |
 | `[archive is the doc]` | `--archive` resolves to the handoff doc being pruned | the archive has to be a DIFFERENT file; see below |
 | `[not conserved]` | a removed line is not present in the archive | add it verbatim, or drop it from the prune |
 
@@ -1738,3 +1741,118 @@ are under a heading that means anything; that the archive is not itself about to
 deleted. It compares **content at the moment of the run**, which is the half a machine can
 do — the same kind of structural-only claim rule (j) declares about a cited forcing
 function.
+
+## §K-W rule (r)'s WRITER half — `--archive-write`
+
+### The gap, and it is the mirror of the one §K closed
+
+🔴 **§K built the verifier and nothing built the writer.** Rule (p) refuses an
+over-ceiling doc with exit **14** `size-ratchet`, and its own documented remedy is "move
+closed text into the archive, leave a pointer, and `--prune` the lines out". Measured on
+the tree §K shipped on: `scripts/lib/handoff_doc.py` had **exactly one file write** (the
+doc), and every `claudedocs/archive/*` file in this repo was produced by a one-off bulk
+`git mv` plus hand authoring. So the sanctioned exit from a blocked session was *hand-build
+the file, get every line byte-exact, then prune* — and rule (r) then refused the prune until
+you had. `--archive-write` is that hand step as a flag.
+
+### How to use it
+
+```bash
+TOPIC=queue-drain
+PRUNE=/tmp/prune-$TOPIC.md               # the VERBATIM lines to remove
+ARCHIVE=claudedocs/archive/handoff-$TOPIC.md   # INSIDE the repo; the tool writes & commits it
+python3 scripts/lib/handoff_doc.py --repo "$PWD" --topic "$TOPIC" \
+  --prune "$PRUNE" --prune-count 3 --archive "$ARCHIVE" \
+  --archive-write \
+  --archive-note 'these are NOT merely superseded — the depth number rests on a measurement artifact; read it for the raw value and do NOT adopt its conclusion' \
+  --advanced 'moved three closed findings into the archive'
+```
+
+* 🔴 **It is an OPT-IN and nothing acquires it by default.** Without it, a durable prune
+  naming a missing archive is still **exit 16** — §K's refusal, unchanged. That is the
+  negative control the whole feature rests on, and it has its own test
+  (`test_without_the_write_flag_the_SAME_RUN_is_still_REFUSED`).
+* 🔴 **`--archive-note TEXT` is REQUIRED with it, and refused without it.** See below.
+* 🔴 **The archive must be INSIDE `--repo`** — exit 2 otherwise, checked on resolved-path
+  identity so a symlink out of the tree does not walk it. Two silent failures make this a
+  refusal rather than a warning: rule (o)'s scanner enumerates the repo from its own
+  location and cannot see a file outside it (**an evicted block that leaks is still a
+  leak**), and `git commit -- <paths>` cannot carry one either. Both would end in
+  `status=written` with the archive neither scanned nor committed. *Reading* an
+  out-of-repo archive is still fine — drop the write flag.
+* **The commit becomes exactly two paths**, the doc and the archive, still path-limited.
+  The archive is in it only when this run actually wrote bytes to it.
+* ⚠ **`--archive` is resolved against the CWD, not against `--repo`** — that is the
+  flag's pre-existing contract, inherited rather than changed here. A *relative*
+  `--archive` passed from a directory that is not the repo root therefore resolves
+  somewhere else, and the containment check above **refuses** it at exit 2 instead of
+  writing to the wrong place. Loud, and the safe direction; pass an absolute path, or
+  run with `--repo "$PWD"` from the repo root as the recipe above does.
+
+### Where the write happens, and why that position is the design
+
+The archive is written **after the doc write and before rule (o)'s leak scan**, inside the
+same `try` and covered by the same rollback. The scanner reads the working tree, so a block
+written after it would never be scanned; a refusal there leaves neither file behind.
+
+### The conservation check is RE-RUN over the write, never skipped by it
+
+🔴 **Rule (r) is a positive control on this writer.** `conservation_problems` is called
+**twice, on two different inputs**, and both calls are the same function:
+
+| when | input | what it catches |
+|---|---|---|
+| in the prune block (both run modes) | the **projected** text `archive_append` would produce | a writer that would drop, reword or renormalise a line — refuses before anything is written |
+| in the write window (`--confirm` only) | the bytes **read back off disk** | the write itself being lossy: truncated, wrong path, encoding loss |
+
+The second row is the one that makes the guard validate the tool's own output. It is also
+the one that is easy to leave **unreachable**: the obvious sabotage (break
+`archive_append`) is caught by the first row and never reaches the second, measured. Its
+test therefore sabotages `write_text` instead, and the two refusals are distinguishable in
+the output — the read-back arm prints `🔴 THIS RUN DID APPEND …`, which also stops the
+run telling an operator their archive is untouched when it had just been written and rolled
+back.
+
+⚠ **So with the write flag, `[no archive]` and `[not conserved]` are unreachable by caller
+error** — the caller no longer owns the content. The three ways exit 16 still fires are
+`[archive is the doc]`, `[archive unreadable]` for something that EXISTS and cannot be
+read, and a writer defect caught by the read-back.
+
+### The editorial header: the note is required, and an existing one is preserved
+
+🔴 **A GENERATED header is worse than none, which is why the note is required rather than
+defaulted.** A real header in this repo reads *"these are NOT merely superseded — one rests
+on a MEASUREMENT ARTIFACT … read them for the raw numbers, do NOT adopt their
+conclusions."* Nothing a machine can compute says that. What it *can* compute — "N blocks
+moved out of `<doc>` on `<date>`" — is strictly **worse than silence**, because it reads as
+a complete description of what the content is now worth and so stops the next reader
+looking for the caveat. The tool writes the machine-derivable half (which doc, which date,
+which section) directly above the caller's sentence and refuses to invent the rest.
+
+**Both options were taken, and preserving alone could not be the answer.** Appending never
+rewrites a byte above the insertion point, so a hand-authored header always survives — it
+just does not *describe* the new block: the header quoted above is a judgement about three
+specific findings, and a fourth arriving under it inherits a caveat nobody made about it.
+So the file's header is preserved **and** every appended block carries its own note.
+
+### Idempotence — two layers, neither a dedupe heuristic
+
+1. **Rule (q) refuses the second run of one prune.** The lines are no longer in the
+   document, so the re-run exits **15** `[absent]` and the archive is not opened at all.
+   Pre-existing behaviour, not something the writer adds.
+2. **The writer appends only removals the archive does not already hold**, as a set
+   difference over `archive_lines` — the *same* containment set rule (r) verifies with, so
+   "already held" and "conserved" cannot disagree, and a re-indented copy counts as held. An
+   archive that already holds every removal yields an empty append: the file is **not opened
+   for writing** and is **not in the commit**, and the run says `ALREADY in` on stdout.
+
+A block-level dedupe (match the heading, hash the block) was not taken: it would be a
+second spelling of one predicate, free to answer differently, and it would miss the
+realistic case of an archive hand-authored earlier that holds *some* of these lines.
+
+### What it does not check
+
+Everything §K's own "what it does not check" lists, plus: that the archive's location is
+one anybody will look in, that the note is true, or that an appended block belongs in the
+same file as the blocks above it. It writes where it is pointed and records the sentence it
+is given.
