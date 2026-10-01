@@ -26,15 +26,22 @@ func main() {
 	}
 
 	// the pane's cwd comes from the tmux binding (`#{pane_current_path}`);
-	// run bare, "current" means here
+	// run bare, "current" means here. argv[2] (when present) is the pane
+	// TITLE (`#{pane_title}`, "OC | <session title>") — the pane's own
+	// claim about its session, which is what disambiguates several
+	// concurrent opencode processes in one directory.
 	var cwd string
 	if len(os.Args) > 1 {
 		cwd = os.Args[1]
 	} else if wd, err := os.Getwd(); err == nil {
 		cwd = wd
 	}
+	title := ""
+	if len(os.Args) > 2 {
+		title = os.Args[2]
+	}
 
-	d, loadErr := sent.Load(cwd, sent.LiveRunner{})
+	d, loadErr := sent.Load(cwd, title, sent.LiveRunner{})
 
 	width, height := 100, 28
 	var model tea.Model

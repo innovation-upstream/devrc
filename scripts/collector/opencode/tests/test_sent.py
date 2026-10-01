@@ -518,6 +518,84 @@ def test_here_json_carries_the_resolution_kind_and_notes(tmp_path, capsys):
     assert any("no session directory matches /nowhere" in n for n in payload["notes"])
 
 
+def test_title_beats_directory_when_one_directory_hosts_several(tmp_path, capsys):
+    """🔴 THE WRONG-SESSION BUG, PINNED. Measured 2026-10-01: THREE opencode
+    processes shared devrc's directory — two interactive TUIs and this very
+    agent session — and newest-by-update always picked whichever was most
+    ACTIVE (the agent session updates itself constantly), so the operator's
+    TUI lost every time. The pane TITLE (`OC | <session title>`) is the
+    pane's own claim; it must beat the directory heuristics."""
+    db = _build_db(tmp_path / "store.db")
+    # the operator's TUI session: same directory, OLDER
+    _add_session(db, sid="s-tui", title="Call recording for meeting transcription & tasks",
+                 directory="/home/zach/workspace/devrc", created=1000, updated=1000)
+    _user_msg_with_text(db, "m1", "s-tui", 1700000001000, "typed in the TUI")
+    # the continuously-active agent session: same directory, NEWEST
+    _add_session(db, sid="s-agent", title="Research opencode plugin for sent messages",
+                 directory="/home/zach/workspace/devrc", created=5000, updated=99999)
+    _user_msg_with_text(db, "m2", "s-agent", 1700000002000, "agent noise")
+    db.commit()
+    # the pane title, as tmux reports it — full title fits when short enough
+    rc, payload, cap = _json_of(
+        tmp_path, capsys, "here", "/home/zach/workspace/devrc",
+        "OC | Call recording for meeting transcription & tasks")
+    assert rc == 0
+    assert payload["session"]["id"] == "s-tui"
+    assert payload["resolved_from"] == "title"
+    assert "typed in the TUI" in payload["messages"][0]["text"]
+
+
+def test_truncated_pane_title_matches_by_stem(tmp_path, capsys):
+    """The TUI truncates long titles with an ellipsis (`…`); the stem must
+    match, and the `!= stem` guard stops a bare 'New session' stem from
+    matching every such session ever created."""
+    db = _build_db(tmp_path / "store.db")
+    _add_session(db, sid="s1", title="Call recording for meeting transcription & tasks",
+                 directory="/home/zach/workspace/devrc", updated=9000)
+    _user_msg_with_text(db, "m1", "s1", 1700000001000, "typed")
+    db.commit()
+    rc, payload, cap = _json_of(
+        tmp_path, capsys, "here", "/home/zach/workspace/devrc",
+        "OC | Call recording for meeting transcript…")
+    assert rc == 0
+    assert payload["session"]["id"] == "s1"
+    assert payload["resolved_from"] == "title-prefix"
+
+
+def test_stale_title_falls_back_to_directory(tmp_path, capsys):
+    """A pane title naming a session that no longer exists must fall through
+    to the directory match — the title is a claim to CHECK, not an answer to
+    trust blindly."""
+    db = _build_db(tmp_path / "store.db")
+    _add_session(db, sid="s1", title="a real session", directory="/tmp/proj",
+                 updated=9000)
+    _user_msg_with_text(db, "m1", "s1", 1700000001000, "typed")
+    db.commit()
+    rc, payload, cap = _json_of(
+        tmp_path, capsys, "here", "/tmp/proj", "OC | deleted session title")
+    assert rc == 0
+    assert payload["session"]["id"] == "s1"
+    assert payload["resolved_from"] == "exact"
+
+
+def test_non_opencode_pane_title_is_ignored(tmp_path, capsys):
+    """An empty or non-OC pane title skips title matching entirely — a zsh
+    pane's title must not match a session that happens to share its text."""
+    db = _build_db(tmp_path / "store.db")
+    _add_session(db, sid="s1", title="zsh", directory="/tmp/proj", updated=1000)
+    _add_session(db, sid="s2", title="other", directory="/tmp/proj", updated=9000)
+    _user_msg_with_text(db, "m2", "s2", 1700000001000, "typed")
+    db.commit()
+    rc, payload, cap = _json_of(tmp_path, capsys, "here", "/tmp/proj", "")
+    assert rc == 0
+    assert payload["session"]["id"] == "s2"          # newest in the directory
+    assert payload["resolved_from"] == "exact"
+    rc, payload, cap = _json_of(tmp_path, capsys, "here", "/tmp/proj", "some other title")
+    assert rc == 0
+    assert payload["session"]["id"] == "s2"
+    assert payload["resolved_from"] == "exact"
+
+
 def test_json_stdout_never_leaks_human_rendering(tmp_path, capsys):
     """The human renderer's header line must not appear beside the JSON —
     one stdout, one consumer, one format."""

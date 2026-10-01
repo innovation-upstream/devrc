@@ -3,7 +3,7 @@
 
 Usage:
     oc-sent show <session-id> [--all-agents] [--db PATH]
-    oc-sent here [CWD] [--all-agents] [--db PATH]
+    oc-sent here [CWD] [TITLE] [--all-agents] [--db PATH]
 
 Session DISCOVERY is a solved problem — `opencode session list [-n N]
 [--format json]` prints full untruncated ids, titles and times newest-first —
@@ -310,20 +310,27 @@ def cmd_show(db, session_id: str, all_agents: bool, as_json: bool) -> int:
 
 
 def resolve_session_for_cwd(
-    db, cwd: str
+    db, cwd: str, title: str = ""
 ) -> tuple[dict | None, str, str]:
     """Return (session, note, kind) for "the current opencode session" at a
-    cwd. kind is "exact", "ancestor" or "fallback" — the --json contract
-    carries it, so it is decided HERE, never re-derived from the note's
-    wording.
+    cwd. kind is one of "title", "title-prefix", "exact", "ancestor",
+    "fallback" — the --json contract carries it, so it is decided HERE,
+    never re-derived from the note's wording.
 
-    Exact `session.directory` match first; then the LONGEST ancestor
-    directory of cwd (an opencode TUI launched at the project root records
-    the root, while the pane may sit in a subdir); then the newest session
-    overall WITH a note — a wrong answer labelled beats a silent wrong
-    answer, and the newest session is the best guess available. Newest
-    means `time_updated` (fallback `time_created`), matching `opencode
-    session list`'s own ordering.
+    🔴 THE TITLE COMES FIRST, AND THE MEASUREMENT IS THE REASON: a directory
+    can host SEVERAL concurrent opencode processes (measured 2026-10-01:
+    three in devrc — two interactive TUIs and this very agent session), and
+    newest-by-update then always picks whichever one is most ACTIVE — an
+    agent session updates itself constantly, so the operator's idle TUI
+    loses to it every time. That is the wrong-session bug this order fixes.
+    The opencode TUI names its own pane `OC | <session title>` (truncated
+    with … when long), so the keybind passes tmux's `#{pane_title}` and a
+    TITLE match — the pane's own claim about which session it is showing —
+    beats every directory guess. Directory matching (exact `session.directory`,
+    then the LONGEST ancestor directory of cwd) is the fallback for panes
+    that are not an opencode TUI, and the newest session overall WITH a note
+    is the last resort. Newest means `time_updated` (fallback
+    `time_created`), matching `opencode session list`'s own ordering.
     """
     sessions = sorted(
         S.iter_sessions(db),
@@ -336,6 +343,34 @@ def resolve_session_for_cwd(
     def _norm(p: str | None) -> str:
         return (p or "").rstrip("/")
 
+    def _title_of(s: dict) -> str:
+        return (s.get("title") or "").strip()
+
+    # --- title resolution: the pane's own claim, checked first ------------
+    clean = (title or "").strip()
+    for pre in ("OC | ", "OC |"):
+        if clean.startswith(pre):
+            clean = clean[len(pre):].lstrip()
+            break
+    clean = clean.strip()
+    if clean:
+        exact = [s for s in sessions if _title_of(s) == clean]
+        if exact:
+            return exact[0], "", "title"
+        # the TUI truncates long titles with an ellipsis; match on the stem.
+        # The strict `!= stem` excludes the exact-equal case already handled
+        # and stops a bare "New session" stem from matching every untitled
+        # session ever created.
+        stem = clean[:-1].rstrip() if clean.endswith("…") else clean
+        if stem:
+            prefixed = [
+                s for s in sessions
+                if _title_of(s).startswith(stem) and _title_of(s) != stem
+            ]
+            if prefixed:
+                return prefixed[0], "", "title-prefix"
+
+    # --- directory resolution: the pre-title heuristics --------------------
     cwd_n = _norm(cwd)
     exact = [s for s in sessions if _norm(s.get("directory")) == cwd_n]
     if exact:
@@ -354,7 +389,8 @@ def resolve_session_for_cwd(
     ), "fallback"
 
 
-def cmd_here(db, cwd: str, all_agents: bool, as_json: bool) -> int:
+def cmd_here(db, cwd: str, all_agents: bool, as_json: bool,
+             title: str = "") -> int:
     if not _store_is_readable(db):
         print(
             "store is unreadable (missing tables or schema drift) — "
@@ -364,7 +400,7 @@ def cmd_here(db, cwd: str, all_agents: bool, as_json: bool) -> int:
         return EXIT_STORE_UNREADABLE
 
     try:
-        session, note, kind = resolve_session_for_cwd(db, cwd)
+        session, note, kind = resolve_session_for_cwd(db, cwd, title)
     except (sqlite3.DatabaseError, IndexError) as exc:
         print(f"store read failed: {exc}", file=sys.stderr)
         return EXIT_STORE_UNREADABLE
@@ -414,6 +450,11 @@ def main(argv: list[str] | None = None) -> int:
         help="directory to resolve against (default: the process's cwd)",
     )
     p_here.add_argument(
+        "title", nargs="?", default="",
+        help="tmux pane title (#{pane_title}, e.g. 'OC | <session title>') — "
+             "the pane's own claim about its session; beats directory matching",
+    )
+    p_here.add_argument(
         "--all-agents", action="store_true",
         help="include subagent-injected pseudo-user messages, tagged",
     )
@@ -435,7 +476,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "show":
             return cmd_show(db, args.session_id, args.all_agents, args.json)
-        return cmd_here(db, args.cwd or os.getcwd(), args.all_agents, args.json)
+        return cmd_here(db, args.cwd or os.getcwd(), args.all_agents, args.json,
+                        args.title)
     finally:
         db.close()
 

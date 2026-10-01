@@ -25,8 +25,34 @@ const payloadOK = `{"session": {"id": "ses_1", "title": "t"},
  "textless_hidden": 1, "other_agent_hidden": 2,
  "resolved_from": "exact", "notes": []}`
 
+// recordingRunner pins what argv the loader actually execs.
+type recordingRunner struct {
+	fakeRunner
+	argv []string
+}
+
+func (r *recordingRunner) Run(argv []string) (string, string, int, error) {
+	r.argv = argv
+	return r.fakeRunner.Run(argv)
+}
+
+func TestLoadPassesThePaneTitleThrough(t *testing.T) {
+	rr := &recordingRunner{fakeRunner: fakeRunner{stdout: payloadOK, code: 0}}
+	Load("/cwd", "OC | Research something…", rr)
+	argv := strings.Join(rr.argv, " ")
+	if !strings.Contains(argv, "here /cwd OC | Research something… --json") {
+		t.Fatalf("title arg not passed: %q", argv)
+	}
+	// empty title still passes a positional (python treats empty as no hint)
+	rr2 := &recordingRunner{fakeRunner: fakeRunner{stdout: payloadOK, code: 0}}
+	Load("/cwd", "", rr2)
+	if !strings.Contains(strings.Join(rr2.argv, " "), "here /cwd  --json") {
+		t.Fatalf("empty title dropped: %q", rr2.argv)
+	}
+}
+
 func TestLoadParsesTheContract(t *testing.T) {
-	d, err := Load("/cwd", fakeRunner{stdout: payloadOK, code: 0})
+	d, err := Load("/cwd", "", fakeRunner{stdout: payloadOK, code: 0})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -53,7 +79,7 @@ func TestLoadParsesTheContract(t *testing.T) {
 
 func TestLoadMapsExitCodesPerTheContract(t *testing.T) {
 	// rc 4 carries a payload — an empty session is a renderable state
-	d, err := Load("/cwd", fakeRunner{stdout: `{"session":{"id":"s"},"messages":[],
+	d, err := Load("/cwd", "", fakeRunner{stdout: `{"session":{"id":"s"},"messages":[],
 		"textless_hidden":0,"other_agent_hidden":0,"resolved_from":null,"notes":[]}`,
 		code: 4})
 	if err != nil {
@@ -65,34 +91,34 @@ func TestLoadMapsExitCodesPerTheContract(t *testing.T) {
 
 	// rc 5 (store unreadable) carries NOTHING on stdout; the stderr wording
 	// is the error
-	_, err = Load("/cwd", fakeRunner{
+	_, err = Load("/cwd", "", fakeRunner{
 		stderr: "store is unreadable (missing tables or schema drift)\n", code: 5})
 	if err == nil || !strings.Contains(err.Error(), "store is unreadable") {
 		t.Fatalf("rc 5 error = %v", err)
 	}
 
 	// rc 3 (no such session) same shape
-	_, err = Load("/cwd", fakeRunner{stderr: "no opencode sessions found\n", code: 3})
+	_, err = Load("/cwd", "", fakeRunner{stderr: "no opencode sessions found\n", code: 3})
 	if err == nil || !strings.Contains(err.Error(), "no opencode sessions") {
 		t.Fatalf("rc 3 error = %v", err)
 	}
 
 	// rc 2 (no store at all)
-	_, err = Load("/cwd", fakeRunner{stderr: "no opencode database found\n", code: 2})
+	_, err = Load("/cwd", "", fakeRunner{stderr: "no opencode database found\n", code: 2})
 	if err == nil || !strings.Contains(err.Error(), "no opencode database") {
 		t.Fatalf("rc 2 error = %v", err)
 	}
 }
 
 func TestLoadNamesAMissingBinary(t *testing.T) {
-	_, err := Load("/cwd", fakeRunner{startErr: errors.New("exec: not found")})
+	_, err := Load("/cwd", "", fakeRunner{startErr: errors.New("exec: not found")})
 	if err == nil || !strings.Contains(err.Error(), "not runnable") {
 		t.Fatalf("missing-binary error = %v", err)
 	}
 }
 
 func TestLoadRejectsMalformedJSON(t *testing.T) {
-	_, err := Load("/cwd", fakeRunner{stdout: "{not json", code: 0})
+	_, err := Load("/cwd", "", fakeRunner{stdout: "{not json", code: 0})
 	if err == nil || !strings.Contains(err.Error(), "cannot parse") {
 		t.Fatalf("malformed error = %v", err)
 	}
