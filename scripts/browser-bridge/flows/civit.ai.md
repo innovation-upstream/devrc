@@ -59,12 +59,18 @@ RETRACTED — it DOES, and it SPENDS REAL BUZZ.** Measured 2026-09-28 on
 submitted two workflows and debited **6 Buzz** from the operator's Blue account,
 returning two real generated images.
 
-**How the false claim survived a reproducible observation:** the button is
-`disabled` until the form validates, and this app's prompt field renders a
+**How the false claim survived a reproducible observation:** the button was
+`disabled` until the form validated, and this app's prompt field renders a
 *placeholder* that reads exactly like a filled-in value. A `click` on a disabled
 button still reports `ok: true` and changes nothing — indistinguishable from
-"the platform swallowed my untrusted event". **Read `.disabled` before drawing
-any conclusion about trust from a dead click.**
+"the platform swallowed my untrusted event". Never draw a conclusion about trust
+from a dead click.
+
+🔴 **Do NOT carry "read `.disabled` first" forward as the safeguard.** A disabled
+control is a **coincidence of one app's validation rules at one version**, never a
+guard you are entitled to — on the app this retraction came from the coincidence
+reversed within four versions, in the reassuring direction. Per-app state and the
+measurement → `flows/<slug>.civit.ai.md`.
 
 Treat every in-frame click on a money control as LIVE. Never fire one to "test
 whether it works".
@@ -98,6 +104,47 @@ The likely source of the false belief: `openBuzzPurchaseGate.ts` and
 `requestConsentGate.ts` gate on handshake **readiness**, and the SDK bans the
 `allow-top-navigation-by-user-activation` sandbox token — all *about* user
 activation, none an `isTrusted` check, none on the spend path.
+
+## 🔴 `SAVE_IMAGE` is allowlisted by EXACT hostname — a block's own output can be refused
+
+This is the **HOST's** gate, so it applies to **every** App Block, not to the one
+you happen to be driving. `isAllowedSaveImageUrl`
+(`civitai/src/components/AppBlocks/saveImageDownload.ts:103`) accepts a url only
+when **`https:`** and the hostname is an **exact** member of
+`CIVITAI_IMAGE_HOSTS` (`:31`) plus one more added at call time:
+
+⚠ **Subdomain LABELS only below, never the full hostnames — deliberate.** This repo
+is PUBLIC and `scripts/tests/test_no_client_hostnames.py` refuses a committed
+client subdomain; its scanner matches `<label>.<apex>`, so a bare label is both
+safe and the half that carries the finding. Read the apex off the source file.
+
+| allowed host (label) | where |
+|---|---|
+| the image CDN — label `image` | `:32` |
+| the orchestrator — label `orchestration` | `:40` |
+| the "next" orchestrator — label `orchestration-next` | `:47` |
+| the hostname of `NEXT_PUBLIC_IMAGE_LOCATION` | added per call, `:114-120` |
+
+**No wildcarding, no suffix match**, and the `https:`-only check means a block's
+canvas/editor export — a local `blob:` — is refused outright by design.
+
+🔴 **Broken as of 2026-10-01: generated blobs come from the label
+`orchestration-`*`new`*, which is NOT in that list** — it differs from the
+allowlisted `orchestration-`*`next`* by one character, and that near-homograph is
+the whole defect: both read as "the new orchestrator" at a glance. A block saving
+its own fresh generation gets *"image url is not allowed"*. The fix is upstream as
+**`civitai/civitai#5277`**, which adds the `orchestration-new` label to
+`CIVITAI_IMAGE_HOSTS`. Re-check the allowlist and that PR's state before reporting
+a save as broken *or* as fixed.
+
+⚠ Scope it honestly: the observed refusals are **specific URLs on specific blob
+hosts**, so a refusal is evidence about that url's hostname, never a proof that no
+save in that block can succeed. A url already on the image-CDN host saves fine.
+The per-app observation for `yt-thumbnail` is in
+`flows/yt-thumbnail.civit.ai.md`.
+
+⚠ All of the above is **cross-repo and gated by nothing here** — line numbers and
+the list's contents move with the civitai repo. Re-read the file before quoting it.
 
 ## 🔴 The frame id changes on EVERY load — re-poll `frames` after any nav
 
