@@ -1371,6 +1371,33 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--timestamp", help="the SERVER timestamp, required with --sent")
     rc.add_argument("--note", help="what you saw, recorded on the row")
 
+    rec = sub.add_parser(
+        "recordings",
+        help="list audio attachments (call recordings + voice notes), newest first")
+    rec.add_argument("--limit", type=int, default=50)
+
+    gr = sub.add_parser(
+        "grab", help="write one attachment's archived bytes (MinIO) to a local file")
+    gr.add_argument("attachment_row_id", type=int, help="the `row_id` from `recordings`")
+    gr.add_argument("-o", "--output",
+                    help="destination path (default: ./signal-recording-<row_id>-<filename>)")
+
+    tr = sub.add_parser(
+        "transcribe",
+        help="read a recording from MinIO, send it to the ASR endpoint, store the transcript")
+    tr.add_argument("attachment_row_id", type=int, help="the `row_id` from `recordings`")
+    tr.add_argument("--language", help="ISO-639 language hint for the ASR endpoint")
+    tr.add_argument("--force", action="store_true",
+                    help="re-transcribe even when a transcript is already stored "
+                         "(the stored one is overwritten in place)")
+
+    tk = sub.add_parser(
+        "tasks",
+        help="extract action items from a stored transcript, post task cards")
+    tk.add_argument("attachment_row_id", type=int, help="the `row_id` from `recordings`")
+    tk.add_argument("--model", default=None,
+                    help="OpenRouter model id (default $SIGNAL_EXTRACT_MODEL)")
+
     return p
 
 
@@ -1573,6 +1600,117 @@ def main(argv=None) -> int:  # pragma: no cover - thin CLI shell over tested uni
             except (SendGateError, ValueError) as exc:
                 print(f"refused: {exc}", file=sys.stderr)
                 return 3
+        elif args.cmd == "recordings":
+            print(json.dumps(db.list_recordings(limit=args.limit), default=str))
+        elif args.cmd == "grab":
+            row = db.get_recording(args.attachment_row_id)
+            if not row:
+                print(f"refused: no attachment row {args.attachment_row_id} "
+                      f"(check `row_id` from `recordings`)", file=sys.stderr)
+                return 4
+            if not row.get("minio_key"):
+                print("refused: that attachment was never archived to MinIO "
+                      "(no minio_key on the row)", file=sys.stderr)
+                return 4
+            from _minio import safe_segment
+            data = _open_minio().get_attachment(row["minio_key"],
+                                                row.get("minio_bucket"))
+            fallback = f"recording-{row['row_id']}"
+            name = safe_segment(row.get("filename") or fallback,
+                                fallback=fallback)
+            out = Path(args.output
+                       or f"signal-recording-{row['row_id']}-{name}")
+            out.write_bytes(data)
+            print(json.dumps({"path": str(out), "bytes": len(data),
+                              "filename": row.get("filename"),
+                              "row_id": row["row_id"]}))
+        elif args.cmd == "transcribe":
+            import _stt
+            row = db.get_recording(args.attachment_row_id)
+            if not row:
+                print(f"refused: no attachment row {args.attachment_row_id} "
+                      f"(check `row_id` from `recordings`)", file=sys.stderr)
+                return 4
+            if not (row.get("content_type") or "").startswith("audio/"):
+                print(f"refused: attachment {args.attachment_row_id} is "
+                      f"{row.get('content_type')!r}, not audio", file=sys.stderr)
+                return 3
+            if not row.get("minio_key"):
+                print("refused: that attachment was never archived to MinIO — "
+                      "nothing to read", file=sys.stderr)
+                return 4
+            if row.get("transcript_text") and not args.force:
+                print(f"already transcribed (transcript_at="
+                      f"{row.get('transcript_at')}); pass --force to redo")
+                print(row["transcript_text"])
+                return 0
+            try:
+                data = _open_minio().get_attachment(row["minio_key"],
+                                                    row.get("minio_bucket"))
+                resp = _stt.transcribe(
+                    data, row.get("filename") or f"recording-{row['row_id']}",
+                    language=args.language,
+                    url=os.environ.get("STT_API_URL") or None,
+                    token=os.environ.get("STT_API_TOKEN") or None)
+                text = _stt.extract_text(resp)
+            except (RuntimeError, OSError) as exc:
+                # SttError subclasses RuntimeError; requests transport errors
+                # subclass OSError. An ASR outage is a refusal, not a traceback.
+                print(f"refused: {exc}", file=sys.stderr)
+                return 3
+            updated = db.record_transcription(
+                row["row_id"], text=text, transcript_json=resp,
+                ts=int(time.time() * 1000))
+            db.commit()
+            print(text)
+            print(json.dumps({"row_id": row["row_id"],
+                              "status": updated["status"],
+                              "chars": len(text)}), file=sys.stderr)
+        elif args.cmd == "tasks":
+            import _extract
+            import clawgate
+            row = db.get_recording(args.attachment_row_id)
+            if not row:
+                print(f"refused: no attachment row {args.attachment_row_id} "
+                      f"(check `row_id` from `recordings`)", file=sys.stderr)
+                return 4
+            if not row.get("transcript_text"):
+                print("refused: no transcript stored for this recording — "
+                      "run `transcribe` first", file=sys.stderr)
+                return 3
+            try:
+                items = _extract.extract_items(
+                    transcript=row["transcript_text"], model=args.model)
+            except (RuntimeError, ValueError) as exc:
+                # ExtractionError subclasses ValueError; a missing API key
+                # raises RuntimeError. Both are refusals.
+                print(f"refused: {exc}", file=sys.stderr)
+                return 3
+            label = (row.get("group_name") or row.get("display_name")
+                     or row.get("phone_number") or "?")
+            posted = 0
+            for item in items:
+                payload = clawgate.build_recording_task_payload(
+                    recording_id=row["row_id"], conversation=label,
+                    item=item, transcript=row["transcript_text"])
+                if clawgate.emit_task(payload):
+                    posted += 1
+            if posted:
+                db.record_tasked(row["row_id"], items_json=items,
+                                 task_ref=f"muster:{posted} card(s)",
+                                 ts=int(time.time() * 1000))
+                db.commit()
+            else:
+                # 🔴 NOT marked tasked when nothing was posted. The token gate
+                # is a graceful no-op (the row is not lost), so this is the
+                # "notification degraded, record intact" case — but the row
+                # must keep waiting for a run that DID post, or `tasked` would
+                # claim cards that do not exist.
+                print("NOTE: CLAWGATE_HOOK_TOKEN unset — items extracted and "
+                      "printed, but NO task cards were posted and the row was "
+                      "not marked tasked", file=sys.stderr)
+            print(json.dumps({"row_id": row["row_id"], "items": items,
+                              "cards_posted": posted}, default=str))
     return 0
 
 

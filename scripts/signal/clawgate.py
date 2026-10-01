@@ -175,6 +175,69 @@ def build_draft_payload(*, draft_id: int, recipient: str, body: str,
     }
 
 
+def emit_task(payload: dict, *, timeout: float = 10.0) -> bool:
+    """Post one Task card payload (`{"directory": …, "body": …}`) to the task
+    service. True if posted.
+
+    The generic half of `emit_draft_task`, split out so a second producer
+    (call recordings → action-item cards) cannot re-open-code the endpoint
+    resolution or the token gate. Same contract, including the graceful
+    no-op: with `CLAWGATE_HOOK_TOKEN` unset it posts nothing and returns
+    False, and the endpoint is resolved only after that check.
+    """
+    token = os.environ.get("CLAWGATE_HOOK_TOKEN")
+    if not token:
+        return False
+    import requests
+
+    resp = requests.post(
+        task_endpoint(),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return True
+
+
+def build_recording_task_payload(*, recording_id: int, conversation: str,
+                                 item: dict, transcript: str) -> dict:
+    """Build the `POST /api/tasks` JSON body for one extracted action item.
+
+    Pure + side-effect-free so it can be asserted in a unit test — same
+    discipline as `build_draft_payload`. `item` is one element of
+    `_extract.parse_items` output: `task` (required), `who`/`due` (nullable),
+    `confidence`.
+
+    The card carries a TRANSCRIPT EXCERPT, not the whole meeting: the full
+    text is in Postgres (`signal.call_recordings`), and the card's job is to
+    say WHAT to do, WHO said they'd do it, and WHERE the evidence lives.
+    """
+    task = (item.get("task") or "").strip()
+    who = item.get("who") or None
+    due = item.get("due") or None
+    title = "📋 call recording #{}{}{} · {}".format(
+        recording_id,
+        f" — {who}" if who else "",
+        f" — due {due}" if due else "",
+        task)[:TITLE_MAX]
+    excerpt = (transcript or "").strip()
+    if len(excerpt) > BODY_PREVIEW_MAX:
+        excerpt = excerpt[:BODY_PREVIEW_MAX] + "…"
+    lines = [
+        f"Action item: {task}",
+        f"Who: {who or '?'}   Due: {due or '-'}   "
+        f"Confidence: {item.get('confidence', 0):.2f}",
+        "",
+        "Transcript excerpt:",
+        excerpt,
+        "",
+        f"Source: call recording #{recording_id} ({conversation}) — the full "
+        f"transcript is stored in the signal pipeline.",
+    ]
+    return {"directory": title, "body": "\n".join(lines)}
+
+
 def emit_draft_task(*, draft_id: int, recipient: str, body: str,
                     mentions: list | None = None,
                     author_names: dict | None = None,
@@ -186,22 +249,9 @@ def emit_draft_task(*, draft_id: int, recipient: str, body: str,
 
     The endpoint is resolved AFTER the token check, so the no-token no-op stays
     exactly what it was: the shared module is not loaded, ~/.claude/clawgate.env
-    is not opened, nothing is posted.
+    is not opened, nothing is posted. Delegates to `emit_task`, which owns that
+    ordering now.
     """
-    token = os.environ.get("CLAWGATE_HOOK_TOKEN")
-    if not token:
-        return False
-    import requests
-
-    url = task_endpoint()
-    payload = build_draft_payload(draft_id=draft_id, recipient=recipient,
-                                  body=body, mentions=mentions,
-                                  author_names=author_names)
-    resp = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    return True
+    return emit_task(build_draft_payload(
+        draft_id=draft_id, recipient=recipient, body=body, mentions=mentions,
+        author_names=author_names), timeout=timeout)

@@ -38,7 +38,7 @@ path's "WHAT THE GATE ACTUALLY IS" box.
 | Routes | the three this module speaks (the server has many more): `GET /v1/receive/{number}` (a **websocket** in json-rpc mode), `GET /v1/attachments/{id}`, `POST /v2/send`. It has **no event-stream endpoint** — `/api/v1/events` belongs to AsamK's native daemon, a different server |
 | Postgres | `mailbox-postgres-0` in ns `mailbox`, schema **`signal`** (shares the instance + role with `mail`) |
 | Attachments | MinIO archive tenant, bucket `signal-attachments`, key `{conversation}/{YYYY-MM-DD}/{attachment_id}_{filename}` + a `.json` sidecar. The id is in the key deliberately — see gotchas |
-| Tables | `signal.contacts`, `signal.groups`, `signal.messages`, `signal.attachments`, `signal.reactions`, `signal.consumer_health`, `signal.excluded_groups` |
+| Tables | `signal.contacts`, `signal.groups`, `signal.messages`, `signal.attachments`, `signal.reactions`, `signal.consumer_health`, `signal.excluded_groups`, `signal.call_recordings` |
 | Search | `signal.messages.search` — a STORED `to_tsvector('english', body)` generated column with a GIN index |
 
 🔴 **EVERY `kubectl` in this file needs a RESOLVED kubeconfig — `$KC_HOMELAB` is the LAN
@@ -64,6 +64,10 @@ one, and note that a timeout there is **not** evidence the cluster is down.
 | `muted` | list muted groups and how many stored rows each one hides |
 | `mute` | hide a group from every read — **stores and deletes nothing** |
 | `unmute` | un-hide a muted group; restores it in full |
+| `recordings` | list audio attachments (call recordings + voice notes), newest first, with their processing status — the entry point of the call-recording pipeline |
+| `grab` | write one attachment's archived bytes (MinIO) to a local file |
+| `transcribe` | read a recording from MinIO → homelab ASR endpoint → store the transcript |
+| `tasks` | extract action items from a stored transcript and post muster task cards |
 
 ```bash
 cd ~/workspace/devrc/scripts/signal
@@ -345,6 +349,55 @@ $PSQL "select m.id, m.body from signal.messages m
        where m.search @@ websearch_to_tsquery('english','permit') and ${MUTED};"
 $PSQL "select count(*) from signal.reactions where message_id is null;"   -- unresolved
 ```
+
+## Call recordings (`recordings` → `grab` → `transcribe` → `tasks`)
+
+Meetings Zach takes on his phone can be recorded by the phone's recorder app and
+shipped into this pipeline as **note-to-self attachments**: recorder app → share →
+Signal → note to self. The consumer ingests them like any attachment — bytes to MinIO
+bucket `signal-attachments`, row in `signal.attachments` — and `signal.call_recordings`
+carries the processing state keyed on that attachment row:
+
+| column | what |
+|---|---|
+| `attachment_row_id` | PK = the `signal.attachments` id (the `row_id` every command takes) |
+| `status` | `new` → `transcribed` → `tasked`; untracked rows read `null` in listings |
+| `transcript_text` / `transcript_json` / `transcript_at` | the ASR transcript and raw response |
+| `items_json` / `items_at` / `tasked_at` / `task_ref` | extracted action items + the task-card posting stamp |
+
+```bash
+python3 consumer.py recordings                       # the queue: status null = unprocessed
+python3 consumer.py grab 51 -o call.wav              # bytes out of MinIO to a local file
+python3 consumer.py transcribe 51 [--language en]    # -> transcript stored; prints it
+python3 consumer.py tasks 51 [--model deepseek/deepseek-v4-flash]
+```
+
+🔴 **`transcribe` and `tasks` need credentials from the operator's shell, and neither is
+preset anywhere**: `transcribe` reads `STT_API_URL` (default `http://10.42.0.10:8118`,
+the `stt` helper's endpoint) and optional `STT_API_TOKEN`; `tasks` reads
+`OPENROUTER_API_KEY` (refuses without it) and model `$SIGNAL_EXTRACT_MODEL` (default
+`deepseek/deepseek-v4-flash`). The deployed pod carries none of these, so in the image
+both commands can only refuse — they are operator CLI commands, like `draft`.
+
+🔴 **`tasks` posts one muster card per extracted item via the same `POST /api/tasks`
+path `draft` uses** (task service, not the router — same resolution, same
+`CLAWGATE_HOOK_TOKEN` graceful no-op). With the token unset it prints the extracted
+items and marks NOTHING — the row stays untasked until a run that actually posted.
+Cards carry the task, who/due as extracted, and a transcript EXCERPT; the full
+transcript stays in the DB.
+
+🔴 **The muted-group rule applies to audio too.** `recordings`/`grab`/`transcribe`/
+`tasks` all read through `SignalDB`, so a recording shared into a muted group's
+conversation is hidden from every command exactly like that group's message bodies.
+Note-to-self recordings are DMs and are never muted.
+
+🔴 **Consent.** These recordings capture meetings with people who know they are
+recorded — keep it that way: a new meeting partner means asking first.
+
+🔴 **Voice notes also list.** `recordings` matches `audio/*`, so voice notes sent in
+chats appear beside call recordings — pick by date/filename/conversation. There is no
+SQL-time classification; a mis-picked `row_id` refuses loudly (`transcribe` on a
+non-audio attachment exits 3).
 
 ## The send path (D3)
 
@@ -672,6 +725,10 @@ cannot fix. Read the row when the numbers look wrong.
 | `MINIO_ARCHIVE_ENDPOINT` | explicit MinIO endpoint (skips the port-forward) |
 | `MINIO_ARCHIVE_ACCESS_KEY` | MinIO credentials; else read from `minio-archive-config` |
 | `MINIO_ARCHIVE_SECRET_KEY` | MinIO credentials; else read from `minio-archive-config` |
+| `STT_API_URL` | homelab ASR endpoint for `transcribe` (default `http://10.42.0.10:8118`, the `scripts/stt` helper's route). Operator-shell credential; not preset in the pod |
+| `STT_API_TOKEN` | optional bearer token for the ASR endpoint (the `stt` helper reads the same one from `~/.config/stt/env`) |
+| `OPENROUTER_API_KEY` | OpenRouter key for `tasks`' action-item extraction. Refuses (exit 3) when absent |
+| `SIGNAL_EXTRACT_MODEL` | OpenRouter model id for `tasks` (default `deepseek/deepseek-v4-flash`; `--model` overrides) |
 
 Off-cluster (workbench) the DB and MinIO layers open an ephemeral `kubectl port-forward`
 and tear it down on exit — exactly like `mail-actions`.

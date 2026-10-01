@@ -145,12 +145,29 @@ MUTANTS: list[Mutant] = [
     # The mute list
     # ------------------------------------------------------------------ #
     Mutant("M1", "the mute filter removed from `search`", DB,
-           "                  AND {not_excluded('m')}\n", "",
+           "WHERE m.search @@ websearch_to_tsquery('english', %s)\n"
+           "                  AND {not_excluded('m')}\n",
+           "WHERE m.search @@ websearch_to_tsquery('english', %s)\n",
            "test_search_hides_a_muted_group", SUITE_EXCL),
 
     Mutant("M2", "the mute filter removed from `list_conversations`", DB,
            "                    WHERE {not_excluded('m')}\n", "",
            "test_conversations_hides_a_muted_group_and_shows_it_again_after_unmute",
+           SUITE_EXCL),
+
+    # The call-recording read surfaces (2026-09-30). Same mutation shape as M1/M2:
+    # the audio surfaces filter through the ONE predicate, and each guard must be
+    # shown REACHABLE — delete the predicate from a recording read and the
+    # recording tests must go red, not just the older message ones.
+    Mutant("M11", "the mute filter removed from `list_recordings`", DB,
+           "WHERE a.content_type LIKE 'audio/%%'\n"
+           "                  AND {not_excluded('m')}\n",
+           "WHERE a.content_type LIKE 'audio/%%'\n",
+           "test_recordings_hides_a_muted_groups_audio", SUITE_EXCL),
+    Mutant("M12", "the mute filter removed from `get_recording`", DB,
+           "WHERE a.id = %s\n                  AND {not_excluded('m')}\n",
+           "WHERE a.id = %s\n",
+           "test_get_recording_hides_a_muted_groups_audio_by_row_id",
            SUITE_EXCL),
 
     Mutant("M3", "the mute filter removed from `get_message` — the id route", DB,
@@ -290,8 +307,11 @@ MUTANTS: list[Mutant] = [
     # ------------------------------------------------------------------ #
     Mutant("B1", "`build-push.sh`'s subcommand pin left stale — the control that refuses "
                  "to push an image whose CLI grew a subcommand nobody decided on", BP,
-           'want_choices="approve conversations draft drafts health mute muted reconcile run search send unapprove unmute "',
-           'want_choices="approve conversations draft drafts health reconcile run search send "',
+           'want_choices="approve conversations draft drafts grab health mute '
+           'muted reconcile recordings run search send tasks transcribe '
+           'unapprove unmute "',
+           'want_choices="approve conversations draft drafts health mute muted '
+           'reconcile run search send unapprove unmute "',
            "test_the_build_control_lists_EXACTLY_the_CLI_subcommands", SUITE_IMAGE),
 
     # ------------------------------------------------------------------ #

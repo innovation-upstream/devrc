@@ -83,7 +83,8 @@ def test_translated_ddl_keeps_the_constraints_it_is_read_for():
 # --------------------------------------------------------------------------- #
 # 2. The schema
 # --------------------------------------------------------------------------- #
-EXPECTED_TABLES = {"contacts", "groups", "messages", "attachments", "reactions"}
+EXPECTED_TABLES = {"contacts", "groups", "messages", "attachments", "reactions",
+                   "call_recordings"}
 
 
 def _tables(db) -> set:

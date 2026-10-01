@@ -243,7 +243,21 @@ choices=$(docker run --rm --entrypoint python3 "$IMAGE" \
 # sendable — a pending draft has no route to the wire until an operator approves
 # it again. It is gated on `SIGNAL_APPROVAL_TOKEN`, which is deliberately absent
 # from this pod's environment, so in the deployed image it can only refuse.
-want_choices="approve conversations draft drafts health mute muted reconcile run search send unapprove unmute "
+#
+# `recordings`/`grab` added 2026-09-30 with the call-recording pipeline.
+# Acknowledged deliberately, as this control demands. `recordings` is read-only
+# (audio attachments + processing state). `grab` WRITES exactly one file to the
+# invoking process's cwd — the pod's own filesystem, nothing shared, nothing
+# deleted.
+#
+# `transcribe`/`tasks` added 2026-09-30 with the same pipeline. Acknowledged
+# deliberately: they WRITE to Postgres (`signal.call_recordings`) and POST to
+# external services — the homelab ASR endpoint (`transcribe`) and the task
+# service (`tasks`). Both read their credentials from the environment
+# (`STT_API_URL`/`STT_API_TOKEN`/`OPENROUTER_API_KEY`/`CLAWGATE_HOOK_TOKEN`),
+# none of which this pod's env carries, so in the deployed image they can only
+# refuse — the same deliberate inertness `unapprove` acknowledged.
+want_choices="approve conversations draft drafts grab health mute muted reconcile recordings run search send tasks transcribe unapprove unmute "
 if [[ "$choices" != "$want_choices" ]]; then
   echo "build-push: REFUSING TO PUSH — subcommand set is '$choices'," >&2
   echo "            expected '$want_choices'. Empty means the parse found no {…}" >&2
