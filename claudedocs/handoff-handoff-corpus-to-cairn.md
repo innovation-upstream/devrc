@@ -27,48 +27,57 @@ be removed, but where the removed text should GO** — and it measures 187 of 18
 cairn-overlap comparison nobody has run.
 
 - **closing-condition:** `check` — a `--prune` eviction of a CLOSED `Open investigations`
-  block lands the lesson in **cairn** as a `RESOLVED:` journal bullet, not only in
-  `claudedocs/archive/`. Verified by: the evicted lesson is returned by
-  `$DEVRC/scripts/cairn-ops/read.sh recall --repo <repo> --search '<a phrase from it>'`
-  with a non-zero hit, AND the archive file still carries the verbatim text (eviction must
-  add a reader, never move the text out of reach). ADDRESSED ⇒ arc CLOSED.
+  block lands the lesson in **cairn**, not only in `claudedocs/archive/`. Verified by:
+  ```bash
+  $DEVRC/scripts/cairn-ops/read.sh search '<a phrase from the recorded bullet>'
+  ```
+  returning a hit, AND the archive file still carrying the block verbatim (eviction must add
+  a reader, never move the text out of reach). ADDRESSED ⇒ arc CLOSED.
+- 🔴 **THE COMMAND ABOVE IS A CORRECTION, NOT A RE-SCOPE — ROUND 1 WROTE ONE THAT CANNOT
+  RUN.** It said `read.sh recall --repo <r> --search '<phrase>'`; `recall` has no `--search`
+  flag and exits **2** with a usage line, which a later session reads as "no hit". The verb is
+  `read.sh search`. Only the spelling changed. `via: measurement`
+- 🔴 **AND THE CONDITION IS NOW KNOWN TO BE UNSATISFIABLE AS CONCEIVED — AN OPERATOR
+  DECISION, DELIBERATELY NOT TAKEN HERE.** Round 1 assumed the evicted block's own text
+  reaches cairn. It cannot: `cairn append` refuses a newline or >2000 chars **before the
+  network** (rc 21) and **288 of 289 closed blocks are multi-line**, 37.7% also over length;
+  the `cairn put` route fragments one block into 3–4 bullets and **swallows its `### `
+  heading** (the documented `dropped-lines` defect). So "the lesson lands in cairn" can only
+  mean a **POINTER** to the archive file. Resolving verbatim-vs-pointer changes what this arc
+  is FOR, and the round-1 freeze says that is not a later session's call. **Until an operator
+  rules, this arc cannot be closed by anyone.** `via: measurement`
 
 ## State now
-- ✅ **THIS DOC IS MERGED.** devrc#1950 squashed as `6c317f7b0c2a` (2026-10-01T05:43:07Z), branch
-  deleted, base clone re-synced. Verified **by content, not ancestry** — a squash never makes the
-  branch head an ancestor: the doc is present on `origin/main` at 16,624 B and carries the SOPS
-  retraction, with an absent-path negative control confirming the check can report absent. All
-  four Tekton legs were green BEFORE the merge, read from the runners' own counts rather than
-  from `mergeStateStatus` (`CLEAN` only ever meant "no conflict"): pytests
-  **collected=24744 passed=24737 failed=0** against a 21,193 floor, gotests **461/0**,
-  nodetests **1720/0**, plus the pinned-cairn-client leg.
-- 🔴 **FOUR SCOPING AGENTS ARE IN FLIGHT AND THEIR RESULTS ARE NOT IN THIS DOC.** Dispatched
-  read-only, one per ranked item, 2026-10-01 ~05:45Z. **If this doc is read before they are
-  recorded, the briefs below are what was asked — not what was found:**
-  - **rank 1** — the `--prune` insertion point in `handoff_doc.py`, add-vs-replace, the RED
-    proof, and the crux: **how an arc-scoped evicted block acquires a per-subsystem
-    `<scope>/<slug>`**, plus which eviction directions the public/confidential split forbids.
-  - **ranks 2+4 paired** (they pull opposite ways, so splitting them yields two half-answers):
-    is the one-bullet cap prose or code; does the "~14 tokens per index row" cost claim survive
-    measurement; where is the `recall` readability cliff; **and is the binding constraint the cap
-    at all, or `nominate()`'s ≥2-path requirement.**
-  - **rank 3** — is `## Requirements` failed, never-shipped or redundant; decisive test is
-    whether it appears in `--template` at all, and whether the `OPEN:` journal markers already won.
-  - **rank 5** — a falsifiable design for the value claim, or an honest "not measurable with
-    these surfaces"; the hard part is an observable separating *read and used* from *printed and
-    ignored*.
-- ⚠ **NO `claim-work` CLAIM IS HELD.** Nothing is being implemented — these are scoping reads.
-  A claim belongs on whichever item is actually worked, and the ranked list is a shared queue.
+- ✅ **THE ANALYSIS DOC IS MERGED** — devrc#1950 squashed `6c317f7b0c2a`, and the first
+  correction devrc#1952 (`246074ca`). Verified by content, not ancestry.
+- 🔴 **FOUR SCOPING AGENTS HAVE ALL REPORTED, AND THEY REFUTE SIX CLAIMS THIS DOC MADE.** The
+  corrections are in the Open investigations blocks below. **Do not act on round 1's reasoning
+  without reading them** — the refutations are load-bearing, not cosmetic.
+- 🔴 **RANK 1 IS DEMOTED. It is a DESIGN PROJECT, not a small change, and it is blocked
+  UPSTREAM** on the store's "pointers, not copies" rule and on the intake question (old rank
+  2). Building the cairn destination first means designing against a protocol about to move.
+  Two agents converged on that independently.
+- ✅ **THE VALUE CLAIM IS HALF-CLOSED AND THE ANSWER IS YES** — a cairn bullet has
+  demonstrably been read and acted on: **61 invocations, 23.5% against a 1.8% cross-project
+  control floor**, 5 of 6 hand-verified. The *counterfactual* half stays unreachable.
+- 🔴 **A DEADLINE NOBODY KNEW ABOUT: the transcript corpus ROLLS AT 30 DAYS.** Claude Code
+  transcripts span **2026-09-01 → 2026-10-01 exactly**, nothing older, no `cleanupPeriodDays`
+  set. Waiting does not grow `n`; every day deletes a day of the only existing evidence. That
+  is why instrumenting is now ranked above measuring.
 - **Carried forward — a REPLACE heading would drop these values.** 187 docs / 7,514,989 B, 28
-  over the 65,536 B base ceiling, largest 6.1× (402,767 B, 114 investigation blocks); 69.9% of
-  bytes in the two APPEND-only sections; **store 331 entry files / 3,527,479 B / 3,129 dated
-  journal bullets, intake 19–80 bullets/day sustained through 2026-09-30 — the store is actively
-  written, NOT starved** (that measurement is what inverted this arc's original hypothesis, so it
-  must not be compressed away); 83–98% of durable handoff content unrepresented in cairn;
-  **366 CLOSED investigation blocks / 700,630 B** as the eviction candidate; devrc's
-  `claudedocs/archive/` at **37 files / 311,415 B** against homelab-talos's 0.
-- **No clawgate task** — `resolve` exited 5 (`0 tasks`), and an unknown session id answers 200
-  with an empty array, so that zero cannot separate "touched no task" from "wrong id".
+  over the 65,536 B base ceiling, largest 6.1× (402,767 B); 69.9% of bytes in the two
+  APPEND-only sections; **store 331 entry files / 3,129 dated journal bullets, intake 19–80
+  bullets/day sustained through 2026-09-30 — actively written, NOT starved** (the measurement
+  that inverted this arc's original hypothesis); 83–98% of durable handoff content
+  unrepresented in cairn; devrc's `claudedocs/archive/` at **37 files / 311,415 B** against
+  homelab-talos's 0.
+- ⚠ **CLOSED-BLOCK POPULATION, RESTATED SO IT IS RE-DERIVABLE:** **289 blocks / 558,672 B**
+  across 188 docs, from the in-repo detector `scripts/handoff-audit.py`. Round 1's
+  **366 / 700,630 B does NOT reproduce** and its detector lived in a scratchpad and is gone.
+  Quote the 289 figure.
+- ⚠ **NO `claim-work` CLAIM IS HELD** and no implementation has started.
+- **No clawgate task** — `resolve` exited 5 (`0 tasks`); an unknown session id answers 200
+  with an empty array, so that zero is not a measured absence.
 
 ## Open investigations — live diagnosis state
 
@@ -180,32 +189,187 @@ cairn-overlap comparison nobody has run.
   whether the recalled bullet changed what the session did. That is the only measurement that
   could falsify the whole arc.
 
+### ❌ REFUTED — "`--prune` evicts closed text to `claudedocs/archive/`, which is read by nothing". BOTH HALVES ARE FALSE
+- as-of: 2026-10-01
+- **Observed:** `handoff_doc.py` (6,887 lines) contains **one** file write (`:6794`),
+  path-limited to the doc, and exactly two `archiv` hits — a comment (`:3068`) and rule (p)'s
+  **remedy string** (`:3582`), i.e. prose telling a human to move text by hand. No script in
+  `scripts/` or `claude/` creates `claudedocs/archive/`. devrc's 37 files came from a one-off
+  bulk `git mv` (`6fa3e13f`, #1627, 35 docs, all `R100`) plus hand-written files since.
+  Positive control: `grep -c prune` → 93 in the same file. `via: measurement`
+- **Observed:** the archive is **indexed and searchable** — 37 of 143 indexed devrc handoff
+  docs sit under it; `resume-state.sh:452` accepts it as a handoff directory,
+  `find-session.py:1152` probes it. The honest claim is `resume-state.sh:415-427`'s own: they
+  *"remain INDEXED … so `handoff_search` keeps returning them"*, and only the no-argument
+  `/resume` fallback globs are non-recursive — **named explicitly resolves; guessed at does
+  not.** A real readership asymmetry, far weaker than round 1's premise. `via: measurement`
+- **Consequence:** the change is not "repoint a destination"; it is **"give `--prune` a
+  destination at all"**, which is strictly larger, and rank 1's justification must be restated
+  on the narrower asymmetry.
+
+### ❌ REFUTED — "the one-bullet cap contradicts the protocol's own cost sentence". A CATEGORY ERROR, MINE
+- as-of: 2026-10-01
+- **Observed:** the *~14 tokens* sentence is about index **ROWS** (entries); the cap governs
+  **BULLETS**. Measured at five scopes, a row costs **16.6–18.8 tokens** (so ~14 is understated
+  19–34%, otherwise sound). A bullet on the **featured** entry costs **223–326 tokens —
+  13–16×** — and the featured entry is always the one just worked on, by construction
+  (`FocusMinPaths = 1`). The two figures differ by an order of magnitude and measure different
+  objects. `via: measurement`
+- 🔴 **Observed — the cap is PROSE ONLY and is already walked with no consequence.** It lives
+  in one file (`subsystem-index/SKILL.md:126,140,155`); `subsystem_touch.py:4871` renders it as
+  advice with no branch, `:4135` as a comment; `JOURNAL_BULLET_MAX_LINES=6` truncates the
+  *quote*, not the write; no test pins any of it. From the pod's attribution trailer:
+  **26.6% of 582 sessions wrote more bullets than entries touched** (worst case today, 8
+  bullets to one entry). De-facto intake is **2.01 bullets/session** against a stated cap of 1.
+  `via: measurement`
+- 🔴 **Observed — and this explains a puzzle round 1 could not.** The cap is walked by
+  CONCATENATION: 145 bullets pack `(a) … (b) …` sub-lessons into one, median **1,588 B** vs
+  790 B. **The cap does not reduce intake; it reshapes it into fewer, larger, less-retrievable
+  bullets** — and `cairn search` scores the whole body, so five lessons share one relevance
+  score. That is why store bullets measured 2× the handoff bullets they would absorb.
+  `via: measurement`
+- **Ruled out: that the cap is the binding constraint.** Over 90 recent commits, **54% reach
+  the write step with nothing writable** (no resolved entry, no nomination) and a further 24%
+  named an entry below `min_paths=2`. The cap can bite on at most the 36% that resolve
+  something, and in 20% of runs it already permits ≥2 because it is per-*entry*. **The
+  nomination floor is upstream of it.** `via: measurement`
+
+### 🔴 OPEN — the slug cannot be derived, and where derivation DOES fire it fires WRONG
+- as-of: 2026-10-01
+- **Observed:** resolving every closed block's backticked repo-existing paths through the real
+  resolver, at two thresholds: at `DEFAULT_MIN_PATHS=2` **95.8% resolve to 0 entries** and
+  1.7% to exactly one; at the most generous `min_paths=1`, 76.8% / 16.3%. **69.9% name no
+  existing repo path at all.** Instrument positive-, negative- and extractor-controlled.
+  `via: measurement`
+- 🔴 **The failure is not sparsity, it is misdirection.** A lesson about the handoff toolchain
+  resolves to `scripts` + `tests` — catch-all directory entries the devrc scope README
+  explicitly disowns (*"Not entries: bare directory names…"*) — while the entry a human would
+  pick, `devrc/handoff-index.md`, exists and is **unreachable by path derivation**.
+  `via: measurement`
+- **Leading hypothesis:** there is no defensible mechanical rule; 84–98% of the population
+  needs a human choice per block. `--prune` can at most accept a `--cairn-ref` the caller
+  names, which makes the feature a thin wrapper around work a human already does and drops the
+  implied 366-block scale to one block at a time.
+- **Next probe:** none for derivation — it is answered. The open question is the operator's
+  verbatim-vs-pointer ruling in `## Goal`.
+
+### ✅ HALF-RESOLVED 2026-10-01 — a cairn bullet IS read and acted on; the counterfactual is not reachable
+- as-of: 2026-10-01
+- **What this settles:** round 1's UNMEASURED block asked whether anyone has ever read a cairn
+  bullet they would otherwise have re-derived. **The READ half is YES.** 61 acted-on recall
+  invocations — **23.5% against a 1.8% cross-project control floor** (40× on mean fraction),
+  5 of 6 hand-verified. Transcripts retain recall output **1,425/1,425 = 100%**.
+  `via: measurement`
+- 🔴 **The naive proxy is saturated BECAUSE THE SKILL MANDATES THE ECHO.** `/resume` step 5
+  requires the report to carry what step 4 recalled, so "a printed ref reappears later" fires
+  **451/454 (99.3%)** and measures compliance. The discriminating observable separates ACTION
+  from ECHO: a rare (df≤3) *path* absent from the transcript before the recall, later appearing
+  in a **read-shaped** tool input. `via: measurement`
+- **Ruled out:** the count as first computed (151). Three artifact classes inflated it, each
+  invisible to the count — recall output spilled to a `tool-results/` file the session then
+  greps (re-reading recall itself); bare `SCREAMING_CONST` tokens matching unrelated Go
+  strings; paths inside `Edit`/`Write` bodies, which are echo into an artifact. `via: measurement`
+- 🔴 **Ruled out: that the counterfactual is reachable.** The `scope-absent` control arm is
+  **n=1** (9 corpus-wide) — empty by SELECTION, not sampling. The only available comparator
+  (344 ran recall / 68 skipped) needs **≈510/arm** to see a 10% shift in message count and
+  **≈10,751/arm** for duration; the small arm has 68. And the outcome variable is a 19-hour
+  session while the effect is one work item. `via: measurement`
+- 🔴 **Ruled out: round 1's own next probe.** *"`find-session --skill resume` then ask whether
+  the bullet changed what the session did"* cannot falsify anything — that surface disagrees
+  with the transcripts by 24%, returned a session that merely READ the skill as its top hit,
+  and has no opencode attribution. `via: measurement`
+- ⚠ **BEARS DIRECTLY ON RANK 1 AND IS THE LEAST WELCOME FINDING:** every firing instance was a
+  **`## Pointers` path**. The 289 closed blocks are **prose lessons often naming no path** —
+  the population this observable can see LEAST. The evidence that bullets get used does not
+  transfer to the content rank 1 proposes moving. `via: measurement`
+- **Next probe:** instrument rather than measure — the recall receipt and the citation ids in
+  ranked item 2. The 30-day roll makes that the only order that works.
+
+### 🔴 OPEN — a `/resume` in devrc pays ~50,000 tokens for step 4 TODAY, and nothing observes it
+- as-of: 2026-10-01
+- **Observed:** of a 192,047 B / 50,772-token default recall read, **97.6% is ONE featured
+  body** — `devrc/tests.md` at 151 bullets (`civitai/blocks.md` 112 next). Index view is 1.2%.
+  `--list` renders the same scope **38× smaller** (5,079 B), yet `/resume` and `/handoff` both
+  run the bare default. `--page` caps the listing, not the body. `via: measurement`
+- **The cliff is per-ENTRY bullet count, not per-scope**: the index scales at ~17 tok/row and
+  pages at 100, which the largest scope (77) has not reached. `via: measurement`
+- **Leading hypothesis:** this is the real cost surface, it is nobody's item, and it is worth
+  more than either intake rank. Remedy is one badge beside the existing `🔴 N OPEN`:
+  `⚠ 151 nuance — OVER 60, prune or split`.
+- ⚠ **Ordering consequence for rank 1:** 289 evicted blocks become **bullets**, landing in
+  featured bodies (~+450 tokens/read over ~190 entries). **Land the badge before any prune.**
+
+### 🔴 OPEN — `## Requirements` is SHIPPED READ-ONLY: a working reader, no writer, and a silent validation hole
+- as-of: 2026-10-01
+- **Observed:** 4 of 467 entries carry it, all in the `cairn` scope, all `created_by: handoff`,
+  7 bullets total. Reader exists in BOTH implementations and renders correctly (verified live:
+  four badge rows agreeing bullet-for-bullet with disk). **Nothing writes it** —
+  `new_entry_template()` emits only `What it is`/`Pointers`/`Nuance`; zero mentions in the
+  append path, the server write path, all 37 skills, and all 11 store schema READMEs, each with
+  a positive control. `internal/store/requirements.go:18-20` says so itself: *"nothing writes a
+  requirement yet."* `via: measurement`
+- **Ruled out: that it is a rival to the journal markers.** `Requirement` **embeds**
+  `JournalBullet` — same grammar, different section. The journal won openness weeks earlier and
+  at scale: **545 markers / 146 of 319 entries / 23 scopes** vs **7 / 4 / 1**. Re-measured in
+  the post-ship window: 60 entries took journal bullets across 11 scopes; the same 4 kept
+  Requirements. `via: measurement`
+- **What it uniquely has, and it is nearly unexercised:** provenance — `grep provenance
+  internal/store/journal.go` → **0 hits**. The journal can say a thing is open, never who
+  asked. But 9 of 10 provenance tokens sit inside those 4 entries, and 3 of 7 bullets are
+  `(inferred)` — agent-self-issued, the class cairn finding #10 measures as **deletion-immune**
+  in the audit tooling. `via: measurement`
+- 🔴 **The real hazard, and it is the permanently-red-gate shape:** the caveat legend invites a
+  writer to use the section, and `validate.go:161` + `ShapeHeadings` **exclude** it — so a
+  mis-spelled marker there gets **no signal from any surface**, silently, on the deployed pod.
+  Filed as cairn finding #9. `via: code`
+- **Next probe:** land finding #9, or declare the section operator-hand-written-only in one
+  sentence of the write protocol. Do not build a new open-business surface beside it.
+
 ## Next steps (ranked)
 
-1. **Repoint `--prune`'s destination at cairn for CLOSED investigation blocks only.** 366
-   blocks / 700,630 B — the one population where eviction is unambiguously safe. Keep the
-   archive file (the text must stay verbatim somewhere); ADD the cairn bullet. This is the
-   closing condition, and it needs no new concept: `RESOLVED:` already exists and
-   `handoff_doc.py` already imports the grammar.
-   forcing: gate — the doc corpus has a byte gate with an 82-entry grandfather ladder, so
-   growth is currently absorbed by raising ceilings rather than by moving text.
-2. **Drop the one-bullet-per-entry cap in the subsystem-index protocol, or state the cost it
-   defends.** It contradicts that protocol's own cost argument, and it is the valve that
-   makes the doc the default sink.
+🔴 **NUMBERING RESTARTS HERE BECAUSE ROUND 1's RANKS WERE BUILT ON REFUTED PREMISES.** Old
+rank 1 is now item 6; old ranks 2/3/4/5 are items 5/7/4/2. `claim-work` slugs derived against
+round 1's numbering are STALE — re-derive before claiming.
+
+1. **FIX THIS DOC'S OWN CORRECTIONS — the closing condition cannot be run and the headline
+   population cannot be re-derived.** The `search`-verb fix is in `## Goal` above; what remains
+   is the operator's verbatim-vs-pointer ruling, without which **nobody can close this arc**.
+   forcing: gate — a close-check against the round-1 command exits 2 and reads as "no hit", so
+   the arc's own gate is currently broken rather than merely unmet.
+2. **INSTRUMENT the value claim instead of measuring it — a recall receipt and opaque per-bullet
+   citation ids.** Have `read.sh recall` emit one `source='tool'` row (`{status, scope, entries,
+   bullets_printed, output_bytes, session}`) — that table holds **0** cairn rows against 1,425
+   transcript-proven invocations — and stamp each printed bullet `[cb:7f3a]` so "was this bullet
+   used" becomes a match on a token existing nowhere else in the corpus: a STRUCTURAL guard
+   where every proxy available today is a spelled one walkable by rewording.
+   forcing: deadline — the transcript corpus rolls at 30 days (2026-09-01 → 2026-10-01, nothing
+   older), so the only existing evidence is being deleted daily and waiting does not grow `n`.
+3. **MAKE `--prune` VERIFY RATHER THAN WRITE.** Refuse (exit 16) a prune of durable lines
+   unless `--archive <path>` is given, the file exists, and **every pruned non-blank line is
+   present in it** — mechanising the hand check `af578a02` performed in prose. No pod, no slug,
+   no network; clean RED proof (a prune with no archive is accepted today). ~120 lines + tests.
+   forcing: gate — `--prune` can today drop durable text with no archive anywhere, and the only
+   thing that has ever checked conservation is one commit message.
+4. **Record the no-backfill decision with the CORRECTED reason, and the per-entry bullet badge
+   with it.** A bullet backfill adds **zero index rows**; the cost is the featured body
+   (+21 bullets/entry ≈ +4,700 tokens/read). Round 1's "14 rows for one scope" was cairn's
+   scope; live today devrc 36, civitai 44, homelab-talos 46, datapacket-talos 77.
    forcing: none
-3. **Diagnose why `## Requirements` died before building any new home for OPEN
-   investigations.** It appears in **4 of 467** store entries. There is already a designed
-   surface for declared-open business (`OPEN:` markers, the `🔴 N OPEN` and `🔴 N REQ OPEN`
-   badges, `## Requirements`) and it is effectively unused; shipping a second one beside it is
-   the permanently-red-gate shape in a different hat.
+5. **Drop ONLY the new-ENTRY half of the intake cap.** That is the one place the ~17-token cost
+   sentence genuinely applies and the cap genuinely contradicts it; zero effect on the featured
+   read. Hold the per-bullet cap at 1→3 until the nomination floor is measured — landing it as
+   *"the cap was the throughput valve"* would write a refuted diagnosis into the protocol.
    forcing: none
-4. **Do NOT backfill Gotchas wholesale — recorded as a decision so a later session does not
-   re-open it.** 6,711 items against a 3,129-bullet store would more than double it in one
-   move and make `cairn recall` unreadable (the index already prints 14 rows for one scope).
-   Route NEW lessons and let the backlog age out.
+6. **DEMOTED — the cairn write destination.** Blocked on item 1's ruling, on the slug problem
+   (95.8% resolve to 0 entries at the real threshold), and on `append`'s newline/2000-char
+   refusal. If ever built: **advisory and non-blocking**, running last, printing `cairn: NOT
+   RECORDED` with the manual command on rc 6/7/8/21/24 at exit 0 — otherwise an outage blocks
+   `/handoff`'s only landing step. Exactly ONE `append` per run, never a `put` (no `If-Match`
+   to lose). Scope from `scope_for_repo(args.repo)`, **never an override** — client-repo →
+   `devrc` scope is the one real leak path and the protocol actively instructs it.
    forcing: none
-5. **Measure the value claim** (the UNMEASURED block above). Until then this arc's premise is
-   assumed, not shown.
+7. **Close cairn finding #9 or declare `## Requirements` hand-written-only.** A mis-spelled
+   marker there is silent on the deployed pod.
    forcing: none
 
 ## Gotchas / decisions / dead-ends
@@ -265,6 +429,40 @@ cairn-overlap comparison nobody has run.
   the control is the right practice; the guard's read-detection is what is wrong. The honest
   response this time was an UPDATE (the doc's `State now` had genuinely gone stale on the merge),
   not a dismissal, so the false positive cost nothing here and will not always.
+
+- 🔴 **SIX CLAIMS IN THIS DOC'S FIRST ROUND WERE WRONG, AND THE PATTERN IS ONE THING: I
+  MEASURED THE CORPUS AND REASONED ABOUT THE TOOL.** Every refuted claim was about *mechanism*
+  (what `--prune` writes, who reads the archive, what the cap governs, what a slug derives
+  from); every surviving claim was about *bytes I counted*. The corpus measurements all held.
+  **The lesson is not "measure more" — it is that a file-count is not a claim about the code
+  that produced it, and reading `handoff_doc.py` would have cost one command each time.**
+- 🔴 **A SCRATCHPAD DETECTOR MAKES A HEADLINE NUMBER UNFALSIFIABLE.** Round 1's
+  366 / 700,630 B cannot be reproduced: the script was never committed, and the in-repo
+  detector gives 289 / 558,672 over *one more* doc. A number whose instrument is gone is not a
+  measurement anyone can check — **quote a figure only from a detector that lives in the repo,
+  or commit the detector in the same change.**
+- 🔴 **`session-summary` ROWS ALL PIN `ts` TO THE SESSION START, SO `argMax(payload, ts)` IS A
+  TIE AND RETURNS AN ARBITRARY SNAPSHOT.** Measured: a session read as 26 assistant messages /
+  2 minutes; its final snapshot says **1,968 / 2,098** — a 75× understatement that looked
+  entirely plausible. Key on `argMax(payload, JSONExtractString(payload,'end_ts'))`. Belongs in
+  the `activity` skill.
+- ⚠ **STEP 4's DOCUMENTED SPELLING IS ~6% OF REAL TRAFFIC.**
+  `$DEVRC/scripts/cairn-ops/read.sh recall` is **93 of 1,425** invocations; essentially all of
+  it is bare `cairn recall --repo <path> 2>&1 | head -60`. Any study keyed on the documented
+  command string measures a sixth of the population — and `| head`/`| tail` is also why **746
+  of 1,425** invocations carry no parseable status line.
+- ⚠ **THE ENFORCED 2000-RUNE BULLET CEILING IS WALKED, AND `put` IS THE HOLE.** 83 bullets
+  exceed it, largest 4,794 chars; `_put_entry` has no per-bullet check at all while the append
+  path does. Any bounded intake rule that is to be enforced rather than requested must cover
+  `put`.
+- **Decision: do NOT unilaterally re-scope the closing condition.** It is frozen at round 1,
+  and the verbatim-vs-pointer question changes what the arc is FOR. The broken *command* was
+  fixed (it could never run); the *substance* is left to the operator, and the arc is declared
+  unclosable until they rule.
+- ⚠ **A guard whose premise I asserted from a REMEDY STRING.** Round 1 read
+  `handoff_doc.py:3582` — prose telling a human to move text to an archive — and recorded it as
+  what the tool DOES. **A remedy string describes work that is not done; a comment is a claim,
+  and so is a help text.**
 
 ## How to verify
 ```bash
