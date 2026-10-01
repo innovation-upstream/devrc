@@ -363,13 +363,33 @@ def _connect_callers(src: str) -> list[str]:
     `sqlite3.connect(...)` / bare `connect(...)` calls, the assignment alias
     (`_c = sqlite3.connect`), importing the connect FUNCTION from any sqlite
     module path (`from sqlite3 import connect`, `from sqlite3.dbapi2 import
-    connect` — the dbapi2 hole is round-2 finding 2's second half), and
-    `getattr(sqlite3, 'connect')` (round-2 finding 2). The reader connection
-    comes from `_shared`; `getattr(sqlite3, 'DatabaseError')` and friends must
-    NOT flag (positive control below).
+    connect`), `getattr(<sqlite3-thing>, 'connect')` under any alias or
+    attribute chain (round-3 finding 1), and `partial(...connect)`. The reader
+    connection comes from `_shared`; `getattr(sqlite3, 'DatabaseError')` and
+    friends must NOT flag (positive controls below). Two disclosed holes, both
+    statically undecidable for a source AST: getattr with a VARIABLE second
+    argument, and a local shim module re-exporting connect.
     """
     tree = ast.parse(src)
     offenders = []
+    # names that REFER to the sqlite3 module, under any alias or attribute
+    # chain: `import sqlite3 as s3` makes `s3` one; `sqlite3.dbapi2.connect`
+    # is an Attribute whose dotted name starts with the real name
+    sqlite_names = {
+        (a.asname or a.name)
+        for node in ast.walk(tree) if isinstance(node, ast.Import)
+        for a in node.names
+        if a.name == "sqlite3" or a.name.startswith("sqlite3.")
+    }
+
+    def _dotted(node) -> str:
+        """`sqlite3.dbapi2` from Attribute(Name('sqlite3'), 'dbapi2')."""
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            return _dotted(node.value) + "." + node.attr
+        return ""
+
     for node in ast.walk(tree):
         # the MODULE import is legal (exception types, export.py's own use);
         # importing the connect FUNCTION by any alias is not — from any path
@@ -385,13 +405,15 @@ def _connect_callers(src: str) -> list[str]:
                 offenders.append(ast.dump(f))
             elif isinstance(f, ast.Name) and f.id == "connect":
                 offenders.append(ast.dump(f))
-            # getattr(sqlite3, 'connect') — flagged on the LITERAL 'connect'
-            # attribute string only: getattr(sqlite3, 'DatabaseError') is the
-            # sanctioned exception-class use and must stay clean (the
-            # positive control below pins exactly that line)
+            # getattr(<sqlite3-thing>, 'connect') — flagged on the LITERAL
+            # 'connect' attribute string only (getattr(mod, var) is statically
+            # undecidable for a source AST and is disclosed, not caught). The
+            # RECEIVER may be the module under any alias or an attribute chain
+            # (sqlite3.dbapi2) — round-3 finding 1's two survivors.
             elif isinstance(f, ast.Name) and f.id == "getattr" and len(node.args) >= 2:
                 a0, a1 = node.args[0], node.args[1]
-                if isinstance(a0, ast.Name) and a0.id.startswith("sqlite3") \
+                dotted = _dotted(a0)
+                if (dotted in sqlite_names or dotted.startswith("sqlite3")) \
                         and isinstance(a1, ast.Constant) and a1.value == "connect":
                     offenders.append(ast.dump(node))
             # partial(<anything>.connect) — deferring the call is opening it
@@ -417,24 +439,35 @@ def test_sent_opens_no_connection_of_its_own():
     "import sqlite3\nopen_db = getattr(sqlite3, 'connect')\ndb = open_db('x')\n",
     "from sqlite3.dbapi2 import connect as _c\ndb = _c('x')\n",
     "import sqlite3 as s3\nfrom functools import partial\ndb = partial(s3.connect)('x')\n",
+    "import sqlite3 as s3\nopen_db = getattr(s3, 'connect')\ndb = open_db('x')\n",
+    "import sqlite3\nopen_db = getattr(sqlite3.dbapi2, 'connect')\ndb = open_db('x')\n",
 ])
 def test_connection_guard_flags_each_spelling(bad_src):
-    """Negative control for the guard above — it must actually fire. The last
-    two rows are the round-2 findings: getattr evasion and the dbapi2 path."""
+    """Negative control for the guard above — it must actually fire. Rows 4-6
+    are the round-2 finds (getattr, the dbapi2 path, the partial deferral);
+    rows 7-8 are round-3 finding 1's survivors: the aliased and
+    attribute-chain getattr receivers."""
     assert _connect_callers(bad_src), f"guard must flag: {bad_src!r}"
 
 
 def test_connection_guard_passes_the_shared_pattern():
     """Positive control — the sanctioned spelling must NOT be flagged, and a
-    bare module import (exception types only, export.py's own use) too. The
-    getattr exemption is deliberate: getattr(sqlite3, 'DatabaseError') is the
-    exception-class use, not a connection."""
+    bare module import (exception types only, export.py's own use) too. Every
+    guard ARM gets a benign twin so over-tightening is caught: getattr with a
+    non-connect attribute, a dbapi2 import of a non-connect name, and a
+    partial that defers something innocent."""
     ok_src = "import _shared as S\ndb = S.get_db(None)\n"
     assert not _connect_callers(ok_src)
     ok_import = "import sqlite3\nraise sqlite3.DatabaseError('x')\n"
     assert not _connect_callers(ok_import)
     ok_getattr = "import sqlite3\nerr_cls = getattr(sqlite3, 'DatabaseError')\n"
     assert not _connect_callers(ok_getattr)
+    ok_alias = "import sqlite3 as s3\nc = getattr(s3, 'DatabaseError')\n"
+    assert not _connect_callers(ok_alias)
+    ok_dbapi2 = "from sqlite3.dbapi2 import DatabaseError\nraise DatabaseError('x')\n"
+    assert not _connect_callers(ok_dbapi2)
+    ok_partial = "from functools import partial\ndoubler = partial(print, 'x')\n"
+    assert not _connect_callers(ok_partial)
 
 
 # --------------------------------------------------------------------------- #
