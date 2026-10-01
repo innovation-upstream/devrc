@@ -119,21 +119,32 @@ So: **a full-flow capture of this block costs the operator's Buzz and their
 consent.** Say the figure up front and get a go-ahead, rather than discovering it
 after the debit.
 
-### 🔴 The button's label is NOT always a total — two of its three states are degenerate
+### 🔴 The button's label is NOT always a total — three of its four states are degenerate
 
-`App.tsx:2565-2569` at `b293455` renders exactly three labels, and an earlier
-revision of this file told you to "read the button — it carries the live total",
-which is false in two of them:
+`App.tsx:2565-2569` at `b293455` renders **four** labels, and an earlier revision of
+this file told you to "read the button — it carries the live total", which is false
+in three of them:
 
 | label | what it means | what to do |
 |---|---|---|
-| `Generate · NNN Buzz` | every selected format priced; `NNN` is the expected total | the only reading you may quote as a cost |
+| `Generate · NNN Buzz` | every selected format priced; `NNN` is the expected total | the only reading you may quote as a cost — but see the grouping trap below |
+| `Estimating…` / `Submitting…` / `Generating…` / `Working…` | the `busy` branch (`App.tsx:2566` → `phaseLabel`, `:3516-3521`). A run is IN FLIGHT; this is a healthy, already-paid generation | 🔴 **not a pricing state and not a consent failure.** Earlier revisions listed only three labels, so a driver reading `Generating…` matched the no-figure row and diagnosed gate 1 — on a run that had already succeeded in being submitted. Read the history panel for the realized cost instead |
 | `Generate · from NNN Buzz` | `estimatePartial` — only SOME formats priced. `aggregateEstimate` (`generation.ts:627-635`) sums the KNOWN runs and returns `partial: true`, so `NNN` is a **floor, not the bill** | never quote it as the cost: the unpriced formats bill on top of it. Treat the total as unknown |
 | bare `Generate`, no figure | NO format priced. The app's own comment at `App.tsx:2562-2564` says `estimate()` **403s until the viewer consents** — so this is the ordinary label for a fresh viewer, i.e. **gate 1 above**, not a defect | the cost is UNKNOWN. There is no figure to get a go-ahead on, so do not click |
 
 The non-price signal is `yt-format-cost-note` (`App.tsx:2390`), present whether or
 not `estimate()` answered: it states the **workflow count** — `One generation.
 Costs Buzz.` or `N separate generations — each one costs Buzz.`
+
+🔴 **THE FIGURE IS LOCALE-GROUPED, SO NEVER `parseInt` IT.** `formatCost` is
+`Math.round(cost).toLocaleString()` (`generation.ts:406-409`), so at four figures the
+label reads `Generate · 1,045 Buzz`. A `parseInt` or `/(\d+)/` extraction returns
+**1**, and you quote "1 Buzz" for a go-ahead on a 1,045 Buzz debit — an error of
+three orders of magnitude, in the direction that gets the click approved. Every
+example figure in this file (209 / 418 / 836) is below 1000, which is exactly why no
+previous measurement exposed this. **Relay the label verbatim, or strip separators
+before parsing** (`replace(/[^\d]/g, '')`). The separator is locale-dependent, so do
+not pattern-match on a comma either.
 
 ### 🔴 The figures below are EXAMPLES AT QUANTITY 1. 836 is not a ceiling.
 
@@ -155,10 +166,18 @@ is nothing in that list:
   is not recorded here.
 
 So one click costs (formats selected) × (quantity) × (per-image price), and at the
-current default 836 Buzz is the per-**format** maximum. A handful of selected
-formats puts a single click two orders of magnitude above the top figure quoted
-above. **Read the label for what it gives you, read the chip count for what
-multiplies it, and never treat a number in this file as a bound.**
+current default 836 Buzz is the per-**format** maximum — the `buzzBudgetPerGen` 900
+bounds each workflow, and N selected formats are N workflows.
+
+⚠ **The honest multiplier, arithmetic rather than a flourish.** 5 formats at
+quantity 1 is **1,045** Buzz (1.2× the 836 quoted above); the `MAX_CUSTOM_FORMATS`
+= 40 ceiling tops out near **8,360** (10×, i.e. ONE order of magnitude), and two
+orders would need ~100 formats, which that ceiling does not permit. An earlier
+revision of this paragraph said "two orders of magnitude" — that was a flourish, not
+a derivation, and it is the same defect class (a bound stated beyond what the
+mechanism supports) as the `836`-as-ceiling it was written to replace. **Read the
+label for what it gives you, read the chip count for what multiplies it, and never
+treat a number in this file as a bound.**
 
 ## States
 
@@ -178,7 +197,8 @@ an id that cannot appear, which is indistinguishable from a failed generation an
 invites a second debit. Details and the dead-id list: *Testids*, below.
 
 ⚠ `yt-history` itself is **absent** when history is ready-and-empty
-(`showHistory`, `History.tsx:91`) — a fresh viewer has no history panel at all, so
+(`showHistory`, declared `src/history.ts:534-542`; the call is `History.tsx:91`) — a
+SIGNED-IN viewer with no history has no panel at all, so
 waiting on `yt-history` before any generation also hangs on a healthy app.
 
 ## 🔴 The two tabs carry NO testid — tag, then click
@@ -380,9 +400,23 @@ built-ins, one selected — it matches **16** nodes of which only 6 are chips:
 | `yt-format-new` | 1 | `App.tsx:2374` |
 | `yt-format-cost-note` | 1 | `App.tsx:2390` |
 
-`querySelectorAll` returns them in document order, so index 0 is the **grid**: a
-"first match" or `nth` habit clicks a container, reports `ok:true`, and changes
-nothing. More appear in other states — `yt-format-publish-${id}` and
+🔴 **`querySelectorAll` returns DOCUMENT order, and index 0 is `yt-format-new` — a
+LIVE BUTTON, not a container.** The table above is grouped by kind, not by
+position; the document order at `b293455` is `yt-format-new` (`App.tsx:2374`) →
+`yt-format-cost-note` (`:2390`) → `yt-format-grid` and everything inside
+`<FormatPicker>` (`:2396`). So a "first match" or `nth` habit does not click an
+inert wrapper: it clicks a `Button` whose `onClick={onNewFormat}` **opens the
+custom-format editor**, swapping in the `yt-format-editor`/`-label`/`-suffix`/
+`-save`/`-cancel` set. It is enabled in exactly the state you measure in —
+`disabled={busy || storageState === 'anon' || customFormatsFull(customFormats)}`,
+all three false when signed in and idle.
+
+⚠ **That is worse than a dead click, and it reads like one.** No chip selection
+changes, so the op reports `ok: true` with nothing visibly different — while the
+app has silently changed state, and your next chip query matches a different node
+set. An earlier revision of this section said index 0 was the grid and "changes
+nothing"; both halves were wrong. **Address the chips by their own ids.** More
+appear in other states — `yt-format-publish-${id}` and
 `yt-format-delete-${id}` per custom format (`FormatPicker.tsx:124`, `:135`), and
 the whole `yt-format-editor`/`-label`/`-suffix`/`-error`/`-save`/`-cancel` set once
 the editor opens (`:173`–`:221`).
@@ -433,7 +467,7 @@ exactly that. Nine of the ten are absent *by design in that state*; the tenth,
 | `pm-result-img` | **not an absence — a dead id.** See the dead-id table above | never |
 
 ⚠ The converse also holds: `yt-history` and its children are absent for a viewer
-with **no** history (`showHistory`, `History.tsx:91`), so that measurement's stated
+with **no** history (`showHistory`, declared `src/history.ts:534-542`), so that measurement's stated
 condition — three completed generations — is what made them present.
 
 🔴 **`pm-save-note` is the SAVE RESULT surface and it reports FAILURE as readily
@@ -443,8 +477,9 @@ fired. Measured 2026-09-30 on 0.1.7: clicking `yt-history-save` on **one** real
 paid candidate rendered **`Couldn't save that image: image url is not allowed`**.
 That is a **platform** refusal, not an app bug — the host's allowlist does not
 carry the hostname this app's blobs are served from. Mechanism, scope and the
-upstream fix: `flows/civit.ai.md` → *"SAVE_IMAGE is allowlisted by exact
-hostname"*.
+upstream fix: `flows/civit.ai.md`, section
+*"`SAVE_IMAGE` is allowlisted by EXACT hostname"* — kept on ONE line so a
+line-based grep for it actually matches the heading.
 
 ⚠ **Scope that to what was measured:** one click, on one model's blob host, at one
 moment. It is evidence that **that** save was refused — not a proof that no save in

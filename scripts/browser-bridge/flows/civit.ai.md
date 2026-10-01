@@ -118,7 +118,7 @@ when **`https:`** and the hostname is an **exact** member of
 | `image.civitai.com` | `:32` |
 | `orchestration.civitai.com` | `:40` |
 | `orchestration-next.civitai.com` | `:47` |
-| the hostname of `NEXT_PUBLIC_IMAGE_LOCATION` | added per call, `:113-118` |
+| the hostname of `NEXT_PUBLIC_IMAGE_LOCATION` | added per call, `:114-120` |
 
 **No wildcarding, no suffix match**, and the `https:`-only check means a block's
 canvas/editor export — a local `blob:` — is refused outright by design.
