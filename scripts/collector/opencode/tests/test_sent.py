@@ -157,7 +157,14 @@ def test_all_agents_shows_injected_messages_tagged(tmp_path, capsys):
 def test_user_message_text_is_joined_across_all_text_parts(tmp_path, capsys):
     """A dispatch brief arrives as a SECOND text part; dropping it would show
     half of what the user sent. `tailer.extract_text` takes only the first —
-    that is the telemetry view, not this one."""
+    that is the telemetry view, not this one.
+
+    🔴 The assertion is the EXACT line, not membership: both parts share one
+    `time_created`, so the output is a (time_created, id) tie resolved by
+    `_order_key`. A membership assertion cannot see part ORDER — the round-1
+    mutation battery showed deleting `key=_order_key` from the parts sort
+    passes such a test (18/18) while silently reintroducing run-to-run flips.
+    """
     db = _build_db(tmp_path / "store.db")
     _add_session(db)
     _add_message(db, "m1", "s1", 1700000001000, _user("m1", 1700000001000))
@@ -166,9 +173,8 @@ def test_user_message_text_is_joined_across_all_text_parts(tmp_path, capsys):
     db.commit()
     rc = SE.main(["show", "s1", "--db", str(tmp_path / "store.db")])
     assert rc == 0
-    out = capsys.readouterr().out
-    assert "typed instruction" in out
-    assert "attached brief" in out
+    out = capsys.readouterr().out.splitlines()
+    assert out == [f"{_expected_local(1700000001000)}  typed instruction ⏎ attached brief"]
 
 
 def test_non_text_parts_never_render(tmp_path, capsys):
@@ -250,6 +256,81 @@ def test_session_with_no_user_messages_is_exit_4(tmp_path, capsys):
     db.commit()
     rc = SE.main(["show", "s1", "--db", str(tmp_path / "store.db")])
     assert rc == X.EXIT_SESSION_EMPTY
+    assert "no displayable user messages" in capsys.readouterr().err
+
+
+def test_only_non_build_session_names_the_filter_and_the_escape_hatch(
+    tmp_path, capsys
+):
+    """A dispatched-subagent session has user messages that are ALL non-build.
+    Reporting `session has no user messages` there is FALSE — the messages
+    exist, the default filter hid them — and it is the case where the answer
+    (the dispatch brief) is exactly what an agent asking for this session
+    wants. Round-1 finding 2, reproduced live store-wide: 60 of 223
+    sessions-with-user-messages were all-non-build, 0 mixed."""
+    db = _build_db(tmp_path / "store.db")
+    _add_session(db)
+    _add_message(db, "m1", "s1", 1700000001000, _user("m1", 1700000001000, "explore"))
+    _add_part(db, "p1", "m1", "s1", 1700000001000, _text("dispatch brief"))
+    db.commit()
+    rc = SE.main(["show", "s1", "--db", str(tmp_path / "store.db")])
+    assert rc == X.EXIT_SESSION_EMPTY
+    err = capsys.readouterr().err
+    assert "--all-agents" in err
+    assert "1" in err
+
+
+def test_mixed_textless_and_non_build_counts_both_in_exit_4(tmp_path, capsys):
+    db = _build_db(tmp_path / "store.db")
+    _add_session(db)
+    # non-build user message WITH text → agent-filtered
+    _add_message(db, "m1", "s1", 1700000001000, _user("m1", 1700000001000, "probe"))
+    _add_part(db, "p1", "m1", "s1", 1700000001000, _text("probe injected"))
+    # build user message with NO text part → textless-hidden
+    _add_message(db, "m2", "s1", 1700000002000, _user("m2", 1700000002000, "build"))
+    _add_part(db, "p2", "m2", "s1", 1700000002000, {"type": "file", "mime": "x"})
+    db.commit()
+    rc = SE.main(["show", "s1", "--db", str(tmp_path / "store.db")])
+    assert rc == X.EXIT_SESSION_EMPTY
+    err = capsys.readouterr().err
+    assert "--all-agents" in err
+    assert "no text part" in err
+
+
+# --------------------------------------------------------------------------- #
+# the store-unreadable wraps round 1 added — a store we cannot READ is rc 5,
+# never a traceback
+# --------------------------------------------------------------------------- #
+def test_db_path_to_a_directory_is_exit_5_not_a_traceback(tmp_path, capsys):
+    """`--db <directory>`: get_db opens a URI connection that raises. export.py
+    wraps this identical call; round 1 found sent.py had dropped the wrap."""
+    rc = SE.main(["show", "s1", "--db", str(tmp_path)])
+    assert rc == X.EXIT_STORE_UNREADABLE
+    assert "cannot open store" in capsys.readouterr().err
+
+
+def test_session_table_missing_reader_columns_is_exit_5(tmp_path, capsys):
+    """`_store_is_readable` probes only (id, time_created) on session; a store
+    whose session table carries EXACTLY those passes the probe, and the
+    `known` scan then reads columns that do not exist. export.py compensates
+    with a wrap round 1 found missing here — a future schema drift must
+    produce rc 5, not an IndexError traceback."""
+    db = sqlite3.connect(tmp_path / "store.db")
+    db.executescript(
+        """
+        CREATE TABLE session (id TEXT, time_created INTEGER);
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT,
+                              time_created INTEGER, time_updated INTEGER, data TEXT);
+        CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT,
+                           time_created INTEGER, time_updated INTEGER, data TEXT);
+        """
+    )
+    db.execute("INSERT INTO session VALUES ('s1', 1000)")
+    db.commit()
+    db.close()
+    rc = SE.main(["show", "s1", "--db", str(tmp_path / "store.db")])
+    assert rc == X.EXIT_STORE_UNREADABLE
+    assert "store read failed" in capsys.readouterr().err
 
 
 def test_missing_store_is_exit_2(tmp_path, capsys):
@@ -274,19 +355,19 @@ def test_unreadable_store_is_not_reported_as_no_such_session(tmp_path, capsys):
 def _connect_callers(src: str) -> list[str]:
     """Every call site that could open a sqlite connection, by spelling.
 
-    Compact version of test_export.py's `_connect_offenders`, covering the
-    shapes that matter here: `import sqlite3` (the module must not appear at
-    all — it has no legitimate use once the connection comes from `_shared`),
-    `sqlite3.connect(...)` / bare `connect(...)` calls, and the assignment
-    alias (`_c = sqlite3.connect`).
+    Compact version of test_export.py's `_connect_offenders`. The MODULE may be
+    imported — round 1's fixes need `sqlite3.DatabaseError` for the store-wrap
+    exit codes, exactly export.py's own use — so the guard flags call SHAPES:
+    `sqlite3.connect(...)` / bare `connect(...)` calls and the assignment alias
+    (`_c = sqlite3.connect`). The reader connection comes from `_shared`.
     """
     tree = ast.parse(src)
     offenders = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            offenders += [a.name for a in node.names if a.name == "sqlite3"]
+        # the MODULE import is legal (exception types, export.py's own use);
+        # importing the connect FUNCTION by any alias is not
         if isinstance(node, ast.ImportFrom) and node.module == "sqlite3":
-            offenders.append(node.module)
+            offenders += [a.name for a in node.names if a.name == "connect"]
         if isinstance(node, ast.Call):
             f = node.func
             if isinstance(f, ast.Attribute) and f.attr == "connect":
@@ -315,9 +396,12 @@ def test_connection_guard_flags_each_spelling(bad_src):
 
 
 def test_connection_guard_passes_the_shared_pattern():
-    """Positive control — the sanctioned spelling must NOT be flagged."""
+    """Positive control — the sanctioned spelling must NOT be flagged, and a
+    bare module import (exception types only, export.py's own use) too."""
     ok_src = "import _shared as S\ndb = S.get_db(None)\n"
     assert not _connect_callers(ok_src)
+    ok_import = "import sqlite3\nraise sqlite3.DatabaseError('x')\n"
+    assert not _connect_callers(ok_import)
 
 
 # --------------------------------------------------------------------------- #

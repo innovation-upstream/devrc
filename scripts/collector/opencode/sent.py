@@ -50,17 +50,33 @@ readonly 1, nav 1, k8s 1. So the default filter is `agent == "build"`, and
 swallows schema drift into empty iterators, which is right for a tailer and
 poisonous here, where emptiness would be read as "you sent nothing" — the
 exact misdirection `export.py`'s EXIT_STORE_UNREADABLE exists to prevent.
-`show` therefore reuses `export._store_is_readable` (the predicate that asks
-for the same columns the reader reads) and refuses with the same exit code
-family as `export.py`: 0 ok, 2 no store, 3 no such session, 4 session has no
-user messages, 5 store unreadable. Message/part ordering re-uses
-`export._order_key`, because `_shared`'s `ORDER BY time_created` is not a
-total order and two runs must agree.
+`show` reuses `export._store_is_readable` and compensates for what that
+predicate does NOT cover — round-1 finding 1, measured:
+
+  * the predicate probes only (id, time_created) on `session`, while the
+    `known` scan reads ~12 columns through `_shared.iter_sessions`. A store
+    whose session table carries exactly the probed columns PASSES the probe
+    and then raises IndexError on the scan. The wrap below
+    (`except (sqlite3.DatabaseError, IndexError)` → rc 5, mirroring
+    export.py's own) is the compensation — the docstring previously claimed
+    the predicate "asks for the same columns the reader reads", which was
+    false for the session reader; this paragraph is its replacement, and the
+    probe gap is INHERITED from export.py, not fixed here (widening it would
+    change export.py's behaviour too).
+  * `S.get_db()` itself can raise (`--db <directory>` → OperationalError on
+    the URI open); it is wrapped → "cannot open store" + rc 5, exactly
+    export.py:244-248.
+
+Exit family (as export.py): 0 ok, 2 no store, 3 no such session, 4 no
+DISPLAYABLE user messages under the current filter, 5 store unreadable.
+Message/part ordering re-uses `export._order_key`, because `_shared`'s
+`ORDER BY time_created` is not a total order and two runs must agree.
 """
 from __future__ import annotations
 
 import argparse
 import datetime
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -115,23 +131,30 @@ def _one_line(text: str) -> str:
 
 def user_messages(
     db, session_id: str, all_agents: bool = False
-) -> tuple[list[tuple[int, str, str, str]], int]:
-    """Return ([(time_created, ts_str, agent, text)], hidden_count).
+) -> tuple[list[tuple[int, str, str]], int, int]:
+    """Return ([(ts_str, agent, text)], textless_hidden, other_agent_hidden).
 
     Ordered by `export._order_key` (total order), text joined from ALL text
     parts of the message — `tailer.extract_text` takes only the first part,
     which is the telemetry view; a dispatch brief attached as a second part is
     part of what the user sent. Empty-text parts contribute nothing, and a
     message whose text parts are all empty is dropped from the list and
-    counted in hidden_count instead.
+    counted in textless_hidden instead. Non-build user messages are likewise
+    counted in other_agent_hidden — round-1 finding 2: 60 of 223
+    sessions-with-user-messages measured 2026-10-01 are ALL non-build (every
+    dispatched-subagent session, 0 mixed), so "no user messages" would be a
+    false sentence for 27% of the population unless the count names what the
+    filter did.
     """
-    out: list[tuple[int, str, str, str]] = []
-    hidden = 0
+    out: list[tuple[str, str, str]] = []
+    textless = 0
+    other_agent = 0
     for message in sorted(S.iter_messages(db, session_id), key=_order_key):
         if message.get("role") != "user":
             continue
         agent = message.get("agent") or "?"
         if not all_agents and agent != HUMAN_AGENT:
+            other_agent += 1
             continue
         texts = [
             part.get("text") or ""
@@ -140,15 +163,14 @@ def user_messages(
         ]
         joined = "\n".join(t for t in texts if t.strip())
         if not joined.strip():
-            hidden += 1
+            textless += 1
             continue
         out.append((
-            message.get("time_created") or 0,
             _fmt_ts(message.get("time_created")),
             agent,
             joined,
         ))
-    return out, hidden
+    return out, textless, other_agent
 
 
 def cmd_show(db, session_id: str, all_agents: bool) -> int:
@@ -160,22 +182,40 @@ def cmd_show(db, session_id: str, all_agents: bool) -> int:
         )
         return EXIT_STORE_UNREADABLE
 
-    known = any(s.get("id") == session_id for s in S.iter_sessions(db))
-    messages, hidden = user_messages(db, session_id, all_agents=all_agents)
+    try:
+        known = any(s.get("id") == session_id for s in S.iter_sessions(db))
+        messages, textless, other_agent = user_messages(
+            db, session_id, all_agents=all_agents
+        )
+    except (sqlite3.DatabaseError, IndexError) as exc:
+        print(f"store read failed: {exc}", file=sys.stderr)
+        return EXIT_STORE_UNREADABLE
 
     if not messages:
         if not known:
             print(f"no such session: {session_id}", file=sys.stderr)
             return EXIT_NO_SUCH_SESSION
-        print("session has no user messages", file=sys.stderr)
+        if other_agent:
+            print(
+                f"no {HUMAN_AGENT}-agent user messages "
+                f"({other_agent} non-build hidden — retry with --all-agents)",
+                file=sys.stderr,
+            )
+        else:
+            print("no displayable user messages", file=sys.stderr)
+        if textless:
+            print(
+                f"({textless} user message(s) had no text part and are not shown)",
+                file=sys.stderr,
+            )
         return EXIT_SESSION_EMPTY
 
-    for _, ts, agent, text in messages:
+    for ts, agent, text in messages:
         tag = "" if agent == HUMAN_AGENT else f"[{agent}] "
         print(f"{ts}  {tag}{_one_line(text)}".rstrip())
-    if hidden:
+    if textless:
         print(
-            f"({hidden} user message(s) had no text part and are not shown)",
+            f"({textless} user message(s) had no text part and are not shown)",
             file=sys.stderr,
         )
     return EXIT_OK
@@ -196,7 +236,11 @@ def main(argv: list[str] | None = None) -> int:
     p_show.add_argument("--db", help="explicit store path (default: discovered)")
     args = ap.parse_args(argv)
 
-    db = S.get_db(Path(args.db) if args.db else None)
+    try:
+        db = S.get_db(Path(args.db) if args.db else None)
+    except sqlite3.DatabaseError as exc:
+        print(f"cannot open store: {exc}", file=sys.stderr)
+        return EXIT_STORE_UNREADABLE
     if db is None:
         print("no opencode database found", file=sys.stderr)
         return EXIT_NO_DB
