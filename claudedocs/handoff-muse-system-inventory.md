@@ -520,6 +520,54 @@ read-only `muse-bridge` cluster API exposed to the public internet.
   ```
   🔴 Do NOT click Allow to produce one — approving is the operator's gate.
 
+### 🔴 I pushed over a LIVE image tag while testing the guard that exists to prevent it
+- as-of: 2026-10-02
+
+- **Symptom + exact repro:** `scripts/release-muse-bridge.sh 0.1.0` was run to
+  exercise its *refusal* path. It did not refuse — it built and **pushed over the
+  live `harbor.homelab.lan/muse/muse-bridge:0.1.0` tag**, which is the exact
+  `imagePullPolicy: IfNotPresent` hazard (M11) the guard was written against.
+- **Root cause — an instrument that fails OPEN, never validated.** The guard was
+  `if docker manifest inspect "$REF" >/dev/null 2>&1; then die ...`. That
+  subcommand does **not** use the docker daemon's trust store, and Harbor serves
+  a self-signed cert, so it cannot reach this registry **at all** and exits
+  non-zero for *every* tag. The "tag does not exist" branch was therefore
+  unconditional: the guard could never fire, for any input.
+- **Observed (with values):** measured 2026-10-02 on this host —
+
+  | tag | `docker manifest inspect` | `docker buildx imagetools inspect` | `docker pull -q` |
+  |---|---|---|---|
+  | `0.1.0` (exists) | rc=1 | rc=1 | **rc=0** |
+  | `0.9.9` (absent) | rc=1 | rc=1 | **rc=1** |
+
+  Only `docker pull` discriminates, because it goes through the daemon.
+- **Blast radius, measured, not inferred:** the running pod was untouched —
+  `muse-bridge-88f74d4c6-mnds9`, **0 restarts**, `started 2026-09-29T21:35:05Z`,
+  `imageID sha256:62efb46f…`, still serving the pre-allowlist binary. What
+  changed is that Harbor's `0.1.0` now resolves to `sha256:0b0b98b3…` — the
+  merged allowlist build — so with `IfNotPresent` the tag means the OLD binary
+  only on the node still holding that layer. A reschedule elsewhere would have
+  enabled the allowlist at an unplanned moment.
+- **Ruled out:** "this is harmless because the content is the reviewed code" —
+  true about the content and irrelevant to the defect: the tag stopped matching
+  what the Deployment claimed, in a cluster whose pull policy makes that
+  unobservable per-node. `via: measurement`.
+- **Ruled out:** restoring `0.1.0` by rebuilding the pre-merge source and pushing
+  it back. These builds are **not reproducible** (base images pinned by tag, not
+  digest — a handoff LOW finding), so that would mint a THIRD digest asserting
+  "this is the old binary" that nobody can verify. Worse than the honest mess.
+  `via: code` (the Dockerfile's `FROM golang:1.26-alpine` / `distroless:nonroot`).
+- **Resolution, operator-chosen:** finish deliberately. `0.1.1` built and pushed
+  from the merged tree, Deployment bumped via homelab-infra **#944**, so the
+  live state matches a commit instead of an accident. `0.1.0` and `0.1.1` now
+  carry the same digest, which is why the bump was required rather than a reuse.
+- **Next probe:** none — closed by #944 plus the guard rewrite. The guard now
+  uses `docker pull -q` **and runs its own positive+negative control on every
+  invocation** (a bogus tag must read absent, `0.1.0` must read present), and was
+  watched to refuse `0.1.0` before building. Residual question worth one look if
+  anyone cares: whether Harbor's own API would be a better instrument than
+  `docker pull`, which has the side effect of pulling layers.
+
 ## Defects (batched)
 
 Fixed as ONE round, not one rank each. Original ranks kept for reference.
@@ -707,6 +755,36 @@ Fixed as ONE round, not one rank each. Original ranks kept for reference.
 - **`scripts/kustomize-validate.sh` needs `nix develop`** — outside it, it fails
   all 124 roots with `kustomize: command not found` and prints `FAIL`. An
   environment defect, not a change defect.
+
+- 🔴 **A GUARD BUILT ON AN UNVALIDATED INSTRUMENT IS NOT A WEAK GUARD, IT IS AN
+  INVERTED ONE — AND I SHIPPED ONE INTO THE ACTION IT WAS GUARDING.** `docker
+  manifest inspect` cannot reach a self-signed registry and fails non-zero for
+  EVERY tag, so `if inspect; then die; fi` reads "the tag is free" always. I
+  wrote that guard, wrote a comment explaining the trap it prevented, and then
+  pushed over a live production tag with it. **The rule I broke is already in
+  `claude/RULES.md`: validate the instrument before reading its verdict — BOTH
+  controls, a case it must reject and a case it must accept.** For an existence
+  check that means: feed it a thing that exists and a thing that does not, and
+  require DIFFERENT answers. A single rc=1 is not evidence of absence; it is
+  evidence of nothing.
+- 🔴 **"Testing the refusal path" IS running the command.** The test that found
+  this was `script 0.1.0` — chosen *because* 0.1.0 exists, expecting a refusal.
+  When the guard is the only thing standing between a test invocation and an
+  irreversible action, a broken guard turns the test into the action. **Put the
+  refusal checks before anything that mutates, and prove they fire with the
+  mutating steps still unreachable** — e.g. by pointing the script at a registry
+  that cannot be written, or by a `--preflight-only` mode. A script whose
+  dangerous path is reachable from its own happy-path test is mis-shaped.
+- ⚠ **`docker pull` as an existence probe has a side effect** — it downloads
+  layers. Acceptable here (small image, LAN registry) and noted so nobody reads
+  it as a free metadata read.
+- **Where the muse-bridge build steps live now:** `homelab-infra:
+  scripts/release-muse-bridge.sh` (added in #944). Phases: default = preflight +
+  tests + build + push + read-back; `--verify-only` = probe what is live, and it
+  was watched to FAIL against the pre-allowlist binary before being trusted. It
+  deliberately makes **no git writes** — the Deployment bump goes through a
+  worktree and a PR, matching PR 925's `deploy(muster): 0.2.1` precedent, because
+  committing to `trunk` IS deploying and the main checkout is shared.
 
 ## How to verify
 
