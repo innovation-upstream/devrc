@@ -49,7 +49,11 @@ default (`muse b1` prints the recipe verbatim).
   ≥10 min gap (`MUSE_MIN_SEND_GAP_MIN`; `--force` overrides deliberately) — it
   is **not a rate limiter**, and is bypassable by anything that can write
   `$XDG_STATE_HOME/muse/last-send` (the gap is read from that file's MTIME, not
-  its contents). It stamps on confirmed SUBMIT, so a reply-timeout still counts.
+  its contents). On both channels it stamps as soon as delivery is POSSIBLE —
+  B1 right after the first Enter, B2 right after muse-cli returns — so a
+  reply-timeout, or a failure between submit and confirmation, still counts.
+  The cost is deliberate: a genuinely inert Enter also stamps, and `--force`
+  is the override.
   🔴 **An agent loop is the threat it does not stop** — give send authority to
   exactly ONE agent per fan-out and stub `MUSE_BB` for the rest.
 - **Cookies/token never cross the wire you type on**: muse-cli keeps its own

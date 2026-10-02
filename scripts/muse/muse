@@ -17,10 +17,13 @@
 #
 # Pacing: sends are human-paced (a few/hour, design §4-B2). The wrapper refuses
 # a second send within $MUSE_MIN_SEND_GAP_MIN minutes (default 10) unless
-# --force; the guard is a reminder, not a rate limiter. It stamps on CONFIRMED
-# SUBMIT (not on a successful round-trip), refuses a non-integer gap rather
-# than failing open, and is still bypassable by anything that can write
-# $STATE_DIR/last-send — it is read from the stamp's MTIME, not its contents.
+# --force; the guard is a reminder, not a rate limiter. On BOTH channels it
+# stamps as soon as delivery is POSSIBLE — B1 right after the first Enter, B2
+# right after muse-cli returns, before either branches on success — so a
+# failure after that point cannot leave a delivered message unstamped. It
+# refuses a non-integer gap rather than failing open, and is still bypassable
+# by anything that can write $STATE_DIR/last-send — it is read from the
+# stamp's MTIME, not its contents.
 #
 # Muse's per-host APPROVAL prompts are the OPERATOR's security gate. This
 # wrapper never clicks Allow on any path, and ATTEMPTS to detect a pending
@@ -183,7 +186,20 @@ cmd_send() {
   done
   [ ${#args[@]} -gt 0 ] || die "send needs task text: muse send \"<task>\"" 2
   [ "$force" -eq 1 ] || pace_check
-  if [ "$use_cli" -eq 1 ]; then cmd_send_cli "${args[@]}" --wait "$wait" ${thread:+--thread "$thread"}; return; fi
+  # 🔴 Forward --force. It used to be consumed here and NOT passed on, so
+  # cmd_send_cli re-initialised force=0 and ran pace_check a SECOND time:
+  # `muse send --force --cli "x"` was refused with exit 2 despite the
+  # documented override, while the un-forced --cli path paced twice. Found by
+  # #1976 round 1.
+  # ⚠ An explicit test, NOT `${force:+--force}`: force is the STRING "0" or
+  # "1", and `:+` expands on non-EMPTY, so the `:+` form passes --force when
+  # force=0 — inverting the flag it was meant to forward.
+  # ⚠ if/fi, not `[ … ] && fwd=(…)`: a failing `&&` list as a function's last
+  # statement returns non-zero. And `${fwd[@]+…}` guards an EMPTY array under
+  # `set -u` on bash < 4.4.
+  local fwd=()
+  if [ "$force" -eq 1 ]; then fwd=(--force); fi
+  if [ "$use_cli" -eq 1 ]; then cmd_send_cli "${args[@]}" --wait "$wait" ${fwd[@]+"${fwd[@]}"} ${thread:+--thread "$thread"}; return; fi
   cmd_send_b1 "${args[@]}" "$wait"
 }
 
@@ -239,6 +255,20 @@ cmd_send_b1() {
   trap - EXIT
   [ "$rc" -eq 0 ] || die "B1: the composer did not take the typed text after retry (got '${got:-?}', wanted len=${#task}). Re-throttled tab or a UI change — see 'muse b1'." 1
   "$BB_BIN" "$B1_REF" key Enter --selector 'textarea[placeholder="Message"]' >/dev/null 2>&1 || true
+  # 🔴 STAMP THE MOMENT DELIVERY BECOMES POSSIBLE — i.e. right after the first
+  # Enter, not after the submit is CONFIRMED. Everything between here and the
+  # confirmation can `die`, and two paths did: the two `state unreadable`
+  # exits below both leave a possibly-delivered message unstamped, so a caller
+  # retrying on exit 1 re-sends with no gap. #1976 round 1 found that the
+  # previous placement's own comment asserted an invariant — "a send that
+  # submits has still DELIVERED" — that those paths broke.
+  # ⚠ THE TRADE IS DELIBERATE AND COSTS SOMETHING: an Enter that really was
+  # inert now also stamps, so a legitimate immediate retry is refused for
+  # $MIN_SEND_GAP_MIN. That is the correct direction for a guard whose whole
+  # job is to stop a loop spamming the operator's account — fail CLOSED — and
+  # --force is the documented override (which now actually works on both
+  # channels; it did not before this round).
+  pace_mark
   sleep 4
   if ! b1_state; then "$BB_BIN" "$B1_REF" wake --wait 3000 >/dev/null 2>&1 || true; b1_state || die "B1: state unreadable right after submit" 1; fi
   # "Cleared" = the composer VALUE is empty (the element itself always stays
@@ -261,12 +291,9 @@ cmd_send_b1() {
       die "B1: the composer did not clear — Enter was inert twice. Check the tab by hand ($B1_REF); if an approval card is pending, review it in the Muse UI." 1
     fi
   fi
-  # 🔴 Mark the pacing stamp HERE, on CONFIRMED SUBMIT — not after the reply
-  # poll. A send that submits and then times out waiting (the `no reply within
-  # Ns` die below) has still DELIVERED a message to Meta; stamping only on a
-  # fully successful round-trip left the gate unmarked, so a caller that
-  # retried on exit 1 re-sent immediately with no gap. Measured 2026-10-01.
-  pace_mark
+  # (The pacing stamp already fired, right after the first Enter above — see
+  # the note there for why it is keyed to POSSIBLE delivery rather than to a
+  # confirmed submit or a successful round-trip.)
   # Poll the delta: lastId+len stable twice wins; cap at $wait.
   local deadline=$((SECONDS + wait)) prev="" started=$SECONDS
   while [ $SECONDS -lt $deadline ]; do
@@ -331,11 +358,19 @@ cmd_send_cli() {
   task=$(printf '%s ' "${args[@]}")
   local rc=0
   "$MUSE_CLI_BIN" send "$task" --wait "$wait" ${thread:+--thread "$thread"} || rc=$?
+  # 🔴 Stamp on ATTEMPT, before branching on rc. muse-cli's `send` combines
+  # delivery and the reply wait, so a non-zero rc cannot distinguish "never
+  # sent" from "sent, then the wait failed" — and in the second case a message
+  # HAS reached Meta. Stamping only on rc==0 left the gate unmarked there, so a
+  # caller retrying on exit 1 re-sent with no gap: the same defect this PR
+  # fixed on B1, still live on B2. Found by #1976 round 1, which also caught
+  # that muse:20-21 and SKILL.md asserted the fixed behaviour for BOTH
+  # channels while only B1 had it.
+  pace_mark
   if [ "$rc" -ne 0 ]; then
     b1_hint
     case $rc in 3) exit 3 ;; *) exit 1 ;; esac
   fi
-  pace_mark
 }
 
 cmd_poll() {
@@ -428,11 +463,20 @@ cmd_status() {
   # $token"` put the bearer token in curl's command line, and MEASURED on this
   # host /proc is mounted without `hidepid` with /proc/<pid>/cmdline mode 0444 —
   # so for up to 15s per call ANY local process under ANY user could read a
-  # token that grants cluster-wide read. `--config -` keeps it off argv and out
-  # of /proc, ps and the process table. Measured 2026-10-01.
-  curl -sS -m 15 --config - "$url" -w '\n[%{http_code}]' <<CURLCFG || rc=$?
-header = "Authorization: Bearer $token"
-CURLCFG
+  # token that grants cluster-wide read. Measured 2026-10-01.
+  #
+  # 🔴 `-H @-`, NOT `--config -`. Both keep the token off argv, but `--config`
+  # applies C-ESCAPE PROCESSING inside a quoted value, so it CORRUPTS the token
+  # it is protecting: measured against a loopback echo server (curl 8.21.0), a
+  # token containing `"` is SILENTLY TRUNCATED at the quote (`aaa"bbb` sends
+  # `Bearer aaa`), a `\` is swallowed, and `\t` becomes a literal tab. rc stays
+  # 0 and the bridge answers 401 — which the comment below reads as "token
+  # rejected", sending the next reader after a credential problem that does not
+  # exist. `-H @-` passes the line VERBATIM. Found by #1976 round 1.
+  # ⚠ The unquoted `--config` spelling (`header = Authorization: …`) sends NO
+  # header at all — also measured. Do not "simplify" back to either form.
+  printf 'Authorization: Bearer %s\n' "$token" \
+    | curl -sS -m 15 -H @- "$url" -w '\n[%{http_code}]' || rc=$?
   echo >&2
   [ "$rc" -eq 0 ] || die "bridge query failed (network)" 4
   # 401 = token rejected; 404 = route gone (API churn); both are answers, not outages.

@@ -263,18 +263,41 @@ def test_the_token_never_reaches_curl_argv():
     any local user could read a cluster-wide-read token for the call's duration.
 
     A structural assertion on the source: argv-passing and stdin-passing are
-    distinguishable in the text, and this is the narrowest expression that can
-    be wrong. A behavioural test would need the real sops key.
+    distinguishable in the text. A behavioural test would need the real sops key.
+
+    🔴 SCANS THE WHOLE INVOCATION, NOT ONE PHYSICAL LINE. #1976 round 1 showed
+    the line-scoped version SURVIVED a mutant that re-added
+    `-H "Authorization: Bearer $token"` on a backslash CONTINUATION line.
+    Continuations are joined before the check.
+
+    🔴 AND IT REQUIRES `-H @-`, NOT `--config -`. Both keep the token off argv,
+    but `--config` applies C-escape processing and CORRUPTS the value:
+    measured against a loopback echo server, `has"quote` arrived as `has` and
+    `has\back` as `hasback`, while `-H @-` passed all five probe shapes
+    verbatim. A corrupted token reads as a 401, i.e. as a credential problem
+    that does not exist.
     """
     source = source_without_comments()
-    curl_lines = [ln for ln in source.splitlines() if "curl " in ln and "-sS" in ln]
-    assert curl_lines, "no curl invocation found -- this guard has gone stale"
-    for line in curl_lines:
-        assert "Authorization" not in line, (
-            f"the bearer token is on curl's command line: {line.strip()!r} -- "
-            "pass it via --config - on stdin so it stays out of /proc and ps"
+    # Join backslash continuations so a multi-line invocation is one unit.
+    joined = source.replace("\\\n", " ")
+    curl_cmds = [ln for ln in joined.splitlines() if "curl " in ln and "-sS" in ln]
+    assert curl_cmds, "no curl invocation found -- this guard has gone stale"
+    for cmd in curl_cmds:
+        # Only what curl itself receives. The header NAME legitimately appears
+        # UPSTREAM of the pipe, in the `printf` that feeds stdin -- that is the
+        # fix, not the defect, so scanning the whole line rejects correct code.
+        argv = cmd[cmd.index("curl ") :]
+        assert "Authorization" not in argv, (
+            f"the bearer token is on curl's command line: {argv.strip()!r} -- "
+            "pipe it via `-H @-` on stdin so it stays out of /proc and ps"
         )
-    assert "--config -" in source
+    assert "-H @-" in source, (
+        "the token must reach curl via `-H @-` on stdin; `--config -` is NOT "
+        "an acceptable substitute -- it C-escape-mangles the token"
+    )
+    assert "--config -" not in source, (
+        "`--config -` silently truncates a token at a double quote -- use -H @-"
+    )
 
 
 def test_b1_state_does_not_clobber_the_login_name():
@@ -303,19 +326,58 @@ def test_the_enter_retry_rechecks_the_signal_the_first_check_used():
     that the element always stays mounted. So every send taking the retry path
     died with "Enter was inert twice" even when the retry had worked.
 
-    Pinned as a RELATIONSHIP, not a spelling: the retry must branch on the same
-    two signals (composer VALUE length, user-node count) as the first check.
+    Pinned as a RELATIONSHIP: the retry must branch on the same two signals
+    (composer VALUE length, user-node count) as the first check, WITH THE SAME
+    COMPARISONS -- the whole normalised condition, not the tokens in it.
+
+    🔴 THIS GUARD WAS BROKEN TWICE AND #1976 round 1 caught both.
+    (a) It sliced on `"Poll the delta"`, a `#` COMMENT that
+        `source_without_comments()` strips. `str.split` on a missing separator
+        returns the WHOLE string, so `retry` was the entire 8,631-char tail of
+        the file -- every later function included. A mutant that deleted the
+        check and parked the tokens in dead code at EOF SURVIVED. The module
+        docstring 20 lines below states this exact lesson for the pace_mark
+        guard, which does it right; this one violated it one function above.
+    (b) It asserted only that `$TALEN` and `$UMSGS` were PRESENT, so mutating
+        `-le` to `-lt` SURVIVED -- and that mutant is live: Enter inert twice
+        with the composer emptied by the UI gives UMSGS == base_umsgs, `-lt`
+        false, no die, pace_mark fires, and the operator is told a message
+        was sent that was not.
+
+    Both anchors below are CODE. Both are asserted present first, so a moved
+    boundary fails loudly here instead of silently widening the slice.
     """
     source = source_without_comments()
-    retry = source.split("submit retry", 1)[1].split("Poll the delta", 1)[0]
+
+    start = 'die "B1: state unreadable after submit retry" 1'
+    # ⚠ NOT `pace_mark` as the end anchor: round 1's own fix moved pace_mark
+    # ABOVE this block, so the next occurrence after `start` is in
+    # cmd_send_cli and the slice silently grew to 2,836 chars. The length
+    # assertion below caught it -- which is the whole reason it is there.
+    end = "local deadline=$((SECONDS + wait))"
+    assert start in source, "retry-block start anchor moved -- re-anchor this guard"
+    assert end in source, "retry-block end anchor moved -- re-anchor this guard"
+    retry = source.split(start, 1)[1].split(end, 1)[0]
+    # The slice must be the retry's tail only, not the rest of the file.
+    assert len(retry) < 600, (
+        f"the retry slice is {len(retry)} chars -- an anchor stopped matching "
+        "and the guard is now scanning unrelated code"
+    )
+    assert "cmd_status" not in retry and "cmd_poll" not in retry, (
+        "the retry slice has swallowed later functions -- see failure (a)"
+    )
 
     assert '"$COMPOSER" = "no"' not in retry, (
         "the retry still gates on the composer ELEMENT being gone, which the "
         "code's own comment says never happens -- it can only ever fail"
     )
-    assert "$TALEN" in retry and "$UMSGS" in retry, (
-        "the retry must re-check the composer VALUE and the user-node count, "
-        "the same two signals the first submit check uses"
+    # Pin the WHOLE condition, normalised on whitespace: a token-presence
+    # assertion is walkable by changing the operator (failure (b) above).
+    normalised = " ".join(retry.split())
+    expected = '[ "$TALEN" -ne 0 ] || [ "$UMSGS" -le "$base_umsgs" ]'
+    assert expected in normalised, (
+        "the retry must re-check the composer VALUE and the user-node count "
+        f"with the same comparisons the first submit check uses: {expected}"
     )
 
 
@@ -340,4 +402,22 @@ def test_pace_mark_fires_on_confirmed_submit_not_after_the_reply():
     assert body.index("pace_mark") < body.index(poll_loop), (
         "pace_mark runs after the reply poll, so a submit-then-timeout leaves "
         "the pacing gate unmarked and an immediate retry re-sends"
+    )
+
+    # 🔴 STRONGER, after #1976 round 1: not merely "before the poll" but before
+    # EVERY exit between the first Enter and the confirmation. Round 1 found
+    # two `state unreadable` dies in that window, each able to leave a
+    # delivered message unstamped. The stamp must sit above the first of them.
+    first_die = 'die "B1: state unreadable right after submit" 1'
+    assert first_die in body, "the post-Enter failure path moved -- re-anchor"
+    assert body.index("pace_mark") < body.index(first_die), (
+        "pace_mark runs AFTER a path that can exit 1 with the message already "
+        "delivered -- a caller retrying on exit 1 then re-sends with no gap"
+    )
+    # ...and the stamp must come after the Enter that makes delivery possible,
+    # not before it (which would stamp on every call, sent or not).
+    enter = '"$B1_REF" key Enter'
+    assert body.index(enter) < body.index("pace_mark"), (
+        "pace_mark fires before any Enter is pressed -- it would stamp for "
+        "calls that never attempted a send"
     )
