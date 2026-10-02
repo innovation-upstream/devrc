@@ -62,7 +62,6 @@ import importlib.util
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -72,7 +71,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
 
-from testlib import skip_dirs  # noqa: E402
+from testlib import mockbin, skip_dirs  # noqa: E402
 
 PY_LIB = REPO / "scripts" / "lib" / "clawgate_tasks.py"
 SH_LIB = REPO / "scripts" / "lib" / "clawgate_handoff.sh"
@@ -200,11 +199,21 @@ def test_the_NEGATIVE_CONTROL_the_stub_which_really_can_say_no():
 
 
 def _exe(d: Path, name: str):
+    """An executable stub named `name` in `d`.
+
+    🔴 `testlib.mockbin.write_exec`, NOT a hand-written shebang. It owns the shebang
+    line precisely so no call site can reintroduce `#!/usr/bin/env` — which does not
+    resolve inside the nix build sandbox — and
+    `test_runtime_shebangs.py::test_no_test_writes_a_usr_bin_env_shebang_at_runtime`
+    fails on any test that writes one itself. (It caught this file's first version, in
+    the SANDBOX tier only: the dev-host tier had been green.)
+
+    The body is a no-op. Every case here resolves a binary by NAME — nothing executes
+    these — so what has to be true of them is only that `shutil.which` and
+    `command -v` see an executable file.
+    """
     d.mkdir(parents=True, exist_ok=True)
-    p = d / name
-    p.write_text("#!/bin/sh\nexit 0\n")
-    p.chmod(p.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    return p
+    return mockbin.write_exec(d / name, "exit 0\n")
 
 
 @pytest.mark.parametrize("present,expect", [
