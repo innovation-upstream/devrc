@@ -484,6 +484,75 @@ was that: their substance is preserved under `## Gotchas / decisions / dead-ends
   round and one of them was wrong (item 1). **A gate that cannot fire is not a verdict that
   nothing is wrong.**
 
+- 🔴 **DECISION (operator asked, 2026-10-01): DO NOT AUTO-MIGRATE HANDOFF CONTENT INTO CAIRN.**
+  The question was whether `/handoff` should automigrate supported content to the store. Four
+  measured reasons it must not, each of which kills it alone:
+  **(a) the store's own policy forbids it** — the `devrc` scope README says *"**Pointers, not
+  copies.** Point at the file, skill or command; do not duplicate its content."*;
+  **(b) there is no derivable address** — at `DEFAULT_MIN_PATHS=2`, **95.8% of closed blocks
+  resolve to ZERO entries** and 69.9% name no existing repo path, and where derivation DOES
+  fire it lands on the `scripts`/`tests` catch-alls that same README disowns, while the entry a
+  human would pick is unreachable by path derivation;
+  **(c) the transport physically cannot carry it** — `scripts/cairn-ops/write.sh` refuses a
+  newline or >`MAX_TEXT_CHARS=2000` at rc **21**, *before the network*, and **288 of 289 closed
+  blocks are multi-line**; the `cairn put` alternative fragments a block into 3–4 bullets and
+  **swallows its `### ` heading** (the documented dropped-lines defect);
+  **(d) the value evidence does not cover this content type** — all **61** measured acted-on
+  recalls were `## Pointers` *paths*; the closed blocks are prose lessons that often name no
+  path, i.e. the population that evidence covers LEAST.
+  ⚠ Second-order: 6,711 Gotchas bullets would more than double a 3,129-bullet store and inflate
+  the featured body that is **97.6% of a ~50,000-token `/resume` read**. **A wrongly auto-filed
+  entry is worse than none** — client-confidential content under a wrong subsystem, read later
+  as curated truth.
+- **DECISION: the narrow version that IS aligned — a POINTER on eviction, not the content.**
+  When a run both EVICTS and already has a resolved cairn entry from `subsystem_touch`, emit one
+  line naming the archive location. That satisfies every constraint the automigration fails:
+  a pointer (policy ✓), single-line and short (transport ✓), addressed to an entry the tool
+  ALREADY resolved rather than one guessed (address ✓). ⚠ **Scope it honestly: it can fire on
+  about a third of runs** — measured over 90 recent commits, **54% reach the write step with
+  nothing writable at all** and only 36% resolve ≥1 entry. The two-thirds where it cannot fire
+  are exactly where guessing would do the damage.
+  **Closing condition:** a `--prune`/`--autoevict` run that resolves an entry appends a pointer
+  bullet naming the archive path, and `$DEVRC/scripts/cairn-ops/read.sh search '<a phrase from
+  that bullet>'` returns it; a run that resolves NO entry appends nothing and says so.
+- ⚠ **FOLLOW-UP (defect, not a rank): `--autoevict` reads ONE of the FOUR evictable categories
+  `handoff-audit.py` computes, and that is why it reports SHORTFALL on docs with thousands of
+  evictable bytes.** It selects only `resolved investigations`. Measured: `cairn/…control-plane`
+  reports **0 resolved investigations but 2,405 B net evictable** (28 of 37 ranked items done,
+  3,536 B) and holds **103,130 B of `Gotchas` — 73% of the doc** — which the automatic path
+  never looks at, while rule (q)'s MANUAL prune already accepts `Open investigations`,
+  `Findings` *or* `Gotchas`. `datapacket/…faro-rum-leads` likewise: 0 resolved investigations,
+  1,572 B net evictable.
+  **Closing condition:** `--autoevict` clears the refusal on a doc whose only evictable content
+  is outside `Open investigations`, with the selector still refusing to touch an OPEN block.
+- 🔴 **FOLLOW-UP (defect): rule (p)'s remedy 1 is GENERIC where the tool already knows the
+  SPECIFIC number, and that cost this session the whole detour.** The refusal says only *"shrink
+  a REPLACE section"*; `handoff-audit.py` has already computed *"28/37 ranked items done,
+  3,536 B"* for the same doc. **Measured proof that remedy 1 is sufficient where we had called
+  the doc unreachable:** dropping those 28 completed ranked items from
+  `cairn/handoff-cairn-control-plane.md` — 39,446 B over its grandfathered allowance — yields
+  **−3,569 B and `status=proposed`**, with all 9 live items and their `forcing:` tags carried.
+  No override, no eviction, no new code. **I read that refusal four or five times and still
+  reached for remedies 2/3 and the override; if I did, a blocked session will.**
+  **Closing condition:** the exit-14 refusal names the doc's own largest evictable category and
+  its byte count, and a session shown that line clears the refusal without an override.
+- ⚠ **THE BAR IS THE DELTA, NOT THE OVERAGE — the sentence that would have prevented the
+  detour.** Rule (p) is `after > allowance AND delta > 0`, so the refusal asks you to *"free up
+  184 B"*, never to get under the ceiling. A doc 43,015 B over clears on a few hundred bytes of
+  REPLACE-section trimming. Every wrong turn this session came from reading "over ceiling" as
+  the thing to fix.
+- 🔴 **A MUTATION BATTERY OWNS THE WHOLE TREE, NOT ONE FILE — four strands, four causes, none a
+  defect in any change under test.** (1) the author edited `handoff_doc.py` while their own
+  battery was live and its `finally` restored a snapshot over four edits; (2) I ran their
+  battery inside their worktree and produced a spurious `baseline is RED (2 → 6 failures)`;
+  (3) an API session limit killed a battery mid-row, stranding `_norm_line(...)` sabotaged out
+  of `archive_append`; (4) a battery exited leaving `RESOLVED_HEAD = re.compile(r".")` in
+  **`scripts/handoff-audit.py`** — a second file, which the author's `trap 'git checkout --
+  scripts/lib/handoff_doc.py'` could not have caught. **Rules: commit before running a battery;
+  never edit or share a tree a battery owns; check for a stranded mutant on EVERY resume, not
+  only after a kill you performed; and scope the restoring trap to every file the battery can
+  touch.** The tell is a one-line diff that reads as a plausible simplification.
+
 ## How to verify
 ```bash
 # the corpus and section weights (re-derives every number in the first block)
