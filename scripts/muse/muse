@@ -383,7 +383,7 @@ cmd_send_cli() {
   task=$(printf '%s ' "${args[@]}")
   local rc=0
   "$MUSE_CLI_BIN" send "$task" --wait "$wait" ${thread:+--thread "$thread"} || rc=$?
-  # 🔴 Stamp on ATTEMPT, before branching on rc — EXCEPT rc 3. muse-cli's
+  # 🔴 Stamp on ATTEMPT, before branching on rc — EXCEPT rc 2. muse-cli's
   # `send` combines delivery and the reply wait, so MOST non-zero rcs cannot
   # distinguish "never sent" from "sent, then the wait failed", and in the
   # second case a message HAS reached Meta. Stamping only on rc==0 left the

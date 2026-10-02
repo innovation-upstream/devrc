@@ -4,34 +4,29 @@
 from the operator's LIVE Muse account across Meta's wire, and until 2026-10-01
 NOTHING tested it. A four-agent inventory found the defects pinned below.
 
-🔴 THE RED/GREEN MATRIX, MEASURED -- not asserted. TWO baselines, because
-this PR ran an audit ladder and one defect was introduced by the ladder's own
-round-1 fix. A single baseline would mislabel that one.
+🔴 THE RED/GREEN MATRIX, MEASURED at every ref below with a sha256 restore
+control, after EVERY change to this module. Re-measure it when you add a
+test -- an earlier version was labelled "MEASURED" and was wrong in all
+three cells because three tests were added and nobody re-ran it (#1976 r4).
 
-Against `origin/main` at **298e4c57** (the PR's base): **8 failed, 5 passed**.
-Those eight are regressions against the ORIGINAL wrapper:
+    298e4c57  (the PR's base)   12 failed,  5 passed
+    c82a16c1  (round 1's tip)    2 failed, 15 passed
+    dff18206  (round 2's tip)    2 failed, 15 passed
+    HEAD                        17 passed
 
-    test_pace_check_fails_closed_on_a_nonnumeric_gap
-    test_usage_advertises_no_flag_the_parser_ignores
-    test_force_reaches_the_cli_channel
-    test_the_cli_channel_paces_an_ambiguous_failure
-    test_the_token_never_reaches_curl_argv
-    test_b1_state_does_not_clobber_the_login_name
-    test_the_enter_retry_rechecks_the_signal_the_first_check_used
-    test_pace_mark_fires_on_confirmed_submit_not_after_the_reply
+Twelve are regressions against the ORIGINAL wrapper. The other five are
+INVARIANT GUARDS, labelled as such in their own docstrings -- they pass in
+every tree by design and must NOT be counted as regression coverage. Get the
+current names from the run, not from a list here: a hardcoded list went
+stale within one round when a test was renamed.
 
-Against **c82a16c1** (round 1's tip): **1 failed, 12 passed** --
-`test_the_cli_channel_does_not_pace_a_send_it_never_made`, which guards a
-regression round 1's own fix INTRODUCED (B2 stamped the pacing gate on an
-rc-3 auth failure that delivered nothing). It is green at base precisely
-because the defect did not exist there; counting it against base would read
-as an invariant guard when it is a regression test with a different baseline.
-
-Against HEAD: **13 passed**.
-
-The remaining four are INVARIANT GUARDS, labelled as such in their own
-docstrings -- they pass in every tree by design and must not be counted as
-regression coverage.
+⚠ The non-monotonic column is real and is the point: a test can be red at a
+LATER tip than at base, because this ladder's own fix rounds introduced
+defects. Do not "simplify" this to a single baseline.
+⚠ An earlier note claimed one test was "green at base precisely because the
+defect did not exist there". That is FALSE now -- round 3 retargeted it onto
+muse-cli's rc 2, and it is red at base too. The claim is deleted rather than
+repaired.
 
 To re-measure: `git stash` is banned here, so copy the wrapper aside, then
 `git checkout HEAD -- scripts/muse/muse`, run, and copy back.
@@ -356,12 +351,74 @@ def test_the_cli_channel_paces_every_ambiguous_failure(env, rc):
         f'printf \'%s\\n\' "$*" >> "$MARKER"\nexit {rc}\n',
     )
 
-    run(env, "send", "a benign task", "--cli")
+    proc = run(env, "send", "a benign task", "--cli")
 
+    # 🔴 BOTH halves. Round 3's parametrisation widened the rc coverage and
+    # silently DROPPED round 2's `assert proc.returncode == 1` -- wider on one
+    # axis, narrower on another. Round 4 measured the cost: mutating the
+    # non-auth arm to `exit 0` or `exit 7` both SURVIVED a green suite. An
+    # `exit 0` there is the dangerous one: `muse send --cli ... || <B1
+    # fallback>` -- the fallback b1_hint itself advertises -- would see
+    # success and never fall back, and a loop would record a delivery that
+    # never happened.
+    assert proc.returncode == 1, (
+        f"muse-cli rc {rc} must surface as the wrapper's exit 1 (dispatch "
+        f"failed); got {proc.returncode}. Only rc 2 maps elsewhere."
+    )
     assert stamp_path(env).exists(), (
         f"muse-cli rc {rc} did not stamp -- it is not provably a non-send, so "
         "a caller retrying on failure may deliver a second time with no gap"
     )
+
+
+def test_the_muse_cli_exit_code_contract_still_holds():
+    """🔴 BINDS THE THIRD-PARTY CONSTANT THE CARVE-OUT RESTS ON.
+
+    `cmd_send_cli` skips the pacing stamp on exactly one muse-cli exit code,
+    because that code means the send provably never left this machine. That
+    is a fact about muse-cli, not about this repo, and nothing in the suite
+    read it -- so a renumbering in muse-cli 0.4.x would silently turn the
+    carve-out into "skip the gate after a possible real send", which is the
+    exact hazard this PR exists to prevent, with the suite fully green.
+
+    The history is why this is not paranoia: round 2 carved the WRONG code,
+    taking it from this wrapper's own stale header legend instead of from
+    muse-cli, and no test objected for two rounds.
+
+    Reads the INSTALLED source; it never executes muse-cli. SKIPs when
+    muse-cli is absent, so the nix sandbox tier (which has no uv tools) stays
+    hermetic rather than going red on an environment fact.
+    """
+    import shutil
+
+    bin_path = shutil.which("muse-cli")
+    if not bin_path:
+        pytest.skip("muse-cli not installed; nothing to bind")
+    root = pathlib.Path(bin_path).resolve().parent.parent
+    cli = next(root.glob("lib/python*/site-packages/muse_cli/cli.py"), None)
+    if cli is None:
+        pytest.skip(f"muse-cli installed at {bin_path} but cli.py not found")
+
+    text = cli.read_text()
+    # Pin the mapping as a RELATIONSHIP between the exception and the code,
+    # normalised on whitespace so reformatting does not break it.
+    flat = " ".join(text.split())
+    for exc, code in (("AuthError", 2), ("GatewayError", 3), ("TimeoutError", 4)):
+        # 🔴 `(?:(?!except\b).)` -- the span must NOT cross into the next
+        # `except` clause. With a plain `.{0,200}?` the pattern for
+        # AuthError->3 MATCHED, by running past AuthError's own handler into
+        # GatewayError's `sys.exit(3)`. That is precisely the renumbering
+        # this guard exists to catch, so the guard was blind to it. Found by
+        # running the NEGATIVE control (all six wrong mappings must fail to
+        # match), never by the positive one, which was green throughout.
+        pat = rf"except {exc} as \w+:(?:(?!except\b).){{0,200}}?sys\.exit\({code}\)"
+        assert re.search(pat, flat), (
+            f"muse-cli no longer maps {exc} -> exit {code}. scripts/muse/muse "
+            f"carves ONLY rc 2 out of the pacing stamp on the grounds that it "
+            f"is AuthError and therefore a provable non-send. Re-derive the "
+            f"mapping from {cli} and update cmd_send_cli, the header legend "
+            f"and SKILL.md together -- they have been wrong before."
+        )
 
 
 def test_the_token_never_reaches_curl_argv():
@@ -530,8 +587,18 @@ def test_the_enter_retry_rechecks_the_signal_the_first_check_used():
     assert f_start in source and f_end in source, (
         "the first-submit-check anchors moved -- re-anchor this guard"
     )
-    first = source.split(f_start, 1)[1].split(f_end, 1)[1].split("if [", 1)
-    first_check = "if [" + first[1].split("then", 1)[0] if len(first) > 1 else ""
+    # ⚠ ORDER, not just presence. `in source` for both does not establish
+    # that f_end FOLLOWS f_start, and the chained split then raises
+    # IndexError instead of the message above -- which reads as a broken test
+    # rather than a finding. Round 4 reproduced it by moving the die above
+    # the Enter.
+    assert source.index(f_start) < source.index(f_end), (
+        "the first-submit-check anchors are out of order -- re-anchor this "
+        "guard rather than reading the slice between them"
+    )
+    after = source.split(f_start, 1)[1].split(f_end, 1)[1].split("if [", 1)
+    assert len(after) > 1, "no condition follows the anchors -- re-anchor"
+    first_check = "if [" + after[1].split("then", 1)[0]
     assert expected in " ".join(first_check.split()), (
         "the FIRST submit check no longer uses the same condition as the "
         f"retry ({expected}). The two must be identical -- that identity is "
