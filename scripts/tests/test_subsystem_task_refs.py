@@ -778,7 +778,7 @@ class TestTheReadSurface:
         assert proc.returncode == 0, proc.stderr
         rows = [ln for ln in proc.stdout.splitlines() if ln.startswith("  thing ")]
         assert len(rows) == 1, f"expected exactly one index row, got {rows}"
-        assert "3 tasks" in rows[0]
+        assert "3 refs" in rows[0]
         for ref in (CLICKUP, GITHUB, LINEAR):
             assert ref not in rows[0], (
                 "the index row must carry a COUNT, not the refs — the refs belong "
@@ -790,7 +790,7 @@ class TestTheReadSurface:
         write_entry(store, "devrc", "thing", f"tasks: [{CLICKUP}]\n")
         proc = run_recall("--store", str(store), "--scope", "devrc", "--list")
         row = next(ln for ln in proc.stdout.splitlines() if ln.startswith("  thing "))
-        assert "1 task" in row and "1 tasks" not in row
+        assert "1 ref" in row and "1 refs" not in row
 
     def test_an_entry_with_NO_tasks_renders_no_badge_at_all(self, tmp_path):
         """The conditionality that makes this additive: 120 of 120 live rows must
@@ -799,7 +799,7 @@ class TestTheReadSurface:
         write_entry(store, "devrc", "thing", "")
         proc = run_recall("--store", str(store), "--scope", "devrc", "--list")
         row = next(ln for ln in proc.stdout.splitlines() if ln.startswith("  thing "))
-        assert "task" not in row and "🔗" not in row
+        assert "ref" not in row and "🔗" not in row
 
     def test_the_BODY_prints_the_refs_themselves(self, tmp_path):
         store = tmp_path / "store"
