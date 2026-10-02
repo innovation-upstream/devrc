@@ -307,3 +307,67 @@ def test_home_nix_deploys_the_wrapper_and_asserts_its_placeholder():
     assert f"grep -q '{PLACEHOLDER}'" in nix, (
         "the derivation no longer asserts the placeholder exists before "
         "substituting it")
+
+
+# --------------------------------------------------------------------------- #
+# `testlib.nix_home` — the indirection helper this change added
+# --------------------------------------------------------------------------- #
+# 🔴 THESE EXIST BECAUSE THE HELPER IS ITSELF A GUARD, AND AN UNTESTED REFUSAL IS
+# AN UNPROVEN ONE. `resolved_source` is what keeps two deploy guards reading
+# through a `let` binding; if its refusal never fires, a renamed binding would
+# read as "the package path is missing" and the two guards would go red for the
+# wrong reason — or worse, a passthrough would let a package swap hide behind a
+# second name while both stayed green.
+import sys as _sys  # noqa: E402
+
+_sys.path.insert(0, str(REPO / "scripts"))
+from testlib import nix_home  # noqa: E402
+
+
+def test_resolved_source_FOLLOWS_a_let_binding():
+    text = (
+        "let\n"
+        "  myWrapper = pkgs.runCommandLocal \"w\" { } ''\n"
+        "    substitute $src $out --subst-var-by X '${thePackage}/bin/thing'\n"
+        "  '';\n"
+        "in {\n"
+        '  home.file.".local/bin/thing".source = myWrapper;\n'
+        "}\n"
+    )
+    out = nix_home.resolved_source(text, 'home.file.".local/bin/thing".source')
+    assert "myWrapper" in out, "the identifier itself must survive for name-pinning guards"
+    assert "${thePackage}/bin/thing" in out, out
+
+
+def test_resolved_source_leaves_an_INLINE_rhs_byte_identical():
+    """The property that keeps every pre-existing assertion's meaning intact: a
+    RHS that already spells its path is returned untouched."""
+    text = '  home.file.".local/bin/thing".source = "${thePackage}/bin/thing";\n'
+    out = nix_home.resolved_source(text, 'home.file.".local/bin/thing".source')
+    assert out == ' = "${thePackage}/bin/thing"', repr(out)
+
+
+def test_resolved_source_REFUSES_an_identifier_with_no_binding():
+    """🔴 THE REFUSAL, WATCHED RATHER THAN ASSUMED — and asserted on ITS OWN
+    message, so a different AssertionError cannot be mistaken for this one."""
+    text = '  home.file.".local/bin/thing".source = goneWrapper;\n'
+    with pytest.raises(AssertionError) as exc:
+        nix_home.resolved_source(text, 'home.file.".local/bin/thing".source')
+    assert "no top-level `goneWrapper" in str(exc.value), str(exc.value)
+
+
+def test_let_binding_ignores_a_MENTION_that_is_not_a_definition():
+    """Matched at line start, so a name appearing inside another expression
+    cannot be read as its binding — which would substitute the wrong body."""
+    text = "let\n  other = foo myWrapper;\n  myWrapper = realBody;\nin {}\n"
+    assert "realBody" in nix_home.let_binding(text, "myWrapper")
+    assert nix_home.let_binding(text, "nothingHere") is None
+
+
+def test_the_LIVE_home_nix_resolves_the_cairn_entry_to_the_pinned_package():
+    """The end the helper exists for, against the real file rather than a
+    fixture: `.local/bin/cairn` must still reach `${cairnPackage}/bin/cairn`."""
+    nix = NIX_HOME.read_text(encoding="utf-8")
+    out = nix_home.resolved_source(nix, 'home.file.".local/bin/cairn".source')
+    assert "${cairnPackage}/bin/cairn" in out, out
+    assert "mkOutOfStoreSymlink" not in out, out

@@ -50,6 +50,9 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib import nix_home  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FLAKE = REPO_ROOT / "flake.nix"
 FLAKE_LOCK = REPO_ROOT / "flake.lock"
@@ -615,7 +618,12 @@ def test_cairn_deploys_from_the_package_and_the_devrc_only_launchers_stay_OUT_OF
     OUT_OF_STORE = ("cairn-who", "cairn-validate")
 
     for leaf, threaded in IN_STORE.items():
-        block = _assignment(text, f'home.file.".local/bin/{leaf}".source')
+        # 🔴 RESOLVED THROUGH ONE LEVEL OF `let` INDIRECTION — `cairn` is now bound
+        # to a wrapper derivation instead of spelling its package path inline, and
+        # the three assertions below are about the PACKAGE, which has not moved.
+        # The helper refuses an unresolvable identifier, so this cannot silently
+        # become a weaker check. See `scripts/testlib/nix_home.py`.
+        block = nix_home.resolved_source(text, f'home.file.".local/bin/{leaf}".source')
         assert "mkOutOfStoreSymlink" not in block, (
             f"`{leaf}` is deployed out-of-store from the checkout. It is supposed to "
             f"come from a pinned flake package.\ngot: {block.strip()!r}")
@@ -630,8 +638,8 @@ def test_cairn_deploys_from_the_package_and_the_devrc_only_launchers_stay_OUT_OF
     # 🔴 AND THE TWO IN-STORE LINES MUST NOT READ THE SAME PACKAGE. `cairn-py` exists
     # only because the Go client ships no `libexec/cairn/lib`; pointing both at one
     # name re-creates exactly the state the flip ended, and nix would not complain.
-    go_block = _assignment(text, 'home.file.".local/bin/cairn".source')
-    py_block = _assignment(text, 'home.file.".local/bin/cairn-py".source')
+    go_block = nix_home.resolved_source(text, 'home.file.".local/bin/cairn".source')
+    py_block = nix_home.resolved_source(text, 'home.file.".local/bin/cairn-py".source')
     assert f"${{{THREADED_LIB_NAME}}}" not in go_block, (
         f"`cairn` is deployed from `{THREADED_LIB_NAME}` — that is the PYTHON "
         f"package, so the operator would be typing the oracle rather than the Go "
