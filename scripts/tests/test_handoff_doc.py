@@ -12542,20 +12542,31 @@ class TestEveryArchiveMarkerIsReachable:
     passes vacuously — and rule (q) runs FIRST here, with eight refusals of its
     own, so preemption is the live hazard rather than a hypothetical."""
 
-    def _scenarios(self, tmp_path: Path) -> dict[str, list[str]]:
-        """marker -> the extra argv that must produce THAT marker. Built in a
-        method body rather than at class scope so this file still COLLECTS
-        against a module that has none of these constants — which is what makes
-        the red-at-base matrix in the PR a measurement."""
+    def _scenarios(self, tmp_path: Path) -> dict[str, tuple[str, list[str]]]:
+        """marker -> (HOW to reach it, the extra argv). Built in a method body
+        rather than at class scope so this file still COLLECTS against a module
+        that has none of these constants — which is what makes the red-at-base
+        matrix in the PR a measurement.
+
+        🔴 THE RUNNER IS PART OF THE LEDGER, AND IT BECAME SO WHEN A MARKER
+        ARRIVED THAT NO READ-ONLY RUN CAN PRODUCE. `[archive moved]` fires inside
+        the WRITE WINDOW — it is the staleness compare immediately before the
+        append — so it needs `--archive-write` AND a concurrent writer. A row
+        claiming to reach it with `--prune` argv alone would refuse for a
+        DIFFERENT reason and read as coverage while measuring something else,
+        which is this class's own stated hazard one level up.
+        """
         return {
-            hd.ARCHIVE_MARKER_NONE: [],
-            hd.ARCHIVE_MARKER_UNREADABLE: [
-                "--archive", str(tmp_path / "absent.md")],
-            hd.ARCHIVE_MARKER_SELF: ["--archive", "DOC"],
-            hd.ARCHIVE_MARKER_NOT_CONSERVED: [
-                "--archive",
-                str(write_archive(tmp_path, "- unrelated", name="other.md")),
-            ],
+            hd.ARCHIVE_MARKER_NONE: ("prune", []),
+            hd.ARCHIVE_MARKER_UNREADABLE: (
+                "prune", ["--archive", str(tmp_path / "absent.md")]),
+            hd.ARCHIVE_MARKER_SELF: ("prune", ["--archive", "DOC"]),
+            hd.ARCHIVE_MARKER_NOT_CONSERVED: (
+                "prune",
+                ["--archive",
+                 str(write_archive(tmp_path, "- unrelated", name="other.md"))],
+            ),
+            hd.ARCHIVE_MARKER_MOVED: ("race", []),
         }
 
     def test_the_ledger_covers_every_marker_the_module_declares(
@@ -12578,10 +12589,21 @@ class TestEveryArchiveMarkerIsReachable:
         )
 
     def test_every_marker_is_reached_by_a_real_run(
-        self, prune_repo: Path, tmp_path: Path
+        self, prune_repo: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
     ) -> None:
         doc = prune_repo / "claudedocs" / "handoff-sample-topic.md"
-        for marker, extra in self._scenarios(tmp_path).items():
+        for marker, (kind, extra) in self._scenarios(tmp_path).items():
+            if kind == "race":
+                rc, err = _race_the_archive(
+                    prune_repo, tmp_path, monkeypatch, capsys
+                )
+                assert rc == hd.EXIT_PRUNE_UNCONSERVED, f"{marker}: rc {rc}\n{err}"
+                assert marker in err, (
+                    f"the scenario for {marker!r} refused for a DIFFERENT "
+                    f"reason, so that marker is not shown reachable:\n{err}"
+                )
+                continue
             argv = [str(doc) if a == "DOC" else a for a in extra]
             res = run_prune(
                 prune_repo, write_prune(tmp_path, PRUNE_DURABLE_LINE), 1, *argv,
@@ -12821,6 +12843,179 @@ def run_write(
 
 def archive_at(repo: Path, rel: str = ARCHIVE_REL) -> Path:
     return repo / rel
+
+
+#: What the "other session" writes into the shared archive. 🔴 ITS CONTENT IS THE
+#: ASSERTION: it must still be there afterwards, because it is the only copy of
+#: whatever that session evicted.
+RACE_TEXT = (
+    "# Archive — sample-topic\n\n"
+    "- ANOTHER SESSION'S ONLY COPY: MEASURED 2026-08-02, lost if clobbered.\n"
+)
+
+
+def _race_the_archive(
+    repo: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> tuple[int, str]:
+    """One `--archive-write` run with a CONCURRENT writer injected into the window
+    between the PROJECTION and the append. Returns `(rc, stderr)`.
+
+    🔴 THE INJECTION POINT IS `find_leak_scanner`, AND IT IS CHOSEN RATHER THAN
+    CONVENIENT. `main` calls it after `_WrittenPath` captures the archive's
+    pre-run bytes and BEFORE the staleness compare re-reads them, which is
+    precisely the window the compare is there to close. Driven in-process for the
+    reason the lossy-write test gives: no argv can make another process land
+    inside that window on cue, so the only way to show the guard reachable is to
+    put a writer there and watch THIS guard's marker come back — not a
+    neighbour's.
+    """
+    archive = archive_at(repo)
+    real = hd.find_leak_scanner
+
+    def racing(r: Path):  # noqa: ANN202
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_text(RACE_TEXT, encoding="utf-8")
+        return real(r)
+
+    monkeypatch.setattr(hd, "find_leak_scanner", racing)
+    rc = hd.main([
+        "--repo", str(repo), "--topic", "sample-topic",
+        "--prune", str(write_prune(tmp_path, PRUNE_DURABLE_LINE, name="race.md")),
+        "--prune-count", "1",
+        "--archive", str(archive), hd.ARCHIVE_WRITE_FLAG,
+        hd.ARCHIVE_NOTE_FLAG, ARCHIVE_NOTE, "--confirm",
+        "--advanced", "racing another session for the archive",
+    ])
+    out = capsys.readouterr()
+    monkeypatch.undo()
+    return rc, out.err
+
+
+class TestTheArchiveIsNotLASTWRITERWINS:
+    """🔴 A SEAM TEST, NOT A UNIT TEST, AND THAT LABEL IS THE POINT. What is under
+    test is the RELATIONSHIP between the projection (rule (r)'s block) and the
+    append (the write window) across an interleaving — no single function owns it,
+    and every component here is individually correct. It is in this file rather
+    than beside rule (s)'s own tests because the seam belongs to
+    `--archive-write`: rule (s) does not introduce the race, it makes it ORDINARY
+    (every ceiling-hit writes an archive, unattended), which is why it is this
+    PR that closes it.
+    """
+
+    def test_a_CONCURRENT_append_REFUSES_and_preserves_the_other_write(
+        self, prune_repo: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    ) -> None:
+        doc_before = doc_text(prune_repo)
+        rc, err = _race_the_archive(prune_repo, tmp_path, monkeypatch, capsys)
+        assert rc == hd.EXIT_PRUNE_UNCONSERVED, err
+        assert hd.ARCHIVE_MARKER_MOVED in err, err
+        assert archive_at(prune_repo).read_text(encoding="utf-8") == RACE_TEXT, (
+            "the other session's append was overwritten — the one outcome that "
+            "destroys the only copy of evicted text"
+        )
+        assert doc_text(prune_repo) == doc_before, (
+            "the refusal says NOTHING WRITTEN and the doc moved"
+        )
+        assert "THIS RUN DID APPEND" not in err, (
+            "the refusal claims this run appended to the archive and rolled it "
+            "back; it never wrote a byte, and the file now holds someone else's"
+        )
+
+    def test_a_CONCURRENT_append_to_an_ALREADY_EXISTING_archive_refuses_too(
+        self, prune_repo: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    ) -> None:
+        """🔴 THE CASE THE MUTATION BATTERY FOUND MISSING, AND IT IS THE ONE THE
+        OTHER TEST STRUCTURALLY CANNOT SEE. There the archive is ABSENT before the
+        run, so the pre-window capture and the projection are BOTH `None` and a
+        mutant reusing the capture instead of re-reading is EQUIVALENT — row M10
+        SURVIVED a green suite for exactly that reason. With a file that already
+        exists the two differ: the capture is taken BEFORE the racer and equals
+        the projection, so a guard built on it sees no change and clobbers. This
+        test is what makes the "fresh read" in the guard load-bearing rather than
+        decorative.
+
+        The pre-existing content deliberately holds NONE of the removals — one
+        that held them all would make `appended` empty, skip the write entirely,
+        and never reach the guard.
+        """
+        archive = archive_at(prune_repo)
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_text(
+            "# Archive — sample-topic\n\n- an older unrelated eviction.\n",
+            encoding="utf-8",
+        )
+        _sh("git", "add", "--", ARCHIVE_REL, cwd=prune_repo)
+        _sh("git", "commit", "-q", "-m", "seed an archive", cwd=prune_repo)
+        doc_before = doc_text(prune_repo)
+        rc, err = _race_the_archive(prune_repo, tmp_path, monkeypatch, capsys)
+        assert rc == hd.EXIT_PRUNE_UNCONSERVED, err
+        assert hd.ARCHIVE_MARKER_MOVED in err, err
+        assert archive.read_text(encoding="utf-8") == RACE_TEXT, (
+            "the other session's write was overwritten, which is the only-copy "
+            "loss this guard exists for"
+        )
+        assert doc_text(prune_repo) == doc_before
+
+    def test_the_UNRACED_run_is_the_control_and_LANDS(
+        self, prune_repo: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    ) -> None:
+        """🔴 POSITIVE CONTROL ON THE INJECTION, and without it the test above is
+        satisfied by an argv that refuses for any reason at all. Byte for byte the
+        same in-process call with the racer replaced by a no-op: exit 0, and the
+        archive holds what THIS run evicted."""
+        real = hd.find_leak_scanner
+        monkeypatch.setattr(hd, "find_leak_scanner", lambda r: real(r))
+        rc = hd.main([
+            "--repo", str(prune_repo), "--topic", "sample-topic",
+            "--prune", str(
+                write_prune(tmp_path, PRUNE_DURABLE_LINE, name="race.md")),
+            "--prune-count", "1",
+            "--archive", str(archive_at(prune_repo)), hd.ARCHIVE_WRITE_FLAG,
+            hd.ARCHIVE_NOTE_FLAG, ARCHIVE_NOTE, "--confirm",
+            "--advanced", "racing another session for the archive",
+        ])
+        out = capsys.readouterr()
+        monkeypatch.undo()
+        assert rc == hd.EXIT_OK, out.out + out.err
+        assert PRUNE_DURABLE_LINE in archive_at(prune_repo).read_text(
+            encoding="utf-8"
+        )
+
+    def test_rule_s_reaches_the_SAME_guard(
+        self, autoevict_repo: Path, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+    ) -> None:
+        """🔴 THE REASON THIS GUARD IS IN THIS PR: rule (s) is what makes the race
+        ordinary, so the guard has to be reachable from the eviction path and not
+        only from a hand-passed `--archive-write`. Same injection, rule (s)'s
+        argv."""
+        archive = autoevict_archive(autoevict_repo)
+        real = hd.find_leak_scanner
+
+        def racing(r: Path):  # noqa: ANN202
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            archive.write_text(RACE_TEXT, encoding="utf-8")
+            return real(r)
+
+        monkeypatch.setattr(hd, "find_leak_scanner", racing)
+        doc_before = doc_text(autoevict_repo)
+        rc = hd.main([
+            "--repo", str(autoevict_repo), "--topic", "sample-topic",
+            "--update", str(_autoevict_update(tmp_path)),
+            "--advanced", "closed an investigation and recorded a finding",
+            hd.AUTOEVICT_FLAG, hd.ARCHIVE_FLAG, str(archive),
+            hd.ARCHIVE_NOTE_FLAG, AUTOEVICT_NOTE, "--confirm",
+        ])
+        out = capsys.readouterr()
+        monkeypatch.undo()
+        assert rc == hd.EXIT_PRUNE_UNCONSERVED, out.out + out.err
+        assert hd.ARCHIVE_MARKER_MOVED in out.err, out.err
+        assert archive.read_text(encoding="utf-8") == RACE_TEXT
+        assert doc_text(autoevict_repo) == doc_before
 
 
 class TestTheWriteFlagFixtureIsWhatItClaims:
@@ -13613,9 +13808,776 @@ class TestTheWriteFlagReachesTheSkill:
                 f"map from the flag to what it does"
             )
 
+    def test_the_reference_topic_names_rule_s_flag(self) -> None:
+        """Rule (s) adds a THIRD flag to this family, and the executor's only map
+        from it to what it does is §K-S."""
+        doc = self._topic().read_text(encoding="utf-8")
+        assert f"`{hd.AUTOEVICT_FLAG}" in doc, (
+            f"scripts/lib/handoff_doc.py accepts {hd.AUTOEVICT_FLAG} and "
+            f"{self._topic().name} never names it"
+        )
+
     def test_the_flag_pin_can_report_absence(self) -> None:
-        """NEGATIVE CONTROL on the loop above — without it, it cannot be told
+        """NEGATIVE CONTROL on the loops above — without it, they cannot be told
         from a loop over an empty tuple."""
         assert "`--archive-rewrite" not in self._topic().read_text(
             encoding="utf-8"
         )
+
+
+# ==========================================================================
+# rule (s) — `--autoevict`: the size ratchet's automatic exit
+#
+# 🔴 WHAT THE RED HALF IS, NAMED SO IT CANNOT BE READ AS A FIXTURE CLAIM. On
+# `b883b4ef` (this branch's base, i.e. #1963's head) the flag does not exist, so
+# `TestTheAutoevictFlagsAreREFUSEDByTheBaseRefsParser` below is the positive
+# control on that: the argv every test here runs is a PARSE ERROR at the base ref
+# and the ONLY route past rule (p) there is `--override-size-ratchet`. The REAL
+# red proof is the pair of runs in `TestRuleSIsAnOptInAndClearsRuleP` — the same
+# argv with and without the flag, exit 14 and exit 0 — because that is a
+# statement about one tree and one document rather than about two refs.
+#
+# ⚠ ZERO NEW SKIPS, so `EXPECTED_SKIPS` in `scripts/run-tests.sh` is untouched.
+# Nothing below is conditional on a binary, a host or an env var.
+# ==========================================================================
+
+
+def _autoevict_body(nbytes: int, tag: str) -> str:
+    """About `nbytes` of block body carrying a DATED, MEASURED claim.
+
+    Dated on purpose: `durable_reason` flags it, so rule (r) ARMS on every
+    eviction here. A body of neutral filler would make the archive optional and
+    every conservation assertion below would pass over a rule that never ran.
+    """
+    line = f"- {tag}: MEASURED 2026-08-01, a number later sessions still quote.\n"
+    return line * max(1, nbytes // len(line.encode("utf-8")))
+
+
+#: The three CLOSED block bodies, DISTINCTLY sized so "the minimum" is an
+#: observable rather than a direction. The target bytes are chosen against the
+#: update's delta — see `TestTheAutoevictFixtureIsWhatItClaims`, which asserts
+#: the relation rather than trusting these numbers.
+AUTOEVICT_SMALL_BODY = _autoevict_body(300, "C-SMALL")
+AUTOEVICT_MID_BODY = _autoevict_body(900, "C-MID")
+AUTOEVICT_BIG_BODY = _autoevict_body(2_400, "C-BIG")
+#: The OPEN block's body. 🔴 ITS TAG IS WHAT EVERY "an open block did not move"
+#: ASSERTION GREPS FOR, so it must appear nowhere else in the fixture.
+AUTOEVICT_OPEN_BODY = _autoevict_body(400, "O-OPEN")
+
+#: 🔴 THE OPEN BLOCK'S HEADING, AND IT MUST MATCH NOTHING `RESOLVED_HEAD` READS.
+#: That matcher is case-SENSITIVE and keys on `✅`, `CLOSED`, `RESOLVED`,
+#: `ANSWERED` and `~~`; this heading carries none of them, which
+#: `test_the_OPEN_heading_matches_no_closed_marker` asserts against the live
+#: pattern rather than against this comment.
+AUTOEVICT_OPEN_HEADING = (
+    "### 🔴 OPEN — the shard rebalance still has no explanation"
+)
+AUTOEVICT_MID_HEADING = (
+    "### ✅ CLOSED BY MEASUREMENT — C-MID, the replica-lag number"
+)
+AUTOEVICT_SMALL_HEADING = "### ✅ CLOSED ON DIAGNOSIS — C-SMALL, the retry wrapper"
+AUTOEVICT_BIG_HEADING = "### ✅ CLOSED BY EVENT — C-BIG, the pool-size dead end"
+
+AUTOEVICT_STAMP = "- as-of: 2026-08-01"
+
+#: 🔴 THE POINTER, PINNED AS A LITERAL. This is what must be LEFT in the document
+#: where the C-MID block's body was: the `### ` heading, the `as-of:` stamp, and
+#: the blank line that separates the block from the next one. Written out rather
+#: than derived, because a derived expectation cannot fail when the removal is
+#: wrong in a way the derivation shares — a prune that also ate the stamp, or the
+#: separator, or re-flowed the gap.
+AUTOEVICT_EXPECTED_MID_POINTER = (
+    f"{AUTOEVICT_MID_HEADING}\n{AUTOEVICT_STAMP}\n\n{AUTOEVICT_BIG_HEADING}\n"
+)
+
+AUTOEVICT_DOC = f"""# Handoff: sample-topic — 2026-08-01
+
+{BASE_GOAL_SECTION}
+## State now
+- Branch / PR: `feat/sample` / none
+
+## Open investigations — live diagnosis state
+{AUTOEVICT_SMALL_HEADING}
+{AUTOEVICT_STAMP}
+{AUTOEVICT_SMALL_BODY}
+{AUTOEVICT_OPEN_HEADING}
+{AUTOEVICT_STAMP}
+{AUTOEVICT_OPEN_BODY}
+{AUTOEVICT_MID_HEADING}
+{AUTOEVICT_STAMP}
+{AUTOEVICT_MID_BODY}
+{AUTOEVICT_BIG_HEADING}
+{AUTOEVICT_STAMP}
+{AUTOEVICT_BIG_BODY}
+## Next steps (ranked)
+1. Instrument the drain loop.
+
+## Gotchas / decisions / dead-ends
+{_ratchet_filler(64_000, "gotcha")}
+## How to verify
+`python3 tools/queue_probe.py --for 240`
+"""
+
+#: An APPEND-only delta sized BETWEEN the small and mid bodies, which is the
+#: whole arrangement that makes "the minimum" observable: the small block alone
+#: cannot pay for it and the mid block alone can.
+AUTOEVICT_GROW_UPDATE = (
+    "## Gotchas / decisions / dead-ends\n" + _ratchet_filler(600, "newfinding")
+)
+
+#: A delta NO set of closed blocks in the fixture can pay for — the shortfall arm.
+AUTOEVICT_HUGE_UPDATE = (
+    "## Gotchas / decisions / dead-ends\n" + _ratchet_filler(9_000, "newfinding")
+)
+
+AUTOEVICT_ARCHIVE_REL = "claudedocs/archive/handoff-sample-topic.md"
+#: A real editorial judgement, for `ARCHIVE_NOTE`'s stated reason.
+AUTOEVICT_NOTE = (
+    "these blocks are CLOSED but not worthless — the replica-lag number is "
+    "still quoted downstream, so read it for the raw value and do NOT adopt "
+    "its conclusion"
+)
+
+
+@pytest.fixture()
+def autoevict_repo(repo: Path) -> Path:
+    """`repo`, with an OVER-CEILING doc carrying three closed and one open block."""
+    (repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+        AUTOEVICT_DOC, encoding="utf-8"
+    )
+    _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=repo)
+    _sh("git", "commit", "-q", "-m", "seed an over-budget handoff doc", cwd=repo)
+    _sh("git", "push", "-q", "origin", "main", cwd=repo)
+    return repo
+
+
+def _autoevict_update(tmp_path: Path, text: str = AUTOEVICT_GROW_UPDATE) -> Path:
+    p = tmp_path / "autoevict-update.md"
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def run_autoevict(
+    repo: Path, tmp_path: Path, *extra: str,
+    update_text: str = AUTOEVICT_GROW_UPDATE,
+    archive: str | Path | None = AUTOEVICT_ARCHIVE_REL,
+    note: str | None = AUTOEVICT_NOTE,
+    flag: bool = True,
+    advanced: str = "closed three investigations and recorded one new finding",
+):
+    """The tool with rule (s)'s argv. `flag=False` is the negative control."""
+    argv: list[str] = []
+    if flag:
+        argv.append(hd.AUTOEVICT_FLAG)
+    if archive is not None:
+        target = archive if isinstance(archive, Path) else repo / archive
+        argv += [hd.ARCHIVE_FLAG, str(target)]
+    if note is not None:
+        argv += [hd.ARCHIVE_NOTE_FLAG, note]
+    return run_tool(
+        repo, *argv, *extra,
+        update=_autoevict_update(tmp_path, update_text), advanced=advanced,
+    )
+
+
+def autoevict_archive(repo: Path) -> Path:
+    return repo / AUTOEVICT_ARCHIVE_REL
+
+
+class TestTheAutoevictFixtureIsWhatItClaims:
+    """Guard the guards, as `TestThePruneFixtureIsWhatItClaims` does. Every test
+    in this section is scoped by a property of this fixture, and one that quietly
+    stopped holding would move which branch runs WITHOUT failing."""
+
+    RELPATH = "claudedocs/handoff-sample-topic.md"
+
+    def _delta(self, update: str = AUTOEVICT_GROW_UPDATE) -> int:
+        """The bytes this update ADDS — the number rule (p) requires freed.
+
+        🔴 IT IS NOT `over_by`, AND THE DIFFERENCE IS WHY THIS HELPER EXISTS
+        RATHER THAN A LITERAL. Rule (p) fires on `after > allowance AND delta >
+        0`, so what clears it is a net delta of 0 — the document stays over the
+        ceiling. A fixture built against the overage would need 3 KB of closed
+        blocks instead of 900 B and would be testing a rule nobody wrote.
+        """
+        merged = hd.merge(AUTOEVICT_DOC, update)
+        return hd.budget_position(self.RELPATH, merged, AUTOEVICT_DOC).delta
+
+    def test_the_fixture_doc_is_over_the_ceiling(self) -> None:
+        assert len(AUTOEVICT_DOC.encode("utf-8")) > hd.handoff_budget.MAX_BYTES, (
+            "the fixture is not over MAX_BYTES, so rule (p) never fires and "
+            "every refusal below measures nothing"
+        )
+
+    def test_the_block_bodies_BRACKET_the_update_s_delta(self) -> None:
+        """🔴 THE ARRANGEMENT THAT MAKES "THE MINIMUM" OBSERVABLE. `small` must
+        be too small to pay for the update and `mid` must be big enough on its
+        own; without BOTH, a selector that took the first candidate, the last, or
+        all of them would be indistinguishable from one that took the minimum."""
+        small = len(AUTOEVICT_SMALL_BODY.encode("utf-8"))
+        mid = len(AUTOEVICT_MID_BODY.encode("utf-8"))
+        big = len(AUTOEVICT_BIG_BODY.encode("utf-8"))
+        delta = self._delta()
+        assert 0 < small < delta <= mid < big, (
+            f"small={small} delta={delta} mid={mid} big={big} — the fixture no "
+            f"longer brackets the delta, so the minimum-selection tests are "
+            f"satisfied by any selector that picks something"
+        )
+
+    def test_the_shortfall_update_outruns_EVERY_closed_block(self) -> None:
+        """The shortfall arm's own precondition: evicting all three still cannot
+        pay for it. Without this the shortfall test would be measuring a
+        selection that happened to succeed."""
+        total = sum(
+            len(b.encode("utf-8")) for b in
+            (AUTOEVICT_SMALL_BODY, AUTOEVICT_MID_BODY, AUTOEVICT_BIG_BODY)
+        )
+        assert total < self._delta(AUTOEVICT_HUGE_UPDATE), (
+            "the shortfall fixture's closed blocks CAN pay for its update, so "
+            "that test exercises the success path under a failure name"
+        )
+
+    def test_the_OPEN_heading_matches_no_closed_marker(self) -> None:
+        """🔴 DRIVEN AGAINST THE LIVE MATCHER, BOTH WAYS. The negative half alone
+        is satisfied by a pattern that matches nothing, so the three CLOSED
+        headings are asserted to MATCH in the same test — that is the positive
+        control on the instrument this whole section's safety claim rests on."""
+        auditor = _load_handoff_audit()
+        assert not auditor.RESOLVED_HEAD.search(AUTOEVICT_OPEN_HEADING), (
+            f"the fixture's OPEN heading matches RESOLVED_HEAD, so it is a "
+            f"CLOSED block as far as the selector is concerned: "
+            f"{AUTOEVICT_OPEN_HEADING!r}"
+        )
+        for heading in (AUTOEVICT_SMALL_HEADING, AUTOEVICT_MID_HEADING,
+                        AUTOEVICT_BIG_HEADING):
+            assert auditor.RESOLVED_HEAD.search(heading), (
+                f"the matcher does not read this as CLOSED, so nothing here is "
+                f"a candidate and every test passes vacuously: {heading!r}"
+            )
+
+    def test_the_bodies_and_tags_are_pairwise_distinct(self) -> None:
+        """Every assertion below greps a tag. Two blocks sharing one would make a
+        'this block did not move' check pass off the other block's text."""
+        tags = ("C-SMALL", "C-MID", "C-BIG", "O-OPEN")
+        for tag in tags:
+            assert AUTOEVICT_DOC.count(f"- {tag}:") >= 1
+        for i, a in enumerate(tags):
+            for b in tags[i + 1:]:
+                assert a not in b and b not in a, (
+                    f"tag {a!r} is a substring of {b!r}, so a grep for one "
+                    f"finds the other"
+                )
+
+    def test_the_archive_path_is_inside_the_repo_and_absent(
+        self, autoevict_repo: Path
+    ) -> None:
+        assert not autoevict_archive(autoevict_repo).exists()
+        assert hd._within(autoevict_repo, autoevict_archive(autoevict_repo))
+
+    def test_the_note_is_a_JUDGEMENT_and_not_a_restatement(self) -> None:
+        assert "do NOT adopt" in AUTOEVICT_NOTE
+        assert len(AUTOEVICT_NOTE) > 60
+
+
+def _load_handoff_audit():
+    """`scripts/handoff-audit.py` as a module — the SAME loader the tool uses.
+
+    Imported through its own path rather than re-implemented, so a test asserting
+    something about `RESOLVED_HEAD` is asserting it about the pattern the
+    selector actually consults.
+    """
+    import importlib.machinery
+    import importlib.util
+    path = REPO_ROOT / "scripts" / "handoff-audit.py"
+    loader = importlib.machinery.SourceFileLoader("_handoff_audit_t", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+class TestTheAutoevictFlagsAreREFUSEDByTheBaseRefsParser:
+    def test_the_flag_exists_here_and_is_an_OPT_IN(self) -> None:
+        """POSITIVE CONTROL ON THE RED CLAIM, read from the module rather than
+        asserted about a ref this process cannot check out: the flag exists HERE,
+        so a run at the base ref cannot be anything but a parse error."""
+        actions = {a.option_strings[0]: a for a in hd.build_parser()._actions
+                   if a.option_strings}
+        assert hd.AUTOEVICT_FLAG in actions
+        assert actions[hd.AUTOEVICT_FLAG].default is False, (
+            "rule (s) is not an OPT-IN, so a run that never asked for it moves "
+            "text out of a document — which is the whole hazard the opt-in "
+            "decision was taken against"
+        )
+
+
+class TestRuleSIsAnOptInAndClearsRuleP:
+    """🔴 THE RED/GREEN PAIR, ON ONE TREE AND ONE DOCUMENT. Two runs of the same
+    argv differing only in the flag: exit 14 with nothing written, exit 0 with
+    the eviction. That is the regression claim; the base-ref parse error above is
+    only the control on it."""
+
+    def test_WITHOUT_the_flag_rule_p_still_REFUSES(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        before = tree_hash(autoevict_repo)
+        res = run_autoevict(
+            autoevict_repo, tmp_path, "--confirm", flag=False,
+            archive=None, note=None,
+        )
+        assert res.returncode == hd.EXIT_SIZE_RATCHET, res.stdout + res.stderr
+        assert "status=size-ratchet" in res.stderr
+        assert tree_hash(autoevict_repo) == before, (
+            "rule (p) refused and the tree moved"
+        )
+        assert not autoevict_archive(autoevict_repo).exists()
+
+    def test_WITH_the_flag_the_SAME_UPDATE_LANDS(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        res = run_autoevict(autoevict_repo, tmp_path, "--confirm")
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "status=written" in res.stdout
+        assert autoevict_archive(autoevict_repo).exists(), (
+            f"the archive was not written:\n{res.stdout}{res.stderr}"
+        )
+
+    def test_the_doc_is_STILL_over_the_ceiling_afterwards(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 WHAT RULE (p) ASKS FOR IS A NET DELTA OF 0, NOT A CLEARED OVERAGE,
+        and this is the assertion that pins the difference. A selector built
+        against the overage would evict every block in the document to reach a
+        threshold this rule never names."""
+        res = run_autoevict(autoevict_repo, tmp_path, "--confirm")
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        after = len(doc_text(autoevict_repo).encode("utf-8"))
+        assert after > hd.handoff_budget.MAX_BYTES, (
+            f"the doc came back UNDER the ceiling at {after} B, so this run "
+            f"evicted far more than rule (p) asked for"
+        )
+        assert after <= len(AUTOEVICT_DOC.encode("utf-8")), (
+            "the document GREW, which is the one thing rule (p) forbids"
+        )
+
+    def test_an_UNDER_ceiling_doc_with_the_flag_evicts_NOTHING(
+        self, repo: Path, tmp_path: Path, update_file: Path
+    ) -> None:
+        """🔴 SILENT WHEN THE RATCHET WOULD NOT HAVE FIRED. A flag that moves
+        text on every run it is passed on is a flag people pass by reflex and a
+        disclosure nobody reads — `size_ratchet_override_note`'s stated reason,
+        inherited."""
+        res = run_tool(
+            repo, hd.AUTOEVICT_FLAG,
+            hd.ARCHIVE_FLAG, str(repo / AUTOEVICT_ARCHIVE_REL),
+            hd.ARCHIVE_NOTE_FLAG, AUTOEVICT_NOTE,
+            "--confirm", update=update_file,
+        )
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        assert "autoevict:" not in res.stdout, (
+            f"rule (p) never fired and rule (s) reported an eviction:\n"
+            f"{res.stdout}"
+        )
+        assert not autoevict_archive(repo).exists(), (
+            "an archive was written on a run where nothing needed evicting"
+        )
+
+
+class TestOnlyCLOSEDBlocksMove:
+    """🔴 THE SAFETY CLAIM, AND IT IS ASSERTED ON A DOCUMENT HOLDING BOTH. An
+    open block and a closed one, one heading apart, in the same section."""
+
+    def test_the_OPEN_block_survives_INTACT(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        res = run_autoevict(autoevict_repo, tmp_path, "--confirm")
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        doc = doc_text(autoevict_repo)
+        assert AUTOEVICT_OPEN_HEADING in doc
+        assert AUTOEVICT_OPEN_BODY.strip() in doc, (
+            "the OPEN block's body left the document — rule (s)'s one "
+            "inviolable property"
+        )
+        archive = autoevict_archive(autoevict_repo).read_text(encoding="utf-8")
+        assert "O-OPEN" not in archive, (
+            "an open block's content reached the archive, so it was evicted "
+            "even though the document still carries a copy"
+        )
+
+    def test_closed_blocks_are_the_ONLY_candidates(self) -> None:
+        """The same claim one level down, on the pure function, so a failure
+        names the selector rather than a whole run."""
+        headings = {b.heading for b in hd.closed_blocks(AUTOEVICT_DOC)}
+        assert headings == {
+            AUTOEVICT_SMALL_HEADING, AUTOEVICT_MID_HEADING, AUTOEVICT_BIG_HEADING
+        }, f"candidate set is wrong: {headings}"
+
+
+def _autoevict_disclosure(stdout: str) -> str:
+    """Rule (s)'s block-level report ALONE, cut out of a run's stdout.
+
+    Bounded at both ends — it starts at the `autoevict: rule (p)` line and stops
+    at the line-level disclosure that follows it — so it can never widen to the
+    diff below, where every unmoved block's heading appears as a context line.
+    Returns "" when there is no such block, which callers must treat as a failure
+    rather than a match.
+    """
+    out: list[str] = []
+    for line in stdout.splitlines():
+        if line.startswith("autoevict: rule (p)"):
+            out.append(line)
+            continue
+        if out and line.startswith("autoevict: REMOVING"):
+            break
+        if out:
+            out.append(line)
+    return "\n".join(out)
+
+
+class TestItEvictsTheMINIMUM:
+    def test_only_the_SMALLEST_SUFFICIENT_block_moves(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THREE CLAIMS IN ONE RUN, AND EACH KILLS A DIFFERENT WRONG SELECTOR.
+        `mid` gone kills "take nothing"; `small` present kills an ascending walk
+        that never shrank (it would take small AND mid); `big` present kills a
+        descending walk and kills "take everything closed"."""
+        res = run_autoevict(autoevict_repo, tmp_path, "--confirm")
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        doc = doc_text(autoevict_repo)
+        assert "- C-MID:" not in doc, "the block that pays for the update stayed"
+        assert "- C-SMALL:" in doc, (
+            "the small block moved too — it cannot pay for this update on its "
+            "own, so taking it is strictly more text moved than necessary"
+        )
+        assert "- C-BIG:" in doc, (
+            "the biggest closed block moved, which is 2.4 KB relocated to free "
+            "~600 B"
+        )
+
+    def test_the_disclosure_names_the_block_that_moved(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 SCOPED TO THE DISCLOSURE BLOCK, NOT TO ALL OF STDOUT, AND THE
+        UNSCOPED VERSION WAS MEASURED WRONG WHILE WRITING THIS. Every unmoved
+        block's heading appears in the DIFF as a context line, so a whole-stdout
+        `not in` is red whatever the report says — it reads as "the report named
+        a block it should not have" while measuring the diff."""
+        res = run_autoevict(autoevict_repo, tmp_path)
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        block = _autoevict_disclosure(res.stdout)
+        assert "1 of 3 CLOSED investigation block(s)" in block, res.stdout
+        assert AUTOEVICT_MID_HEADING.lstrip("# ") in block, (
+            f"the moved block is not named in the disclosure:\n{block}"
+        )
+        for heading in (AUTOEVICT_SMALL_HEADING, AUTOEVICT_BIG_HEADING):
+            assert heading.lstrip("# ") not in block, (
+                f"a block that did NOT move is reported as moved: {heading}"
+            )
+
+    def test_the_disclosure_locator_can_report_absence(self) -> None:
+        """NEGATIVE CONTROL on `_autoevict_disclosure`, which the test above is
+        built on: a locator that returned the whole of stdout, or nothing at all,
+        would make it vacuous in one direction."""
+        assert _autoevict_disclosure("doc: x\n--- a/x\n+++ b/x\n") == ""
+        assert _autoevict_disclosure(
+            "doc: x\nautoevict: rule (p) would have REFUSED\n  a line\n"
+            "autoevict: REMOVING 1 line(s)\n  not this one\n"
+        ) == "autoevict: rule (p) would have REFUSED\n  a line"
+
+
+class TestThePointerStays:
+    def test_the_heading_and_the_as_of_stamp_are_LEFT_BEHIND(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 PINNED AS A WHOLE LITERAL REGION, not as two `in` checks. The
+        failure this catches is a removal that is right about the body and wrong
+        about the gap — an eaten separator, a re-flowed blank, a stamp taken with
+        the lines around it — and two independent `in` assertions cannot see any
+        of those."""
+        res = run_autoevict(autoevict_repo, tmp_path, "--confirm")
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        doc = doc_text(autoevict_repo)
+        assert AUTOEVICT_EXPECTED_MID_POINTER in doc, (
+            "the evicted block's pointer region is not what it must be. "
+            f"expected:\n{AUTOEVICT_EXPECTED_MID_POINTER!r}\n"
+            f"got the region:\n"
+            f"{doc[max(0, doc.find(AUTOEVICT_MID_HEADING)):][:400]!r}"
+        )
+
+    def test_a_LOAD_BEARING_line_is_never_a_removal(self) -> None:
+        """The same property on the pure function: no `PruneTarget` rule (s)
+        builds may carry a field `load_bearing_field` claims."""
+        candidates = hd.closed_blocks(AUTOEVICT_DOC)
+        plan = hd.autoevict_plan(AUTOEVICT_DOC, candidates)
+        offenders = [
+            t.line for t in plan.removed if hd.load_bearing_field(t.line)
+        ]
+        assert not offenders, f"load-bearing lines selected for removal: {offenders}"
+
+
+class TestRuleRVerifiesWhatRuleSWrote:
+    def test_every_removed_line_is_in_the_archive_the_run_wrote(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        res = run_autoevict(autoevict_repo, tmp_path, "--confirm")
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        archive = autoevict_archive(autoevict_repo).read_text(encoding="utf-8")
+        doc = doc_text(autoevict_repo)
+        for line in AUTOEVICT_MID_BODY.splitlines():
+            if not line.strip():
+                continue
+            assert line in archive, f"evicted line missing from archive: {line!r}"
+            assert line not in doc, f"line is in BOTH doc and archive: {line!r}"
+        assert AUTOEVICT_NOTE in archive, "the caller's note is not in the archive"
+        assert hd.ARCHIVE_BLOCK_PREFIX in archive
+
+    def test_both_paths_are_in_the_ONE_commit(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        res = run_autoevict(autoevict_repo, tmp_path, "--confirm")
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        changed = _sh(
+            "git", "show", "--name-only", "--format=", "HEAD", cwd=autoevict_repo
+        ).split()
+        assert sorted(changed) == sorted(
+            ["claudedocs/handoff-sample-topic.md", AUTOEVICT_ARCHIVE_REL]
+        ), changed
+
+    def test_an_archive_that_IS_the_doc_is_REFUSED(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 RULE (r)'s SELF-ARCHIVE WALK, REACHED THROUGH RULE (s). It is not
+        branched around: the eviction hands `conservation_problems` the same
+        `archive_is_the_doc` the prune path does."""
+        before = tree_hash(autoevict_repo)
+        res = run_autoevict(
+            autoevict_repo, tmp_path, "--confirm",
+            archive="claudedocs/handoff-sample-topic.md",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_UNCONSERVED, res.stdout + res.stderr
+        assert hd.ARCHIVE_MARKER_SELF in res.stderr
+        assert tree_hash(autoevict_repo) == before
+
+    def test_an_EXISTING_archive_keeps_its_own_header(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        """Constraint: require a note OR preserve an existing header. The append
+        never rewrites a byte above the insertion point, so a hand-authored
+        header survives — and the new block still carries its own note, because
+        the old header is a judgement about different content."""
+        header = (
+            "# Archive — sample-topic\n\n"
+            "🔴 These are kept for their NUMBERS, not their conclusions.\n"
+        )
+        archive = autoevict_archive(autoevict_repo)
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_text(header, encoding="utf-8")
+        res = run_autoevict(autoevict_repo, tmp_path, "--confirm")
+        assert res.returncode == hd.EXIT_OK, res.stdout + res.stderr
+        text = archive.read_text(encoding="utf-8")
+        assert text.startswith(header), (
+            f"the existing header was rewritten:\n{text[:300]!r}"
+        )
+        assert AUTOEVICT_NOTE in text
+
+
+class TestRuleSsUsageContract:
+    def test_the_flag_without_an_ARCHIVE_is_a_USAGE_refusal(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        res = run_autoevict(
+            autoevict_repo, tmp_path, archive=None, note=None
+        )
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert hd.ARCHIVE_FLAG in res.stderr
+
+    def test_the_flag_without_a_NOTE_is_a_USAGE_refusal(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        """Constraint: the archive needs a REAL note. A generated one reads as a
+        complete description of the content's status and stops the next reader
+        looking for the caveat, so there is no default."""
+        res = run_autoevict(autoevict_repo, tmp_path, note=None)
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert hd.ARCHIVE_NOTE_FLAG in res.stderr
+
+    def test_the_flag_cannot_be_COMBINED_with_a_prune(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        prune = write_prune(tmp_path, "- gotcha: synthetic filler, carrying no "
+                                      "field any rule reads.")
+        res = run_autoevict(
+            autoevict_repo, tmp_path, hd.PRUNE_FLAG, str(prune),
+            hd.PRUNE_COUNT_FLAG, "1",
+        )
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+        assert hd.AUTOEVICT_FLAG in res.stderr and hd.PRUNE_FLAG in res.stderr
+
+    def test_an_ARCHIVE_with_neither_prune_nor_autoevict_is_still_refused(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        """The widening is scoped: `--archive` alone remains an inert flag, and
+        an inert flag is still worth refusing."""
+        res = run_autoevict(autoevict_repo, tmp_path, flag=False, note=None)
+        assert res.returncode == hd.EXIT_USAGE, res.stdout + res.stderr
+
+
+class TestTheShortfallRefusesRatherThanEvictingEverything:
+    def test_an_UNPAYABLE_delta_refuses_and_moves_NOTHING(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        before = tree_hash(autoevict_repo)
+        res = run_autoevict(
+            autoevict_repo, tmp_path, "--confirm",
+            update_text=AUTOEVICT_HUGE_UPDATE,
+        )
+        assert res.returncode == hd.EXIT_SIZE_RATCHET, res.stdout + res.stderr
+        assert "status=size-ratchet" in res.stderr
+        assert "NOTHING WAS MOVED" in res.stderr
+        assert tree_hash(autoevict_repo) == before, (
+            "the shortfall arm refused and the tree moved"
+        )
+        assert not autoevict_archive(autoevict_repo).exists(), (
+            "an archive was written on a run that refused"
+        )
+
+
+class TestRulePsRefusalNAMESRuleS:
+    """🔴 THE WHOLE COST OF AN OPT-IN IS DISCOVERABILITY, AND THIS IS WHERE IT IS
+    PAID. The exit-14 refusal is the one surface a blocked session is guaranteed
+    to read; a flag it does not name is a fix nobody takes."""
+
+    def test_the_refusal_names_the_flag_and_both_archive_flags(
+        self, autoevict_repo: Path, tmp_path: Path
+    ) -> None:
+        res = run_autoevict(
+            autoevict_repo, tmp_path, flag=False, archive=None, note=None
+        )
+        assert res.returncode == hd.EXIT_SIZE_RATCHET, res.stdout + res.stderr
+        for flag in (hd.AUTOEVICT_FLAG, hd.ARCHIVE_FLAG, hd.ARCHIVE_NOTE_FLAG):
+            assert flag in res.stderr, (
+                f"rule (p)'s refusal does not name {flag}, so the blocked "
+                f"session cannot assemble the command that unblocks it:\n"
+                f"{res.stderr}"
+            )
+
+    def test_remedy_two_is_UNCHANGED_by_this_rule(self) -> None:
+        """🔴 THE WHOLE-STRING PIN ON REMEDY 2 IS WHY RULE (s) IS REMEDY THREE.
+        Renumbering it to put the new route second would have been a cosmetic
+        reword breaking a machine-readable claim for nothing — this asserts the
+        new remedy did not do that."""
+        res = hd.size_ratchet_report(
+            "claudedocs/handoff-sample-topic.md",
+            hd.merge(AUTOEVICT_DOC, AUTOEVICT_GROW_UPDATE),
+            AUTOEVICT_DOC,
+        )
+        assert _normalised_remedy_two(res) == EXPECTED_REMEDY_TWO
+        assert any(
+            ln.strip().startswith("3.") and hd.AUTOEVICT_FLAG in ln
+            for ln in res.splitlines()
+        ), f"rule (s) is not remedy 3:\n{res}"
+
+
+class TestTheSelectorsOwnEdges:
+    def test_a_block_with_an_UNBALANCED_FENCE_is_not_a_candidate(self) -> None:
+        """🔴 AN UNCLOSED FENCE MAKES `_block_extent` RUN TO EOF, so the block
+        would "contain" the rest of the document and an eviction would take it.
+        Refused as a candidate rather than reconciled."""
+        doc = AUTOEVICT_DOC.replace(
+            AUTOEVICT_MID_BODY,
+            AUTOEVICT_MID_BODY + "```python\nprint('never closed')\n",
+        )
+        headings = {b.heading for b in hd.closed_blocks(doc)}
+        assert AUTOEVICT_MID_HEADING not in headings, (
+            "a block whose fence is never closed was offered as a candidate"
+        )
+        assert AUTOEVICT_SMALL_HEADING in headings, (
+            "the fence guard swallowed a block it has no business touching, so "
+            "this test would pass with the selector disabled entirely"
+        )
+
+    def test_a_block_OUTSIDE_an_append_only_section_is_not_a_candidate(
+        self
+    ) -> None:
+        """Rule (q) refuses a removal in a REPLACE section outright, and rule (s)
+        must not be a second route into content `--update` rewrites wholesale.
+
+        🔴 THE HEADING IS THE WHOLE TEST, AND THE FIRST SPELLING OF IT PROVED THE
+        GUARD UNREACHABLE RATHER THAN SOUND. It renamed the H2 to `## State now`,
+        at which point the AUDITOR's own section regex stops matching, `resolved`
+        comes back empty and `closed_blocks` returns `()` whether or not this
+        guard exists — so battery row M8 (`if False:` in place of the guard)
+        SURVIVED a fully green suite. `## Investigations — …` is the one shape
+        where the two disagree: it matches the auditor's `\binvestigations?\b`
+        and does NOT match `append_bucket`'s `open investigations` prefix, so the
+        auditor offers three blocks and this guard is the only thing refusing
+        them. The `resolved` assertion below is the positive control that keeps it
+        that way.
+        """
+        heading = "## Investigations — live diagnosis state"
+        doc = AUTOEVICT_DOC.replace(
+            "## Open investigations — live diagnosis state", heading
+        )
+        assert len(_load_handoff_audit().audit_text(doc)["resolved"]) == 3, (
+            "the auditor sees no closed block under this heading, so this test "
+            "cannot reach the guard it is about — green for the wrong reason"
+        )
+        assert hd.append_bucket(heading) is None, (
+            "this heading IS an append bucket, so the guard under test is not "
+            "the one being exercised"
+        )
+        assert hd.closed_blocks(doc) == ()
+
+    def test_a_doc_the_rule_does_not_REFUSE_selects_NOTHING(self) -> None:
+        """🔴 THE SELECTOR'S CONTRACT BOUNDARY, PINNED BECAUSE A DEAD CONJUNCT
+        USED TO HIDE IT. `()` means "no set of these candidates clears the rule",
+        and on a document rule (p) does not refuse the EMPTY set already clears
+        it — so `()` is the right answer here and a misleading one to the
+        question `main` asks of it, which is why `main` only calls this inside
+        `if size_ratchet_report(...)`. An `if trial` conjunct in the shrink pass
+        read as the decision not to shrink to nothing and was dead on every
+        reachable path; this is what makes the boundary a measurement."""
+        assert not hd.size_ratchet_report(
+            "claudedocs/handoff-sample-topic.md", AUTOEVICT_DOC, AUTOEVICT_DOC
+        ), "the fixture GROWS against itself, so this test measures nothing"
+        assert hd.autoevict_selection(
+            "claudedocs/handoff-sample-topic.md", AUTOEVICT_DOC, AUTOEVICT_DOC,
+            hd.closed_blocks(AUTOEVICT_DOC),
+        ) == ()
+
+    def test_a_doc_with_NO_closed_block_says_so_rather_than_counting_zero(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 THE COMMON SHORTFALL, AND ITS OWN SENTENCE. A doc with nothing
+        closed is the ordinary case for this refusal, and "evicting all 0 would
+        relocate the document's history" is a claim about a document that HAS
+        closed history. The refusal has to name the one fact that rules this
+        remedy out for them."""
+        doc = AUTOEVICT_DOC
+        for heading in (AUTOEVICT_SMALL_HEADING, AUTOEVICT_MID_HEADING,
+                        AUTOEVICT_BIG_HEADING):
+            doc = doc.replace(heading, "### 🔴 OPEN — " + heading.split("— ")[1])
+        (repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+            doc, encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=repo)
+        _sh("git", "commit", "-q", "-m", "a doc with nothing closed", cwd=repo)
+        assert hd.closed_blocks(doc) == (), (
+            "the fixture still has a closed block, so this exercises the "
+            "other branch under this test's name"
+        )
+        res = run_autoevict(repo, tmp_path, "--confirm")
+        assert res.returncode == hd.EXIT_SIZE_RATCHET, res.stdout + res.stderr
+        assert "nothing this rule COULD move" in res.stderr, res.stderr
+        assert "Evicting all 0" not in res.stderr, (
+            f"the refusal counted zero instead of saying what is wrong:\n"
+            f"{res.stderr}"
+        )
+        assert not autoevict_archive(repo).exists()
+
+    def test_the_candidate_walk_can_report_an_EMPTY_set(self) -> None:
+        """NEGATIVE CONTROL on `closed_blocks`, which every assertion above is
+        built on: a walk that returned everything, or that raised, would make
+        them all vacuous in one direction."""
+        assert hd.closed_blocks("# nothing here\n") == ()
+        assert hd.closed_blocks("") == ()

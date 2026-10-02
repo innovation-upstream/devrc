@@ -3603,8 +3603,20 @@ def _ratchet_trailer_value(reason: str) -> str:
     return _printable_clipped(reason, SIZE_RATCHET_REASON_MAX)
 
 
-def size_ratchet_report(relpath: str, merged_text: str, base_text: str) -> str:
+def size_ratchet_report(
+    relpath: str, merged_text: str, base_text: str, repo: Path | None = None
+) -> str:
     """Rule (p)'s refusal, or "" when this update may land.
+
+    🔴 `repo` IS FOR ONE THING: PRINTING AN ARCHIVE PATH THAT WILL NOT BE REFUSED.
+    `ARCHIVE_FLAG` resolves a relative path against the CWD, NOT against `--repo`
+    — that is the flag's pre-existing contract, and `--archive-write`'s
+    containment check then refuses an archive outside the target repo at exit 2.
+    MEASURED: `claudedocs/archive/x.md` passed with `--repo <another repo>`
+    resolves against the caller's cwd and is refused, which is the correct
+    verdict and a dead end for a remedy that printed a relative path. So remedy 3
+    prints an ABSOLUTE one when the caller is known. `None` keeps every existing
+    call site — and the selector's own, which reads only non-emptiness — unchanged.
 
     🔴 NEVER RAISES, AND THAT IS A CONTRACT RATHER THAN CAUTION — the identical
     one `evictable_note` carries, for the identical reason. This runs in the
@@ -3660,6 +3672,37 @@ def size_ratchet_report(relpath: str, merged_text: str, base_text: str) -> str:
             "commit. 🔴 Moving the text WITHOUT rule (q) means hand-editing "
             "the committed doc, which bypasses every gate in this module at "
             "once — see rule (q)'s header for what that cost us.",
+            # 🔴 THE FLAG IS NAMED IN THE REFUSAL BECAUSE THE REFUSAL IS THE ONE
+            # SURFACE A BLOCKED SESSION IS GUARANTEED TO READ. Rule (s) is an
+            # OPT-IN (see its header for why automatic was rejected), and the
+            # whole cost of an opt-in is that the blocked caller has to know it
+            # exists — so the command is printed WHOLE rather than named, because
+            # the three flags it needs together are exactly what made remedy 2
+            # multi-step. It is remedy THREE and not remedy two: remedy 2 is
+            # pinned as a WHOLE NORMALISED STRING by
+            # `test_rule_p_s_remedy_two_is_pinned_WORD_FOR_WORD`, which is
+            # deliberate (a phrase pin on it was measured walkable), and
+            # renumbering it to make room here would be a cosmetic reword
+            # breaking a machine-readable claim for nothing.
+            f"    3. or let this tool pick the lines: {AUTOEVICT_FLAG} evicts "
+            f"the CLOSED investigation blocks needed to clear this refusal — "
+            f"the MINIMUM set, smallest-first — and writes them to the archive "
+            f"itself, leaving each block's `###` heading and `as-of:` stamp "
+            f"behind as a pointer. An OPEN block is never a candidate. What "
+            f"it removes is remedy 2's HAND WORK — the archive file and the "
+            f"verbatim line list — rather than making remedy 2 possible: that "
+            f"one is multi-step, not unusable. Add to this exact command:\n"
+            f"         {AUTOEVICT_FLAG} {ARCHIVE_FLAG} "
+            f"{repo if repo is not None else '<--repo>'}"
+            f"/claudedocs/archive/handoff-<topic>.md \\\n"
+            f"         {ARCHIVE_NOTE_FLAG} '<what a reader must know about this "
+            f"content — NOT \"moved out of the doc\">'\n"
+            f"       🔴 ABSOLUTE, and INSIDE --repo. {ARCHIVE_FLAG} resolves a "
+            f"RELATIVE path against your CWD rather than against --repo, and the "
+            f"containment check then refuses it at exit 2 — which is right (rule "
+            f"(o)'s leak scan and the path-limited commit both need the file in "
+            f"the repo) and is a dead end if you typed a bare "
+            f"`claudedocs/...`.",
             "  🔴 Do NOT satisfy this by DELETING an open investigation, a "
             "gotcha or a ruled-out theory. Eviction means MOVE, leaving a "
             "pointer: those sections exist so a future session does not repeat "
@@ -4369,8 +4412,23 @@ def prune_note(
     plan: PrunePlan,
     archive_path: str | None = None,
     appended: ArchiveAppend | None = None,
+    *,
+    lead: str | None = None,
 ) -> str:
     """Rule (q)'s disclosure, printed ABOVE the diff, or "" when nothing pruned.
+
+    🔴 `lead` REPLACES THE FIRST SENTENCE AND NOTHING ELSE, AND IT EXISTS SO RULE
+    (s) CAN REUSE THIS DISCLOSURE RATHER THAN GROW A SECOND COPY OF IT. The
+    default sentence asserts the removals are lines "that you named", which is
+    true of every `--prune` run and FALSE of an `--autoevict` one, where the TOOL
+    picked them — a comment-is-a-claim defect in the one block an operator reads
+    to decide whether the right thing was taken. Everything below the lead —
+    the per-line rows, rule (f)'s durable count, and all three conservation
+    sentences — is identical for both callers because it is identical in
+    substance, and a parallel `autoevict`-flavoured copy of those four paragraphs
+    is exactly the duplicated-predicate shape `claude/RULES.md` names: three of
+    them would then be free to drift out of agreement with rule (r)'s actual
+    verdict.
 
     🔴 ABOVE THE DIFF, beside rule (f)'s warning and for its reason: it is a
     classification of what the diff DELETES, and a reader who has to derive that
@@ -4398,6 +4456,7 @@ def prune_note(
     total = sum(len(t.line) + 1 for t in plan.removed)
     durable = durable_removals(plan)
     out = [
+        lead if lead is not None else
         f"prune: REMOVING {len(plan.removed)} line(s) / ~{total:,} B that you "
         f"named. Every one is an explicit, verbatim removal:"
     ]
@@ -4501,11 +4560,21 @@ ARCHIVE_MARKER_UNREADABLE = "[archive unreadable]"
 ARCHIVE_MARKER_SELF = "[archive is the doc]"
 ARCHIVE_MARKER_NOT_CONSERVED = "[not conserved]"
 
+#: 🔴 THE CONCURRENCY ARM, AND IT IS A FIFTH CAUSE RATHER THAN A FLAVOUR OF
+#: `[not conserved]` BECAUSE THE REMEDY IS DIFFERENT AND SO IS THE BLAME. The
+#: other four are verdicts about the caller's archive; this one says the file
+#: changed between the moment this run read it and the moment it was about to
+#: write — another session appended to the same arc's archive — so nothing is
+#: wrong with either party and the fix is "re-run", which is safe because
+#: `archive_append` appends only removals the file does not already hold.
+ARCHIVE_MARKER_MOVED = "[archive moved]"
+
 ARCHIVE_MARKERS: tuple[str, ...] = (
     ARCHIVE_MARKER_NONE,
     ARCHIVE_MARKER_UNREADABLE,
     ARCHIVE_MARKER_SELF,
     ARCHIVE_MARKER_NOT_CONSERVED,
+    ARCHIVE_MARKER_MOVED,
 )
 
 
@@ -4786,6 +4855,81 @@ def archive_append(
     )
 
 
+def archive_moved_problem(
+    archive_path: str, projected_from: bytes | None, found: bytes | None
+) -> PruneProblem:
+    """Rule (r)'s CONCURRENCY arm: the archive changed under this run.
+
+    🔴 WHY THIS EXISTS AT ALL, AND IT IS A RISK RULE (s) ESCALATES RATHER THAN
+    INHERITS. `--archive-write` declared concurrency uncovered and that was
+    defensible: a human passes that flag deliberately, one document at a time, so
+    last-writer-wins is a rare manual race. `--autoevict` makes archive writes
+    FREQUENT AND UNATTENDED — any session that hits the ceiling writes one — so two
+    sessions on one arc, or one session's `/handoff` racing another's, become
+    ordinary. And the archive is the ONLY durable home for evicted text: a lost
+    append is not a cosmetic race, it is text that exists NOWHERE, which is the
+    precise failure rule (r) was built to prevent.
+
+    🔴 SO THE BEHAVIOUR IS OPTIMISTIC-CONCURRENCY-AND-REFUSE, NOT LAST-WRITER-WINS
+    AND NOT A MERGE. The three options and why this one:
+      * REFUSE loses nothing. Both written paths roll back, the other session's
+        append survives untouched, and the remedy is `re-run` — which is correct
+        rather than merely cheap, because `archive_append`'s idempotence is a set
+        difference over `_norm_line`, so a re-run against the file as it now
+        stands appends exactly what is still missing.
+      * RE-PROJECT (read the fresh bytes, append onto them) would also preserve
+        both, and it was rejected: it puts a second `archive_append` call and a
+        "what if the re-projection appends nothing" branch INSIDE the write
+        window, which is the one place in this module where a defect costs a file.
+      * LAST-WRITER-WINS was rejected outright here for the reason above — it is
+        the one outcome that destroys the only copy.
+
+    🔴 IT IS DELIBERATELY NOT GATED ON `--autoevict`, AND THAT IS THE DECISION
+    RATHER THAN AN OVERSIGHT. It sits under `if archive_write is not None:`, so
+    it binds `--prune --archive-write` too — this change therefore DOES alter
+    behaviour for an existing caller, by adding an exit-16 path that did not
+    exist. That is the intended trade, twice over. The hazard is in the SHARED
+    write window, and a guard scoped to the CALLER rather than to the HAZARD is
+    the spelled-guard shape `claude/RULES.md` names: it would leave the identical
+    silent clobber open for whoever happens not to have passed this flag. And
+    what it replaces for that caller is not "no refusal" — it is OVERWRITE THE
+    OTHER SESSION'S ONLY COPY AND REPORT SUCCESS. A loud refusal on a race beats
+    a silent loss on one.
+
+    ⚠ IT HAS CAUGHT NOTHING IN THE WILD, AND THAT IS THE CORRECT STATE FOR A RACE
+    GUARD rather than evidence against it — one that has already fired was added
+    too late. What stands in for an incident is REACHABILITY: three seam tests
+    drive a real interleaving through `main`, and two mutation rows (the compare
+    always agreeing; the compare reusing a stale pre-window capture) are both
+    KILLED. `claude/RULES.md` asks for a guard proven REACHABLE, not one proven
+    needed by damage.
+
+    ⚠ IT IS A CHECK, NOT A LOCK, AND THE RESIDUAL WINDOW IS NAMED RATHER THAN
+    IMPLIED. The compare happens immediately before `write_text`, so what is closed
+    is the window from the PROJECTION — which spans the merge, every rule below it,
+    the diff, and on a confirmed run the doc write — down to two adjacent syscalls.
+    A racer landing between the final `read_bytes` and the `write_text` still wins.
+    Closing that needs an `O_EXCL` lock file or a locked rename, which is a bigger
+    change than this one and is NOT claimed here.
+    """
+    def _what(b: bytes | None) -> str:
+        return "ABSENT" if b is None else f"{len(b):,} B"
+
+    return PruneProblem(
+        ARCHIVE_MARKER_MOVED,
+        archive_path,
+        f"the archive changed between the moment this run read it "
+        f"({_what(projected_from)}) and the moment it was about to append to it "
+        f"({_what(found)}), so another writer reached it first. NOTHING was "
+        f"written — not the doc, not the archive — because appending the block "
+        f"this run projected would have overwritten their append, and the "
+        f"archive is the only durable home the evicted text has. Re-run: the "
+        f"writer appends only what the file does not already hold, so a second "
+        f"run lands exactly the lines still missing and cannot duplicate a line "
+        f"either session already put there.",
+    )
+
+
 def _within(repo: Path, path: Path) -> bool:
     """Is `path` inside `repo` once BOTH sides are resolved?
 
@@ -4796,6 +4940,448 @@ def _within(repo: Path, path: Path) -> bool:
     which is the whole CREATE case for `--archive-write`.
     """
     return path.resolve().is_relative_to(repo.resolve())
+
+
+# --- rule (s): the size ratchet gets an EXIT the blocked session can take ------
+#
+# 🔴 THE MEASURED PROBLEM, AND IT IS NOT "THE RULE IS TOO STRICT". Rule (p)
+# refuses an update to a doc already over its ceiling, and the sanctioned exit is
+# rule (q) + rule (r): hand-build an archive file, then name every evicted line
+# VERBATIM in a prune file. MEASURED on the corpus the day this landed: 5 of 190
+# docs are over right now (by 3,440 to 47,080 B) and 13 more are inside 4 KiB of
+# it, so the population is not theoretical. The exit is MULTI-STEP: hand-author
+# an archive file, then name every evicted line verbatim in a prune file, then
+# get the count right.
+#
+# ⚠ THE `[ambiguous]` JUSTIFICATION IS RETRACTED AS THE HEADLINE AND KEPT AS A
+# NARROWER TRUE CLAIM. It read: rule (q) needs each named line to match EXACTLY
+# ONE document line, `- as-of:` and `` `via: measurement` `` recur by design, so
+# a hand prune of a closed block is refused `[ambiguous]`. Re-derived through
+# `prune_plan` ITSELF on the doc this rule was built against (7 closed blocks,
+# 92 prunable lines):
+#
+#   BODY-ONLY — the DOCUMENTED eviction shape, heading and stamp left as the
+#     pointer: 5 of 7 blocks resolve CLEAN and prune first try; 2 refused, both
+#     on one repeated `` `via: measurement` `` (2x). 🔴 THE CLEAN FIVE INCLUDE
+#     THE BLOCK `--autoevict` ACTUALLY SELECTED — a hand prune of that block
+#     would have worked, so the headline was wrong about its own worked example.
+#   WHOLE-BLOCK — stamp and heading named too: 7 of 7 refused `[ambiguous]`, on
+#     the `- as-of:` stamp, which occurs 16x.
+#
+# 🔴 AND THE STAMP IS REPORTED `[ambiguous]`, NOT `[load-bearing]`, WHICH IS NOT
+# WHAT READING THE RULE SUGGESTS — `as-of:` is the one BLOCK-SCOPED field, so
+# `prune_plan`'s pass 1 defers its load-bearing check to pass 2 and the line
+# reaches match resolution first. Measured; a reviewer re-derived it the other
+# way from the same code, which is why it is written down.
+#
+# 🔴 SO THE JUSTIFICATION IS THE ONE THE OPERATOR NAMED: THE TOOL PICKS THE
+# LINES. Remedy 2 is multi-step hand work, not unusable, and the ambiguity this
+# also sidesteps is real but NARROW. The mechanism is unchanged by the
+# correction: rule (q) resolves a name by normalised TEXT; this rule addresses
+# lines by NUMBER, because it knows the block boundaries it took them from.
+# Nothing about rule (q)'s matcher changes — a `--prune` naming `- as-of:` is
+# still refused, correctly.
+#
+# A session that cannot get through the hand work cannot record its work at all,
+# which is the one failure `EXIT_SIZE_RATCHET`'s own header calls strictly worse
+# than an oversized doc.
+#
+# ⚠ IT REACHES 3 OF THOSE 5 DOCS, NOT 5, AND THE SCOPE IS PART OF THE CLAIM.
+# Both cairn control-plane docs have ZERO candidates: one has no H3 the CLOSED
+# matcher accepts ANYWHERE in it (0 of 0), the other is an ARCHIVE whose 7 closed
+# H3s sit under `## Moved from …`, `## Open-investigation blocks closed and moved
+# out …` and the preamble — none an append-only heading, since `open-investigation`
+# hyphenated is not `APPEND_PREFIXES`' `open investigations`. Both land on
+# `autoevict_shortfall_report`, exit 14, override as their only exit: the
+# pre-rule-(s) state, unchanged. Positive control on that walk: it returns 7 on
+# the doc this rule was built against.
+#
+# ⚠ IT FREEZES A DOC, IT DOES NOT HEAL ONE. That doc is over by 3,440 B and holds
+# 8,560 B of closed text in total, against a per-round delta of a few hundred
+# bytes — order 20-30 further sessions before the candidates run out and the
+# override is the only exit again. A deferral with a measurable horizon, not a
+# fix for unbounded growth.
+#
+# ⚠ AND THE DESTINATION IS GOVERNED BY THE SAME CEILING. `budget_position`'s
+# `is_handoff_doc` is `claudedocs/` + `/handoff-`, which MATCHES the
+# `claudedocs/archive/handoff-<topic>.md` remedy 3 prints, so this moves bytes
+# from one counted document into another: corpus bytes unchanged, doc count up.
+# Live, measured: cairn's own archive doc is grandfathered to 147,456 B and is
+# 35,672 B over even that. Not a reason to change the destination — #1960/#1963
+# sanctioned it — but "durable" here means "out of the document a session has to
+# READ", never "out of the budget".
+#
+# 🔴 IT IS OPT-IN, AND THE ARGUMENT IS NOT CONVENIENCE-VS-SAFETY. An automatic
+# eviction on every over-ceiling update would make this module the ACTOR for a
+# judgement the rules deliberately leave to the author: rule (p)'s own refusal
+# says "nothing in this rule can tell a deletion from an eviction — the
+# arithmetic is identical", and a tool that moves text nobody asked it to touch
+# has made that distinction unobservable from the transcript. Three further
+# reasons, each independent:
+#   * REVERSIBILITY. A refusal is a no-op; an eviction writes two files and
+#     commits both. Under uncertainty the DEFAULT keeps the rollback path.
+#   * THE DIFF A HUMAN APPROVES. The proposal run exists to put the diff in the
+#     transcript. An automatic selector changes that diff without being asked,
+#     so the two-run shape would no longer be "approve what you asked for".
+#   * THE NOTE. Rule (r)'s writer requires an editorial sentence precisely
+#     because a generated one is worse than none (`ARCHIVE_BLOCK_PREFIX`). There
+#     is no automatic value for it, so an automatic eviction would have to either
+#     synthesise the thing that comment forbids or refuse anyway.
+# ⚠ THE COST OF OPT-IN IS DISCOVERABILITY, AND IT IS PAID WHERE IT IS INCURRED:
+# `size_ratchet_report` — the one surface a blocked session is guaranteed to
+# read — names the flag and prints the whole command. A flag nobody is told about
+# is a fix nobody takes.
+#
+# 🔴 AND IT SYNTHESISES A `PrunePlan` RATHER THAN GROWING A SECOND PIPELINE.
+# `archive_append`, `conservation_problems`, the read-back check, `_undo_write`'s
+# two-path rollback and the path-limited commit all read a `PrunePlan`; handing
+# them one means rule (r) verifies THIS rule's bytes with the same code and the
+# same refusal, which is constraint (4) satisfied by construction rather than by
+# a second implementation that could be branched around.
+
+#: Rule (s)'s flag, named once so `--help`, the usage refusals and rule (p)'s
+#: refusal cannot disagree about its spelling.
+AUTOEVICT_FLAG = "--autoevict"
+
+
+class ClosedBlock(typing.NamedTuple):
+    """One CLOSED investigation block, with the lines an eviction would remove."""
+
+    heading: str
+    """The `### `+ heading LINE, verbatim. It is NOT removed — see `kept`."""
+    line_no: int
+    """1-based line number of that heading in the text it was found in."""
+    section: str
+    """The `## ` section's TEXT, for the report and for `PruneTarget.heading`."""
+    removed: tuple[int, ...]
+    """Line numbers this eviction removes, ascending."""
+    kept: tuple[int, ...]
+    """Line numbers left behind INSIDE the block as the pointer — every line
+    `load_bearing_field` claims, which is what makes the `as-of:` stamp survive."""
+    freed: int
+    """Bytes `removed` accounts for, counted off the RAW lines."""
+
+
+def closed_blocks(text: str) -> tuple[ClosedBlock, ...]:
+    """Every closed investigation block in `text`. NEVER RAISES.
+
+    🔴 THE "IS IT CLOSED?" PREDICATE IS `handoff-audit.py`'s AND THERE IS NO COPY
+    OF IT HERE. `RESOLVED_HEAD` is case-SENSITIVE on purpose and its own comment
+    records the measurement that settled it — `re.I` added 12,902 B over 10
+    blocks and 10 of 10 were INVERSIONS (`bounded, not closed`, `unresolved, and
+    deliberately not resolved`, `fail-closed` as a term of art). A second matcher
+    here would be a second thing to get that wrong in, on the one path that
+    DELETES text from a document. `evictable_note` reuses the same auditor for
+    the same reason; this is the second consumer, not a second implementation.
+
+    🔴 THE PREDICATE COMES FROM THE AUDITOR AND THE EXTENT COMES FROM THE PRUNE
+    MACHINERY, AND THE SPLIT IS DELIBERATE RATHER THAN INCIDENTAL. The auditor
+    says WHICH headings are closed; `_doc_rows`/`_block_extent` say WHAT lines a
+    block holds — and they must, because `apply_prune` removes by those line
+    numbers. Two walks over one document can disagree (fences, heading levels),
+    so the heading the auditor named is re-resolved HERE and a candidate whose
+    heading is not a level-3-or-deeper heading in `_doc_rows`' own view is
+    DROPPED rather than reconciled. A disagreement is a reason not to touch the
+    block, never a reason to pick a winner.
+
+    🔴 AN OPEN BLOCK IS NOT A CANDIDATE, AND THAT IS WHERE THE WHOLE RULE LIVES.
+    `audit_text`'s `resolved` bucket is the H3s under an investigations H2 whose
+    HEADING matches `RESOLVED_HEAD`; a block headed `🔴 OPEN` is not in it and
+    therefore cannot be selected, evicted, or reported. Pinned by a test holding
+    one of each in one document.
+
+    🔴 NEVER RAISES, the contract `evictable_note` and `size_ratchet_report`
+    carry and for their reason: this runs in the WRITE PATH, the only step that
+    records a session. `SystemExit` is caught because the auditor raises exactly
+    that, at module level, when ITS sibling is missing. Any failure degrades to
+    "no candidates", which lands the caller on rule (p)'s ordinary refusal — the
+    behaviour before this rule existed — rather than on a crash.
+    """
+    if not _AUDITOR.is_file():
+        return ()
+    try:
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("_handoff_audit",
+                                                      str(_AUDITOR))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        spans = mod.audit_text(text)["resolved"]
+    except (Exception, SystemExit):
+        return ()
+    start_idx, _end_idx = AUDIT_SPAN_INDEX["resolved"]
+    rows = _doc_rows(text)
+    by_no = {row.line_no: row for row in rows}
+    out: list[ClosedBlock] = []
+    for entry in spans:
+        # The auditor's spans are 0-based half-open over `splitlines(keepends=True)`
+        # — the same convention `evictable_note` reads them with — so the heading
+        # is at `start`, i.e. line number `start + 1`.
+        head = by_no.get(entry[start_idx] + 1)
+        if head is None or head.level < 3:
+            # The two walks disagree about this line. See the header: dropped.
+            continue
+        if head.heading is None or append_bucket(head.heading) is None:
+            # Not an append-only section. Rule (q) refuses a removal there
+            # outright (`[replace section]`), and this rule must not be a second
+            # route into the content `--update` already rewrites wholesale.
+            continue
+        extent = _block_extent(rows, head.line_no - 1)
+        # 🔴 AN UNBALANCED FENCE INSIDE THE EXTENT DISQUALIFIES THE BLOCK. An
+        # unclosed fence makes `_doc_rows` read every later line as code, so
+        # `_block_extent` finds no closing heading and runs to EOF — the block
+        # would "contain" the rest of the document. Rule (q) refuses a fence
+        # delimiter for the mirror-image reason (`[fence delimiter]`: removing one
+        # end re-partitions everything after it); here the whole fence always goes
+        # together, so the hazard is the extent, not the delimiter.
+        if sum(1 for row in extent if row.fence_delim) % 2:
+            continue
+        body = extent[1:]
+        # 🔴 TRAILING BLANKS ARE NOT THIS BLOCK'S CONTENT. They are the separator
+        # before whatever follows, and removing them would butt the next heading
+        # directly against this block's surviving pointer.
+        while body and not body[-1].line.strip():
+            body.pop()
+        # 🔴 EVERY LOAD-BEARING LINE STAYS, WHICH IS HOW THE POINTER SURVIVES.
+        # `load_bearing_field` is rule (q)'s own "may this line be removed at
+        # all?" question, so the `as-of:` stamp the documented eviction shape
+        # leaves behind is kept by the SAME predicate that refuses to let a
+        # `--prune` drop it — not by a second list of field names here. Rule (q)
+        # grants a narrow exception for `as-of:` when its whole block goes; this
+        # rule never needs it, because this rule never removes the block.
+        removed = [row for row in body if load_bearing_field(row.line) is None]
+        kept = [row for row in body if load_bearing_field(row.line) is not None]
+        if not any(row.line.strip() for row in removed):
+            # Nothing but blanks and fields: an eviction would free nothing and
+            # conserve nothing, so there is no candidate here.
+            continue
+        out.append(
+            ClosedBlock(
+                head.line,
+                head.line_no,
+                heading_text(head.heading),
+                tuple(row.line_no for row in removed),
+                tuple(row.line_no for row in kept),
+                sum(len(row.raw.encode("utf-8")) for row in removed),
+            )
+        )
+    return tuple(out)
+
+
+def autoevict_plan(text: str, selection: typing.Sequence[ClosedBlock]) -> PrunePlan:
+    """The document with `selection`'s bodies gone, as a `PrunePlan`.
+
+    🔴 A `PrunePlan` RATHER THAN A NEW TYPE, so `archive_append`,
+    `conservation_problems`, `prune_note` and the write window's read-back check
+    all run UNCHANGED over this rule's bytes. That is constraint (4) — rule (r)
+    verifies what this rule wrote — satisfied by construction rather than by a
+    second code path that could be branched around.
+
+    🔴 `removed` LISTS THE NON-BLANK REMOVALS ONLY, AND `text` REMOVES THE BLANKS
+    TOO. The asymmetry is forced by rule (r), not chosen: `archive_lines` DROPS
+    blank lines (`prune_naming_lines` cannot name one, so no removal can ever need
+    a blank conserved), so a blank `PruneTarget` would be a line
+    `conservation_problems` could never find in any archive — the rule would
+    refuse every eviction of a block containing one blank line, which is every
+    real block. Interior blanks are still removed from the document, because
+    leaving them behind is what turns an evicted block into a run of empty lines.
+    `problems` is always `()`: every line here was chosen by line NUMBER from this
+    document's own rows, so none of rule (q)'s resolution failures can arise.
+    """
+    rows = _doc_rows(text)
+    by_no = {row.line_no: row for row in rows}
+    gone = {n for block in selection for n in block.removed}
+    targets = tuple(
+        PruneTarget(
+            n,
+            by_no[n].line,
+            heading_text(by_no[n].heading) if by_no[n].heading else "(preamble)",
+            durable_reason(by_no[n].line),
+        )
+        for n in sorted(gone)
+        if by_no[n].line.strip()
+    )
+    return PrunePlan(apply_prune(rows, gone), targets, ())
+
+
+def autoevict_selection(
+    relpath: str,
+    merged_text: str,
+    base_text: str,
+    candidates: typing.Sequence[ClosedBlock],
+) -> tuple[ClosedBlock, ...]:
+    """The smallest set of `candidates` whose eviction clears rule (p), or ().
+
+    🔴 THE STOPPING CONDITION IS `size_ratchet_report` ITSELF, NOT AN ARITHMETIC
+    RESTATEMENT OF IT. "How many bytes clear this?" has a non-obvious answer —
+    the refusal fires on `after > allowance AND delta > 0`, so what clears it is
+    a net delta of 0, NOT a cleared overage, and rule (p)'s own call site has a
+    comment about authors sent cutting toward the wrong number. Recomputing that
+    here would be the duplicated predicate `claude/RULES.md` says ends up wrong
+    at N-1 of N sites, and wrong in the direction that evicts more than it had
+    to. So each step asks the rule, over the text an eviction would produce.
+
+    🔴 ASCENDING BY BYTES, BECAUSE THE QUANTITY TO MINIMISE IS TEXT MOVED. A
+    descending walk clears in the fewest blocks and is the wrong answer: with a
+    delta of 100 B and closed blocks of 200 B and 47,000 B it relocates 47,000 B
+    to free 100. Fewest-blocks is not the stake — "a tool that silently relocates
+    500 KB is worse than one that refuses" is.
+
+    🔴 THEN A SHRINK PASS, WHICH IS WHAT MAKES "MINIMUM" MORE THAN A DIRECTION.
+    An ascending walk accumulates, so a large block that would have sufficed
+    ALONE arrives after several small ones are already chosen: 30+40+120 to free
+    100, where 120 alone does it. Dropping the largest still-redundant member
+    while the rule stays clear converges on 120. It is NOT a subset-sum optimum —
+    that is NP-hard and the gain over this is marginal — and saying so is the
+    point: the claim is "no member of this set can be dropped", which is checked,
+    not "no smaller set exists", which is not.
+
+    🔴 `()` MEANS "NO SET OF THESE CANDIDATES CLEARS THE RULE" — INCLUDING THE
+    EMPTY SET, WHICH IS WHY THE CALLER MUST ONLY ASK WHEN THE RULE IS ACTUALLY
+    FIRING. On a document rule (p) does not refuse, the empty set already clears
+    it and this returns `()`, which is the honest answer to the question asked
+    ("which blocks must move?" — none) and would be a misleading one to the
+    question `main` asks of the result ("could it be cleared?"). `main` resolves
+    that by calling this only inside `if size_ratchet_report(...)`, and the
+    shrink pass below therefore has NO `if trial` conjunct: one was written and
+    it was dead on every reachable path — `clears([])` is False exactly when the
+    caller's precondition holds — while reading as the decision not to shrink to
+    nothing. `claude/RULES.md`, and the same finding `--archive-write` row R14
+    recorded one function away.
+
+    The caller reports the shortfall; it does not evict the lot and hope.
+    """
+    rows = _doc_rows(merged_text)
+
+    def clears(chosen: typing.Sequence[ClosedBlock]) -> bool:
+        gone = {n for block in chosen for n in block.removed}
+        return not size_ratchet_report(
+            relpath, apply_prune(rows, gone), base_text
+        )
+
+    chosen: list[ClosedBlock] = []
+    for candidate in sorted(candidates, key=lambda b: (b.freed, b.line_no)):
+        chosen.append(candidate)
+        if clears(chosen):
+            break
+    else:
+        return ()
+    for candidate in sorted(chosen, key=lambda b: (-b.freed, b.line_no)):
+        trial = [b for b in chosen if b.line_no != candidate.line_no]
+        if len(trial) == len(chosen):
+            continue  # already dropped by an earlier round of this pass
+        if clears(trial):
+            chosen = trial
+    return tuple(sorted(chosen, key=lambda b: b.line_no))
+
+
+#: How many evicted blocks rule (s)'s report names before it stops listing. The
+#: same bound `PRUNE_SHOWN_MAX` sets on rule (q)'s rows and for its reason, named
+#: separately because the unit differs: eight BLOCKS is a much longer report than
+#: eight lines, and whoever retunes one should not silently retune the other.
+AUTOEVICT_SHOWN_MAX = 8
+
+
+def autoevict_note(
+    selection: typing.Sequence[ClosedBlock],
+    candidates: typing.Sequence[ClosedBlock],
+    plan: PrunePlan,
+    archive_path: str,
+) -> str:
+    """Rule (s)'s disclosure: which blocks moved, by heading. "" when none did.
+
+    🔴 BY HEADING AND BY BYTES, BECAUSE THE TOOL CHOSE THEM. Rule (q)'s
+    disclosure lists LINES, which is the right unit for removals an author typed
+    out; here the author typed a flag, so the only thing that tells them whether
+    the right text left is the block titles. It also states what it did NOT take:
+    a run that moved 2 of 9 closed blocks and a run that moved 9 of 9 read
+    identically otherwise, and the second is the one worth reading the diff over.
+    """
+    if not selection:
+        return ""
+    freed = sum(block.freed for block in selection)
+    out = [
+        f"autoevict: rule (p) would have REFUSED this update. "
+        f"{len(selection)} of {len(candidates)} CLOSED investigation block(s) "
+        f"were evicted to `{archive_path}` to clear it — "
+        f"{len(plan.removed)} line(s) / {freed:,} B out of the document:"
+    ]
+    for block in sorted(selection, key=lambda b: b.line_no)[:AUTOEVICT_SHOWN_MAX]:
+        out.append(
+            f"  {block.section} :{block.line_no}  {block.freed:>8,} B  "
+            f"{_clip(block.heading.strip(), PRUNE_LINE_MAX)}"
+        )
+    if len(selection) > AUTOEVICT_SHOWN_MAX:
+        out.append(
+            f"  … and {len(selection) - AUTOEVICT_SHOWN_MAX} more — see the diff."
+        )
+    out.append(
+        f"  Each block's `###` heading and every field line in it — the `as-of:` "
+        f"stamp included — STAYS in the document as a pointer; only the body "
+        f"moved. OPEN blocks were never candidates: the selector reads "
+        f"handoff-audit.py's case-SENSITIVE closed-heading matcher, so a block "
+        f"headed `🔴 OPEN` cannot be chosen."
+    )
+    out.append(
+        f"  This is the MINIMUM that clears rule (p): candidates were taken "
+        f"smallest-first and then every still-redundant one was dropped, so no "
+        f"block in the list above can be removed from it while the rule stays "
+        f"clear. It is not a proof that no smaller SET exists."
+    )
+    return "\n".join(out)
+
+
+def autoevict_shortfall_report(
+    relpath: str,
+    merged_text: str,
+    base_text: str,
+    candidates: typing.Sequence[ClosedBlock],
+) -> str:
+    """Rule (s) was asked and could not clear rule (p). NOTHING WRITTEN.
+
+    🔴 IT REFUSES RATHER THAN EVICTING EVERYTHING CLOSED. Moving every closed
+    block and still landing over the line would relocate the document's whole
+    history to buy nothing, and the run would read as a success. The honest
+    answer is the two numbers and the two remedies that DO work.
+    """
+    pos = budget_position(relpath, merged_text, base_text)
+    available = sum(block.freed for block in candidates)
+    return "\n".join([
+        "status=size-ratchet",
+        "NOTHING WRITTEN — not the doc, not a commit, not a ref.",
+        f"  {AUTOEVICT_FLAG} was passed and cannot clear rule (p) on this "
+        f"document. {relpath} is {pos.after:,} B against an allowance of "
+        f"{pos.allowance:,} B and this update adds {pos.delta:,} B, so "
+        f"{pos.delta:,} B must come out — and every CLOSED investigation block "
+        f"in it comes to {available:,} B across {len(candidates)} block(s).",
+        # 🔴 TWO SENTENCES, BECAUSE THE ZERO-CANDIDATE CASE IS THE COMMON ONE AND
+        # THE OTHER WORDING IS FALSE ABOUT IT. "Evicting all 0 would relocate the
+        # document's history" is a claim about a document that HAS closed
+        # history; a doc with none needs to be told that, because it is the
+        # single fact that rules this remedy out for them. A comment is a claim
+        # and so is a refusal.
+        (
+            "  🔴 NOTHING WAS MOVED, and there was nothing this rule COULD "
+            "move: no block under an append-only investigations heading has a "
+            "heading scripts/handoff-audit.py reads as CLOSED (it is "
+            "case-SENSITIVE: ✅, CLOSED, RESOLVED, ANSWERED, ~~)."
+            if not candidates else
+            f"  🔴 NOTHING WAS MOVED. Evicting all {len(candidates)} would "
+            f"relocate the document's history and still leave this update "
+            f"refused, so the archive was not written and neither was the doc."
+        ),
+        "  What does work:",
+        "    1. shrink a REPLACE section in THIS delta — `State now`, `Next "
+        "steps` and `How to verify` are rewritten wholesale, so what they no "
+        "longer need to say costs nothing to drop. That is the only remedy that "
+        "needs no judgement about history.",
+        f"    2. or name the lines yourself with `{PRUNE_FLAG} <file> "
+        f"{PRUNE_COUNT_FLAG} <n>` and `{ARCHIVE_FLAG} <file>` — rule (q) can "
+        f"reach content this rule will not touch (an OPEN block's stale half, a "
+        f"retracted bullet under `Gotchas`), at the cost of naming every line.",
+        f'    3. or {SIZE_RATCHET_FLAG} "<why>" — {SIZE_RATCHET_WHO_MAY}.',
+    ])
 
 
 def prune_unconserved_report(
@@ -6474,6 +7060,29 @@ def build_parser() -> argparse.ArgumentParser:
         f"rewritten; this note describes THIS block.",
     )
     p.add_argument(
+        AUTOEVICT_FLAG,
+        action="store_true",
+        dest="autoevict",
+        help=f"rule (s): when rule (p) would REFUSE this update (exit 14 — the "
+        f"doc is over its ceiling and this update grows it), evict the CLOSED "
+        f"investigation blocks needed to clear it instead of refusing. THIS TOOL "
+        f"PICKS THE LINES, which is the point: the sanctioned exit is otherwise "
+        f"hand-authoring an archive file and then naming every evicted line "
+        f"verbatim in a prune file. (It also sidesteps rule (q)'s `[ambiguous]` "
+        f"refusal, but that is a NARROW bonus rather than the reason — measured "
+        f"on one real doc, a body-only prune resolves CLEAN on 5 of its 7 closed "
+        f"blocks.) The selection is the MINIMUM that clears the rule — smallest "
+        f"first, then every still-redundant one dropped — and each evicted "
+        f"block's `###` heading and every field line in it stay behind as a "
+        f"pointer. An OPEN block is NEVER a candidate: the closed-heading "
+        f"matcher is scripts/handoff-audit.py's, case-SENSITIVE. Requires "
+        f"{ARCHIVE_FLAG} and {ARCHIVE_NOTE_FLAG} and IMPLIES "
+        f"{ARCHIVE_WRITE_FLAG}; rule (r) then verifies the archive over the "
+        f"bytes this run wrote. Silent when rule (p) would not have fired. "
+        f"Refuses (exit 14, nothing written) when evicting every closed block "
+        f"still would not clear it. Mutually exclusive with {PRUNE_FLAG}.",
+    )
+    p.add_argument(
         "--advanced",
         help="one line: what changed since the doc was written. Required — "
         "without it, or with a value that means nothing changed, no diff is "
@@ -6675,6 +7284,43 @@ def main(argv: list[str] | None = None) -> int:
     # so it fires identically in a repo where the rule could never fire, and
     # refused with EXIT_USAGE rather than EXIT_SIZE_RATCHET: this is a complaint
     # about an ARGUMENT, not a verdict about a document.
+    # ---- rule (s)'s argument shape, and the ONE implication it makes ---------
+    # 🔴 `--autoevict` IS A `--archive-write` WHOSE LINE SELECTION THE TOOL DOES,
+    # SO IT SETS THAT FLAG HERE RATHER THAN BEING TESTED BESIDE IT AT SIX SITES.
+    # Every downstream consumer — the three write-flag argument refusals below,
+    # the `--repo` containment check, the projection, the write window, the
+    # commit's path set and the rollback — then reads ONE name and cannot
+    # disagree about whether this run writes an archive. The alternative, an
+    # `args.archive_write or args.autoevict` conjunct repeated at each of them, is
+    # the duplicated predicate `claude/RULES.md` says ends up wrong at N-1 of N
+    # sites, and the site it would be wrong at is a rollback.
+    # ⚠ IT IS SET BEFORE THE REFUSALS, NOT AFTER, which is what makes
+    # `--autoevict` with no `--archive` land on the writer's own refusal — the one
+    # that already names both missing flags and prints the note's example.
+    if args.autoevict:
+        args.archive_write = True
+    # 🔴 MUTUALLY EXCLUSIVE WITH `--prune`, AND IT IS A DECLARED NON-GOAL RATHER
+    # THAN AN OVERSIGHT. Both produce a removal set and rule (r) appends ONE
+    # archive block per run, so combining them means merging two plans whose line
+    # numbers are taken against different texts (the prune's against the merge,
+    # the eviction's against the pruned merge). That is buildable and it is not
+    # what the measured problem needs: the blocked session has NO prune file, and
+    # a session that has one is not blocked — its prune is already the exit. A
+    # caller who wants both can land the prune first and re-run.
+    if args.autoevict and args.prune is not None:
+        print(
+            f"{AUTOEVICT_FLAG} and {PRUNE_FLAG} cannot be combined.\n"
+            f"  Both remove lines and rule (r) writes ONE archive block per run, "
+            f"so one run would have to merge two removal sets addressed against "
+            f"two different texts. That is deliberately not built: "
+            f"{AUTOEVICT_FLAG} exists for the session that has no prune file, "
+            f"and a prune is already rule (p)'s exit for the session that has "
+            f"one.\n"
+            f"  Land the prune on its own first, then re-run with "
+            f"{AUTOEVICT_FLAG} if rule (p) still refuses.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     # ---- rule (q)'s argument shape, refused BEFORE anything is read ---------
     # 🔴 EXIT_USAGE, NEVER EXIT_PRUNE_REFUSED, for the reason the size-ratchet
     # block below states about its own empty reason: 15 is the RULE's verdict
@@ -6714,11 +7360,18 @@ def main(argv: list[str] | None = None) -> int:
     # prune removes nothing, so there is no verdict to give. An inert flag is
     # worth refusing rather than ignoring: a caller who passed it believes
     # something is being conserved.
-    if args.archive is not None and args.prune is None:
+    # ⚠ WIDENED BY RULE (s), AND THE WIDENING IS THE WHOLE OF THE CHANGE HERE:
+    # `--autoevict` also removes lines, so an archive beside it is not inert. The
+    # refusal's own sentence — "this run removes none" — is what had to move, not
+    # the rule: it is a claim, and it became false for one flag combination.
+    if args.archive is not None and args.prune is None and not args.autoevict:
         print(
-            f"{ARCHIVE_FLAG} needs {PRUNE_FLAG}: it names where the lines a "
-            f"prune removes have gone, and this run removes none.\n"
-            f"  Drop it, or add `{PRUNE_FLAG} <file> {PRUNE_COUNT_FLAG} <n>`.",
+            f"{ARCHIVE_FLAG} needs {PRUNE_FLAG} or {AUTOEVICT_FLAG}: it names "
+            f"where the lines a removal took have gone, and this run removes "
+            f"none.\n"
+            f"  Drop it, or add `{PRUNE_FLAG} <file> {PRUNE_COUNT_FLAG} <n>` to "
+            f"name them yourself, or `{AUTOEVICT_FLAG}` to let rule (s) pick "
+            f"closed blocks when rule (p) would refuse.",
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -7030,12 +7683,63 @@ def main(argv: list[str] | None = None) -> int:
     # inside the branch would be a `NameError` on the ordinary update path, the
     # one path this whole change is supposed to leave byte-identical.
     appended: ArchiveAppend | None = None
+    # 🔴 ALSO BOUND BEFORE THE BRANCH, AND FOR `appended`'s REASON ONE LEVEL ON.
+    # The write window's read-back check reads `plan`, and rule (s) is a SECOND
+    # producer of one — so a name bound only inside the `--prune` arm would be a
+    # `NameError` on the eviction path, inside the window where a file has
+    # already been written.
+    plan: PrunePlan | None = None
+    # 🔴 THE BYTES THE PROJECTION WAS BUILT ON, FOR THE STALENESS CHECK IN THE
+    # WRITE WINDOW. `None` means "the archive did not exist when we read it",
+    # which is a state the comparison must be able to express: a racer CREATING
+    # the file is exactly the collision `archive_moved_problem` exists for, and
+    # a sentinel that could not say "absent" would miss it.
+    archive_projected_from: bytes | None = None
+    #: Rule (s)'s own two reports need these; `()` is the `--prune` path.
+    selection: tuple[ClosedBlock, ...] = ()
+    candidates: tuple[ClosedBlock, ...] = ()
     if args.prune is not None:
         plan = prune_plan(merged_text, prune_text, args.prune_count)
         if plan.problems:
             print(prune_refusal_report(plan, relpath), file=sys.stderr)
             return EXIT_PRUNE_REFUSED
-        # ---- rule (r): has the durable half of this prune got anywhere to go?
+    # ---- rule (s): rule (p) would refuse, so EVICT what has closed -----------
+    # 🔴 A SECOND PRODUCER OF A `PrunePlan`, AND THAT IS THE WHOLE INTEGRATION.
+    # Rule (r)'s block below is reached by BOTH arms, unmoved and unbranched, so
+    # the archive this rule writes is verified by the same two calls — the
+    # projection here and the read-back in the write window — that verify a
+    # `--prune`'s. Constraint (4) is satisfied by there being nothing to branch
+    # around rather than by a second check that agrees.
+    #
+    # 🔴 THE POSITION IS RULE (q)'S, FOR ITS REASON AND ONE MORE. Applied to the
+    # MERGE and before every rule that reads the text, so rule (p) at its own site
+    # several hundred lines down reads these bytes — this rule SATISFIES that
+    # refusal rather than suppressing it, and `--override-size-ratchet` remains the
+    # only thing that suppresses it. The one more: the ratchet is asked HERE by the
+    # same function that refuses THERE. A second spelling of "is this doc over and
+    # growing?" — a byte comparison here, the rule's own predicate there — is how
+    # an eviction comes to fire on a document the rule would have let through.
+    #
+    # ⚠ AND `size_ratchet_report` NEVER RAISES AND DEGRADES TO "", which this arm
+    # inherits deliberately: if its own code fails, this reads "no ratchet", evicts
+    # NOTHING, and the run proceeds exactly as it does today. Fail-open in the same
+    # direction as the rule it is the exit from.
+    elif args.autoevict and size_ratchet_report(relpath, merged_text, base_text):
+        candidates = closed_blocks(merged_text)
+        selection = autoevict_selection(
+            relpath, merged_text, base_text, candidates
+        )
+        if not selection:
+            print(
+                autoevict_shortfall_report(
+                    relpath, merged_text, base_text, candidates
+                ),
+                file=sys.stderr,
+            )
+            return EXIT_SIZE_RATCHET
+        plan = autoevict_plan(merged_text, selection)
+    if plan is not None:
+        # ---- rule (r): has the durable half of this removal got anywhere to go?
         # 🔴 AFTER RULE (q) AND BEFORE THE ASSIGNMENT TO `merged_text`, and both
         # halves of the position are load-bearing. After, because
         # `conservation_problems` reads `plan.removed`, which only exists once
@@ -7111,6 +7815,14 @@ def main(argv: list[str] | None = None) -> int:
             appended = archive_append(
                 archive_text, plan, args.archive_note, relpath, _today()
             )
+            # Captured HERE and not from `archive_text` later, so it cannot drift
+            # from the value `archive_append` actually saw. `read_text` then
+            # `.encode("utf-8")` is byte-exact for anything this module could
+            # have decoded, and a mismatch is a LOUD refusal rather than a silent
+            # loss, so the safe direction is also the cheap one.
+            archive_projected_from = (
+                None if archive_text is None else archive_text.encode("utf-8")
+            )
             unconserved = conservation_problems(
                 plan, args.archive, appended.text, "", archive_is_the_doc
             )
@@ -7125,7 +7837,29 @@ def main(argv: list[str] | None = None) -> int:
             )
             return EXIT_PRUNE_UNCONSERVED
         merged_text = plan.text
-        pruned_note = prune_note(plan, args.archive, appended)
+        # 🔴 ONE DISCLOSURE PER PRODUCER, AND THE ARM IS KEYED ON `selection`
+        # RATHER THAN ON `args.autoevict`. The flag can be passed on a run where
+        # rule (p) never fired and nothing was evicted; `selection` is non-empty
+        # only when blocks actually moved, which is the thing the note is about.
+        # Rule (s) prints TWO blocks because they answer different questions:
+        # which BLOCKS left (its own report — the tool chose them, so the titles
+        # are the only thing that tells an author the right text went) and which
+        # LINES left plus where they went (rule (q)'s disclosure, reused through
+        # `prune_note`'s `lead`).
+        if selection:
+            pruned_note = "\n".join([
+                autoevict_note(selection, candidates, plan, args.archive),
+                prune_note(
+                    plan, args.archive, appended,
+                    lead=(
+                        f"autoevict: REMOVING {len(plan.removed)} line(s) the "
+                        f"TOOL selected — every one inside a block whose heading "
+                        f"handoff-audit.py reads as CLOSED:"
+                    ),
+                ),
+            ])
+        else:
+            pruned_note = prune_note(plan, args.archive, appended)
 
     if _canon(merged_text) == _canon(base_text):
         print(
@@ -7369,7 +8103,7 @@ def main(argv: list[str] | None = None) -> int:
     # note and a third time at the trailer is the duplicated-predicate shape
     # `claude/RULES.md` says ends up wrong at N-1 sites; here it would let a
     # commit carry an override stamp for a rule that never fired.
-    ratchet = size_ratchet_report(relpath, merged_text, base_text)
+    ratchet = size_ratchet_report(relpath, merged_text, base_text, repo)
     if ratchet and not args.size_ratchet_override:
         print(ratchet, file=sys.stderr)
         return EXIT_SIZE_RATCHET
@@ -7634,7 +8368,38 @@ def main(argv: list[str] | None = None) -> int:
         # this run is about to commit. Written before the gate, it is covered by
         # the same refusal the doc is, and rolled back by the same rollback.
         if archive_write is not None:
-            assert appended is not None  # implied by `archive_write is not None`
+            # Both implied by `archive_write is not None`: it is set only from a
+            # non-empty `appended`, and `appended` only ever comes from a run that
+            # built a `plan` — rule (q)'s or rule (s)'s.
+            assert appended is not None
+            assert plan is not None
+            # ---- rule (r)'s CONCURRENCY arm: did the archive move under us? ---
+            # 🔴 IMMEDIATELY BEFORE THE WRITE, AND A FRESH READ RATHER THAN
+            # `archive_write.original`. `claude/RULES.md`: re-check at the moment
+            # you ACT, not in the survey that motivated it — and `original` is
+            # captured several statements earlier, so reusing it would move the
+            # check back into the survey. The refusal hands `_undo_write` NO
+            # archive (`archive_written` is still False): we have not written it,
+            # the other session's bytes are theirs, and the one thing this must
+            # never do is roll their append back.
+            fresh = (
+                archive_write.path.read_bytes()
+                if archive_write.path.exists() else None
+            )
+            if fresh != archive_projected_from:
+                print(
+                    prune_unconserved_report(
+                        (
+                            archive_moved_problem(
+                                args.archive, archive_projected_from, fresh
+                            ),
+                        ),
+                        plan, relpath,
+                    )
+                    + _undo_write(repo, doc, relpath, original, staged, None),
+                    file=sys.stderr,
+                )
+                return EXIT_PRUNE_UNCONSERVED
             archive_write.path.parent.mkdir(parents=True, exist_ok=True)
             archive_write.path.write_text(appended.text, encoding="utf-8")
             archive_written = True

@@ -1682,6 +1682,7 @@ the first:
 | `[archive unreadable]` | `--archive` names a file that cannot be read | write the file FIRST, or pass `--archive-write` and this run will — but see §K-W: that flag forgives ABSENT, never UNREADABLE |
 | `[archive is the doc]` | `--archive` resolves to the handoff doc being pruned | the archive has to be a DIFFERENT file; see below |
 | `[not conserved]` | a removed line is not present in the archive | add it verbatim, or drop it from the prune |
+| `[archive moved]` | the archive changed between this run READING it and WRITING it — another session appended first | re-run; the writer appends only what the file does not already hold, so nothing duplicates and nothing is lost. See §K-S |
 
 🔴 **`[archive is the doc]` closes a walk, not a typo.** The containment check runs
 against the doc as the process found it — *before* the prune is written — so
@@ -1856,3 +1857,258 @@ Everything §K's own "what it does not check" lists, plus: that the archive's lo
 one anybody will look in, that the note is true, or that an appended block belongs in the
 same file as the blocks above it. It writes where it is pointed and records the sentence it
 is given.
+
+## §K-S rule (s) — `--autoevict`: rule (p)'s automatic exit
+
+### The gap, and it is MEASURED rather than inferred
+
+🔴 **The two routes above existed and sessions still could not take them.** Rule (p)
+refuses an over-ceiling update at exit **14** and its remedy 2 is "move the closed text,
+leave a pointer, `--prune` the lines out". Measured on the corpus the day this landed:
+**5 of 190 docs are over right now** — by 3,440 to 47,080 B — and **13 more sit inside
+4 KiB of the ceiling**, so the blocked population is not theoretical.
+
+⚠ **THE `[ambiguous]` JUSTIFICATION IS RETRACTED AS THE HEADLINE AND KEPT AS A NARROWER
+TRUE CLAIM — re-measuring it is what caught that.** The claim was: rule (q) resolves a named
+line by normalised TEXT and each name must match exactly one line, while `- as-of: <date>`
+and `` `via: measurement` `` recur across blocks by design, so a hand prune of a closed
+block is refused. Re-derived through `prune_plan` **itself** on the doc this rule was built
+against — 7 closed blocks, 92 prunable lines:
+
+| shape | result |
+|---|---|
+| **BODY-ONLY** — the documented eviction shape, `### ` heading and `as-of:` stamp left as the pointer | **5 of 7 blocks resolve CLEAN** and prune first try; 2 refused, both on one repeated `` `via: measurement` `` (2×) |
+| **WHOLE-BLOCK** — heading and stamp named too | **7 of 7 refused** `[ambiguous]`, on the `- as-of:` stamp (16×) |
+
+🔴 **The clean five include the block `--autoevict` actually selected** — a hand prune of
+that block would have worked first try, so the old headline was wrong about its own worked
+example.
+
+🔴 **And the stamp is reported `[ambiguous]`, NOT `[load-bearing]`** — which is not what
+reading the rule suggests. `as-of:` is the one BLOCK-SCOPED field, so `prune_plan`'s pass 1
+*defers* its load-bearing check to pass 2 and the line reaches match resolution first. A
+reviewer re-derived this the other way from the same code, which is why it is written down.
+
+**So the justification is the one the operator named: the tool picks the lines.** Remedy 2
+is multi-step hand work — author an archive, name every line verbatim, get the count right —
+not unusable; the ambiguity rule (s) also sidesteps is a real but narrow bonus. A session
+that cannot get through the hand work cannot record its work, which
+`EXIT_SIZE_RATCHET`'s own docstring calls strictly worse than an oversized doc.
+
+### What it does
+
+When rule (p) **would** refuse, `--autoevict` evicts the CLOSED investigation blocks needed
+to clear it and proceeds. The tool selects the lines; that is the point, and it is what
+sidesteps the ambiguity rather than a wider matcher — it addresses lines by **number**,
+because it knows the block boundaries it took them from. Rule (q)'s matcher is unchanged: a
+`--prune` file naming `- as-of:` is still refused, correctly.
+
+```bash
+TOPIC=queue-drain
+ARCHIVE=claudedocs/archive/handoff-$TOPIC.md   # INSIDE the repo; the tool writes & commits it
+python3 scripts/lib/handoff_doc.py --repo "$PWD" --topic "$TOPIC" \
+  --update "$UPDATE" --advanced 'what changed this session' \
+  --autoevict --archive "$ARCHIVE" \
+  --archive-note 'these are CLOSED but not worthless — the lag number is still quoted downstream; read it for the raw value and do NOT adopt its conclusion'
+```
+
+### Why OPT-IN rather than automatic — the decision, and the three reasons
+
+🔴 **An automatic eviction would make the tool the ACTOR for a judgement the rules
+deliberately leave to the author.** Rule (p)'s own refusal says *"nothing in this rule can
+tell a deletion from an eviction — the arithmetic is identical"*; a tool that moves text
+nobody asked it to touch has made that distinction unobservable from the transcript. Three
+further reasons, each sufficient on its own:
+
+1. **Reversibility.** A refusal is a no-op. An eviction writes two files and commits both.
+   Under uncertainty the DEFAULT keeps the rollback path.
+2. **The diff a human approves.** The proposal run exists to put the diff in the
+   transcript. An automatic selector changes that diff without being asked, so the two-run
+   shape stops meaning "approve what you asked for".
+3. **The note.** `--archive-note` is REQUIRED because a generated header is worse than none
+   (§K-W). There is no automatic value for it, so an automatic eviction would have to either
+   synthesise the thing that rule forbids or refuse anyway.
+
+⚠ **THE COST OF AN OPT-IN IS DISCOVERABILITY, AND IT IS PAID WHERE IT IS INCURRED.** Rule
+(p)'s exit-14 refusal — the one surface a blocked session is guaranteed to read — names the
+flag as **remedy 3** and prints the whole command. It is remedy 3 and not remedy 2 because
+remedy 2 is pinned as a WHOLE NORMALISED STRING (`EXPECTED_REMEDY_TWO`), deliberately: a
+phrase pin on it was measured walkable, so renumbering would break a machine-readable claim
+for a cosmetic gain.
+
+### What it will not touch
+
+* **An OPEN block, ever.** The candidate set is `handoff-audit.py`'s `resolved` bucket — the
+  H3s under an investigations H2 whose HEADING matches `RESOLVED_HEAD`, which is
+  **case-SENSITIVE on purpose** (its own comment records `re.I` adding 12,902 B over 10
+  blocks, **10 of 10 inversions**: `bounded, not closed`, `unresolved, and deliberately not
+  resolved`, `fail-closed` as a term of art). There is no second matcher in
+  `handoff_doc.py`; a block headed `🔴 OPEN` cannot be selected, evicted or reported.
+* **Any line `load_bearing_field` claims.** Every field line STAYS, which is how the
+  documented pointer shape — the `### ` heading plus its `as-of:` stamp — survives. It is the
+  same predicate that refuses to let a `--prune` drop a stamp, not a second list of names.
+* **A block outside an append-only section.** `append_bucket` must be non-None, so rule (s)
+  is not a second route into content `--update` already rewrites wholesale.
+* **A block whose fence is unbalanced.** An unclosed fence makes `_block_extent` run to EOF,
+  so the "block" would contain the rest of the document. Dropped as a candidate.
+* **A heading the two walks disagree about.** The auditor names the heading; `_doc_rows`
+  re-resolves it, and a candidate that is not a level-3-or-deeper heading in *its* view is
+  dropped rather than reconciled.
+
+### The minimum, and what that word is allowed to mean
+
+Candidates are taken **smallest-first** until rule (p) clears, then every still-redundant
+member is dropped largest-first while it stays clear.
+
+* **Ascending, because the quantity to minimise is TEXT MOVED, not block count.** A
+  descending walk clears in the fewest blocks and is the wrong answer: with a delta of
+  100 B and closed blocks of 200 B and 47,000 B it relocates 47,000 B to free 100.
+* **The shrink pass is what makes "minimum" more than a direction.** An ascending walk
+  accumulates, so a large block that would have sufficed ALONE arrives after several small
+  ones are chosen: 30+40+120 to free 100, where 120 alone does it.
+* 🔴 **It is NOT a subset-sum optimum, and saying so is the point.** The claim this makes is
+  *"no member of this set can be dropped"*, which is checked. *"No smaller set exists"* is
+  not checked and is not claimed.
+
+🔴 **THE STOPPING CONDITION IS `size_ratchet_report` ITSELF.** What clears rule (p) is a net
+delta of **0**, not a cleared overage — so the document is normally still over the ceiling
+afterwards, and that is correct. A byte restatement here would be a second spelling of the
+rule, wrong in the direction that evicts more than it had to.
+
+⚠ **A BRIEF ASKED FOR "ITERATE UNTIL THE PROJECTED SIZE IS UNDER THE CEILING", AND THAT IS
+RETRACTED — recorded here so the next reader does not re-derive the wrong threshold.** It is
+the intuitive reading and it is wrong on the predicate: rule (p) is
+`after > allowance AND delta > 0`, so a **non-positive delta** clears it and the document
+normally stays over the ceiling afterwards. Three measurements settled it:
+
+* Two runs on the real doc, from the operator's own side: **`+184 B` refused**, and
+  **`−1,478 B` allowed while still 1,962 B over** — `status=proposed`, not a refusal. The
+  two thresholds are observably different.
+* Clearing to the ceiling on the cutover doc would evict **3,237 B instead of 451 B — 7×
+  more text** — to reach a number the rule never names.
+* On a **grandfathered** doc it can be unreachable, which would convert a *clearable*
+  refusal into a permanent shortfall: strictly worse than the state rule (s) exists to fix.
+
+So the stopping condition is `size_ratchet_report` **itself**, and deliberately not a byte
+comparison that could drift from it. `test_the_doc_is_STILL_over_the_ceiling_afterwards`
+pins the resulting semantic.
+
+
+### Rule (r) is not branched around — it is handed a plan
+
+Rule (s) synthesises a `PrunePlan` and hands it to the SAME pipeline `--prune
+--archive-write` uses: `archive_append` projects the block, `conservation_problems` checks
+the projection, the write window re-runs the identical check over the bytes read back off
+disk, and `_undo_write` rolls BOTH paths back on any refusal. Conservation holds by there
+being nothing to branch around.
+
+⚠ **`removed` lists the non-blank removals only, and the document loses the interior blanks
+too.** That asymmetry is forced, not chosen: `archive_lines` DROPS blank lines, so a blank
+`PruneTarget` would be a line `conservation_problems` could never find in any archive — the
+rule would refuse every eviction of a block containing one blank line, i.e. every real
+block.
+
+### When it refuses
+
+* **Evicting every closed block still would not clear rule (p)** → exit **14**, nothing
+  written, and the report states the two numbers (bytes needed, bytes available across all
+  candidates) and the three remedies that do work. It does NOT evict the lot and hope:
+  relocating a document's whole history to buy nothing would read as a success.
+* **`--archive` or `--archive-note` missing** → exit **2**, on §K-W's own refusals. The flag
+  IMPLIES `--archive-write`, so those refusals are reached unchanged.
+* **Combined with `--prune`** → exit **2**. Declared non-goal: both produce a removal set
+  and rule (r) appends ONE archive block per run, so one run would have to merge two sets
+  addressed against two different texts. The blocked session has no prune file, and a
+  session that has one is not blocked.
+
+### What it does not check
+
+That the blocks it moved were the ones a human would have picked; that the archive is
+somewhere anybody will look; that the note is true. It also cannot reach content rule (q)
+can — an OPEN block's stale half, a retracted bullet under `Gotchas` — which is why the
+shortfall refusal names `--prune` as remedy 2 rather than calling itself the only exit.
+
+### Concurrency — the risk rule (s) ESCALATES, and what is done about it
+
+🔴 **`--archive-write` declared concurrency uncovered, and that was defensible for
+`--archive-write`.** A human passes that flag deliberately, one document at a time, so
+last-writer-wins on a shared archive is a rare manual race. **Rule (s) makes archive writes
+frequent and unattended** — every session that hits the ceiling writes one — so two sessions
+on one arc, or one session's `/handoff` racing another's, become ordinary rather than
+exotic. And the archive is the **only** durable home for evicted text: a lost append is not
+a cosmetic race, it is text that exists nowhere, which is the precise failure rule (r) was
+built to prevent.
+
+**The behaviour implemented is optimistic-concurrency-and-refuse.** Immediately before the
+append, the write window re-reads the archive and compares it against the bytes the
+projection was built on. A mismatch is exit **16** `[archive moved]`, with **nothing
+written** — not the doc, not the archive — and the other session's bytes untouched, because
+the rollback is handed no archive. The remedy printed is "re-run", which is *correct* and
+not merely cheap: `archive_append`'s idempotence is a set difference over `_norm_line`, so a
+second run against the file as it now stands appends exactly the lines still missing and
+cannot duplicate one either session already wrote.
+
+The two alternatives, and why not:
+
+* **Re-project** (read the fresh bytes, append onto those) preserves both writes too, and
+  was rejected for *where* it puts the code: a second `archive_append` call plus a "what if
+  the re-projection appends nothing" branch, inside the write window — the one place in this
+  module where a defect costs a file.
+* **Last-writer-wins** was rejected outright. It is the single outcome that destroys the
+  only copy of evicted text.
+
+🔴 **IT IS DELIBERATELY IN SCOPE FOR A PR TITLED RULE (s), AND DELIBERATELY NOT GATED ON
+`--autoevict`.** It sits under `if archive_write is not None:`, so it binds
+`--prune --archive-write` as well — this change therefore *does* alter behaviour for an
+existing caller, by adding an exit-16 path that did not exist. That is the intended trade,
+twice over. The hazard lives in the **shared write window**, and a guard scoped to the
+CALLER rather than to the HAZARD is the spelled-guard shape `claude/RULES.md` names: it
+would leave the identical silent clobber open for whoever happens not to have passed this
+flag. And what it replaces for that caller is not "no refusal" — it is *overwrite the other
+session's only copy and report success*. A loud refusal on a race beats a silent loss on one.
+
+⚠ **It has caught nothing in the wild, and that is the correct state for a race guard** — a
+guard that has already fired is one that was added too late. What stands in for an incident
+is **reachability**: three seam tests drive a real interleaving through `main`, and two
+mutation rows (the compare always agreeing; the compare reusing a stale pre-window capture)
+are both KILLED. `claude/RULES.md` asks for a guard proven REACHABLE, not one proven needed
+by damage.
+
+⚠ **IT IS A CHECK, NOT A LOCK, AND THE RESIDUAL WINDOW IS NAMED RATHER THAN IMPLIED.** What
+is closed is the window from the PROJECTION — which spans the merge, every rule below it,
+the diff, and on a confirmed run the doc write and the leak scan (a subprocess) — down to
+two adjacent syscalls. A racer landing between the final `read_bytes` and the `write_text`
+still wins, and nothing here detects it. Closing that needs an `O_EXCL` lock file or a
+locked rename; it is a bigger change than this one and is **not** claimed.
+
+### What it does NOT reach, what it does not heal, and where the bytes go
+
+🔴 **It reaches 3 of the 5 over-ceiling docs, not 5.** Both cairn control-plane docs have
+**zero** candidates, for two *different* reasons, and both land on
+`autoevict_shortfall_report` → exit **14** with the override as their only exit — the
+pre-rule-(s) state, unchanged:
+
+* `handoff-cairn-control-plane.md` (141,319 B, grandfathered to 98,304, over by 43,015) —
+  **no H3 anywhere in it** matches the CLOSED matcher. Nothing to select.
+* `handoff-cairn-control-plane-archive.md` (183,128 B, grandfathered to 147,456, over by
+  35,672) — **is an archive**. Its 7 closed H3s sit under `## Moved from …`,
+  `## Open-investigation blocks closed and moved out …` and the preamble, none of them an
+  append-only heading (`open-investigation` hyphenated is not `APPEND_PREFIXES`'
+  `open investigations`), so the append-only guard correctly refuses them all.
+
+Positive control on that walk: it returns **7** on the doc this rule was built against.
+*Measured against a live refusal, not inferred* — the first doc was driven through the tool
+and came back exit 14, `NOTHING WAS MOVED, and there was nothing this rule COULD move`.
+
+⚠ **It freezes a doc; it does not heal one.** On the cutover doc: over by 3,440 B with
+**8,560 B** of closed text in total, against a per-round delta of a few hundred bytes —
+**order 20–30 further sessions** before the candidates run out and the override is the only
+exit again. A deferral with a measurable horizon, not a fix for unbounded growth.
+
+⚠ **The destination is governed by the same ceiling.** `budget_position`'s `is_handoff_doc`
+is `claudedocs/` + `/handoff-`, which **matches** the `claudedocs/archive/handoff-<topic>.md`
+remedy 3 prints. So rule (s) moves bytes from one counted document into another counted
+document: **corpus bytes unchanged, doc count up.** Live endpoint, measured: cairn's own
+archive doc is grandfathered to 147,456 B and is 35,672 B over even that. Not a reason to
+change the destination — §K and §K-W sanctioned it — but **"durable" here means "out of the
+document a session has to READ", never "out of the budget".**
