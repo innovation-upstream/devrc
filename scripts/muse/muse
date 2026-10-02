@@ -22,8 +22,11 @@
 # right after muse-cli returns, before either branches on success — so a
 # failure after that point cannot leave a delivered message unstamped. The
 # COST differs per channel and both halves are deliberate: on B1 a genuinely
-# inert Enter also stamps; on B2 every failure stamps EXCEPT muse-cli's rc 3
-# (auth needed), carved out because it provably never left this machine. It
+# inert Enter also stamps; on B2 every failure stamps EXCEPT muse-cli's rc 2
+# (AuthError — cookies expired), carved out because it provably never left
+# this machine. ⚠ rc 2, NOT rc 3: rc 3 is GatewayError and MAY have sent.
+# Read muse_cli/cli.py:713-721 before changing this; round 2 of #1976 had it
+# backwards from the legend below, which is why that legend now says so. It
 # refuses a non-integer gap rather than failing open, and is still bypassable
 # by anything that can write $STATE_DIR/last-send — it is read from the
 # stamp's MTIME, not its contents.
@@ -42,8 +45,14 @@
 # Rebuilding it structurally -- branching on a data-message-* attribute rather
 # than on words -- needs one live approval card to map, so it stays open.
 #
-# Exit codes: 0 ok · 1 dispatch failed (B1 detail printed) · 2 usage · 3
-# muse-cli auth needed · 4 bridge query failed · 5 operator approval pending.
+# Exit codes (THIS wrapper's, not muse-cli's): 0 ok · 1 dispatch failed (B1
+# detail printed) · 2 usage/paced · 3 muse-cli auth needed · 4 bridge query
+# failed · 5 operator approval pending.
+# ⚠ muse-cli's OWN codes are DIFFERENT and this header was read as if they
+# matched: muse-cli exits 2 on AuthError, 3 on GatewayError, 4 on Timeout
+# (muse_cli/cli.py:713-721, v0.3.2). The wrapper maps muse-cli 2 -> its own
+# 3. Do not assume the numbers line up — #1976 round 2 did, and shipped a
+# pacing carve-out on the wrong failure class.
 set -euo pipefail
 
 MUSE_CLI_BIN=${MUSE_CLI:-muse-cli}
@@ -381,17 +390,30 @@ cmd_send_cli() {
   # gate unmarked there, so a caller retrying on exit 1 re-sent with no gap:
   # the same defect this PR fixed on B1, still live on B2 (#1976 round 1).
   #
-  # ⚠ rc 3 IS distinguishable, and an earlier wording of this comment claimed
-  # otherwise while the `case` two lines below enumerated it — the code
-  # contradicted its own justification. rc 3 is muse-cli's "auth needed": the
-  # send never left this machine. Stamping it paced the operator out of BOTH
-  # channels after a failure that definitively sent nothing, and an expired
-  # cookie is a routine state, not a rare one. Found by #1976 round 2, which
-  # also measured that this round's fix INTRODUCED it.
-  if [ "$rc" -ne 3 ]; then pace_mark; fi
+  # ⚠ ONE rc IS distinguishable — the AUTH one — and it is rc 2, NOT rc 3.
+  # 🔴 READ FROM muse-cli's SOURCE, not from its exit-code folklore
+  # (muse_cli/cli.py:713-721, muse-cli 0.3.2):
+  #     except AuthError    -> sys.exit(2)      cookies expired; NEVER sent
+  #     except GatewayError -> sys.exit(3)      stream reset / non-2xx / api
+  #                                             error; MAY have sent
+  #     except TimeoutError -> sys.exit(4)      MAY have sent
+  # gateway.py raises AuthError for exactly the motivating case ("cookies
+  # expired? re-export") and GatewayError for VM-unavailable, commented
+  # "Not an auth problem, so say so" — muse-cli draws the distinction we need.
+  #
+  # Round 2 carved out rc 3 believing it was auth. That was backwards and
+  # measured so by #1976 round 3: the expired cookie (rc 2) still stamped —
+  # the exact regression round 2 said it had removed — while a gateway error,
+  # which is in the AMBIGUOUS class that must stamp, did not. Both halves
+  # wrong, from one mislabel. The `3 muse-cli auth needed` legend in this
+  # file's header predates the PR and is what the mislabel was read from;
+  # it is corrected above, because round 2 made it load-bearing.
+  if [ "$rc" -ne 2 ]; then pace_mark; fi
   if [ "$rc" -ne 0 ]; then
     b1_hint
-    case $rc in 3) exit 3 ;; *) exit 1 ;; esac
+    # Surface auth as the wrapper's own exit 3 ("muse-cli auth needed"), which
+    # is what `muse auth export` answers. Everything else is exit 1.
+    case $rc in 2) exit 3 ;; *) exit 1 ;; esac
   fi
 }
 

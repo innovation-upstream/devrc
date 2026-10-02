@@ -39,8 +39,14 @@ To re-measure: `git stash` is banned here, so copy the wrapper aside, then
 INDEX, so if the fix is already staged it restores the FIX and the "pre-fix"
 run comes back fully GREEN -- a false all-green that reads as the regression
 tests being vacuous. That happened while writing this module. Prove the
-swap landed before trusting the run: `grep -c 'COMPOSER" = "no"'` on the
-restored file must be 1.
+swap landed before trusting the run.
+⚠ THE OBVIOUS CONTROL DOES NOT WORK: `grep -c 'COMPOSER" = "no"'` returns 1
+at the base AND at HEAD -- at base it matches the live defective code, at
+HEAD it matches the comment that quotes it -- so it cannot distinguish the
+two trees and reads as a pass either way. Round 3 found it had never been
+able to go red. Compare the content instead:
+    test $(sha256sum <restored> | cut -d" " -f1) \
+       = $(git cat-file blob 298e4c57:scripts/muse/muse | sha256sum | cut -d" " -f1)
 
 🔴 HOW TO WRITE A TEST HERE WITHOUT SENDING A REAL MESSAGE. On 2026-10-01 an
 agent auditing this wrapper sent a real message to the operator's account. It
@@ -89,11 +95,12 @@ def source_without_comments() -> str:
     assertion is unaffected by comments either way. Do not name specific
     examples here -- an earlier version listed `"--config -"` as a presence
     assertion, and the very next round FLIPPED it to `not in source`, which
-    strictly requires stripping (`--config -` now appears in a comment at
-    muse:468, so the raw source contains it and the stripped source does
-    not). The docstring's own example became its counter-example inside one
-    round. Two earlier drafts were also wrong, in the opposite direction
-    ("every structural guard below must read THIS").
+    strictly requires stripping. The docstring's own example became its
+    counter-example inside one round. Two earlier drafts were wrong in the
+    opposite direction ("every structural guard below must read THIS"), and a
+    third cited a line number that was already off by 22 when it was written.
+    This paragraph has now been wrong four times; it names nothing that can
+    drift.
 
     🔴 THE RULE, WITHOUT AN EXAMPLE TO GO STALE: if your assertion is `not
     in`, you MUST read the stripped source -- the comments quote the very
@@ -305,44 +312,55 @@ def test_force_reaches_the_cli_channel(env):
 
 
 def test_the_cli_channel_does_not_pace_a_send_it_never_made(env):
-    """REGRESSION against the ROUND-1 FIX, which introduced this.
+    """REGRESSION against ROUND 2's fix, which carved the WRONG exit code.
 
-    Round 1 moved B2's `pace_mark` above the rc branch so a muse-cli failure
-    AFTER delivery would still stamp. That over-reached: rc 3 is muse-cli's
-    "auth needed", which means the send never left this machine, and stamping
-    it paced the operator out of BOTH channels after a definite non-send. An
-    expired cookie is a routine state, so this fired often.
+    muse-cli 0.3.2, muse_cli/cli.py:713-721:
+        AuthError    -> exit 2   cookies expired; NEVER sent
+        GatewayError -> exit 3   stream reset / non-2xx; MAY have sent
+        TimeoutError -> exit 4   MAY have sent
 
-    The stub exits 3. Nothing was delivered; nothing may be stamped.
+    Round 2 believed rc 3 was auth and carved THAT out. Measured at its tip:
+    rc 2 (the real expired cookie) STAMPED -- the regression round 2 said it
+    had removed -- while rc 3, which belongs in the ambiguous stamping class,
+    did not. One mislabel, wrong in both directions.
     """
-    # muse-cli's rc 3 == auth needed. write_exec owns the shebang.
-    write_exec(pathlib.Path(env["MUSE_CLI"]), 'printf \'%s\\n\' "$*" >> "$MARKER"\nexit 3\n')
+    write_exec(pathlib.Path(env["MUSE_CLI"]), 'printf \'%s\\n\' "$*" >> "$MARKER"\nexit 2\n')
     assert not stamp_path(env).exists()
 
     proc = run(env, "send", "a benign task", "--cli")
 
-    assert proc.returncode == 3, f"expected muse-cli's rc 3 to pass through"
+    assert proc.returncode == 3, (
+        "muse-cli's AuthError (rc 2) must surface as this wrapper's exit 3, "
+        f"'muse-cli auth needed'; got {proc.returncode}"
+    )
     assert not stamp_path(env).exists(), (
-        "an auth failure stamped the pacing gate -- the operator is now paced "
+        "an expired cookie stamped the pacing gate -- the operator is paced "
         "out of both channels after a send that never left this machine"
     )
 
 
-def test_the_cli_channel_paces_an_ambiguous_failure(env):
-    """The other side of the pair above -- the case rc 3 must NOT weaken.
+@pytest.mark.parametrize("rc", [1, 3, 4, 127])
+def test_the_cli_channel_paces_every_ambiguous_failure(env, rc):
+    """The other side of the pair -- the class rc 2 must NOT be widened into.
 
-    For any non-zero rc that is NOT 3, muse-cli cannot distinguish "never
-    sent" from "sent, then the wait failed", so the gate must stamp. Without
-    this, narrowing the rc-3 carve-out to `if false` (or widening it to every
-    rc) passes on the test above alone.
+    A TABLE, not one case: round 2's single rc-1 test could not see that the
+    carve-out had been pointed at rc 3. rc 3 (GatewayError) and rc 4
+    (TimeoutError) are the ones that MAY have delivered, so they must stamp;
+    127 stands for "the binary vanished", which is also not a proof of
+    non-delivery by anything the wrapper can observe.
     """
-    # The default stub exits 1, i.e. the ambiguous case.
-    proc = run(env, "send", "a benign task", "--cli")
+    # f-string, NOT %-formatting: the stub body itself contains `%s` (the
+    # printf that records argv), which `%` would consume as a placeholder.
+    write_exec(
+        pathlib.Path(env["MUSE_CLI"]),
+        f'printf \'%s\\n\' "$*" >> "$MARKER"\nexit {rc}\n',
+    )
 
-    assert proc.returncode == 1
+    run(env, "send", "a benign task", "--cli")
+
     assert stamp_path(env).exists(), (
-        "an ambiguous muse-cli failure did not stamp -- a caller retrying on "
-        "exit 1 re-sends with no gap, which may be a second real delivery"
+        f"muse-cli rc {rc} did not stamp -- it is not provably a non-send, so "
+        "a caller retrying on failure may deliver a second time with no gap"
     )
 
 
@@ -388,7 +406,10 @@ def test_the_token_never_reaches_curl_argv():
         # straight back on argv while the literal string "Authorization"
         # never appears in the curl invocation. Assert the SHAPE instead --
         # every `-H` curl receives must be exactly `@-`.
-        h_args = re.findall(r"-H\s+(\S+)", argv)
+        # Both spellings. Round 3 walked the short-only version with
+        # `--header "$hdr"`, which put the token back on argv while
+        # h_args == ["@-"] kept this loop satisfied.
+        h_args = re.findall(r"(?:-H|--header)\s*=?\s*(\S+)", argv)
         assert h_args, "curl no longer receives a -H argument -- re-anchor"
         for h in h_args:
             assert h == "@-", (
@@ -498,11 +519,29 @@ def test_the_enter_retry_rechecks_the_signal_the_first_check_used():
     #
     # The two checks must be IDENTICAL; that relationship is the invariant, so
     # assert the string appears on BOTH sides rather than only naming it.
-    assert " ".join(source.split()).count(expected) >= 2, (
-        "the first submit check and the retry re-check must use the SAME "
-        f"condition, {expected} -- found fewer than two occurrences, so one "
-        "of them has drifted and this guard's description would be a lie"
+    # 🔴 SLICE the first check too -- do NOT count occurrences. Round 3 showed
+    # `count(expected) >= 2` pins ARITY, not identity: a mutant that drifted
+    # the first check to `-lt` AND parked a copy of the condition in dead code
+    # SURVIVED, and so did a realistic one that added a legitimate third
+    # user of the condition. Round 1's failure (a) -- "tokens in dead code" --
+    # re-admitted in a new shape, in this same guard.
+    f_start = '"$B1_REF" key Enter'
+    f_end = 'die "B1: state unreadable right after submit"'
+    assert f_start in source and f_end in source, (
+        "the first-submit-check anchors moved -- re-anchor this guard"
     )
+    first = source.split(f_start, 1)[1].split(f_end, 1)[1].split("if [", 1)
+    first_check = "if [" + first[1].split("then", 1)[0] if len(first) > 1 else ""
+    assert expected in " ".join(first_check.split()), (
+        "the FIRST submit check no longer uses the same condition as the "
+        f"retry ({expected}). The two must be identical -- that identity is "
+        "the invariant, and a count of occurrences does not pin it."
+    )
+    # ⚠ If you ever consolidate these two into a shared helper -- which is the
+    # better design, and which muse's own comment recommends for the sibling
+    # `pace_check` duplication -- this assertion must be re-anchored onto the
+    # helper. It failing on a correct refactor is a false positive, not a bug
+    # in the refactor.
 
 
 def test_pace_mark_fires_on_confirmed_submit_not_after_the_reply():

@@ -53,9 +53,13 @@ default (`muse b1` prints the recipe verbatim).
   B1 right after the first Enter, B2 right after muse-cli returns — so a
   reply-timeout, or a failure between submit and confirmation, still counts.
   The cost is deliberate and differs per channel: on **B1** a genuinely inert
-  Enter also stamps; on **B2** every failure stamps *except* muse-cli's rc 3
-  (auth needed), which is carved out because it provably never left this
-  machine. `--force` is the override on both.
+  Enter also stamps; on **B2** every failure stamps *except* muse-cli's
+  **rc 2** (`AuthError` — cookies expired), carved out because it provably
+  never left this machine. `--force` is the override on both.
+  ⚠ **rc 2, not rc 3** — muse-cli exits 2 on auth, 3 on `GatewayError` (which
+  may have sent) and 4 on timeout, and those do **not** line up with this
+  wrapper's own exit codes. An earlier version of this line said rc 3 and was
+  wrong in both directions at once.
   🔴 **An agent loop is the threat it does not stop** — give send authority to
   exactly ONE agent per fan-out and stub `MUSE_BB` for the rest.
 - **Cookies/token never cross the wire you type on**: muse-cli keeps its own
