@@ -14,8 +14,18 @@ the reply, read goals/feed, and query cluster status through the **muse-bridge**
 - **B1 browser flow** — browser-bridge `flows/muse.ai.md`. PRIMARY (operator's
   call 2026-10-01): the wrapper drives it end-to-end — open own tab, type +
   assert, Enter + confirm, poll the delta by id+len, close the tab. It
-  **detects Muse's pending approval prompts and stops (exit 5)** rather than
-  clicking Allow — approving is the operator's security gate.
+  **attempts** to detect a pending approval prompt and stop (exit 5) rather
+  than clicking Allow — approving is the operator's security gate, and the
+  wrapper never clicks Allow on any path.
+  🔴 **DO NOT RELY ON THAT DETECTION — it has never been positive-controlled,
+  and it is wrong in both directions.** `muse:92` matches `"Needs approval"` /
+  `"Needs review"`; neither string appears in the approval UI this very file
+  documents below ("Allow Muse to access \<host\>?" / "Review the approval
+  request in chat to continue"), and all four were measured absent from the
+  live DOM on 2026-10-01. It also scans the WHOLE transcript, so a chat *about*
+  approvals can pin exit 5 on permanently. **Check for a pending card yourself
+  before a send.** Rebuilding the guard structurally needs one live approval
+  card to map, which is why it is still open.
 - **B2 `muse-cli`** — programmatic (cookies → HTTPS → Noise-XX WebSocket),
   behind `--cli`. Installed `uv tool install muse-cli`; the command is
   **`muse-cli`**, never bare `muse` (that belongs to Muse Code). Blocked for

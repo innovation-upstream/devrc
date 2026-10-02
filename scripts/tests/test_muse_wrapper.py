@@ -17,8 +17,16 @@ against the fixed tree, **10 passed**. So six are genuine REGRESSION tests:
 
 The other four are INVARIANT GUARDS and are labelled as such in their own
 docstrings -- they pass in both trees by design and must not be counted as
-regression coverage. To re-measure: `git stash` is banned here, so copy the
-wrapper aside, `git checkout -- scripts/muse/muse`, run, then copy back.
+regression coverage.
+
+To re-measure: `git stash` is banned here, so copy the wrapper aside, then
+`git checkout HEAD -- scripts/muse/muse`, run, and copy back.
+🔴 `HEAD` IS LOAD-BEARING. A bare `git checkout -- <path>` restores from the
+INDEX, so if the fix is already staged it restores the FIX and the "pre-fix"
+run comes back fully GREEN -- a false all-green that reads as the regression
+tests being vacuous. That happened while writing this module. Prove the
+swap landed before trusting the run: `grep -c 'COMPOSER" = "no"'` on the
+restored file must be 1.
 
 🔴 HOW TO WRITE A TEST HERE WITHOUT SENDING A REAL MESSAGE. On 2026-10-01 an
 agent auditing this wrapper sent a real message to the operator's account. It
@@ -55,12 +63,18 @@ MUSE = REPO_ROOT / "scripts" / "muse" / "muse"
 def source_without_comments() -> str:
     """The wrapper's CODE, with `#` comment lines stripped.
 
-    🔴 Every structural guard below must read THIS, not the raw file. The
-    comments here deliberately quote the defective code they replaced (that is
-    how the fix explains itself), so a naive substring scan matches the
+    🔴 Required by the guards that assert an expression is ABSENT, because the
+    wrapper's comments deliberately QUOTE the defective code they replaced --
+    that is how each fix explains itself. A naive substring scan matches the
     explanation and reports the bug as still present. Measured while writing
     this module: `test_the_enter_retry_...` failed against the FIXED tree
     because the comment above the fix contains the old expression verbatim.
+
+    ⚠ Only the absence-asserting guards need it. The three that assert
+    PRESENCE (`"--config -"`, `"$TALEN"`, `"UMSGS"`) are unaffected by
+    comments either way. An earlier version of this docstring said "every
+    structural guard below must read THIS", which was wider than the truth --
+    the same guards-narrower shape, pointed the other way.
 
     Line-level stripping only -- adequate because every quoted expression here
     sits in a whole-line comment, and a trailing-comment variant would still be
@@ -212,8 +226,16 @@ def test_usage_advertises_no_flag_the_parser_ignores(env):
     `cmd_poll_b1` ignored its arguments entirely -- so an agent reading the help
     passed `--wait 300` and silently got the hardcoded behaviour.
 
-    Two-way by construction: it reads the help TEXT and the parser SOURCE, so it
-    fails if either side grows a flag the other lacks.
+    ONE-WAY, deliberately: it asserts `advertised <= parsed`, i.e. the help may
+    not promise a flag the parser ignores. A flag the parser gains and the help
+    omits PASSES -- `--thread` is exactly that today.
+
+    🔴 This docstring claimed "two-way by construction … fails if either side
+    grows a flag the other lacks", which the assertion does not provide. Caught
+    by #1976 round 0. That is RULES.md -> "guards-narrower": a description
+    claiming coverage the body has not got is worse than no description,
+    because it stops the next reader looking. Equality is not the fix -- it
+    would fail today on `--thread` for no defect.
     """
     help_text = run(env, "--help").stdout
     source = source_without_comments()

@@ -22,9 +22,19 @@
 # than failing open, and is still bypassable by anything that can write
 # $STATE_DIR/last-send — it is read from the stamp's MTIME, not its contents.
 #
-# Muse's per-host APPROVAL prompts are the OPERATOR's security gate: this
-# wrapper DETECTS a pending approval and stops (exit 5) rather than clicking
-# Allow on Muse's behalf.
+# Muse's per-host APPROVAL prompts are the OPERATOR's security gate. This
+# wrapper never clicks Allow on any path, and ATTEMPTS to detect a pending
+# approval and stop (exit 5).
+# 🔴 THAT DETECTION IS NOT TRUSTWORTHY AND THIS COMMENT USED TO SAY IT WAS.
+# b1_state (below) matches "Needs approval"/"Needs review"; the approval UI
+# emits neither -- it shows "Allow Muse to access <host>?" and the toast
+# "Review the approval request in chat to continue", and all four strings were
+# measured ABSENT from the live DOM on 2026-10-01. So it has never been
+# positive-controlled: no approval card has ever been observed to trip it.
+# It also scans the ENTIRE transcript, so a conversation ABOUT approvals can
+# pin exit 5 on permanently (2 "approv" hits were measured in the live feed).
+# Rebuilding it structurally -- branching on a data-message-* attribute rather
+# than on words -- needs one live approval card to map, so it stays open.
 #
 # Exit codes: 0 ok · 1 dispatch failed (B1 detail printed) · 2 usage · 3
 # muse-cli auth needed · 4 bridge query failed · 5 operator approval pending.
