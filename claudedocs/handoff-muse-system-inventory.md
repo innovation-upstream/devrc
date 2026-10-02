@@ -296,40 +296,56 @@ flux unstructured walkers, `handleOpenAPI`.
 
 ## 6. Ranked next steps
 
-**Tier 1 — one-liners, no deploy, high value**
+🔴 **Numbers 9–24 are the ORIGINAL ranks** — Tier 1 (1–8) is merged and removed,
+and the survivors keep their numbers because rank is half a `claim-work` claim's
+identity. Claim before acting: `claim-work --slug-for <this doc> <rank>`.
 
-1. **B1** — `muse:227` → `[ "$TALEN" -eq 0 ]`. The retry path currently always fails.
-2. **S3** — `muse:387` → `curl --config -` (or `-H @-`) on stdin. Stops leaking the token to `ps`.
-3. **B3** — rename `USER` → `UMSGS` (`:101` + readers `:179,184,219`, `base_user` `:202`).
-4. **Pacing** — move `pace_mark` to fire on **confirmed submit** (`:228`), not after the reply poll (`:248`). Single highest-value change against the agent-loop spam path.
-5. **Pacing** — fail **closed** on a non-numeric `MUSE_MIN_SEND_GAP_MIN` (validate after `:34`).
-6. **Docs** — fix SKILL.md `:61`'s `--cli` inversion (it says B1, it is B2); soften `:38`'s "enforces"; correct `:84`'s "~10–25 s" to the measured ~75 s wall.
-7. **`usage()`** — delete the phantom `poll --wait` (`:47`), which is advertised and never parsed.
-8. **M10** — correct the last hop in the two monitoring comments; it sits inside an alert runbook.
+**Security-forcing — the public exposure, operator-gated where noted**
 
-**Tier 2 — small, correctness**
+9. **S2 — implement the `ns` allowlist in `nsFrom`** (`containers/muse-bridge/main.go:212-216`),
+   plus a test that `?ns=kube-system` → 400. The design mandates it in as many
+   words; only the regex shipped, so all **57** namespaces are readable by the
+   token. Pure code; needs a rebuild + tag bump.
+   forcing: security — a third-party LLM connector can read every namespace.
+16. **S1 — close the origin bypass** in
+    `clusters/production/apps/nebula/gateway/muse-bridge-ingress.yaml`: drop the
+    `web` entrypoint, add `certResolver: letsencrypt`, add a Cloudflare-only
+    `IPAllowList`. ⚠ **Decide class vs instance** — `muster-ingress.yaml:24-26` is
+    identical. The Cloudflare SSL-mode change to Full (strict) is the operator's.
+    forcing: security — measured: origin `<hetzner-origin-ip>` answers cleartext
+    HTTP on :80 and a self-signed cert on :443; the bearer token crosses that leg.
+18. **S5 — delete the four unused RBAC grants** (`clusters/homelab/apps/muse/rbac.yaml:16,19`):
+    `pods/log`, `services`, `namespaces`, `replicasets`. No handler reads any.
+    forcing: security — `pods/log` across 57 namespaces is one merged handler away
+    from a cluster-wide secret read; measured `can-i get pods/log` → yes.
+11. **B2 — rebuild the approval guard structurally.** See the open investigation
+    above; BLOCKED on capturing one live approval card.
+    forcing: security — it is the wrapper's only security branch and has never
+    been positive-controlled.
+19. **M6 — real `http.Server` timeouts + graceful shutdown** (`main.go:104`),
+    `replicas: 2` + a PDB.
+    forcing: security — all four timeouts are zero and the origin is directly
+    reachable, so pre-auth slowloris reaches a single replica.
+17. **S4 — bound `/v1/nodes`**: `ResourceVersion: "0"` + `Limit`, or drop the
+    cluster-wide pod rollup (`handlers.go:17,55`).
+    forcing: security — 30 req/min × an unbounded 837-pod etcd read, drivable from
+    the public internet by one token.
+22. **Audit log — add `client=` and `tokid=`** (`main.go:167-169`). XFF already
+    arrives and the sha256 is already computed at `:124`.
+    forcing: security — design §3.2 mandates token-id; today a Muse call and an
+    audit agent's probes are indistinguishable in the log.
+14. **Golden field-set test** for the five bridge item structs.
+    forcing: security — the data-minimization claim (`main.go:5`, `openapi.yaml:6-8`)
+    is the design's central control and NO test asserts any response's field set.
 
-9. **S2** — `ns` allowlist in `nsFrom` + a test that `?ns=kube-system` → 400. Pure code, no cluster risk, closes the widest exposure. *(Requires rebuild + tag bump.)*
-10. **Flow file re-map** — strike `count` from `:66`/`:75`, add the approval and hydration gates, re-date. Make `muse b1` **cite** the flow file instead of duplicating it (one rule, one place).
-11. **B2** — rebuild the approval guard **structurally**: branch on a `data-message-*` attribute, or at minimum scope the text scan to the composer/toast container, never the transcript. Needs one live approval card to map.
-12. **M1/M2** — emit `"stable": true/false`; port `cmd_poll_b1`'s zero-length guard into `cmd_send_b1`; re-wake inside the poll loop instead of a bare `continue`; close the tab on the timeout path.
-13. **B4** — derive the host from `browser whoami`, not the `laptop` literal.
-14. **Golden field-set test** for the five bridge item structs — pins the design's central guarantee. ~20 lines, no deploy.
-15. **Fix `TestLimiterBurstThenRefill`** to actually test refill; make the route table testable via `func (s *server) routes()` and assert every registered pattern except `/v1/health` returns 401.
+**Gate-forcing**
 
-**Tier 3 — larger, operator-gated**
-
-16. **S1** — drop the `web` entrypoint, add `certResolver: letsencrypt`, add a Cloudflare-only `IPAllowList` middleware; set CF SSL mode to **Full (strict)**. ⚠ Decide whether to fix the **class** (`muster-ingress.yaml` is identical) or just muse. The dashboard half is the operator's.
-17. **S4** — `ResourceVersion: "0"` + `Limit`, and a ~30 s cache on `/v1/nodes`; or drop the pod-request rollup entirely.
-18. **S5** — delete the four unused RBAC grants; if the allowlist lands, convert to per-namespace RoleBindings keeping ClusterRole only for `nodes`.
-19. **M6** — real `http.Server` timeouts + `signal.NotifyContext`/`Shutdown`; `replicas: 2` + a PDB.
-20. **M12** — a Tekton pipeline for `containers/muse-bridge/**` modelled on `clawgate-ci-pipeline.yaml`; closes "nothing tests it" and "nothing builds it" at once.
-21. **M5** — fill in the five response schemas and the 500/404/405 responses in `openapi.yaml`.
-22. **Audit log** — add `client=` (XFF already arrives) and `tokid=` (sha256 already computed at `main.go:124`). ~3 lines; makes usage attributable and satisfies design §3.2.
-23. **Nix-deploy the wrapper** as a `mkOutOfStoreSymlink` into `~/.local/bin/muse`, beside `dl-route` (`home.nix:3179`) and `stt` (`:3187`). 🔴 **Sequencing matters: ship B4 and the pacing fix FIRST** — otherwise this puts a laptop-only tool with a leaky gate onto both hosts' `$PATH`. The wrapper is already tracked, so only `home.nix` changes.
-24. **Extract the B1 JS** to `scripts/muse/b1.js` and fixture-test it under the existing `node` gate tier. The regression test that would have caught **B2** is concrete and **fails against today's code**: a transcript containing the literal "Needs approval" in a message body must not set the approval flag.
-
----
+20. **M12 — a Tekton pipeline for `containers/muse-bridge/**`**, modelled on
+    `clawgate-ci-pipeline.yaml`.
+    forcing: gate — nothing automated builds or tests the bridge; its 5 tests run
+    only when a human types `go test`, and `imagePullPolicy: IfNotPresent` on the
+    mutable tag `0.1.0` means a rebuild can deploy "successfully" and run the old
+    binary.
 
 ## 7. Honesty ledger
 
@@ -361,3 +377,162 @@ a *growing* reply; whether the stray muse.ai tab is still open.
 **One earlier relay corrected:** `poll --wait` was reported as "in the wrapper, absent from
 SKILL.md". It is advertised in `usage():47` and **never parsed** — a wrapper help bug, not a
 doc omission.
+## Goal
+
+Make the Meta Muse integration correct and safe to drive from agents: the wrapper
+that sends from the operator's live account, the B1 browser flow, and the
+read-only `muse-bridge` cluster API exposed to the public internet.
+
+- **closing-condition:** `check` — every item under "Ranked next steps" below is
+  either merged or explicitly dropped by the operator, AND
+  `KUBECONFIG=$KC_HOMELAB kubectl auth can-i --list --as=system:serviceaccount:muse:muse-reader`
+  shows no verb the handlers do not use. Frozen at round 1; later audits open a
+  NEW arc rather than extending this one.
+
+## State now
+
+- **Branch:** `main`, clean (one unrelated untracked file,
+  `nix/system/apply-networkmanager-openvpn.sh`, not ours).
+- **Merged this session** — all verified by CONTENT on the remote, never by
+  ancestry (squash merges are never ancestors):
+  - devrc **#1972** (`82b4c6e3`) — the inventory doc this handoff updates.
+  - devrc **#1976** (`272c7f03`) — six wrapper fixes, 16 hermetic tests, one
+    dev-host contract test. Shipped after a **five-round audit ladder**.
+  - homelab-infra **#941** (`490796a3`) — `MuseBridgePublicPathDown`'s triage
+    runbook pointed at homelab Traefik; the last hop is the **Service**
+    (`clusters/homelab/apps/nebula/gateway/nginx.conf:1205-1207`).
+- **Tier 1 is DONE** (old ranks 1–8). Tier 2/3 remain; ranks below keep their
+  ORIGINAL numbers so any live `claim-work` claim still resolves.
+- **A concurrent session shipped #1975** ("thread-aware B1 routing", +206/−37 in
+  `scripts/muse/muse`) from a base BEFORE #1976, so main carried none of the
+  fixes. Merged forward in `6153bd5e`; both are live on `main` now.
+- **Deploy status, stated separately from merged:** `scripts/muse/muse` is **NOT
+  nix-deployed** — `git grep scripts/muse -- nix/` is empty and
+  `~/.local/bin/muse` does not exist. The only reachable copy is
+  `$DEVRC/scripts/muse/muse`, which is current after a base-clone ff-merge. The
+  SKILL.md half IS a nix store copy and needs a `switch`/`ship.sh` to go live.
+- **CI:** all four Tekton checks green on the merge commit — `pytests
+  collected=24993 passed=24985 skipped=8 failed=0`.
+- **No clawgate task recorded**: `clawgate_handoff.sh resolve` exited **5**
+  (nothing resolved). An unknown session id also answers with an empty array, so
+  that zero cannot distinguish "touched no task" from "wrong id" — it is not a
+  clean bill of health, and no `clawgate-task:` field was written.
+
+## Open investigations — live diagnosis state
+
+### The B1 approval guard has never been positive-controlled and is wrong in both directions
+- as-of: 2026-10-02
+
+- **Symptom + exact repro:** `scripts/muse/muse`'s `b1_state` sets `APPROVAL` by
+  scanning `document.body.innerText` for `"Needs approval"` / `"Needs review"`.
+  Exit 5 ("operator approval pending") is the wrapper's only security branch.
+  Repro of the false-positive half: have any muse.ai message body contain the
+  literal string `Needs approval`; every subsequent `muse send` hard-exits 5.
+- **Observed (with values):** measured live on the muse.ai feed 2026-10-01 —
+  `has_needs_approval: false`, `has_needs_review: false`, `has_allow_muse: false`,
+  `has_review_the_approval: false`. The strings the UI actually emits, documented
+  in `claude/skills/muse/SKILL.md` itself, are `"Allow Muse to access <host>?"`
+  and the toast `"Review the approval request in chat to continue"` — **neither is
+  what the code matches**. Separately, **2 occurrences of `approv`** were measured
+  in the existing transcript, inside prior message bodies discussing connector
+  approval modes.
+- **Ruled out:** "the guard works and simply had nothing to detect" — the strings
+  it matches appear nowhere in the documented UI or the live DOM, so a pending card
+  could not trip it. `via: measurement`.
+- **Ruled out:** "scoping the text scan is enough" — the flow file's own rule is
+  `select on attributes, never on label text` (`flows/muse.ai.md:45`), because the
+  UI is mixed Spanish/English. `via: doc`.
+- **Leading hypothesis:** the guard must branch on a `data-message-*` attribute on
+  the approval card, not on words. The attribute name is unknown because no
+  approval card has been observed since the flow was mapped.
+- **Next probe:** the next time an approval prompt appears, BEFORE clicking Allow,
+  capture the card's attributes:
+  ```bash
+  BB=$DEVRC/scripts/browser-bridge/browser
+  $BB --instance personal open https://muse.ai --wake=4000   # your OWN tab
+  $BB bw://<host>/personal/<tabId> js '(function(){var o=[];document.querySelectorAll("[data-message-item],[data-message-role]").forEach(function(n){var a={};for(var i=0;i<n.attributes.length;i++){var x=n.attributes[i];if(x.name.indexOf("data-")===0)a[x.name]=x.value}o.push(a)});return JSON.stringify(o)})()' --wake=3000
+  ```
+  🔴 Do NOT click Allow to produce one — approving is the operator's gate.
+
+## Defects (batched)
+
+Fixed as ONE round, not one rank each. Original ranks kept for reference.
+
+- **(10) Flow file re-map** — `flows/muse.ai.md:66,75` still teach polling on
+  assistant COUNT, measured flat across a send; add the approval and hydration
+  gates; make `muse b1` cite the file instead of duplicating it.
+- **(12) M1/M2 indistinguishable outcomes** — emit `"stable": true/false`; port
+  `cmd_poll_b1`'s zero-length guard into `cmd_send_b1`; re-wake inside the poll
+  loop instead of a bare `continue`; close the tab on the timeout path.
+- **(13) B4 host hardcode** — `muse:119` `bw://laptop/`; derive from
+  `browser whoami` (NOT shell `whoami`, which is the username).
+- **(15) `TestLimiterBurstThenRefill` never tests refill**; and extract
+  `func (s *server) routes()` so the real route table is assertable.
+- **(21) M5 — fill in `openapi.yaml`'s five response schemas** and the 500/404/405
+  responses; today every data route returns an untyped `ItemList`.
+- **(23) Nix-deploy the wrapper** as a `mkOutOfStoreSymlink` into
+  `~/.local/bin/muse`. 🔴 **Sequenced AFTER (13)** or it puts a laptop-only tool on
+  both hosts' `$PATH`.
+- **(24) Extract the B1 JS** to `scripts/muse/b1.js` and fixture-test it under the
+  `node` tier.
+
+## Gotchas / decisions / dead-ends
+
+- 🔴 **I merged a public IP into this PUBLIC repo through a gate that caught it.**
+  #1972's check read `failed=2`; the description named one test
+  (`test_prune_skill_size`, inherited from a stale base). I verified that one,
+  built a merged tree, ran **two** test files, and merged. The second failure was
+  `test_no_unallowlisted_public_ip_literal_is_committed` firing on my own diff —
+  the Hetzner origin IP, quoted from the security audit. Another session scrubbed
+  it (#1979). **Reconcile the failure COUNT, never just the named test.**
+- 🔴 **A dispatched agent sent a real message from the live Muse account.** Its
+  brief said "do not send"; it built a stub env as an interpolated shell string
+  (`env $E …`) and zsh does not word-split, so every override silently vanished.
+  **Build subprocess env as a dict; stub `MUSE_BB` with a binary whose absence is
+  detectable; grant send authority to exactly ONE agent per fan-out.**
+- **`readlink -f` resolves paths that do not exist** — it printed
+  `/home/zach/.local/bin/muse` for a missing file and I read that as proof of
+  existence. Use `[ -e ]`.
+- **zsh ate a git ref**: `$ref:scripts/...` applies the `:s` history modifier.
+  Brace it — `${ref}:scripts/...`.
+- **The audit ladder's own shape, five rounds running:** every round's defect was
+  introduced by the PREVIOUS round's fix, and most were guards whose DESCRIPTION
+  was wider than their body. Two were live production bugs introduced while fixing
+  others — `--config -` silently truncating the token at a quote (presenting as a
+  401), and the rc-3/rc-2 carve-out that left the expired-cookie case stamping.
+- **muse-cli's exit codes do NOT match the wrapper's** — `AuthError→2`,
+  `GatewayError→3`, `TimeoutError→4` (`muse_cli/cli.py:713-721`, v0.3.2). The
+  wrapper's own header legend said rc 3 was auth; that is what produced the
+  wrong-code carve-out. Now pinned by
+  `scripts/devhost-tests/test_muse_cli_exit_contract.py`.
+- **A test needing a BINARY goes in `scripts/devhost-tests/`, not `scripts/tests/`**
+  — a skip in a hermetic target is an UNPINNED SKIP and GUARD 2 fails the sandbox
+  tier while the dev host stays green.
+- **Decision:** `[ -n "$force" ]` in place of the `-eq 1` test is an **equivalent
+  mutant** (measured across all four stamp × `--force` states) and is deliberately
+  NOT tested. Do not add a test to force a kill there.
+
+## How to verify
+
+```bash
+# the wrapper's own suite, plus the dev-host contract pin
+nix develop $DEVRC -c python3 -m pytest \
+  $DEVRC/scripts/tests/test_muse_wrapper.py \
+  $DEVRC/scripts/devhost-tests/test_muse_cli_exit_contract.py -q    # 20 passed
+
+# the content gates that caught the IP leak — run these before ANY merge here
+nix develop $DEVRC -c python3 -m pytest \
+  $DEVRC/scripts/tests/test_no_public_ips.py \
+  $DEVRC/scripts/tests/test_no_captured_text.py -q
+
+# the six fixes are live in the only reachable copy (NOT nix-deployed)
+grep -c -- '-H @-' $DEVRC/scripts/muse/muse        # 3 (1 code, 2 comment)
+grep -c 'UMSGS'    $DEVRC/scripts/muse/muse        # >0
+
+# bridge RBAC is still read-only
+KUBECONFIG=$KC_HOMELAB kubectl auth can-i --list \
+  --as=system:serviceaccount:muse:muse-reader | grep -E 'create|delete|patch|update'
+```
+
+🔴 **Do NOT run `muse send` to verify** — it sends from the operator's live
+account across Meta's wire and the pacing gate allows one send per 10 min.
