@@ -52,8 +52,10 @@ default (`muse b1` prints the recipe verbatim).
   its contents). On both channels it stamps as soon as delivery is POSSIBLE —
   B1 right after the first Enter, B2 right after muse-cli returns — so a
   reply-timeout, or a failure between submit and confirmation, still counts.
-  The cost is deliberate: a genuinely inert Enter also stamps, and `--force`
-  is the override.
+  The cost is deliberate and differs per channel: on **B1** a genuinely inert
+  Enter also stamps; on **B2** every failure stamps *except* muse-cli's rc 3
+  (auth needed), which is carved out because it provably never left this
+  machine. `--force` is the override on both.
   🔴 **An agent loop is the threat it does not stop** — give send authority to
   exactly ONE agent per fan-out and stub `MUSE_BB` for the rest.
 - **Cookies/token never cross the wire you type on**: muse-cli keeps its own

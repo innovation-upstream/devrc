@@ -4,19 +4,33 @@
 from the operator's LIVE Muse account across Meta's wire, and until 2026-10-01
 NOTHING tested it. A four-agent inventory found the defects pinned below.
 
-🔴 THE RED/GREEN MATRIX, MEASURED -- not asserted. Run against the PRE-FIX
-wrapper (`origin/main` at 298e4c57) this module is **6 failed, 4 passed**;
-against the fixed tree, **10 passed**. So six are genuine REGRESSION tests:
+🔴 THE RED/GREEN MATRIX, MEASURED -- not asserted. TWO baselines, because
+this PR ran an audit ladder and one defect was introduced by the ladder's own
+round-1 fix. A single baseline would mislabel that one.
+
+Against `origin/main` at **298e4c57** (the PR's base): **8 failed, 5 passed**.
+Those eight are regressions against the ORIGINAL wrapper:
 
     test_pace_check_fails_closed_on_a_nonnumeric_gap
     test_usage_advertises_no_flag_the_parser_ignores
+    test_force_reaches_the_cli_channel
+    test_the_cli_channel_paces_an_ambiguous_failure
     test_the_token_never_reaches_curl_argv
     test_b1_state_does_not_clobber_the_login_name
     test_the_enter_retry_rechecks_the_signal_the_first_check_used
     test_pace_mark_fires_on_confirmed_submit_not_after_the_reply
 
-The other four are INVARIANT GUARDS and are labelled as such in their own
-docstrings -- they pass in both trees by design and must not be counted as
+Against **c82a16c1** (round 1's tip): **1 failed, 12 passed** --
+`test_the_cli_channel_does_not_pace_a_send_it_never_made`, which guards a
+regression round 1's own fix INTRODUCED (B2 stamped the pacing gate on an
+rc-3 auth failure that delivered nothing). It is green at base precisely
+because the defect did not exist there; counting it against base would read
+as an invariant guard when it is a regression test with a different baseline.
+
+Against HEAD: **13 passed**.
+
+The remaining four are INVARIANT GUARDS, labelled as such in their own
+docstrings -- they pass in every tree by design and must not be counted as
 regression coverage.
 
 To re-measure: `git stash` is banned here, so copy the wrapper aside, then
@@ -50,6 +64,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import subprocess
 
 import pytest
@@ -70,11 +85,19 @@ def source_without_comments() -> str:
     this module: `test_the_enter_retry_...` failed against the FIXED tree
     because the comment above the fix contains the old expression verbatim.
 
-    ⚠ Only the absence-asserting guards need it. The three that assert
-    PRESENCE (`"--config -"`, `"$TALEN"`, `"UMSGS"`) are unaffected by
-    comments either way. An earlier version of this docstring said "every
-    structural guard below must read THIS", which was wider than the truth --
-    the same guards-narrower shape, pointed the other way.
+    ⚠ Only the absence-asserting guards strictly need it; a presence
+    assertion is unaffected by comments either way. Do not name specific
+    examples here -- an earlier version listed `"--config -"` as a presence
+    assertion, and the very next round FLIPPED it to `not in source`, which
+    strictly requires stripping (`--config -` now appears in a comment at
+    muse:468, so the raw source contains it and the stripped source does
+    not). The docstring's own example became its counter-example inside one
+    round. Two earlier drafts were also wrong, in the opposite direction
+    ("every structural guard below must read THIS").
+
+    🔴 THE RULE, WITHOUT AN EXAMPLE TO GO STALE: if your assertion is `not
+    in`, you MUST read the stripped source -- the comments quote the very
+    expressions the fixes removed. If it is `in`, either works.
 
     Line-level stripping only -- adequate because every quoted expression here
     sits in a whole-line comment, and a trailing-comment variant would still be
@@ -255,6 +278,74 @@ def test_usage_advertises_no_flag_the_parser_ignores(env):
     )
 
 
+def test_force_reaches_the_cli_channel(env):
+    """REGRESSION (red before the round-1 fix) -- behavioural, not structural.
+
+    `cmd_send` consumed `--force` and did not forward it, so `cmd_send_cli`
+    re-initialised force=0 and ran pace_check a SECOND time. Measured on the
+    pre-fix wrapper: `muse send --force --cli` exits 2 with the message "Use
+    --force to override deliberately" -- while --force was given.
+
+    #1976 round 2 found the round-1 fix shipped with NO test: removing the
+    forwarding, and re-spelling it as the `${force:+--force}` inversion the
+    code's own comment warns about, both SURVIVED a green suite.
+    """
+    stamp = stamp_path(env)
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text("0")  # fresh -> the gate would refuse without --force
+
+    proc = run(env, "send", "a benign task", "--force", "--cli")
+
+    assert env["_marker"].exists(), (
+        "--force did not reach the --cli channel: the pacing gate refused a "
+        f"send the operator explicitly forced (rc={proc.returncode}, "
+        f"stderr={proc.stderr.strip()!r})"
+    )
+    assert "pacing" not in proc.stderr
+
+
+def test_the_cli_channel_does_not_pace_a_send_it_never_made(env):
+    """REGRESSION against the ROUND-1 FIX, which introduced this.
+
+    Round 1 moved B2's `pace_mark` above the rc branch so a muse-cli failure
+    AFTER delivery would still stamp. That over-reached: rc 3 is muse-cli's
+    "auth needed", which means the send never left this machine, and stamping
+    it paced the operator out of BOTH channels after a definite non-send. An
+    expired cookie is a routine state, so this fired often.
+
+    The stub exits 3. Nothing was delivered; nothing may be stamped.
+    """
+    # muse-cli's rc 3 == auth needed. write_exec owns the shebang.
+    write_exec(pathlib.Path(env["MUSE_CLI"]), 'printf \'%s\\n\' "$*" >> "$MARKER"\nexit 3\n')
+    assert not stamp_path(env).exists()
+
+    proc = run(env, "send", "a benign task", "--cli")
+
+    assert proc.returncode == 3, f"expected muse-cli's rc 3 to pass through"
+    assert not stamp_path(env).exists(), (
+        "an auth failure stamped the pacing gate -- the operator is now paced "
+        "out of both channels after a send that never left this machine"
+    )
+
+
+def test_the_cli_channel_paces_an_ambiguous_failure(env):
+    """The other side of the pair above -- the case rc 3 must NOT weaken.
+
+    For any non-zero rc that is NOT 3, muse-cli cannot distinguish "never
+    sent" from "sent, then the wait failed", so the gate must stamp. Without
+    this, narrowing the rc-3 carve-out to `if false` (or widening it to every
+    rc) passes on the test above alone.
+    """
+    # The default stub exits 1, i.e. the ambiguous case.
+    proc = run(env, "send", "a benign task", "--cli")
+
+    assert proc.returncode == 1
+    assert stamp_path(env).exists(), (
+        "an ambiguous muse-cli failure did not stamp -- a caller retrying on "
+        "exit 1 re-sends with no gap, which may be a second real delivery"
+    )
+
+
 def test_the_token_never_reaches_curl_argv():
     """REGRESSION (red before the fix).
 
@@ -291,6 +382,19 @@ def test_the_token_never_reaches_curl_argv():
             f"the bearer token is on curl's command line: {argv.strip()!r} -- "
             "pipe it via `-H @-` on stdin so it stays out of /proc and ps"
         )
+        # 🔴 STRUCTURAL, not a word-guard. Round 2 showed the check above is
+        # walkable by building the header in a variable first:
+        # `hdr="Authorization: Bearer $token"; … -H "$hdr"` puts the token
+        # straight back on argv while the literal string "Authorization"
+        # never appears in the curl invocation. Assert the SHAPE instead --
+        # every `-H` curl receives must be exactly `@-`.
+        h_args = re.findall(r"-H\s+(\S+)", argv)
+        assert h_args, "curl no longer receives a -H argument -- re-anchor"
+        for h in h_args:
+            assert h == "@-", (
+                f"curl receives -H {h!r}; the only permitted value is `@-` "
+                "(read from stdin). Anything else risks the token on argv."
+            )
     assert "-H @-" in source, (
         "the token must reach curl via `-H @-` on stdin; `--config -` is NOT "
         "an acceptable substitute -- it C-escape-mangles the token"
@@ -373,11 +477,31 @@ def test_the_enter_retry_rechecks_the_signal_the_first_check_used():
     )
     # Pin the WHOLE condition, normalised on whitespace: a token-presence
     # assertion is walkable by changing the operator (failure (b) above).
-    normalised = " ".join(retry.split())
     expected = '[ "$TALEN" -ne 0 ] || [ "$UMSGS" -le "$base_umsgs" ]'
-    assert expected in normalised, (
+    assert expected in " ".join(retry.split()), (
         "the retry must re-check the composer VALUE and the user-node count "
         f"with the same comparisons the first submit check uses: {expected}"
+    )
+
+    # 🔴 (c) AND THE FIRST CHECK ITSELF. Round 2 found this guard's docstring
+    # and failure message both saying "the same comparisons THE FIRST SUBMIT
+    # CHECK uses" while the slice above reads the RETRY side only -- the first
+    # check sat outside it, asserted by nothing. Mutating it `-le` -> `-lt`
+    # and `-ne 0` -> `-eq 0` BOTH survived a green suite. That is the same
+    # failure as (b), moved one check up, under a sentence that reads as
+    # covering it: RULES.md -> guards-narrower, third occurrence in this
+    # module. The live mutant: an inert first Enter with the composer cleared
+    # by the UI gives UMSGS == base_umsgs, so under `-lt` the whole condition
+    # is false, the retry block is SKIPPED, and the run reaches the poll loop
+    # to die with "no reply ... (submit WAS confirmed)" -- asserting a submit
+    # that never happened.
+    #
+    # The two checks must be IDENTICAL; that relationship is the invariant, so
+    # assert the string appears on BOTH sides rather than only naming it.
+    assert " ".join(source.split()).count(expected) >= 2, (
+        "the first submit check and the retry re-check must use the SAME "
+        f"condition, {expected} -- found fewer than two occurrences, so one "
+        "of them has drifted and this guard's description would be a lie"
     )
 
 
