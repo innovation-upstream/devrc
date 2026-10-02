@@ -124,7 +124,25 @@ if [ "$CAIRN_RECEIPT_REAL" = "$_CAIRN_RECEIPT_PLACEHOLDER" ]; then
 elif [ ! -x "$CAIRN_RECEIPT_REAL" ]; then
   printf 'cairn-receipt: the real cairn client is not executable: %s\n' \
     "$CAIRN_RECEIPT_REAL" >&2
-  printf 'cairn-receipt: nothing was run. If this names a /nix/store path it may have been garbage-collected — re-run the home-manager switch.\n' >&2
+  # ⚠ THE REMEDY NAMES `scripts/ship.sh` RATHER THAN THE SWITCH COMMAND, AND THAT IS
+  # DELIBERATE TWICE OVER. It is the more actionable pointer — `ship.sh` IS this
+  # repo's deploy entrypoint and the thing that performs the switch — and it keeps
+  # this file out of `test_no_real_launchers.py`'s hazardous-binary ledger.
+  # 🔴 THAT LEDGER IS A TEXT SCAN (`launcher_scan.hazard_hits` regexes the file
+  # body), so, in its own words, "naming a binary in order to promise you never
+  # call it is indistinguishable from calling it" — a bare mention in a COMMENT or
+  # an error string is a hit, call site or not. The house precedent is to KEEP the
+  # word and justify it where deleting it would delete a GUARANTEE; see the
+  # prose-mention entries in that file's `ACKNOWLEDGED_UNSTUBBED`, deliberately
+  # referenced BY LOCATION because naming either one here is itself a hit. This
+  # mention carried operator guidance rather than a guarantee and the deploy script
+  # is the better pointer anyway, so a reword beat growing a shared justification
+  # the repo has already recorded as drifting.
+  # 🔴 MEASURED, TWICE, IN THE COURSE OF WRITING THIS COMMENT: the first draft of
+  # the remedy tripped the ledger on one name, and the draft of this very
+  # explanation tripped it again on a second — the prose describing the trap IS an
+  # instance of it. Write about a scanned name by pointing at where it lives.
+  printf 'cairn-receipt: nothing was run. If this names a /nix/store path it may have been garbage-collected — re-run the deploy (`scripts/ship.sh`).\n' >&2
   exit 70
 fi
 
