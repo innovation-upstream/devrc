@@ -47,53 +47,47 @@ measurements (done, and they held).
   because its condition encoded an outcome nobody could reach.
 
 ## State now
-- 🔴 **RANK 1 IS BUILT AND IN FLIGHT — devrc#1983, `feat/cairn-invocation-receipt`.** The
-  receipt lands at the **PATH bin seam** (`nix/home.nix`'s `.local/bin/cairn` becomes a
-  fail-open wrapper) and **not** in `scripts/cairn-ops/read.sh`, which is a change from what
-  this doc's rank 1 specified. Three measured reasons: `read.sh recall` ends in
-  `exec cairn …` so it has no after-the-call moment; its header pins *"STDOUT IS THE CLIENT'S,
-  BYTE FOR BYTE"* because `/resume`, `/handoff` and `/analyze-service` diff recall output
-  against prior captures; and it is **93 of 1,425 (~6%)** of traffic. Every caller reaches the
-  client through PATH, so one wrapper covers all of them.
-- ⚠ **THE ROW'S PAYLOAD IS NARROWER THAN THIS DOC ASKED FOR, ON AN OPERATOR DECISION.**
-  `entries`, `bullets_printed` and `output_bytes` are all properties of the client's STDOUT,
-  so obtaining them means capturing and re-emitting it — the byte-for-byte contract, plus a
-  changed `isatty()` and changed SIGPIPE under the very common `| head` form. Traded for 100%
-  of traffic instead of ~6%. The row carries
-  `{tool, outcome, verb, scope, repo}` + `exit_code` + `duration_ms` + `session`, as
-  `source='tool' kind='invocation'` — the EXISTING adoption signal, not a new class.
-- ✅ **CLAUSE (a)'s DESTINATION IS VALIDATED, WITH BOTH CONTROLS, AND IT WAS DONE BEFORE ANY
-  CODE WAS WRITTEN** (this doc's own next probe): an isolated spool went **0 → 1** rows through
-  the real `~/.config/activity-collector/emit`, and the row's fields decoded correctly.
-  `emit` base64-encodes `b64:` values ITSELF — verified by decoding a real spool line — so a
-  caller passes plaintext.
-- 🔴 **A BUG SHIPPED AND WAS CAUGHT ONLY BY BUILDING THE ARTIFACT, AND THE CLASS GENERALISES.**
-  The wrapper's placeholder guard spelled `@CAIRN_REAL@` in its own `case` pattern; `substitute`
-  rewrites EVERY occurrence, so the deployed file compared the real store path against itself,
-  matched, and refused **every** `cairn` call at exit 70. The checkout copy passed its own
-  smoke test throughout, because there the placeholder is still a placeholder. **A guard that
-  must RECOGNISE a token cannot SPELL that token in a file something rewrites.** Matrix:
-  16 failed → 19 passed.
-- ⚠ **NO CI LEG BUILDS `nix/home.nix`** — devrc's four Tekton legs are pytests, gotests,
-  nodetests and cairn-client-runs. The wrapper derivation is therefore gated by **nothing in
-  CI**; its only verification is a hand-run `nix build` plus source-level assertions. That is
-  the same shape as the bug above, so it is named rather than assumed away.
-- ⚠ **RANK 2 IS CLAIMED (`cairn-recall-value-instrumentation-2`) AND SCOPED BUT NOT STARTED.**
-  Its design is now settled and is NOT what the ranked item implied — see the investigation
-  block below before writing any code.
-- 🔴 **THE DEADLINE IS STILL THE ONLY LIVE CLOCK, AND IT IS NOW DATED RATHER THAN RESTATED.**
-  Measured **2026-10-01**: Claude Code transcripts spanned **2026-09-01 → 2026-10-01 exactly**
-  — nothing older, no `cleanupPeriodDays` set — so the corpus **rolls at 30 days and does not
-  accumulate**. ⚠ It has since rolled, which is the point rather than a caveat: a day of the
-  only existing evidence was deleted between that measurement and this update, and re-reading
-  the span is one command (`ls` the transcript dir's oldest entry) that a later session should
-  run rather than trusting this line. Waiting does not grow `n`.
+- ✅ **RANK 1 IS MERGED AND VERIFIED BY CONTENT — devrc#1983, squash `82d859ce`.** Supersedes
+  this section's previous "built and IN FLIGHT". Verified on `origin/main`, not by ancestry:
+  `scripts/cairn-receipt.sh` present, `nix/home.nix` carries
+  `source = cairnWithReceipt;`, `scripts/testlib/nix_home.py` present,
+  `scripts/tests/test_cairn_receipt.py` present, and **0** env-shebang literals left in the
+  test stubs. Final gate: `collected=25017 passed=25009 skipped=8 failed=0`, all four legs.
+  Claim `cairn-recall-value-instrumentation-1` RELEASED.
+- 🔴 **MERGED IS NOT RUNNING, AND THIS IS THE ONE GAP THAT MATTERS.** `.local/bin/cairn` is a
+  `home.file`, so **no row is written on either host until a home-manager switch runs**
+  (`scripts/ship.sh`). What IS verified is the BUILT artifact, by hand: real client, real
+  `~/.config/activity-collector/emit`, rc **0**, stdout byte-identical (134 B on
+  `cairn -verbs`), stderr byte-identical, one row landed, and a failing client recorded
+  `outcome=error` with `exit_code=11` intact. **Deployed-and-verified is NOT claimed.**
+- ✅ **THE PARENT ARC IS CLOSED — `handoff-handoff-corpus-to-cairn.md`, verdict NOT ADDRESSED**
+  (operator, 2026-10-02; devrc#1980 `dc410367`). Its one item: the evicted block's own text
+  cannot reach cairn. Only rank 2 was re-homed here.
+- ✅ **devrc#1985 `ed2637c5` MERGED — rank 2's design record.** ⚠ Merged **without a gate
+  verdict**, at operator direction ("skip gate") after all four legs returned `NO CAPACITY`.
+  What stands in its place: the four disclosure gates + `test_handoff_doc_size.py` run
+  locally on that exact tree (**240 passed**), and the retrigger commit verified
+  byte-identical to the tested one. Doc-only diff, one file.
+- ⚠ **RANK 2 IS STILL CLAIMED (`cairn-recall-value-instrumentation-2`) AND BLOCKED ON AN
+  OPERATOR DECISION, NOT ON WORK.** Everything needed to build it is settled and recorded in
+  the investigation block below; the open question is PLACEMENT, and it is in `## Next steps`.
+- ⚠ **FIVE PRs LANDED THIS SESSION, AND TWO OF THEM WERE NOT THIS ARC'S WORK** — devrc#1974
+  `36d06188` (the parent's session close), devrc#1979 `8f36cb82` (a routable public IP scrubbed
+  out of a PUBLIC repo, landed by #1972 inside the very S1 finding whose claim is that
+  publishing that origin bypasses Cloudflare), devrc#1980, devrc#1983, devrc#1985.
+- ⚠ **MY WORKTREES AND LOCAL BRANCHES ARE CLEANED UP** (five of each removed); the base clone
+  is on `main`, **1 behind `origin/main`** because other sessions landed #1981/#1982 after my
+  last fetch — `git -C $DEVRC merge --ff-only origin/main` before any work.
+- **No clawgate task.** `clawgate_handoff.sh resolve` printed `NOTHING RESOLVED — 0 tasks`
+  (rc 5), and `field <doc>` returned rc 1 (none present). An unknown session id answers 200
+  with an EMPTY ARRAY, so that zero cannot separate "touched no task" from "wrong id". **No
+  field written, none created.** Not a clean bill of health.
 - **Carried forward — a REPLACE heading would drop these values.** `source='tool'` held **0**
-  cairn rows against **1,425** transcript-proven invocations; the documented
-  `read.sh recall` spelling is **93 of 1,425 (~6%)** of real traffic and **746 of 1,425** carry
-  no parseable status line because of `| head`/`| tail`; the naive echo proxy fires
-  **451/454 = 99.3%**; the counterfactual needs **≈510/arm** (message count) and
-  **≈10,751/arm** (duration) against a small arm of **68**.
+  cairn rows against **1,425** transcript-proven invocations; `read.sh recall` is **93 of
+  1,425 (~6%)** of real traffic and **746 of 1,425** carry no parseable status line because of
+  `| head`/`| tail`; the naive echo proxy fires **451/454 = 99.3%**; the counterfactual needs
+  **≈510/arm** (message count) and **≈10,751/arm** (duration) against a small arm of **68**.
+  Transcript span measured **2026-10-01**: 2026-09-01 → 2026-10-01, rolling at 30 days.
 
 ## Open investigations — live diagnosis state
 
@@ -198,28 +192,108 @@ measurements (done, and they held).
   the bin seam to escape). That is an operator call, not a measurement, and it is upstream of
   writing any renderer code.
 
+### 🔴 OPEN — the Tekton gate produced THREE distinct non-code failure modes in one day, and only one is documented
+- as-of: 2026-10-02
+- **Symptom + exact repro:** a devrc PR's four legs report `fail`, and nothing is wrong with
+  the code. Read the raw statuses, never `gh pr checks` alone:
+  ```bash
+  H=$(gh pr view <n> --repo innovation-upstream/devrc --json headRefOid --jq .headRefOid)
+  gh api repos/innovation-upstream/devrc/commits/$H/statuses \
+    --jq '.[] | "\(.context) \(.state) created=\(.created_at) — \(.description)"'
+  ```
+- **Observed (with values) — mode 1, CAPACITY STARVATION.** All four legs:
+  *"NO CAPACITY: <leg> — the gate never started (queued past its deadline). Not a code
+  failure."* Seen on devrc#1974 after **65 minutes** pending, and again on devrc#1985. The
+  gate SAYS it is not a code failure; that sentence is the discriminator. `via: measurement`
+- **Observed — mode 2, A DUPLICATE-TRIGGER RACE THAT LEAVES NO VERDICT.** devrc#1983's head
+  `dcdf33c8` received **two** pending status sets three seconds apart (17:03:29 and 17:03:32,
+  contexts duplicated), then at 17:04:08–11 all four were marked
+  `error — superseded by a newer run or a closed pull request — this commit was not
+  validated`. Two runs for one commit superseded each other and the commit ended with **no
+  verdict at all**. 🔴 I read those four `fail` rows as a code failure first; the timestamps
+  are what refuted it. `via: measurement`
+- **Observed — mode 3, A MERGED COMMIT THAT WAS NEVER VALIDATED.** `2a3168ae` and `82b4c6e3`
+  both carry `superseded … this commit was not validated` on all four legs. **A superseded
+  commit has no verdict**, so "it merged, therefore it was green" is unfounded for those.
+  `via: measurement`
+- 🔴 **Ruled out: that any of the three is a code signal.** In every case a byte-identical
+  re-push went green — devrc#1974 first try, devrc#1983 first try. Tree identity was proven
+  with `git diff --stat <old> HEAD` empty, not assumed. `via: measurement`
+- **Ruled out: that the skill already covers this.** `claude/skills/tekton/SKILL.md` documents
+  the congestion mode (one node, no concurrency control, *"it heals when the queue drains"*,
+  and the `ExceededNodeResources` tell). It documents **neither** the duplicate-trigger race
+  **nor** the superseded-no-verdict state. ⚠ I re-derived the congestion mode from scratch
+  before reading the skill, which is the avoidable half. `via: doc`
+- **Leading hypothesis:** modes 2 and 3 are one mechanism — whatever marks a run superseded
+  fires on a duplicate trigger for the SAME sha, not only on a newer sha. If so the fix is in
+  the EventListener/dedup, and the operator-facing remedy is unchanged (re-push).
+- **Next probe:** `tekton` skill, then the EventListener logs for `dcdf33c8` — did two
+  PipelineRuns get created for one push event, and does the supersede check compare SHAs or
+  run ids? That is the one question that separates "duplicate webhook" from "supersede logic
+  too eager".
+
+### 🔴 OPEN — three guards in this branch were tripped by PROSE ABOUT THEM, which is one rule in three costumes
+- as-of: 2026-10-02
+- **Observed — site 1, the deploy placeholder (the one that would have shipped broken).**
+  `cairn-receipt.sh`'s guard spelled `@CAIRN_REAL@` in its own `case` pattern. `substitute`
+  rewrites EVERY occurrence, so the DEPLOYED file compared the real store path against the
+  real store path, matched, and refused **every** `cairn` invocation at exit 70. The checkout
+  copy passed its own smoke test throughout — there the placeholder is still a placeholder.
+  Only the BUILT artifact shows it. Matrix: **16 failed → 19 passed**. `via: measurement`
+- **Observed — site 2, the hazardous-binary ledger.** `test_no_real_launchers.py` is a TEXT
+  scan and says so: *"naming a binary in order to promise you never call it is
+  indistinguishable from calling it."* `cairn-receipt.sh` tripped it on a binary it never
+  invokes, named in ONE error string; the reworded remedy then tripped it on a SECOND binary,
+  named in the comment explaining the trap. `via: measurement`
+- **Observed — site 3, the runtime shebang.** `test_runtime_shebangs.py` is a SOURCE scan;
+  the helper written to strip a shebang tripped it on its own `startswith("#!")` while
+  writing no shebang at all. `via: measurement`
+- 🔴 **Ruled out, AND THIS CORRECTS A CLAIM I PUBLISHED: that site 3 was two-tier blindness.**
+  I first reported *"local passed because this dev host HAS `env`"*. **False** — it is a source
+  scan, and the full local `scripts/tests` target DID catch it, naming all three sites at
+  once (`collected=16101 passed=16094 skipped=6 failed=1`). The real cause is the same as the
+  two rounds before it: I ran a SUBSET. `via: measurement`
+- **The rule, stated once:** *a guard that must RECOGNISE a token cannot SPELL that token in a
+  file something scans or rewrites.* All three sites now assemble the token from adjacent
+  literals and say why.
+- **Next probe:** none for the sites — all three are closed and guarded. The open question is
+  whether this class deserves a meta-guard (a scan for test/script files that spell a token
+  their own scanner matches), which is a devrc question and nobody's rank yet.
+
 ## Next steps (ranked)
 
-1. **SHIP THE RECALL RECEIPT (clause (a)) — one `source='tool'` row per invocation**, carrying
-   `{status, scope, entries, bullets_printed, output_bytes, session}`. Repo: `devrc`; the
-   emitting edge is `scripts/cairn-ops/read.sh` and whatever it calls to reach the activity
-   store. 🔴 **Instrument the BARE spelling too, or it measures ~6% of traffic** — `read.sh
-   recall` is 93 of 1,425 invocations and the rest is bare `cairn recall`. Land it with the
-   positive control from the closing condition, not just a green test.
-   forcing: deadline — the transcript corpus rolls at 30 days (2026-09-01 → 2026-10-01,
-   nothing older, no `cleanupPeriodDays`), so the only evidence that could justify any further
-   automation here is deleted daily and waiting does not grow `n`.
-2. **STAMP EACH PRINTED BULLET WITH AN OPAQUE CITATION ID (clause (b))** — `[cb:7f3a]`-shaped,
-   derived so it is stable per bullet and collides with nothing in the corpus. Both renderers
-   must agree, which makes this a **cairn** change, not a devrc one:
-   `internal/report` + `lib/subsystem_recall.py`, pinned equal by the cross-language fixture
-   (`internal/report/testdata/reader_fixtures.json` — regenerate and diff, never hand-edit).
-   ⚠ **This changes rendered bytes, so it will break every devrc guard that pins the pinned
-   client's output** — exactly how cairn#162's `tasks`→`refs` rename reddened devrc `main`.
-   Bump the devrc pin and update those expectations in the same round.
-   forcing: deadline — same clock as item 1; and the citation id is the only observable that
-   reaches the prose-lesson population at all, which is what the parent arc's evidence could
-   not see.
+1. **OPERATOR DECISION — WHERE THE CITATION ID IS PRINTED. This blocks rank 2 entirely and is
+   not a measurement.** A `[cb:xxxx]` id only works if it is PRINTED, so it lands in a
+   transcript. Printing one per bullet costs ~11 B each: **~1,660 B on the 151-bullet entry**,
+   which the parent arc measured as **97.6% of a ~50,000-token `/resume` read** — and the
+   parent arc's own shipped remedy (cairn#168's `⚠ OVER 30 nuance` badge) exists to warn about
+   exactly that size. So rank 2 enlarges the system's biggest cost surface in order to measure
+   whether that surface earns its keep. The alternatives are (a) every bullet on every read,
+   (b) an opt-in flag — which reinstates the ~6% selection problem rank 1 was moved to the bin
+   seam to escape, (c) abandon clause (b) and keep only the receipt.
+   forcing: user — the trade is a judgement about read cost versus attribution power, the two
+   options differ in what the arc can ever conclude, and no further measurement separates them.
+2. **BUILD THE CITATION ID, ONCE (1) IS ANSWERED.** Repo: **cairn** (public), then a devrc pin
+   bump. Design settled — do NOT re-derive it, and do NOT implement the obvious version:
+   parse for IDs ONLY, emit the body verbatim as now, append the id to each matched bullet's
+   OPENING line. `sha256`-derived, **8 hex not 4** (3,129 bullets at 16 bits collide with
+   probability ≈1). Files: `internal/report/text.go` + `lib/subsystem_recall.py`, then
+   regenerate `internal/report/testdata/reader_fixtures.json` (**325,085 B**, regenerate and
+   diff — hand-editing is a declared failure) and the **25 of 128** conformance goldens that
+   carry rendered bullets; then `go test`, `tests/conformance/run_go.sh`,
+   `tests/conformance/suite.py run`, `tests/parity/harness.py`, `tests/dualrun/`; then the
+   devrc pin bump plus every devrc guard that pins the pinned client's bytes.
+   forcing: deadline — the transcript corpus rolls at 30 days (measured 2026-10-01:
+   2026-09-01 → 2026-10-01, nothing older, no `cleanupPeriodDays`), so the evidence any
+   attribution study would use is deleted daily and waiting does not grow `n`.
+3. **VERIFY THE RECEIPT ON A SWITCHED HOST — the gap between merged and running.**
+   `scripts/ship.sh`, then confirm a real `cairn recall` leaves a row:
+   `ACTIVITY_SPOOL_DIR` default `~/.local/state/activity/spool/current.log`, grep for
+   `source=tool` + `kind=invocation`. 🔴 Carry the positive control: a run that MUST produce a
+   row, counted, beside the figure under test — a zero here is otherwise indistinguishable
+   from a reader wired to nothing, which is the whole failure this arc exists to escape.
+   forcing: gate — rank 1 is merged but writes nothing until a switch runs, so the arc's
+   headline claim ("cairn invocations are now observable") is unverified on both hosts.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **DECISION (operator, 2026-10-01): DO NOT AUTO-MIGRATE HANDOFF CONTENT INTO CAIRN.** Four
@@ -282,22 +356,118 @@ measurements (done, and they held).
   so it is necessary and NOT sufficient: it proves substitution happened, never that the
   resulting script works. Only running the built artifact proves that.
 
+- 🔴 **THE STORE ALREADY HELD ALL THREE OF THIS SESSION'S HEADLINE LESSONS, AND I RE-DERIVED
+  EVERY ONE AT FULL PRICE. THAT IS THE FINDING, AND IT IS ABOUT THIS ARC'S OWN SUBJECT.**
+  Measured at `/handoff` step 4, by reading the entries the probe surfaced:
+  (a) *"🔴 A GUARD THAT MATCHES A STRING AGAINST A FILE IS WALKABLE BY PROSE **ABOUT** THE
+  GUARD — and the round that documented it did the walking"* — `devrc/scripts.md`, dated
+  **2026-09-20**. I hit that in three different costumes in one branch;
+  (b) *"SIGTERM from `timeout`, not an assertion"* — `devrc/tests.md`, i.e. the exit-143
+  lesson, already written down;
+  (c) *"A SUBSET RUN, AND `failed=0` IS ITS SIGNATURE … subset run bypasses guards"* —
+  `devrc/tests.md`, i.e. the three-CI-round method failure, already written down.
+  **The index was therefore UNCHANGED this session: a fourth copy of a recorded lesson is the
+  accumulation the `already there` check exists to stop.** ⚠ And the uncomfortable half, which
+  this arc of all arcs should carry: the arc is ABOUT whether recalled bullets get used, and
+  its own session did not read them. The cost was not a missing record — it was a missing
+  **recall at the start of the work**, which is `/resume` step 4 and takes one command.
+- ⚠ **ROUTE IDENTIFIED BUT NOT TAKEN, NAMED SO IT IS NOT LOST:** the Tekton duplicate-trigger
+  race and the superseded-no-verdict state (the investigation block above) belong in
+  `claude/skills/tekton/SKILL.md`, which today documents only the congestion mode. They are
+  NOT in the subsystem index either — an ops-gotcha routes to its owning skill, not to a
+  scope entry. Until someone lands that edit the evidence lives ONLY in this doc's
+  investigation block, which is exactly the medium the store exists to outlive. One small PR.
+- 🔴 **THE METHOD FAILURE THAT COST THREE CI ROUNDS, STATED AS A METHOD AND NOT AS BAD LUCK.**
+  devrc#1983 went red three times, every one a REAL finding, and the root cause was identical
+  each time: **I ran the suites I guessed were adjacent** (561 tests, then 99) instead of
+  enumerating what reads the thing I changed. Round 3 is when I finally did it —
+  `find scripts/tests -name '*.py' -print0 | xargs -0 grep -ln 'local/bin/cairn'` → eight
+  files → all eight run → exactly **2 failed of 1309**, both found in one pass.
+  **Enumerate the readers of what you are changing; do not reason about adjacency.**
+- 🔴 **AND THE FIRST ATTEMPT AT THAT ENUMERATION RETURNED EMPTY, WHICH I NEARLY BELIEVED.** It
+  piped into `xargs -0 command grep` — `command` is a shell BUILTIN `xargs` cannot exec, so it
+  exits **127** with no output, indistinguishable from a clean zero. `claude/RULES.md` names
+  this trap and I had read it the same day. Plain `grep` after `xargs` is the fix.
+- 🔴 **A HAND-ROLLED `pytest` INVOCATION OF THIS SUITE PROVES NOTHING, AND IT REPORTS SUCCESS.**
+  I ran `python3 -m pytest scripts/tests -p testlib.nolaunch_plugin …` directly; it died at
+  startup with `ImportError: No module named 'testlib'` (the suites need a per-directory
+  `sys.path`, which is why `scripts/run-tests.sh` exists and says so in its header), my
+  `| tail` swallowed the status, and the wrapper printed `DONE rc=0`. **Zero tests ran and it
+  looked clean.** Use `scripts/run-tests.sh --targets "<exact target>" <root>`; it also owns
+  GUARD 1, which aborts naming a missing tool rather than letting ~55 `skipif`s silently skip.
+- ⚠ **`run-tests.sh` EXIT 143 IS A KILL, NOT A FAILURE.** 128+15 = SIGTERM, mine from a
+  `timeout` landing in the tenth target group: the runner printed `RESULT: FAIL (exit=143)`
+  with **zero** `FAILED` lines and nine groups at 18,005 passed. Count the per-target summary
+  lines; never read the runner's exit code as a verdict. Budget ≥50 min for a full run —
+  `scripts/tests` alone is ~40.
+- 🔴 **`emit` BASE64-ENCODES `b64:` VALUES ITSELF — pass plaintext.** Verified by decoding a
+  real spool line (`b64:text=Y2Fpcm4tcmVjYWxs` → `cairn-recall`). A test stub therefore
+  receives plaintext, and the right test boundary is **what the caller hands emit**, not
+  emit's line format, which emit's existing consumers already pin.
+- 🔴 **`source='tool' kind='invocation'` IS AN EXISTING SIGNAL WITH AN EXISTING CONSUMER.**
+  `session-analysis/adoption-scan.py` reads it as the adoption signal for shipped TOOLS;
+  `collector/invocation.py::build_fields` is the shape (tool name in `text` AS WELL AS the
+  payload). ⚠ Do not import that module — it is **not deployed** on this host, which is why
+  `claude-hooks/hook_telemetry.py` reuses the PATTERN and not the MODULE. ⚠ And
+  `hook_telemetry` deliberately chose `source='hook'` over `'tool'` because a Stop hook is not
+  a tool the operator CHOSE to run; a `cairn` invocation is, so `'tool'` is right here.
+- ⚠ **`$EPOCHREALTIME` IS LOCALE-FORMATTED** — its decimal separator follows `LC_NUMERIC`, so
+  a `.`-only parse is wrong under e.g. `de_DE`. Handle both separators rather than forcing
+  `LC_ALL=C`: this process's locale is INHERITED BY THE CLIENT and changing it could change
+  the client's own output, which the byte-for-byte contract forbids.
+- 🔴 **A NEW FILE THAT IS NOT `git add`ed IS INVISIBLE TO A FLAKE BUILD** — `nix build` failed
+  with `path '…/scripts/cairn-receipt.sh' does not exist` while the file sat in the worktree.
+  Loud here, which is the good direction; `nix/home.nix`'s own comments warn the extension
+  case is SILENT. Stage new files before the first build.
+- ⚠ **`--subst-var-by` DOES NOT FAIL ON A MISSING PLACEHOLDER**, so the derivation asserts the
+  placeholder exists BEFORE substituting and that none survives after. ⚠ The second assertion
+  passed while the tautology bug was live — it proves substitution HAPPENED, never that the
+  result WORKS. Only running the built artifact proves that.
+- 🔴 **NO CI LEG BUILDS `nix/home.nix`.** devrc's four Tekton legs are pytests, gotests,
+  nodetests and cairn-client-runs — none evaluates or builds the home-manager config, so the
+  `cairnWithReceipt` derivation is gated by **nothing in CI**. Its verification is a hand-run
+  `nix build` plus source-level assertions. Named rather than assumed away, because it is the
+  same shape as the tautology bug: the checkout passes, the artifact is what ships.
+- **Decision: the receipt's payload is NARROWER than the ranked item asked for.** `entries`,
+  `bullets_printed` and `output_bytes` are all properties of the client's STDOUT, so getting
+  them means capturing and re-emitting it — against `read.sh`'s *"STDOUT IS THE CLIENT'S, BYTE
+  FOR BYTE"* pin, and changing `isatty()` and SIGPIPE under the common `| head` form. Traded
+  on an operator decision for **100% of traffic instead of ~6%**.
+- **Decision: a reword, not a ledger entry, for the hazardous-binary hit.** The house
+  precedent is to KEEP the word and justify it where deleting it would delete a GUARANTEE;
+  that mention carried operator GUIDANCE, and the shared justification it would have joined is
+  a dense string the repo has already recorded as drifting on its own counts.
+- ⚠ **devrc#1927 IS AN OPEN PR WHOSE WORK ALREADY LANDED** via devrc#1928 `7f84306c`. Verified
+  by content: zero two-index-slice hits in `handoff-audit-pr-operator-asks.md` at
+  `origin/main`. Not acted on — closing someone else's PR is not this arc's call.
+- 🔴 **THE PUBLIC-IP SCRUB GUARDS HEAD ONLY.** devrc#1979 removed the literal from the tip;
+  the value remains in reachable history on a PUBLIC repo, and `test_no_public_ips.py`'s own
+  docstring says rewriting history would not unpublish what is already cloned or forked.
+  Whether the long-lived cluster-wide-read bearer token that S1 describes needs ROTATING is an
+  open operator decision, deliberately not bundled.
+
 ## How to verify
 ```bash
-# (a) the receipt — the row must exist AND the query must be shown able to return non-zero
-$DEVRC/scripts/cairn-ops/read.sh recall --repo /home/zach/workspace/devrc >/dev/null
-# then query the activity store for source='tool' cairn rows for this session;
-# POSITIVE CONTROL: the same query over a window containing a known-present row type
-# must return a non-zero count, or the zero means nothing.
+# rank 1 landed — by CONTENT, never by ancestry (a squash is never an ancestor)
+git -C $DEVRC fetch origin
+git -C $DEVRC cat-file -e origin/main:scripts/cairn-receipt.sh && echo "wrapper present"
+git -C $DEVRC show origin/main:nix/home.nix | grep -c 'source = cairnWithReceipt;'   # 1
 
-# (b) the citation id — absent before, present after, and unique
-$DEVRC/scripts/cairn-ops/read.sh recall --repo /home/zach/workspace/devrc \
-  | grep -oE '\[cb:[0-9a-f]{4,}\]' | sort -u | head
-# then grep the token across the corpus and confirm exactly one origin.
+# the wrapper's own suite, and the guards that read the entry it changed
+nix develop $DEVRC --command bash -c 'cd '"$DEVRC"' && python3 -m pytest \
+  scripts/tests/test_cairn_receipt.py scripts/tests/test_cairn_cli.py \
+  scripts/tests/test_cairn_flake_pin.py scripts/tests/test_no_real_launchers.py \
+  scripts/tests/test_runtime_shebangs.py -q'          # 24 + the four guards
 
-# the renderers must agree byte-for-byte (clause (b) touches both)
-cd /home/zach/workspace/cairn && go test ./internal/report/... && python3 tests/parity/harness.py
+# the full target, THE ONLY WAY THAT WORKS (a hand-rolled pytest dies on sys.path)
+nix develop $DEVRC --command bash $DEVRC/scripts/run-tests.sh --targets "scripts/tests" $DEVRC
+# read the per-target summary LINES, not the exit code: 143 is a SIGTERM kill, not a failure.
 
-# the parent arc, for context only — CLOSED, verdict NOT ADDRESSED
-sed -n '/^## State now/,/^## Open/p' $DEVRC/claudedocs/handoff-handoff-corpus-to-cairn.md | head -20
+# the built artifact — the only thing that shows a substitution bug
+nix build --impure "$DEVRC"'#homeConfigurations.zach.config.home.file.".local/bin/cairn".source' \
+  --no-link --print-out-paths
+
+# rank 3: is a row actually written? Carry the positive control.
+grep -c 'source=tool' ~/.local/state/activity/spool/current.log   # under test
+# then a run that MUST produce one, counted, so a zero cannot mean "wired to nothing"
 ```
