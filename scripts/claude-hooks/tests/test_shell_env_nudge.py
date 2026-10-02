@@ -38,7 +38,12 @@ def vars_of(cmd):
 # --- repo roots via cd / assignment ---
 check("cd datapacket", vars_of(f"cd {HOME}/workspace/civit/datapacket-talos && git status"), ["DATAPACKET"])
 check("REPO= assignment", vars_of(f"REPO={HOME}/workspace/civit/civitai && cd $REPO"), ["CIVITAI"])
-check("civitai-cli new handle", vars_of(f"CLI={HOME}/workspace/civit/civitai-cli"), ["CIVITAI_CLI"])
+check("cli handle", vars_of(f"CLI={HOME}/workspace/civit/cli"), ["CIVITAI_CLI"])
+# 🔴 THE REPOINTED-AWAY CLONE MUST NOT NUDGE. `civit/civitai-cli` is a second,
+# dormant clone of the same remote that this handle used to name; it is still on
+# disk, so a nudge for it would name a tree nothing works in. Not merely a
+# negative case — it is the regression arm for this change.
+check("dormant clone is not a handle", vars_of(f"CLI={HOME}/workspace/civit/civitai-cli"), [])
 check("homelab cd", vars_of(f"cd {HOME}/workspace/homelab-talos"), ["HOMELAB"])
 
 # --- kubeconfig absolute + relative + inline ---

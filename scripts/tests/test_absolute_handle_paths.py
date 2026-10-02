@@ -102,14 +102,27 @@ A match must end at a path boundary, or `workspace/devrc` would claim a sibling
 a remedy naming the wrong tree. Measured, by deleting `_RIGHT_BOUND`:
 `/home/zach/workspace/devrc-scratch/notes.md` becomes a `$DEVRC` finding.
 
-⚠ `workspace/civit/civitai` vs `workspace/civit/civitai-cli` READS like the same
-mechanism and is NOT one; this note asserted it was until it was planted. Both
-patterns start at the SAME offset, and the table is longest-suffix-first, so
-`$CIVITAI_CLI` claims it with or without `_RIGHT_BOUND` -- deleting the boundary
-changes that verdict not at all. That pair is protected by LONGEST MATCH WINS
-above. The boundary's job is the sibling NO handle names. Both cases are
-asserted by `test_a_sibling_directory_is_not_a_match`; only the `devrc-scratch`
-arm grades the boundary.
+⚠ A WITHIN-SEGMENT PREFIX PAIR READS like the same mechanism and is NOT one;
+this note asserted it was until it was planted. When one suffix is a character
+prefix of another INSIDE a path segment (`workspace/civit/civitai` vs
+`workspace/civit/civitai-cli`, the pair that used to be live here), both patterns
+start at the SAME offset, and the table is longest-suffix-first, so the longer
+handle claims it with or without `_RIGHT_BOUND` -- deleting the boundary changes
+that verdict not at all. That shape is protected by LONGEST MATCH WINS above.
+The boundary's job is the sibling NO handle names, asserted by the
+`devrc-scratch` arm of `test_a_sibling_directory_is_not_a_match` -- which is the
+ONLY arm there that grades the boundary.
+
+🔴 THAT PAIR IS NO LONGER LIVE, AND THE CLASS IS STILL GUARDED. `CIVITAI_CLI`
+was repointed from `workspace/civit/civitai-cli` to `workspace/civit/cli` (the
+handle is named for the REMOTE `civitai/cli`, and the directory it named was a
+dormant second clone of it). `cli` is neither a prefix nor a suffix of
+`civitai`, so NO within-segment prefix pair exists in the live table today --
+which does not retire the hazard, because any future handle can reintroduce it.
+`test_longest_match_wins_for_a_within_segment_prefix_pair` keeps the coverage on
+a SYNTHETIC `agent-handles.nix` rather than on whichever real pair happens to
+exist, so the guard no longer depends on the table's contents. Read the sentence
+above as describing a SHAPE, not an inventory.
 
 TWO TIERS -- THIS MODULE MUST RUN WHERE IT ACTUALLY GATES
 ----------------------------------------------------------
@@ -1007,33 +1020,153 @@ def test_the_longest_handle_wins():
 def test_a_sibling_directory_is_not_a_match():
     """BOUNDARY, NOT SUBSTRING -- and the arms below grade DIFFERENT mechanisms.
 
-    🔴 THE `civitai-cli` ARM DOES NOT GRADE THE BOUNDARY, and this docstring said
-    it did. `workspace/civit/civitai` is a character prefix of
-    `workspace/civit/civitai-cli`, but both patterns start at the same offset and
-    the table is longest-suffix-first, so `$CIVITAI_CLI` claims it with or
-    without `_RIGHT_BOUND` -- measured by deleting the boundary and re-running
-    this input. It is kept because asserting that the MORE SPECIFIC handle is the
-    one reported is worth an assertion; the mechanism it grades is LONGEST MATCH
-    WINS, not this one.
-
-    🔴 NOR DOES THE `homelab-trunk` ARM -- checked, because the obvious pairing
-    is wrong twice over. No handle suffix is a character PREFIX of
-    `workspace/homelab-trunk` (`homelab-talos` diverges at the fourth letter),
-    so it is green with `_RIGHT_BOUND` and green without it. It grades a weaker
-    and still worthwhile claim: a path under home that no handle covers is not
-    flagged.
+    🔴 THE `homelab-trunk` ARM DOES NOT GRADE THE BOUNDARY -- checked, because
+    the obvious pairing is wrong twice over. No handle suffix is a character
+    PREFIX of `workspace/homelab-trunk` (`homelab-talos` diverges at the fourth
+    letter), so it is green with `_RIGHT_BOUND` and green without it. It grades a
+    weaker and still worthwhile claim: a path under home that no handle covers is
+    not flagged.
 
     `devrc-scratch` is the ONLY arm here that grades `_RIGHT_BOUND`, and it does
     so squarely: `workspace/devrc` IS a character prefix of it, so with the
     boundary deleted `$DEVRC` claims it and the gate prints a remedy naming the
-    wrong tree -- measured."""
-    assert _found("`/home/zach/workspace/civit/civitai-cli/main.go`") == [
-        ("/home/zach/workspace/civit/civitai-cli/main.go", "CIVITAI_CLI")
-    ]
-    # ...and a genuine sibling with no handle at all is not matched by the
-    # shorter one it merely resembles.
+    wrong tree -- measured.
+
+    ⚠ A THIRD ARM LIVED HERE and was MOVED, not deleted. It planted
+    `/home/zach/workspace/civit/civitai-cli/main.go` and asserted `CIVITAI_CLI`
+    claimed it over `CIVITAI` -- a WITHIN-SEGMENT prefix pair, which (as this
+    docstring used to get wrong) grades LONGEST MATCH WINS and never the
+    boundary. `CIVITAI_CLI` was repointed to `workspace/civit/cli`, so that pair
+    is no longer in the live table and the arm would have been asserting a path
+    no handle names. Its coverage is now
+    `test_longest_match_wins_for_a_within_segment_prefix_pair`, on a synthetic
+    table -- see that test for why the class outlived its only real instance."""
+    # A genuine sibling with no handle at all is not matched by the shorter one
+    # it merely resembles.
     assert _found("`/home/zach/workspace/devrc-scratch/notes.md`") == []
     assert _found("`/home/zach/workspace/homelab-trunk/containers/x`") == []
+
+
+def test_longest_match_wins_for_a_within_segment_prefix_pair(monkeypatch, tmp_path):
+    """🔴 THE WITHIN-SEGMENT PREFIX PAIR, ON A SYNTHETIC TABLE BECAUSE THE REAL
+    ONE WAS RETIRED -- and that is the point of writing it this way.
+
+    THE HAZARD. Two handle suffixes where the shorter is a character prefix of
+    the longer INSIDE a path segment (`.../civit/civitai` vs
+    `.../civit/civitai-cli`). A path in the LONGER checkout must be reported
+    under the LONGER handle; reported under the shorter one, the printed remedy
+    names a DIFFERENT TREE THAT EXISTS -- a wrong instruction that reads as a
+    correct one.
+
+    🔴 TWO INDEPENDENT MECHANISMS DEFEND IT, AND THE SECOND IS LATENT -- which is
+    exactly why it needs its own assertion rather than being inferred from a
+    green run. MEASURED on this module's own constants:
+
+        pattern `fixture/probe` vs `/home/zach/fixture/probe-extended/main.go`
+          WITH `_RIGHT_BOUND`:    short matches False, long matches True
+          WITHOUT `_RIGHT_BOUND`: both match, BOTH AT OFFSET 1
+
+    So (1) `_RIGHT_BOUND` normally stops the shorter pattern dead -- `-` is in its
+    exclusion class, so the extension's first character rejects the match, and
+    only ONE pattern ever fires. Table ORDER is then irrelevant. And (2) with the
+    boundary gone the two patterns collide at ONE offset, and `_handle_table`'s
+    `-len(rel)` sort feeding `_violations`' first-writer-wins claim is the ONLY
+    thing left choosing the right handle. Arm two below neutralises
+    `_RIGHT_BOUND` deliberately so that second mechanism is EXERCISED instead of
+    merely present: a defence nothing drives is a defence nobody can report
+    broken.
+
+    ⚠ THE RETIRED REAL ARM COULD NOT TELL THOSE APART, and its docstring said as
+    much without drawing the conclusion: it noted that deleting `_RIGHT_BOUND`
+    "changes that verdict not at all" -- i.e. it was green under either mechanism
+    alone, so it graded the CONJUNCTION and could not fail while one of the two
+    still held. The arms below split it.
+
+    🔴 WHY NOT `test_the_longest_handle_wins`, WHICH LOOKS LIKE THE SAME CLAIM.
+    That test's pair is `$HOMELAB` vs `$KC_WORKBENCH`, where the longer suffix
+    extends the shorter ACROSS a `/` -- so both patterns match with the boundary
+    intact and ordering is load-bearing there without any help. A sort keyed on
+    SEGMENT COUNT instead of character length orders that pair correctly (2 vs 3)
+    and so SURVIVES it -- measured: that mutant leaves
+    `test_the_longest_handle_wins` passing. On a within-segment pair the same
+    mutant TIES (3 vs 3) and the tiebreak hands the offset to whichever name
+    sorts first. The two tests grade different mutants; neither subsumes the
+    other.
+
+    🔴 WHY SYNTHETIC. `CIVITAI_CLI` was repointed from
+    `workspace/civit/civitai-cli` to `workspace/civit/cli` (it is named for the
+    remote `civitai/cli`; the old directory was a dormant second clone of it).
+    `cli` is neither a prefix nor a suffix of `civitai`, so the live table holds
+    NO within-segment prefix pair today. The hazard class is unchanged -- any
+    future handle can reintroduce it -- so the coverage is driven from a
+    synthetic `agent-handles.nix` and no longer depends on which real pair
+    happens to exist. The nix file is PARSED, not stubbed, so the real
+    `_handle_table` parse AND the real sort are both still under test; only the
+    source bytes are fixtured.
+
+    ⚠ The fixture suffixes are deliberately NOT the retired real ones: a fixture
+    reusing the live table's own values cannot distinguish "the sort works" from
+    "the hardcoded path happens to be there"."""
+    # A two-entry `repos` block whose suffixes are a within-segment prefix pair,
+    # and whose handle names sort the WRONG way alphabetically (`AAA_SHORT` <
+    # `ZZZ_LONG`), so a mutant that ties on segment count and breaks the tie by
+    # name resolves to the SHORTER handle and this test goes red.
+    synthetic = tmp_path / "agent-handles.nix"
+    synthetic.write_text(
+        '{ home }:\n'
+        '{\n'
+        '  repos = {\n'
+        '    AAA_SHORT = "${home}/fixture/probe";\n'
+        '    ZZZ_LONG = "${home}/fixture/probe-extended";\n'
+        '  };\n'
+        '  kubeconfigs = {\n'
+        '    KC_FIXTURE = "${home}/fixture/probe-extended/kubeconfig";\n'
+        '  };\n'
+        '}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("test_absolute_handle_paths.HANDLES_NIX", synthetic)
+
+    # POSITIVE CONTROL on the fixture itself: every verdict below is worthless if
+    # the synthetic table never parsed, and a `_NIX_ENTRY` that stopped matching
+    # would leave this test green over an EMPTY table. Membership only -- the
+    # ORDER is what arm two grades behaviourally, and asserting it here as well
+    # would just restate `test_the_table_is_longest_suffix_first`.
+    table = _handle_table()
+    assert ("ZZZ_LONG", "fixture/probe-extended") in table, table
+    assert ("AAA_SHORT", "fixture/probe") in table, table
+
+    # --- ARM ONE: the boundary. With `_RIGHT_BOUND` intact the shorter pattern
+    # cannot match across `-extended` at all, so exactly ONE finding exists and
+    # it names the longer handle. Graded on the remedy too, so a mutant cannot
+    # pass by still reporting *a* finding.
+    found = _found("`/home/zach/fixture/probe-extended/main.go`")
+    assert found == [("/home/zach/fixture/probe-extended/main.go", "ZZZ_LONG")], (
+        f"a within-segment prefix pair resolved to the wrong handle: {found}"
+    )
+    assert _remedy(*found[0]) == "$ZZZ_LONG/main.go"
+
+    # ...and the SHORTER checkout still resolves to the shorter handle, so the
+    # verdict above is not just "always prefer the longer name".
+    assert _found("`/home/zach/fixture/probe/main.go`") == [
+        ("/home/zach/fixture/probe/main.go", "AAA_SHORT")
+    ]
+
+    # --- ARM TWO: the ORDERING, driven rather than assumed. Neutralise
+    # `_RIGHT_BOUND` so BOTH patterns match at one offset -- the collision the
+    # boundary normally hides -- and the `-len(rel)` sort plus
+    # `_violations`' first-writer-wins claim is all that is left. This is the arm
+    # a segment-count sort kills and `test_the_longest_handle_wins` cannot.
+    monkeypatch.setattr("test_absolute_handle_paths._RIGHT_BOUND", r"")
+    found = _found("`/home/zach/fixture/probe-extended/main.go`")
+    assert found == [("/home/zach/fixture/probe-extended/main.go", "ZZZ_LONG")], (
+        "with `_RIGHT_BOUND` neutralised both patterns collide at one offset and "
+        "the table ORDER is the only thing choosing between them -- it chose the "
+        "SHORTER handle, so the remedy would name a different tree. "
+        "`_handle_table`'s `-len(rel)` sort is what prevents this; a sort keyed "
+        f"on segment count ties here and loses it. got {found}"
+    )
+    assert _remedy(*found[0]) == "$ZZZ_LONG/main.go"
 
 
 @pytest.mark.parametrize(

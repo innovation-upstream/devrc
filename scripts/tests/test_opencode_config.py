@@ -1435,7 +1435,11 @@ def test_env_plugin_existence_guards_every_handle():
         ("repos", "DEVRC", "/home/testuser/workspace/devrc"),
         ("repos", "DATAPACKET", "/home/testuser/workspace/civit/datapacket-talos"),
         ("repos", "CIVITAI", "/home/testuser/workspace/civit/civitai"),
-        ("repos", "CIVITAI_CLI", "/home/testuser/workspace/civit/civitai-cli"),
+        # ⚠ NOT `civit/civitai-cli`. The handle is named for the remote
+        # (`civitai/cli`); a second, dormant clone of it sits at `civit/civitai-cli`
+        # and this handle used to name THAT one. Both directories exist, so the
+        # `-d` guard could never report the mistake — this literal is the pin.
+        ("repos", "CIVITAI_CLI", "/home/testuser/workspace/civit/cli"),
         ("kubeconfigs", "KC_HOMELAB", "/home/testuser/workspace/homelab-talos/homelab-kubeconfig"),
         ("kubeconfigs", "KC_WORKBENCH", "/home/testuser/workspace/homelab-talos/workbench-kubeconfig"),
         ("kubeconfigs", "KC_PROD", "/home/testuser/workspace/homelab-talos/production-kubeconfig"),

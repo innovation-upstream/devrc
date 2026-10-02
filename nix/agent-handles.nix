@@ -24,7 +24,17 @@
     HOMELAB = "${home}/workspace/homelab-talos";
     DATAPACKET = "${home}/workspace/civit/datapacket-talos";
     CIVITAI = "${home}/workspace/civit/civitai";
-    CIVITAI_CLI = "${home}/workspace/civit/civitai-cli";
+    # ⚠ NAMED FOR THE REMOTE (`civitai/cli`), NOT FOR ITS DIRECTORY. Two full
+    # clones of that remote exist on this host and this used to point at the
+    # DORMANT one (`civit/civitai-cli`, 6 worktrees, working tree 3.5 months
+    # stale) rather than the one every session works in (`civit/cli`, 71
+    # worktrees). That was invisible because every handle here is
+    # existence-guarded on `-d`: both directories exist, so the wrong one
+    # exported cleanly. It stopped being cosmetic once `handoff_index.py` added
+    # `CIVITAI_CLI` to `REPO_ENV_HANDLES` — the indexer never git-fetches, so
+    # the handle decides which clone's refs the corpus is read from and a
+    # dormant clone is a permanent, unbounded corpus lag.
+    CIVITAI_CLI = "${home}/workspace/civit/cli";
   };
 
   # Kubeconfigs — guarded on the FILE existing (`-f`).
