@@ -85,12 +85,12 @@ MIN_SKILLS = 30
 # --------------------------------------------------------------------------- #
 MEASURED_ENTRIES = 41
 MEASURED_TIER_A_ENTRIES = 23
-MEASURED_TIER_A_CHARS = 7_112
+MEASURED_TIER_A_CHARS = 7_144
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 7_371
+MEASURED_UNDER_LEDGER_CHARS = 7_403
 # ...and what the same 40 entries would cost with every skill tier A. The
-# difference is what the ledger buys: 3,560 chars.
-MEASURED_ALL_TIER_A_CHARS = 10_861
+# difference is what the ledger buys: 3,490 chars.
+MEASURED_ALL_TIER_A_CHARS = 10_893
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
