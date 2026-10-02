@@ -302,12 +302,14 @@ identity. Claim before acting: `claim-work --slug-for <this doc> <rank>`.
 
 **Security-forcing — the public exposure, operator-gated where noted**
 
-9. **S2 — DONE, awaiting merge + a rebuild. `IN FLIGHT: homelab-infra#942`.**
-   What remains is NOT code: review and merge #942, then **build and push a new
-   image tag** (`0.1.1`) and bump `clusters/homelab/apps/muse/deployment.yaml`
-   — until then the running pod serves the old binary and every namespace is
-   still readable. The build step is recorded nowhere (M12/rank 20), so this
-   hands off to the operator.
+9. **S2 — code DONE and audited; what remains is DELIVERY, and it is the
+   operator's.** `IN FLIGHT: homelab-infra#942` (head `88c7ff151`). Merge it,
+   then **build and push `harbor.homelab.lan/muse/muse-bridge:0.1.1`** and bump
+   `clusters/homelab/apps/muse/deployment.yaml`. Until that image runs, all 57
+   namespaces stay readable by the token — merging alone changes nothing.
+   Confirm with `kubectl logs -n muse deploy/muse-bridge | grep 'listening on'`:
+   **no `ns-allow=` means the old binary.** The build step is recorded nowhere
+   (rank 20), which is why this cannot be finished from a session.
    forcing: security — a third-party LLM connector can read every namespace
    until the new image is actually running.
 16. **S1 — close the origin bypass** in
@@ -315,12 +317,12 @@ identity. Claim before acting: `claim-work --slug-for <this doc> <rank>`.
     `web` entrypoint, add `certResolver: letsencrypt`, add a Cloudflare-only
     `IPAllowList`. ⚠ **Decide class vs instance** — `muster-ingress.yaml:24-26` is
     identical. The Cloudflare SSL-mode change to Full (strict) is the operator's.
-    forcing: security — measured: the Hetzner origin answers cleartext
-    HTTP on :80 and a self-signed cert on :443; the bearer token crosses that leg.
+    forcing: security — measured: the Hetzner origin answers cleartext HTTP on
+    :80 and a self-signed cert on :443; the bearer token crosses that leg.
 18. **S5 — delete the four unused RBAC grants** (`clusters/homelab/apps/muse/rbac.yaml:16,19`):
     `pods/log`, `services`, `namespaces`, `replicasets`. No handler reads any.
-    forcing: security — `pods/log` across 57 namespaces is one merged handler away
-    from a cluster-wide secret read; measured `can-i get pods/log` → yes.
+    forcing: security — `pods/log` across 57 namespaces is one merged handler
+    away from a cluster-wide secret read; measured `can-i get pods/log` → yes.
 11. **B2 — rebuild the approval guard structurally.** See the open investigation
     above; BLOCKED on capturing one live approval card.
     forcing: security — it is the wrapper's only security branch and has never
@@ -331,20 +333,23 @@ identity. Claim before acting: `claim-work --slug-for <this doc> <rank>`.
     reachable, so pre-auth slowloris reaches a single replica.
 17. **S4 — bound `/v1/nodes`**: `ResourceVersion: "0"` + `Limit`, or drop the
     cluster-wide pod rollup (`handlers.go:17,55`). ⚠ **The allowlist does NOT
-    cover this route** — `/v1/nodes` takes no `ns` and still aggregates pod
-    requests across all 837 pods cluster-wide, by design.
-    forcing: security — 30 req/min × an unbounded 837-pod etcd read, drivable from
-    the public internet by one token.
+    cover this route by design** — it takes no `ns`; an audit confirmed
+    `nodeInfo` carries no pod or namespace identity, so it is not a bypass.
+    forcing: security — 30 req/min × an unbounded 837-pod etcd read, drivable
+    from the public internet by one token.
 22. **Audit log — add `client=` and `tokid=`** (`main.go`, the `ServeHTTP` audit
     line). XFF already arrives and the sha256 is already computed in `auth`.
-    🔴 **Fix the injection in the same change:** that line interpolates the
-    **raw** `ns` and `r.URL.RequestURI()` with `%s`, so a `%0a` in the query can
-    forge log lines in the one surface used for attribution. Found 2026-10-02
-    while implementing S2; deliberately not changed there, because altering the
-    log format belongs with the change that re-shapes the line.
+    🔴 **Fix the injection in the same change:** that line interpolates the raw
+    `ns` and `r.URL.RequestURI()` with `%s`, so a `%0a` in the query can forge
+    log lines in the one surface used for attribution. Found 2026-10-02 while
+    implementing S2; deliberately not changed there, because altering the log
+    format belongs with the change that re-shapes the line.
+    ⚠ **Sequencing note:** moving the audit log into per-route middleware would
+    stop UNMATCHED requests being logged (a 404 is served by `NotFoundHandler`,
+    outside any per-route wrapper). Do not do that — those probe lines are the
+    attribution data this item exists to improve.
     forcing: security — design §3.2 mandates token-id; today a Muse call and an
-    audit agent's probes are indistinguishable in the log, and either can be
-    spoofed by a crafted query string.
+    audit agent's probes are indistinguishable, and either can be spoofed.
 14. **Golden field-set test** for the five bridge item structs.
     forcing: security — the data-minimization claim (`main.go:5`, `openapi.yaml`)
     is the design's central control and NO test asserts any response's field set.
@@ -352,9 +357,11 @@ identity. Claim before acting: `claim-work --slug-for <this doc> <rank>`.
 **Gate-forcing**
 
 20. **M12 — a Tekton pipeline for `containers/muse-bridge/**`**, modelled on
-    `clawgate-ci-pipeline.yaml`. 🔴 **Now also the blocker on rank 9 landing in
-    reality**: #942 cannot take effect without a build+push nobody has
-    automated, and `go test` still runs only when a human types it.
+    `clawgate-ci-pipeline.yaml`. 🔴 **This is now the blocker on rank 9 reaching
+    reality**, not merely a gate gap: #942 cannot take effect without a
+    build+push nobody has automated. Measured: `tekton/gitops-validate` is the
+    COMPLETE status set for this repo and has no Go leg, so 18 tests run only
+    when a human types `go test`.
     forcing: gate — nothing automated builds or tests the bridge, and
     `imagePullPolicy: IfNotPresent` on the mutable tag `0.1.0` means a rebuild
     can deploy "successfully" and run the old binary.
@@ -406,64 +413,76 @@ read-only `muse-bridge` cluster API exposed to the public internet.
 - **Branch:** devrc `main`, clean (one unrelated untracked file,
   `nix/system/apply-networkmanager-openvpn.sh`, not ours). The S2 work is in
   **homelab-infra**, not devrc.
-- **THIS SESSION — rank 9 (S2) implemented, PR OPEN, NOT MERGED, NOT DEPLOYED:**
-  **homelab-infra #942** (`feat/muse-bridge-ns-allowlist`, commit `1712500ed`,
-  based on `origin/trunk` `d7866d524`). `claim-work muse-system-inventory-9`
-  held for the duration; release it when #942 merges.
-  - `nsAllowed(ns, allow)` in `containers/muse-bridge/main.go` is now the
-    single namespace boundary: pattern **AND** allowlist membership. Default
-    `["muse"]`; `MUSE_BRIDGE_NS_ALLOW` (comma-separated) widens it
-    per-deployment with no rebuild, **replacing** the default rather than
-    extending it. Unset/all-blank falls back to the compiled-in list — a
-    fallback that can only narrow, never open.
-  - An allowlist entry that cannot match `nsPattern` is unreachable rather
-    than permissive, so `sortedNsAllow` stops the pod at boot. `maxUnavailable:
-    0` keeps the old pod serving through that crash-loop.
-  - **Second half of the same hazard, consolidated:** `nsCtx` validated the ns
-    and then all four handlers re-read `r.URL.Query().Get("ns")` for the value
-    they actually handed client-go — gate and use were independent reads.
-    `nsCtx` now returns the validated ns; no handler re-reads the query.
-  - Extracted `func (s *server) routes()` so the tests assert the **real**
-    route table. That is **half of rank 15**; its other half
-    (`TestLimiterBurstThenRefill` never testing refill) is still open.
-  - `containers/muse-bridge/ns_allow_test.go` — 8 new tests. `go build`,
-    `go vet`, `go test -race` all clean (13 tests total in the package).
-- **The default was chosen by MEASUREMENT, not taste:** over the service's
-  entire recorded audit log (`kubectl logs -n muse deploy/muse-bridge
-  --since=72h | grep -v route=/v1/health`), **every** successful ns-scoped
-  request ever made used `ns=muse`. 57 namespaces live; nothing but `muse` has
-  ever been asked for. `/v1/nodes` and `/openapi.yaml` take no ns.
-- 🔴 **Deploy status, stated separately from merged: #942 is INERT ON MERGE and
-  the code is NOT running.** `imagePullPolicy: IfNotPresent` on the mutable tag
-  `0.1.0` (M11) means it needs a **build, push and tag bump**, and nothing in
-  the repo automates that (M12 — the build step is recorded nowhere). The PR
-  deliberately does NOT bump the tag: bumping it with no pushed image leaves
-  Flux pulling a tag that does not exist. Merging changes no cluster behaviour —
-  `openapi.yaml` is `go:embed`'d rather than a ConfigMap, and the
-  `deployment.yaml` change is a comment documenting the knob (no `env` key
-  added, so no rollout).
-- **Previously merged** — all verified by CONTENT on the remote, never by
-  ancestry (squash merges are never ancestors):
-  - devrc **#1972** (`82b4c6e3`) — the inventory doc this handoff updates.
-  - devrc **#1976** (`272c7f03`) — six wrapper fixes, 16 hermetic tests, one
-    dev-host contract test. Shipped after a **five-round audit ladder**.
-  - homelab-infra **#941** (`490796a3`) — `MuseBridgePublicPathDown`'s triage
-    runbook pointed at homelab Traefik; the last hop is the **Service**
-    (`clusters/homelab/apps/nebula/gateway/nginx.conf:1205-1207`).
-- **Tier 1 is DONE** (old ranks 1–8). Ranks below keep their ORIGINAL numbers
-  so any live `claim-work` claim still resolves.
-- **A concurrent session shipped #1975** ("thread-aware B1 routing", +206/−37 in
-  `scripts/muse/muse`) from a base BEFORE #1976, so main carried none of the
-  fixes. Merged forward in `6153bd5e`; both are live on `main`.
+- **RANK 9 (S2) IS IMPLEMENTED AND AUDITED — homelab-infra #942, OPEN, NOT
+  MERGED, NOT DEPLOYED.** Branch `feat/muse-bridge-ns-allowlist`, head
+  `88c7ff151`, 6 commits, based on `origin/trunk` `d7866d524`.
+  `claim-work muse-system-inventory-9` is still HELD — release it when #942
+  merges.
+  - `nsAllowed(ns, allow)` in `containers/muse-bridge/main.go` is the single
+    namespace boundary: pattern **AND** allowlist membership. Default
+    `["muse"]`; `MUSE_BRIDGE_NS_ALLOW` widens it per-deployment (comma-separated,
+    **replaces** rather than extends), and `resolveNsAllow` holds one invariant —
+    **the effective allowlist is never empty**, so an all-unreachable value falls
+    back instead of 400ing every namespace while `/v1/health` stays green.
+  - An unreachable entry is a startup **WARNING**, not a boot failure. The
+    earlier `log.Fatal` traded a milder failure for a worse one: the typo is
+    already fail-closed, while refusing to boot takes a public service down on a
+    cold start or reschedule (`maxUnavailable: 0` covers a rolling update ONLY).
+  - `routeTable()` is one declarative table; `routes()` applies auth FROM it, so
+    forgetting `s.auth(...)` is no longer something a route can do. `newServer()`
+    is the single wiring path used by main and every route test.
+  - The 400 names which half refused — `missing ns parameter` / `malformed ns:
+    must match <pattern>` / `namespace not served` — none echoing the input.
+  - `nsCtx` returns the validated ns; no handler re-reads the request parameter.
+  - **18 tests**, `go build`/`go vet`/`go test -race` clean. `kustomize-validate:
+    PASS (124 roots)`.
+- **A FIVE-ROUND AUDIT LADDER RAN (rounds 0–4) and STOPPED MECHANICALLY.**
+  Round 3 and round 4 each changed **zero executable payload lines**, so
+  `audit-dispatch.py --round 5` **refuses with exit 5** — the attribution gate,
+  not a judgement call. Payload by executable lines per round: **114 / 23 / 101 /
+  10 / 0 / 0**.
+  - Round 0 (requirements & deletion): 12 requirements, 4 deletion candidates,
+    all four actioned (`D1=deleted D2=deleted D3=kept D4=deleted`).
+  - Round 1 (nine axes, blind): 4 🟡. Round 2: 1 🔴 + 2 🟡 + 2 🟢. Round 3: 3 🟡 +
+    3 🟢. Round 4: 1 🔴 + 2 🟡 — **all claim/prose defects, zero code defects**.
+  - 🔴 **Every round's findings were defects in the PREVIOUS round's fix**, and
+    the dominant finding four rounds running was a FALSE SENTENCE a fix wrote
+    while explaining itself. Three such sentences were mine: a two-way-ledger
+    coverage claim no test provided, an anti-enumeration rationale that did not
+    hold, and "nothing outside this function assigns s.router" which was false
+    when written.
+  - 🔴 **Two guards I shipped were walkable and one of my dismissals was false.**
+    The first route guard matched `mux.HandleFunc("GET …")`, so a method-less
+    registration served a path with NO bearer token while the suite stayed green;
+    its replacement keyed on the variable NAME, so `m2 := mux` walked past it.
+    The claim that the mux's registration set "cannot be enumerated" was WRONG —
+    `index.segments` is `map[routingIndexKey][]*http.pattern` and `pattern.str`
+    is the registered string. `registeredPatterns()` now reads it.
+- 🔴 **Deploy status, stated separately from merged: #942 is INERT ON MERGE.**
+  `imagePullPolicy: IfNotPresent` on the mutable tag `0.1.0` (M11) means it needs
+  a **build, push and tag bump**, and nothing in the repo automates that (M12).
+  The PR deliberately does NOT bump the tag — bumping with no pushed image leaves
+  Flux pulling a tag that does not exist. `openapi.yaml` is `go:embed`'d rather
+  than a ConfigMap, and the manifest change is a comment, so merging changes no
+  cluster behaviour. **Verified live at every round: pod `muse-bridge-88f74d4c6-
+  mnds9`, image `0.1.0`, 0 restarts, startup line carries no `ns-allow=` — the
+  running binary predates this work.**
+- **CI tells us almost nothing here, measured:** `tekton/gitops-validate` is the
+  **complete** expected status set for homelab-infra (enumerated across PRs 941,
+  920, 910, 731 — it goes red, so the instrument works), and it has **no Go leg**.
+  All 18 tests run only when a human types `go test`.
+- **Previously merged:** devrc #1972 (`82b4c6e3`), devrc #1976 (`272c7f03`),
+  homelab-infra #941 (`490796a3`) — all verified by CONTENT on the remote, never
+  by ancestry.
+- **Tier 1 is DONE** (old ranks 1–8). Ranks keep their ORIGINAL numbers so any
+  live `claim-work` claim resolves.
 - **`scripts/muse/muse` is still NOT nix-deployed** — `git grep scripts/muse --
-  nix/` is empty and `~/.local/bin/muse` does not exist. The only reachable copy
-  is `$DEVRC/scripts/muse/muse`. The SKILL.md half IS a nix store copy and needs
-  a `switch`/`ship.sh` to go live.
+  nix/` is empty, `~/.local/bin/muse` does not exist. Only reachable copy is
+  `$DEVRC/scripts/muse/muse`. SKILL.md is a nix store copy needing a `switch`.
 - **No clawgate task recorded, and that is not a clean bill of health:**
-  `clawgate_handoff.sh resolve` exited **5** (nothing resolved) again this
-  session. An unknown session id also answers with an empty array, so the zero
-  cannot distinguish "touched no task" from "wrong id". No `clawgate-task:`
-  field written.
+  `clawgate_handoff.sh resolve` exited **5** again. An unknown session id also
+  answers with an empty array, so the zero cannot distinguish "touched no task"
+  from "wrong id". No `clawgate-task:` field written.
 
 ## Open investigations — live diagnosis state
 
@@ -513,20 +532,29 @@ Fixed as ONE round, not one rank each. Original ranks kept for reference.
   loop instead of a bare `continue`; close the tab on the timeout path.
 - **(13) B4 host hardcode** — `muse:119` `bw://laptop/`; derive from
   `browser whoami` (NOT shell `whoami`, which is the username).
-- **(15) `TestLimiterBurstThenRefill` never tests refill.** ⚠ **The other half of
-  this item is DONE** — `func (s *server) routes()` was extracted in #942, so the
-  real route table is now assertable and `TestTheNsScopedRouteLedger…` asserts
-  part of it. `TestRouterWhitelist` still builds its own mux and still proves
-  nothing about the real table; the refill arithmetic is still unexercised.
+- 🔴 **NEW (found by the #942 audit) — `muse status <ns>` will BREAK at the
+  rebuild, and its own comment will mislead you.** `cmd_status` passes an
+  arbitrary namespace (`muse status pods flux-system`, `muse status workloads
+  <ns>`, `muse status flux <ns>`, and the bare `muse status <ns>` fallthrough).
+  Once the new image runs, every one returns `{"error":"namespace not served…"}`
+  `[400]` — and the wrapper's trailing comment enumerates 401 and 404 as
+  "answers, not outages" while saying **nothing about 400**, so a policy denial
+  reads as a typo. This is a **devrc** change, lands at the rebuild rather than
+  at the merge, and was deliberately kept out of #942 (wrong repo).
+- **(15) `TestLimiterBurstThenRefill` never tests refill.** ⚠ The OTHER half of
+  this item is DONE and done properly: `routes()` was extracted AND the finding
+  it existed for is closed — `TestEveryRouteExceptTheProbeTargetIsAuthWrapped…`
+  asserts behaviourally that every non-public route 401s, on the real table,
+  with a two-way public-set ledger. `TestRouterWhitelist` now drives the real
+  table too. The refill arithmetic is still unexercised.
 - **(21) M5 — fill in `openapi.yaml`'s five response schemas** and the 500/404/405
   responses; today every data route returns an untyped `ItemList`. ⚠ #942 updated
-  the `ns` parameter and `BadNs` descriptions only — the five item schemas are
-  untouched.
+  the `ns` parameter and `BadNs` descriptions only.
 - **(23) Nix-deploy the wrapper** as a `mkOutOfStoreSymlink` into
-  `~/.local/bin/muse`. 🔴 **Sequenced AFTER (13)** or it puts a laptop-only tool on
-  both hosts' `$PATH`.
-- **(24) Extract the B1 JS** to `scripts/muse/b1.js` and fixture-test it under the
-  `node` tier.
+  `~/.local/bin/muse`. 🔴 **Sequenced AFTER (13)**, and now also after the
+  `muse status` 400 fix above.
+- **(24) Extract the B1 JS** to `scripts/muse/b1.js` and fixture-test it under
+  the `node` tier.
 
 ## Gotchas / decisions / dead-ends
 
@@ -598,16 +626,105 @@ Fixed as ONE round, not one rank each. Original ranks kept for reference.
   workspace. `go build ./...` and `go vet ./...` were clean throughout. Do not
   chase those; trust the toolchain.
 
+- 🔴 **A TEST THAT PANICS ABORTS THE GO TEST BINARY AND SILENTLY HOLLOWS OUT A
+  MUTATION SWEEP.** Measured: de-gating a handler made one route test panic, so
+  the run printed ONE failure and the two seam guards that should also have
+  fired never executed — reading as "those guards missed the mutant".
+  `defer recover()` in the loop body and report the panic as a failure. **Any
+  sweep over a suite where one test can panic is measuring a PREFIX of itself.**
+- 🔴 **THREE OF MY OWN SWEEP HARNESSES PRODUCED FALSE READINGS, each of which
+  read as a result.** (a) A guard asserted the body contained `"ns"`, and
+  `"namespace not served"` contains no such substring — every gated route read
+  as UNGATED. (b) A mutation's anchor line occurred TWICE, so the assert failed,
+  nothing was mutated, and the mutant scored **SURVIVED against an unmutated
+  tree** (caught only because the traceback printed above the result). (c) A
+  positive control computed FROM the body under test, so whenever the primary
+  assertion correctly fired the control `t.Fatalf`'d "wired to nothing". **Give
+  every mutant three controls before reading its verdict: anchor occurs exactly
+  once, the bytes actually changed, and the tree compiles.** A mutant that does
+  not compile scores NOTHING.
+- 🔴 **A SPELLED GUARD IS WALKABLE EVEN WHEN YOU WROTE IT KNOWING THAT.** Two
+  successive route guards were defeated by a different spelling — the second
+  keyed on the variable NAME (`m2 := mux`) four lines below its own comment
+  warning about exactly this. **Assert the STATE, by enumerating what the
+  system really does**; for `http.ServeMux` that is `index.segments`
+  (`map[routingIndexKey][]*http.pattern`) plus `index.multis`, with
+  `pattern.str` the registered string, read by reflection — `f.String()` works
+  directly, no `unsafe` needed.
+- 🔴 **READING UNEXPORTED INTERNALS IS DEFENSIBLE ONLY AS A PAIR:** `t.Fatal` on
+  every absent field (so a rename breaks loudly instead of silently ceasing to
+  check) **and** a positive control registering an extra item and asserting it
+  is SEEN (so fields that exist but no longer hold data cannot pass). One
+  control per BRANCH — a single `segments`-shaped control left the `multis` loop
+  no-op'able and SURVIVING.
+- 🔴 **A FIXTURE CONSTANT CAN MAKE A WHOLE CLASS INVISIBLE.** Every route test
+  built its server with `k8s: nil` on purpose (a nil client is how "got past the
+  gate" is observed as a panic) — so a registration CONDITIONAL on `s.k8s`
+  appeared in neither the table nor the mux, they agreed, and the suite was
+  green while production served it with no token. **Ask which dimension your
+  fixture pins**, then assert the thing is independent of it.
+- 🔴 **A PAYLOAD CHANGE CAN VOID A MUTATION CONTROL IN THE SAME COMMIT, WITH THE
+  SUITE GREEN THROUGHOUT.** Moving a filter upstream meant a test's input could
+  no longer reach the state it was asserting about: the mutant was KILLED at the
+  base sha and SURVIVED at the head. Pin an invariant against a HAND-BUILT
+  input, not one produced by the code under test.
+- 🔴 **"ONE MUTANT SURVIVES" WAS WRONG TWICE, IN THE SAME PARAGRAPH.** It named
+  one; an audit found a second; it then named two and said "the complete set";
+  the next audit measured a third. **A list of residual limits reads as
+  COMPLETE** — write "the ones found so far", and never offer a survivor count
+  as closed.
+- **Decision: two guard gaps are ACCEPTED and documented rather than closed** —
+  a registration in `main()` after construction, and a mux interposed inside
+  `ServeHTTP`. Neither is reachable by an in-process test. Closing the second
+  structurally would stop unmatched requests being logged, which is a behaviour
+  regression to fix a guard gap: the wrong trade. Both are listed in
+  `ns_allow_test.go` with their reasons.
+- **The audit ladder's own shape, FIVE rounds: every round's findings were
+  defects in the PREVIOUS round's fix, and the dominant finding four rounds
+  running was a false sentence a fix wrote while explaining itself.** It ended
+  on the ATTRIBUTION GATE (`audit-dispatch.py --round 5` → exit 5), not on a
+  clean round and not on judgement: rounds 3 and 4 each changed zero executable
+  payload lines, i.e. the ladder had started auditing prose it had itself
+  written.
+- ⚠ **Do not trust a payload figure without saying which unit it is.** My posted
+  `payload=40` for round 2 counted comment lines inside payload files; the
+  executable-line figure for that range is **10**. One name, one number, per
+  round.
+- ⚠ **`gh pr view --json comments` does NOT return review comments**, so an
+  `audit-claims` block posted as a review is invisible to `audit-dispatch.py`.
+  Post it as an issue comment.
+- ⚠ **A cross-repo audit assembly cannot verify its own payload figures** — the
+  brief is assembled in `devrc`, so neither endpoint of a homelab-infra range
+  resolves there and the gate reads the count as POSTED. Measure it yourself in
+  the target clone and say so.
+- ⚠ **The editor LSP reported dozens of phantom compile errors** for
+  `containers/muse-bridge` (`undefined: server`, broken `k8s.io` imports) — a
+  single-file/GOROOT-only view of a module outside the workspace. `go build
+  ./...` and `go vet ./...` were clean throughout. Do not chase those.
+- **A test needing a BINARY goes in `scripts/devhost-tests/`, not
+  `scripts/tests/`** — a skip in a hermetic target is an UNPINNED SKIP and
+  GUARD 2 fails the sandbox tier while the dev host stays green.
+- **`scripts/kustomize-validate.sh` needs `nix develop`** — outside it, it fails
+  all 124 roots with `kustomize: command not found` and prints `FAIL`. An
+  environment defect, not a change defect.
+
 ## How to verify
 
 ```bash
-# the muse-bridge suite, including the 8 new allowlist tests (13 total)
-go test -C $HOMELAB/containers/muse-bridge ./... -count=1 -race -v | grep -E '^(---|ok|FAIL)'
+# the muse-bridge suite (18 tests) — there is NO repo-level Go gate here
+go test -C $HOMELAB/containers/muse-bridge ./... -count=1 -race -v | grep -cE 'PASS:'   # 18
 go vet -C $HOMELAB/containers/muse-bridge ./...
 
-# the regression proof: revert nsFrom to the pre-change pattern-only code and
-# watch all four ns-scoped routes go red ("handler panicked past the gate").
-# Copy the file aside first — never `git stash` in a shared checkout.
+# manifests (needs the dev shell, see gotchas)
+nix develop $HOMELAB -c scripts/kustomize-validate.sh | tail -1   # PASS (124 roots)
+
+# the regression proof for S2: revert nsFrom to pattern-only and watch all four
+# ns-scoped routes go red. Copy the file aside first — never `git stash` here.
+
+# 🔴 IS THE ALLOWLIST ACTUALLY LIVE? This is the only question that matters,
+# and merging #942 does not change the answer:
+KUBECONFIG=$KC_HOMELAB kubectl logs -n muse deploy/muse-bridge | grep 'listening on'
+#   no `ns-allow=` in that line => OLD binary, every namespace still readable
 
 # the wrapper's own suite, plus the dev-host contract pin
 nix develop $DEVRC -c python3 -m pytest \
@@ -619,18 +736,9 @@ nix develop $DEVRC -c python3 -m pytest \
   $DEVRC/scripts/tests/test_no_public_ips.py \
   $DEVRC/scripts/tests/test_no_captured_text.py -q
 
-# the six wrapper fixes are live in the only reachable copy (NOT nix-deployed)
-grep -c -- '-H @-' $DEVRC/scripts/muse/muse        # 3 (1 code, 2 comment)
-grep -c 'UMSGS'    $DEVRC/scripts/muse/muse        # >0
-
 # bridge RBAC is still read-only
 KUBECONFIG=$KC_HOMELAB kubectl auth can-i --list \
   --as=system:serviceaccount:muse:muse-reader | grep -E 'create|delete|patch|update'
-
-# 🔴 the allowlist is NOT live until a new image is built, pushed and the tag
-# bumped. What the RUNNING pod enforces:
-KUBECONFIG=$KC_HOMELAB kubectl logs -n muse deploy/muse-bridge | grep 'listening on'
-# no `ns-allow=` in that line  => old binary, every namespace still readable
 ```
 
 🔴 **Do NOT run `muse send` to verify** — it sends from the operator's live
