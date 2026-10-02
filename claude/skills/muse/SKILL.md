@@ -14,8 +14,18 @@ the reply, read goals/feed, and query cluster status through the **muse-bridge**
 - **B1 browser flow** — browser-bridge `flows/muse.ai.md`. PRIMARY (operator's
   call 2026-10-01): the wrapper drives it end-to-end — open own tab, type +
   assert, Enter + confirm, poll the delta by id+len, close the tab. It
-  **detects Muse's pending approval prompts and stops (exit 5)** rather than
-  clicking Allow — approving is the operator's security gate.
+  **attempts** to detect a pending approval prompt and stop (exit 5) rather
+  than clicking Allow — approving is the operator's security gate, and the
+  wrapper never clicks Allow on any path.
+  🔴 **DO NOT RELY ON THAT DETECTION — it has never been positive-controlled,
+  and it is wrong in both directions.** `muse:92` matches `"Needs approval"` /
+  `"Needs review"`; neither string appears in the approval UI this very file
+  documents below ("Allow Muse to access \<host\>?" / "Review the approval
+  request in chat to continue"), and all four were measured absent from the
+  live DOM on 2026-10-01. It also scans the WHOLE transcript, so a chat *about*
+  approvals can pin exit 5 on permanently. **Check for a pending card yourself
+  before a send.** Rebuilding the guard structurally needs one live approval
+  card to map, which is why it is still open.
 - **B2 `muse-cli`** — programmatic (cookies → HTTPS → Noise-XX WebSocket),
   behind `--cli`. Installed `uv tool install muse-cli`; the command is
   **`muse-cli`**, never bare `muse` (that belongs to Muse Code). Blocked for
@@ -35,8 +45,23 @@ default (`muse b1` prints the recipe verbatim).
   of secrets: no hostnames, IPs, tokens, cluster names, credentials, or
   client-identifying detail. (The public `muse-bridge.zacx.dev` hostname is the
   one sanctioned exception — it exists to be public.)
-- **Pacing**: human-paced, a few sends per hour. The wrapper enforces a ≥10 min
-  gap between sends (`MUSE_MIN_SEND_GAP_MIN`; `--force` overrides deliberately).
+- **Pacing**: human-paced, a few sends per hour. The wrapper *reminds* you of a
+  ≥10 min gap (`MUSE_MIN_SEND_GAP_MIN`; `--force` overrides deliberately) — it
+  is **not a rate limiter**, and is bypassable by anything that can write
+  `$XDG_STATE_HOME/muse/last-send` (the gap is read from that file's MTIME, not
+  its contents). On both channels it stamps as soon as delivery is POSSIBLE —
+  B1 right after the first Enter, B2 right after muse-cli returns — so a
+  reply-timeout, or a failure between submit and confirmation, still counts.
+  The cost is deliberate and differs per channel: on **B1** a genuinely inert
+  Enter also stamps; on **B2** every failure stamps *except* muse-cli's
+  **rc 2** (`AuthError` — cookies expired), carved out because it provably
+  never left this machine. `--force` is the override on both.
+  ⚠ **rc 2, not rc 3** — muse-cli exits 2 on auth, 3 on `GatewayError` (which
+  may have sent) and 4 on timeout, and those do **not** line up with this
+  wrapper's own exit codes. An earlier version of this line said rc 3 and was
+  wrong in both directions at once.
+  🔴 **An agent loop is the threat it does not stop** — give send authority to
+  exactly ONE agent per fan-out and stub `MUSE_BB` for the rest.
 - **Cookies/token never cross the wire you type on**: muse-cli keeps its own
   cookie storage; the bridge token lives in sops in the homelab repo. Never
   echo, commit, prompt, or task-text either one.
@@ -47,22 +72,33 @@ default (`muse b1` prints the recipe verbatim).
 
 ```bash
 M=$DEVRC/scripts/muse/muse
-$M send "<task>" [--wait 180] [--force] [--cli]   # dispatch + await reply (JSON)
-$M send "<task>" --thread "<name>"                # dispatch into a SIDE CHAT (routed)
-$M poll [--thread "<name>"]                       # latest assistant turn (scoped)
-$M threads                                        # B1 thread list (JSON: Main chat + side chats)
-$M status [ns|nodes|workloads <ns>|flux <ns>]     # CLUSTER snapshot (bridge; default ns muse)
-$M vm                                             # Muse VM/session status (muse-cli)
-$M auth export                                    # B2 one-time cookie export (steps on failure)
-$M b1                                             # the full B1 recipe
-$M setup                                          # runbook pointers
+$M send "<task>" [--wait 180] [--force] [--cli] # dispatch + await reply (JSON)
+$M send "<task>" --thread "<name>"               # dispatch into a SIDE CHAT (routed)
+$M poll [--cli] [--limit N] [--thread "<name>"]  # latest assistant turn (NO --wait)
+$M threads                                       # B1 thread list (JSON: Main + side chats)
+$M status [ns|nodes|workloads <ns>|flux <ns>]    # CLUSTER snapshot (bridge; default ns muse)
+$M vm                                            # Muse VM/session status (muse-cli)
+$M auth export                                   # B2 one-time cookie export (steps on failure)
+$M b1                                            # the full B1 recipe
+$M setup                                         # runbook pointers
 ```
 
 `send` returns `{"sent": true, "channel": "b1", "thread": "…", "path": "…",
 "reply": "…"}` — the reply is the newest assistant TURN only, and
 `thread`/`path` name the conversation it dispatched into. `note`-style
-timeouts are a timeout, not a silence-verdict — re-check with `poll`. On B1
-(`--cli`), muse-cli's `{sent, stream, reply|note}` shape comes back instead.
+timeouts are a timeout, not a silence-verdict — re-check with `poll`.
+
+On the **B2** path (`--cli` — which is muse-cli, **NOT** the browser flow; B1
+is the default and takes no flag), muse-cli's `{sent, stream, reply|note}`
+shape comes back instead. `--thread <id>` on the B2 path implies `--cli`;
+`--thread "<title>"` on B1 is the SIDE-CHAT routing below — same flag, two
+resolvers.
+
+🔴 **`"sent": true` with exit 0 does not mean the reply is complete.** An empty
+reply and one truncated at the `--wait` deadline are byte-indistinguishable from
+a good one. Measured poll cadence is ~12.7 s, so a generation stall longer than
+that satisfies the stable-twice heuristic and truncates silently — likeliest
+exactly when Muse pauses for a connector round-trip.
 
 ## 🔴 Thread routing — resolve, then route (measured 2026-10-01)
 
@@ -106,7 +142,11 @@ Run `$M b1` and follow it. Core: `$BB --instance personal open https://muse.ai`
 (own tab), then `flows/muse.ai.md` — snapshot → type → **assert length** →
 `key Enter` (no form/button exists) → confirm composer cleared → poll until
 last `data-message-id` + `innerText.length` are stable twice → extract only the
-newest `data-message-turn-id` group. Measured round-trip ~10–25 s.
+newest `data-message-turn-id` group. **Measured wall time ~75 s** end to end
+(2026-10-01): Muse's own contribution is ≤21 s; the rest is wrapper overhead —
+six `b1_state` reads at ~6 s each of `--wake` settle, plus open and extraction.
+⚠ The flow file's "first reply ≤14 s" is not resolvable through the wrapper,
+whose poll cadence is ~12.7 s.
 
 🔴 **B1 gotchas measured 2026-10-01**:
 - **Approvals gate the composer.** Muse's per-host approval prompt ("Allow Muse

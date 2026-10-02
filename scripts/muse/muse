@@ -24,14 +24,42 @@
 #
 # Pacing: sends are human-paced (a few/hour, design §4-B2). The wrapper refuses
 # a second send within $MUSE_MIN_SEND_GAP_MIN minutes (default 10) unless
-# --force; the guard is a reminder, not a rate limiter.
+# --force; the guard is a reminder, not a rate limiter. On BOTH channels it
+# stamps as soon as delivery is POSSIBLE — B1 right after the first Enter, B2
+# right after muse-cli returns, before either branches on success — so a
+# failure after that point cannot leave a delivered message unstamped. The
+# COST differs per channel and both halves are deliberate: on B1 a genuinely
+# inert Enter also stamps; on B2 every failure stamps EXCEPT muse-cli's rc 2
+# (AuthError — cookies expired), carved out because it provably never left
+# this machine. ⚠ rc 2, NOT rc 3: rc 3 is GatewayError and MAY have sent.
+# Read muse_cli/cli.py:713-721 before changing this; round 2 of #1976 had it
+# backwards from the legend below, which is why that legend now says so. It
+# refuses a non-integer gap rather than failing open, and is still bypassable
+# by anything that can write $STATE_DIR/last-send — it is read from the
+# stamp's MTIME, not its contents.
 #
-# Muse's per-host APPROVAL prompts are the OPERATOR's security gate: this
-# wrapper DETECTS a pending approval and stops (exit 5) rather than clicking
-# Allow on Muse's behalf.
+# Muse's per-host APPROVAL prompts are the OPERATOR's security gate. This
+# wrapper never clicks Allow on any path, and ATTEMPTS to detect a pending
+# approval and stop (exit 5).
+# 🔴 THAT DETECTION IS NOT TRUSTWORTHY AND THIS COMMENT USED TO SAY IT WAS.
+# b1_state (below) matches "Needs approval"/"Needs review"; the approval UI
+# emits neither -- it shows "Allow Muse to access <host>?" and the toast
+# "Review the approval request in chat to continue", and all four strings were
+# measured ABSENT from the live DOM on 2026-10-01. So it has never been
+# positive-controlled: no approval card has ever been observed to trip it.
+# It also scans the ENTIRE transcript, so a conversation ABOUT approvals can
+# pin exit 5 on permanently (2 "approv" hits were measured in the live feed).
+# Rebuilding it structurally -- branching on a data-message-* attribute rather
+# than on words -- needs one live approval card to map, so it stays open.
 #
-# Exit codes: 0 ok · 1 dispatch failed (B1 detail printed) · 2 usage · 3
-# muse-cli auth needed · 4 bridge query failed · 5 operator approval pending.
+# Exit codes (THIS wrapper's, not muse-cli's): 0 ok · 1 dispatch failed (B1
+# detail printed) · 2 usage/paced · 3 muse-cli auth needed · 4 bridge query
+# failed · 5 operator approval pending.
+# ⚠ muse-cli's OWN codes are DIFFERENT and this header was read as if they
+# matched: muse-cli exits 2 on AuthError, 3 on GatewayError, 4 on Timeout
+# (muse_cli/cli.py:713-721, v0.3.2). The wrapper maps muse-cli 2 -> its own
+# 3. Do not assume the numbers line up — #1976 round 2 did, and shipped a
+# pacing carve-out on the wrong failure class.
 set -euo pipefail
 
 MUSE_CLI_BIN=${MUSE_CLI:-muse-cli}
@@ -54,8 +82,11 @@ muse — dispatch/poll the user's Muse agent; cluster status via muse-bridge.
   muse send "<task>" --thread "<name>"              route the dispatch into a
                                    SIDE CHAT resolved by title (exact, then
                                    unique prefix; 0/2+ matches list candidates)
-  muse poll [--cli] [--thread "<name>"]             latest assistant reply, scoped
-                                   to the named side chat when --thread is given
+  muse poll [--cli] [--limit N] [--thread "<name>"] latest assistant reply,
+                                   scoped to the named side chat when --thread
+                                   is given. --limit is the muse-cli path only;
+                                   there is deliberately no --wait (poll reads
+                                   once).
   muse threads                                      the B1 thread list (JSON: Main
                                    chat + side chats, with unread/active flags)
   muse status [ns|nodes|workloads <ns>|flux <ns>]   CLUSTER snapshot (A)
@@ -102,7 +133,11 @@ print((r.get("data") or {}).get("value",""),end="")'
 }
 
 # b1_state: one read of the live chat state, as shell vars.
-# Sets: COMPOSER(yes/no) ASST USER LASTID LEN APPROVAL
+# Sets: COMPOSER(yes/no) TALEN ASST UMSGS LASTID LEN APPROVAL
+# 🔴 UMSGS, never USER: reading the user-message COUNT into `USER` clobbers the
+# login-name env var, and assignment to an already-exported name KEEPS the
+# export — so every subsequent $BB_BIN child inherited `USER=<a number>`.
+# b1_state runs up to a dozen times per send. Measured 2026-10-01.
 b1_state() {
   local v
   v=$(bb_js '(function(){var t=document.querySelector("textarea[placeholder=Message]");var a=document.querySelectorAll("[data-message-role=assistant]");var u=document.querySelectorAll("[data-message-role=user]");var l=a[a.length-1];var b=document.body.innerText;var na=b.indexOf("Needs approval")>=0||b.indexOf("Needs review")>=0;return JSON.stringify({c:!!t,tl:t?t.value.length:-1,a:a.length,u:u.length,id:l?l.getAttribute("data-message-id"):"none",len:l?(l.innerText||"").length:0,ap:na})})()') || return 1
@@ -114,7 +149,7 @@ b1_state() {
   parsed=$(python3 -c 'import json,sys
 d=json.loads(sys.argv[1])
 print("yes" if d["c"] else "no", d["tl"], d["a"], d["u"], d["id"], d["len"], "yes" if d["ap"] else "no")' "$v" 2>/dev/null) || return 1
-  read -r COMPOSER TALEN ASST USER LASTID LEN APPROVAL <<<"$parsed"
+  read -r COMPOSER TALEN ASST UMSGS LASTID LEN APPROVAL <<<"$parsed"
 }
 
 b1_open() {
@@ -260,7 +295,16 @@ PYEOF
 
 # --- pacing guard -----------------------------------------------------------
 pace_check() {
-  [ "$MIN_SEND_GAP_MIN" -eq 0 ] 2>/dev/null && return 0
+  # 🔴 FAIL CLOSED on a gap that is not an integer. Both tests below are
+  # `[ … -eq/-lt … ]`, and a non-numeric operand makes `[` ERROR — which, inside
+  # an `if`, is simply FALSE, so the guard fell through and ALLOWED the send.
+  # Measured 2026-10-01: MUSE_MIN_SEND_GAP_MIN=10m printed "integer expected" on
+  # stderr and then sent. Validated here, on the send path only, so a bad value
+  # cannot also break `muse --help` / `b1` / `setup`.
+  case "$MIN_SEND_GAP_MIN" in
+    ''|*[!0-9]*) die "MUSE_MIN_SEND_GAP_MIN must be a non-negative integer (minutes); got '$MIN_SEND_GAP_MIN'. Use 0 to disable the pacing guard deliberately." 2 ;;
+  esac
+  [ "$MIN_SEND_GAP_MIN" -eq 0 ] && return 0
   mkdir -p "$STATE_DIR"
   local stamp="$STATE_DIR/last-send"
   if [ -f "$stamp" ]; then
@@ -291,7 +335,34 @@ cmd_send() {
   done
   [ ${#args[@]} -gt 0 ] || die "send needs task text: muse send \"<task>\"" 2
   [ "$force" -eq 1 ] || pace_check
-  if [ "$use_cli" -eq 1 ]; then cmd_send_cli "${args[@]}" --wait "$wait" ${thread:+--thread "$thread"}; return; fi
+  # 🔴 Forward --force. It used to be consumed here and NOT passed on, so
+  # cmd_send_cli re-initialised force=0 and ran pace_check a SECOND time:
+  # `muse send --force --cli "x"` was refused with exit 2 despite the
+  # documented override, while the un-forced --cli path paced twice. Found by
+  # #1976 round 1.
+  # ⚠ An explicit test, NOT `${force:+--force}`: force is the STRING "0" or
+  # "1", and `:+` expands on non-EMPTY, so the `:+` form passes --force when
+  # force=0 — inverting the flag it was meant to forward.
+  #
+  # ⚠ NO TEST KILLS THAT INVERSION, AND THAT IS CORRECT — it is an EQUIVALENT
+  # MUTANT, measured in #1976 round 2: swapping this to `[ -n "$force" ]`
+  # produces identical rc AND identical muse-cli reachability on all four
+  # (stamp × --force) combinations. The reason is that cmd_send's own
+  # pace_check above is AUTHORITATIVE — by the time we get here a force=0 call
+  # has already been gated — so cmd_send_cli's second pace_check is redundant
+  # and skipping it changes nothing. Keep the correct spelling anyway: the
+  # redundancy is not guaranteed to survive a refactor, and the next reader
+  # should not learn the wrong idiom from working code. Do NOT add a test to
+  # force a kill here; it would be asserting an implementation detail that has
+  # no observable consequence. The duplicated gate is a "one rule, one place"
+  # smell worth consolidating separately.
+  # ⚠ if/fi, not `[ … ] && fwd=(…)`: a failing `&&` list as a function's last
+  # statement returns non-zero. And `${fwd[@]+…}` guards an EMPTY array under
+  # `set -u` on bash < 4.4.
+  local fwd=()
+  if [ "$force" -eq 1 ]; then fwd=(--force); fi
+  if [ "$use_cli" -eq 1 ]; then cmd_send_cli "${args[@]}" --wait "$wait" ${fwd[@]+"${fwd[@]}"} ${thread:+--thread "$thread"}; return; fi
+  # ⚠ third positional is #1975's thread name; cmd_send_b1 now routes.
   cmd_send_b1 "${args[@]}" "$wait" "$thread"
 }
 
@@ -318,12 +389,12 @@ cmd_send_b1() {
     b1_state || die "B1: cannot read the muse.ai chat state (composer/feed) in the new tab — see 'muse b1' to drive it by hand. Tab left open: $B1_REF" 1
   fi
   local hydrate_deadline=$((SECONDS + 20))
-  while [ "$ASST" -eq 0 ] && [ "$USER" -eq 0 ] && [ $SECONDS -lt $hydrate_deadline ]; do
+  while [ "$ASST" -eq 0 ] && [ "$UMSGS" -eq 0 ] && [ $SECONDS -lt $hydrate_deadline ]; do
     sleep 3
     "$BB_BIN" "$B1_REF" wake --wait 3000 >/dev/null 2>&1 || true
     b1_state || true
   done
-  if [ "$ASST" -eq 0 ] && [ "$USER" -eq 0 ]; then
+  if [ "$ASST" -eq 0 ] && [ "$UMSGS" -eq 0 ]; then
     trap - EXIT
     die "B1: the feed never hydrated (0 messages after 20s) — the tab is stuck on a shell DOM. Tab left open: $B1_REF (wake it / reload, then re-run)." 1
   fi
@@ -341,7 +412,7 @@ cmd_send_b1() {
     trap - EXIT
     [ "$COMPOSER" = "yes" ] || die "B1: no composer mounted (the app may be in an error state — reload https://muse.ai in tab $B1_REF and re-run)." 1
   fi
-  local base_asst=$ASST base_user=$USER base_id=$LASTID base_len=$LEN
+  local base_asst=$ASST base_umsgs=$UMSGS base_id=$LASTID base_len=$LEN
   "$BB_BIN" "$B1_REF" type "$task" --selector 'textarea[placeholder="Message"]' >/dev/null 2>&1 || die "B1: the type op failed" 1
   local got rc=1
   for attempt in 1 2; do
@@ -353,21 +424,45 @@ cmd_send_b1() {
   trap - EXIT
   [ "$rc" -eq 0 ] || die "B1: the composer did not take the typed text after retry (got '${got:-?}', wanted len=${#task}). Re-throttled tab or a UI change — see 'muse b1'." 1
   "$BB_BIN" "$B1_REF" key Enter --selector 'textarea[placeholder="Message"]' >/dev/null 2>&1 || true
+  # 🔴 STAMP THE MOMENT DELIVERY BECOMES POSSIBLE — i.e. right after the first
+  # Enter, not after the submit is CONFIRMED. Everything between here and the
+  # confirmation can `die`, and two paths did: the two `state unreadable`
+  # exits below both leave a possibly-delivered message unstamped, so a caller
+  # retrying on exit 1 re-sends with no gap. #1976 round 1 found that the
+  # previous placement's own comment asserted an invariant — "a send that
+  # submits has still DELIVERED" — that those paths broke.
+  # ⚠ THE TRADE IS DELIBERATE AND COSTS SOMETHING: an Enter that really was
+  # inert now also stamps, so a legitimate immediate retry is refused for
+  # $MIN_SEND_GAP_MIN. That is the correct direction for a guard whose whole
+  # job is to stop a loop spamming the operator's account — fail CLOSED — and
+  # --force is the documented override (which now actually works on both
+  # channels; it did not before this round).
+  pace_mark
   sleep 4
   if ! b1_state; then "$BB_BIN" "$B1_REF" wake --wait 3000 >/dev/null 2>&1 || true; b1_state || die "B1: state unreadable right after submit" 1; fi
   # "Cleared" = the composer VALUE is empty (the element itself always stays
   # mounted — checking its existence is how Enter #1 was misread as inert,
   # measured 2026-10-01) AND a new user node appeared.
-  if [ "$TALEN" -ne 0 ] || [ "$USER" -le "$base_user" ] 2>/dev/null; then
+  if [ "$TALEN" -ne 0 ] || [ "$UMSGS" -le "$base_umsgs" ] 2>/dev/null; then
     # Inert Enter (re-throttled tab) — re-wake and submit once more.
     "$BB_BIN" "$B1_REF" wake --wait 3000 >/dev/null 2>&1 || true
     "$BB_BIN" "$B1_REF" key Enter --selector 'textarea[placeholder="Message"]' >/dev/null 2>&1 || true
     sleep 4
     trap - EXIT
     b1_state || die "B1: state unreadable after submit retry" 1
-    trap - EXIT
-    [ "$COMPOSER" = "no" ] || die "B1: the composer did not clear — Enter was inert twice. Check the tab by hand ($B1_REF); if an approval card is pending, review it in the Muse UI." 1
+    # 🔴 Re-check the SAME two signals the first check used (value emptied AND a
+    # new user node). This line used to test `[ "$COMPOSER" = "no" ]` — whether
+    # the textarea ELEMENT was gone — which the comment above says never
+    # happens, so it could only ever fail: every send that took the retry path
+    # died claiming "inert twice" even when the retry had worked. The 2026-10-01
+    # fix was applied to the first check and not to this one.
+    if [ "$TALEN" -ne 0 ] || [ "$UMSGS" -le "$base_umsgs" ] 2>/dev/null; then
+      die "B1: the composer did not clear — Enter was inert twice. Check the tab by hand ($B1_REF); if an approval card is pending, review it in the Muse UI." 1
+    fi
   fi
+  # (The pacing stamp already fired, right after the first Enter above — see
+  # the note there for why it is keyed to POSSIBLE delivery rather than to a
+  # confirmed submit or a successful round-trip.)
   # Poll the delta: lastId+len stable twice wins; cap at $wait.
   local deadline=$((SECONDS + wait)) prev="" started=$SECONDS
   while [ $SECONDS -lt $deadline ]; do
@@ -387,7 +482,6 @@ cmd_send_b1() {
   fi
   local reply
   reply=$(bb_js '(function(){var a=document.querySelectorAll("[data-message-role=assistant]");var l=a[a.length-1];var turn=l.getAttribute("data-message-turn-id");var p=[];for(var i=0;i<a.length;i++){if(a[i].getAttribute("data-message-turn-id")===turn)p.push((a[i].innerText||"").trim())}return p.join("\n---\n")})()') || reply=""
-  pace_mark
   b1_close
   trap - EXIT
   python3 - "$reply" "${ROUTED_TITLE:-Main chat}" "${ROUTED_PATH:-/}" <<'PYEOF'
@@ -438,11 +532,38 @@ cmd_send_cli() {
   task=$(printf '%s ' "${args[@]}")
   local rc=0
   "$MUSE_CLI_BIN" send "$task" --wait "$wait" ${thread:+--thread "$thread"} || rc=$?
+  # 🔴 Stamp on ATTEMPT, before branching on rc — EXCEPT rc 2. muse-cli's
+  # `send` combines delivery and the reply wait, so MOST non-zero rcs cannot
+  # distinguish "never sent" from "sent, then the wait failed", and in the
+  # second case a message HAS reached Meta. Stamping only on rc==0 left the
+  # gate unmarked there, so a caller retrying on exit 1 re-sent with no gap:
+  # the same defect this PR fixed on B1, still live on B2 (#1976 round 1).
+  #
+  # ⚠ ONE rc IS distinguishable — the AUTH one — and it is rc 2, NOT rc 3.
+  # 🔴 READ FROM muse-cli's SOURCE, not from its exit-code folklore
+  # (muse_cli/cli.py:713-721, muse-cli 0.3.2):
+  #     except AuthError    -> sys.exit(2)      cookies expired; NEVER sent
+  #     except GatewayError -> sys.exit(3)      stream reset / non-2xx / api
+  #                                             error; MAY have sent
+  #     except TimeoutError -> sys.exit(4)      MAY have sent
+  # gateway.py raises AuthError for exactly the motivating case ("cookies
+  # expired? re-export") and GatewayError for VM-unavailable, commented
+  # "Not an auth problem, so say so" — muse-cli draws the distinction we need.
+  #
+  # Round 2 carved out rc 3 believing it was auth. That was backwards and
+  # measured so by #1976 round 3: the expired cookie (rc 2) still stamped —
+  # the exact regression round 2 said it had removed — while a gateway error,
+  # which is in the AMBIGUOUS class that must stamp, did not. Both halves
+  # wrong, from one mislabel. The `3 muse-cli auth needed` legend in this
+  # file's header predates the PR and is what the mislabel was read from;
+  # it is corrected above, because round 2 made it load-bearing.
+  if [ "$rc" -ne 2 ]; then pace_mark; fi
   if [ "$rc" -ne 0 ]; then
     b1_hint
-    case $rc in 3) exit 3 ;; *) exit 1 ;; esac
+    # Surface auth as the wrapper's own exit 3 ("muse-cli auth needed"), which
+    # is what `muse auth export` answers. Everything else is exit 1.
+    case $rc in 2) exit 3 ;; *) exit 1 ;; esac
   fi
-  pace_mark
 }
 
 cmd_poll() {
@@ -531,7 +652,24 @@ cmd_status() {
   local token; token=$(bridge_token) || die "could not decrypt bridge token" 4
   [ -n "$token" ] || die "bridge token decrypted empty" 4
   local rc=0
-  curl -sS -m 15 -H "Authorization: Bearer $token" "$url" -w '\n[%{http_code}]' || rc=$?
+  # 🔴 The header goes in on STDIN, never as argv. `-H "Authorization: Bearer
+  # $token"` put the bearer token in curl's command line, and MEASURED on this
+  # host /proc is mounted without `hidepid` with /proc/<pid>/cmdline mode 0444 —
+  # so for up to 15s per call ANY local process under ANY user could read a
+  # token that grants cluster-wide read. Measured 2026-10-01.
+  #
+  # 🔴 `-H @-`, NOT `--config -`. Both keep the token off argv, but `--config`
+  # applies C-ESCAPE PROCESSING inside a quoted value, so it CORRUPTS the token
+  # it is protecting: measured against a loopback echo server (curl 8.21.0), a
+  # token containing `"` is SILENTLY TRUNCATED at the quote (`aaa"bbb` sends
+  # `Bearer aaa`), a `\` is swallowed, and `\t` becomes a literal tab. rc stays
+  # 0 and the bridge answers 401 — which the comment below reads as "token
+  # rejected", sending the next reader after a credential problem that does not
+  # exist. `-H @-` passes the line VERBATIM. Found by #1976 round 1.
+  # ⚠ The unquoted `--config` spelling (`header = Authorization: …`) sends NO
+  # header at all — also measured. Do not "simplify" back to either form.
+  printf 'Authorization: Bearer %s\n' "$token" \
+    | curl -sS -m 15 -H @- "$url" -w '\n[%{http_code}]' || rc=$?
   echo >&2
   [ "$rc" -eq 0 ] || die "bridge query failed (network)" 4
   # 401 = token rejected; 404 = route gone (API churn); both are answers, not outages.
