@@ -44,7 +44,7 @@ because they are the only structural enforcement of the task rituals, and both u
 | `clawgate-writeback-guard.py` | `PostToolUse` + `Stop` | arms on a read of a specific task id, and at Stop does a LIVE re-read to check a `claude-code` comment landed after the last work event. |
 
 🔴 **Both accept TWO CLI spellings — `muster` and `clawgatectl`, in that PREFERENCE order.**
-The ledger is `scripts/lib/clawgate_tasks.TASK_CLI_NAMES` (`resolve_task_cli()` for python,
+The ledger is `TASK_CLI_NAMES` in `scripts/lib/clawgate_tasks.py` (`resolve_task_cli()` for python,
 `clawgate_task_cli()` / `$CLAWGATE_TASK_CLI_NAMES` in `scripts/lib/clawgate_handoff.sh` for shell,
 pinned two-way). The write-back guard's live read TRIES `muster` first and falls back, so a host
 whose switch has not landed still MEASURES instead of reaching no verdict; the interview gate

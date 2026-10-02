@@ -150,7 +150,7 @@ a `home-manager switch` and both are used:
 | **ROUTER** (approvals, attention, terminals, layout, transcripts) | **`clawgatectl`** | `health` · `attention` · `view` · `panel` · `term` · `tmux` · `transcript`, plus `chief write` / `chief launch` | `nix/pkgs/tools/clawgatectl.nix`, **a LOCAL PATH** (its source repo is private) |
 
 🔴 **`clawgatectl` ALSO still speaks every task verb, and devrc treats it as the FALLBACK, not as
-the recommendation.** One ledger decides: `scripts/lib/clawgate_tasks.TASK_CLI_NAMES` =
+the recommendation.** One ledger decides: `TASK_CLI_NAMES` in `scripts/lib/clawgate_tasks.py` =
 `("muster", "clawgatectl")`, with `resolve_task_cli()` for python and `clawgate_task_cli()` /
 `$CLAWGATE_TASK_CLI_NAMES` (`scripts/lib/clawgate_handoff.sh`) for shell, pinned two-way. Every
 devrc consumer that reads the board resolves through it — the write-back guard, the task-interview
