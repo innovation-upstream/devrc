@@ -27,7 +27,7 @@ only what is true of **muse.ai**.
   that must observe live state. `type`/`key` take no `--wake` (read-op flag
   only); assert their effect with a wake'd `js` read instead.
 
-## Selectors (mapped live 2026-09-29)
+## Selectors (mapped live 2026-10-01)
 
 | what | selector |
 |---|---|
@@ -41,6 +41,9 @@ only what is true of **muse.ai**.
 | card / presentation | `data-message-has-presentation="true"` (goal/plan/task cards, "By Muse" chips) — a card can be a separate node in the same turn |
 | date separators | `div.text-center` with a date/time string, no data attrs — skip in polls |
 | sidebar goals | left-rail `section.flex.flex-col` rows (goal titles + relative times) — no stable ids; read via a byte-capped `text`, never deep selectors |
+| thread row | `div[data-testid="hatch-thread-row"]` — "Main chat" is row 0, alone in `div.grow-1`; the side chats are siblings in `div.gap-px`. Click with the derived `:nth-child(pos)` among the PARENT's children (the position among row siblings is NOT the DOM position — "Main chat" is child 0 of its own container) |
+| active thread | `div[data-testid="hatch-thread-row"][aria-current="page"]` — THE landing verifier. Row text = title + optional `Unread updates` + optional lowercase relative time (`10m`, `1h`, clock) — clean titles before matching; never match raw text |
+| thread page | `https://muse.ai/thread/<uuid>` (main chat = `/`). The UUID is readable only AFTER opening the row (not in row DOM, not in localStorage — checked `hatch:*` keys) — **cleaned titles are the routing contract, ids are not** |
 
 UI text is mixed Spanish/English. Select on **attributes**, never on label text.
 
@@ -92,6 +95,45 @@ exactly like silence) before concluding anything.
   nodes' `innerText` (byte-capped). Cards are turn-grouped like messages.
 - Sidebar goal list: byte-capped `text` on the left rail — rows carry a title
   plus a relative time ("1h", "10:22 am"). No stable ids; do not selector-hunt.
+
+## Thread routing flow (dispatch into a side chat, keep Main chat clean)
+
+The composer/feed contract is IDENTICAL on a thread page (mapped live
+2026-10-01: same `data-message-*` nodes, same composer) — only the sidebar
+route differs. Resolve → click → verify → then run the send/poll sequences
+above unchanged.
+
+```bash
+# 1. resolve: enumerate rows; titles CLEANED (strip "Unread updates" + a
+#    trailing lowercase reltime/clock — "Style Explorer Unread updates 1h" is
+#    NOT a title). Match = exact cleaned title, then unique prefix.
+$BB $REF js '(function(){var rows=document.querySelectorAll("[data-testid=hatch-thread-row]");var out=[];for(var i=0;i<rows.length;i++){var e=rows[i];var raw=(e.innerText||"").replace(/\s+/g," ").trim();var t=raw.replace(/unread updates/ig,"").replace(/\s+/g," ").trim().replace(/ (\d{1,2}:\d{2}( am| pm)?|\d+[smhd]|am|pm)$/,"").trim();var p=e.parentElement,pos=0;for(var j=0;j<p.children.length;j++){if(p.children[j]===e){pos=j+1;break}}var pcls=(p.className||"").toString();var pc=pcls.indexOf("grow-1")>=0?"grow-1":(pcls.indexOf("gap-px")>=0?"gap-px":"");out.push({sel:pc?("div."+pc+" > [data-testid=\"hatch-thread-row\"]:nth-child("+pos+")"):"",title:t,unread:raw.toLowerCase().indexOf("unread updates")>=0,active:e.getAttribute("aria-current")==="page"})}return JSON.stringify(out)})()' --wake=3000
+# 0/2+ matches: LIST candidates and stop — never guess (a mis-route dispatches
+# into the wrong conversation).
+
+# 2. open: trusted `click` with the matched row's derived selector.
+$BB $REF click '<sel-from-step-1>'
+
+# 3. VERIFY the landing before any type/Enter:
+$BB $REF js '(function(){var c=document.querySelectorAll("[data-testid=hatch-thread-row][aria-current=page]");var t=c.length?(c[0].innerText||"").replace(/\s+/g," ").trim().replace(/unread updates/ig,"").replace(/\s+/g," ").trim().replace(/ (\d{1,2}:\d{2}( am| pm)?|\d+[smhd]|am|pm)$/,"").trim():"";return JSON.stringify({active:t,path:location.pathname})})()' --wake=3000
+# active == the matched title AND path == /thread/<uuid> (or / for "Main
+# chat"), else STOP — the delta baseline and composer gates below read the
+# ROUTED page, so a silent mis-route dispatches into the wrong conversation.
+
+# 4. run the send-task / poll-reply flows above (the hydrate gate applies to
+#    the thread's feed — a fresh thread page hydrates like Main chat).
+```
+
+Gotchas measured 2026-10-01:
+- **Row click needs the TRUSTED click op** (the rows are `role=button` with
+  React `onClick` — the trusted CDP path is what lands; derive the selector
+  from the enumeration, never click by JS).
+- **The wrapper already does all of this**: `muse threads` prints the list,
+  `muse send/poll --thread "<name>"` route + verify. Hand-drive only when the
+  wrapper itself is being debugged.
+- A fresh tab opens at `/` = Main chat, with `aria-current=page` on the Main
+  chat row — each dispatch starts un-routed, and thread navigation in your
+  own tab does not persist.
 
 ## 🔴 DOM churn: re-map procedure
 

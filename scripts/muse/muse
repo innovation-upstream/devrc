@@ -10,6 +10,13 @@
 #                   --cli; blocked on the cookie-export step working on Brave.
 #   A   muse-bridge — READ-ONLY cluster status (public HTTPS + bearer token).
 #
+# THREAD ROUTING (B1, mapped live 2026-10-01): the sidebar's thread rows are
+# the routing contract — "Main chat" plus the side chats, active row marked
+# aria-current=page, titles CLEANED of "Unread updates" and relative-time
+# suffixes before matching. Thread ids live nowhere readable (row DOM, localStorage)
+# — routes are title-resolved, click-landed, and landing-VERIFIED. Default
+# send/poll stay on Main chat; --thread "<name>" routes explicitly.
+#
 # Cookie handling is muse-cli's OWN storage only (~/.config/muse-cli/cookies.txt,
 # mode 600). This wrapper never reads, copies, echoes or logs cookies. The
 # browser-bridge deliberately has no cookie op — never add one. Never commit or
@@ -43,8 +50,14 @@ muse — dispatch/poll the user's Muse agent; cluster status via muse-bridge.
   muse send "<task>" [--wait N] [--force] [--cli]   dispatch + await the reply
                                    B1 browser flow by default (--wait default
                                    180); --cli routes through muse-cli (needs
-                                   its one-time cookie export) with --thread
-  muse poll [--wait N] [--cli]                      latest assistant reply
+                                   its one-time cookie export)
+  muse send "<task>" --thread "<name>"              route the dispatch into a
+                                   SIDE CHAT resolved by title (exact, then
+                                   unique prefix; 0/2+ matches list candidates)
+  muse poll [--cli] [--thread "<name>"]             latest assistant reply, scoped
+                                   to the named side chat when --thread is given
+  muse threads                                      the B1 thread list (JSON: Main
+                                   chat + side chats, with unread/active flags)
   muse status [ns|nodes|workloads <ns>|flux <ns>]   CLUSTER snapshot (A)
   muse vm                                           Muse VM/session status (B2)
   muse auth [export|...]                            muse-cli auth passthrough
@@ -80,7 +93,10 @@ need_muse_cli() {
 bb_js() {
   "$BB_BIN" "$B1_REF" js "$1" --wake=3000 2>/dev/null \
     | python3 -c 'import json,sys
-d=json.load(sys.stdin)
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
 r=d.get("result") or {}
 print((r.get("data") or {}).get("value",""),end="")'
 }
@@ -122,6 +138,126 @@ except Exception:
 
 b1_close() { [ -n "${B1_TAB:-}" ] && "$BB_BIN" "$B1_REF" close >/dev/null 2>&1 || true; }
 
+# --- B1 thread plumbing (mapped live 2026-10-01) ----------------------------
+# The sidebar carries one row per thread: row 0 "Main chat" (alone in a
+# div.grow-1 container), the side chats as siblings in a div.gap-px container.
+# The ACTIVE thread is the row with aria-current=page. Row text = title +
+# optional "Unread updates" + optional lowercase relative time ("10m", "1h",
+# clock) — titles must be CLEANED before matching; raw text never matches.
+# Thread ids are NOT in the row DOM and NOT in localStorage (checked:
+# hatch:* keys carry none) — cleaned TITLES are the routing contract. A
+# thread page lands at https://muse.ai/thread/<uuid>; main chat is /.
+# A JS IIFE (the js op evaluates ONE expression; multi-statement bodies
+# return null with no error).
+# Suffix vocabulary measured on rows 2026-10-01: "just now", "10m"/"1h"
+# (lowercase \d+[smhd] ONLY — case-sensitive, so a title ending "3D" is
+# safe), clock times ("2:48 PM", case-insensitive). The time suffix can
+# APPEAR BETWEEN reads (rows render it after hydration), so the cleaner runs
+# at every read and the landing verify tolerates it (see b1_route).
+clean_title_js='function(t){t=(t||"").replace(/\s+/g," ").trim().replace(/unread updates/ig,"").replace(/\s+/g," ").trim();t=t.replace(/ (just now)$/i,"").replace(/ (\d{1,2}:\d{2}( ?am| ?pm)?)$/i,"").replace(/ (\d+[smhd]|am|pm)$/,"").trim();return t}'
+
+threads_read_js="(function(){var f=${clean_title_js};var rows=document.querySelectorAll('[data-testid=hatch-thread-row]');var out=[];for(var i=0;i<rows.length;i++){var e=rows[i];var p=e.parentElement,pos=0;for(var j=0;j<p.children.length;j++){if(p.children[j]===e){pos=j+1;break}}var pcls=(p.className||'').toString();var pc=pcls.indexOf('grow-1')>=0?'grow-1':(pcls.indexOf('gap-px')>=0?'gap-px':'');var raw=(e.innerText||'');out.push({sel:pc?('div.'+pc+' > [data-testid=\"hatch-thread-row\"]:nth-child('+pos+')'):'',title:f(raw),unread:raw.toLowerCase().indexOf('unread updates')>=0,active:e.getAttribute('aria-current')==='page'})}return JSON.stringify(out)})()"
+
+active_thread_js="(function(){var f=${clean_title_js};var c=document.querySelectorAll('[data-testid=hatch-thread-row][aria-current=page]');return JSON.stringify({active:c.length?f(c[0].innerText||''):'',path:location.pathname})})()"
+
+# b1_threads_read: one read of the sidebar rows. Sets THREADS_JSON (an array of
+# {sel,title,unread,active}). Returns non-zero when the read fails or is empty.
+b1_threads_read() {
+  local v
+  v=$(bb_js "$threads_read_js") || return 1
+  [ -n "$v" ] || return 1
+  THREADS_JSON=$v
+}
+
+# b1_wait_sidebar: wait for the sidebar to render (fresh tabs hydrate the
+# shell DOM first — rows are part of the sidebar, not the feed).
+b1_wait_sidebar() {
+  local deadline=$((SECONDS + 12))
+  while :; do
+    if b1_threads_read && [ "$(printf '%s' "$THREADS_JSON" | python3 -c 'import json,sys
+try: print(len(json.load(sys.stdin)))
+except Exception: print(0)')" -gt 0 ] 2>/dev/null; then
+      return 0
+    fi
+    [ $SECONDS -lt $deadline ] || return 1
+    sleep 2
+    "$BB_BIN" "$B1_REF" wake --wait 3000 >/dev/null 2>&1 || true
+  done
+}
+
+# b1_route <name>: resolve a thread by cleaned title and OPEN it in the B1 tab.
+# Resolution: exact cleaned-title match, then unique prefix. 0/2+ matches die
+# LISTING candidates — a silent guess would dispatch into the wrong
+# conversation. The landing is VERIFIED (aria-current title equality + page
+# shape) — the click is a trusted CDP op (a JS .click() is not trusted here).
+b1_route() {
+  local name="$1"
+  b1_wait_sidebar || die "B1: the thread sidebar never rendered (no rows after 12s) — see 'muse b1' to drive it by hand." 1
+  local outcome sel title
+  outcome=$(python3 - "$THREADS_JSON" "$name" <<'PYEOF'
+import json, sys
+rows = json.loads(sys.argv[1])
+req = sys.argv[2].strip().lower()
+exact = [r for r in rows if r["title"].lower() == req]
+cands = exact or [r for r in rows if r["title"].lower().startswith(req)]
+if not cands:
+    print("NOMATCH " + json.dumps([r["title"] for r in rows]))
+elif len(cands) > 1:
+    print("AMBIG " + json.dumps([r["title"] for r in cands]))
+else:
+    print("MATCH " + json.dumps(cands[0]))
+PYEOF
+) || die "B1: thread match failed (unreadable sidebar JSON)" 1
+  case "$outcome" in
+    MATCH*)  outcome=${outcome#MATCH } ;;
+    NOMATCH*) die "B1: no thread matching '$name'. Available: ${outcome#NOMATCH }" 1 ;;
+    AMBIG*)  die "B1: '$name' matches several threads: ${outcome#AMBIG }" 1 ;;
+    *)       die "B1: thread match returned an unknown outcome" 1 ;;
+  esac
+  sel=$(printf '%s' "$outcome" | python3 -c 'import json,sys
+print(json.load(sys.stdin).get("sel",""))')
+  title=$(printf '%s' "$outcome" | python3 -c 'import json,sys
+print(json.load(sys.stdin).get("title",""))')
+  [ -n "$sel" ] || die "B1: thread row '$title' has no clickable selector" 1
+  "$BB_BIN" "$B1_REF" click "$sel" >/dev/null 2>&1 || die "B1: the thread-row click failed (selector '$sel')" 1
+  sleep 3
+  local landed atitle apath
+  landed=$(bb_js "$active_thread_js") || die "B1: cannot read the active thread after routing" 1
+  atitle=$(printf '%s' "$landed" | python3 -c 'import json,sys
+print(json.load(sys.stdin).get("active",""))')
+  apath=$(printf '%s' "$landed" | python3 -c 'import json,sys
+print(json.load(sys.stdin).get("path",""))')
+  # Landing verify is PREFIX-tolerant: the time suffix vocabulary can render a
+  # label the cleaner has never seen ("just now" was measured only because a
+  # verify run caught it) — the route guarantees WHICH row was clicked, so the
+  # verify detects landing, not re-matching.
+  case "$atitle" in
+    "$title"|"$title "*) : ;;
+    *) die "B1: routing did not land on '$title' (active: '$atitle') — stopping instead of dispatching into the wrong conversation." 1 ;;
+  esac
+  if [ "$title" = "Main chat" ]; then
+    [ "$apath" = "/" ] || die "B1: expected the main-chat page (/) after routing — got $apath." 1
+  else
+    case "$apath" in /thread/*) : ;; *) die "B1: expected a /thread/<id> page after routing to '$title' — got $apath." 1 ;; esac
+  fi
+  ROUTED_TITLE=$title
+  ROUTED_PATH=$apath
+}
+
+# cmd_threads: the B1 thread list (read-only). Open a tab, read the sidebar,
+# print JSON, close. This is the resolver surface callers use to pick a
+# --thread value; it never needs the feed and never types.
+cmd_threads() {
+  b1_open
+  trap 'b1_close' EXIT
+  sleep 2
+  b1_wait_sidebar || die "B1: the thread sidebar never rendered (no rows after 12s) — see 'muse b1' to drive it by hand." 1
+  python3 - "$THREADS_JSON" <<'PYEOF'
+import json, sys
+print(json.dumps({"threads": json.loads(sys.argv[1])}))
+PYEOF
+}
+
 # --- pacing guard -----------------------------------------------------------
 pace_check() {
   [ "$MIN_SEND_GAP_MIN" -eq 0 ] 2>/dev/null && return 0
@@ -142,12 +278,12 @@ pace_mark() { mkdir -p "$STATE_DIR"; date +%s > "$STATE_DIR/last-send"; }
 
 # --- verbs ------------------------------------------------------------------
 cmd_send() {
-  local wait=180 force=0 use_cli=0
+  local wait=180 force=0 use_cli=0 thread=""
   local args=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --wait)   wait="$2"; shift 2 ;;
-      --thread) use_cli=1; thread="$2"; shift 2 ;;
+      --thread) thread="$2"; shift 2 ;;
       --force)  force=1; shift ;;
       --cli)    use_cli=1; shift ;;
       *)        args+=("$1"); shift ;;
@@ -156,17 +292,23 @@ cmd_send() {
   [ ${#args[@]} -gt 0 ] || die "send needs task text: muse send \"<task>\"" 2
   [ "$force" -eq 1 ] || pace_check
   if [ "$use_cli" -eq 1 ]; then cmd_send_cli "${args[@]}" --wait "$wait" ${thread:+--thread "$thread"}; return; fi
-  cmd_send_b1 "${args[@]}" "$wait"
+  cmd_send_b1 "${args[@]}" "$wait" "$thread"
 }
 
-# B1 send: open own tab -> gate checks -> type/assert -> Enter/confirm -> poll
-# the delta -> close. Never auto-approves: a pending Muse approval is the
-# operator's security gate and stops the wrapper (exit 5).
+# B1 send: open own tab -> [route to the named side chat] -> gate checks ->
+# type/assert -> Enter/confirm -> poll the delta -> close. Routing happens
+# BEFORE the hydrate gate so the feed gates apply to the ROUTED page (the
+# composer/feed contract is identical on thread pages — mapped live
+# 2026-10-01). Never auto-approves: a pending Muse approval is the operator's
+# security gate and stops the wrapper (exit 5).
 cmd_send_b1() {
   local task="$1"; shift
   local wait="${1:-180}"
+  local thread="${2:-}"
+  ROUTED_TITLE="" ROUTED_PATH=""
   b1_open
   trap 'b1_close' EXIT
+  if [ -n "$thread" ]; then b1_route "$thread"; fi
   # 🔴 The composer mounts BEFORE the feed hydrates: a fresh hidden tab can
   # read composer=yes with a skeleton feed (measured 2026-10-01), and Enter
   # into that shell does nothing. Gate the send on the FEED having nodes.
@@ -248,28 +390,33 @@ cmd_send_b1() {
   pace_mark
   b1_close
   trap - EXIT
-  python3 - "$reply" <<'PYEOF'
+  python3 - "$reply" "${ROUTED_TITLE:-Main chat}" "${ROUTED_PATH:-/}" <<'PYEOF'
 import json, sys
-print(json.dumps({"sent": True, "channel": "b1", "reply": sys.argv[1]}))
+print(json.dumps({"sent": True, "channel": "b1", "thread": sys.argv[2], "path": sys.argv[3], "reply": sys.argv[1]}))
 PYEOF
 }
 
-# B1 poll: open a fresh tab, read the LATEST assistant turn, close.
+# B1 poll: open a fresh tab, [route to the named side chat], read the LATEST
+# assistant turn of THAT thread, close. Without --thread this reads Main chat
+# (the open lands at https://muse.ai/ = Main chat, mapped live 2026-10-01).
 cmd_poll_b1() {
+  local thread="${1:-}"
+  ROUTED_TITLE="" ROUTED_PATH=""
   b1_open
   trap 'b1_close' EXIT
+  if [ -n "$thread" ]; then b1_route "$thread"; fi
   sleep 2
   b1_state || { "$BB_BIN" "$B1_REF" wake --wait 4000 >/dev/null 2>&1 || true; b1_state || die "B1: cannot read the chat state for a poll" 1; }
   if [ "$LASTID" = "none" ] || [ "$LEN" -eq 0 ] 2>/dev/null; then
-    die "B1: no assistant messages readable in the feed" 1
+    die "B1: no assistant messages readable in the feed${thread:+ (thread '$thread')}" 1
   fi
   local reply
   reply=$(bb_js '(function(){var a=document.querySelectorAll("[data-message-role=assistant]");var l=a[a.length-1];var turn=l.getAttribute("data-message-turn-id");var p=[];for(var i=0;i<a.length;i++){if(a[i].getAttribute("data-message-turn-id")===turn)p.push((a[i].innerText||"").trim())}return p.join("\n---\n")})()') || reply=""
   b1_close
   trap - EXIT
-  python3 - "$LASTID" "$reply" <<'PYEOF'
+  python3 - "$LASTID" "$reply" "${ROUTED_TITLE:-Main chat}" "${ROUTED_PATH:-/}" <<'PYEOF'
 import json, sys
-print(json.dumps({"channel": "b1", "lastId": sys.argv[1], "reply": sys.argv[2]}))
+print(json.dumps({"channel": "b1", "thread": sys.argv[3], "path": sys.argv[4], "lastId": sys.argv[1], "reply": sys.argv[2]}))
 PYEOF
 }
 
@@ -303,7 +450,7 @@ cmd_poll() {
   local args=()
   while [ $# -gt 0 ]; do
     case "$1" in
-      --thread) use_cli=1; thread="$2"; shift 2 ;;
+      --thread) thread="$2"; shift 2 ;;
       --limit)  limit="$2"; shift 2 ;;
       --cli)    use_cli=1; shift ;;
       *)        args+=("$1"); shift ;;
@@ -316,7 +463,7 @@ cmd_poll() {
     [ "$rc" -eq 0 ] || { b1_hint; exit 1; }
     return
   fi
-  cmd_poll_b1
+  cmd_poll_b1 "$thread"
 }
 
 cmd_vm()   { need_muse_cli; exec "$MUSE_CLI_BIN" status; }
@@ -427,6 +574,12 @@ $BB $REF js '(function(){var t=document.querySelector("textarea[placeholder=Mess
 
 # 3. poll the newest TURN only; stable (same id+len) twice = done
 # 4. extract delta: assistant nodes sharing the last data-message-turn-id
+#
+# Thread routing: `muse threads` lists the sidebar (JSON), `send/poll
+# --thread "<name>"` resolve a cleaned title, trusted-click the row, and
+# VERIFY the landing (aria-current + /thread/<id> page) before dispatching.
+# Hand-driving the same: rows are [data-testid=hatch-thread-row] — "Main
+# chat" in div.grow-1, side chats in div.gap-px; active = aria-current=page.
 
 🔴 Gotchas measured 2026-10-01:
 - Muse's per-host APPROVAL GATES block the composer: while a "Needs approval"
@@ -441,14 +594,15 @@ EOF
 }
 
 case "${1:-}" in
-  send)   shift; cmd_send "$@" ;;
-  poll)   shift; cmd_poll "$@" ;;
-  status) shift; cmd_status "$@" ;;
-  vm)     shift; cmd_vm ;;
-  auth)   shift; cmd_auth "$@" ;;
-  b1)     cmd_b1 ;;
-  setup)  cmd_setup ;;
+  send)    shift; cmd_send "$@" ;;
+  poll)    shift; cmd_poll "$@" ;;
+  threads) shift; cmd_threads "$@" ;;
+  status)  shift; cmd_status "$@" ;;
+  vm)      shift; cmd_vm ;;
+  auth)    shift; cmd_auth "$@" ;;
+  b1)      cmd_b1 ;;
+  setup)   cmd_setup ;;
   help|--help|-h) usage ;;
-  "")     usage ;;
-  *)      die "unknown verb: $1 (see: muse help)" 2 ;;
+  "")      usage ;;
+  *)       die "unknown verb: $1 (see: muse help)" 2 ;;
 esac

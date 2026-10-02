@@ -1,6 +1,6 @@
 ---
 name: muse
-description: Dispatch tasks to the user's Meta Muse personal agent (muse.ai) and read replies — muse-cli programmatic channel first, browser-bridge flow as fallback; also queries cluster status via muse-bridge. Use for: "dispatch to muse", "send a task to muse", "poll muse", "what did muse say", "muse status", muse goals/feed/ideas, muse connector or muse-bridge work. NOT the email queue (mailbox), the task board (clickup/muster), or dispatching opencode agents (opencode-dispatch).
+description: Dispatch tasks to the user's Meta Muse personal agent (muse.ai) and read replies — muse-cli programmatic channel first, browser-bridge flow as fallback; also queries cluster status via muse-bridge. Use for: "dispatch to muse", "send a task to muse", "poll muse", "what did muse say", "muse status", "muse threads", thread routing, muse goals/feed/ideas, muse connector or muse-bridge work. NOT the email queue (mailbox), the task board (clickup/muster), or dispatching opencode agents (opencode-dispatch).
 allowed-tools: Bash, Read, Grep, Glob
 ---
 
@@ -48,18 +48,43 @@ default (`muse b1` prints the recipe verbatim).
 ```bash
 M=$DEVRC/scripts/muse/muse
 $M send "<task>" [--wait 180] [--force] [--cli]   # dispatch + await reply (JSON)
-$M poll [--cli]                                    # latest assistant turn
-$M status [ns|nodes|workloads <ns>|flux <ns>]      # CLUSTER snapshot (bridge; default ns muse)
-$M vm                                              # Muse VM/session status (muse-cli)
-$M auth export                                     # B2 one-time cookie export (steps on failure)
-$M b1                                              # the full B1 recipe
-$M setup                                           # runbook pointers
+$M send "<task>" --thread "<name>"                # dispatch into a SIDE CHAT (routed)
+$M poll [--thread "<name>"]                       # latest assistant turn (scoped)
+$M threads                                        # B1 thread list (JSON: Main chat + side chats)
+$M status [ns|nodes|workloads <ns>|flux <ns>]     # CLUSTER snapshot (bridge; default ns muse)
+$M vm                                             # Muse VM/session status (muse-cli)
+$M auth export                                    # B2 one-time cookie export (steps on failure)
+$M b1                                             # the full B1 recipe
+$M setup                                          # runbook pointers
 ```
 
-`send` returns `{"sent": true, "channel": "b1", "reply": "…"}` — the reply is
-the newest assistant TURN only. `note`-style timeouts are a timeout, not a
-silence-verdict — re-check with `poll`. On B1 (`--cli`), muse-cli's
-`{sent, stream, reply|note}` shape comes back instead.
+`send` returns `{"sent": true, "channel": "b1", "thread": "…", "path": "…",
+"reply": "…"}` — the reply is the newest assistant TURN only, and
+`thread`/`path` name the conversation it dispatched into. `note`-style
+timeouts are a timeout, not a silence-verdict — re-check with `poll`. On B1
+(`--cli`), muse-cli's `{sent, stream, reply|note}` shape comes back instead.
+
+## 🔴 Thread routing — resolve, then route (measured 2026-10-01)
+
+The muse.ai sidebar carries **Main chat** plus the **side chats** (the
+threads). Default `send`/`poll` stay on Main chat — the wrapper never picks a
+thread implicitly. To keep the operator's Main chat clean, agents dispatch
+into a side chat:
+
+1. `$M threads` — resolve the available threads (JSON with `title`, `unread`,
+   `active`). Thread ids are readable NOWHERE (row DOM, localStorage) —
+   **cleaned titles are the routing contract**.
+2. `$M send "<task>" --thread "<title>"` — the wrapper resolves the cleaned
+   title (exact, then unique prefix; 0/2+ matches die LISTING candidates —
+   never guess), trusted-clicks the sidebar row, and **verifies the landing**
+   (`aria-current=page` + `/thread/<uuid>` page) before dispatching. The
+   composer/feed contract is identical on thread pages.
+3. `$M poll --thread "<title>"` — reads THAT thread's newest turn (without
+   `--thread` it reads Main chat, which after a routed dispatch is the wrong
+   page — scope every routed dispatch's follow-ups).
+
+Resolution failures are answers, not errors: a NOMATCH/AMBIG listing is what
+you re-resolve `$M threads` against.
 
 ## First-time auth (B2 ONLY, one-time, USER hands — currently blocked on Brave)
 
