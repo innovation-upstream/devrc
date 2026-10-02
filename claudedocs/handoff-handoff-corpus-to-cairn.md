@@ -48,39 +48,73 @@ cairn-overlap comparison nobody has run.
   rules, this arc cannot be closed by anyone.** `via: measurement`
 
 ## State now
-- ✅ **THE ARC'S TOOLING SHIPPED: rule (r) + the writer + the automatic exit.** `--prune` now
-  REFUSES a durable removal with no archive (rule (r), exit 16, devrc#1960 `368bd298`);
-  `--archive-write`/`--archive-note` WRITE that archive instead of requiring a hand-built one
-  (devrc#1963 `a3480a13`); and `--autoevict` (rule (s)) evicts the minimum set of CLOSED blocks
-  when rule (p) would refuse (devrc#1966). All three verified on a REAL over-ceiling doc as
-  proposal-only runs, with `homelab-talos` left byte-identical to HEAD and 0 tracked
-  modifications each time.
-- ✅ **`cairn#168` `fc2ddfe9` — the per-entry bullet-count badge**, both renderers, pinned equal
-  by a cross-language test, firing on 5 live entries including the 151-bullet one that is 97.6%
-  of a ~50,000-token `/resume` read.
-- 🔴 **`main` WAS RED AND NOT BECAUSE OF THIS ARC — unbroken by devrc#1971 `298e4c57`.**
-  `ece2f05d` (#1965) stripped two quote characters from `prune-skill/SKILL.md`'s YAML
-  `description:` (11,781 → 11,779 B) without updating the eight figures a guard derives from
-  that size. Attributed with the discriminating control — a PRISTINE detached worktree at
-  `origin/main` carrying no PR's code reproduced it — and verified fixed the same way: the
-  formerly-red test returns **40 passed** on the new `main`. ⚠ Every open PR had inherited that
-  red, so two were retriggered rather than merged on a stale verdict.
-- 🔴 **THE BLOCKED POPULATION WAS UNDER-MEASURED THREE TIMES, INCLUDING BY AN INDEPENDENT
-  AUDIT.** Enumerating from `handoff_index.REPO_ENV_HANDLES` instead of hand-written
-  `~/workspace/<repo>` paths: **581 handoff docs, 7 over their effective ceiling** — not
-  190/5. `$DATAPACKET` resolves to `~/workspace/civit/datapacket-talos`, outside the shape both
-  I and round 0 scanned, and holds **388 docs** (more than the other four repos combined) with
-  2 over ceiling. `handoff_budget.py`'s own comment records a prior scan *"short by 54
-  documents"* for exactly this reason; I read that comment and made the same error after it.
-- ⚠ **NO CLAWGATE TASK.** `clawgate_handoff.sh resolve` printed `NOTHING RESOLVED — 0 tasks`.
-  An unknown session id answers 200 with an EMPTY ARRAY, so that zero cannot separate "touched
-  no task" from "wrong id". No field written, none created. ⚠ My first read of its exit code was
-  `head`'s, not the script's — the pipe-eats-the-status trap; the MESSAGE is the authority.
-- **Carried forward — a REPLACE heading would drop these values.** 187→581 docs measured;
-  69.9% of handoff bytes in the two APPEND-only sections; **store 331 entry files / 3,129 dated
-  journal bullets, intake 19–80/day — actively written, NOT starved**; 83–98% of durable handoff
-  content unrepresented in cairn; **289 CLOSED investigation blocks / 558,672 B** (the
-  re-derivable figure; round 1's 366/700,630 does not reproduce).
+- 🔴 **THIS ARC IS CLOSED. Verdict: NOT ADDRESSED — and the one item is that the evicted
+  block's own text cannot reach cairn.** The operator ruled on 2026-10-02, which is the
+  ruling the round-1 condition had been waiting on: `--prune` eviction was to land the
+  lesson *in cairn*, and the transport cannot carry it. `cairn append` refuses a newline or
+  `>MAX_TEXT_CHARS=2000` at rc **21, before the network**, and **288 of 289 closed blocks
+  are multi-line** (37.7% also over length); the `cairn put` route fragments one block into
+  3–4 bullets and **swallows its `### ` heading**. So "the lesson lands in cairn" could only
+  ever have meant a **POINTER** to the archive file, which is a different arc's deliverable.
+  **Nothing below re-opens this.**
+- 🔴 **NOT ADDRESSED IS A VERDICT ON THE CONDITION, NOT ON THE SESSION'S OUTPUT — read the
+  two separately.** The condition went unmet; the arc still shipped its whole toolchain and
+  four corpus measurements that held under refutation. A reader who takes the verdict as
+  "this produced nothing" has misread it.
+- ✅ **THE SUCCESSOR ARC IS `claudedocs/handoff-cairn-recall-value-instrumentation.md`**, and
+  it carries **only** old rank 2 (instrument the value claim). Nothing else was re-homed:
+  rank 1 is answered by this verdict and rank 3 shipped.
+- ✅ **THE SESSION-CLOSE DOC MERGED — devrc#1974, ON A REAL GREEN GATE**, after taking
+  `origin/main` so the merge carried devrc#1977 and devrc#1979: all four Tekton legs pass,
+  `collected=24977 passed=24969 skipped=8 failed=0`. 🔴 **BUT ITS FIRST RUN PRODUCED NO
+  VERDICT AT ALL, AND THAT IS THE PART WORTH CARRYING** — all four legs returned
+  *"NO CAPACITY: … the gate never started (queued past its deadline). Not a code failure"*
+  after 65 minutes pending. A **re-push of a byte-identical tree** (empty commit, squashed
+  away on merge) got the real green, which is the `tekton` skill's own documented remedy. The
+  substitute evidence I had assembled meanwhile — `main` observed green at `8f36cb82`, plus
+  the repo's own runner on that exact sha giving **`scripts/tests` 16,055 passed / 6 skipped /
+  0 failed** and 18,005 passed over nine target groups — turned out not to be needed. **Worth
+  the hour anyway: it is what made merging-without-a-verdict a decision rather than a
+  default**, and the retrigger was only attempted because the queue was visibly draining
+  (another PR's leg had just passed).
+- ✅ **THE ARC'S TOOLING IS MERGED AND UNCHANGED BY THIS ROUND.** rule (r) devrc#1960
+  `368bd298`; `--archive-write` devrc#1963 `a3480a13`; `--autoevict` (rule (s)) devrc#1966;
+  the per-entry bullet-count badge cairn#168 `fc2ddfe9`; the decision + follow-ups devrc#1970.
+- 🔴 **`main` WAS RED A SECOND TIME, FOR A WHOLLY DIFFERENT CAUSE THAN devrc#1971's, AND
+  ANOTHER SESSION FIXED IT WHILE I WAS DIAGNOSING IT.** cairn#162 `7a83b7c` renamed the index
+  badge and body label `tasks` → `refs`; devrc#1973 `e580d17a` bumped the cairn flake pin onto
+  it; two expectations in `scripts/tests/test_subsystem_task_refs.py` still asserted the old
+  spelling. Landed as devrc#1977 `2a3168ae` by a concurrent session. Details and the two traps
+  it cost me are in the investigation block and the gotchas below.
+- 🔴 **AND A THIRD RED, WHICH WAS A REAL DISCLOSURE RATHER THAN A STALE EXPECTATION — devrc#1979
+  (mine) SCRUBS A ROUTABLE PUBLIC IP OUT OF A PUBLIC REPO.** devrc#1972 `82b4c6e3` committed a
+  Hetzner origin address into `claudedocs/handoff-muse-system-inventory.md:132`, inside the very
+  finding (**S1**) whose claim is that publishing that origin bypasses Cloudflare's TLS, WAF and
+  rate limiting while a long-lived cluster-wide-read bearer token crosses the path in cleartext.
+  **A document about an exposed origin published the origin.** Scrubbed to `<hetzner-origin-ip>`,
+  the convention this corpus already uses (`<hetzner-lighthouse-ip>`, `<hetzner-gw-ip>`); controls
+  watched both ways (1 failed/14 passed pristine → 228 passed over all four disclosure gates on
+  the committed tree). ⚠ **Operator decision, flagged and NOT bundled:** the gate guards HEAD
+  only, so the value stays in reachable history, and whether S1's bearer token needs rotating is
+  not this change's call.
+- ⚠ **`main` WAS RED THREE TIMES IN ONE WINDOW FROM THREE UNRELATED CAUSES, AND THAT IS THE
+  ACTUAL FINDING** — the prune-skill figures (#1965 → #1971), the cairn badge rename (#1973 →
+  #1977), and the committed IP (#1972 → #1979). Each one reddened the shared leg for **every**
+  open PR, which is how "merged with CI unread" becomes routine rather than exceptional. Two of
+  the three were landed by **doc-only** PRs, which is the class most likely to be waved through.
+- ⚠ **devrc#1927 IS AN OPEN PR WHOSE WORK ALREADY LANDED** — it fixes the slice-syntax false
+  positive (a two-index slice read as IPv6 — spelled `N::M` here deliberately, see the gotcha
+  below) in `handoff-audit-pr-operator-asks.md`, and devrc#1928 `7f84306c` already unbroke
+  exactly that. Verified by content: zero such hits in that doc at `origin/main`. Recorded,
+  not acted on — closing someone else's PR is not this arc's call.
+- **Carried forward — a REPLACE heading would drop these values.** 187→**581** handoff docs
+  measured (7 over effective ceiling), enumerated from `handoff_index.REPO_ENV_HANDLES` and
+  **never** from hand-written `~/workspace/<repo>` paths; 69.9% of handoff bytes in the two
+  APPEND-only sections; **store 331 entry files / 3,129 dated journal bullets, intake 19–80
+  bullets/day — actively written, NOT starved**; 83–98% of durable handoff content
+  unrepresented in cairn; **289 CLOSED investigation blocks / 558,672 B** (the re-derivable
+  figure, from the in-repo `scripts/handoff-audit.py`; round 1's 366 / 700,630 B does not
+  reproduce and its detector is gone).
 
 ## Open investigations — live diagnosis state
 
@@ -379,25 +413,96 @@ cairn-overlap comparison nobody has run.
   performed; scope the trap to every file the battery can touch.
 - **Next probe:** none — the rules are in devrc#1966's body. Open because nothing enforces them.
 
+### ✅ CLOSED 2026-10-02 — the arc's closing condition is answered NOT ADDRESSED, on an operator ruling, and the verbatim-vs-pointer question is what it turned on
+- as-of: 2026-10-02
+- **What this settles:** the round-1 condition — *"a `--prune` eviction of a CLOSED block lands
+  the lesson in cairn"* — is **unsatisfiable as conceived**, and the operator closed the arc on
+  that basis rather than re-scoping it. The frozen-condition rule held throughout: the broken
+  *command* was corrected (`read.sh search`, not `recall --search`, which exits 2 with a usage
+  line a later session reads as "no hit"); the *substance* was never re-scoped by any session.
+  `via: doc`
+- **Ruled out: that a later session could have closed this.** The ruling changes what the arc is
+  FOR — verbatim content versus a pointer — and the freeze rule reserves that to the operator.
+  Three rounds correctly declined it; the cost of declining was three rounds of carrying an
+  unclosable item, which is the right trade. `via: doc`
+- 🔴 **Ruled out: that the verdict condemns the arc's output.** Every corpus measurement
+  survived refutation; every *mechanism* claim that was refuted was reasoned rather than
+  measured (six of them, round 1). The toolchain shipped in four PRs. `via: measurement`
+- **Next probe:** none. The arc is frozen; the instrumentation half lives in the successor.
+
+### 🔴 OPEN — a devrc gate pins the PINNED cairn client's rendered bytes, so a cairn rename lands as a red devrc main with no devrc change
+- as-of: 2026-10-02
+- **Symptom + exact repro:** `tekton/devrc-pytests` FAILED on `main` and on every open PR,
+  naming `TestTheReadSurface::test_the_index_row_stays_ONE_LINE_and_carries_a_count`, with a
+  doc-only diff in the PR under test. Reproduced at the locked rev:
+  ```bash
+  CAIRN_LIB=/home/zach/workspace/cairn/lib python3 \
+    /home/zach/workspace/cairn/lib/subsystem_recall.py --store <fixture> --scope devrc --list
+  ```
+- **Observed (with values):** the row renders `  thing    1 nuance   public   🔗 3 refs` at
+  cairn `5c96ffda` (devrc's locked rev) against the asserted `3 tasks`. **Two** tests fail, not
+  the one CI names — `..._carries_a_count` and `test_the_singular_is_used_for_one_task` (`1 ref`
+  vs `1 task`); the Tekton `description` field truncates to the first. Local run on the
+  pre-fix tree: **2 failed, 75 passed**. `via: measurement`
+- **Observed:** the cause is upstream and deliberate. cairn#162 `7a83b7c` moved badge and body
+  label to `refs` because `entry.tasks` parses the `refs:` front-matter key and the badge was
+  *"naming a key the file format no longer has"*. It explicitly keeps the accepted INPUT
+  spellings (`tasks:`, `task:`) and `report_json`'s payload key `"tasks"` (exits at P8). So the
+  rename is correct and devrc's expectation was the stale half. `via: code`
+- **Ruled out: that this was mine, or this arc's.** `git log eb212424..origin/main` shows the
+  fix already landed as devrc#1977 `2a3168ae` from a concurrent session, and the PR I was
+  merging touches one `claudedocs/` file. `via: measurement`
+- 🔴 **Ruled out: that the fix commit was ever validated.** `2a3168ae` and `82b4c6e3` both
+  report *"superseded by a newer run or a closed pull request — this commit was not
+  validated"* on all four legs. **A commit whose gate was superseded has no verdict**, and
+  reading the merge as validated is the error that was available here. `via: measurement`
+- ✅ **RESOLVED on the observation rather than the inference: `main` IS green.**
+  `tekton/devrc-main-pytests` on `8f36cb82` at 2026-10-02T06:31:11Z —
+  **collected=24977 passed=24969 skipped=8 failed=0**, all four legs success. The arithmetic
+  closes it cleanly across all three reds: 24,967 passed with the 2 badge failures →
+  24,968 with those fixed and the IP failing → **24,969 with none failing**. Each step moves
+  by exactly the number of tests involved, which is what makes the attribution a measurement
+  and not a story. `via: measurement`
+- **Leading hypothesis (the part still open):** this will recur on the next cairn
+  rendered-output change, because `scripts/testlib/cairn_lib.py` deliberately points
+  source-reading guards at the pin and its own docstring already rules the direction —
+  *"Where the two disagree the PIN is right — devrc's expectation is the thing to update."*
+  The gap is that nothing couples a pin BUMP to the expectations it can invalidate: devrc#1973
+  bumped the pin and shipped green, and the red surfaced on the next unrelated PR.
+- ⚠ **And a second, unrelated thing the same read surfaced: the PR-branch gate SERIALISES
+  behind the main-branch gate.** At 06:54 PRs #1974, #1975 and #1976 were ALL pending, all
+  created ~06:10, while `main`'s re-run created at 06:31 had already finished. So a
+  44-minute-pending PR leg here is **queueing, not a stuck pod** — worth knowing before
+  reaching for the `tekton` skill, and worth NOT reading as "my PR broke the gate".
+  `via: measurement`
+- **Next probe:** decide whether a cairn pin bump should run the devrc guards that READ the
+  pin. That is a devrc question, not this arc's, and it is the only live thread in this block.
+
 ## Next steps (ranked)
 
-1. **ANSWER THE FROZEN CLOSING CONDITION AND CLOSE THIS ARC.** Unchanged and still the operator's
-   call: round 1's condition is unsatisfiable as conceived (the evicted block's own text cannot
-   reach cairn — `append` refuses newlines and >2000 chars, 288 of 289 blocks are multi-line), so
-   the honest verdict is **NOT ADDRESSED** with that as the one item. Re-home only item 2 into a
-   successor.
-   forcing: user — the verbatim-vs-pointer ruling is an operator decision and nobody else can
-   close the arc without it.
-2. **INSTRUMENT the value claim rather than measuring it** — the recall receipt (`source='tool'`
-   carries **0** cairn rows against 1,425 transcript-proven invocations) and opaque per-bullet
-   citation ids, which turn "was this bullet used" into a match on a token existing nowhere else.
-   forcing: deadline — the transcript corpus rolls at 30 days (2026-09-01 → 2026-10-01, nothing
-   older), so the only evidence that could justify further automation is deleted daily.
-3. ✅ **DONE — the eviction toolchain is merged.** rule (r) devrc#1960 `368bd298`;
-   `--archive-write` devrc#1963 `a3480a13`; `--autoevict` devrc#1966; `main` unbroken
-   devrc#1971 `298e4c57`; the badge cairn#168 `fc2ddfe9`; the decision + follow-ups devrc#1970.
-   forcing: gate — a prune could drop durable text with no archive anywhere, and the only thing
-   that had ever checked conservation was one commit message.
+🔴 **THERE ARE NO LIVE ITEMS. THIS ARC IS CLOSED AND FROZEN — verdict NOT ADDRESSED, operator
+2026-10-02.** Nothing here is work a session may draw from. A session that wants the
+instrumentation goes to the successor doc; a session that wants anything else is starting a
+NEW arc and should say so.
+
+⚠ **ALL THREE RANKS ARE DISCHARGED, AND THEY ARE RECORDED RATHER THAN DELETED BECAUSE A
+CLOSED ARC WHOSE LIST STILL READS AS LIVE IS THIS QUEUE'S DUPLICATE-WORK HAZARD** — the
+claim lock is released on completion, so nothing else would stop a `/resume` here from
+re-doing one.
+
+- ~~**1. Answer the frozen closing condition and close this arc**~~ — **DONE: answered NOT
+  ADDRESSED** on the operator's 2026-10-02 ruling, with the one item named in `## State now`.
+  Its forcing kind was **user** for three rounds, and that forcing function has now fired.
+  ⚠ Deliberately not respelled as a live field — a struck, discharged item must not parse as
+  one.
+- ~~**2. Instrument the value claim**~~ — **RE-HOMED, not done.** It is rank 1 of
+  `claudedocs/handoff-cairn-recall-value-instrumentation.md`, carrying its 30-day deadline and
+  every measurement behind it. 🔴 **Read that doc, not this one, for anything about the recall
+  receipt or the citation ids** — this arc records no further state on it.
+- ~~**3. Make `--prune` verify rather than write**~~ — **SHIPPED**, and it grew past the
+  original item: rule (r) devrc#1960 `368bd298` (refuse a durable removal with no archive,
+  exit 16), `--archive-write` devrc#1963 `a3480a13` (write the archive rather than require a
+  hand-built one), `--autoevict` (rule (s)) devrc#1966.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A GLOB'S ZERO IS A CLAIM ABOUT THE GLOB, NOT ABOUT THE TREE, AND IT COST A WRONG
@@ -607,6 +712,93 @@ cairn-overlap comparison nobody has run.
   never edit or share a tree a battery owns; check for a stranded mutant on EVERY resume, not
   only after a kill you performed; and scope the restoring trap to every file the battery can
   touch.** The tell is a one-line diff that reads as a plausible simplification.
+
+- 🔴 **I REPRODUCED A PINNED-CLIENT FAILURE AGAINST THE DEPLOYED CLIENT AND GOT A PASS, WHICH
+  IS THE DIRTY-TREE TRAP WEARING A PIN'S CLOTHES.** `cairn_pin`'s route 2 resolves
+  `shutil.which("cairn"|"cairn-py")` → `realpath` → `<store>/libexec/cairn/lib`, so a plain
+  local run reads **whatever home-manager last switched to** — here `cairn-cdf6fae` (#151, nine
+  commits behind) — while `flake.lock` pins `5c96ffda`. My first repro printed `🔗 3 tasks` and
+  the assertions passed, which read as "CI is wrong". **A pin is only a pin where something
+  resolves it; `which` resolves the DEPLOYMENT.** Fix: `CAIRN_LIB=<locked lib>` (route 1), or
+  `nix build github:ZacxDev/cairn/<locked-rev>#cairn` and put its `bin` first. Confirm the
+  working tree is byte-exactly the locked rev before using it as the lib (`git rev-parse HEAD`
+  against `flake.lock`'s `rev`, plus a clean `status`).
+- 🔴 **`scripts/run-tests.sh` REFUSED TO VOUCH AND EXITED 3 WITH ZERO TESTS RUN, AND THAT IS THE
+  GUARD WORKING.** `logrotate` and `dash` were missing from my `nix-shell -p` environment, so
+  GUARD 1 aborted naming them rather than letting ~55 `skipif`s silently skip. **Reading the
+  exit code alone would have called this a code failure**; the message says *"This is a MISSING
+  ENVIRONMENT, not a code failure"* and prints the one correct invocation —
+  `nix develop <repo> --command bash <repo>/scripts/run-tests.sh <repo>`, whose shell is built
+  from the same `gateTools` as the gate. Use that, not an ad-hoc `-p` list.
+- 🔴 **AN OPEN-PR SWEEP IS STRUCTURALLY BLIND TO WORK THAT JUST MERGED, AND THAT IS WHERE A
+  DUPLICATE IS MOST LIKELY.** I swept `gh pr list --state open` (51 rows), found nothing on the
+  red gate, took a `claim-work` claim, cut a worktree — and the fix was already **merged** as
+  devrc#1977, three commits ahead of my stale base clone. The sweep's premise is that a
+  duplicate is in flight; a duplicate that LANDED while you were diagnosing is invisible to it.
+  **Cheap discriminator, and it is one command: `git fetch` then `git log <base>..origin/main`
+  BEFORE claiming, not after.** The claim mechanism did its job — it is a lock, not a detector.
+  Released as `devrc-cairn-refs-badge-rename-unbreak`; worktree and branch removed.
+- 🔴 **I RAN A FULL SUITE AGAINST THE SHARED BASE CLONE AND ANOTHER SESSION MOVED ITS `main`
+  UNDER THE RUN — A STALE TREE IS THE LESSER HALF OF THIS.** At launch the base clone was
+  `eb212424`; a later read showed `fa577dc9` with a `merge --ff-only` reporting *"Already up to
+  date"*, i.e. **somebody else fast-forwarded it mid-run** (#1972, #1977, #1978 landed in that
+  window). So the run was not merely measuring a tree three commits stale — it was measuring a
+  tree that **changed identity while pytest was collecting**, which no result from it can be
+  attributed to any commit. **A long test run belongs in a worktree even when you are only
+  READING**, because the hazard is not your own writes; `git worktree add … origin/main` is
+  what surfaced the drift here, and it is also the fix. Re-sync per `claude/RULES.md`:
+  `git -C <repo> fetch origin && git -C <repo> merge --ff-only origin/main` — and read
+  *"Already up to date"* as a claim that someone ELSE did it, not that nothing moved.
+- 🔴 **I WROTE THE SENTENCE DESCRIBING THE SLICE FALSE POSITIVE AND IT TRIPPED THE GATE ON
+  ITSELF — THE THIRD RECORDED TIME THIS EXACT RECURSION HAS HAPPENED IN THIS REPO.** The
+  scanner reads a two-index slice as a routable IPv6 literal, so a bullet *explaining* that
+  behaviour is itself a hit; devrc#1927's body already said so in as many words — *"Two of the
+  three lines are the doc explaining this exact false positive, including its own recorded
+  remedy… Documenting the trap re-triggered it."* The convention that works is the one
+  `scripts/testlib/public_ip_scan.py` applies to its own docstring — **describe it, never
+  spell it**; prose sites use non-hex placeholder indices. 🔴 **And my own pre-commit grep
+  sweep PASSED it**, because I swept for dotted-quad IPv4 and private ranges and the hazard was
+  IPv6-shaped: **a zero from a hand-written pattern is a claim about the pattern, not about the
+  file.** The repo's gate found it in 62 s. **Run the real gate, not your own grep** — and for
+  a public repo, run it BEFORE the commit rather than after.
+- 🔴 **`RESULT: FAIL (exit=143)` FROM `run-tests.sh` IS A KILL, NOT A FAILURE — AND THE
+  CONTENT SAYS SO WHILE THE EXIT CODE LIES.** 143 = 128+15 = SIGTERM; mine came from my own
+  `timeout 2700` landing in the tenth target group. The log carried **zero** `FAILED` lines
+  and nine completed groups at 18,005 passed, with `scripts/tests` alone at **16,055 passed /
+  6 skipped / 0 failed** in 39m19s. A session that branched on the runner's exit code would
+  have recorded a red suite on a tree with no failing test. **Count the per-target summary
+  lines; never read the runner's exit code as a verdict.** Budget ≥50 min for a full devrc
+  run — `scripts/tests` alone is ~40.
+- 🔴 **A TEKTON LEG CAN FAIL WITHOUT BEING A VERDICT, AND IT TELLS YOU IN WORDS: "NO CAPACITY
+  … the gate never started (queued past its deadline). Not a code failure."** All four of
+  #1974's legs reported that after 65 minutes pending. 🔴 **The remedy is the `tekton` skill's
+  already-documented one — re-push and let the queue drain — and a re-push of a BYTE-IDENTICAL
+  tree is enough** (`git commit --allow-empty`, verified with `git diff --stat <old> HEAD`
+  empty, squashed away on merge). It then went green first try. ⚠ **I re-derived this skill's
+  congestion gotcha instead of reading it**: `claude/skills/tekton/SKILL.md` already says runs
+  land on one node with no concurrency control, that anyone else's PR checks in that window
+  die too, and that *"it heals when the queue drains"*. **Check the owning skill before
+  diagnosing the shared CI** — the discriminator for "is the queue moving" is another PR's leg
+  flipping to pass, which costs one command.
+- 🔴 **A SECURITY GATE'S RED IS NOT A REASON TO ALLOWLIST THE VALUE, AND THE GATE SAYS SO
+  BEFORE YOU ASK.** `test_no_public_ips.py`'s docstring rules the direction itself — an
+  `ALLOWLIST` entry *"is for values that are not a disclosure at all"*, and *"if you are
+  tempted to pin a real endpoint, the answer is an env var, not a pin"*. It also pre-empts the
+  reassurance a scrub invites: *"this guards HEAD. Git history still carries every value ever
+  committed, and rewriting history would not unpublish anything that has already been cloned or
+  forked. This stops the NEXT one."* **Read the gate's own prose before proposing a remedy for
+  it** — mine was going to be the right remedy for the wrong stated reason until I did.
+- ⚠ **A ONE-LINE DOC SCRUB STILL NEEDS THE COMMITTED-TREE RE-RUN, FOR THE ORDINARY REASON.** The
+  gate reads `git ls-files` paths but then reads them from the WORKING TREE, so my first green
+  (15 passed) was a claim about a dirty tree, not about the commit. Committed, then re-ran: 228
+  passed over all four disclosure gates. **Two independent claims, both made.**
+- **Decision: take upstream into devrc#1974 rather than merge it through the red gate.** The
+  red was pre-existing on `main` and unrelated to a doc-only diff, so merging would have been
+  defensible — and would also have recorded a second PR merged on an unread gate, which this
+  doc's own round criticised. Merging `origin/main` in cost one command and made the green
+  honest. ⚠ The merged tree's files are disjoint from the PR's one file, which is **not** by
+  itself safety (`claude/RULES.md`: disjoint files are not safety) — the two relevant gates
+  were run on the merged tree before the push.
 
 ## How to verify
 ```bash

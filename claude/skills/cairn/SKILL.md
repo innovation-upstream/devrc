@@ -160,6 +160,24 @@ disagree with. `scripts/lib/cairn_pin.py` is the seam that finds it
 (`$CAIRN_LIB`, else `cairn` on PATH → `libexec/cairn/lib`); it REFUSES rather
 than falling back, because there is nothing local left to fall back to.
 
+🔴 **BUT "THE PIN" AND "THE CLIENT ON PATH" ARE DIFFERENT REVISIONS, AND THE
+SECOND ROUTE READS THE DEPLOYED ONE — SO A LOCAL REPRO OF A CI FAILURE CAN PASS
+FOR THAT REASON ALONE.** Route 2 is `which` → `realpath` → the store path, i.e.
+whatever home-manager last switched this host onto; CI's hermetic checks carry
+the package built from `flake.lock`. The two drift freely, and nothing warns:
+measured 2026-10-02, the deployed client was **nine commits behind** the locked
+rev, and a devrc guard that pins the reader's rendered bytes failed in CI while
+the identical command passed locally — which reads as "CI is wrong" rather than
+"I am reading a different program". **To reproduce anything about the PINNED
+reader, name the pin explicitly:** export `$CAIRN_LIB` at the locked `lib/`
+(route 1), or `nix build github:ZacxDev/cairn/<locked-rev>#cairn` and put its
+`bin` first. If you point `$CAIRN_LIB` at a cairn WORKING TREE, prove it is the
+locked rev first — `git rev-parse HEAD` against `flake.lock`'s `rev`, plus a
+clean `git status` — because a dirty tree makes the run evidence about your
+edits and not about the pin. ⚠ The same asymmetry is why
+`scripts/testlib/cairn_lib.py` rules the direction for devrc's own
+expectations: *"Where the two disagree the PIN is right."*
+
 Two directories exist and they are not interchangeable:
 `~/.cache/subsystem-store` is the synced
 read-through cache, stamped by `cairn sync`; `~/.claude/analyze-service-index`
