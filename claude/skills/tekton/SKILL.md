@@ -300,6 +300,32 @@ debugging, changing or copying a specific pipeline.
     incident:
     `~/workspace/devrc/claude/skills/tekton/reference/pipelines.md` → "NO CAPACITY".
 
+12. 🔴 **TWO RUNS CAN RACE ON ONE SHA AND MARK EACH OTHER SUPERSEDED, LEAVING THE COMMIT WITH
+    NO VERDICT — AND IT PRESENTS AS FOUR RED LEGS.** Measured 2026-10-02 on devrc#1983, head
+    `dcdf33c8`: the head received **two** sets of `pending` statuses **three seconds apart**
+    (17:03:29–32, every context duplicated), and at 17:04:08–11 all four were overwritten with
+    `error` —
+    `superseded by a newer run or a closed pull request — this commit was not validated`.
+    One push, two PipelineRuns, each considering the other newer; net result **no run reported
+    and nothing was validated**. 🔴 **I read those four `fail` rows as a code failure first.**
+    The discriminator is gotcha 11's timeline — the duplicated `pending` pairs are visible only
+    there, and `gh pr checks` shows just the final `error`:
+    `gh api repos/<r>/commits/<sha>/statuses --jq '.[] | "\(.created_at) \(.context) \(.state) \(.description)"'`
+    **Remedy is the same as a held gate: re-push.** A byte-identical re-push went green first
+    try (`git commit --allow-empty`, tree proven unchanged with
+    `git diff --stat <old> HEAD` empty, squashed away on merge).
+    🔴 **AND THE COROLLARY IS THE DANGEROUS HALF: A MERGED COMMIT CAN CARRY THIS MARKER.**
+    `2a3168ae` and `82b4c6e3` both show `superseded … not validated` on all four legs, so
+    **"it merged, therefore it was green" is unfounded for them** — a superseded commit has no
+    verdict at all, and the squash that follows inherits none. When you need to know a merged
+    change was gated, read the statuses of the sha that actually RAN, not the one that landed.
+    ⚠ **Not congestion**: both gotcha 3's kill signatures (`255`/`137`, `NOT RUN:`) and gotcha
+    11's `NO CAPACITY` describe a run that was *held or killed*; this is a run that *completed
+    the dedup check and lost*. Open question, and the one probe worth running: do the
+    EventListener logs show two PipelineRuns created for ONE push event, and does the supersede
+    check compare SHAs or run ids? That separates "duplicate webhook" from "supersede logic too
+    eager", and only the second is fixable in the pipeline.
+
 6. **A gate pod rejected at ADMISSION posts a FAILED TEST, so it reads as a bad change.**
    Two ways this has bitten, both on `devrc-ci`, both 2026-08-29/30:
    **(a) PodSecurity.** `tekton-ci` carried no `pod-security.kubernetes.io/*` label, so it
