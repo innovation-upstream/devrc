@@ -139,7 +139,34 @@ and **`grantProfiles`** (`notes.go`). Round-tripping a GET body into a PATCH sil
 Both are `omitempty`, so on a task that never set them the key is simply absent — which looks
 identical to "the field isn't wired". Confirm against `notes.go`, not against one task's JSON.
 
-## `clawgatectl` — the machine client (use it instead of curl)
+## The machine clients — `muster` for tasks, `clawgatectl` for the router (use one instead of curl)
+
+🔴 **TWO BINARIES, ONE SPLIT, AND IT IS A SPLIT RATHER THAN A REPLACEMENT.** Both are on PATH after
+a `home-manager switch` and both are used:
+
+| half | binary | verbs | packaged in devrc as |
+|---|---|---|---|
+| **TASK / agent / chief-ask** (everything on this page) | **`muster`** | `task ls` · `task get` · `task create` · `task comment` · `task status` · `agent ls` · `agent resolve` · `agent messages` · `agent task get` · `agent task comment` · `agent task status` · `chief ask` — **exactly 12, no more** | flake input `muster` (`github.com/ZacxDev/muster`) → `pkgs.muster-cli`, **a PINNED FETCH by revision** |
+| **ROUTER** (approvals, attention, terminals, layout, transcripts) | **`clawgatectl`** | `health` · `attention` · `view` · `panel` · `term` · `tmux` · `transcript`, plus `chief write` / `chief launch` | `nix/pkgs/tools/clawgatectl.nix`, **a LOCAL PATH** (its source repo is private) |
+
+🔴 **`clawgatectl` ALSO still speaks every task verb, and devrc treats it as the FALLBACK, not as
+the recommendation.** One ledger decides: `TASK_CLI_NAMES` in `scripts/lib/clawgate_tasks.py` =
+`("muster", "clawgatectl")`, with `resolve_task_cli()` for python and `clawgate_task_cli()` /
+`$CLAWGATE_TASK_CLI_NAMES` (`scripts/lib/clawgate_handoff.sh`) for shell, pinned two-way. Every
+devrc consumer that reads the board resolves through it — the write-back guard, the task-interview
+guard, `/resume`'s reconciler and `cairn-who` — so a host where `muster` is missing still MEASURES
+rather than reporting a gap. 🔴 **Do NOT teach a task recipe as `clawgatectl`:** that client is
+built from a private repo on its own cadence and is the one that drifted on the provenance headers
+(it sent `X-Clawgate-*` while muster read `X-Muster-*`), so for **six days every task comment was
+authored `api` and the task↔session thread recorded NOTHING** — 798 rows, then zero. muster #26 made
+the server accept both spellings; the cause was a client the server could not gate.
+
+🔴 **muster's CLI has NO `health` verb and no router verbs at all, and that is enforced upstream.**
+`tests/verb-ledger.sh` asserts the 12 above against the BUILT binary by **exact equality** — it
+fails when the set grows *or* shrinks — and it runs as the nix derivation's `installCheckPhase`, so
+"this artefact has exactly those verbs" is a property of the package rather than of this table.
+Consequence: `curl :30306/health` is how you check the task board, and `clawgatectl health` reports
+the **router** only.
 
 🔑 **SUPERSEDES the 2026-08-11 note here that "a wrapper CLI was evaluated and rejected".** That
 note has been deleted: `clawgatectl` shipped on 2026-08-12 in
@@ -163,48 +190,64 @@ worth knowing: **the note is only as good as the checkout's freshness** — `dri
 now reports a stale `homelab-talos` per host — and an **unparseable** `var buildVersion` line means
 the package is not installed at all (`clawgatectl: command not found`), never a guessed label.
 
-🔴 **It already knows the split, and the choice is PER ROUTE, not per verb** (`clawgatectl --help`
-is the authority): `CLAWGATE_API_URL` serves the `health` · `attention` · `view` · `panel` · `term`
-· `tmux` · `transcript` verbs; **`CLAWGATE_TASK_API_URL` serves `task` · `agent` · `agent task`**.
-Overrides are `--api-url` / `--task-api-url`. ⚠ `CLAWGATE_TASK_API_URL` is **OPTIONAL and falls
-back to `CLAWGATE_API_URL`** — so on a host that never heard of the split the task verbs silently
-aim at the router and every one of them 404s (rc 7, "this CLI is newer than the server"), which
-reads as a stale binary rather than a misconfigured base. ⚠ **`chief` SPANS BOTH**: `chief ask` is
-task-side (`GET /api/agents` → `POST /api/agents/{name}/messages`), `chief write`/`chief launch`
-are router-side (`/api/term/chief/*`).
+🔴 **That whole class is DELETED for the task half, and that is the structural point of the split.**
+`muster` is packaged from a **pinned fetch** of a PUBLIC repo, so its version IS its revision (the
+store path reads `muster-cli-<rev>`), there is no working tree for it to be behind, and
+`drift-check.sh`'s BUILT-SOURCE ladder does not apply to it at all. `clawgatectl` keeps the
+local-path trade because its source repo is private — a fetch would put a credential in the nix
+store — so the staleness closure above still governs **the router half**, and still governs
+clawgatectl's task verbs whenever they are reached as the fallback.
+
+🔴 **`clawgatectl` already knows the split, and ITS choice is PER ROUTE, not per verb**
+(`clawgatectl --help` is the authority): `CLAWGATE_API_URL` serves the `health` · `attention` ·
+`view` · `panel` · `term` · `tmux` · `transcript` verbs; **`CLAWGATE_TASK_API_URL` serves `task` ·
+`agent` · `agent task`**. Overrides are `--api-url` / `--task-api-url`. ⚠ `CLAWGATE_TASK_API_URL` is
+**OPTIONAL and falls back to `CLAWGATE_API_URL`** — so on a host that never heard of the split the
+task verbs silently aim at the router and every one of them 404s (rc 7, "this CLI is newer than the
+server"), which reads as a stale binary rather than a misconfigured base. ⚠ **`chief` SPANS BOTH in
+`clawgatectl`**: `chief ask` is task-side (`GET /api/agents` → `POST /api/agents/{name}/messages`),
+`chief write`/`chief launch` are router-side (`/api/term/chief/*`).
+
+⚠ **`muster` has NO such fork, and that is the whole reason the fallback-to-the-router failure above
+cannot happen to it**: every verb it has is task-side, so it resolves ONE base. It carries only
+`chief ask` — the task-side half — which is why `chief write`/`chief launch` remain `clawgatectl`
+commands rather than having moved.
 
 It reads `CLAWGATE_API_URL` + `CLAWGATE_HOOK_TOKEN` out of `~/.claude/clawgate.env` itself, so the
 `H="Authorization: Bearer $(grep '^CLAWGATE_HOOK_TOKEN=' … | cut -d= -f2)"` preamble that used to
 head every recipe in this skill **is gone** — the token never reaches argv (`/proc` is world
 readable) and never reaches your scrollback.
 
-**Commands that exist. There are no others** — anything else is still curl:
+**Commands that exist. There are no others** — anything else is still curl. Spelled `muster` here
+because that is the client to use; every `task`/`agent` row works verbatim under `clawgatectl` too
+(it is the fallback), and the `health` row is `clawgatectl`-ONLY — `muster` has no such verb:
 
 | command | route |
 |---|---|
-| `clawgatectl health` | `GET /health` (open, no token) |
-| `clawgatectl agent ls` | `GET /api/agents` |
-| `clawgatectl agent resolve <name> [--id]` | `GET /api/agents`, matched client-side |
-| `clawgatectl task ls [--tag --status --limit --summary]` | `GET /api/tasks` |
-| `clawgatectl task get <id>` | `GET /api/tasks/{id}` |
-| `clawgatectl task create --body\|--body-file [--title --tag --repo --branch --model --directory --privilege]` | `POST /api/tasks` |
-| `clawgatectl task status <id> <open\|in_progress\|ready_for_review\|complete>` | `PATCH /api/tasks/{id}/status` |
-| `clawgatectl task comment <id> --body\|--body-file [--source]` | `POST /api/tasks/{id}/comments` |
+| `clawgatectl health` (router; **not a muster verb**) | `GET /health` (open, no token) |
+| `muster agent ls` | `GET /api/agents` |
+| `muster agent resolve <name> [--id]` | `GET /api/agents`, matched client-side |
+| `muster task ls [--tag --status --limit --summary]` | `GET /api/tasks` |
+| `muster task get <id>` | `GET /api/tasks/{id}` |
+| `muster task create --body\|--body-file [--title --tag --repo --branch --model --directory --privilege]` | `POST /api/tasks` |
+| `muster task status <id> <open\|in_progress\|ready_for_review\|complete>` | `PATCH /api/tasks/{id}/status` |
+| `muster task comment <id> --body\|--body-file [--source]` | `POST /api/tasks/{id}/comments` |
+| `muster agent messages <name>` · `muster agent task get\|comment\|status` · `muster chief ask <name> --body` | the agent-side routes (`/api/agents/{name}/messages`, `/agent/task*`) |
 
 ```bash
 # board summary, filtered SERVER-side (MEASURED live 0.7.87, 2026-08-13: 19 tasks unfiltered, 3 with --limit 3)
-clawgatectl task ls --summary --status open --limit 20 \
+muster task ls --summary --status open --limit 20 \
   | jq -r '.[] | "\(.id)\t\(.status)\t\(.title // .directory)\t\((.tags//[])|join(","))\t\(.commentCount)c"'
 
 # one task + its comments (comments are ALREADY here — there is no /comments GET)
 # NOTE the `.retracted` branch: without it a retracted comment prints as a blank
 # entry and reads as a server bug. See "Comment retraction" above.
-clawgatectl task get 177 \
+muster task get 177 \
   | jq -r '"#\(.id) [\(.status)] \(.title)\n\n\(.body)\n\n--- comments ---", ((.comments//[])[] | "[\(.author) \(.createdAt[0:16])]\n\(if .retracted then "(comment retracted)" else .body end)")'
 
 # name -> id: THE read that replaces `SELECT id FROM agents WHERE name=…`
-clawgatectl agent resolve operator --id       # -> 10
-clawgatectl task create --title t --body b    # -> {"id":183}
+muster agent resolve operator --id            # -> 10
+muster task create --title t --body b         # -> {"id":183}
 ```
 
 **stdout is JSON and nothing else**; diagnostics, skew notes and resolve candidates go to stderr,
@@ -441,7 +484,7 @@ The CONCLUSION was wrong** — measured live against `0.7.99` on 11 tasks. The s
 404s, but the thread is **EMBEDDED on every task read**, so the CLI has always been able to answer:
 
 ```bash
-clawgatectl task get N | jq '.sessions[] | select(.role=="worked")'
+muster task get N | jq '.sessions[] | select(.role=="worked")'
 # {"sessionId":"55810ec6-…","role":"worked","host":"nixos",
 #  "firstSeenAt":"…","lastSeenAt":"…","detailAvailable":false}
 ```
@@ -451,12 +494,12 @@ clawgatectl task get N | jq '.sessions[] | select(.role=="worked")'
 | session → tasks | `GET /api/sessions/{id}/tasks` | ✅ callable (hook token), pinned in the golden |
 | task → sessions | `GET /api/tasks/{id}` → **`sessions[]`** | ✅ **embedded on the task read**, list and single. Pinned by `task_sessions_test.go` ("response embeds the link it just made") |
 | task → sessions | `GET /api/tasks/{id}/sessions` | 🔴 **404 BY DESIGN — do not "fix" it.** `TestNoForwardSessionsSubRoute` pins 404/405 because the codebase embeds a task's children rather than keep a second contract in sync. Correctly absent from `routes.golden` |
-| either direction | `clawgatectl` | ✅ `task get` (embed, above) · reverse is still curl |
+| either direction | `muster` / `clawgatectl` | ✅ `task get` (embed, above) · reverse is still curl |
 
 🔴 **The lesson that cost this file three days of being wrong:** "the sub-route 404s" and "the data
 is unreachable" are different claims, and the second does not follow from the first. A handoff doc
 queued *"build the forward direction"* as ranked work on the strength of this table. One
-`clawgatectl task get` would have retired it.
+a `task get` on either client would have retired it.
 
 #### Reading a thread WITHOUT being fooled by it
 
@@ -501,7 +544,7 @@ two until it was corrected):
 | `requireOperatorToken` | `operator.go:58` | bearer must be the reserved agent named `Operator` |
 | `requireAgentToken` | `agent.go:30` | bearer resolves to *any* agent; that agent is injected into the request ctx |
 
-### `requireHookToken` — 17 routes (what clawgatectl and every producer use)
+### `requireHookToken` — 17 routes (what both CLIs and every producer use)
 <!-- RE-DERIVED 2026-08-21 against live 0.7.98: 17, up from 16, the new one being
      `GET /api/sessions/{id}/tasks` (#357) — which IS now pinned and callable, so
      the trunk/deployed gap this file used to warn about is CLOSED.
@@ -521,7 +564,11 @@ two until it was corrected):
      Re-derive with: grep -hoE 'HandleFunc\("(GET|POST|PATCH|DELETE) /api/[^"]*",\s*s\.require[A-Za-z]+' \
        internal/api/*.go | sort | uniq -c -->
 
-| route | clawgatectl | note |
+⚠ **The CLI column names a VERB, not a binary.** Every `task`/`agent` verb below exists on **both**
+clients and the one to type is `muster` (`clawgatectl` is the fallback); the five ROUTER rows at the
+bottom are `clawgatectl`-only, and `— curl` means neither client has a verb for it.
+
+| route | CLI verb | note |
 |---|---|---|
 | `GET /api/agents` | `agent ls` / `agent resolve` | the roster; **the Postgres-lookup killer** |
 | `GET /api/tasks` | `task ls` | `?tag= &status= &limit= &summary=1`, all server-side at 0.7.87 |

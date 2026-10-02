@@ -798,8 +798,45 @@ def test_the_hooks_constants_are_pinned_to_their_literals():
     # (a spelling was dropped and every create through it is silently allowed). The
     # second direction is the one the muster rename would have tripped.
     assert guard.CREATE_PATHS == ("/api/tasks", "/api/v1/tasks")
-    assert guard.TASK_CLI_NAMES == ("clawgatectl", "muster")
+    # 🔴 RE-ORDERED 2026-10-01, mirroring the shared ledger (see the seam test below).
+    # Order is NOT what this file uses — it only ever tests MEMBERSHIP — but a mirror
+    # allowed to disagree about order is a mirror a reader cannot trust to say which
+    # client a skill should teach.
+    assert guard.TASK_CLI_NAMES == ("muster", "clawgatectl")
     assert guard.TASK_CLI_VALUE_FLAGS == ("--api-url", "--token", "--env-file")
+
+
+def test_the_interview_guard_cli_ledger_is_the_SHARED_one_in_ORDER():
+    """🔴 THE SEAM. `scripts/lib/clawgate_tasks.TASK_CLI_NAMES` is the one definition of
+    which binaries serve the task half; this gate keeps a FROZEN MIRROR of it because
+    `PREFILTER` is built at import and the whole design of this file is that a Bash call
+    naming neither binary returns before anything is imported (its I/O contract). A
+    frozen mirror is only defensible while something compares the two.
+
+    Fails on GROW, SHRINK and REORDER. The SHRINK direction is the dangerous one here:
+    a spelling present in the shared ledger but missing from this gate is a
+    criteria-less `task create` ALLOWED, fail-open, with no diagnostic anywhere.
+
+    ⚠ This gate deliberately calls NO resolver — it reads an argv the model is about to
+    run and never picks a binary — so it is the ledger, not `resolve_task_cli`, that is
+    shared. That asymmetry is stated on the constant itself.
+    """
+    cg = _load("clawgate_tasks_for_interview_ledger",
+               str(ROOT / "scripts" / "lib" / "clawgate_tasks.py"))
+    assert guard.TASK_CLI_NAMES == tuple(cg.TASK_CLI_NAMES), (
+        "the interview gate recognises %r while the shared ledger names %r — a name in "
+        "the ledger and not here is a silent allow."
+        % (guard.TASK_CLI_NAMES, tuple(cg.TASK_CLI_NAMES)))
+
+
+@pytest.mark.parametrize("binary", ("muster", "clawgatectl"))
+def test_a_criteria_less_create_is_DENIED_under_EITHER_binary(binary):
+    """🔴 MEMBERSHIP, EXERCISED RATHER THAN ASSERTED. The ledger test above pins the
+    tuple; this drives a real create through each name and watches it get denied, which
+    is the claim a reader of the tuple actually cares about. Driven over the literals so
+    a third spelling needs a deliberate new case."""
+    assert denied_missing('%s task create --title T --body "%s"' % (binary, NO_AC))
+    assert allowed('%s task create --title T --body "%s"' % (binary, AC))
 
 
 def test_the_missing_criteria_message_explains_the_status_gate():

@@ -76,6 +76,55 @@ if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 from timeouts import unbounded_timeout_reason  # noqa: E402
 
+
+# 🔴 THE TASK-CLI PREFERENCE IS IMPORTED, NEVER RESTATED — same rule as the timeout
+# predicate above, and the same failure if it is not: a second copy of "prefer
+# muster, fall back to clawgatectl" is a copy that goes stale, and the staleness
+# here is SILENT (a client that IS installed reported as absent). The ledger and
+# the reasoning live on `TASK_CLI_NAMES` / `resolve_task_cli` in
+# `scripts/lib/clawgate_tasks.py`; the shell half of the same predicate is
+# `clawgate_task_cli` in `scripts/lib/clawgate_handoff.sh`, pinned two-way to it.
+#
+# 🔴 BY EXPLICIT PATH, NOT THROUGH THE `_LIB` sys.path INSERT ABOVE, even though this
+# module IS in `scripts/lib/` and the plain `import` would work. That insert puts this
+# whole directory at `sys.path[0]` FOR THE IMPORTING PROCESS, so every name in it can
+# shadow a stdlib or site-packages module for code that never asked — a cost the
+# comment above accepts for ONE pre-existing dependency and should not be asked to pay
+# for a second. `test_clawgate_predicate_single_source.py` pins the same rule for every
+# other importer of this module.
+#
+# ⚠ AND NO `$DEVRC_DIR` ARM, DELIBERATELY, UNLIKE THE OTHER IMPORTERS. Theirs exists
+# because a HOOK is deployed as a lone nix-store copy with no `scripts/lib/` beside it.
+# `cairn-who` is deployed by `mkOutOfStoreSymlink` straight into devrc's working tree
+# (`nix/home.nix`, and that file explains at length why it must be), so the sibling
+# this resolves is the only one that can ever be correct and a second candidate path
+# would be unreachable code. Said out loud because the shared guard admits this file
+# through its lenient `or "devrc" in text` arm rather than through its intent.
+#
+# 🔴 RAISES RATHER THAN FALLING BACK TO A TUPLE OF ITS OWN: a private second spelling
+# of the preference is precisely the bug this indirection removes, and a fallback would
+# reintroduce it at the one moment nobody is looking.
+def _load_clawgate_tasks():
+    import importlib.machinery
+    import importlib.util
+    path = Path(__file__).resolve().parent / "clawgate_tasks.py"
+    if not path.exists():
+        raise ImportError("scripts/lib/clawgate_tasks.py not found beside %s"
+                          % __file__)
+    loader = importlib.machinery.SourceFileLoader("_who_clawgate_tasks", str(path))
+    spec = importlib.util.spec_from_file_location("_who_clawgate_tasks", str(path),
+                                                  loader=loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+_CG = _load_clawgate_tasks()
+#: Aliased with a leading underscore because they are this module's PRIVATE dependency,
+#: not part of its surface — `fetch_task(resolve=…)` is the seam a caller or a test uses.
+_TASK_CLI_NAMES = _CG.TASK_CLI_NAMES
+_resolve_task_cli = _CG.resolve_task_cli
+
 #: How long to wait on each external tool. `session-manager` shells into tmux on
 #: two hosts and a full cross-host scan measured ~5s; the laptop being asleep is
 #: the case this bound exists for, and it must EXPIRE rather than hang a command
@@ -275,7 +324,7 @@ def _one_line(text: str) -> str:
 def _run(cmd: Sequence[str], timeout: int) -> tuple[int, str, str]:
     """Run a tool, capturing both streams SEPARATELY.
 
-    🔴 Never `2>&1`. `clawgatectl` documents that JSON goes to stdout and
+    🔴 Never `2>&1`. BOTH task CLIs document that JSON goes to stdout and
     nothing else ever does, precisely so a diagnostic on stderr cannot corrupt
     a parse. Merging them here would throw that guarantee away at the one place
     that depends on it.
@@ -298,16 +347,37 @@ def _run(cmd: Sequence[str], timeout: int) -> tuple[int, str, str]:
 
 
 def fetch_task(task: str, *, timeout: int = DEFAULT_TIMEOUT,
-               runner=_run) -> dict[str, Any]:
-    """`clawgatectl task get <id>` -> the task object.
+               runner=_run, resolve=None) -> dict[str, Any]:
+    """`<task CLI> task get <id>` -> the task object.
 
     Its documented exit codes are used as-is rather than re-derived from the
     message text: 4 is not-found, 3 is auth, 6 is network. Reading the message
-    instead is how a wording change turns "unreachable" into "not found".
+    instead is how a wording change turns "unreachable" into "not found". Both
+    clients implement the same table, which is what makes one classifier correct
+    for either.
+
+    🔴 THE BINARY IS RESOLVED, NOT SPELLED. `resolve_task_cli` (shared, in
+    `scripts/lib/clawgate_tasks.py`) prefers `muster` — the client muster's own
+    suites gate — and falls back to `clawgatectl`. This site used to hardcode
+    `clawgatectl`, which on a host carrying only `muster` would have raised
+    `WhoError: clawgatectl is not on PATH` through `_run`'s FileNotFoundError arm:
+    a message blaming the subsystem that was never missing.
+
+    ⚠ EVERY MESSAGE BELOW NAMES THE RESOLVED BINARY, not a literal. With two
+    clients in play, "exited 6" is only actionable once you know which one exited.
+
+    `resolve` is injectable for the same reason `runner` is — the two legs of the
+    preference have to be drivable without mutating PATH.
     """
     if not str(task).strip():
         raise WhoError("empty task id")
-    rc, out, err = runner(["clawgatectl", "task", "get", str(task)], timeout)
+    if resolve is None:
+        resolve = _resolve_task_cli
+    cli = resolve()
+    if cli is None:
+        raise WhoError("no task CLI is on PATH (tried %s)"
+                       % ", ".join(_TASK_CLI_NAMES))
+    rc, out, err = runner([cli, "task", "get", str(task)], timeout)
     # One line. A tool's stderr is often several (a version-skew notice above
     # the real error), and interpolating it raw breaks the render's
     # indentation so the follow-up sentence reads as unrelated output.
@@ -325,13 +395,13 @@ def fetch_task(task: str, *, timeout: int = DEFAULT_TIMEOUT,
         # 400 — the id itself was refused. An operator typo, and the LIKELIEST
         # failure of all; reporting it as "unreachable" sends them to debug the
         # network while clawgate's own 400 is printed directly above.
-        raise BadTaskId(f"clawgatectl refused the id {task!r} — {detail}")
+        raise BadTaskId(f"{cli} refused the id {task!r} — {detail}")
     if rc != 0:
-        raise ClawgateUnreachable(f"clawgatectl exited {rc} — {detail}")
+        raise ClawgateUnreachable(f"{cli} exited {rc} — {detail}")
     try:
         return json.loads(out)
     except json.JSONDecodeError as exc:
-        raise ClawgateUnreachable(f"clawgatectl returned non-JSON: {exc}")
+        raise ClawgateUnreachable(f"{cli} returned non-JSON: {exc}")
 
 
 def sessions_of(task_obj: dict[str, Any]) -> list[SessionHit]:

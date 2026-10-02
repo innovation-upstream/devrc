@@ -1691,7 +1691,7 @@ alerts_block(){
 # carry now, and how many comments POSTDATE the doc?
 #
 # 🔴 EVERY WAY THIS CAN FAIL PRINTS A `!` GAP, because the alternative is the
-# false green this whole script exists to avoid. `clawgatectl` missing, a 401, a
+# false green this whole script exists to avoid. No task CLI on PATH, a 401, a
 # task that does not exist and a server that dropped the field all produce the
 # same observable — nothing to reconcile — and reporting that as "no drift"
 # states a fact about the board that was never measured.
@@ -1702,10 +1702,12 @@ alerts_block(){
 # still gets an explicit line, because "this doc names no task" and "the task is
 # fine" are different statements and the digest must not let one read as the other.
 #
-# clawgatectl rather than a hand-rolled curl: it reads the token from
+# A task CLI rather than a hand-rolled curl: it reads the token from
 # ~/.claude/clawgate.env itself, never puts it in argv, and returns exit codes
 # that distinguish unreachable (6) from auth (3) from not-found (4) — which is
-# the difference between "the board is down" and "that task is gone".
+# the difference between "the board is down" and "that task is gone". WHICH client
+# is `clawgate_task_cli`'s answer (`muster`, else `clawgatectl`) — never spelled
+# here; see `$CLAWGATE_TASK_CLI_NAMES` in scripts/lib/clawgate_handoff.sh.
 clawgate_block(){
   echo "CLAWGATE"
   if [ "$CLAWGATE_LIB_OK" -ne 1 ]; then
@@ -1737,16 +1739,30 @@ clawgate_block(){
     return
   fi
 
-  if ! have clawgatectl; then
-    echo "  (clawgatectl not on PATH — task #$id NOT checked)"
-    UNRECONCILED+=("clawgate task #$id was NOT checked (clawgatectl not on PATH) — its status is UNKNOWN, not fine")
+  # 🔴 THE BINARY IS RESOLVED, NOT SPELLED. `clawgate_task_cli` (shared, in
+  # scripts/lib/clawgate_handoff.sh) prefers `muster` — whose CLI muster's own gates
+  # can see — and falls back to `clawgatectl`. This site used to hardcode
+  # `clawgatectl`, so a host carrying only `muster` would have printed "not on PATH"
+  # and recorded a gap: honest about being a gap, and still a lost reconciliation on
+  # a machine that had a perfectly good client. The resolved name is reported in
+  # every message below, because "which client answered" is the first thing a
+  # non-zero rc makes you want to know.
+  local cli
+  if ! cli=$(clawgate_task_cli); then
+    # ⚠ THE PHRASE "not on PATH" IS LOAD-BEARING, not prose. It is what
+    # `test_resume_state_clawgate.py::test_NO_task_CLI_on_PATH_is_a_gap` reads, and that
+    # assertion predates the resolver — it pins "the tool is not installed is SAID, not
+    # silently folded into no-drift", which is the whole gap convention. Widening the
+    # line to name both clients must not drop the phrase that guard keys on.
+    echo "  (task CLI not on PATH — tried $CLAWGATE_TASK_CLI_NAMES — task #$id NOT checked)"
+    UNRECONCILED+=("clawgate task #$id was NOT checked (task CLI not on PATH; tried $CLAWGATE_TASK_CLI_NAMES) — its status is UNKNOWN, not fine")
     return
   fi
   local json rc
-  json=$(clawgatectl task get "$id" 2>/dev/null); rc=$?
+  json=$("$cli" task get "$id" 2>/dev/null); rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$json" ]; then
-    echo "  (clawgatectl exit $rc — task #$id NOT checked)"
-    UNRECONCILED+=("clawgate did not answer for task #$id (clawgatectl exit $rc: 3=auth 4=no such task 6=unreachable 8=non-JSON) — its status is UNKNOWN, not fine")
+    echo "  ($cli exit $rc — task #$id NOT checked)"
+    UNRECONCILED+=("clawgate did not answer for task #$id ($cli exit $rc: 3=auth 4=no such task 6=unreachable 8=non-JSON) — its status is UNKNOWN, not fine")
     return
   fi
   local status

@@ -138,6 +138,14 @@ there. Only what's specific to this repo, where a working tree is also a **deplo
   **derived from `nix/pkgs/` at scan time and pinned two-way by a test**, so a third
   such package is covered automatically. `absent` / `fetch failed` / `detached` are
   reported as **UNMEASURED**, never folded into a clean count.
+  🔴 **The way OUT of this class is a pinned fetch, and the task CLI took it.** A
+  local-path derivation only exists because its source repo is PRIVATE — a fetch would
+  put a credential in the nix store. `muster` is PUBLIC, so `pkgs.muster-cli` comes from
+  a flake input pinned by `flake.lock`: its version IS its revision, there is no working
+  tree to be behind, and it is **not in the BUILT-SOURCE set at all**. `clawgatectl`
+  keeps the local-path trade (private source) and still owns the ROUTER half, so rc 17
+  is not going away — but **do not "simplify" a new package to `${workspace}/<repo>`
+  when the source is public**: that enrols it in this whole ladder for nothing.
   🔴 **UNMEASURED is not forever — rc 18.** Setting no code was right per run and
   wrong forever: a scope that can never be evaluated escalated NEVER, so the run
   read as clean while rc 17 was structurally unable to fire for it. Measured

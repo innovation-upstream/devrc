@@ -126,9 +126,60 @@
     # only when something asks for the cairn output.
     # ------------------------------------------------------------------------
     cairn.url = "github:ZacxDev/cairn";
+
+    # ------------------------------------------------------------------------
+    # `muster` — the task board / agent / runbook service, consumed here for ONE
+    # output: `packages.muster-cli`, whose binary is `muster`. It is the TASK half
+    # of what `clawgatectl` used to serve alone.
+    #
+    # 🔴 A PINNED FETCH, AND THAT IS THE WHOLE POINT OF THIS INPUT EXISTING —
+    # NOT A CONVENIENCE. `nix/pkgs/tools/clawgatectl.nix` builds from a LOCAL
+    # WORKING TREE, and its header says why: its source is a PRIVATE repo, so a
+    # fetch would put a GitHub credential in the nix store. The cost it names is
+    # that the derivation's `vendorHash` is only correct for whichever checkout a
+    # host happens to hold — which broke BOTH machines, in OPPOSITE directions,
+    # on one commit (devrc #483 / homelab-infra #323, 2026-08-14: one host built a
+    # genuine 0.7.95, the other built a 0.7.87 binary wearing a 0.7.95 label and
+    # `task status` silently printed help and exited 0). muster is PUBLIC, so its
+    # client can be FETCHED and pinned by revision, and that entire class is
+    # deleted rather than worked around. 🔴 DO NOT "simplify" this to a
+    # `${workspace}/muster` local path: it would re-create the defect, and it
+    # would also enrol muster in `drift-check.sh`'s BUILT-SOURCE ladder (rc 17/18),
+    # which exists only because local-path packages have no other way to be
+    # judged.
+    #
+    # 🔴 THE PIN IS `flake.lock`, NOT THIS URL — the same sentence the cairn input
+    # above carries, for the same reason: muster's flake derives its `version`
+    # from `self.shortRev` precisely so an artefact cannot be mislabelled, which
+    # is worth nothing if the input resolves to whatever `main` holds at build
+    # time. Move it with `nix flake lock --update-input muster` and say in the
+    # commit what moved.
+    #
+    # 🔴 DELIBERATELY *NOT* `inputs.nixpkgs.follows = "nixpkgs"`, and the reason is
+    # upstream's rather than ours — identical in shape to the cairn input's. muster's
+    # flake pins `buildGo125Module`/`go_1_25` against its own `go.mod` directive and
+    # its own CI's toolchain, and its header states that spelling it as
+    # `buildGoModule` + a compiler in `nativeBuildInputs` is a pin that reads as one
+    # and is not. Following devrc's `nixpkgs-unstable` would rebuild the client under
+    # a Go nothing in muster has ever run its suite under, so the thing deployed
+    # would stop being the thing that was tested. The cost is a second nixpkgs in the
+    # lock, evaluated only when something asks for this output.
+    #
+    # ⚠ WHAT COMES WITH THE PACKAGE, so nobody reads it as untested: muster's own
+    # derivation sets `doCheck = true` (its `cmd/muster` + `internal/taskstatus`
+    # suites, including the cobra-tree verb ledger) AND `doInstallCheck = true`
+    # (`tests/verb-ledger.sh` against `$out/bin/muster`, which is the only check
+    # that can see whether the derivation packaged the CLI at all). Both run on a
+    # `home-manager switch`, which is a host that CAN sandbox. 🔴 That is ALSO why
+    # this package is NOT in `gateTools`: devrc's CI pod cannot sandbox a nix build
+    # (PodSecurity `baseline`), so a Go check phase there fails impure and would
+    # make the pytests gate permanently red — the measurement is on `gateTools`'
+    # cairn-go entry below, and this package makes the identical trade.
+    # ------------------------------------------------------------------------
+    muster.url = "github:ZacxDev/muster";
   };
 
-  outputs = { self, nixpkgs, home-manager, nixpkgs-playwright-1_57, nixpkgs-opencode-1_18_29, cairn, ... }:
+  outputs = { self, nixpkgs, home-manager, nixpkgs-playwright-1_57, nixpkgs-opencode-1_18_29, cairn, muster, ... }:
     let
       system = "x86_64-linux";
       # Explicit allowUnfree so unfree pkgs (elixir-ls, playwright browsers)
@@ -240,10 +291,42 @@
         }).opencode;
       };
 
+      # ---------------------------------------------------------------------
+      # muster's own CLI — binary `muster`, flake attribute `muster-cli` (the two
+      # names differ deliberately upstream; see that flake's `mkCLI` header).
+      #
+      # 🔴 AN OVERLAY RATHER THAN AN `extraSpecialArgs` THREAD, AND THE REASON IS
+      # STRUCTURAL, NOT STYLISTIC. `nix/pkgs/tools/default.nix` — the list that
+      # decides what lands on PATH — is imported as `{ pkgs, workspace }` and has
+      # no channel to a flake input at all. The `cairn` input is threaded instead
+      # because its consumer is `nix/home.nix`, which home-manager hands a module
+      # argument; this one's consumer is a plain `import`. An overlay also makes
+      # `pkgs.muster-cli` resolve identically for every consumer at once, which is
+      # the property `opencodePinOverlay` above was written for.
+      #
+      # ⚠ `muster-cli`, NOT `muster`: the attribute name matches upstream's, where
+      # `packages.muster` is reserved for the SERVICE (`cmd/muster-server`). The
+      # BINARY this installs is `muster` — `meta.mainProgram` says so, and
+      # `lib.getExe` resolves through that, not through `pname`.
+      #
+      # ⚠ IT CANNOT EVALUATE TO `null` — unlike mention-review/stt-voice/oc-sent-tui
+      # above, whose derivations yield null when they cannot read a version out of
+      # their Go source. muster's flake DERIVES its version from the git revision
+      # (`self.shortRev`), so there is no unparseable-source state to model and the
+      # consumer needs no null filter. Said explicitly because the three siblings
+      # all need one and a reader will look for it.
+      # ---------------------------------------------------------------------
+      musterCliOverlay = final: _prev: {
+        muster-cli = muster.packages.${system}.muster-cli;
+      };
+
       pkgs = import nixpkgs {
         inherit system;
         config.allowUnfree = true;
-        overlays = [ mentionReviewOverlay sttVoiceOverlay ocSentTuiOverlay opencodePinOverlay ];
+        overlays = [
+          mentionReviewOverlay sttVoiceOverlay ocSentTuiOverlay opencodePinOverlay
+          musterCliOverlay
+        ];
       };
       # Same allowUnfree treatment for the frozen 1.57 nixpkgs — the browser
       # bundle is unfree there too, and an --impure fallback would make the

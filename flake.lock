@@ -38,6 +38,24 @@
         "type": "github"
       }
     },
+    "muster": {
+      "inputs": {
+        "nixpkgs": "nixpkgs_2"
+      },
+      "locked": {
+        "lastModified": 1790892390,
+        "narHash": "sha256-tdUi+c62TM6nlgsJnK72/gJFyZhfhM7oNs+Q8v0Ztjg=",
+        "owner": "ZacxDev",
+        "repo": "muster",
+        "rev": "4b5d1280ef830396f4d494a353970f3e15d11a5d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ZacxDev",
+        "repo": "muster",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1788746152,
@@ -88,6 +106,22 @@
     },
     "nixpkgs_2": {
       "locked": {
+        "lastModified": 1788746152,
+        "narHash": "sha256-RaKngusl5I8pNi8RfrVvsHq3NZe7eFWzDlb01+hEVqY=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "42f17a57f4f6e33b3de3dca0a2a5ea5233169d02",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_3": {
+      "locked": {
         "lastModified": 1790178388,
         "narHash": "sha256-kK3t7gwoz4Nx8RF46cs1Xz/skKNcK7y3KYP+gGqX6W8=",
         "owner": "NixOS",
@@ -106,7 +140,8 @@
       "inputs": {
         "cairn": "cairn",
         "home-manager": "home-manager",
-        "nixpkgs": "nixpkgs_2",
+        "muster": "muster",
+        "nixpkgs": "nixpkgs_3",
         "nixpkgs-opencode-1_18_29": "nixpkgs-opencode-1_18_29",
         "nixpkgs-playwright-1_57": "nixpkgs-playwright-1_57"
       }

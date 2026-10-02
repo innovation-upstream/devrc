@@ -35,6 +35,28 @@ if str(LIB) not in sys.path:
 
 import cairn_who as W  # noqa: E402
 
+#: 🔴 WHICH TASK CLI `fetch_task` RESOLVES IS PINNED FOR THIS WHOLE MODULE, AND IT HAS
+#: TO BE, BECAUSE THE ANSWER DIFFERS BETWEEN THE TWO TIERS. `fetch_task` now asks
+#: `resolve_task_cli()` (shared, `scripts/lib/clawgate_tasks.py`) which binary to run —
+#: and on the DEV HOST `clawgatectl` is installed while in the NIX SANDBOX neither
+#: client is. Left to the real resolver, every `fetch_task` case here would resolve a
+#: name on one tier and raise "no task CLI is on PATH" on the other: a suite green on a
+#: dev host and red in the authoritative tier, which is the two-tier trap `claude/
+#: RULES.md` names. The autouse fixture below makes the resolution deterministic in both.
+#:
+#: `clawgatectl` rather than `muster` is deliberate: these cases assert EXIT-CODE
+#: classification and message text, and pinning the fallback name means the messages this
+#: module reads are the ones a reader of them today would actually see on a host that has
+#: not switched yet. The PREFERENCE itself is measured separately below, and the shared
+#: resolver's own both-legs battery is in `test_task_cli_resolver.py`.
+PINNED_FETCH_CLI = "clawgatectl"
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_task_cli(monkeypatch):
+    monkeypatch.setattr(W, "_resolve_task_cli", lambda: PINNED_FETCH_CLI)
+
+
 # Invented, and deliberately shaped like the real thing.
 FAKE_UUID = "11111111-2222-4333-8444-555555555555"
 FAKE_UUID_2 = "66666666-7777-4888-8999-000000000000"
@@ -567,6 +589,101 @@ def test_fetch_task_refuses_an_empty_id_before_shelling_out():
         with pytest.raises(W.WhoError):
             W.fetch_task(bad, runner=runner)
     assert not called, "an empty id reached the network"
+
+
+# --------------------------------------------------------------------------- #
+# WHICH BINARY `fetch_task` RUNS — the preference, both legs
+# --------------------------------------------------------------------------- #
+def _argv_capturing_runner(seen):
+    def runner(cmd, timeout):
+        seen.append(list(cmd))
+        return 0, '{"id": 42}', ""
+    return runner
+
+
+@pytest.mark.parametrize("on_path,expect", [
+    (("muster", "clawgatectl"), "muster"),
+    (("clawgatectl",), "clawgatectl"),
+    (("muster",), "muster"),
+])
+def test_fetch_task_RESOLVES_the_binary_and_prefers_muster(monkeypatch, on_path, expect):
+    """🔴 BOTH LEGS, READ OFF ARGV[0]. `fetch_task` used to open-code
+    `["clawgatectl", "task", "get", …]`, so on a host carrying only `muster` it raised
+    `WhoError: clawgatectl is not on PATH` through `_run`'s FileNotFoundError arm — a
+    diagnosis naming the subsystem that was never missing.
+
+    LEG 1 (`muster` present) is the repoint itself: the client that answers is the one
+    whose provenance headers the board records, and `clawgatectl`'s are the ones muster
+    did not read for six days. LEG 2 (`muster` absent) is what keeps `cairn-who` working
+    on a host whose `home-manager switch` has not landed.
+
+    The REAL resolver runs here — `_resolve_task_cli` is monkeypatched only in its
+    `which`-equivalent, by overriding the module's binding with one driven off
+    `on_path` — so this exercises the resolution step rather than asserting around it.
+    """
+    monkeypatch.setattr(
+        W, "_resolve_task_cli",
+        lambda: next((n for n in W._TASK_CLI_NAMES if n in on_path), None))
+    seen = []
+    W.fetch_task("42", runner=_argv_capturing_runner(seen))
+    assert seen and seen[0][0] == expect, seen
+    assert seen[0][1:] == ["task", "get", "42"], seen
+
+
+def test_fetch_task_REFUSES_when_no_task_CLI_resolves(monkeypatch):
+    """🔴 `None`, not a guessed name. A resolver that invented one would shell out to a
+    binary that does not exist and the error would blame PATH for the wrong thing; a
+    `fetch_task` that proceeded with `None` as argv[0] would raise a TypeError nobody
+    can read. The message must NAME the ledger it tried, or the operator cannot tell
+    "nothing installed" from "the client failed"."""
+    monkeypatch.setattr(W, "_resolve_task_cli", lambda: None)
+    called = []
+
+    with pytest.raises(W.WhoError) as exc:
+        W.fetch_task("42", runner=_argv_capturing_runner(called))
+    assert not called, "it shelled out with no resolved binary"
+    msg = str(exc.value)
+    for name in W._TASK_CLI_NAMES:
+        assert name in msg, (name, msg)
+
+
+def test_the_module_takes_the_LEDGER_from_the_shared_module_not_its_own_copy():
+    """🔴 ONE RULE, ONE PLACE — asserted, not promised. `cairn_who` imports
+    `TASK_CLI_NAMES` and `resolve_task_cli` by explicit path out of
+    `scripts/lib/clawgate_tasks.py`; a private tuple here would be the N-th copy that
+    goes stale, and its staleness is SILENT (a client that IS installed reported as
+    absent).
+
+    Structural half: no CODE string constant in `cairn_who.py` spells either client's
+    name. Prose is exempt — the file discusses both at length — which is the same
+    distinction `test_clawgate_predicate_single_source.py` draws.
+    """
+    import importlib.machinery
+    import importlib.util
+    path = LIB / "clawgate_tasks.py"
+    loader = importlib.machinery.SourceFileLoader("_cw_shared", str(path))
+    spec = importlib.util.spec_from_file_location("_cw_shared", str(path), loader=loader)
+    shared = importlib.util.module_from_spec(spec)
+    loader.exec_module(shared)
+    assert tuple(W._TASK_CLI_NAMES) == tuple(shared.TASK_CLI_NAMES)
+    code = _code_strings(LIB / "cairn_who.py")
+    offenders = [s for s in code if s in set(shared.TASK_CLI_NAMES)]
+    assert offenders == [], (
+        "cairn_who.py re-spells %r in CODE — take the ledger from "
+        "scripts/lib/clawgate_tasks.TASK_CLI_NAMES instead." % sorted(set(offenders)))
+
+
+def test_the_POSITIVE_CONTROL_for_that_structural_half(tmp_path):
+    """Without it, an empty offender list is indistinguishable from `_code_strings`
+    wired to nothing — and the control for THAT helper lives elsewhere in this file, so
+    this one pins the pairing: a CODE occurrence of a client name is found, the same
+    name in a DOCSTRING is not."""
+    in_code = tmp_path / "copy.py"
+    in_code.write_text('NAMES = ("muster", "clawgatectl")\n')
+    assert "muster" in _code_strings(in_code)
+    in_prose = tmp_path / "prose.py"
+    in_prose.write_text('"""Runs muster task get."""\nX = 1\n')
+    assert "muster" not in _code_strings(in_prose)
 
 
 def test_fetch_task_rejects_non_json_rather_than_returning_a_blank():

@@ -632,9 +632,25 @@ class TestDriftComputation:
 # --------------------------------------------------------------------------- #
 # §4 the CLAWGATE block inside resume-state.sh — end to end
 # --------------------------------------------------------------------------- #
+#: 🔴 EVERY TASK CLI THE SUBJECT MAY RESOLVE, in the shared ledger's order. Spelled
+#: here as LITERALS rather than imported from `scripts/lib/clawgate_tasks.py`: a harness
+#: that derives its expectation from the code under test asserts only that the code
+#: agrees with itself. The two-way pin between this repo's python and shell ledgers
+#: lives in `scripts/tests/test_task_cli_resolver.py`, which is also where the
+#: resolver's own both-legs battery is; what THIS file owns is the subject —
+#: `resume-state.sh` — actually resolving one and reporting WHICH.
+TASK_CLIS = ("muster", "clawgatectl")
+
+
 @pytest.fixture
 def stubs(tmp_path_factory):
-    """`clawgatectl` (answerable) plus `gh`/`kubectl`/`curl` tripwires."""
+    """Both task CLIs (answerable, and each logs its OWN name) plus `gh`/`kubectl`/`curl`
+    tripwires.
+
+    🔴 BOTH, AND EACH NAMING ITSELF IN THE LOG. With only one stub installed the
+    preference is untestable: "a client answered" is satisfied by either, so the log line
+    is the only thing that identifies which binary the subject chose.
+    """
     d = tmp_path_factory.mktemp("clawgate-stubbin")
     log = d / "invocations.log"
     for name in ("kubectl", "curl"):
@@ -647,12 +663,13 @@ def stubs(tmp_path_factory):
         'if [ -n "${STUB_GH_JSON:-}" ]; then printf "%s\\n" "$STUB_GH_JSON"; exit 0; fi\n'
         'exit 1\n'
     ))
-    write_exec(
-        d / "clawgatectl",
-        'printf "clawgatectl %s\\n" "$*" >> "$STUB_LOG"\n'
-        'if [ "${STUB_CG_RC:-0}" != 0 ]; then exit "$STUB_CG_RC"; fi\n'
-        'cat "$STUB_CG_JSON"\n',
-    )
+    for cli in TASK_CLIS:
+        write_exec(
+            d / cli,
+            'printf "%s %%s\\n" "$*" >> "$STUB_LOG"\n' % cli
+            + 'if [ "${STUB_CG_RC:-0}" != 0 ]; then exit "$STUB_CG_RC"; fi\n'
+            'cat "$STUB_CG_JSON"\n',
+        )
     return d, log
 
 
@@ -736,6 +753,12 @@ def _sandbox_bin(root: Path) -> Path:
     host while the nix sandbox (which has no clawgatectl) measured the intended
     one. Two tiers, opposite blind spots. A curated PATH makes both tiers run
     the same case.
+
+    🔴 AND IT IS NOW TWO BINARIES, NOT ONE. `muster` lands on PATH with the same
+    `home-manager switch` that deploys this script, so the moment that switch runs on
+    this host the no-client case would silently start measuring a live call again —
+    exactly the defect above, in the new client's costume. The assertion below names
+    the whole ledger rather than one spelling.
     """
     d = root / "sandbox-bin"
     if d.exists():
@@ -749,21 +772,32 @@ def _sandbox_bin(root: Path) -> Path:
     # to be a subset of the enumerated list, and clawgatectl unreachable from
     # it. This is the justification recorded in PINNED_PATH_CLOBBERS.
     assert set(p.name for p in d.iterdir()) <= set(_SANDBOX_TOOLS)
-    assert not shutil.which("clawgatectl", path=str(d)), "the sandbox bin leaked clawgatectl"
+    for cli in TASK_CLIS:
+        assert not shutil.which(cli, path=str(d)), "the sandbox bin leaked %s" % cli
     return d
 
 
 def run_resume(repo: Path, stubs, *, task: dict | None = None, cg_rc: int = 0,
-               drop_clawgatectl: bool = False) -> str:
+               drop_clawgatectl: bool = False, clients=None) -> str:
+    """`clients` is which task CLIs exist on this run's PATH (default: all of them).
+    `drop_clawgatectl` is kept as the spelling for "none of them", because that is what
+    it has always meant to its callers — the case where no client is installed at all.
+    """
     d, log = stubs
     env = _git_env(repo)
-    if drop_clawgatectl:
-        # Stubs FIRST (gh/kubectl/curl tripwires still apply), then a curated
-        # bin with no clawgatectl in it and nothing else on PATH at all.
-        nocg = repo.parent / "bin-no-clawgatectl"
+    if clients is None:
+        clients = () if drop_clawgatectl else TASK_CLIS
+    else:
+        assert not drop_clawgatectl, "pass one or the other, not both"
+    if set(clients) != set(TASK_CLIS):
+        # Stubs FIRST (gh/kubectl/curl tripwires still apply), then a curated bin with
+        # NO task client in it and nothing else on PATH at all. The directory name
+        # carries the selection, so two cases in one test session do not share a dir.
+        tag = "-".join(clients) or "none"
+        nocg = repo.parent / ("bin-clients-" + tag)
         nocg.mkdir(exist_ok=True)
         for f in d.iterdir():
-            if f.name != "clawgatectl" and f.is_file():
+            if f.is_file() and (f.name not in TASK_CLIS or f.name in clients):
                 shutil.copy2(f, nocg / f.name)
         env["PATH"] = f"{nocg}{os.pathsep}{_sandbox_bin(repo.parent)}"
     else:
@@ -870,12 +904,70 @@ class TestClawgateBlock:
         out = run_resume(make_repo(tmp_path, fm("193")), stubs, cg_rc=rc)
         assert gaps(out), f"exit {rc} produced no gap: {drift_lines(out)}"
 
-    def test_clawgatectl_missing_from_PATH_is_a_gap(self, tmp_path, stubs):
-        """🔴 The nix sandbox and any host without it land here. "The tool is not
-        installed" is the case most likely to be read as "nothing to report"."""
+    def test_NO_task_CLI_on_PATH_is_a_gap(self, tmp_path, stubs):
+        """🔴 The nix sandbox and any host without either client land here. "The tool is
+        not installed" is the case most likely to be read as "nothing to report".
+
+        🔴 NEITHER, NOT just `clawgatectl`. With a resolver in front of the call, a test
+        that removed one client would now measure the FALLBACK succeeding — green, and
+        about the opposite thing. The gap also has to NAME the ledger it tried, or the
+        operator cannot tell "no client" from "the client failed"."""
         out = run_resume(make_repo(tmp_path, fm("193")), stubs, drop_clawgatectl=True)
         assert any("not on PATH" in g for g in gaps(out)), drift_lines(out)
+        for cli in TASK_CLIS:
+            assert any(cli in g for g in gaps(out)), (cli, gaps(out))
         assert CLEAN_BILL not in "\n".join(drift_lines(out))
+
+    def test_the_block_PREFERS_MUSTER_when_both_clients_are_installed(self, tmp_path,
+                                                                     stubs):
+        """🔴 LEG 1, MEASURED OFF THE INVOCATION LOG rather than off the digest — both
+        stubs return the same JSON, so the rendered block cannot tell them apart and the
+        log line is the only witness to which binary ran.
+
+        Why the preference matters here and is not cosmetic: the client that answers is
+        the one whose provenance headers the board records, and `clawgatectl`'s were the
+        ones muster did not read for six days."""
+        _d, log = stubs
+        if log.exists():
+            log.unlink()
+        run_resume(make_repo(tmp_path, fm("193")), stubs, task=IN_FLIGHT)
+        text = log.read_text()
+        assert re.search(r"^muster task get 193$", text, re.M), text
+        assert not re.search(r"^clawgatectl task get 193$", text, re.M), (
+            "the fallback ran as well as, or instead of, the preferred client:\n" + text)
+
+    def test_the_block_FALLS_BACK_to_clawgatectl_when_muster_is_absent(self, tmp_path,
+                                                                      stubs):
+        """🔴 LEG 2, AND IT IS WHY THE FALLBACK EXISTS. `/resume` runs at the start of
+        every session on two machines. On a host whose `home-manager switch` has not
+        landed there is no `muster`, and a resolver without this leg would turn that into
+        a `!` gap on every resume — honest about being a gap, and still a reconciliation
+        lost on a machine that has a working client.
+
+        The digest must come back CLEAN here, not merely gap-free: "it did not crash" is
+        a weaker claim than "it reconciled"."""
+        _d, log = stubs
+        if log.exists():
+            log.unlink()
+        out = run_resume(make_repo(tmp_path, fm("193"),
+                                   commit_date="2026-08-01T00:00:00 +0000"),
+                         stubs, task=IN_FLIGHT, clients=("clawgatectl",))
+        text = log.read_text()
+        assert re.search(r"^clawgatectl task get 193$", text, re.M), text
+        assert block(out, "CLAWGATE") == [
+            "task #193  status=in_progress  comments=1 (0 newer than the doc, by last commit)"
+        ], block(out, "CLAWGATE")
+        assert not gaps(out), gaps(out)
+
+    def test_the_gap_NAMES_the_client_that_failed(self, tmp_path, stubs):
+        """With two clients in play, "exit 6" is only actionable once the operator knows
+        WHICH one exited. Driven on the fallback leg as well, so the message is not
+        hardcoded to the preferred name."""
+        for clients, expect in ((TASK_CLIS, "muster"), (("clawgatectl",), "clawgatectl")):
+            out = run_resume(make_repo(tmp_path / expect, fm("193")), stubs, cg_rc=6,
+                             clients=clients)
+            joined = "\n".join(gaps(out))
+            assert "%s exit 6" % expect in joined, (expect, joined)
 
     def test_a_status_outside_the_vocabulary_is_a_gap(self, tmp_path, stubs):
         """🔴 FIXTURE-DERIVED. No other fixture supplies a status outside the four
@@ -1311,12 +1403,17 @@ class TestClawgateBlock:
         """POSITIVE CONTROL on the assertion above: a counter wired to nothing
         reports the same zero as a clean run. The subject DOES invoke
         `clawgatectl` through the same log, so the log is proven writable by the
-        subject itself, not merely by a direct exec."""
+        subject itself, not merely by a direct exec.
+
+        🔴 The line it looks for is the PREFERRED client's, because that is the one the
+        subject resolves when both are installed. A pattern naming either would be
+        satisfied by the fallback firing, which is a different (and wrong) run."""
         _d, log = stubs
         if log.exists():
             log.unlink()
         run_resume(make_repo(tmp_path, fm("193")), stubs, task=IN_FLIGHT)
-        assert re.search(r"^clawgatectl task get 193$", log.read_text(), re.M), log.read_text()
+        assert re.search(r"^%s task get 193$" % TASK_CLIS[0], log.read_text(), re.M), \
+            log.read_text()
 
 
 # --------------------------------------------------------------------------- #
@@ -2895,7 +2992,11 @@ HANDOFF_PINS: list[tuple[str, str]] = [
 RESUME_PINS: list[tuple[str, str]] = [
     ("CLAWGATE", "the block is named in the digest the step describes"),
     ("clawgate-task:", "the reader knows which field it reconciles"),
-    ("clawgatectl task get", "how the task is fetched, so a failure is legible"),
+    # 🔴 RE-PINNED 2026-10-01: the script resolves the binary now (`muster` preferred,
+    # `clawgatectl` the fallback), so the doc must teach the VERB rather than one
+    # spelling — a reader handed `clawgatectl task get` on a muster-only host is handed
+    # a command that does not exist.
+    ("task get", "how the task is fetched, so a failure is legible"),
     ("UNKNOWN", "🔴 a dead clawgate is stated as unknown, never as no drift"),
 ]
 

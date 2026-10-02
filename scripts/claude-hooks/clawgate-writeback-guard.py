@@ -19,19 +19,23 @@ ever issued: the cards never left `open`. A guard on a command that was never ru
 observes nothing. The one act that provably DID happen in both failures is the read,
 so the read is what arms this hook:
 
-    clawgatectl task get <N>          # the SKILL's own step 1
-    muster task get <N>               # the same verb on the extracted CLI (below)
-    curl … /api/tasks/<N>[/…]         # the same read, before clawgatectl existed
+    muster task get <N>               # the SKILL's own step 1, on muster's own CLI
+    clawgatectl task get <N>          # the same verb on the older client (below)
+    curl … /api/tasks/<N>[/…]         # the same read, before either CLI existed
     curl … /api/v1/tasks/<N>[/…]      # …and a versioned mount, if muster picks one
 
-🔴 THE TRIGGER NAMES TWO BINARIES BECAUSE THE RENAME IS A SILENT KILL. The tasks half
-of clawgate is being extracted into `muster` (`github.com/ZacxDev/muster`), CLI binary
-`muster`, same verbs. Every arming pattern here used to spell `clawgatectl` literally,
-so after the rename `tracked_ids` would stay empty and Stop would return before
-reaching any verdict — not a block, not a notice, NOTHING, which is also exactly what
-a correctly-written-back session looks like. Both spellings therefore land BEFORE the
-rename, from one tuple (`TASK_CLI_NAMES`) that also drives which clients the live read
-tries. The live read additionally honours `CLAWGATE_TASK_API_URL` from the SAME
+🔴 THE TRIGGER NAMES TWO BINARIES BECAUSE DROPPING EITHER IS A SILENT KILL. The task
+half of clawgate was extracted into `muster` (`github.com/ZacxDev/muster`), whose own
+CLI binary is `muster` with the same verbs; `clawgatectl` — a client built from a
+DIFFERENT and PRIVATE repo — still speaks them too, and is still the ONLY client for
+the ROUTER half. Every arming pattern here once spelled `clawgatectl` literally, so a
+rename would have left `tracked_ids` empty and Stop returning before any verdict — not
+a block, not a notice, NOTHING, which is also exactly what a correctly-written-back
+session looks like. Both spellings therefore arm it, and the ledger they come from
+(`scripts/lib/clawgate_tasks.TASK_CLI_NAMES`, mirrored here — see `TASK_CLI_NAMES` and
+`task_cli_names`) also decides which client the live read tries FIRST: `muster`, with
+`clawgatectl` as the fallback, so a host whose switch has not landed can still MEASURE.
+The live read additionally honours `CLAWGATE_TASK_API_URL` from the SAME
 `~/.claude/clawgate.env`; `CLAWGATE_API_URL` is NOT repointed, because
 `clawgate-hook.sh` reads it for `/api/send` — permission routing, which stays. That
 name is NOT spelled in this file: `scripts/lib/clawgate_tasks.TASK_API_URL_VARS` owns
@@ -519,7 +523,7 @@ def _sh():
 # Comments authored by anything else (a human on the board, `api`, `drafter`) are
 # not this agent writing back. The allowlist that produces this value lives in the
 # server (`X-Clawgate-Source` -> {extension, api, drafter, repo-cos, claude-code});
-# `clawgatectl task comment` defaults to exactly this one.
+# both clients' `task comment` default to exactly this one.
 AGENT_AUTHOR = "claude-code"
 
 # A card in either of these is already handed over — someone closed it, and nagging
@@ -680,6 +684,23 @@ def task_api_url_vars():
     return tuple(_cg().TASK_API_URL_VARS)
 
 
+def task_cli_names():
+    """The ordered task-CLI preference, from the ONE module that defines it.
+
+    🔴 `muster` FIRST, `clawgatectl` as the FALLBACK — and this function is what makes
+    that a single decision rather than six. The reasoning (muster's API with a client
+    muster's gates cannot see; six days of comments attributed to `api`; why the old
+    client must stay reachable) is on `TASK_CLI_NAMES` in
+    `scripts/lib/clawgate_tasks.py`.
+
+    ⚠ NOT a duplicate of the module-level `TASK_CLI_NAMES` mirror above — see that
+    constant's header for why the hot path keeps a frozen copy and why the two are
+    pinned two-way. Everything that RESOLVES or INVOKES a binary reads this
+    function; only the arming regex reads the mirror.
+    """
+    return tuple(_cg().TASK_CLI_NAMES)
+
+
 # Same shape for the bearer token: muster may reuse clawgate's hook token or mint its
 # own (unsettled in the extraction plan), so BOTH are supported and the specific one
 # wins. Nothing here ever prints a token.
@@ -729,10 +750,24 @@ FLOW_REPO = "devrc/claude/skills/clawgate/flows/task-pickup.md"
 # correctly-written-back session looks like. Widened BEFORE the rename so no window
 # exists in which it is inert.
 #
-# 🔴 ONE TUPLE, THREE CONSUMERS. TASK_CLI_NAMES drives this regex AND the ordered
-# client list `_read_task` tries AND nothing else — a name repeated at N sites goes
-# stale at N-1 of them, and here every staleness is a silent allow.
-TASK_CLI_NAMES = ("clawgatectl", "muster")
+# 🔴 THIS TUPLE IS A MIRROR OF `scripts/lib/clawgate_tasks.TASK_CLI_NAMES`, AND THAT
+# MODULE IS THE AUTHORITY. `_read_task` below walks `task_cli_names()`, which reads
+# the shared ledger, so the PREFERENCE ORDER has exactly one definition and this copy
+# cannot decide it. What this copy is for is the regex two lines down, which is built
+# at IMPORT and is on the PostToolUse hot path — `task_read_ids` runs on every single
+# tool call, and the shared module's deployed copy sits on a read-only nix-store path
+# where `__pycache__` can never be written, so loading it here would recompile 40 KB
+# of python from source per call (measured on this host: ~3 ms cold, ~0.25 ms warm;
+# the hook's whole ledger design is lazy for exactly this reason — see `_cg`).
+#
+# 🔴 SO IT IS PINNED TWO-WAY, AS A SEQUENCE, BY
+# `test_the_cli_name_ledger_is_pinned_in_BOTH_directions` AND
+# `test_the_cli_ledger_is_the_SHARED_one_in_ORDER`. A mirror nothing compares is just
+# a second place for the names to rot: it fails when either side GROWS, SHRINKS, or
+# REORDERS. Order is asserted even though the regex does not care about it, because a
+# mirror that is allowed to disagree about order is a mirror a reader cannot trust to
+# say what runs first.
+TASK_CLI_NAMES = ("muster", "clawgatectl")
 _TASK_CLI_ALT = "|".join(TASK_CLI_NAMES)
 TASK_GET_RX = re.compile(r"\b(?:" + _TASK_CLI_ALT + r")\s+task\s+get\s+(\d+)\b")
 
@@ -1408,7 +1443,7 @@ def task_endpoint(task_id, env_path=CLAWGATE_ENV):
 
 
 def _via_cli(binary, task_id, timeout, api_url=None):
-    """One task read through one CLI binary — `clawgatectl` or `muster`.
+    """One task read through one CLI binary — `muster` or `clawgatectl`.
 
     🔴 `--api-url` is passed ONLY for the task-specific key (the FIRST entry in the
     shared `TASK_API_URL_VARS` ledger), never for the generic
@@ -1432,22 +1467,22 @@ def _via_cli(binary, task_id, timeout, api_url=None):
 
 
 def _via_curl(task_id, timeout, env_path=CLAWGATE_ENV, why=None):
-    """The fallback for a host with no task CLI on PATH.
+    """The fallback for a host where NEITHER task CLI answered.
 
     That used to say "the laptop today — its homelab-talos checkout predates the
     command, so nix does not build it", and that is now STALE: `clawgatectl` was
     verified present on BOTH hosts. The fallback stays anyway — it costs nothing on a
-    host that has the binary (it is only reached once `clawgatectl` has failed or is
-    absent), and "the client is missing" is not the only way to arrive here: a
-    `clawgatectl` that exists and exits non-zero lands here too.
+    host that has a working client (it is only reached once EVERY entry in
+    `task_cli_names()` has failed or is absent), and "the client is missing" is not
+    the only way to arrive here: a client that exists and exits non-zero lands here
+    too.
 
     🔴 The token goes in on STDIN via `curl -K -`, never in argv: an argv is visible
     to every process on the box through /proc, and this runs after every turn.
 
-    `why` carries the FIRST client's failure into this one's message. Without it a
-    `clawgatectl` that exists but exits non-zero reports as "no clawgatectl" — a
-    diagnosis pointing at the wrong subsystem, which is the shape that has cost this
-    repo whole sessions.
+    `why` carries EVERY client's failure into this one's message. Without it a client
+    that exists but exits non-zero reports as absent — a diagnosis pointing at the
+    wrong subsystem, which is the shape that has cost this repo whole sessions.
     """
     conf = _env_file(env_path)
     # 🔴 The TASKS-specific keys win, and `CLAWGATE_API_URL` is the FALLBACK, not the
@@ -1531,8 +1566,12 @@ def _read_task(task_id, timeout, env_path):
     # "first client: …" was the whole diagnosis; with two, reporting only one of them
     # points at the wrong subsystem — the exact shape that has cost this repo whole
     # sessions, one client wider.
+    # 🔴 `task_cli_names()`, NOT the module-level mirror — the SHARED ledger decides
+    # which client is tried first, and the first one that answers is the one whose
+    # provenance headers the board records. See `task_cli_names`.
+    clis = task_cli_names()
     whys = []
-    for binary in TASK_CLI_NAMES:
+    for binary in clis:
         try:
             return _via_cli(binary, task_id, timeout, api_url=api_url)
         except LiveReadError as e:
@@ -1551,7 +1590,7 @@ def _read_task(task_id, timeout, env_path):
     except FileNotFoundError:
         raise LiveReadError("no task client is available: none of %s, and curl is "
                             "absent too (%s)"
-                            % (", ".join(TASK_CLI_NAMES), "; ".join(whys)))
+                            % (", ".join(clis), "; ".join(whys)))
     except subprocess.TimeoutExpired:
         raise LiveReadError("curl timed out after %ss" % timeout)
     except Exception as e:                # noqa: BLE001
@@ -1676,6 +1715,34 @@ def writeback_state(task, first_read_ts, skew=CLOCK_SKEW_ALLOWANCE_SECS,
 # --------------------------------------------------------------------------- #
 # The text the operator's model actually reads
 # --------------------------------------------------------------------------- #
+def prescribed_cli():
+    """The binary the block/notice text TELLS the model to run.
+
+    🔴 THE PREFERRED ONE, DERIVED — never a literal. These strings are the only place
+    in the repo that puts a task-write command in front of a model, so a name spelled
+    here is a name that silently keeps prescribing a client after the preference
+    moves. It is `task_cli_names()[0]`, i.e. the head of the SHARED ledger.
+
+    ⚠ IT PRESCRIBES THE PREFERRED CLIENT, NOT THE ONE THE LIVE READ HAPPENED TO USE.
+    Those can differ (muster absent → the read fell back to clawgatectl), and the
+    preferred one is still the right thing to print: the fallback exists so the
+    MEASUREMENT survives a half-switched host, not so the host's state becomes the
+    recommendation. A model handed a name it does not have gets `command not found`
+    and can read the other off `$PATH`; a model handed the deprecated name writes
+    through the client whose provenance headers the board mis-attributed for six days.
+
+    The `except` is not defensive padding: every caller is on the Stop path, where
+    `_read_task` has already forced `_cg()`, so it cannot normally fire. It covers a
+    direct call with an injected reader (the suite does this), and it falls back to
+    the module-level MIRROR — pinned two-way to the shared ledger, so the fallback
+    cannot be a name the ledger disagrees with.
+    """
+    try:
+        return task_cli_names()[0]
+    except Exception:                     # noqa: BLE001 — see the docstring
+        return TASK_CLI_NAMES[0]
+
+
 def dismiss_cmd(task_id, session_id):
     """The ONE command that deterministically clears a task from this session.
 
@@ -1708,9 +1775,9 @@ def missing_text(task_id, first_read_ts, session_id=""):
         "#194) already shipped this way: the card stayed `open` with zero comments and "
         "was re-dispatched and paid for twice.\n"
         "Write it back before this turn ends:\n"
-        "  clawgatectl task comment %(id)d --body \"<what shipped, evidence per "
+        "  %(cli)s task comment %(id)d --body \"<what shipped, evidence per "
         "acceptance criterion, and an explicit NOT-verified list>\"\n"
-        "  clawgatectl task status %(id)d ready_for_review\n"
+        "  %(cli)s task status %(id)d ready_for_review\n"
         "Use `complete` instead of `ready_for_review` ONLY when the task body carried "
         "a `## Acceptance criteria` heading AND every criterion is validated — see the "
         "clawgate skill's status gate.\n"
@@ -1726,6 +1793,7 @@ def missing_text(task_id, first_read_ts, session_id=""):
         "  %(dismiss)s"
         % {"id": int(task_id), "ts": first_read_ts,
            "dismiss": dismiss_cmd(task_id, session_id),
+           "cli": prescribed_cli(),
            "flow": FLOW_DEPLOYED, "flow_repo": FLOW_REPO}
     )
 
@@ -1749,8 +1817,8 @@ def authored_text(task_id, session_id=""):
         "is terminal and outranks `worked`, so a file-then-work session still reads as "
         "`created` and this hook cannot tell the two apart. If you worked it, write it "
         "back yourself:" % task_id,
-        '  clawgatectl task comment %d --body "<what shipped, evidence per acceptance '
-        'criterion, and an explicit NOT-verified list>"' % task_id,
+        '  %s task comment %d --body "<what shipped, evidence per acceptance '
+        'criterion, and an explicit NOT-verified list>"' % (prescribed_cli(), task_id),
         "",
         "Do NOT flip the status just to quiet this line — `ready_for_review` pushes a "
         "notification to Zach, and on a task nobody has started that is a false claim.",
@@ -1805,13 +1873,14 @@ def unknown_text(task_id, first_read_ts, error, session_id="", endpoint=None):
         "than the board being down, and it will keep reporting UNVERIFIED for every "
         "task until it is pointed at the right one.\n"
         "If this session did work on task %(id)d, write it back:\n"
-        "  clawgatectl task comment %(id)d --body \"…\"\n"
-        "  clawgatectl task status %(id)d ready_for_review\n"
+        "  %(cli)s task comment %(id)d --body \"…\"\n"
+        "  %(cli)s task status %(id)d ready_for_review\n"
         "If it did not, silence it for this session with:\n"
         "  %(dismiss)s"
         % {"id": int(task_id), "ts": first_read_ts, "err": _scrub(str(error), 160),
            "endpoint": endpoint or "unresolved (the reader failed before one was bound)",
            "tasks_var": task_api_url_vars()[0], "env": CLAWGATE_ENV,
+           "cli": prescribed_cli(),
            "dismiss": dismiss_cmd(task_id, session_id)}
     )
 

@@ -2,8 +2,13 @@
 
 ⚠ **The board is `muster`'s** (`http://192.168.50.250:30306`, env `CLAWGATE_TASK_API_URL`) — every
 `/api/tasks*` and `/agent/task*` route named below, and the `/tasks` UI. The permission router
-(`:30302`) **404s all of them**; see `SKILL.md` → "TWO SERVICES". Every `clawgatectl task …`
-command in this flow resolves the right base by itself — that is the reason to use it over `curl`.
+(`:30302`) **404s all of them**; see `SKILL.md` → "TWO SERVICES". Every `muster task …` command in
+this flow resolves the right base by itself — that is the reason to use it over `curl`.
+
+🔴 **The client is `muster`** — muster's own CLI, packaged from a pinned fetch and on PATH after a
+switch. `clawgatectl` speaks the identical task verbs and is the **fallback** (it is also the ONLY
+client for the router half), so every command below works verbatim with either name in front of it.
+If `muster: command not found`, use `clawgatectl` and say so — do not fall back to `curl`.
 
 **Run this on "read and evaluate clawgate task N", and on "local dispatch".** It is
 enforced: `~/.claude/hooks/clawgate-writeback-guard.py` (PostToolUse watches, Stop
@@ -24,14 +29,14 @@ flow was opened. Everything else about the pickup is here.
 Route-level cites: `task-api.md` → "Notifications".
 
 ```bash
-clawgatectl task get <id>            # 1. READ — body, comments AND sessions are ALL already here
+muster task get <id>                 # 1. READ — body, comments AND sessions are ALL already here
                                      #    (no /comments GET exists; it is 405)
 #  1b. WHO ALREADY TOUCHED IT — free, the read above already returned it:
 #      jq '.sessions[] | select(.role=="worked" or .role=="created")'
 #      A `worked` link from ANOTHER session => say so before doing the work again.
 #  2. EVALUATE and report to Zach. Do NOT flip status yet — see the ordering trap below.
 #  3a. On "local dispatch": settle the acceptance criteria (detector below).
-clawgatectl task comment <id> --body "$(cat <<'EOF'
+muster task comment <id> --body "$(cat <<'EOF'
 **Starting** — host <host>, session <id>.
 Acceptance criteria (AUTHOR-SPECIFIED | DERIVED — not author-specified):
 1. … 2. …
@@ -41,10 +46,10 @@ Assumptions: <the ones that would change the work if wrong>.
 <if DERIVED> These criteria are mine, not yours — object now if they are wrong.
 EOF
 )"                                                # 3b. PRE-START comment, BEFORE the flip
-clawgatectl task status <id> in_progress          # 3c. THEN flip, and work
+muster task status <id> in_progress               # 3c. THEN flip, and work
 #     …4. implement per repo defaults: tests watched to FAIL at base, worktree, PR…
-clawgatectl task comment <id> --body "…"          # 5. ONE completion comment (shape below)
-clawgatectl task status <id> ready_for_review     # 6. …or `complete` — see the gate
+muster task comment <id> --body "…"               # 5. ONE completion comment (shape below)
+muster task status <id> ready_for_review          # 6. …or `complete` — see the gate
 ```
 
 **Step 1b — has someone already done this?** The `sessions` array is the task's thread: which
