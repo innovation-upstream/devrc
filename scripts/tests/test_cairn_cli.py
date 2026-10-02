@@ -43,6 +43,7 @@ REPO = Path(__file__).resolve().parents[2]
 # `cairn` flake pin, so `pinned("<module>")` is where their source now is.
 # One seam for every such test — see `scripts/testlib/cairn_lib.py`.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib import nix_home  # noqa: E402
 from testlib.cairn_lib import PINNED_LIB, pinned  # noqa: E402,F401
 
 sys.path.insert(0, str(REPO / "scripts"))
@@ -1392,9 +1393,15 @@ def test_cairn_is_deployed_from_the_pinned_package_not_a_bare_store_copy():
     assert 'home.file.".local/bin/cairn".source' in nix, (
         "the `cairn` PATH entry is gone from nix/home.nix"
     )
-    # The whole assignment, whatever it spans.
-    head = nix.split('home.file.".local/bin/cairn".source', 1)[1]
-    assignment = head.split(";", 1)[0]
+    # 🔴 RESOLVED THROUGH ONE LEVEL OF `let` INDIRECTION, because the entry is now
+    # bound to a wrapper derivation (`cairnWithReceipt`) rather than spelling the
+    # package path inline. The PROPERTY this test is about — the pinned package is
+    # what ends up on PATH — is unchanged; only the spelling moved, and reading the
+    # bare identifier would report "not deployed from the pinned package" about a
+    # tree that still is. `resolved_source` REFUSES an identifier with no binding,
+    # so a renamed or deleted wrapper fails loudly instead of looking like a
+    # missing package path. See `scripts/testlib/nix_home.py`.
+    assignment = nix_home.resolved_source(nix, 'home.file.".local/bin/cairn".source')
     assert "${cairnPackage}/bin/cairn" in assignment, (
         "`cairn` is not deployed from the pinned flake package's `bin/cairn` "
         "wrapper. A bare `home.file` copy of scripts/cairn resolves __file__ "

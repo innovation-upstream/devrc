@@ -3,6 +3,45 @@ let
   home = config.home.homeDirectory;
   workspace = "${home}/workspace";
 
+  # 🔴 THE PATH `cairn`, WRAPPED SO EVERY INVOCATION LEAVES ONE TELEMETRY ROW.
+  # `activity.events` held **0** rows about cairn against 1,425 invocations proven
+  # to exist in transcripts, so "was a recalled bullet used" could only be answered
+  # by mining prose. `scripts/cairn-receipt.sh` carries the whole contract and the
+  # reasoning; the two facts that belong HERE are why the wrapper is at this seam
+  # and why it is a derivation rather than a plain path:
+  #   * the bare `cairn recall` is ~94% of real traffic (the documented
+  #     `read.sh recall` spelling is 93 of 1,425), and every caller reaches the
+  #     client through PATH — so this is the ONE place that covers all of them;
+  #   * `cairn` is a PUBLIC OSS repo and a host's spool path is not its business,
+  #     while devrc owns this entry outright.
+  #
+  # ⚠ IT IS DELIBERATELY BOUND HERE RATHER THAN INLINE AT THE `home.file` LINE.
+  # The `cairn` / `cairn-who` / `cairn-validate` entries must stay CONTIGUOUS
+  # (`test_peer_host.py::test_the_cairn_home_nix_entries_stay_ADJACENT`), and a
+  # multi-line derivation wedged between them would not add a `home.file` key —
+  # so that guard would stay GREEN while the positional phrases it protects
+  # ("the pair above", "Read all three lines together") drifted apart on screen.
+  # Keeping the entry a one-liner is what keeps the guard's premise true.
+  #
+  # The two `grep`s are build-time assertions, not belt-and-braces:
+  # `--subst-var-by` does NOT fail when its placeholder is absent, so without the
+  # first one a renamed placeholder would ship a script that refuses at RUNTIME on
+  # every `cairn` call, and without the second a failed substitution would too.
+  # A build failure here is strictly better than either.
+  cairnWithReceipt = pkgs.runCommandLocal "cairn-with-receipt" { } ''
+    grep -q '@CAIRN_REAL@' ${../scripts/cairn-receipt.sh} || {
+      echo "cairn-receipt.sh no longer carries the @CAIRN_REAL@ placeholder" >&2
+      exit 1
+    }
+    substitute ${../scripts/cairn-receipt.sh} "$out" \
+      --subst-var-by CAIRN_REAL '${cairnPackage}/bin/cairn'
+    if grep -q '@CAIRN_REAL@' "$out"; then
+      echo "the @CAIRN_REAL@ substitution did not take effect" >&2
+      exit 1
+    fi
+    chmod +x "$out"
+  '';
+
   # ONE copy of the unpacked-MV3-extension deploy that browser-bridge's
   # activation pioneered and discord-embed's block carried as a deliberate
   # second paste. A THIRD extension (claude-usage, 2026-09-19) is the
@@ -1607,7 +1646,22 @@ in
   # ⚠ THE TWO STILL MOVE TOGETHER: delete `cairn-py` and 22 files importing
   # `cairn_pin`, both out-of-store launchers below, and the writer all refuse with
   # `CairnPinUnresolved`. Loud by design, still a failure.
-  home.file.".local/bin/cairn".source = "${cairnPackage}/bin/cairn";
+  #
+  # 🔴 AND IT IS NO LONGER THE PACKAGE BINARY DIRECTLY — IT IS A WRAPPER THAT
+  # RECORDS ONE TELEMETRY ROW AND THEN RUNS IT. See `cairnWithReceipt` in the `let`
+  # above for why this seam, and `scripts/cairn-receipt.sh` for the contract. Two
+  # consequences a reader of THIS line needs:
+  #   * `cairn_pin`'s route 2 still resolves — MEASURED, not reasoned: it does
+  #     `which("cairn")` -> realpath -> `parents[1]/libexec/cairn/lib`, which the Go
+  #     package already failed (it ships `bin/` only), so the fall-through to
+  #     `cairn-py` is the path taken BOTH before and after this change. Verified by
+  #     running `cairn_pin.ensure()` with the wrapper on PATH and getting the same
+  #     lib directory as without it.
+  #   * the wrapper runs the client as a CHILD with fds inherited, so stdout,
+  #     stderr, `isatty()` and SIGPIPE under `| head` are untouched, and the
+  #     client's exit code is this entry's exit code. `read.sh`'s "STDOUT IS THE
+  #     CLIENT'S, BYTE FOR BYTE" still holds.
+  home.file.".local/bin/cairn".source = cairnWithReceipt;
   # 🔴 `cairn-who` — the task -> sessions -> windows -> transcripts resolver, split
   # out of `cairn` because it is a different noun: it touches no store, no cache and
   # none of the store's flags. 🔴 NO LONGER THE SAME DEPLOY MODE AS THE LINE ABOVE,
