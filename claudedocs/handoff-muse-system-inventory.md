@@ -296,45 +296,56 @@ flux unstructured walkers, `handleOpenAPI`.
 
 ## 6. Ranked next steps
 
-🔴 **Numbers 9–24 are the ORIGINAL ranks** — Tier 1 (1–8) is merged and removed,
-and the survivors keep their numbers because rank is half a `claim-work` claim's
-identity. Claim before acting: `claim-work --slug-for <this doc> <rank>`.
+🔴 **Numbers are ORIGINAL ranks** — Tier 1 (1–8) and rank 9 are done and
+removed; survivors keep their numbers because rank is half a `claim-work`
+claim's identity. Claim before acting:
+`claim-work --slug-for <this doc> <rank>`.
+
+**Regression-forcing — WE broke this today**
+
+25. **`muse status <ns>` is BROKEN on every namespace but `muse`, and the
+    wrapper's own comment will send you the wrong way.** `cmd_status` in
+    `$DEVRC/scripts/muse/muse` passes an arbitrary ns (`muse status pods
+    flux-system`, `muse status workloads <ns>`, `muse status flux <ns>`, and the
+    bare `muse status <ns>` fallthrough). Since 22:41Z today each returns
+    `{"error":"namespace not served…"}` `[400]` — correct server behaviour, but
+    the trailing comment enumerates 401 and 404 as "answers, not outages" and
+    says NOTHING about 400, so a policy denial reads as a typo. Fix: handle 400
+    distinctly, name the allowlist in the message, and update the comment.
+    Repo: devrc, file `scripts/muse/muse`.
+    forcing: regression — a live break introduced by today's deploy (#944),
+    in the operator's own CLI.
 
 **Security-forcing — the public exposure, operator-gated where noted**
 
-9. **S2 — code DONE and audited; what remains is DELIVERY, and it is the
-   operator's.** `IN FLIGHT: homelab-infra#942` (head `88c7ff151`). Merge it,
-   then **build and push `harbor.homelab.lan/muse/muse-bridge:0.1.1`** and bump
-   `clusters/homelab/apps/muse/deployment.yaml`. Until that image runs, all 57
-   namespaces stay readable by the token — merging alone changes nothing.
-   Confirm with `kubectl logs -n muse deploy/muse-bridge | grep 'listening on'`:
-   **no `ns-allow=` means the old binary.** The build step is recorded nowhere
-   (rank 20), which is why this cannot be finished from a session.
-   forcing: security — a third-party LLM connector can read every namespace
-   until the new image is actually running.
 16. **S1 — close the origin bypass** in
     `clusters/production/apps/nebula/gateway/muse-bridge-ingress.yaml`: drop the
     `web` entrypoint, add `certResolver: letsencrypt`, add a Cloudflare-only
-    `IPAllowList`. ⚠ **Decide class vs instance** — `muster-ingress.yaml:24-26` is
-    identical. The Cloudflare SSL-mode change to Full (strict) is the operator's.
+    `IPAllowList`. ⚠ **Decide class vs instance** — `muster-ingress.yaml:24-26`
+    is identical. The Cloudflare SSL-mode change to Full (strict) is the
+    operator's. Repo: homelab-infra.
     forcing: security — measured: the Hetzner origin answers cleartext HTTP on
-    :80 and a self-signed cert on :443; the bearer token crosses that leg.
-18. **S5 — delete the four unused RBAC grants** (`clusters/homelab/apps/muse/rbac.yaml:16,19`):
-    `pods/log`, `services`, `namespaces`, `replicasets`. No handler reads any.
+    :80 and a self-signed cert on :443; the bearer token crosses that leg, and
+    it is now the token guarding a working allowlist.
+18. **S5 — delete the four unused RBAC grants**
+    (`clusters/homelab/apps/muse/rbac.yaml:16,19`): `pods/log`, `services`,
+    `namespaces`, `replicasets`. No handler reads any. Repo: homelab-infra.
     forcing: security — `pods/log` across 57 namespaces is one merged handler
     away from a cluster-wide secret read; measured `can-i get pods/log` → yes.
+    ⚠ This is also the arc's closing condition's second clause.
 11. **B2 — rebuild the approval guard structurally.** See the open investigation
-    above; BLOCKED on capturing one live approval card.
+    above; BLOCKED on capturing one live approval card. Repo: devrc.
     forcing: security — it is the wrapper's only security branch and has never
     been positive-controlled.
-19. **M6 — real `http.Server` timeouts + graceful shutdown** (`main.go`),
-    `replicas: 2` + a PDB.
+19. **M6 — real `http.Server` timeouts + graceful shutdown**
+    (`containers/muse-bridge/main.go`), `replicas: 2` + a PDB. Repo:
+    homelab-infra.
     forcing: security — all four timeouts are zero and the origin is directly
     reachable, so pre-auth slowloris reaches a single replica.
 17. **S4 — bound `/v1/nodes`**: `ResourceVersion: "0"` + `Limit`, or drop the
-    cluster-wide pod rollup (`handlers.go:17,55`). ⚠ **The allowlist does NOT
-    cover this route by design** — it takes no `ns`; an audit confirmed
-    `nodeInfo` carries no pod or namespace identity, so it is not a bypass.
+    cluster-wide pod rollup (`handlers.go:17,55`). ⚠ Outside the allowlist BY
+    DESIGN — an audit confirmed `nodeInfo` carries no pod or namespace identity,
+    so it is not a bypass. Repo: homelab-infra.
     forcing: security — 30 req/min × an unbounded 837-pod etcd read, drivable
     from the public internet by one token.
 22. **Audit log — add `client=` and `tokid=`** (`main.go`, the `ServeHTTP` audit
@@ -342,29 +353,30 @@ identity. Claim before acting: `claim-work --slug-for <this doc> <rank>`.
     🔴 **Fix the injection in the same change:** that line interpolates the raw
     `ns` and `r.URL.RequestURI()` with `%s`, so a `%0a` in the query can forge
     log lines in the one surface used for attribution. Found 2026-10-02 while
-    implementing S2; deliberately not changed there, because altering the log
-    format belongs with the change that re-shapes the line.
-    ⚠ **Sequencing note:** moving the audit log into per-route middleware would
-    stop UNMATCHED requests being logged (a 404 is served by `NotFoundHandler`,
-    outside any per-route wrapper). Do not do that — those probe lines are the
-    attribution data this item exists to improve.
+    implementing S2; deliberately not changed there.
+    ⚠ **Sequencing:** do NOT move the audit log into per-route middleware —
+    UNMATCHED requests would stop being logged (a 404 is served by
+    `NotFoundHandler`, outside any per-route wrapper), and those probe lines are
+    the attribution data this item exists to improve. Repo: homelab-infra.
     forcing: security — design §3.2 mandates token-id; today a Muse call and an
     audit agent's probes are indistinguishable, and either can be spoofed.
-14. **Golden field-set test** for the five bridge item structs.
-    forcing: security — the data-minimization claim (`main.go:5`, `openapi.yaml`)
-    is the design's central control and NO test asserts any response's field set.
+14. **Golden field-set test** for the five bridge item structs. Repo:
+    homelab-infra.
+    forcing: security — the data-minimization claim (`main.go:5`,
+    `openapi.yaml`) is the design's central control and NO test asserts any
+    response's field set.
 
 **Gate-forcing**
 
 20. **M12 — a Tekton pipeline for `containers/muse-bridge/**`**, modelled on
-    `clawgate-ci-pipeline.yaml`. 🔴 **This is now the blocker on rank 9 reaching
-    reality**, not merely a gate gap: #942 cannot take effect without a
-    build+push nobody has automated. Measured: `tekton/gitops-validate` is the
-    COMPLETE status set for this repo and has no Go leg, so 18 tests run only
-    when a human types `go test`.
+    `clawgate-ci-pipeline.yaml`, and it must PUSH (clawgate-ci deliberately does
+    not). 🔴 Today proved the cost of its absence twice over: 18 tests that only
+    run by hand, and a hand-rolled release script whose broken guard pushed over
+    a live tag. Deleting `scripts/release-muse-bridge.sh` is part of this item.
+    Repo: homelab-infra.
     forcing: gate — nothing automated builds or tests the bridge, and
-    `imagePullPolicy: IfNotPresent` on the mutable tag `0.1.0` means a rebuild
-    can deploy "successfully" and run the old binary.
+    `imagePullPolicy: IfNotPresent` on a mutable tag means a rebuild can deploy
+    "successfully" and run the old binary.
 
 ## 7. Honesty ledger
 
@@ -410,79 +422,72 @@ read-only `muse-bridge` cluster API exposed to the public internet.
 
 ## State now
 
-- **Branch:** devrc `main`, clean (one unrelated untracked file,
-  `nix/system/apply-networkmanager-openvpn.sh`, not ours). The S2 work is in
-  **homelab-infra**, not devrc.
-- **RANK 9 (S2) IS IMPLEMENTED AND AUDITED — homelab-infra #942, OPEN, NOT
-  MERGED, NOT DEPLOYED.** Branch `feat/muse-bridge-ns-allowlist`, head
-  `88c7ff151`, 6 commits, based on `origin/trunk` `d7866d524`.
-  `claim-work muse-system-inventory-9` is still HELD — release it when #942
-  merges.
-  - `nsAllowed(ns, allow)` in `containers/muse-bridge/main.go` is the single
-    namespace boundary: pattern **AND** allowlist membership. Default
-    `["muse"]`; `MUSE_BRIDGE_NS_ALLOW` widens it per-deployment (comma-separated,
-    **replaces** rather than extends), and `resolveNsAllow` holds one invariant —
-    **the effective allowlist is never empty**, so an all-unreachable value falls
-    back instead of 400ing every namespace while `/v1/health` stays green.
-  - An unreachable entry is a startup **WARNING**, not a boot failure. The
-    earlier `log.Fatal` traded a milder failure for a worse one: the typo is
-    already fail-closed, while refusing to boot takes a public service down on a
-    cold start or reschedule (`maxUnavailable: 0` covers a rolling update ONLY).
-  - `routeTable()` is one declarative table; `routes()` applies auth FROM it, so
-    forgetting `s.auth(...)` is no longer something a route can do. `newServer()`
-    is the single wiring path used by main and every route test.
-  - The 400 names which half refused — `missing ns parameter` / `malformed ns:
-    must match <pattern>` / `namespace not served` — none echoing the input.
-  - `nsCtx` returns the validated ns; no handler re-reads the request parameter.
-  - **18 tests**, `go build`/`go vet`/`go test -race` clean. `kustomize-validate:
-    PASS (124 roots)`.
-- **A FIVE-ROUND AUDIT LADDER RAN (rounds 0–4) and STOPPED MECHANICALLY.**
-  Round 3 and round 4 each changed **zero executable payload lines**, so
-  `audit-dispatch.py --round 5` **refuses with exit 5** — the attribution gate,
-  not a judgement call. Payload by executable lines per round: **114 / 23 / 101 /
-  10 / 0 / 0**.
-  - Round 0 (requirements & deletion): 12 requirements, 4 deletion candidates,
-    all four actioned (`D1=deleted D2=deleted D3=kept D4=deleted`).
-  - Round 1 (nine axes, blind): 4 🟡. Round 2: 1 🔴 + 2 🟡 + 2 🟢. Round 3: 3 🟡 +
-    3 🟢. Round 4: 1 🔴 + 2 🟡 — **all claim/prose defects, zero code defects**.
-  - 🔴 **Every round's findings were defects in the PREVIOUS round's fix**, and
-    the dominant finding four rounds running was a FALSE SENTENCE a fix wrote
-    while explaining itself. Three such sentences were mine: a two-way-ledger
-    coverage claim no test provided, an anti-enumeration rationale that did not
-    hold, and "nothing outside this function assigns s.router" which was false
-    when written.
-  - 🔴 **Two guards I shipped were walkable and one of my dismissals was false.**
-    The first route guard matched `mux.HandleFunc("GET …")`, so a method-less
-    registration served a path with NO bearer token while the suite stayed green;
-    its replacement keyed on the variable NAME, so `m2 := mux` walked past it.
-    The claim that the mux's registration set "cannot be enumerated" was WRONG —
-    `index.segments` is `map[routingIndexKey][]*http.pattern` and `pattern.str`
-    is the registered string. `registeredPatterns()` now reads it.
-- 🔴 **Deploy status, stated separately from merged: #942 is INERT ON MERGE.**
-  `imagePullPolicy: IfNotPresent` on the mutable tag `0.1.0` (M11) means it needs
-  a **build, push and tag bump**, and nothing in the repo automates that (M12).
-  The PR deliberately does NOT bump the tag — bumping with no pushed image leaves
-  Flux pulling a tag that does not exist. `openapi.yaml` is `go:embed`'d rather
-  than a ConfigMap, and the manifest change is a comment, so merging changes no
-  cluster behaviour. **Verified live at every round: pod `muse-bridge-88f74d4c6-
-  mnds9`, image `0.1.0`, 0 restarts, startup line carries no `ns-allow=` — the
-  running binary predates this work.**
-- **CI tells us almost nothing here, measured:** `tekton/gitops-validate` is the
-  **complete** expected status set for homelab-infra (enumerated across PRs 941,
-  920, 910, 731 — it goes red, so the instrument works), and it has **no Go leg**.
-  All 18 tests run only when a human types `go test`.
-- **Previously merged:** devrc #1972 (`82b4c6e3`), devrc #1976 (`272c7f03`),
-  homelab-infra #941 (`490796a3`) — all verified by CONTENT on the remote, never
-  by ancestry.
-- **Tier 1 is DONE** (old ranks 1–8). Ranks keep their ORIGINAL numbers so any
-  live `claim-work` claim resolves.
+- **Branch:** devrc `main`, in sync with `origin/main`, clean (one unrelated
+  untracked file, `nix/system/apply-networkmanager-openvpn.sh`, not ours).
+  homelab-infra `trunk` in sync, clean (`?? kickoff.md`, `?? result` are not
+  ours). **No worktrees of ours remain** in either repo.
+- 🔴 **RANK 9 (S2) IS DONE — MERGED, DEPLOYED AND VERIFIED AGAINST THE LIVE
+  PUBLIC ENDPOINT.** Not "shipped"; the original symptom was reproduced as gone.
+  - homelab-infra **#942** (squash `9fd1571b4`) — the allowlist code.
+  - homelab-infra **#944** (squash `c99003df1`) — Deployment pinned to `0.1.1`
+    plus `scripts/release-muse-bridge.sh`.
+  - Both verified by CONTENT on `origin/trunk`, never by ancestry.
+  - `claim-work muse-system-inventory-9` RELEASED.
+- **Live, measured 2026-10-02 22:41Z** — pod `muse-bridge-576d566995-2r6d4`,
+  image `0.1.1`, 0 restarts, startup line
+  `muse-bridge listening on :8080 (rate=30/min cap=16384B ns-allow=muse)`:
+
+  | request to `https://muse-bridge.zacx.dev` | result |
+  |---|---|
+  | `/v1/pods?ns=kube-system` | **400** `namespace not served: this bridge is restricted to an allowlist` |
+  | `/v1/events?ns=default` | **400** same |
+  | `/v1/pods?ns=muse` (positive control) | **200**, real pod list — a gate, not a blanket refusal |
+  | `/v1/pods?ns=Kube-System` | **400** `malformed ns: must match ^[a-z0-9-]{1,63}$` |
+  | `/v1/pods` (no ns) | **400** `missing ns parameter` |
+  | `/v1/nodes` | **200** — outside the allowlist BY DESIGN, carries no namespace identity |
+
+  The first row is the exact request that previously returned the contents of
+  `kube-system`. Token read from sops, passed to curl on **stdin not argv**
+  (finding S3), decrypted copy shredded.
+- **The audit ladder ran rounds 0–4 and STOPPED MECHANICALLY** —
+  `audit-dispatch.py --round 5` exits **5**, because rounds 3 and 4 each changed
+  zero executable payload lines. Payload by executable lines: **114 / 23 / 101 /
+  10 / 0 / 0**. Round 0: 12 requirements, 4 deletion candidates, all actioned.
+  Rounds 1–4: 4 🟡 / (1 🔴 + 2 🟡 + 2 🟢) / (3 🟡 + 3 🟢) / (1 🔴 + 2 🟡). **Every
+  round's findings were defects in the PREVIOUS round's fix**, and four rounds
+  running the dominant finding was a false sentence a fix wrote while explaining
+  itself. 18 tests; `go build`/`go vet`/`go test -race` clean;
+  `kustomize-validate: PASS (124 roots)`; `tekton/gitops-validate` green on both
+  PRs ("all 10 legs passed").
+- 🔴 **I PUSHED OVER THE LIVE `0.1.0` TAG while testing the guard that exists to
+  prevent it.** Full block under Open investigations (landed `c4adcd34`). Root
+  cause: `docker manifest inspect` cannot reach this self-signed Harbor and
+  exits non-zero for EVERY tag, so `if exists; then refuse` was unconditionally
+  "free". Contained — the pod never restarted — but by luck, not design.
+  Resolved by finishing deliberately. ⚠ **Consequence that outlives it:
+  `0.1.0` and `0.1.1` now carry the SAME digest** (`sha256:0b0b98b3…`), so
+  `0.1.0` no longer means "the pre-allowlist build" anywhere except a node
+  holding the old cached layer.
+- **Where the build/push steps now live:** `homelab-infra:
+  scripts/release-muse-bridge.sh`. Before today they existed NOWHERE — no Tekton
+  pipeline for `containers/muse-bridge/**`, and `clawgate-ci` is explicitly
+  "Harbor pull, no registry push", so every image was hand-built from memory.
+  It makes **no git writes** (the Deployment bump goes via worktree + PR, per PR
+  925's precedent) and is a **stopgap** — rank 20 is the fix.
+- **CI measured, so nobody re-derives it:** `tekton/gitops-validate` is the
+  COMPLETE expected status set for homelab-infra (enumerated across PRs 941/920/
+  910/731; it goes red, so the instrument works) and it has **no Go leg**. The 18
+  tests run only when a human types `go test`.
+- **Tier 1 (ranks 1–8) and now rank 9 are DONE and removed.** Survivors keep
+  their ORIGINAL numbers because rank is half a `claim-work` claim's identity.
 - **`scripts/muse/muse` is still NOT nix-deployed** — `git grep scripts/muse --
   nix/` is empty, `~/.local/bin/muse` does not exist. Only reachable copy is
   `$DEVRC/scripts/muse/muse`. SKILL.md is a nix store copy needing a `switch`.
-- **No clawgate task recorded, and that is not a clean bill of health:**
-  `clawgate_handoff.sh resolve` exited **5** again. An unknown session id also
-  answers with an empty array, so the zero cannot distinguish "touched no task"
-  from "wrong id". No `clawgate-task:` field written.
+- **No clawgate task recorded, and that is NOT a clean bill of health:**
+  `clawgate_handoff.sh resolve` exited **5** (nothing resolved) for the third
+  time this arc. An unknown session id also answers 200 with an EMPTY ARRAY, so
+  the zero cannot distinguish "touched no task" from "wrong id". No
+  `clawgate-task:` field written (`field` exits 1 — none present).
 
 ## Open investigations — live diagnosis state
 
@@ -571,6 +576,8 @@ read-only `muse-bridge` cluster API exposed to the public internet.
 ## Defects (batched)
 
 Fixed as ONE round, not one rank each. Original ranks kept for reference.
+⚠ The `muse status` 400 defect was PROMOTED to rank 25 — it is a live
+regression now, not a latent one — and is deliberately not duplicated here.
 
 - **(10) Flow file re-map** — `flows/muse.ai.md:66,75` still teach polling on
   assistant COUNT, measured flat across a send; add the approval and hydration
@@ -580,27 +587,17 @@ Fixed as ONE round, not one rank each. Original ranks kept for reference.
   loop instead of a bare `continue`; close the tab on the timeout path.
 - **(13) B4 host hardcode** — `muse:119` `bw://laptop/`; derive from
   `browser whoami` (NOT shell `whoami`, which is the username).
-- 🔴 **NEW (found by the #942 audit) — `muse status <ns>` will BREAK at the
-  rebuild, and its own comment will mislead you.** `cmd_status` passes an
-  arbitrary namespace (`muse status pods flux-system`, `muse status workloads
-  <ns>`, `muse status flux <ns>`, and the bare `muse status <ns>` fallthrough).
-  Once the new image runs, every one returns `{"error":"namespace not served…"}`
-  `[400]` — and the wrapper's trailing comment enumerates 401 and 404 as
-  "answers, not outages" while saying **nothing about 400**, so a policy denial
-  reads as a typo. This is a **devrc** change, lands at the rebuild rather than
-  at the merge, and was deliberately kept out of #942 (wrong repo).
-- **(15) `TestLimiterBurstThenRefill` never tests refill.** ⚠ The OTHER half of
-  this item is DONE and done properly: `routes()` was extracted AND the finding
-  it existed for is closed — `TestEveryRouteExceptTheProbeTargetIsAuthWrapped…`
-  asserts behaviourally that every non-public route 401s, on the real table,
-  with a two-way public-set ledger. `TestRouterWhitelist` now drives the real
-  table too. The refill arithmetic is still unexercised.
-- **(21) M5 — fill in `openapi.yaml`'s five response schemas** and the 500/404/405
-  responses; today every data route returns an untyped `ItemList`. ⚠ #942 updated
-  the `ns` parameter and `BadNs` descriptions only.
+- **(15) `TestLimiterBurstThenRefill` never tests refill.** ⚠ The other half is
+  DONE properly: `routes()` extracted AND the finding it existed for closed —
+  every non-public route is asserted to 401 on the real table, with a two-way
+  public-set ledger. The refill arithmetic is still unexercised.
+- **(21) M5 — fill in `openapi.yaml`'s five response schemas** and the
+  500/404/405 responses; every data route still returns an untyped `ItemList`.
+  ⚠ #942 updated the `ns` parameter and `BadNs` descriptions only.
 - **(23) Nix-deploy the wrapper** as a `mkOutOfStoreSymlink` into
-  `~/.local/bin/muse`. 🔴 **Sequenced AFTER (13)**, and now also after the
-  `muse status` 400 fix above.
+  `~/.local/bin/muse`. 🔴 Sequenced AFTER (13) **and after rank 25** — shipping
+  it now would put a tool that 400s on most of its own arguments on both hosts'
+  `$PATH`.
 - **(24) Extract the B1 JS** to `scripts/muse/b1.js` and fixture-test it under
   the `node` tier.
 
@@ -786,38 +783,112 @@ Fixed as ONE round, not one rank each. Original ranks kept for reference.
   worktree and a PR, matching PR 925's `deploy(muster): 0.2.1` precedent, because
   committing to `trunk` IS deploying and the main checkout is shared.
 
+- 🔴 **TWO FALSE READINGS IN ONE SESSION, BOTH "AN ABSENCE READ AS AN ANSWER",
+  AND THE SECOND CAME TEN MINUTES AFTER DIAGNOSING THE FIRST.** (a) `docker
+  manifest inspect` returns rc=1 for every tag on a self-signed registry, so an
+  existence guard built on it is INVERTED, not weak — it pushed over a live
+  production tag. (b) A CI wait loop keyed on
+  `gh api .../status --jq '.statuses[0].state'` exited immediately, because that
+  is `null` before any status is POSTED and `null != "pending"` is true — a
+  not-yet-created status read as settled. **For any "is it there / is it done"
+  probe, require the thing to EXIST as a separate condition from its value**, and
+  demand different answers for a case that is present and one that is not.
+- 🔴 **"Testing the refusal path" IS running the command.** The invocation that
+  found (a) was deliberately chosen to be refused. When a broken guard is the
+  only thing between a test and an irreversible action, the test becomes the
+  action. **Put refusal checks before anything that mutates and prove they fire
+  with the mutating steps unreachable** — a script whose dangerous path is
+  reachable from its own happy-path test is mis-shaped.
+- **`flux` is NOT installed on this host.** Trigger a reconcile with
+  `kubectl -n flux-system annotate --overwrite kustomization/<name>
+  reconcile.fluxcd.io/requestedAt="$(date -u +%FT%TZ)"` — same mechanism, and it
+  worked (Deployment picked up `0.1.1`, rollout completed).
+- **`sops` is NOT on PATH either**, so `release-muse-bridge.sh --verify-only`
+  SKIPS its authenticated probe and says so rather than passing silently. Run
+  the probe under `nix-shell -p sops`. A verifier that announces what it did not
+  check is the design; a pass from it alone would have been the startup line
+  only, which is necessary and NOT sufficient.
+- **Decision: two guard gaps in `ns_allow_test.go` are ACCEPTED and documented**
+  — a registration in `main()` after construction, and a mux interposed inside
+  `ServeHTTP`. Neither is reachable in-process; closing the second structurally
+  would stop unmatched requests being logged. A behaviour regression to close a
+  guard gap is the wrong trade.
+- **A SPELLED guard is walkable even when you wrote it knowing that.** Two
+  successive route guards fell to a different spelling; the second keyed on the
+  variable name (`m2 := mux`) four lines under its own warning about exactly
+  that. What finally held was enumerating what the system really serves:
+  `http.ServeMux`'s `index.segments` (`map[routingIndexKey][]*http.pattern`)
+  plus `index.multis`, with `pattern.str` the registered string — reachable by
+  plain reflection, `f.String()`, no `unsafe` needed.
+- **Reading unexported internals is defensible only as a PAIR:** `t.Fatal` on
+  every absent field, so a rename breaks loudly instead of silently ceasing to
+  check, AND a positive control per BRANCH that registers an extra item and
+  asserts it is seen. One `segments`-shaped control left the `multis` loop
+  no-op'able and surviving.
+- **A fixture constant can make a whole class invisible:** every route test
+  built its server with `k8s: nil` on purpose, so a registration conditional on
+  `s.k8s` appeared in neither the table nor the mux, they agreed, and production
+  would have served it with no token. Ask which dimension your fixture pins.
+- **A payload change can void a mutation control in the same commit with the
+  suite green throughout** — mutant KILLED at the base sha, SURVIVED at the
+  head. Pin an invariant against a HAND-BUILT input, not one produced by the
+  code under test.
+- ⚠ **Say which unit a payload figure is.** The posted `payload=40` for round 2
+  counted comment lines inside payload files; the executable-line figure is 10.
+  One name, one number, per round.
+- ⚠ **A cross-repo audit assembly cannot verify its own payload figures** — the
+  brief is assembled in `devrc`, so neither endpoint of a homelab-infra range
+  resolves there and the gate reads the count as POSTED. Measure it in the
+  target clone and say so.
+- ⚠ **`gh pr view --json comments` does NOT return review comments**, so an
+  `audit-claims` block posted as a review is invisible to `audit-dispatch.py`.
+  Post it as an issue comment.
+
 ## How to verify
 
 ```bash
-# the muse-bridge suite (18 tests) — there is NO repo-level Go gate here
+# 🔴 THE ONE THAT MATTERS — is the allowlist LIVE? (reproduces the old symptom)
+~/workspace/homelab-talos/scripts/release-muse-bridge.sh --verify-only
+#   asserts `ns-allow=` in the startup line, then probes the public endpoint.
+#   ⚠ it SKIPS the authenticated half when sops is absent and says so — for the
+#   behavioural proof, run it under: nix-shell -p sops --run '…'
+#   Watched to FAIL (rc=1) against the pre-allowlist binary before being trusted.
+
+# the probe by hand, token on STDIN never argv (finding S3)
+H=~/workspace/homelab-talos
+nix-shell -p sops --run "SOPS_AGE_KEY_FILE=$H/.secrets/age.key sops -d \
+  --extract '[\"stringData\"][\"token\"]' \
+  $H/clusters/homelab/apps/muse/muse-bridge-token.enc.yaml" > /tmp/.tok
+printf 'header = "Authorization: Bearer %s"\n' "$(cat /tmp/.tok)" \
+  | curl -s --config - -w '\n%{http_code}\n' \
+    https://muse-bridge.zacx.dev/v1/pods?ns=kube-system   # want 400 namespace not served
+shred -u /tmp/.tok
+
+# the bridge suite (18 tests) — there is NO repo-level Go gate here
 go test -C $HOMELAB/containers/muse-bridge ./... -count=1 -race -v | grep -cE 'PASS:'   # 18
 go vet -C $HOMELAB/containers/muse-bridge ./...
 
-# manifests (needs the dev shell, see gotchas)
+# manifests (needs the dev shell; outside it, it fails all 124 roots with
+# `kustomize: command not found` and prints FAIL — an env defect, not a change defect)
 nix develop $HOMELAB -c scripts/kustomize-validate.sh | tail -1   # PASS (124 roots)
-
-# the regression proof for S2: revert nsFrom to pattern-only and watch all four
-# ns-scoped routes go red. Copy the file aside first — never `git stash` here.
-
-# 🔴 IS THE ALLOWLIST ACTUALLY LIVE? This is the only question that matters,
-# and merging #942 does not change the answer:
-KUBECONFIG=$KC_HOMELAB kubectl logs -n muse deploy/muse-bridge | grep 'listening on'
-#   no `ns-allow=` in that line => OLD binary, every namespace still readable
 
 # the wrapper's own suite, plus the dev-host contract pin
 nix develop $DEVRC -c python3 -m pytest \
   $DEVRC/scripts/tests/test_muse_wrapper.py \
   $DEVRC/scripts/devhost-tests/test_muse_cli_exit_contract.py -q    # 20 passed
 
-# the content gates that caught the IP leak — run these before ANY merge here
+# the content gates that caught an IP leak earlier in this arc — before ANY merge here
 nix develop $DEVRC -c python3 -m pytest \
   $DEVRC/scripts/tests/test_no_public_ips.py \
   $DEVRC/scripts/tests/test_no_captured_text.py -q
 
-# bridge RBAC is still read-only
+# the arc's closing condition, second clause (rank 18 is what closes it)
 KUBECONFIG=$KC_HOMELAB kubectl auth can-i --list \
-  --as=system:serviceaccount:muse:muse-reader | grep -E 'create|delete|patch|update'
+  --as=system:serviceaccount:muse:muse-reader | grep -E 'pods/log|services|namespaces|replicasets'
 ```
 
 🔴 **Do NOT run `muse send` to verify** — it sends from the operator's live
 account across Meta's wire and the pacing gate allows one send per 10 min.
+⚠ And `muse status <ns>` now 400s for every namespace but `muse` (rank 25) —
+that is the server being right and the CLI being wrong, not a regression in the
+bridge.
