@@ -32,7 +32,10 @@ REPO_VARS = {
     f"{HOME}/workspace/homelab-talos": "HOMELAB",
     f"{HOME}/workspace/civit/datapacket-talos": "DATAPACKET",
     f"{HOME}/workspace/civit/civitai": "CIVITAI",
-    f"{HOME}/workspace/civit/civitai-cli": "CIVITAI_CLI",
+    # ⚠ The handle is named for the REMOTE (`civitai/cli`), not for a
+    # `civitai-cli` directory. It pointed at a dormant second clone of that
+    # remote until it was repointed here; grep for the HANDLE, not the name.
+    f"{HOME}/workspace/civit/cli": "CIVITAI_CLI",
 }
 # Absolute kubeconfig path -> canonical env var.
 KC_VARS = {
