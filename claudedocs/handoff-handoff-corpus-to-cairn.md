@@ -48,36 +48,39 @@ cairn-overlap comparison nobody has run.
   rules, this arc cannot be closed by anyone.** `via: measurement`
 
 ## State now
-- ✅ **THE ANALYSIS DOC IS MERGED** — devrc#1950 squashed `6c317f7b0c2a`, and the first
-  correction devrc#1952 (`246074ca`). Verified by content, not ancestry.
-- 🔴 **FOUR SCOPING AGENTS HAVE ALL REPORTED, AND THEY REFUTE SIX CLAIMS THIS DOC MADE.** The
-  corrections are in the Open investigations blocks below. **Do not act on round 1's reasoning
-  without reading them** — the refutations are load-bearing, not cosmetic.
-- 🔴 **RANK 1 IS DEMOTED. It is a DESIGN PROJECT, not a small change, and it is blocked
-  UPSTREAM** on the store's "pointers, not copies" rule and on the intake question (old rank
-  2). Building the cairn destination first means designing against a protocol about to move.
-  Two agents converged on that independently.
-- ✅ **THE VALUE CLAIM IS HALF-CLOSED AND THE ANSWER IS YES** — a cairn bullet has
-  demonstrably been read and acted on: **61 invocations, 23.5% against a 1.8% cross-project
-  control floor**, 5 of 6 hand-verified. The *counterfactual* half stays unreachable.
-- 🔴 **A DEADLINE NOBODY KNEW ABOUT: the transcript corpus ROLLS AT 30 DAYS.** Claude Code
-  transcripts span **2026-09-01 → 2026-10-01 exactly**, nothing older, no `cleanupPeriodDays`
-  set. Waiting does not grow `n`; every day deletes a day of the only existing evidence. That
-  is why instrumenting is now ranked above measuring.
-- **Carried forward — a REPLACE heading would drop these values.** 187 docs / 7,514,989 B, 28
-  over the 65,536 B base ceiling, largest 6.1× (402,767 B); 69.9% of bytes in the two
-  APPEND-only sections; **store 331 entry files / 3,129 dated journal bullets, intake 19–80
-  bullets/day sustained through 2026-09-30 — actively written, NOT starved** (the measurement
-  that inverted this arc's original hypothesis); 83–98% of durable handoff content
-  unrepresented in cairn; devrc's `claudedocs/archive/` at **37 files / 311,415 B** against
-  homelab-talos's 0.
-- ⚠ **CLOSED-BLOCK POPULATION, RESTATED SO IT IS RE-DERIVABLE:** **289 blocks / 558,672 B**
-  across 188 docs, from the in-repo detector `scripts/handoff-audit.py`. Round 1's
-  **366 / 700,630 B does NOT reproduce** and its detector lived in a scratchpad and is gone.
-  Quote the 289 figure.
-- ⚠ **NO `claim-work` CLAIM IS HELD** and no implementation has started.
-- **No clawgate task** — `resolve` exited 5 (`0 tasks`); an unknown session id answers 200
-  with an empty array, so that zero is not a measured absence.
+- ✅ **THE ARC'S TOOLING SHIPPED: rule (r) + the writer + the automatic exit.** `--prune` now
+  REFUSES a durable removal with no archive (rule (r), exit 16, devrc#1960 `368bd298`);
+  `--archive-write`/`--archive-note` WRITE that archive instead of requiring a hand-built one
+  (devrc#1963 `a3480a13`); and `--autoevict` (rule (s)) evicts the minimum set of CLOSED blocks
+  when rule (p) would refuse (devrc#1966). All three verified on a REAL over-ceiling doc as
+  proposal-only runs, with `homelab-talos` left byte-identical to HEAD and 0 tracked
+  modifications each time.
+- ✅ **`cairn#168` `fc2ddfe9` — the per-entry bullet-count badge**, both renderers, pinned equal
+  by a cross-language test, firing on 5 live entries including the 151-bullet one that is 97.6%
+  of a ~50,000-token `/resume` read.
+- 🔴 **`main` WAS RED AND NOT BECAUSE OF THIS ARC — unbroken by devrc#1971 `298e4c57`.**
+  `ece2f05d` (#1965) stripped two quote characters from `prune-skill/SKILL.md`'s YAML
+  `description:` (11,781 → 11,779 B) without updating the eight figures a guard derives from
+  that size. Attributed with the discriminating control — a PRISTINE detached worktree at
+  `origin/main` carrying no PR's code reproduced it — and verified fixed the same way: the
+  formerly-red test returns **40 passed** on the new `main`. ⚠ Every open PR had inherited that
+  red, so two were retriggered rather than merged on a stale verdict.
+- 🔴 **THE BLOCKED POPULATION WAS UNDER-MEASURED THREE TIMES, INCLUDING BY AN INDEPENDENT
+  AUDIT.** Enumerating from `handoff_index.REPO_ENV_HANDLES` instead of hand-written
+  `~/workspace/<repo>` paths: **581 handoff docs, 7 over their effective ceiling** — not
+  190/5. `$DATAPACKET` resolves to `~/workspace/civit/datapacket-talos`, outside the shape both
+  I and round 0 scanned, and holds **388 docs** (more than the other four repos combined) with
+  2 over ceiling. `handoff_budget.py`'s own comment records a prior scan *"short by 54
+  documents"* for exactly this reason; I read that comment and made the same error after it.
+- ⚠ **NO CLAWGATE TASK.** `clawgate_handoff.sh resolve` printed `NOTHING RESOLVED — 0 tasks`.
+  An unknown session id answers 200 with an EMPTY ARRAY, so that zero cannot separate "touched
+  no task" from "wrong id". No field written, none created. ⚠ My first read of its exit code was
+  `head`'s, not the script's — the pipe-eats-the-status trap; the MESSAGE is the authority.
+- **Carried forward — a REPLACE heading would drop these values.** 187→581 docs measured;
+  69.9% of handoff bytes in the two APPEND-only sections; **store 331 entry files / 3,129 dated
+  journal bullets, intake 19–80/day — actively written, NOT starved**; 83–98% of durable handoff
+  content unrepresented in cairn; **289 CLOSED investigation blocks / 558,672 B** (the
+  re-derivable figure; round 1's 366/700,630 does not reproduce).
 
 ## Open investigations — live diagnosis state
 
@@ -313,36 +316,88 @@ cairn-overlap comparison nobody has run.
   mis-spelled marker there gets **no signal from any surface**, silently, on the deployed pod.
   Filed as cairn finding #9. `via: code`
 
+### ✅ RESOLVED 2026-10-02 — the blocked docs never needed the override; rule (p) remedy 1 already cleared them, and the bar was misread all session
+- as-of: 2026-10-02
+- **What this settles:** the operator rejected routing blocked sessions to
+  `--override-size-ratchet`, and they were right — it was never necessary. **Rule (p) is
+  `after > allowance AND delta > 0`, so what clears it is a NON-POSITIVE DELTA, not a cleared
+  overage.** The refusal asks to *"free up 184 B"*, never to get under the ceiling.
+- **Observed (with values):** `cairn/handoff-cairn-control-plane.md` is **39,446 B over** its
+  grandfathered allowance and was classified SHORTFALL by `--autoevict` (0 resolved
+  investigations). It carries **28 of 37 ranked items already DONE = 3,536 B** in `Next steps`,
+  a REPLACE section. Dropping them yields **−3,569 B and `status=proposed`**, all 9 live items
+  and their `forcing:` tags carried, repo left with 0 tracked modifications. No override, no
+  eviction, no new code. `via: measurement`
+- 🔴 **Ruled out: that SHORTFALL meant "nothing to do".** It means "nothing in the ONE section
+  `--autoevict` reads". That doc holds **103,130 B of `Gotchas` — 73% of itself** — which the
+  automatic path never looks at, while rule (q)'s MANUAL prune already accepts `Open
+  investigations`, `Findings` *or* `Gotchas`. `handoff-audit.py` computes FOUR evictable
+  categories; `--autoevict` selects from one. `via: measurement`
+- 🔴 **The reusable part, and it is about reading rather than tooling:** I read that refusal
+  four or five times, quoted remedies 2 and 3 and the override repeatedly, and never acted on
+  remedy 1 — which is first in the list and says exactly this. The operator's one-line pushback
+  is what redirected it. **A remedy you have read is not a remedy you have considered.**
+- **Next probe:** none. The follow-ups are filed; see the Gotchas entries.
+
+### 🔴 OPEN — rule (s) reaches 4 of 7 blocked docs, and 3 are structurally out of reach
+- as-of: 2026-10-02
+- **Observed, live-driven per doc (proposal-only, repos left byte-identical):** REACHABLE —
+  `homelab/devrc-consumer-cutover` (1 of 7 blocks, 451 B) and
+  `datapacket/app-blocks-earning-and-supply` (1 of 1 block, 1,727 B). SHORTFALL —
+  `datapacket/faro-rum-leads`, `cairn/control-plane`, `cairn/control-plane-archive`, each
+  returning *"NOTHING WAS MOVED, and there was nothing this rule COULD move"*. Unmeasured:
+  `homelab/comic-flex`, `homelab/clawgate-to-muster-extraction` (proxy-positive only).
+  `via: measurement`
+- ⚠ **A PROXY OVER-REPORTS AND I CAUGHT IT ONLY BY DISAGREEING WITH A LIVE RUN.**
+  `handoff-audit.py`'s evictable count is NOT `--autoevict`'s selector — the selector also
+  requires an append-only investigations heading. On `cairn/control-plane-archive` the proxy
+  said 4 blocks / 7,676 B and the live selector said SHORTFALL. **Read a proxy-positive as an
+  upper bound; a proxy-ZERO is definitive, because a stricter selector cannot find more.**
+  `via: measurement`
+- **Leading hypothesis:** the three shortfalls are not a marking failure. `cairn/control-plane`
+  has 5 investigation blocks and **0 marked closed**, all under the correct heading — its
+  investigations are genuinely open. The bytes are in `Gotchas`, which the selector does not
+  read. So the fix is the filed follow-up, not re-marking.
+- **Next probe:** widen the candidate set (filed); until then those three clear via remedy 1.
+
+### 🔴 OPEN — a mutation battery owns the WHOLE TREE, and the mitigation written for it had the same bug
+- as-of: 2026-10-02
+- **Observed — four strands, four causes, none a defect in any change under test:** (1) the
+  implementing agent edited `handoff_doc.py` while its own battery was live and the battery's
+  `finally` restored a snapshot over four edits; (2) I ran that battery inside its worktree and
+  produced a spurious `baseline is RED (2 → 6 failures)` I briefly reported as a defect; (3) an
+  API session limit killed a battery mid-row, stranding `_norm_line(...)` sabotaged out of
+  `archive_append`; (4) a battery exited leaving `RESOLVED_HEAD = re.compile(r".")` in
+  **`scripts/handoff-audit.py`** — a SECOND file, which the author's
+  `trap 'git checkout -- scripts/lib/handoff_doc.py'` structurally could not catch.
+  `via: measurement`
+- 🔴 **Strand 4 is the one to remember: the mitigation itself was the defect.** A one-file trap
+  on a two-file battery reads as protection and provides half.
+- **The tell, in every strand:** a one-line diff in the target file that reads as a plausible
+  simplification. **Rules:** commit before running a battery; never edit or share a tree a
+  battery owns; check for a stranded mutant on EVERY resume, not only after a kill you
+  performed; scope the trap to every file the battery can touch.
+- **Next probe:** none — the rules are in devrc#1966's body. Open because nothing enforces them.
+
 ## Next steps (ranked)
 
-🔴 **SEVEN ITEMS BECAME THREE, ON ROUND 0's DELETION PASS — and the numbering moved AGAIN,
-which is a real cost paid deliberately.** `claim-work --list` carried no claim on this arc's
-slug when the cut was made, so nothing live was re-pointed; re-derive any slug before claiming.
-Four items were deleted as ranks because a rank is work a session DRAWS FROM, and none of them
-was that: their substance is preserved under `## Gotchas / decisions / dead-ends` below.
-**Every remaining item carries an external forcing function — `forcing: none` is now 0.**
-
-1. **ANSWER THE FROZEN CLOSING CONDITION AND CLOSE THIS ARC.** The round-1 condition is
-   unsatisfiable as conceived (see `## Goal`), so the honest verdict is **NOT ADDRESSED — the
-   one item: the evicted block's own text cannot reach cairn**. Closing it is the operator's
-   call, not a later session's. Re-home ONLY items 2 and 3 into a narrowly-scoped successor arc.
-   forcing: user — the verbatim-vs-pointer ruling is an operator decision, and the arc cannot be
-   closed by anyone without it. ⚠ This was `forcing: gate` for one round; round 0 corrected it,
-   and the correction is the honest one — half of the old item was already done in its own PR.
-2. **INSTRUMENT the value claim instead of measuring it — a recall receipt and opaque per-bullet
-   citation ids.** Have `read.sh recall` emit one `source='tool'` row (`{status, scope, entries,
-   bullets_printed, output_bytes, session}`) — that table holds **0** cairn rows against 1,425
-   transcript-proven invocations — and stamp each printed bullet `[cb:7f3a]` so "was this bullet
-   used" becomes a match on a token existing nowhere else in the corpus: a STRUCTURAL guard
-   where every proxy available today is a spelled one walkable by rewording.
+1. **ANSWER THE FROZEN CLOSING CONDITION AND CLOSE THIS ARC.** Unchanged and still the operator's
+   call: round 1's condition is unsatisfiable as conceived (the evicted block's own text cannot
+   reach cairn — `append` refuses newlines and >2000 chars, 288 of 289 blocks are multi-line), so
+   the honest verdict is **NOT ADDRESSED** with that as the one item. Re-home only item 2 into a
+   successor.
+   forcing: user — the verbatim-vs-pointer ruling is an operator decision and nobody else can
+   close the arc without it.
+2. **INSTRUMENT the value claim rather than measuring it** — the recall receipt (`source='tool'`
+   carries **0** cairn rows against 1,425 transcript-proven invocations) and opaque per-bullet
+   citation ids, which turn "was this bullet used" into a match on a token existing nowhere else.
    forcing: deadline — the transcript corpus rolls at 30 days (2026-09-01 → 2026-10-01, nothing
-   older), so the only existing evidence is deleted daily and waiting does not grow `n`.
-3. **MAKE `--prune` VERIFY RATHER THAN WRITE.** Refuse (exit 16) a prune of durable lines
-   unless `--archive <path>` is given, the file exists, and **every pruned non-blank line is
-   present in it** — mechanising the hand check `af578a02` performed in prose. No pod, no slug,
-   no network; clean RED proof (a prune with no archive is accepted today). ~120 lines + tests.
-   forcing: gate — `--prune` can today drop durable text with no archive anywhere, and the only
-   thing that has ever checked conservation is one commit message.
+   older), so the only evidence that could justify further automation is deleted daily.
+3. ✅ **DONE — the eviction toolchain is merged.** rule (r) devrc#1960 `368bd298`;
+   `--archive-write` devrc#1963 `a3480a13`; `--autoevict` devrc#1966; `main` unbroken
+   devrc#1971 `298e4c57`; the badge cairn#168 `fc2ddfe9`; the decision + follow-ups devrc#1970.
+   forcing: gate — a prune could drop durable text with no archive anywhere, and the only thing
+   that had ever checked conservation was one commit message.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **A GLOB'S ZERO IS A CLAIM ABOUT THE GLOB, NOT ABOUT THE TREE, AND IT COST A WRONG
