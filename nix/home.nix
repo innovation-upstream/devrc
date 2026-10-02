@@ -3459,12 +3459,19 @@ in
         #     is a HAZARD (the unit sees a narrower config than a human) and is
         #     forbidden outright. A handle nix exports and the module does not
         #     read is a CHOICE — `agent-handles.nix` serves every agent shell,
-        #     not just this indexer, and `CIVITAI_CLI` is a client checkout with
-        #     no handoff corpus of its own. That direction is pinned against an
+        #     not just this indexer. That direction is pinned against an
         #     ENUMERATED ledger in the test, so a new handle forces a decision
         #     instead of being silently excluded; it is not left unchecked. The
         #     sets DID diverge (five declared, four read) while this line claimed
         #     otherwise and the suite was green.
+        #     ⚠ THAT LEDGER IS NOW EMPTY — all five declared handles are read.
+        #     It held `CIVITAI_CLI`, excluded as "a client checkout with no
+        #     handoff corpus of its own"; measured 2026-10-02 that mainline
+        #     holds 27 `claudedocs/handoff-*.md`, so the premise had EXPIRED and
+        #     the exclusion was retired. The entry was right when written — a
+        #     ledger entry is a claim about the corpus AT A DATE and a corpus
+        #     grows, which nothing in the suite can notice. Re-measure before
+        #     trusting any exclusion here.
         #
         # 🔴 A HANDLE POINTING AT AN ABSENT CHECKOUT IS NOT FREE, AND THIS
         # COMMENT USED TO SAY IT WAS. It is reported as UNMEASURED rather than

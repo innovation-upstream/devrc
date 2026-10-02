@@ -176,7 +176,7 @@ _EXPECTED_ORPHAN_WARNING = (
 #: exists: the checkout is gone everywhere, so no host has the handle set, and
 #: dropping `--prune` leaves the rows. Two handles, in `REPO_ENV_HANDLES` order.
 _EXPECTED_PRUNE_CONFIG_REFUSAL = (
-    "REFUSING --rebuild --prune: 2 of 4 repo handle(s) are UNSET — $DATAPACKET, "
+    "REFUSING --rebuild --prune: 2 of 5 repo handle(s) are UNSET — $DATAPACKET, "
     "$CIVITAI. --prune deletes every stored label THIS config does not name, "
     "which is only sound if this config is as wide as the corpus; an unset "
     "handle narrows it SILENTLY (the repo produces no derivation at all, so it "
@@ -2157,13 +2157,22 @@ class TestTheUnitEnvironmentMatchesTheHandlesTheIndexerReads:
         # BY DEFAULT, and adding one to `agent-handles.nix` must force a decision
         # here rather than being silently excluded. Each entry carries the reason
         # it is not indexed, in the source.
-        not_indexed = {
-            # A CLI client checkout, not a project with a handoff corpus of its
-            # own — the docs about it live in `civitai`. Indexing it would add a
-            # repo whose mainline holds no `claudedocs/handoff-*.md`, i.e. a
-            # standing PARTIAL/zero-doc contribution for no retrieval value.
-            "CIVITAI_CLI",
-        }
+        # 🔴 EMPTY ON PURPOSE, AND THAT IS A RESULT RATHER THAN AN OVERSIGHT —
+        # every declared repo handle is now read by the indexer. Keep the
+        # assertion and this ledger: the point was never the entries, it is that
+        # a NEW handle in `agent-handles.nix` forces a decision here instead of
+        # being silently excluded, and an empty ledger enforces that just as well.
+        #
+        # ⚠ `CIVITAI_CLI` lived here, excluded as "a repo whose mainline holds no
+        # `claudedocs/handoff-*.md`, i.e. a standing PARTIAL/zero-doc contribution
+        # for no retrieval value". Retired 2026-10-02: that mainline holds **27**.
+        # The entry was correct when written and EXPIRED — which is the reusable
+        # lesson, because nothing about the suite could notice. A ledger entry is
+        # a claim about the corpus AT A DATE, the corpus grows, and a green test
+        # pinning a stale premise reads exactly like a current one. If you add an
+        # entry here, say what would make it expire and how to re-measure it:
+        #   git -C <repo> ls-tree -r --name-only origin/<mainline> -- claudedocs
+        not_indexed: set[str] = set()
         extra = declared - set(hi.REPO_ENV_HANDLES)
         assert extra == not_indexed, (
             f"nix/agent-handles.nix declares {sorted(extra)} which "
@@ -3595,7 +3604,7 @@ class TestARetiredRepoIsToldTheOneRemedyThatWorks:
         against the tuple first: adding a handle legitimately changes "2 of 4",
         and a bare string mismatch would send the next reader hunting a prose
         change that never happened."""
-        assert len(hi.REPO_ENV_HANDLES) == 4, (
+        assert len(hi.REPO_ENV_HANDLES) == 5, (
             "REPO_ENV_HANDLES changed size — update the '2 of N' literal in "
             "_EXPECTED_PRUNE_CONFIG_REFUSAL, and re-read it: the message names "
             "the handles by value too."
@@ -3676,7 +3685,7 @@ class TestARetiredRepoIsToldTheOneRemedyThatWorks:
         rc = hi.main(["--rebuild", "--write"], open_store=_refusing_store())
         err = capsys.readouterr().err
         assert rc == hi.RC_REFUSED
-        assert "ALL 4 repo(s) came back UNMEASURED" in err
+        assert "ALL 5 repo(s) came back UNMEASURED" in err
         assert "Fix the repo handles — in THIS state that is the only remedy" in err
         assert "writes 0 row(s) and exits 0" in err
         # The retracted remedy must not survive anywhere in the message.
@@ -3851,7 +3860,7 @@ class TestThePlanDescribesTheRunThatActuallyHappens:
             "the plan promises the row count BELOW it; printing it after would "
             "make the sentence false in the run it is true of"
         )
-        assert "(after DELETE of 5 repo label(s)" in out
+        assert "(after DELETE of 6 repo label(s)" in out
 
     def test_a_PASSING_dry_run_still_prints_the_plan(self, tmp_path, capsys):
         """The other half of the control: the pre-flight `nix/home.nix` tells an

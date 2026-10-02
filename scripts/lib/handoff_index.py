@@ -368,7 +368,31 @@ _HANDOFF_NAME = re.compile(r"\Ahandoff-.+\.md\Z")
 #: exactly the kind of thing that must never be committed; a handle that is unset
 #: on a host simply contributes no repo, which is also how a laptop without a
 #: checkout is meant to behave.
-REPO_ENV_HANDLES: tuple[str, ...] = ("DEVRC", "HOMELAB", "DATAPACKET", "CIVITAI")
+#:
+#: ⚠ `CIVITAI_CLI` WAS A DELIBERATE EXCLUSION AND IS NOW INCLUDED, BECAUSE THE
+#: PREMISE EXPIRED RATHER THAN BECAUSE THE DECISION WAS WRONG. The ledger in
+#: `test_handoff_index.py` excluded it as "a repo whose mainline holds no
+#: `claudedocs/handoff-*.md`, i.e. a standing PARTIAL/zero-doc contribution for
+#: no retrieval value". Measured 2026-10-02: that mainline holds **27** of them.
+#: The exclusion mechanism worked exactly as designed — it is an ENUMERATION
+#: precisely so a handle forces a decision instead of being silently excluded,
+#: and this is that decision being re-taken on new evidence. 🔴 So the lesson is
+#: not "the ledger was wrong": a ledger entry is a claim about the corpus AT A
+#: DATE, and a corpus GROWS. Re-measure an exclusion's premise before trusting
+#: it — `git -C <repo> ls-tree -r --name-only origin/<mainline> -- claudedocs`.
+#:
+#: 🔴 WIDENING THIS TUPLE NARROWS WHERE `--prune` CAN RUN. `prune_config_refusal`
+#: requires every entry to be SET, so a host lacking this checkout can no longer
+#: prune. That is the documented and intended trade (pruning from a partial view
+#: deletes the repos you cannot see); it cannot wedge the timer, because `--prune`
+#: is operator-typed and never in the unit's argv.
+REPO_ENV_HANDLES: tuple[str, ...] = (
+    "DEVRC",
+    "HOMELAB",
+    "DATAPACKET",
+    "CIVITAI",
+    "CIVITAI_CLI",
+)
 
 # --------------------------------------------------------------------------- #
 # Schema — idempotent, additive-only DDL, in sync.py's shape
