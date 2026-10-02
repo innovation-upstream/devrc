@@ -611,3 +611,218 @@ def test_pace_mark_fires_on_confirmed_submit_not_after_the_reply():
         "pace_mark fires before any Enter is pressed -- it would stamp for "
         "calls that never attempted a send"
     )
+
+
+# ---------------------------------------------------------------------------
+# `muse status` and the bridge's namespace allowlist (rank 25)
+#
+# These exercise cmd_status END TO END through a stubbed `curl` and `sops`,
+# rather than scanning the source, because the defect was never a missing
+# expression -- it was a status code nothing BRANCHED on. A source assertion
+# would have passed against the broken tree the moment the string "400"
+# appeared anywhere, including inside the comment that caused the bug by
+# enumerating 401 and 404 and stopping.
+#
+# 🔴 Hermetic in BOTH tiers: the stubs are prepended to PATH, so they win over
+# a real `sops`/`curl` whether or not either is installed. `sops_bin` resolves
+# `sops` from PATH first (muse:615-616), which is what makes this possible
+# without a devhost-tests entry.
+# ---------------------------------------------------------------------------
+
+# Consumes the `-H @-` header on stdin (so the upstream printf cannot SIGPIPE),
+# records its argv, and reproduces real curl's output shape EXACTLY: the body,
+# then `\n[<code>]` with no trailing newline.
+CURL_STUB = """cat >/dev/null
+printf '%s\\n' "$*" >> "$CURL_ARGV"
+printf '%s' "$STUB_BODY"
+printf '\\n[%s]' "$STUB_CODE"
+"""
+
+SOPS_STUB = """printf 'stub-bridge-token\\n'
+"""
+
+TOKEN_ENC_REL = "clusters/homelab/apps/muse/muse-bridge-token.enc.yaml"
+
+
+@pytest.fixture()
+def status_env(tmp_path: pathlib.Path):
+    """cmd_status with `curl` and `sops` stubbed, and a fake homelab checkout."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    write_exec(bindir / "curl", CURL_STUB)
+    write_exec(bindir / "sops", SOPS_STUB)
+
+    homelab = tmp_path / "homelab"
+    enc = homelab / TOKEN_ENC_REL
+    enc.parent.mkdir(parents=True)
+    enc.write_text("stub\n")
+    key = homelab / ".secrets" / "age.key"
+    key.parent.mkdir(parents=True)
+    key.write_text("stub\n")
+
+    argv = tmp_path / "curl-argv"
+    return {
+        "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+        "HOME": str(tmp_path),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+        "MUSE_HOMELAB_REPO": str(homelab),
+        "MUSE_BRIDGE_URL": "https://bridge.invalid",
+        "CURL_ARGV": str(argv),
+        "STUB_CODE": "200",
+        "STUB_BODY": '{"items":[],"count":0}',
+        "_argv": argv,
+    }
+
+
+def test_the_status_stubs_are_reachable(status_env):
+    """POSITIVE CONTROL for every assertion below.
+
+    Without this, each one would pass just as happily if `cmd_status` died in
+    bridge_token and never reached curl at all -- an absent explanation and an
+    unreached code path are the same observable on stderr.
+    """
+    proc = run(status_env, "status")
+    assert proc.returncode == 0, f"cmd_status did not complete: {proc.stderr}"
+    assert status_env["_argv"].exists(), (
+        "the curl stub was never invoked -- cmd_status failed upstream of it, "
+        "so this module's stderr assertions prove nothing"
+    )
+    assert "/v1/health" in status_env["_argv"].read_text()
+
+
+def test_a_disallowed_namespace_is_explained_as_policy_not_a_typo(status_env):
+    """REGRESSION (red at origin/main) for rank 25.
+
+    homelab-infra #942/#944 deployed a server-side namespace allowlist, so
+    every `muse status pods <ns>` outside it answers 400. The wrapper branched
+    on no code at all and its trailing comment enumerated only 401 and 404, so
+    the operator saw a bare error body and read a POLICY DENIAL as a typo.
+    """
+    env = {**status_env, "STUB_CODE": "400",
+           "STUB_BODY": '{"error":"namespace not served: this bridge is '
+                        'restricted to an allowlist"}'}
+    proc = run(env, "status", "pods", "flux-system")
+
+    assert "POLICY ANSWER" in proc.stderr, (
+        "a 400 produced no policy explanation -- the operator cannot tell a "
+        f"refused namespace from a misspelled one. stderr={proc.stderr!r}"
+    )
+    # The refused namespace itself, so the message names WHAT was refused.
+    assert "flux-system" in proc.stderr
+    # Where the list actually lives -- without this the explanation says "not
+    # allowed" and leaves the reader with nowhere to go.
+    assert "MUSE_BRIDGE_NS_ALLOW" in proc.stderr
+    # The body is still the authority on which half refused, so it must survive
+    # to stdout rather than being replaced by the explanation.
+    assert "namespace not served" in proc.stdout
+    assert "[400]" in proc.stdout
+
+
+def test_a_nonverb_first_word_is_named_as_a_namespace_guess(status_env):
+    """REGRESSION (red at origin/main) for the INVERSE misread.
+
+    cmd_status reinterprets any non-verb first word as a namespace, so
+    `muse status pdos` is a pods query for ns=pdos. Once the allowlist landed
+    that answers 400 -- identical on the wire to a real namespace being
+    refused. Only this branch can produce a verb typo, so only it can say so.
+    """
+    env = {**status_env, "STUB_CODE": "400",
+           "STUB_BODY": '{"error":"namespace not served"}'}
+    proc = run(env, "status", "pdos")
+
+    assert "NOT A VERB" in proc.stderr, (
+        "a mistyped verb was reported purely as a refused namespace, which is "
+        f"the misdirection rank 25 exists to remove. stderr={proc.stderr!r}"
+    )
+    assert "pdos" in proc.stderr
+    # The real verbs, so the reader does not have to go find usage().
+    for verb in ("health", "nodes", "pods", "workloads", "flux"):
+        assert verb in proc.stderr
+
+
+def test_an_explicit_verb_is_not_reported_as_a_verb_typo(status_env):
+    """NEGATIVE CONTROL for the guess branch -- it must not fire on a real verb.
+
+    Without this, `guessed_ns=1` unconditionally would pass the test above and
+    tell the operator `flux-system` is not a verb on every refusal.
+    """
+    env = {**status_env, "STUB_CODE": "400",
+           "STUB_BODY": '{"error":"namespace not served"}'}
+    proc = run(env, "status", "workloads", "flux-system")
+
+    assert "POLICY ANSWER" in proc.stderr, "the policy branch stopped firing"
+    assert "NOT A VERB" not in proc.stderr, (
+        "`workloads` IS a verb and was reported as a mistyped one"
+    )
+
+
+def test_a_route_that_sends_no_ns_is_not_blamed_on_the_allowlist(status_env):
+    """NEGATIVE CONTROL: /v1/nodes carries no ns, so a 400 there is not a
+    namespace refusal and must not be explained as one. `nodes` is outside the
+    allowlist BY DESIGN (it carries no namespace identity), so conflating the
+    two would send a reader to widen a list that was never consulted.
+    """
+    env = {**status_env, "STUB_CODE": "400",
+           "STUB_BODY": '{"error":"something else"}'}
+    proc = run(env, "status", "nodes")
+
+    assert "POLICY ANSWER" in proc.stderr
+    assert "MUSE_BRIDGE_NS_ALLOW" not in proc.stderr, (
+        "a 400 on a route that sends no ns was blamed on the namespace "
+        "allowlist"
+    )
+
+
+@pytest.mark.parametrize("code", ["200", "401", "404", "500"])
+def test_only_400_gets_the_policy_explanation(status_env, code):
+    """NEGATIVE CONTROL for the whole branch.
+
+    A `case` that matched too widely -- or an unconditional printf -- would
+    pass every positive assertion above while telling the operator that a
+    successful query was a policy refusal.
+    """
+    env = {**status_env, "STUB_CODE": code, "STUB_BODY": '{"items":[]}'}
+    proc = run(env, "status", "pods", "muse")
+    assert "POLICY ANSWER" not in proc.stderr, (
+        f"HTTP {code} was explained as a 400 policy refusal"
+    )
+
+
+def test_the_body_and_status_code_still_reach_stdout(status_env):
+    """INVARIANT GUARD (not a regression) on the output contract.
+
+    Reading the status code required CAPTURING curl's output instead of
+    streaming it. That is exactly the shape that silently stops printing the
+    body -- and `status` has no other output, so a caller would see nothing.
+    """
+    env = {**status_env, "STUB_CODE": "200",
+           "STUB_BODY": '{"items":[{"name":"muse-bridge"}],"count":1}'}
+    proc = run(env, "status", "pods", "muse")
+
+    assert proc.returncode == 0, proc.stderr
+    assert '"name":"muse-bridge"' in proc.stdout, (
+        "the response body no longer reaches stdout"
+    )
+    assert proc.stdout.rstrip().endswith("[200]"), (
+        "the `[<code>]` suffix no longer terminates stdout -- anything parsing "
+        f"it breaks. stdout={proc.stdout!r}"
+    )
+
+
+def test_the_status_exit_code_is_unchanged_by_the_400_branch(status_env):
+    """INVARIANT GUARD: `status` exits 0 for every HTTP answer, 400 included.
+
+    Deliberate and documented (muse's header legend; SKILL.md). The inability
+    of a caller to branch on it is a REAL defect, batched as M3/M4 in
+    claudedocs/handoff-muse-system-inventory.md -- this guard exists so rank 25
+    cannot change that contract as a side effect, and so that whoever DOES fix
+    M3 has to come here and change it on purpose.
+    """
+    for code in ("200", "400", "401", "404", "500"):
+        env = {**status_env, "STUB_CODE": code, "STUB_BODY": "{}"}
+        proc = run(env, "status", "pods", "muse")
+        assert proc.returncode == 0, (
+            f"HTTP {code} changed cmd_status's exit status to "
+            f"{proc.returncode}; if that is intended, M3 is being fixed and "
+            "this guard plus the header legend must move together"
+        )

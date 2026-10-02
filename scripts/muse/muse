@@ -636,7 +636,7 @@ bridge_token() {
 }
 
 cmd_status() {
-  local what="health" ns="muse"
+  local what="health" ns="muse" guessed_ns=0
   if [ $# -gt 0 ]; then
     case "$1" in
       health)    what="health" ;;
@@ -644,11 +644,16 @@ cmd_status() {
       pods)      what="pods"; [ $# -gt 1 ] && ns="$2" ;;
       workloads) what="workloads"; [ $# -gt 1 ] && ns="$2" ;;
       flux)      what="flux"; [ $# -gt 1 ] && ns="$2" ;;
-      *)         what="pods"; ns="$1" ;;
+      # A bare word that is not a verb is REINTERPRETED as a namespace. That
+      # makes `muse status pdos` a pods query for ns=pdos, which the bridge
+      # answers 400 — so a VERB typo and a namespace the server refuses are the
+      # same observable. guessed_ns records which one happened, because only
+      # this branch can produce the first, and the 400 handler below says so.
+      *)         what="pods"; ns="$1"; guessed_ns=1 ;;
     esac
   fi
-  local url="$BRIDGE_URL/v1/$what"
-  case "$what" in pods|workloads|flux) url="$url?ns=$ns" ;; esac
+  local url="$BRIDGE_URL/v1/$what" sent_ns=0
+  case "$what" in pods|workloads|flux) url="$url?ns=$ns"; sent_ns=1 ;; esac
   local token; token=$(bridge_token) || die "could not decrypt bridge token" 4
   [ -n "$token" ] || die "bridge token decrypted empty" 4
   local rc=0
@@ -668,11 +673,56 @@ cmd_status() {
   # exist. `-H @-` passes the line VERBATIM. Found by #1976 round 1.
   # ⚠ The unquoted `--config` spelling (`header = Authorization: …`) sends NO
   # header at all — also measured. Do not "simplify" back to either form.
-  printf 'Authorization: Bearer %s\n' "$token" \
-    | curl -sS -m 15 -H @- "$url" -w '\n[%{http_code}]' || rc=$?
+  #
+  # The response is CAPTURED rather than streamed so the status branch below can
+  # read the code. The body is reprinted verbatim and `-w` still appends
+  # `[<code>]`, so anything parsing either is unaffected; the only change is
+  # that output arrives at once instead of as it lands (bounded by -m 15).
+  local out
+  out=$(printf 'Authorization: Bearer %s\n' "$token" \
+    | curl -sS -m 15 -H @- "$url" -w '\n[%{http_code}]') || rc=$?
+  printf '%s\n' "$out"
   echo >&2
   [ "$rc" -eq 0 ] || die "bridge query failed (network)" 4
-  # 401 = token rejected; 404 = route gone (API churn); both are answers, not outages.
+
+  # 🔴 EVERY HTTP CODE HERE IS AN ANSWER, NOT AN OUTAGE — AND THIS COMMENT USED
+  # TO NAME ONLY TWO OF THEM. It read "401 = token rejected; 404 = route gone",
+  # which was complete until 2026-10-02: homelab-infra #942/#944 deployed a
+  # server-side namespace ALLOWLIST (startup line `ns-allow=muse`), so every
+  # `muse status pods <ns>` / `workloads <ns>` / `flux <ns>` and the bare
+  # `muse status <ns>` fallthrough now answers **400** for every namespace
+  # outside it. With 400 unmentioned, a POLICY DENIAL read as a typo. 400 is
+  # explained below; 401 and 404 still mean what they said.
+  #
+  # Exit status is deliberately UNCHANGED (0 for any HTTP answer, including
+  # 400). That is the documented contract — a caller branching on exit status
+  # cannot distinguish these, which is a REAL and separate defect, batched as
+  # M3/M4 in claudedocs/handoff-muse-system-inventory.md. Do not fix it here:
+  # changing it silently would alter every existing caller's behaviour.
+  local code="${out##*\[}"; code="${code%\]}"
+  case "$code" in
+    400)
+      printf 'muse: the bridge answered 400 — a POLICY ANSWER, not an outage.\n' >&2
+      if [ "$sent_ns" -eq 1 ]; then
+        printf '  ns=%s was REFUSED by the bridge, which serves only an allowlisted\n' "$ns" >&2
+        printf '  set of namespaces. The allowlist is SERVER-side and the bridge does\n' >&2
+        printf '  not disclose its contents (that would let a prober enumerate it one\n' >&2
+        printf '  namespace at a time): it is MUSE_BRIDGE_NS_ALLOW on the muse-bridge\n' >&2
+        printf '  Deployment, comma-separated, REPLACING a compiled default of `muse`.\n' >&2
+        printf '  The body above says which half refused — "namespace not served" is\n' >&2
+        printf '  well-formed but not allowlisted, "malformed ns" fails the pattern.\n' >&2
+        printf '  🔴 Widening it is a deliberate security change on the cluster, NOT a\n' >&2
+        printf '  client fix: the bridge has ClusterRole-wide read and this allowlist\n' >&2
+        printf '  is its ONLY namespace boundary.\n' >&2
+        if [ "$guessed_ns" -eq 1 ]; then
+          printf '  ⚠ AND `%s` WAS NOT A VERB, so it was read as a NAMESPACE. If you\n' "$ns" >&2
+          printf '    meant a verb, it is one of: health nodes pods workloads flux.\n' >&2
+        fi
+      else
+        printf '  The %s route rejected the request itself — see the body above.\n' "$what" >&2
+      fi
+      ;;
+  esac
 }
 
 cmd_setup() {

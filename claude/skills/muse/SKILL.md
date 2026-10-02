@@ -165,6 +165,15 @@ whose poll cadence is ~12.7 s.
 with the sops bearer token (`clusters/homelab/apps/muse/` in the homelab repo;
 age key at `.secrets/age.key`). The token is decrypted per call and **never
 printed**. 401 = token rejected (expected without one); 404 = route gone.
+🔴 **400 is a POLICY ANSWER, and every ns but `muse` gets one.** Since
+homelab-infra #942/#944 (2026-10-02, startup line `ns-allow=muse`) the bridge
+serves an allowlisted namespace set, so `status pods <ns>`, `workloads <ns>`,
+`flux <ns>` and the bare `status <ns>` fallthrough all answer 400 outside it —
+the server being right, not a broken CLI. The list is server-side
+(`MUSE_BRIDGE_NS_ALLOW` on the Deployment, REPLACING a compiled default of
+`muse`) and deliberately undisclosed, so widening it is a cluster security
+change. ⚠ **`status` exits 0 on 400/401/404/5xx alike** — the code is printed,
+never returned, so a caller branching on exit status reads a denial as success.
 Connector (Muse side): `custom.homelab-bridge`, wired + live-tested 2026-10-01 —
 Muse answers "what pods are running in ns muse" through it; its approval
 defaults are "Ask for some actions" and the API is GET-only, so the whole
