@@ -302,17 +302,20 @@ identity. Claim before acting: `claim-work --slug-for <this doc> <rank>`.
 
 **Security-forcing — the public exposure, operator-gated where noted**
 
-9. **S2 — implement the `ns` allowlist in `nsFrom`** (`containers/muse-bridge/main.go:212-216`),
-   plus a test that `?ns=kube-system` → 400. The design mandates it in as many
-   words; only the regex shipped, so all **57** namespaces are readable by the
-   token. Pure code; needs a rebuild + tag bump.
-   forcing: security — a third-party LLM connector can read every namespace.
+9. **S2 — DONE, awaiting merge + a rebuild. `IN FLIGHT: homelab-infra#942`.**
+   What remains is NOT code: review and merge #942, then **build and push a new
+   image tag** (`0.1.1`) and bump `clusters/homelab/apps/muse/deployment.yaml`
+   — until then the running pod serves the old binary and every namespace is
+   still readable. The build step is recorded nowhere (M12/rank 20), so this
+   hands off to the operator.
+   forcing: security — a third-party LLM connector can read every namespace
+   until the new image is actually running.
 16. **S1 — close the origin bypass** in
     `clusters/production/apps/nebula/gateway/muse-bridge-ingress.yaml`: drop the
     `web` entrypoint, add `certResolver: letsencrypt`, add a Cloudflare-only
     `IPAllowList`. ⚠ **Decide class vs instance** — `muster-ingress.yaml:24-26` is
     identical. The Cloudflare SSL-mode change to Full (strict) is the operator's.
-    forcing: security — measured: origin `<hetzner-origin-ip>` answers cleartext
+    forcing: security — measured: the Hetzner origin answers cleartext
     HTTP on :80 and a self-signed cert on :443; the bearer token crosses that leg.
 18. **S5 — delete the four unused RBAC grants** (`clusters/homelab/apps/muse/rbac.yaml:16,19`):
     `pods/log`, `services`, `namespaces`, `replicasets`. No handler reads any.
@@ -322,30 +325,39 @@ identity. Claim before acting: `claim-work --slug-for <this doc> <rank>`.
     above; BLOCKED on capturing one live approval card.
     forcing: security — it is the wrapper's only security branch and has never
     been positive-controlled.
-19. **M6 — real `http.Server` timeouts + graceful shutdown** (`main.go:104`),
+19. **M6 — real `http.Server` timeouts + graceful shutdown** (`main.go`),
     `replicas: 2` + a PDB.
     forcing: security — all four timeouts are zero and the origin is directly
     reachable, so pre-auth slowloris reaches a single replica.
 17. **S4 — bound `/v1/nodes`**: `ResourceVersion: "0"` + `Limit`, or drop the
-    cluster-wide pod rollup (`handlers.go:17,55`).
+    cluster-wide pod rollup (`handlers.go:17,55`). ⚠ **The allowlist does NOT
+    cover this route** — `/v1/nodes` takes no `ns` and still aggregates pod
+    requests across all 837 pods cluster-wide, by design.
     forcing: security — 30 req/min × an unbounded 837-pod etcd read, drivable from
     the public internet by one token.
-22. **Audit log — add `client=` and `tokid=`** (`main.go:167-169`). XFF already
-    arrives and the sha256 is already computed at `:124`.
+22. **Audit log — add `client=` and `tokid=`** (`main.go`, the `ServeHTTP` audit
+    line). XFF already arrives and the sha256 is already computed in `auth`.
+    🔴 **Fix the injection in the same change:** that line interpolates the
+    **raw** `ns` and `r.URL.RequestURI()` with `%s`, so a `%0a` in the query can
+    forge log lines in the one surface used for attribution. Found 2026-10-02
+    while implementing S2; deliberately not changed there, because altering the
+    log format belongs with the change that re-shapes the line.
     forcing: security — design §3.2 mandates token-id; today a Muse call and an
-    audit agent's probes are indistinguishable in the log.
+    audit agent's probes are indistinguishable in the log, and either can be
+    spoofed by a crafted query string.
 14. **Golden field-set test** for the five bridge item structs.
-    forcing: security — the data-minimization claim (`main.go:5`, `openapi.yaml:6-8`)
+    forcing: security — the data-minimization claim (`main.go:5`, `openapi.yaml`)
     is the design's central control and NO test asserts any response's field set.
 
 **Gate-forcing**
 
 20. **M12 — a Tekton pipeline for `containers/muse-bridge/**`**, modelled on
-    `clawgate-ci-pipeline.yaml`.
-    forcing: gate — nothing automated builds or tests the bridge; its 5 tests run
-    only when a human types `go test`, and `imagePullPolicy: IfNotPresent` on the
-    mutable tag `0.1.0` means a rebuild can deploy "successfully" and run the old
-    binary.
+    `clawgate-ci-pipeline.yaml`. 🔴 **Now also the blocker on rank 9 landing in
+    reality**: #942 cannot take effect without a build+push nobody has
+    automated, and `go test` still runs only when a human types it.
+    forcing: gate — nothing automated builds or tests the bridge, and
+    `imagePullPolicy: IfNotPresent` on the mutable tag `0.1.0` means a rebuild
+    can deploy "successfully" and run the old binary.
 
 ## 7. Honesty ledger
 
@@ -391,9 +403,46 @@ read-only `muse-bridge` cluster API exposed to the public internet.
 
 ## State now
 
-- **Branch:** `main`, clean (one unrelated untracked file,
-  `nix/system/apply-networkmanager-openvpn.sh`, not ours).
-- **Merged this session** — all verified by CONTENT on the remote, never by
+- **Branch:** devrc `main`, clean (one unrelated untracked file,
+  `nix/system/apply-networkmanager-openvpn.sh`, not ours). The S2 work is in
+  **homelab-infra**, not devrc.
+- **THIS SESSION — rank 9 (S2) implemented, PR OPEN, NOT MERGED, NOT DEPLOYED:**
+  **homelab-infra #942** (`feat/muse-bridge-ns-allowlist`, commit `1712500ed`,
+  based on `origin/trunk` `d7866d524`). `claim-work muse-system-inventory-9`
+  held for the duration; release it when #942 merges.
+  - `nsAllowed(ns, allow)` in `containers/muse-bridge/main.go` is now the
+    single namespace boundary: pattern **AND** allowlist membership. Default
+    `["muse"]`; `MUSE_BRIDGE_NS_ALLOW` (comma-separated) widens it
+    per-deployment with no rebuild, **replacing** the default rather than
+    extending it. Unset/all-blank falls back to the compiled-in list — a
+    fallback that can only narrow, never open.
+  - An allowlist entry that cannot match `nsPattern` is unreachable rather
+    than permissive, so `sortedNsAllow` stops the pod at boot. `maxUnavailable:
+    0` keeps the old pod serving through that crash-loop.
+  - **Second half of the same hazard, consolidated:** `nsCtx` validated the ns
+    and then all four handlers re-read `r.URL.Query().Get("ns")` for the value
+    they actually handed client-go — gate and use were independent reads.
+    `nsCtx` now returns the validated ns; no handler re-reads the query.
+  - Extracted `func (s *server) routes()` so the tests assert the **real**
+    route table. That is **half of rank 15**; its other half
+    (`TestLimiterBurstThenRefill` never testing refill) is still open.
+  - `containers/muse-bridge/ns_allow_test.go` — 8 new tests. `go build`,
+    `go vet`, `go test -race` all clean (13 tests total in the package).
+- **The default was chosen by MEASUREMENT, not taste:** over the service's
+  entire recorded audit log (`kubectl logs -n muse deploy/muse-bridge
+  --since=72h | grep -v route=/v1/health`), **every** successful ns-scoped
+  request ever made used `ns=muse`. 57 namespaces live; nothing but `muse` has
+  ever been asked for. `/v1/nodes` and `/openapi.yaml` take no ns.
+- 🔴 **Deploy status, stated separately from merged: #942 is INERT ON MERGE and
+  the code is NOT running.** `imagePullPolicy: IfNotPresent` on the mutable tag
+  `0.1.0` (M11) means it needs a **build, push and tag bump**, and nothing in
+  the repo automates that (M12 — the build step is recorded nowhere). The PR
+  deliberately does NOT bump the tag: bumping it with no pushed image leaves
+  Flux pulling a tag that does not exist. Merging changes no cluster behaviour —
+  `openapi.yaml` is `go:embed`'d rather than a ConfigMap, and the
+  `deployment.yaml` change is a comment documenting the knob (no `env` key
+  added, so no rollout).
+- **Previously merged** — all verified by CONTENT on the remote, never by
   ancestry (squash merges are never ancestors):
   - devrc **#1972** (`82b4c6e3`) — the inventory doc this handoff updates.
   - devrc **#1976** (`272c7f03`) — six wrapper fixes, 16 hermetic tests, one
@@ -401,22 +450,20 @@ read-only `muse-bridge` cluster API exposed to the public internet.
   - homelab-infra **#941** (`490796a3`) — `MuseBridgePublicPathDown`'s triage
     runbook pointed at homelab Traefik; the last hop is the **Service**
     (`clusters/homelab/apps/nebula/gateway/nginx.conf:1205-1207`).
-- **Tier 1 is DONE** (old ranks 1–8). Tier 2/3 remain; ranks below keep their
-  ORIGINAL numbers so any live `claim-work` claim still resolves.
+- **Tier 1 is DONE** (old ranks 1–8). Ranks below keep their ORIGINAL numbers
+  so any live `claim-work` claim still resolves.
 - **A concurrent session shipped #1975** ("thread-aware B1 routing", +206/−37 in
   `scripts/muse/muse`) from a base BEFORE #1976, so main carried none of the
-  fixes. Merged forward in `6153bd5e`; both are live on `main` now.
-- **Deploy status, stated separately from merged:** `scripts/muse/muse` is **NOT
-  nix-deployed** — `git grep scripts/muse -- nix/` is empty and
-  `~/.local/bin/muse` does not exist. The only reachable copy is
-  `$DEVRC/scripts/muse/muse`, which is current after a base-clone ff-merge. The
-  SKILL.md half IS a nix store copy and needs a `switch`/`ship.sh` to go live.
-- **CI:** all four Tekton checks green on the merge commit — `pytests
-  collected=24993 passed=24985 skipped=8 failed=0`.
-- **No clawgate task recorded**: `clawgate_handoff.sh resolve` exited **5**
-  (nothing resolved). An unknown session id also answers with an empty array, so
-  that zero cannot distinguish "touched no task" from "wrong id" — it is not a
-  clean bill of health, and no `clawgate-task:` field was written.
+  fixes. Merged forward in `6153bd5e`; both are live on `main`.
+- **`scripts/muse/muse` is still NOT nix-deployed** — `git grep scripts/muse --
+  nix/` is empty and `~/.local/bin/muse` does not exist. The only reachable copy
+  is `$DEVRC/scripts/muse/muse`. The SKILL.md half IS a nix store copy and needs
+  a `switch`/`ship.sh` to go live.
+- **No clawgate task recorded, and that is not a clean bill of health:**
+  `clawgate_handoff.sh resolve` exited **5** (nothing resolved) again this
+  session. An unknown session id also answers with an empty array, so the zero
+  cannot distinguish "touched no task" from "wrong id". No `clawgate-task:`
+  field written.
 
 ## Open investigations — live diagnosis state
 
@@ -466,10 +513,15 @@ Fixed as ONE round, not one rank each. Original ranks kept for reference.
   loop instead of a bare `continue`; close the tab on the timeout path.
 - **(13) B4 host hardcode** — `muse:119` `bw://laptop/`; derive from
   `browser whoami` (NOT shell `whoami`, which is the username).
-- **(15) `TestLimiterBurstThenRefill` never tests refill**; and extract
-  `func (s *server) routes()` so the real route table is assertable.
+- **(15) `TestLimiterBurstThenRefill` never tests refill.** ⚠ **The other half of
+  this item is DONE** — `func (s *server) routes()` was extracted in #942, so the
+  real route table is now assertable and `TestTheNsScopedRouteLedger…` asserts
+  part of it. `TestRouterWhitelist` still builds its own mux and still proves
+  nothing about the real table; the refill arithmetic is still unexercised.
 - **(21) M5 — fill in `openapi.yaml`'s five response schemas** and the 500/404/405
-  responses; today every data route returns an untyped `ItemList`.
+  responses; today every data route returns an untyped `ItemList`. ⚠ #942 updated
+  the `ns` parameter and `BadNs` descriptions only — the five item schemas are
+  untouched.
 - **(23) Nix-deploy the wrapper** as a `mkOutOfStoreSymlink` into
   `~/.local/bin/muse`. 🔴 **Sequenced AFTER (13)** or it puts a laptop-only tool on
   both hosts' `$PATH`.
@@ -512,9 +564,51 @@ Fixed as ONE round, not one rank each. Original ranks kept for reference.
   mutant** (measured across all four stamp × `--force` states) and is deliberately
   NOT tested. Do not add a test to force a kill there.
 
+- 🔴 **A Go test that PANICS aborts the test binary and suppresses every later
+  test's verdict — which silently hollows out a mutation sweep.** Measured
+  2026-10-02 while sweeping #942: de-gating `handleFlux` made the route test
+  panic on the nil k8s client, so the run printed **one** FAIL and the two seam
+  guards that should also have fired never executed. Reading that output, the
+  ledger guard and the structural guard both looked like they had **failed to
+  catch the mutant**. Fix: `defer recover()` inside the loop body and report the
+  panic as a failure — the same mutant then fires all three, each with its own
+  message. **Any sweep over a suite where one test can panic is measuring a
+  prefix of itself.**
+- **A nil dependency is a usable positive control.** `museOnly()` builds the
+  server with `k8s: nil`, so "the request got past the gate" is observable as a
+  panic. A 400-only test cannot distinguish a correct allowlist from a gate that
+  refuses *every* namespace — the panic case is what separates them, and it costs
+  no fake clientset.
+- **The error message for a disallowed ns is deliberately the SAME as for a
+  malformed one** (`invalid or missing ns`). Distinguishing them would let a
+  prober enumerate the allowlist one namespace at a time.
+- **Decision: the compiled-in default is NOT the knob.** The env var is, and it
+  **replaces** the default rather than merging with it — otherwise an operator
+  narrowing the list to `monitoring` would silently retain `muse`. A test pins
+  the replacement semantics and a second pins the default at exactly `["muse"]`,
+  so widening the compiled-in list fails the suite rather than passing quietly.
+- **The go toolchain here is on `$PATH` directly** (`go1.26.8`), so bridge tests
+  run as `go test -C <dir> ./... -count=1 -race` — not through devrc's
+  `gate.sh`/`scoped-tests.sh`, which are the python/node/go tiers of **devrc**
+  and know nothing about homelab-infra. `go build` leaves a `muse-bridge` binary
+  in the package dir; delete it before staging.
+- ⚠ **The editor LSP in this session reported dozens of phantom compile errors**
+  for `containers/muse-bridge` (`undefined: server`, `could not import
+  k8s.io/api/core/v1`) — a single-file/GOROOT-only view of a module outside the
+  workspace. `go build ./...` and `go vet ./...` were clean throughout. Do not
+  chase those; trust the toolchain.
+
 ## How to verify
 
 ```bash
+# the muse-bridge suite, including the 8 new allowlist tests (13 total)
+go test -C $HOMELAB/containers/muse-bridge ./... -count=1 -race -v | grep -E '^(---|ok|FAIL)'
+go vet -C $HOMELAB/containers/muse-bridge ./...
+
+# the regression proof: revert nsFrom to the pre-change pattern-only code and
+# watch all four ns-scoped routes go red ("handler panicked past the gate").
+# Copy the file aside first — never `git stash` in a shared checkout.
+
 # the wrapper's own suite, plus the dev-host contract pin
 nix develop $DEVRC -c python3 -m pytest \
   $DEVRC/scripts/tests/test_muse_wrapper.py \
@@ -525,13 +619,18 @@ nix develop $DEVRC -c python3 -m pytest \
   $DEVRC/scripts/tests/test_no_public_ips.py \
   $DEVRC/scripts/tests/test_no_captured_text.py -q
 
-# the six fixes are live in the only reachable copy (NOT nix-deployed)
+# the six wrapper fixes are live in the only reachable copy (NOT nix-deployed)
 grep -c -- '-H @-' $DEVRC/scripts/muse/muse        # 3 (1 code, 2 comment)
 grep -c 'UMSGS'    $DEVRC/scripts/muse/muse        # >0
 
 # bridge RBAC is still read-only
 KUBECONFIG=$KC_HOMELAB kubectl auth can-i --list \
   --as=system:serviceaccount:muse:muse-reader | grep -E 'create|delete|patch|update'
+
+# 🔴 the allowlist is NOT live until a new image is built, pushed and the tag
+# bumped. What the RUNNING pod enforces:
+KUBECONFIG=$KC_HOMELAB kubectl logs -n muse deploy/muse-bridge | grep 'listening on'
+# no `ns-allow=` in that line  => old binary, every namespace still readable
 ```
 
 🔴 **Do NOT run `muse send` to verify** — it sends from the operator's live
