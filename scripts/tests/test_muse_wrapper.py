@@ -4,29 +4,39 @@
 from the operator's LIVE Muse account across Meta's wire, and until 2026-10-01
 NOTHING tested it. A four-agent inventory found the defects pinned below.
 
-🔴 THE RED/GREEN MATRIX, MEASURED at every ref below with a sha256 restore
-control, after EVERY change to this module. Re-measure it when you add a
-test -- an earlier version was labelled "MEASURED" and was wrong in all
-three cells because three tests were added and nobody re-ran it (#1976 r4).
+🔴 THE RED/GREEN MATRIX, MEASURED at every ref with a sha256 restore control,
+after EVERY change to this module. Re-measure when you add, remove or rename a
+test -- an earlier version was labelled "MEASURED" and was wrong in all three
+cells because three tests were added and nobody re-ran it (#1976 r4), and the
+version after that was right about the numbers and wrong about what they meant
+(#1976 r5).
 
-    298e4c57  (the PR's base)   12 failed,  5 passed
-    c82a16c1  (round 1's tip)    2 failed, 15 passed
-    dff18206  (round 2's tip)    2 failed, 15 passed
-    HEAD                        17 passed
+    298e4c57  (the PR's base)   12 failed,  4 passed
+    c82a16c1  (round 1's tip)    2 failed, 14 passed
+    dff18206  (round 2's tip)    2 failed, 14 passed
+    HEAD                        16 passed
 
-Twelve are regressions against the ORIGINAL wrapper. The other five are
-INVARIANT GUARDS, labelled as such in their own docstrings -- they pass in
-every tree by design and must NOT be counted as regression coverage. Get the
-current names from the run, not from a list here: a hardcoded list went
-stale within one round when a test was renamed.
+⚠ Measured WITH muse-cli installed is irrelevant to these numbers -- the test
+that needs the binary lives in scripts/devhost-tests/ and is not in this file.
 
-⚠ The non-monotonic column is real and is the point: a test can be red at a
-LATER tip than at base, because this ladder's own fix rounds introduced
-defects. Do not "simplify" this to a single baseline.
-⚠ An earlier note claimed one test was "green at base precisely because the
-defect did not exist there". That is FALSE now -- round 3 retargeted it onto
-muse-cli's rc 2, and it is red at base too. The claim is deleted rather than
-repaired.
+🔴 GREEN AT BASE DOES NOT MEAN "INVARIANT GUARD". An earlier version said "the
+other five are INVARIANT GUARDS, labelled as such", and only two of them were.
+A reader pruning "invariant guards" would have deleted a real regression test
+that round 0 explicitly decided to KEEP. The four green-at-base tests are:
+
+    test_the_stub_is_reachable_and_records      POSITIVE CONTROL for the module
+    test_a_fresh_stamp_refuses_a_second_send    INVARIANT GUARD
+    test_gap_zero_disables_the_guard            INVARIANT GUARD
+    test_help_survives_an_unusable_pacing_gap   REGRESSION -- against a draft
+                                                fix made DURING this PR, so the
+                                                defect never existed at base
+
+That last row is the phenomenon worth keeping: a test can be green at base and
+still be regression coverage, because this ladder's own fix rounds introduced
+defects. Read each test's OWN docstring label; do not infer it from the column.
+
+⚠ The counts above are test ITEMS; four of them come from one parametrised
+function, so the twelve red-at-base items are nine distinct functions.
 
 To re-measure: `git stash` is banned here, so copy the wrapper aside, then
 `git checkout HEAD -- scripts/muse/muse`, run, and copy back.
@@ -369,56 +379,6 @@ def test_the_cli_channel_paces_every_ambiguous_failure(env, rc):
         f"muse-cli rc {rc} did not stamp -- it is not provably a non-send, so "
         "a caller retrying on failure may deliver a second time with no gap"
     )
-
-
-def test_the_muse_cli_exit_code_contract_still_holds():
-    """🔴 BINDS THE THIRD-PARTY CONSTANT THE CARVE-OUT RESTS ON.
-
-    `cmd_send_cli` skips the pacing stamp on exactly one muse-cli exit code,
-    because that code means the send provably never left this machine. That
-    is a fact about muse-cli, not about this repo, and nothing in the suite
-    read it -- so a renumbering in muse-cli 0.4.x would silently turn the
-    carve-out into "skip the gate after a possible real send", which is the
-    exact hazard this PR exists to prevent, with the suite fully green.
-
-    The history is why this is not paranoia: round 2 carved the WRONG code,
-    taking it from this wrapper's own stale header legend instead of from
-    muse-cli, and no test objected for two rounds.
-
-    Reads the INSTALLED source; it never executes muse-cli. SKIPs when
-    muse-cli is absent, so the nix sandbox tier (which has no uv tools) stays
-    hermetic rather than going red on an environment fact.
-    """
-    import shutil
-
-    bin_path = shutil.which("muse-cli")
-    if not bin_path:
-        pytest.skip("muse-cli not installed; nothing to bind")
-    root = pathlib.Path(bin_path).resolve().parent.parent
-    cli = next(root.glob("lib/python*/site-packages/muse_cli/cli.py"), None)
-    if cli is None:
-        pytest.skip(f"muse-cli installed at {bin_path} but cli.py not found")
-
-    text = cli.read_text()
-    # Pin the mapping as a RELATIONSHIP between the exception and the code,
-    # normalised on whitespace so reformatting does not break it.
-    flat = " ".join(text.split())
-    for exc, code in (("AuthError", 2), ("GatewayError", 3), ("TimeoutError", 4)):
-        # 🔴 `(?:(?!except\b).)` -- the span must NOT cross into the next
-        # `except` clause. With a plain `.{0,200}?` the pattern for
-        # AuthError->3 MATCHED, by running past AuthError's own handler into
-        # GatewayError's `sys.exit(3)`. That is precisely the renumbering
-        # this guard exists to catch, so the guard was blind to it. Found by
-        # running the NEGATIVE control (all six wrong mappings must fail to
-        # match), never by the positive one, which was green throughout.
-        pat = rf"except {exc} as \w+:(?:(?!except\b).){{0,200}}?sys\.exit\({code}\)"
-        assert re.search(pat, flat), (
-            f"muse-cli no longer maps {exc} -> exit {code}. scripts/muse/muse "
-            f"carves ONLY rc 2 out of the pacing stamp on the grounds that it "
-            f"is AuthError and therefore a provable non-send. Re-derive the "
-            f"mapping from {cli} and update cmd_send_cli, the header legend "
-            f"and SKILL.md together -- they have been wrong before."
-        )
 
 
 def test_the_token_never_reaches_curl_argv():
