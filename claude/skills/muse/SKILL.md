@@ -35,8 +35,13 @@ default (`muse b1` prints the recipe verbatim).
   of secrets: no hostnames, IPs, tokens, cluster names, credentials, or
   client-identifying detail. (The public `muse-bridge.zacx.dev` hostname is the
   one sanctioned exception — it exists to be public.)
-- **Pacing**: human-paced, a few sends per hour. The wrapper enforces a ≥10 min
-  gap between sends (`MUSE_MIN_SEND_GAP_MIN`; `--force` overrides deliberately).
+- **Pacing**: human-paced, a few sends per hour. The wrapper *reminds* you of a
+  ≥10 min gap (`MUSE_MIN_SEND_GAP_MIN`; `--force` overrides deliberately) — it
+  is **not a rate limiter**, and is bypassable by anything that can write
+  `$XDG_STATE_HOME/muse/last-send` (the gap is read from that file's MTIME, not
+  its contents). It stamps on confirmed SUBMIT, so a reply-timeout still counts.
+  🔴 **An agent loop is the threat it does not stop** — give send authority to
+  exactly ONE agent per fan-out and stub `MUSE_BB` for the rest.
 - **Cookies/token never cross the wire you type on**: muse-cli keeps its own
   cookie storage; the bridge token lives in sops in the homelab repo. Never
   echo, commit, prompt, or task-text either one.
@@ -47,8 +52,8 @@ default (`muse b1` prints the recipe verbatim).
 
 ```bash
 M=$DEVRC/scripts/muse/muse
-$M send "<task>" [--wait 180] [--force] [--cli]   # dispatch + await reply (JSON)
-$M poll [--cli]                                    # latest assistant turn
+$M send "<task>" [--wait 180] [--force] [--cli] [--thread <id>]  # dispatch + await (JSON)
+$M poll [--cli] [--limit N]                        # latest assistant turn (no --wait)
 $M status [ns|nodes|workloads <ns>|flux <ns>]      # CLUSTER snapshot (bridge; default ns muse)
 $M vm                                              # Muse VM/session status (muse-cli)
 $M auth export                                     # B2 one-time cookie export (steps on failure)
@@ -58,8 +63,16 @@ $M setup                                           # runbook pointers
 
 `send` returns `{"sent": true, "channel": "b1", "reply": "…"}` — the reply is
 the newest assistant TURN only. `note`-style timeouts are a timeout, not a
-silence-verdict — re-check with `poll`. On B1 (`--cli`), muse-cli's
-`{sent, stream, reply|note}` shape comes back instead.
+silence-verdict — re-check with `poll`. On the **B2** path (`--cli` — which is
+muse-cli, NOT the browser flow; B1 is the default and takes no flag), muse-cli's
+`{sent, stream, reply|note}` shape comes back instead. `--thread` implies
+`--cli`.
+
+🔴 **`"sent": true` with exit 0 does not mean the reply is complete.** An empty
+reply and one truncated at the `--wait` deadline are byte-indistinguishable from
+a good one. Measured poll cadence is ~12.7 s, so a generation stall longer than
+that satisfies the stable-twice heuristic and truncates silently — likeliest
+exactly when Muse pauses for a connector round-trip.
 
 ## First-time auth (B2 ONLY, one-time, USER hands — currently blocked on Brave)
 
@@ -81,7 +94,11 @@ Run `$M b1` and follow it. Core: `$BB --instance personal open https://muse.ai`
 (own tab), then `flows/muse.ai.md` — snapshot → type → **assert length** →
 `key Enter` (no form/button exists) → confirm composer cleared → poll until
 last `data-message-id` + `innerText.length` are stable twice → extract only the
-newest `data-message-turn-id` group. Measured round-trip ~10–25 s.
+newest `data-message-turn-id` group. **Measured wall time ~75 s** end to end
+(2026-10-01): Muse's own contribution is ≤21 s; the rest is wrapper overhead —
+six `b1_state` reads at ~6 s each of `--wake` settle, plus open and extraction.
+⚠ The flow file's "first reply ≤14 s" is not resolvable through the wrapper,
+whose poll cadence is ~12.7 s.
 
 🔴 **B1 gotchas measured 2026-10-01**:
 - **Approvals gate the composer.** Muse's per-host approval prompt ("Allow Muse

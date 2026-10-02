@@ -17,7 +17,10 @@
 #
 # Pacing: sends are human-paced (a few/hour, design §4-B2). The wrapper refuses
 # a second send within $MUSE_MIN_SEND_GAP_MIN minutes (default 10) unless
-# --force; the guard is a reminder, not a rate limiter.
+# --force; the guard is a reminder, not a rate limiter. It stamps on CONFIRMED
+# SUBMIT (not on a successful round-trip), refuses a non-integer gap rather
+# than failing open, and is still bypassable by anything that can write
+# $STATE_DIR/last-send — it is read from the stamp's MTIME, not its contents.
 #
 # Muse's per-host APPROVAL prompts are the OPERATOR's security gate: this
 # wrapper DETECTS a pending approval and stops (exit 5) rather than clicking
@@ -44,7 +47,9 @@ muse — dispatch/poll the user's Muse agent; cluster status via muse-bridge.
                                    B1 browser flow by default (--wait default
                                    180); --cli routes through muse-cli (needs
                                    its one-time cookie export) with --thread
-  muse poll [--wait N] [--cli]                      latest assistant reply
+  muse poll [--cli] [--limit N]                     latest assistant reply
+                                   (--limit is the muse-cli path only; there is
+                                   deliberately no --wait — poll reads once)
   muse status [ns|nodes|workloads <ns>|flux <ns>]   CLUSTER snapshot (A)
   muse vm                                           Muse VM/session status (B2)
   muse auth [export|...]                            muse-cli auth passthrough
@@ -86,7 +91,11 @@ print((r.get("data") or {}).get("value",""),end="")'
 }
 
 # b1_state: one read of the live chat state, as shell vars.
-# Sets: COMPOSER(yes/no) ASST USER LASTID LEN APPROVAL
+# Sets: COMPOSER(yes/no) TALEN ASST UMSGS LASTID LEN APPROVAL
+# 🔴 UMSGS, never USER: reading the user-message COUNT into `USER` clobbers the
+# login-name env var, and assignment to an already-exported name KEEPS the
+# export — so every subsequent $BB_BIN child inherited `USER=<a number>`.
+# b1_state runs up to a dozen times per send. Measured 2026-10-01.
 b1_state() {
   local v
   v=$(bb_js '(function(){var t=document.querySelector("textarea[placeholder=Message]");var a=document.querySelectorAll("[data-message-role=assistant]");var u=document.querySelectorAll("[data-message-role=user]");var l=a[a.length-1];var b=document.body.innerText;var na=b.indexOf("Needs approval")>=0||b.indexOf("Needs review")>=0;return JSON.stringify({c:!!t,tl:t?t.value.length:-1,a:a.length,u:u.length,id:l?l.getAttribute("data-message-id"):"none",len:l?(l.innerText||"").length:0,ap:na})})()') || return 1
@@ -98,7 +107,7 @@ b1_state() {
   parsed=$(python3 -c 'import json,sys
 d=json.loads(sys.argv[1])
 print("yes" if d["c"] else "no", d["tl"], d["a"], d["u"], d["id"], d["len"], "yes" if d["ap"] else "no")' "$v" 2>/dev/null) || return 1
-  read -r COMPOSER TALEN ASST USER LASTID LEN APPROVAL <<<"$parsed"
+  read -r COMPOSER TALEN ASST UMSGS LASTID LEN APPROVAL <<<"$parsed"
 }
 
 b1_open() {
@@ -124,7 +133,16 @@ b1_close() { [ -n "${B1_TAB:-}" ] && "$BB_BIN" "$B1_REF" close >/dev/null 2>&1 |
 
 # --- pacing guard -----------------------------------------------------------
 pace_check() {
-  [ "$MIN_SEND_GAP_MIN" -eq 0 ] 2>/dev/null && return 0
+  # 🔴 FAIL CLOSED on a gap that is not an integer. Both tests below are
+  # `[ … -eq/-lt … ]`, and a non-numeric operand makes `[` ERROR — which, inside
+  # an `if`, is simply FALSE, so the guard fell through and ALLOWED the send.
+  # Measured 2026-10-01: MUSE_MIN_SEND_GAP_MIN=10m printed "integer expected" on
+  # stderr and then sent. Validated here, on the send path only, so a bad value
+  # cannot also break `muse --help` / `b1` / `setup`.
+  case "$MIN_SEND_GAP_MIN" in
+    ''|*[!0-9]*) die "MUSE_MIN_SEND_GAP_MIN must be a non-negative integer (minutes); got '$MIN_SEND_GAP_MIN'. Use 0 to disable the pacing guard deliberately." 2 ;;
+  esac
+  [ "$MIN_SEND_GAP_MIN" -eq 0 ] && return 0
   mkdir -p "$STATE_DIR"
   local stamp="$STATE_DIR/last-send"
   if [ -f "$stamp" ]; then
@@ -176,12 +194,12 @@ cmd_send_b1() {
     b1_state || die "B1: cannot read the muse.ai chat state (composer/feed) in the new tab — see 'muse b1' to drive it by hand. Tab left open: $B1_REF" 1
   fi
   local hydrate_deadline=$((SECONDS + 20))
-  while [ "$ASST" -eq 0 ] && [ "$USER" -eq 0 ] && [ $SECONDS -lt $hydrate_deadline ]; do
+  while [ "$ASST" -eq 0 ] && [ "$UMSGS" -eq 0 ] && [ $SECONDS -lt $hydrate_deadline ]; do
     sleep 3
     "$BB_BIN" "$B1_REF" wake --wait 3000 >/dev/null 2>&1 || true
     b1_state || true
   done
-  if [ "$ASST" -eq 0 ] && [ "$USER" -eq 0 ]; then
+  if [ "$ASST" -eq 0 ] && [ "$UMSGS" -eq 0 ]; then
     trap - EXIT
     die "B1: the feed never hydrated (0 messages after 20s) — the tab is stuck on a shell DOM. Tab left open: $B1_REF (wake it / reload, then re-run)." 1
   fi
@@ -199,7 +217,7 @@ cmd_send_b1() {
     trap - EXIT
     [ "$COMPOSER" = "yes" ] || die "B1: no composer mounted (the app may be in an error state — reload https://muse.ai in tab $B1_REF and re-run)." 1
   fi
-  local base_asst=$ASST base_user=$USER base_id=$LASTID base_len=$LEN
+  local base_asst=$ASST base_umsgs=$UMSGS base_id=$LASTID base_len=$LEN
   "$BB_BIN" "$B1_REF" type "$task" --selector 'textarea[placeholder="Message"]' >/dev/null 2>&1 || die "B1: the type op failed" 1
   local got rc=1
   for attempt in 1 2; do
@@ -216,16 +234,29 @@ cmd_send_b1() {
   # "Cleared" = the composer VALUE is empty (the element itself always stays
   # mounted — checking its existence is how Enter #1 was misread as inert,
   # measured 2026-10-01) AND a new user node appeared.
-  if [ "$TALEN" -ne 0 ] || [ "$USER" -le "$base_user" ] 2>/dev/null; then
+  if [ "$TALEN" -ne 0 ] || [ "$UMSGS" -le "$base_umsgs" ] 2>/dev/null; then
     # Inert Enter (re-throttled tab) — re-wake and submit once more.
     "$BB_BIN" "$B1_REF" wake --wait 3000 >/dev/null 2>&1 || true
     "$BB_BIN" "$B1_REF" key Enter --selector 'textarea[placeholder="Message"]' >/dev/null 2>&1 || true
     sleep 4
     trap - EXIT
     b1_state || die "B1: state unreadable after submit retry" 1
-    trap - EXIT
-    [ "$COMPOSER" = "no" ] || die "B1: the composer did not clear — Enter was inert twice. Check the tab by hand ($B1_REF); if an approval card is pending, review it in the Muse UI." 1
+    # 🔴 Re-check the SAME two signals the first check used (value emptied AND a
+    # new user node). This line used to test `[ "$COMPOSER" = "no" ]` — whether
+    # the textarea ELEMENT was gone — which the comment above says never
+    # happens, so it could only ever fail: every send that took the retry path
+    # died claiming "inert twice" even when the retry had worked. The 2026-10-01
+    # fix was applied to the first check and not to this one.
+    if [ "$TALEN" -ne 0 ] || [ "$UMSGS" -le "$base_umsgs" ] 2>/dev/null; then
+      die "B1: the composer did not clear — Enter was inert twice. Check the tab by hand ($B1_REF); if an approval card is pending, review it in the Muse UI." 1
+    fi
   fi
+  # 🔴 Mark the pacing stamp HERE, on CONFIRMED SUBMIT — not after the reply
+  # poll. A send that submits and then times out waiting (the `no reply within
+  # Ns` die below) has still DELIVERED a message to Meta; stamping only on a
+  # fully successful round-trip left the gate unmarked, so a caller that
+  # retried on exit 1 re-sent immediately with no gap. Measured 2026-10-01.
+  pace_mark
   # Poll the delta: lastId+len stable twice wins; cap at $wait.
   local deadline=$((SECONDS + wait)) prev="" started=$SECONDS
   while [ $SECONDS -lt $deadline ]; do
@@ -245,7 +276,6 @@ cmd_send_b1() {
   fi
   local reply
   reply=$(bb_js '(function(){var a=document.querySelectorAll("[data-message-role=assistant]");var l=a[a.length-1];var turn=l.getAttribute("data-message-turn-id");var p=[];for(var i=0;i<a.length;i++){if(a[i].getAttribute("data-message-turn-id")===turn)p.push((a[i].innerText||"").trim())}return p.join("\n---\n")})()') || reply=""
-  pace_mark
   b1_close
   trap - EXIT
   python3 - "$reply" <<'PYEOF'
@@ -384,7 +414,15 @@ cmd_status() {
   local token; token=$(bridge_token) || die "could not decrypt bridge token" 4
   [ -n "$token" ] || die "bridge token decrypted empty" 4
   local rc=0
-  curl -sS -m 15 -H "Authorization: Bearer $token" "$url" -w '\n[%{http_code}]' || rc=$?
+  # 🔴 The header goes in on STDIN, never as argv. `-H "Authorization: Bearer
+  # $token"` put the bearer token in curl's command line, and MEASURED on this
+  # host /proc is mounted without `hidepid` with /proc/<pid>/cmdline mode 0444 —
+  # so for up to 15s per call ANY local process under ANY user could read a
+  # token that grants cluster-wide read. `--config -` keeps it off argv and out
+  # of /proc, ps and the process table. Measured 2026-10-01.
+  curl -sS -m 15 --config - "$url" -w '\n[%{http_code}]' <<CURLCFG || rc=$?
+header = "Authorization: Bearer $token"
+CURLCFG
   echo >&2
   [ "$rc" -eq 0 ] || die "bridge query failed (network)" 4
   # 401 = token rejected; 404 = route gone (API churn); both are answers, not outages.
