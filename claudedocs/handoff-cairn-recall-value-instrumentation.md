@@ -54,12 +54,25 @@ measurements (done, and they held).
   `scripts/tests/test_cairn_receipt.py` present, and **0** env-shebang literals left in the
   test stubs. Final gate: `collected=25017 passed=25009 skipped=8 failed=0`, all four legs.
   Claim `cairn-recall-value-instrumentation-1` RELEASED.
-- 🔴 **MERGED IS NOT RUNNING, AND THIS IS THE ONE GAP THAT MATTERS.** `.local/bin/cairn` is a
-  `home.file`, so **no row is written on either host until a home-manager switch runs**
-  (`scripts/ship.sh`). What IS verified is the BUILT artifact, by hand: real client, real
-  `~/.config/activity-collector/emit`, rc **0**, stdout byte-identical (134 B on
-  `cairn -verbs`), stderr byte-identical, one row landed, and a failing client recorded
-  `outcome=error` with `exit_code=11` intact. **Deployed-and-verified is NOT claimed.**
+- ✅ **SUPERSEDED 2026-10-02 — THE SWITCH HAS RUN ON THIS HOST, AND CLOSING-CONDITION CLAUSE (a)
+  IS MET HERE.** The previous text of this bullet read *"MERGED IS NOT RUNNING, AND THIS IS THE ONE
+  GAP THAT MATTERS"*. On **this** host it IS running: `~/.local/bin/cairn` → `readlink -f` →
+  `/nix/store/pf3pm…-cairn-with-receipt`, and one `read.sh recall --repo $DEVRC` took the spool
+  **0 → 1 lines**, the row decoding to `source=tool kind=invocation`, `text=cairn`,
+  `payload={"tool":"cairn","outcome":"ok","verb":"recall","repo":"/home/zach/workspace/devrc"}`
+  — i.e. a row naming THAT invocation, which is what clause (a) asks for. **Positive control
+  carried:** a `cairn -verbs` that MUST produce a row produced one (`exit_code=0 duration_ms=5`),
+  so the figure under test sits beside a non-zero that moved.
+  ⚠ **Scope: THIS host only, and that is the whole of the claim.** The other host is unmeasured,
+  which is what rank 3 still owns. "Deployed-and-verified" is claimable for this machine and for
+  no other.
+- ⚠ **WHAT THE SUPERSEDED BULLET GOT RIGHT, KEPT BECAUSE IT IS STILL THE MECHANISM.**
+  `.local/bin/cairn` is a `home.file`, so a merge writes nothing until `scripts/ship.sh` runs —
+  which is exactly why the host-by-host scope above is load-bearing rather than pedantic. The
+  hand-verification of the BUILT artifact stands as recorded: real client, real
+  `~/.config/activity-collector/emit`, rc **0**, stdout byte-identical (134 B on `cairn -verbs`),
+  stderr byte-identical, one row landed, and a failing client recorded `outcome=error` with
+  `exit_code=11` intact.
 - ✅ **THE PARENT ARC IS CLOSED — `handoff-handoff-corpus-to-cairn.md`, verdict NOT ADDRESSED**
   (operator, 2026-10-02; devrc#1980 `dc410367`). Its one item: the evicted block's own text
   cannot reach cairn. Only rank 2 was re-homed here.
@@ -68,16 +81,43 @@ measurements (done, and they held).
   What stands in its place: the four disclosure gates + `test_handoff_doc_size.py` run
   locally on that exact tree (**240 passed**), and the retrigger commit verified
   byte-identical to the tested one. Doc-only diff, one file.
-- ⚠ **RANK 2 IS STILL CLAIMED (`cairn-recall-value-instrumentation-2`) AND BLOCKED ON AN
-  OPERATOR DECISION, NOT ON WORK.** Everything needed to build it is settled and recorded in
-  the investigation block below; the open question is PLACEMENT, and it is in `## Next steps`.
+- ✅ **THE PLACEMENT DECISION IS TAKEN — OPERATOR RULING, 2026-10-02: EVERY BULLET, EVERY READ.**
+  This closes what was rank 1 and unblocks rank 2. Of the three options put to the operator —
+  (a) every bullet on every read, (b) an opt-in flag, (c) abandon clause (b) and keep only the
+  receipt — **(a) was chosen and (b) was explicitly REJECTED**, on the ground that a flag
+  reinstates the measured ~6% selection bias rank 1 was moved to the bin seam to escape.
+  🔴 **AND THE COST OBJECTION WAS RETRACTED BY THE SESSION THAT RAISED IT.** Re-measured: the ids
+  add **~2,114 B to a 192,047 B read ≈ 1.1%** (~560 tokens). The `## Next steps` text that called
+  this *"the single biggest cost surface in the system"* and the investigation block's
+  *"~1,660 B … 97.6% of a ~50,000-token `/resume` read"* are the OVERSTATEMENT — they priced the
+  ids against a single 151-bullet entry rather than against a whole read. Do not re-derive the
+  tension from them.
+- ⚠ **RANK 2 IS IN FLIGHT, NOT BLOCKED — `ZacxDev/cairn#174` IS ITS PR A, AND THE WORK IS SPLIT
+  THREE WAYS.** PR A (**OPEN**, `feat/bullet-citation-id`, +708/−4, `mergeStateStatus CLEAN`):
+  the id derivation and the bullet START-LINE that makes an id placeable —
+  `internal/store/journal.go`, `lib/subsystem_resolver.py`, plus
+  `internal/store/citationid_test.go`, `internal/store/testdata/citation_ids.json`,
+  `tests/citation_ids.py`, `tests/test_citation_ids.py`, `flake.nix`. PR B: the two renderers.
+  PR C: the devrc pin bump. Claim `cairn-recall-value-instrumentation-2` still HELD (rc 12).
+  🔴 **PR A IS THE SESSION'S FIRST PUBLIC-REPO CHANGE AND A REAL LEAK WAS ALREADY SHIPPED INTO IT
+  ONCE, CAUGHT ONLY BY `tests/leakscan.py`.** Its output also becomes a CONTRACT the moment ids
+  print — changing the derivation afterwards invalidates every id ever emitted — so it gets a
+  round 0 and the nine axes before merge, not a glance.
+- 🔴 **8 HEX, NOT 4 — SETTLED ON A MEASUREMENT.** A 3,129-bullet corpus at 16 bits collides with
+  probability ≈1 (birthday `p ≈ n²/2^(b+1)`); 32 bits gives ≈0.1% corpus-wide. The closing
+  condition's own regex already permits it (`[0-9a-f]{4,}`), so this needs no change there.
 - ⚠ **FIVE PRs LANDED THIS SESSION, AND TWO OF THEM WERE NOT THIS ARC'S WORK** — devrc#1974
   `36d06188` (the parent's session close), devrc#1979 `8f36cb82` (a routable public IP scrubbed
   out of a PUBLIC repo, landed by #1972 inside the very S1 finding whose claim is that
   publishing that origin bypasses Cloudflare), devrc#1980, devrc#1983, devrc#1985.
 - ⚠ **MY WORKTREES AND LOCAL BRANCHES ARE CLEANED UP** (five of each removed); the base clone
-  is on `main`, **1 behind `origin/main`** because other sessions landed #1981/#1982 after my
-  last fetch — `git -C $DEVRC merge --ff-only origin/main` before any work.
+  is on `main`, **3 behind `origin/main`** as of 2026-10-02T22:54Z (was 1 when this was written —
+  other sessions keep landing) — `git -C $DEVRC merge --ff-only origin/main` before any work.
+  The count is a snapshot, not a fact; re-read it rather than trusting this line.
+- ⚠ **TWO UNTRACKED DOCS ARE STRANDED IN THE devrc BASE CLONE AND THEY ARE NOT THIS ARC'S** —
+  `claudedocs/scope-chief-{model-selector,situational-awareness}-2026-09-19.md`. Flagged because
+  unsaved docs in a shared tree are one routine `checkout` from silent, unreported deletion. Not
+  acted on: committing another session's work is not this arc's call.
 - **No clawgate task.** `clawgate_handoff.sh resolve` printed `NOTHING RESOLVED — 0 tasks`
   (rc 5), and `field <doc>` returned rc 1 (none present). An unknown session id answers 200
   with an EMPTY ARRAY, so that zero cannot separate "touched no task" from "wrong id". **No
@@ -117,14 +157,18 @@ measurements (done, and they held).
   saturates it, so no transcript-mined observable can carry this claim. An opaque token minted
   per printed bullet is STRUCTURAL: it cannot be reworded into existence, and its appearance
   anywhere else in the corpus has exactly one explanation.
-- **Next probe:** before building, confirm the receipt's destination can actually be written
-  and read by the client — i.e. that the activity path reachable from
-  `scripts/cairn-ops/read.sh` can emit a `source='tool'` row at all, with a positive control
-  showing a non-zero count. That is clause (a)'s instrument, and the parent arc never
-  exercised it.
+- ✅ **ANSWERED 2026-10-02 — this block's "Next probe" is DONE, and the answer is YES.** It asked
+  whether the activity path reachable from `scripts/cairn-ops/read.sh` can emit a `source='tool'`
+  row at all, with a positive control. It can, measured on this host: spool **0 → 1** across one
+  `read.sh recall`, the row naming `verb=recall repo=/home/zach/workspace/devrc`, beside a
+  `cairn -verbs` positive control that also produced one. Clause (a)'s instrument is exercised;
+  the parent arc never did it. **Nothing here bears on the SPELLED-guard finding above**, which is
+  what the rest of this block is about and which remains open.
+- **Next probe:** none standing for the instrument. The block's own open question is unchanged —
+  no transcript-mined observable can carry the value claim, which is why the opaque token exists.
 
-### 🔴 OPEN — the receipt's own measurement surface has two known traps, both of which produced a confident wrong number already
-- as-of: 2026-10-01
+### 🔴 OPEN — the receipt's measurement surface has FOUR known traps now, and every one produced a confident wrong number before it was understood
+- as-of: 2026-10-02
 - **Observed:** `session-summary` rows all pin `ts` to the SESSION START, so
   `argMax(payload, ts)` is a **tie** and returns an arbitrary snapshot. Measured: a session
   read as 26 assistant messages / 2 minutes; its final snapshot says **1,968 / 2,098** — a 75×
@@ -140,9 +184,34 @@ measurements (done, and they held).
   30-character secret. **Do NOT reach for the collector's `activity_writer` file as a
   workaround, and do not "fix" the skill — put the flag before the positional.**
   `via: measurement`
-- **Leading hypothesis:** both traps are read-path only; neither blocks emitting a row. They
-  are recorded so the arc's first query is not the one that gets believed.
-- **Next probe:** none standing — apply both when writing clause (a)'s query.
+- 🔴 **Observed 2026-10-02 — TRAP 3, AND IT IS THE B64 GOTCHA'S MIRROR IMAGE ON THE READ SIDE.**
+  This doc already records that `emit` base64-encodes `b64:` values itself, **so pass plaintext**.
+  The read-side consequence was NOT recorded and it cost a wrong answer: `grep -c 'cairn'` over the
+  spool returned **0** while a cairn row was sitting in it, because the field is
+  `b64:text=Y2Fpcm4=`. The reassuring zero arrived beside a correct `source=tool` count of 1, which
+  is what made it believable — one true number vouching for a false one.
+  **Decode before you grep**, or match on `source=tool` and decode `b64:text=`/`b64:payload=` per
+  line. One command that works:
+  `grep 'source=tool' "$SPOOL" | grep -oP 'b64:payload=\K[A-Za-z0-9+/=]+' | base64 -d`.
+  ⚠ Generalises past this arc: **every** `b64:` field in the spool is opaque to a literal grep, so
+  any consumer written against the line format needs the decode and `adoption-scan.py`'s
+  tool-name-in-`text` convention exists precisely so a consumer can group WITHOUT it. `via: measurement`
+- 🔴 **Observed 2026-10-02 — TRAP 4, AND IT INVALIDATES THIS DOC'S OWN RANK-3 RECIPE BELOW.**
+  `~/.local/state/activity/spool/current.log` is a **TRANSIENT BUFFER, NOT A LEDGER** — the
+  collector drains it. Measured across three consecutive commands in one session: the file
+  existed (317 B, 1 `source=tool` row), then `cat` reported **no such file**, then it existed
+  again at 1,024 B. Nothing was wrong; it had been drained and recreated.
+  🔴 **So a `grep -c source=tool` on the spool is a reading about the last few seconds, and a zero
+  read a minute after the run is indistinguishable from a receipt wired to nothing** — which is
+  the exact failure this whole arc exists to escape, reproduced by the arc's own verification
+  recipe. **Measure as a DELTA across the run, in one command**: count lines, run the client,
+  count again. Or query the activity store downstream, where rows are durable. The `## How to
+  verify` block below is corrected accordingly. `via: measurement`
+- **Leading hypothesis:** all four traps are read-path only; none blocks emitting a row, and the
+  receipt itself is sound. They are recorded so the arc's first query is not the one that gets
+  believed — and traps 3 and 4 are both the same shape as traps 1 and 2: **a plausible number
+  produced by an instrument nobody validated first.**
+- **Next probe:** none standing — apply all four when writing clause (a)'s query.
 
 ### 🔴 OPEN — rank 2 cannot be built as specified: there is NO per-bullet render site, and the obvious workaround converts a validator warning into read-surface DATA LOSS
 - as-of: 2026-10-02
@@ -219,11 +288,18 @@ measurements (done, and they held).
 - 🔴 **Ruled out: that any of the three is a code signal.** In every case a byte-identical
   re-push went green — devrc#1974 first try, devrc#1983 first try. Tree identity was proven
   with `git diff --stat <old> HEAD` empty, not assumed. `via: measurement`
-- **Ruled out: that the skill already covers this.** `claude/skills/tekton/SKILL.md` documents
-  the congestion mode (one node, no concurrency control, *"it heals when the queue drains"*,
-  and the `ExceededNodeResources` tell). It documents **neither** the duplicate-trigger race
-  **nor** the superseded-no-verdict state. ⚠ I re-derived the congestion mode from scratch
-  before reading the skill, which is the avoidable half. `via: doc`
+- ✅ **RESOLVED 2026-10-02 — THE SKILL NOW COVERS ALL THREE; devrc#1989, squash `ae1e3b6e`.**
+  Verified by content on `origin/main`: `claude/skills/tekton/SKILL.md` **gotcha 12** carries the
+  duplicate-trigger race with its own timeline (*"17:03:29–32, every context duplicated"*, then
+  all four overwritten at 17:04:08–11 with `superseded by a newer run or a closed pull request —
+  this commit was not validated"`) and the superseded-no-verdict state naming `2a3168ae` and
+  `82b4c6e3`, with the ruling that **"it merged, therefore it was green" is unfounded for them**.
+  This supersedes the bullet's previous text, which read *"It documents **neither** the
+  duplicate-trigger race **nor** the superseded-no-verdict state"* — true when written, false now.
+  ⚠ What still stands from it: the skill already documented the congestion mode (one node, no
+  concurrency control, *"it heals when the queue drains"*, the `ExceededNodeResources` tell), and
+  **I re-derived that from scratch before reading the skill** — the avoidable half, and the same
+  shape as this doc's own closing finding about not recalling before working. `via: doc`
 - **Leading hypothesis:** modes 2 and 3 are one mechanism — whatever marks a run superseded
   fires on a duplicate trigger for the SAME sha, not only on a newer sha. If so the fix is in
   the EventListener/dedup, and the operator-facing remedy is unchanged (re-push).
@@ -262,38 +338,61 @@ measurements (done, and they held).
 
 ## Next steps (ranked)
 
-1. **OPERATOR DECISION — WHERE THE CITATION ID IS PRINTED. This blocks rank 2 entirely and is
-   not a measurement.** A `[cb:xxxx]` id only works if it is PRINTED, so it lands in a
-   transcript. Printing one per bullet costs ~11 B each: **~1,660 B on the 151-bullet entry**,
-   which the parent arc measured as **97.6% of a ~50,000-token `/resume` read** — and the
-   parent arc's own shipped remedy (cairn#168's `⚠ OVER 30 nuance` badge) exists to warn about
-   exactly that size. So rank 2 enlarges the system's biggest cost surface in order to measure
-   whether that surface earns its keep. The alternatives are (a) every bullet on every read,
-   (b) an opt-in flag — which reinstates the ~6% selection problem rank 1 was moved to the bin
-   seam to escape, (c) abandon clause (b) and keep only the receipt.
-   forcing: user — the trade is a judgement about read cost versus attribution power, the two
-   options differ in what the arc can ever conclude, and no further measurement separates them.
-2. **BUILD THE CITATION ID, ONCE (1) IS ANSWERED.** Repo: **cairn** (public), then a devrc pin
-   bump. Design settled — do NOT re-derive it, and do NOT implement the obvious version:
-   parse for IDs ONLY, emit the body verbatim as now, append the id to each matched bullet's
-   OPENING line. `sha256`-derived, **8 hex not 4** (3,129 bullets at 16 bits collide with
-   probability ≈1). Files: `internal/report/text.go` + `lib/subsystem_recall.py`, then
-   regenerate `internal/report/testdata/reader_fixtures.json` (**325,085 B**, regenerate and
+✅ **THE FORMER RANK 1 — "OPERATOR DECISION: WHERE THE CITATION ID IS PRINTED" — IS ANSWERED AND
+IS GONE FROM THIS LIST.** Ruling: **every bullet, every read**; the opt-in flag REJECTED. The
+cost figure it was argued on (*"~1,660 B … 97.6% of a ~50,000-token read"*, *"the system's biggest
+cost surface"*) was **retracted** — re-measured at ~2,114 B on a 192,047 B read ≈ **1.1%**. Record
+in `## State now`. Do not reinstate the tension.
+
+1. **AUDIT AND MERGE `ZacxDev/cairn#174` — PR A of rank 2, and the arc's first PUBLIC-repo change.**
+   Round 0 first (it may legitimately challenge the A/B/C split), then the nine axes, then merge on
+   green. It ships the id derivation and the bullet START-LINE that makes an id placeable.
+   🔴 **Two reasons it earns a full ladder rather than a read-through:** its output becomes a
+   **CONTRACT** — once ids print, changing the derivation invalidates every id ever emitted — and a
+   real leak was already shipped into this branch once, caught only by `tests/leakscan.py`. Run that
+   gate **unpiped** and read its exit code directly; **2 means "could not vouch", never "passed"**.
+   🔴 The normalisation is the highest-value thing to attack: nobody has ruled on what the hash
+   covers, so reflow, trailing whitespace, a `RESOLVED:` prefix, the `[cairn: zach/<uuid>]` suffix
+   stored bullets already carry in their TEXT, and an edited bullet each need a stated answer.
+   forcing: gate — a contract-forming derivation is cheap to change before it prints and
+   impossible after, so the audit has to precede the merge rather than follow it.
+2. **BUILD THE RENDERER — PR B.** Repo: **cairn** (public). Design settled — do NOT re-derive it,
+   and do NOT implement the obvious version: parse for IDs ONLY, emit the body verbatim as now,
+   append the id to each matched bullet's OPENING line. `sha256`-derived, **8 hex not 4** (3,129
+   bullets at 16 bits collide with probability ≈1). Files: `internal/report/text.go` +
+   `lib/subsystem_recall.py` (the `SurfacedHeadings` loop and its Python counterpart at ~:3145),
+   then regenerate `internal/report/testdata/reader_fixtures.json` (**325,085 B**, regenerate and
    diff — hand-editing is a declared failure) and the **25 of 128** conformance goldens that
-   carry rendered bullets; then `go test`, `tests/conformance/run_go.sh`,
-   `tests/conformance/suite.py run`, `tests/parity/harness.py`, `tests/dualrun/`; then the
-   devrc pin bump plus every devrc guard that pins the pinned client's bytes.
+   carry rendered bullets; then five gates must agree — `go test ./... -count=1`
+   (🔴 **`-count=1` is load-bearing: `ok (cached)` is not a run**), `tests/conformance/run_go.sh`,
+   `tests/conformance/suite.py run`, `tests/parity/harness.py`, `tests/dualrun/`.
    forcing: deadline — the transcript corpus rolls at 30 days (measured 2026-10-01:
    2026-09-01 → 2026-10-01, nothing older, no `cleanupPeriodDays`), so the evidence any
    attribution study would use is deleted daily and waiting does not grow `n`.
-3. **VERIFY THE RECEIPT ON A SWITCHED HOST — the gap between merged and running.**
-   `scripts/ship.sh`, then confirm a real `cairn recall` leaves a row:
-   `ACTIVITY_SPOOL_DIR` default `~/.local/state/activity/spool/current.log`, grep for
-   `source=tool` + `kind=invocation`. 🔴 Carry the positive control: a run that MUST produce a
-   row, counted, beside the figure under test — a zero here is otherwise indistinguishable
-   from a reader wired to nothing, which is the whole failure this arc exists to escape.
-   forcing: gate — rank 1 is merged but writes nothing until a switch runs, so the arc's
-   headline claim ("cairn invocations are now observable") is unverified on both hosts.
+3. **PR C — THE devrc PIN BUMP, plus every devrc guard that pins the pinned client's BYTES.**
+   Expect devrc `main` to redden: that is exactly how cairn#162's `tasks`→`refs` rename did it.
+   🔴 **ENUMERATE the readers, never guess which suites are adjacent** —
+   `find scripts/tests -name '*.py' -print0 | xargs -0 grep -ln '<thing>'`, with **plain `grep`**
+   after `xargs` (`command grep` is a builtin `xargs` cannot exec: exit **127**, no output,
+   indistinguishable from a clean zero). Guessing adjacency cost three CI rounds on devrc#1983.
+   And devrc's suite runs only via `scripts/run-tests.sh --targets "<exact target>" <root>` — a
+   hand-rolled `pytest -p testlib.…` dies on `sys.path` and a `| tail` hides it as rc 0.
+   forcing: gate — the pin is what makes the ids reach the surface `/resume` actually reads, so
+   until it lands the renderer is merged and inert.
+4. **VERIFY THE RECEIPT ON THE *OTHER* HOST — the only remaining half of that gap.**
+   ⚠ **Re-scoped 2026-10-02: this host is DONE** (see `## State now`), so what is left is the
+   second machine and nothing else. `scripts/ship.sh` there, then confirm a real `cairn recall`
+   leaves a row: `ACTIVITY_SPOOL_DIR` default `~/.local/state/activity/spool/current.log`,
+   `source=tool` + `kind=invocation`.
+   🔴 **Measure it as a DELTA, not as a grep — the spool is DRAINED by the collector** (trap 4).
+   Count lines, run the client, count again, in ONE command; a count taken a minute later is a
+   reading about the last few seconds. 🔴 **And decode before matching: `b64:text=`/`b64:payload=`
+   are base64, so a literal `grep 'cairn'` returns a confident 0 over a row that is right there**
+   (trap 3). Carry the positive control either way: a run that MUST produce a row, counted beside
+   the figure under test — a zero is otherwise indistinguishable from a reader wired to nothing,
+   which is the whole failure this arc exists to escape.
+   forcing: gate — the arc's headline claim ("cairn invocations are now observable") is verified on
+   ONE host, and a one-host measurement is not the fleet claim the sentence reads as.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **DECISION (operator, 2026-10-01): DO NOT AUTO-MIGRATE HANDOFF CONTENT INTO CAIRN.** Four
@@ -371,12 +470,13 @@ measurements (done, and they held).
   this arc of all arcs should carry: the arc is ABOUT whether recalled bullets get used, and
   its own session did not read them. The cost was not a missing record — it was a missing
   **recall at the start of the work**, which is `/resume` step 4 and takes one command.
-- ⚠ **ROUTE IDENTIFIED BUT NOT TAKEN, NAMED SO IT IS NOT LOST:** the Tekton duplicate-trigger
-  race and the superseded-no-verdict state (the investigation block above) belong in
-  `claude/skills/tekton/SKILL.md`, which today documents only the congestion mode. They are
-  NOT in the subsystem index either — an ops-gotcha routes to its owning skill, not to a
-  scope entry. Until someone lands that edit the evidence lives ONLY in this doc's
-  investigation block, which is exactly the medium the store exists to outlive. One small PR.
+- ✅ **ROUTE TAKEN — devrc#1989 `ae1e3b6e`, merged 2026-10-02T20:39Z.** This item previously read
+  *"ROUTE IDENTIFIED BUT NOT TAKEN"* and said the evidence *"lives ONLY in this doc's investigation
+  block"*. It no longer does: the Tekton duplicate-trigger race and the superseded-no-verdict
+  state are now `claude/skills/tekton/SKILL.md` **gotcha 12**, verified by content. The routing
+  ruling it carried is the durable half and is unchanged: **an ops-gotcha routes to its owning
+  skill, not to a scope entry or a handoff doc** — the skill loads deterministically on trigger,
+  which is why neither the subsystem index nor this doc was the right home.
 - 🔴 **THE METHOD FAILURE THAT COST THREE CI ROUNDS, STATED AS A METHOD AND NOT AS BAD LUCK.**
   devrc#1983 went red three times, every one a REAL finding, and the root cause was identical
   each time: **I ran the suites I guessed were adjacent** (561 tests, then 99) instead of
@@ -437,9 +537,12 @@ measurements (done, and they held).
   precedent is to KEEP the word and justify it where deleting it would delete a GUARANTEE;
   that mention carried operator GUIDANCE, and the shared justification it would have joined is
   a dense string the repo has already recorded as drifting on its own counts.
-- ⚠ **devrc#1927 IS AN OPEN PR WHOSE WORK ALREADY LANDED** via devrc#1928 `7f84306c`. Verified
-  by content: zero two-index-slice hits in `handoff-audit-pr-operator-asks.md` at
-  `origin/main`. Not acted on — closing someone else's PR is not this arc's call.
+- ✅ **devrc#1927 IS NOW CLOSED** (unmerged), which is the right outcome and resolves this item.
+  It previously read *"IS AN OPEN PR WHOSE WORK ALREADY LANDED"* via devrc#1928 `7f84306c` —
+  verified then by content (zero two-index-slice hits in `handoff-audit-pr-operator-asks.md` at
+  `origin/main`). Somebody else closed it; this arc did not, and deliberately did not.
+  ⚠ **Read the closure as reconciliation, not as this arc's work** — a `CLOSED without merge`
+  on a reconciler's drift line looks identical to an abandoned plan, and here it is the opposite.
 - 🔴 **THE PUBLIC-IP SCRUB GUARDS HEAD ONLY.** devrc#1979 removed the literal from the tip;
   the value remains in reachable history on a PUBLIC repo, and `test_no_public_ips.py`'s own
   docstring says rewriting history would not unpublish what is already cloned or forked.
@@ -467,7 +570,18 @@ nix develop $DEVRC --command bash $DEVRC/scripts/run-tests.sh --targets "scripts
 nix build --impure "$DEVRC"'#homeConfigurations.zach.config.home.file.".local/bin/cairn".source' \
   --no-link --print-out-paths
 
-# rank 3: is a row actually written? Carry the positive control.
-grep -c 'source=tool' ~/.local/state/activity/spool/current.log   # under test
-# then a run that MUST produce one, counted, so a zero cannot mean "wired to nothing"
+# is the receipt actually LIVE on this host? (the arbiter — a `diff` proves nothing here)
+readlink -f "$(command -v cairn)"      # …-cairn-with-receipt ⇒ switched; a bare client ⇒ not
+
+# is a row actually written? 🔴 A DELTA, because the collector DRAINS the spool (trap 4),
+# and DECODED, because b64:text=/b64:payload= are base64 (trap 3). Never a bare grep.
+SPOOL=~/.local/state/activity/spool/current.log
+before=$(wc -l < "$SPOOL" 2>/dev/null || echo 0)
+$DEVRC/scripts/cairn-ops/read.sh recall --repo "$DEVRC" >/dev/null 2>&1
+after=$(wc -l < "$SPOOL" 2>/dev/null || echo 0); echo "$before -> $after"
+grep 'source=tool' "$SPOOL" | grep -oP 'b64:payload=\K[A-Za-z0-9+/=]+' | base64 -d; echo
+
+# 🔴 THE POSITIVE CONTROL, not optional: a run that MUST produce a row, counted beside the
+# figure under test — otherwise a zero cannot be told from a reader wired to nothing.
+cairn -verbs >/dev/null 2>&1 && wc -l < "$SPOOL"
 ```
