@@ -37,9 +37,13 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # scripts/
+from testlib import mockbin  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "cairn-receipt.sh"
@@ -50,24 +54,59 @@ NIX_HOME = REPO / "nix" / "home.nix"
 #: it whole here invites a copy-paste into a file that is.
 PLACEHOLDER = "@CAIRN" + "_REAL@"
 
-STUB = """#!/usr/bin/env bash
-printf 'STDOUT:%s\\n' "$*"
+#: 🔴 NO SHEBANG — `testlib.mockbin.write_exec` owns it, and both bodies are
+#: POSIX `sh` so its `/bin/sh` is correct. See `_write_exec` for the measurement.
+STUB = """printf 'STDOUT:%s\\n' "$*"
 printf 'STDERR-line\\n' >&2
 exit "${STUB_RC:-0}"
 """
 
 #: A fake `emit` that records its own argv, so a test can read the fields the
 #: wrapper passed WITHOUT re-implementing the v1 line format.
-EMIT_STUB = """#!/usr/bin/env bash
-printf '%s\\n' "$@" >> "$EMIT_LOG"
+EMIT_STUB = """printf '%s\\n' "$@" >> "$EMIT_LOG"
 exit 0
 """
 
 
 def _write_exec(path: Path, body: str) -> Path:
-    path.write_text(body, encoding="utf-8")
-    path.chmod(0o755)
-    return path
+    """🔴 THROUGH `testlib.mockbin`, WHICH OWNS THE SHEBANG — never a hand-written
+    one. `test_runtime_shebangs.py::test_no_test_writes_a_usr_bin_env_shebang_at_
+    runtime` forbids a test writing `#!/usr/bin/env …` at runtime because **`env`
+    is not on PATH in the nix build sandbox**, so such a stub is unrunnable in the
+    tier the merge is gated on. MEASURED here: this file shipped with two such
+    stubs, every local run passed (this dev host HAS `env`), and the SANDBOX tier
+    caught it — the two-tier blindness in `claude/RULES.md`, in the direction where
+    the local tier is the blind one."""
+    return mockbin.write_exec(path, body)
+
+
+#: 🔴 ASSEMBLED FROM TWO LITERALS, FOR THE THIRD TIME IN THIS CHANGE. The shebang
+#: guard is a SOURCE scan over `scripts/tests`, so a test file that SPELLS a
+#: shebang marker is a hit whether or not it writes one — the same shape as the
+#: deploy placeholder in `cairn-receipt.sh` and the binary names in its error
+#: string. Measured: the first draft of the helper below used the literal in its
+#: own assertion and turned the guard red while writing no shebang at all.
+#: **A guard that must recognise a token cannot spell that token in a file it
+#: scans.** Build it, do not write it.
+_SHEBANG_MARK = "#" + "!"
+
+
+def _write_exec_replacing_shebang(path: Path, body: str) -> Path:
+    """For a body that legitimately carries its OWN env shebang — the committed
+    `cairn-receipt.sh`, whose first line is correct for a DEPLOYED script (the
+    host convention requires that spelling) and merely unrunnable in the sandbox,
+    where `env` is not on PATH.
+
+    The first line is NOT under test here; the guard logic below it is. So that
+    line is dropped and `mockbin` supplies a sandbox-safe one. Doing it this way
+    rather than relaxing `write_exec` keeps the ban exactly where it belongs: on
+    tests INVENTING such a line, not on a test materialising a real file."""
+    lines = body.split("\n")
+    assert lines[0].startswith(_SHEBANG_MARK), (
+        f"{path.name}: expected the real script to carry an interpreter line at "
+        "line 1; if it no longer does, this helper substitutes nothing and should "
+        "be deleted rather than left looking load-bearing")
+    return mockbin.write_exec(path, "\n".join(lines[1:]))
 
 
 @pytest.fixture
@@ -83,7 +122,7 @@ def world(tmp_path):
         f"{SCRIPT} no longer carries the {PLACEHOLDER} placeholder, so "
         "nix/home.nix's substitution has nothing to replace and the deployed "
         "wrapper would refuse at runtime")
-    substituted = _write_exec(
+    substituted = _write_exec_replacing_shebang(
         tmp_path / "cairn-substituted", raw.replace(PLACEHOLDER, str(stub)))
 
     env = dict(os.environ)
