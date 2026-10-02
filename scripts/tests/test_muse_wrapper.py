@@ -16,8 +16,8 @@ version after that was right about the numbers and wrong about what they meant
     dff18206  (round 2's tip)    2 failed, 14 passed
     HEAD                        16 passed
 
-⚠ Measured WITH muse-cli installed is irrelevant to these numbers -- the test
-that needs the binary lives in scripts/devhost-tests/ and is not in this file.
+⚠ All muse-cli (`--cli`) tests were removed 2026-10-02 when that channel was
+retired by operator decision (devrc PR: muse-cli ripout).
 
 🔴 GREEN AT BASE DOES NOT MEAN "INVARIANT GUARD". An earlier version said "the
 other five are INVARIANT GUARDS, labelled as such", and only two of them were.
@@ -57,7 +57,7 @@ able to go red. Compare the content instead:
 agent auditing this wrapper sent a real message to the operator's account. It
 built a stub environment as a STRING and interpolated it unquoted:
 
-    E="MUSE_BB=/bin/false MUSE_CLI=stub"
+    E="MUSE_BB=/bin/false"
     env $E bash muse send "a task"      # zsh does NOT word-split $E
 
 zsh passed `$E` to `env` as ONE argument, so none of the overrides applied and
@@ -149,7 +149,6 @@ def env(tmp_path: pathlib.Path):
         "HOME": str(tmp_path),
         "XDG_STATE_HOME": str(tmp_path / "state"),
         "MUSE_BB": str(stub),
-        "MUSE_CLI": str(stub),
         "MARKER": str(marker),
         "_marker": marker,  # test-side handle; stripped before exec
     }
@@ -281,103 +280,12 @@ def test_usage_advertises_no_flag_the_parser_ignores(env):
     advertised = {tok.strip("[]") for tok in poll_line.split() if tok.startswith("[--")}
 
     # The flags cmd_poll actually parses, read from its own case arms.
-    body = source.split("cmd_poll()", 1)[1].split("cmd_vm", 1)[0]
+    body = source.split("cmd_poll()", 1)[1].split("sops_bin()", 1)[0]
     parsed = {tok for tok in ("--cli", "--thread", "--limit", "--wait") if f"{tok})" in body}
 
     assert advertised <= parsed, (
         f"usage() advertises {sorted(advertised - parsed)} for `poll`, which "
         "cmd_poll does not parse -- a phantom flag"
-    )
-
-
-def test_force_reaches_the_cli_channel(env):
-    """REGRESSION (red before the round-1 fix) -- behavioural, not structural.
-
-    `cmd_send` consumed `--force` and did not forward it, so `cmd_send_cli`
-    re-initialised force=0 and ran pace_check a SECOND time. Measured on the
-    pre-fix wrapper: `muse send --force --cli` exits 2 with the message "Use
-    --force to override deliberately" -- while --force was given.
-
-    #1976 round 2 found the round-1 fix shipped with NO test: removing the
-    forwarding, and re-spelling it as the `${force:+--force}` inversion the
-    code's own comment warns about, both SURVIVED a green suite.
-    """
-    stamp = stamp_path(env)
-    stamp.parent.mkdir(parents=True, exist_ok=True)
-    stamp.write_text("0")  # fresh -> the gate would refuse without --force
-
-    proc = run(env, "send", "a benign task", "--force", "--cli")
-
-    assert env["_marker"].exists(), (
-        "--force did not reach the --cli channel: the pacing gate refused a "
-        f"send the operator explicitly forced (rc={proc.returncode}, "
-        f"stderr={proc.stderr.strip()!r})"
-    )
-    assert "pacing" not in proc.stderr
-
-
-def test_the_cli_channel_does_not_pace_a_send_it_never_made(env):
-    """REGRESSION against ROUND 2's fix, which carved the WRONG exit code.
-
-    muse-cli 0.3.2, muse_cli/cli.py:713-721:
-        AuthError    -> exit 2   cookies expired; NEVER sent
-        GatewayError -> exit 3   stream reset / non-2xx; MAY have sent
-        TimeoutError -> exit 4   MAY have sent
-
-    Round 2 believed rc 3 was auth and carved THAT out. Measured at its tip:
-    rc 2 (the real expired cookie) STAMPED -- the regression round 2 said it
-    had removed -- while rc 3, which belongs in the ambiguous stamping class,
-    did not. One mislabel, wrong in both directions.
-    """
-    write_exec(pathlib.Path(env["MUSE_CLI"]), 'printf \'%s\\n\' "$*" >> "$MARKER"\nexit 2\n')
-    assert not stamp_path(env).exists()
-
-    proc = run(env, "send", "a benign task", "--cli")
-
-    assert proc.returncode == 3, (
-        "muse-cli's AuthError (rc 2) must surface as this wrapper's exit 3, "
-        f"'muse-cli auth needed'; got {proc.returncode}"
-    )
-    assert not stamp_path(env).exists(), (
-        "an expired cookie stamped the pacing gate -- the operator is paced "
-        "out of both channels after a send that never left this machine"
-    )
-
-
-@pytest.mark.parametrize("rc", [1, 3, 4, 127])
-def test_the_cli_channel_paces_every_ambiguous_failure(env, rc):
-    """The other side of the pair -- the class rc 2 must NOT be widened into.
-
-    A TABLE, not one case: round 2's single rc-1 test could not see that the
-    carve-out had been pointed at rc 3. rc 3 (GatewayError) and rc 4
-    (TimeoutError) are the ones that MAY have delivered, so they must stamp;
-    127 stands for "the binary vanished", which is also not a proof of
-    non-delivery by anything the wrapper can observe.
-    """
-    # f-string, NOT %-formatting: the stub body itself contains `%s` (the
-    # printf that records argv), which `%` would consume as a placeholder.
-    write_exec(
-        pathlib.Path(env["MUSE_CLI"]),
-        f'printf \'%s\\n\' "$*" >> "$MARKER"\nexit {rc}\n',
-    )
-
-    proc = run(env, "send", "a benign task", "--cli")
-
-    # 🔴 BOTH halves. Round 3's parametrisation widened the rc coverage and
-    # silently DROPPED round 2's `assert proc.returncode == 1` -- wider on one
-    # axis, narrower on another. Round 4 measured the cost: mutating the
-    # non-auth arm to `exit 0` or `exit 7` both SURVIVED a green suite. An
-    # `exit 0` there is the dangerous one: `muse send --cli ... || <B1
-    # fallback>` -- the fallback b1_hint itself advertises -- would see
-    # success and never fall back, and a loop would record a delivery that
-    # never happened.
-    assert proc.returncode == 1, (
-        f"muse-cli rc {rc} must surface as the wrapper's exit 1 (dispatch "
-        f"failed); got {proc.returncode}. Only rc 2 maps elsewhere."
-    )
-    assert stamp_path(env).exists(), (
-        f"muse-cli rc {rc} did not stamp -- it is not provably a non-send, so "
-        "a caller retrying on failure may deliver a second time with no gap"
     )
 
 
@@ -581,7 +489,7 @@ def test_pace_mark_fires_on_confirmed_submit_not_after_the_reply():
     Pinned by ORDER within cmd_send_b1: pace_mark must precede the poll loop.
     """
     source = source_without_comments()
-    body = source.split("cmd_send_b1()", 1)[1].split("cmd_send_cli", 1)[0]
+    body = source.split("cmd_send_b1()", 1)[1].split("cmd_poll_b1()", 1)[0]
 
     assert "pace_mark" in body, "cmd_send_b1 no longer stamps at all"
     # Anchor on CODE, not a comment -- source_without_comments() strips the
