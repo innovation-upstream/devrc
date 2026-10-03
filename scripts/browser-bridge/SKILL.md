@@ -61,7 +61,15 @@ split an unquoted `$F`). ⚠ an export outlives the call — env-routed ops say 
 on stderr.
 A toolbar-icon click copies `bw://<host>/<instance>/<tabId>` — one token that IS
 `--instance`+`--tab`, either side of the op; host verified; a foreign ref RUNS
-there over ssh (unreachable → rc 4 + paste). 🔴 For
+there over ssh (unreachable → rc 4 + paste). 🔴 **PASS IT WHOLE — it is
+`--instance`+`--tab` ONLY for a LOCAL ref, because the HOST lives in the token
+and in neither flag.** Hand-splitting `bw://laptop/work/<tab>` into
+`--instance work --tab <tab>` silently targets the **local** bridge; if no
+profile is connected there you get `NO Brave profile is connected … FULLY
+RESTART Brave`, a confident diagnosis **about the wrong machine**, while the
+real tab is fine on the other host (measured 2026-10-03, workbench→laptop).
+`whoami` prints the host you are ON, which is what makes the mismatch
+checkable. 🔴 For
 `type`/`js`/`eval`/`agent` it is a reference only BEFORE the op — after it, it is
 the text/goal you send. `agent` refuses a LEADING one, `--tab` and `--frame`.
 Result payloads land under `.result.data`.
