@@ -85,12 +85,12 @@ MIN_SKILLS = 30
 # --------------------------------------------------------------------------- #
 MEASURED_ENTRIES = 41
 MEASURED_TIER_A_ENTRIES = 23
-MEASURED_TIER_A_CHARS = 7_144
+MEASURED_TIER_A_CHARS = 7_150
 # devrc's whole listing under the ledger (tier A in full, tier B name-only).
-MEASURED_UNDER_LEDGER_CHARS = 7_403
+MEASURED_UNDER_LEDGER_CHARS = 7_409
 # ...and what the same 40 entries would cost with every skill tier A. The
 # difference is what the ledger buys: 3,490 chars.
-MEASURED_ALL_TIER_A_CHARS = 10_893
+MEASURED_ALL_TIER_A_CHARS = 10_899
 
 # 🔴 THE TIER-A RATCHET, in the REAL formula: the tier-A block cost
 # `sum(len(name) + 4 + min(len(desc), 1536)) + (n - 1)`.
@@ -126,6 +126,11 @@ MEASURED_ALL_TIER_A_CHARS = 10_893
 # 2026-09-26 `civitai-app-fleet` cut above, the block is 7,485 across 23
 # entries and the ceiling stays 7,617: headroom is 132. The mean tier-A entry
 # is 7,485 / 23 = 325.4.
+#
+# 2026-10-02: muse's description was rewritten when muse-cli was retired (the
+# old text advertised the retired channel first) — +6 chars on the tier-A
+# block, now 7,150 across 23 entries; the ceiling stays 7,617, headroom 467.
+# The mean tier-A entry is 7,150 / 23 = 310.9.
 #
 # 🔴 2026-09-27: THREE SKILLS ADDED AT ONCE — `cairn-read`, `cairn-write`,
 # `cairn-hygiene`, the thin routers over `scripts/cairn-ops/` (clawgate cg#665).
