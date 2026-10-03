@@ -61,7 +61,6 @@ __all__ = [
     "genesis_names_doc",
     "doc_basename",
     "doc_commits",
-    "session_docs",
     "sessions_docs",
     "writer_members",
     "reader_members",
@@ -481,15 +480,45 @@ def sessions_docs(repo: str, session_ids: Iterable[str],
     🔴 THE SAME EDGE `doc_commits` READS, READ SESSION-FIRST — and that is the
     whole change. `doc_commits` asks "which sessions touched THIS doc"; a session
     that DRIFTS (resumed from handoff-A, ended by writing handoff-B) is invisible
-    to every doc-first query but handoff-B's. Measured 2026-10-03 over the
-    stamped corpus: **36 of 291** writer sessions wrote >=2 distinct handoff docs
-    (~1 in 8); 4 of 36 crossed repos. No new trailer, no new persisted state —
-    the commit already carries the id, and its FILE LIST already names the doc.
+    to every doc-first query but handoff-B's. No new trailer, no new persisted
+    state — the commit already carries the id, and its FILE LIST names the doc.
 
-    🔴 ONE WALK FOR ALL THE IDS, by ORing their `--grep` patterns. Measured cold:
-    `--grep='^Claude-Session-Id: '` over `claudedocs` is 1.28s for all four set
-    handles, and a per-session walk is 1.65s — so a per-MEMBER pass over a
-    six-member arc would cost ~10s for an answer one pass gives.
+    🔴 THE RATE, AT THE SCOPE MEASURED — **29 of 291 (~1 in 10)**, not 1 in 8.
+    Measured 2026-10-03 over the stamped corpus at the scope `doc_commit_revs`
+    walks (HEAD + upstream per handle), across the four SET handles with
+    `$CIVITAI_CLI` UNMEASURED. **36 of 291** stamped writer sessions touched >=2
+    distinct docs, but 7 of those 36 wrote every one of them in ONE commit — a
+    bulk move, not a session changing subject. Requiring some pair of a
+    session's docs to have **DISJOINT commit sets** gives **29 of 291**;
+    excluding the single 37-doc bulk-move session gives **28 of 291**. 4 of the
+    29 crossed repos. ⚠ State it at this scope: the `>=2 docs` population is a
+    different, wider claim, and quoting it as the drift rate overstates by ~25%.
+
+    🔴 ONE WALK FOR ALL THE IDS, by ORing their `--grep` patterns — **~3x
+    faster than per-member** for a six-member arc over the 4 readable handles.
+    Measured 2026-10-03 on the laptop (8 cores), the three shapes INTERLEAVED
+    round-robin in ONE process, warmed once, 5 runs each, medians, AT TWO LOAD
+    POINTS because one measurement here is not a general claim:
+
+        load avg ~5        ~18        shape
+        ---------    ---------        -----------------------------------------
+            1.91s      7.81s         A bare prefix `^Claude-Session-Id: `
+            3.97s     14.91s         B the ORed anchored full ids RUN HERE
+           12.65s     42.37s         C one pass per member
+            3.19x      2.84x         RATIO C/B
+
+    🔴 THE RATIO IS THE CLAIM; THE ABSOLUTES ARE A PROPERTY OF THE BOX'S LOAD,
+    NOT OF THE QUERY. They swing ~4x between those two points — so quoting one
+    as "the cost" is how this docstring was wrong the first time. The ratio is
+    internally controlled by the interleaving (a load swing hits all three
+    shapes, not whichever ran last) and lands at 2.8-3.2x here; round 0
+    measured 2.1x at a third load. Direction not in doubt, magnitude ~2-3x.
+
+    ⚠ AN EARLIER DOCSTRING QUOTED **1.28s**, WHICH TIMED SHAPE A — the bare
+    prefix, not the anchored ORed full ids this function runs. Paired against
+    `~10s` for per-member it implied ~8x, where the real saving is ~3x. (And
+    1.28s does reproduce as shape A at low load: 1.91s above. The number was
+    right; the query it was attached to was not.) Quote the shape you timed.
 
     Raises `GitUnavailable` like its siblings: a session that wrote nothing here
     and a repo that could not be read produce the same empty dict otherwise, and
@@ -539,16 +568,15 @@ def sessions_docs(repo: str, session_ids: Iterable[str],
     return {sid: tuple(docs) for sid, docs in out.items()}
 
 
-def session_docs(repo: str, session_id: str,
-                 run: Callable[..., subprocess.CompletedProcess] | None = None,
-                 ) -> tuple[str, ...]:
-    """The handoff doc basenames one session's commits touched in `repo`.
-
-    A thin single-session door onto `sessions_docs` rather than a second walk —
-    one rule, one place: the `--grep`/`trailer_ids` pairing is the predicate, and
-    two spellings of it would be wrong at one site eventually.
-    """
-    return sessions_docs(repo, (session_id,), run=run).get(session_id, ())
+# ⚠ NO SINGULAR `session_docs(repo, sid)` DOOR, DELETED 2026-10-03 AND NOT AN
+# OVERSIGHT. It shipped as "a thin single-session door rather than a second
+# walk" and had ZERO production callers — the cross-arc footer calls the plural
+# — so it was kept alive by 10 tests and a named FOLLOW-ON (`arc_seeds_to_docs`),
+# which is not a named CONSUMER. That is the distinction the `next_command`
+# deletion in `find-session.py` turned on, and this is the same rule applied
+# again rather than an exception argued once. `sessions_docs(repo, (sid,))[sid]`
+# is the one-line spelling and returns the identical answer, so nothing was
+# lost but a name. Re-add it when a caller exists and is NAMED here.
 
 
 def writer_members(commits: Sequence[ArcCommit], repo: str = "") -> list[ArcMember]:

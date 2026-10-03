@@ -156,14 +156,25 @@ python3 $DEVRC/scripts/find-session.py --arc handoff-<topic>.md    # or a slug, 
 - 🔴 **A SESSION DRIFTS, so one arc is not one member's whole story — read the `CROSS-ARC`
   footer.** A session opens resumed from handoff-A, does that work, then moves on and ends by
   writing handoff-B; keyed on the GENESIS it is single-valued, so handoff-B's arc listed it and
-  never named handoff-A. Measured 2026-10-03 over the stamped corpus: **36 of 291** writer
-  sessions (~1 in 8) wrote ≥2 distinct handoff docs, **4 of 36** across repos. The footer names
-  each member's OTHER docs with a pasteable `--arc` command, from the commit trailers in git
-  (one `--grep` pass per repo handle — **no transcript needed, so it works for a session whose
-  transcript is on the other host**). It prints **even when nothing was found**, and names
-  every handle that was UNSET or unreadable as **NOT MEASURED** — which is not the same as
-  "that member wrote only this doc". `--json` carries it as `cross_arc` (present-and-empty,
-  never absent) plus `cross_arc_gaps`.
+  never named handoff-A. Measured 2026-10-03 over the stamped corpus (HEAD + upstream per
+  handle, four handles readable, `$CIVITAI_CLI` UNMEASURED): of **291** stamped writer
+  sessions, **29 (~1 in 10) DRIFTED** — some pair of their docs has DISJOINT commit sets, so
+  the session genuinely changed subject; **28** excluding one 37-doc bulk-move session; **4**
+  of the 29 across repos. ⚠ **36 of 291 touched ≥2 docs, but 7 of those wrote them all in ONE
+  commit** — that is a bulk move, not drift, and quoting 36 as the drift rate (as an earlier
+  version of this line did, "~1 in 8") overstates it by ~25%. The footer names each member's
+  OTHER docs with a pasteable `--arc` command, from the commit trailers in git (one `--grep`
+  pass per repo handle, **~3× faster than per-member** — and **no transcript needed, so it
+  works for a session whose transcript is on the other host**). It prints **even when nothing
+  was found**, and names every handle that was UNSET or unreadable as **NOT MEASURED** — which
+  is not the same as "that member wrote only this doc".
+  🔴 **HUMAN RENDERING ONLY — `--arc --json` carries NO cross-arc key.** `cross_arc` and
+  `cross_arc_gaps` were deleted 2026-10-03: the walk costs ~4-15s per `--arc` run depending on box load (1.52s of it measured end-to-end on `--json`) and neither key
+  ever had a named consumer (5 of 6 measured consumer sessions parse `members` and discard the
+  rest), the same rule that deleted `next_command`. It is **not** emitted as an empty list — a
+  fabricated zero from a walk that never ran is indistinguishable from "no member wrote another
+  doc". A programmatic caller wanting session→doc edges calls `handoff_arc.sessions_docs()`,
+  which is public and does the real walk.
 - **Ids and repo labels only, never transcript paths** — paths name the client repo they sit
   under and this repo is PUBLIC.
 - **Exit 5 is not an empty arc.** It means no repo handle this shell can see holds the doc, so

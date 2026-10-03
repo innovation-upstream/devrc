@@ -1485,26 +1485,38 @@ class TestTheHandleProseNamesEveryHandle:
 # 🔴 THE DEFECT, MEASURED. A session opens resumed from handoff-A, does that
 # work, then moves on and ends by writing handoff-B. `--arc handoff-B` lists it
 # as a member and NEVER NAMES handoff-A, because every resolver here was keyed
-# on the session's GENESIS and is single-valued. Measured over the stamped
-# corpus 2026-10-03: **36 of 291** writer sessions (~1 in 8) write >=2 distinct
-# handoff docs; **4 of 36** drift ACROSS repos and **1 of 36** is an opencode
-# `ses_…` id. So the cross-repo and the `ses_…` cases below are populations, not
-# hypotheticals.
+# on the session's GENESIS and is single-valued.
 #
-# ⚠ RE-DERIVED INDEPENDENTLY on this branch over EVERY SET HANDLE ($DEVRC,
-# $HOMELAB, $DATAPACKET, $CIVITAI; $CIVITAI_CLI unset => UNMEASURED, so the
-# denominator is scoped to four): 291 / 36 / 4 / 1 all reproduced exactly.
-# The docs-per-session histogram did NOT: measured here it is
-# {1: 255, 2: 25, 3: 9, 4: 1, 37: 1}, where the 37 is one bulk-move session.
-# An earlier draft of this comment carried {1: 256, 2: 27, 3: 7, 4: 1} and a
-# "35/289 excluding 18 bulk-move commits" figure from the original recon; both
-# are at a scope this branch did not reproduce, so they are REMOVED rather than
-# restated. The headline counts the code and SKILL.md quote are the re-derived
-# ones.
+# 🔴 THE RATE, AT THE SCOPE MEASURED — **29 of 291 (~1 in 10)**. An earlier
+# version of this comment said "36 of 291 (~1 in 8)", a figure for a WIDER
+# population than the word "drift" names; this is the correction. Measured
+# 2026-10-03 over EVERY SET HANDLE ($DEVRC, $HOMELAB, $DATAPACKET, $CIVITAI;
+# $CIVITAI_CLI unset => UNMEASURED, so the denominator is scoped to four), at
+# the scope `doc_commit_revs` walks — HEAD + upstream per handle, NOT `--all`,
+# which would credit commits on unmerged branches no shipped reader can see:
+#   291  stamped writer sessions
+#    36  touched >=2 DISTINCT handoff docs            <- the old headline
+#     7  of those wrote every doc in ONE commit       <- a bulk move, not drift
+#    29  have some doc pair with DISJOINT commit sets <- DRIFTED (~1 in 10)
+#    28  the same, excluding the single 37-doc bulk-move session (6b88ffe8)
+#     4  of the 29 drifted ACROSS repos
+# Histogram: {1: 255, 2: 25, 3: 9, 4: 1, 37: 1}.
+# ⚠ THE DISJOINTNESS CRITERION IS WHAT MAKES THE CLAIM HONEST: a session that
+# touched two docs in ONE commit did not change subject, it moved files.
+# Quoting the `>=2 docs` count as the drift rate overstates it by ~25%.
+# ⚠ AND THE `ses_…` CASE IS A POPULATION OF THE WIDER SET ONLY — 1 of the 36
+# multi-doc sessions, **0 of the 29 drifted**. The cross-repo case is a
+# population of both (4 either way). Said here because the fixture below is
+# justified by the multi-doc population and a reader must not upgrade that.
+# An earlier draft also carried {1: 256, 2: 27, 3: 7, 4: 1} and a "35/289
+# excluding 18 bulk-move commits" figure from the original recon; both are at a
+# scope this branch did not reproduce, so they stay REMOVED. ⚠ That recon
+# figure was the one that would have caught this very overstatement — dropping
+# it as unreproduced was right, and RE-DERIVING it is what was owed.
 #
 # The edge needed no new capture: the commit's trailer carries the id and the
 # commit's FILE LIST names the doc. `doc_commits` already pairs them, but
-# DOC-FIRST. `session_docs` is the same pairing read SESSION-FIRST.
+# DOC-FIRST. `sessions_docs` is the same pairing read SESSION-FIRST.
 # =========================================================================== #
 
 #: 🔴 EVERY ELEMENT OF `drift_repo` IS LOAD-BEARING — the ledger, so a later
@@ -1660,14 +1672,27 @@ def _all_handles_on(monkeypatch, repo_a, repo_b, fillers):
 
 
 class TestSessionDocsReadsTheEdgeSESSIONFIRST:
-    """`handoff_arc.session_docs` — the reverse of `doc_commits`."""
+    """`handoff_arc.sessions_docs` — the reverse of `doc_commits`.
+
+    ⚠ EVERY SINGLE-SESSION CASE HERE CALLS THE PLURAL, as
+    `sessions_docs(repo, (sid,))[sid]`. The singular `session_docs(repo, sid)`
+    door was deleted (D3, 2026-10-03): zero production callers — the cross-arc
+    footer calls the plural — so it was kept alive by these ten tests and a
+    named FOLLOW-ON, which is not a named CONSUMER. 🔴 THE PORT CHANGED NO
+    ASSERTION: each of the ten still fails for exactly the reason it failed
+    before, because `sessions_docs(repo, (sid,))[sid]` IS what the deleted
+    function returned, verbatim. ⚠ But note `test_a_SINGLE_doc_session…`'s own
+    warning below — a ONE-id call is structurally blind to cross-crediting, and
+    `test_ONE_PASS_over_SEVERAL_ids_does_NOT_CROSS_CREDIT` is the only guard
+    here that is not. That was true before the port and is unchanged by it.
+    """
 
     def test_a_DRIFTING_session_reports_BOTH_docs_newest_first(self, drift_repo):
         """🔴 THE DEFECT, DIRECTLY. One session, two docs, two separate commits.
         Newest-first, because that is `git log`'s own order and every other
         ordering in this module is git's."""
         a, _b, _f = drift_repo
-        assert ha.session_docs(str(a), SID_DRIFT) == (
+        assert ha.sessions_docs(str(a), (SID_DRIFT,))[SID_DRIFT] == (
             "handoff-beta.md", "handoff-alpha.md")
 
     def test_a_SQUASH_shaped_stamp_STILL_mints_an_edge(self, drift_repo):
@@ -1676,7 +1701,8 @@ class TestSessionDocsReadsTheEdgeSESSIONFIRST:
         EMPTY for it — measured at a 40% relative undercount corpus-wide. If this
         assertion is the only one that moves, the reader stopped reading `%B`."""
         a, _b, _f = drift_repo
-        assert "handoff-alpha.md" in ha.session_docs(str(a), SID_DRIFT), (
+        assert "handoff-alpha.md" in ha.sessions_docs(
+            str(a), (SID_DRIFT,))[SID_DRIFT], (
             "the squash-shaped stamp minted no edge — the reverse lookup is "
             "reading git's trailer parser instead of the whole body")
 
@@ -1691,14 +1717,15 @@ class TestSessionDocsReadsTheEdgeSESSIONFIRST:
         below. A description wider than the implementation it grades.
         """
         a, _b, _f = drift_repo
-        assert ha.session_docs(str(a), SID_SINGLE) == ("handoff-beta.md",)
+        assert ha.sessions_docs(str(a), (SID_SINGLE,))[SID_SINGLE] == (
+            "handoff-beta.md",)
 
     def test_ONE_PASS_over_SEVERAL_ids_does_NOT_CROSS_CREDIT(self, drift_repo):
         """🔴 THE KILLER FOR A DROPPED `trailer_ids` RE-VERIFICATION, and it has
         to be a MULTI-id call to be one.
 
         `--grep` is a PREFILTER: the footer ORs every member's pattern into ONE
-        walk (1.65s per session otherwise), so git returns a commit matching ANY
+        walk (per-member is ~3x slower), so git returns a commit matching ANY
         of them. Crediting each matched commit to every REQUESTED id — rather
         than to the ids its body really carries — hands each session the whole
         arc's docs. Fixtures chosen pairwise distinct so no two expectations can
@@ -1720,15 +1747,31 @@ class TestSessionDocsReadsTheEdgeSESSIONFIRST:
         docs under `claudedocs/archive/`; a lookup that cannot see that prefix
         reports a drifting session as single-doc for every archived arc."""
         a, _b, _f = drift_repo
-        assert ha.session_docs(str(a), SID_ARCHIVE) == ("handoff-delta.md",), (
+        assert ha.sessions_docs(str(a), (SID_ARCHIVE,))[SID_ARCHIVE] == (
+            "handoff-delta.md",), (
             "a doc under claudedocs/archive/ was not reached — the path "
             "alternation is gone and every archived arc now reads as absent")
 
     def test_an_INDENTED_trailer_mints_NO_edge(self, drift_repo):
-        """The `^` anchor plus the re-verification. Gamma's body quotes a
-        SID_DRIFT trailer indented inside prose; that is not a stamp."""
+        """The RE-VERIFICATION. Gamma's body quotes a SID_DRIFT trailer
+        indented inside prose; that is not a stamp.
+
+        ⚠ IT DOES NOT PIN THE `^` ANCHOR IN `_trailer_grep`, and an earlier
+        docstring here said "the `^` anchor plus the re-verification" — a
+        description wider than the implementation it grades. MEASURED
+        2026-10-03: deleting the `^` from `_trailer_grep` leaves this test GREEN
+        (the mutant SURVIVED), because `trailer_ids()` rejects an indented
+        trailer on its own — over a body carrying BOTH an indented and a
+        flush-left stamp it returns only the flush-left one. So the anchor is a
+        PREFILTER WIDTH choice (how much git hands back, i.e. a cost question)
+        and `trailer_ids` is the guard. The assertion is unchanged and still
+        kills every mutant that drops the re-verification; only the claim about
+        what it covers is corrected. 🔴 The `^` anchor is consequently
+        UNGUARDED — widening it back would be caught by nothing here.
+        """
         a, _b, _f = drift_repo
-        assert "handoff-gamma.md" not in ha.session_docs(str(a), SID_DRIFT), (
+        assert "handoff-gamma.md" not in ha.sessions_docs(
+            str(a), (SID_DRIFT,))[SID_DRIFT], (
             "an INDENTED quotation of a trailer minted a session->doc edge")
 
     def test_the_COLUMN_0_trailer_in_the_SAME_body_DOES_mint_one(self, drift_repo):
@@ -1737,28 +1780,31 @@ class TestSessionDocsReadsTheEdgeSESSIONFIRST:
         (1 of the 36 measured drifting sessions). Without this assertion the
         indented-trailer test is satisfied by a walk that found nothing at all."""
         a, _b, _f = drift_repo
-        assert ha.session_docs(str(a), SID_SESO) == ("handoff-gamma.md",), (
+        assert ha.sessions_docs(str(a), (SID_SESO,))[SID_SESO] == (
+            "handoff-gamma.md",), (
             "the flush-left trailer in the same body minted no edge — either "
             "the walk is wired to nothing, or `ses_…` ids are being "
             "shape-filtered again")
 
     def test_a_session_that_wrote_NOTHING_here_is_an_EMPTY_tuple(self, drift_repo):
         a, _b, _f = drift_repo
-        assert ha.session_docs(str(a), SID_NO_TRANSCRIPT) == ()
+        assert ha.sessions_docs(
+            str(a), (SID_NO_TRANSCRIPT,))[SID_NO_TRANSCRIPT] == ()
 
     def test_an_UNREADABLE_repo_RAISES_rather_than_returning_empty(self, tmp_path):
         """Same posture as `doc_commits`: an unreadable repo and a session that
         wrote nothing produce the same zero, so they must not be the same
         return."""
         with pytest.raises(ha.GitUnavailable):
-            ha.session_docs(str(tmp_path / "nope"), SID_DRIFT)
+            ha.sessions_docs(str(tmp_path / "nope"), (SID_DRIFT,))
 
     def test_the_SECOND_repo_is_only_reachable_by_WALKING_it(self, drift_repo):
         """🔴 THE KILLER FOR A SEED-REPO-ONLY IMPLEMENTATION. 4 of 36 measured
         drifting sessions cross repos; a lookup scoped to the seed doc's own repo
         reports them as having stayed put."""
         _a, b, _f = drift_repo
-        assert ha.session_docs(str(b), SID_DRIFT) == ("handoff-epsilon.md",)
+        assert ha.sessions_docs(str(b), (SID_DRIFT,))[SID_DRIFT] == (
+            "handoff-epsilon.md",)
 
     def test_the_run_is_INJECTABLE_and_the_function_is_otherwise_pure(self,
                                                                      drift_repo):
@@ -1772,7 +1818,7 @@ class TestSessionDocsReadsTheEdgeSESSIONFIRST:
             return subprocess.run(argv, capture_output=True, text=True,
                                   timeout=60, env=ha._git_env())
 
-        assert ha.session_docs(str(a), SID_DRIFT, run=run) == (
+        assert ha.sessions_docs(str(a), (SID_DRIFT,), run=run)[SID_DRIFT] == (
             "handoff-beta.md", "handoff-alpha.md")
         assert seen, "the injected runner was never called"
 
@@ -1883,26 +1929,36 @@ class TestTheCrossArcFooterIsNeverSILENTLYEMPTY:
             empty, env={}, run=None))
         assert "0 of 0 members have no stamped commit outside this doc" in rendered
 
-    def test_cross_arc_is_PRESENT_AND_EMPTY_in_json_never_absent(self, capsys,
-                                                                 drift_repo,
-                                                                 monkeypatch):
-        a, b, fillers = drift_repo
-        _all_handles_on(monkeypatch, a, b, fillers)
-        monkeypatch.setattr(fs, "arc_repo_for", lambda basename: (str(a), GAMMA))
-        monkeypatch.setattr(fs, "archive_search", lambda a_, since: [])
-        arg = fs.parse_args(["--arc", "handoff-gamma", "--json"])
-        arg.arc = "handoff-gamma.md"
-        assert fs.run_arc(arg) == fs.EXIT_OK
-        payload = json.loads(capsys.readouterr().out)
-        assert "cross_arc" in payload, (
-            "`cross_arc` was ABSENT for an arc with no other docs — a machine "
-            "caller cannot tell that from a build with no such key")
-        assert payload["cross_arc"] == []
+    # ⚠ TWO TESTS DELETED HERE 2026-10-03, and the deletion is the point.
+    # `test_cross_arc_is_PRESENT_AND_EMPTY_in_json_never_absent` and
+    # `test_cross_arc_CARRIES_the_other_docs_in_json` asserted a `--json` key
+    # that no longer exists: the cross-arc walk is now computed on the HUMAN
+    # rendering branch only, so there is nothing on the `--json` path to be
+    # present-and-empty ABOUT. They were deleted outright rather than hollowed
+    # out — a test retained in a form that can no longer fail for its own reason
+    # is worse than a deleted one, because it reads as coverage. What replaces
+    # them is the POSITIVE key-set pin below, which is red if either key
+    # returns. The programmatic surface for cross-arc data is now
+    # `handoff_arc.sessions_docs()` and nothing else.
 
-    def test_cross_arc_CARRIES_the_other_docs_in_json(self, capsys, drift_repo,
-                                                      monkeypatch):
-        """The positive control for the test above: a reassuring `[]` is
-        indistinguishable from a key wired to nothing."""
+    def test_the_json_key_set_is_PINNED_and_NO_cross_arc_key_RETURNED(
+            self, capsys, drift_repo, monkeypatch):
+        """🔴 BACK-COMPAT, AND THE GUARD THAT REPLACES TWO DELETED ONES.
+
+        `run_arc --json`'s comment records that 5 of 6 real consumer sessions
+        parsed `members` and discarded everything else. ADDING a top-level key
+        is safe; changing `doc` from a string or `members` from a flat array is
+        NOT, so both are pinned by TYPE here.
+
+        🔴 THE SET IS PINNED POSITIVELY AND EXACTLY — `==`, not a subset check —
+        so this is the assertion that goes red if `cross_arc` or
+        `cross_arc_gaps` silently returns. Both were deleted (D1/D2, 2026-10-03)
+        because the walk that fed them costs ~4-15s by load and neither key
+        ever had a named consumer; a re-add must be a deliberate change to this
+        line, not a quiet reappearance. The explicit absence assertions below
+        are there so the FAILURE MESSAGE names the hazard rather than just
+        dumping two sets.
+        """
         a, b, fillers = drift_repo
         _all_handles_on(monkeypatch, a, b, fillers)
         monkeypatch.setattr(fs, "arc_repo_for", lambda basename: (str(a), BETA))
@@ -1911,27 +1967,17 @@ class TestTheCrossArcFooterIsNeverSILENTLYEMPTY:
         arg.arc = "handoff-beta.md"
         assert fs.run_arc(arg) == fs.EXIT_OK
         payload = json.loads(capsys.readouterr().out)
-        docs = {d for e in payload["cross_arc"] for d in e["docs"]}
-        assert docs == {"handoff-alpha.md", "handoff-epsilon.md"}, docs
-
-    def test_the_SINGLE_DOC_json_key_set_is_PINNED(self, capsys, drift_repo,
-                                                   monkeypatch):
-        """🔴 BACK-COMPAT. `run_arc --json`'s comment records that 5 of 6 real
-        consumer sessions parsed `members` and discarded everything else.
-        ADDING a top-level key is safe; changing `doc` from a string or
-        `members` from a flat array is NOT, so both are pinned by TYPE here."""
-        a, b, fillers = drift_repo
-        _all_handles_on(monkeypatch, a, b, fillers)
-        monkeypatch.setattr(fs, "arc_repo_for", lambda basename: (str(a), BETA))
-        monkeypatch.setattr(fs, "archive_search", lambda a_, since: [])
-        arg = fs.parse_args(["--arc", "handoff-beta", "--json"])
-        arg.arc = "handoff-beta.md"
-        assert fs.run_arc(arg) == fs.EXIT_OK
-        payload = json.loads(capsys.readouterr().out)
+        for gone in ("cross_arc", "cross_arc_gaps"):
+            assert gone not in payload, (
+                f"`{gone}` is back on the --json path. It was deleted with the "
+                "walk that feeds it (~4-15s by load, zero named consumers); "
+                "if a "
+                "caller now exists, NAME it in run_arc and update this pin "
+                "deliberately — and do not emit a fabricated empty list, which "
+                "is indistinguishable from 'no member wrote another doc'")
         assert set(payload) == {
             "doc", "repo", "members", "total_commits", "unstamped_commits",
-            "coverage", "readers_measured", "unmeasured",
-            "cross_arc", "cross_arc_gaps"}, sorted(payload)
+            "coverage", "readers_measured", "unmeasured"}, sorted(payload)
         assert isinstance(payload["doc"], str)
         assert isinstance(payload["members"], list)
         assert all(isinstance(m, dict) for m in payload["members"])
@@ -2034,35 +2080,125 @@ class TestUNMEASUREDIsNotEMPTYOnTheNewSurface:
 class TestTheORDINARYPathPaysNOTHINGForThis:
     """🔴 `arc_writer_counts` / `arc_annotation` run on the NON-`--arc` path under
     a measured budget (`MAX_ANNOTATION_DOC_WALKS = 12`, +3.24s over 11 docs). The
-    reverse lookup is 1.65s PER SESSION across four handles — ~33s for a 20-hit
-    query. Same shape as
+    reverse lookup over the four readable handles costs ~4-15s for a six-member
+    arc (~4s at load ~5, ~15s at load ~18; 2026-10-03, laptop), so a 20-hit
+    query that reached it would be minutes. Same shape as
     `test_a_doc_that_costs_NO_git_walk_does_not_spend_budget`.
+
+    ⚠ ONLY `sessions_docs` IS PATCHED NOW. The singular `session_docs` was
+    deleted (D3, 2026-10-03), and `monkeypatch.setattr` on a name the module no
+    longer defines raises `AttributeError` — which would have turned both of
+    these green-for-the-wrong-reason into collection-time errors.
     """
 
-    def test_arc_writer_counts_makes_NO_session_docs_CALL(self, monkeypatch):
+    def test_arc_writer_counts_makes_NO_sessions_docs_CALL(self, monkeypatch):
         calls = []
 
         def forbidden(*args, **kwargs):
             calls.append(args)
             raise AssertionError(
                 "the ordinary annotation path called the reverse session->doc "
-                "lookup; that is 1.65s PER HIT and the budget is measured in "
-                "doc walks")
+                "lookup; that is seconds per arc-shaped call and the budget is "
+                "measured in doc walks")
 
-        monkeypatch.setattr(fs.handoff_arc, "session_docs", forbidden)
         monkeypatch.setattr(fs.handoff_arc, "sessions_docs", forbidden)
         rows = [{"genesis": f"claudedocs/handoff-b{i}.md"} for i in range(20)]
         fs.arc_writer_counts(rows, repo_lookup=lambda b: (None, None))
         assert calls == []
 
-    def test_arc_annotation_makes_NO_session_docs_CALL(self, monkeypatch):
+    def test_arc_annotation_makes_NO_sessions_docs_CALL(self, monkeypatch):
         def forbidden(*args, **kwargs):
             raise AssertionError("arc_annotation reached the reverse lookup")
 
-        monkeypatch.setattr(fs.handoff_arc, "session_docs", forbidden)
         monkeypatch.setattr(fs.handoff_arc, "sessions_docs", forbidden)
         assert fs.arc_annotation({"genesis": "claudedocs/handoff-q.md"},
                                  {"handoff-q.md": 3})
+
+
+class TestTheJSONPathPaysNOTHINGForThisEITHER:
+    """🔴 D2, ASSERTED ON CONTROL FLOW RATHER THAN ON A COMMENT.
+
+    `run_arc` used to hoist `cross = arc_cross_docs(report)` ABOVE `if a.json:`,
+    so every machine consumer paid the reverse walk to populate two keys none
+    of them read. MEASURED 2026-10-03 on the laptop, this arc's shape (6
+    members, 4 readable handles): an `--arc --json` run went 25.31s -> 23.79s
+    median, 1.52s saved. ⚠ The walk in ISOLATION costs ~4s at load ~5 and ~15s
+    at load ~18 — a ~4x swing with load, which is why the end-to-end delta is
+    the number quoted here and the ratio over per-member (~3x) is the claim
+    made about the DESIGN. Both keys are gone and so is the call.
+
+    🔴 CALL-RECORDING, NOT AN AST READ OF THE SOURCE. Same shape as
+    `test_a_doc_that_costs_NO_git_walk_does_not_spend_budget`: a structural
+    check on the text passes while a second caller one frame down still walks.
+    And the pair below is a POSITIVE-AND-NEGATIVE control — the zero on the
+    `--json` path means nothing unless the same recorder counts non-zero on the
+    human path, which would otherwise be indistinguishable from a recorder
+    wired to nothing.
+    """
+
+    @staticmethod
+    def _recorder(monkeypatch):
+        """Count `sessions_docs` calls, still returning the real answer."""
+        real = fs.handoff_arc.sessions_docs
+        seen = []
+
+        def counted(repo, session_ids, run=None):
+            ids = tuple(session_ids)
+            seen.append((repo, ids))
+            return real(repo, ids, run=run)
+
+        monkeypatch.setattr(fs.handoff_arc, "sessions_docs", counted)
+        return seen
+
+    def test_the_JSON_path_makes_ZERO_reverse_walk_calls(self, capsys,
+                                                         drift_repo,
+                                                         monkeypatch):
+        a, b, fillers = drift_repo
+        _all_handles_on(monkeypatch, a, b, fillers)
+        monkeypatch.setattr(fs, "arc_repo_for", lambda basename: (str(a), BETA))
+        monkeypatch.setattr(fs, "archive_search", lambda a_, since: [])
+        seen = self._recorder(monkeypatch)
+        arg = fs.parse_args(["--arc", "handoff-beta", "--json"])
+        arg.arc = "handoff-beta.md"
+        assert fs.run_arc(arg) == fs.EXIT_OK
+        capsys.readouterr()
+        assert seen == [], (
+            "the --json path walked the session->doc edge after all — that is "
+            f"seconds charged to a consumer that reads no cross-arc key: {seen!r}")
+
+    def test_the_HUMAN_path_makes_EXACTLY_ONE_PASS_PER_HANDLE(self, capsys,
+                                                              drift_repo,
+                                                              monkeypatch):
+        """🔴 THE POSITIVE CONTROL, AND THE ONE-PASS PROPERTY IN ONE ASSERTION.
+
+        Exactly one call per READABLE handle, each carrying EVERY member id at
+        once. A per-member implementation produces `members x handles` calls and
+        is ~3x slower; a second walk produces `2 x handles`. Both are caught by
+        the count, and the id-set assertion is what makes the count mean
+        "one ORed pass" rather than "one pass that forgot four members".
+        """
+        a, b, fillers = drift_repo
+        mapping = _all_handles_on(monkeypatch, a, b, fillers)
+        readable = [h for h in hi.REPO_ENV_HANDLES if mapping.get(h)]
+        monkeypatch.setattr(fs, "arc_repo_for", lambda basename: (str(a), BETA))
+        monkeypatch.setattr(fs, "archive_search", lambda a_, since: [])
+        seen = self._recorder(monkeypatch)
+        arg = fs.parse_args(["--arc", "handoff-beta"])
+        arg.arc = "handoff-beta.md"
+        assert fs.run_arc(arg) == fs.EXIT_OK
+        rendered = capsys.readouterr().out
+        assert "CROSS-ARC" in rendered, "the human path printed no footer"
+        assert len(seen) == len(readable), (
+            f"expected exactly one reverse-walk pass per readable handle "
+            f"({len(readable)}), got {len(seen)} — either a per-MEMBER walk or "
+            f"a second pass came back: {[(r, len(i)) for r, i in seen]}")
+        report = fs.arc_report("handoff-beta.md")
+        want = {m.session_id for m in report.members}
+        assert want, "fixture produced no members, so the count below is vacuous"
+        for repo, ids in seen:
+            assert set(ids) == want, (
+                f"a pass over {repo!r} carried {set(ids)!r}, not every member "
+                f"{want!r} — the ORed one-pass property is gone")
 
 
 class TestTheExit2CauseListNamesTheCROSSHOSTCause:
@@ -2072,10 +2208,19 @@ class TestTheExit2CauseListNamesTheCROSSHOSTCause:
     handed a handoff doc" and "transcript pruned" — and omitted the MEASURED
     DOMINANT one: the transcript lives on the OTHER HOST. Measured 2026-10-03
     from the laptop (`peer-host ssh-target --json` reports `laptop: via local`,
-    `workbench: via zach@…`): of 291 stamped writer sessions, **6** have a
-    transcript here, **245** on the workbench, **40** on neither. So the
-    sentence named the 40 and the 0 and skipped the 245 — and it is the one an
-    agent reads before deciding the seed was bad.
+    `workbench: via zach@…`): of the stamped writer sessions, only a handful
+    have a transcript here and the large majority are on the workbench. So the
+    sentence named the rare causes and skipped the common one — and it is the
+    one an agent reads before deciding the seed was bad.
+
+    ⚠ WHAT THESE GUARDS PIN IS THE CAUSE AND THE ESCAPE, NOT A COUNT, and that
+    is a correction. The shipped string used to carry four corpus literals
+    (`6`/`245`/`291`/`40`) and the guard was `assert "245" in err` — a literal
+    pinned to a literal, which re-measures nothing and would have stayed GREEN
+    through any corpus drift while the sentence it blessed went false. The
+    ranking ("dominant cause is the other host") and the `git log --grep`
+    escape are the half that is actionable and the half that makes the sentence
+    TRUE, so they are what is asserted.
 
     Verified live at `3e7725bc`: `--arc 0049ef1b-…` refuses, while the git
     reverse lookup answers instantly from `$DATAPACKET`.
@@ -2090,12 +2235,27 @@ class TestTheExit2CauseListNamesTheCROSSHOSTCause:
         assert rc == fs.EXIT_USAGE
         err = capsys.readouterr().err
         assert "OTHER HOST" in err, (
-            "the refusal still omits the measured DOMINANT cause (245 of 291 "
-            "stamped writers' transcripts are on the peer host), so an agent "
+            "the refusal still omits the measured DOMINANT cause — most "
+            "stamped writers' transcripts are on the peer host — so an agent "
             "reads it as 'the seed was bad'")
-        assert "245" in err and "291" in err, (
-            "the cause is named without the measurement that makes it the "
-            "dominant one")
+        # 🔴 THE CAUSE AS A RANKING, not a census. These three phrases are what
+        # make the sentence an instruction rather than a shrug: it is the
+        # dominant cause, it is NOT the seed, and here is who the peer is.
+        assert "MEASURED DOMINANT cause" in err, (
+            "the other-host cause is mentioned without being RANKED, so a "
+            "reader cannot tell it from the two rare causes listed after it")
+        assert "not that the seed is wrong" in err, (
+            "the refusal names a cause but does not exonerate the seed, which "
+            "is the inference an agent actually draws from an exit 2")
+        assert "peer-host ssh-target --json" in err, (
+            "the refusal says 'the other host' without naming the command "
+            "that resolves WHICH host")
+        # 🔴 AND NO CORPUS CENSUS CAME BACK. A count in this string is pinned to
+        # nothing that re-measures it, so it goes stale silently and green.
+        for stale in ("245", "291"):
+            assert stale not in err, (
+                f"a hardcoded corpus count ({stale}) is back in the refusal "
+                "string; it is re-measured by nothing and will go stale green")
 
     def test_the_refusal_POINTS_AT_the_git_derived_path(self, tmp_path,
                                                         monkeypatch, capsys):

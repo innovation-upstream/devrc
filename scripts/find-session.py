@@ -1264,15 +1264,30 @@ def arc_cross_docs(report, env=None, run=None):
     🔴 THE DEFECT THIS CLOSES. A session DRIFTS: it opens resumed from handoff-A,
     does that work, then moves on and ends by writing handoff-B. Every resolver
     here was keyed on the session's GENESIS and is single-valued, so a reader who
-    found handoff-B's arc could not get back to handoff-A. Measured 2026-10-03
-    over the stamped corpus: **36 of 291** writer sessions (~1 in 8) wrote >=2
-    distinct handoff docs; **4 of 36** drifted across repos.
+    found handoff-B's arc could not get back to handoff-A.
+
+    🔴 THE RATE, AT THE SCOPE MEASURED — **29 of 291 (~1 in 10)**, not 1 in 8.
+    Measured 2026-10-03 over the stamped corpus, at the scope `doc_commit_revs`
+    walks (HEAD + upstream per handle; `--all` would credit unmerged branches no
+    reader can see), across the four SET handles with `$CIVITAI_CLI` UNMEASURED.
+    Of 291 stamped writer sessions, **36** touched >=2 distinct handoff docs —
+    but that population is NOT "drifted": 7 of the 36 wrote all their docs in
+    ONE commit, which is a bulk move and not a session changing subject.
+    Requiring some pair of a session's docs to have **DISJOINT commit sets**
+    gives **29 of 291**, and excluding the single 37-doc bulk-move session
+    (`6b88ffe8`) gives **28 of 291**. 4 of the 29 drifted ACROSS repos.
+    ⚠ The `ses_…` (opencode) id is 1 of the 36 multi-doc sessions and **0 of the
+    29 drifted** — the fixture that carries that shape is justified by the
+    multi-doc population, not by this one.
 
     🔴 ONE `--grep` PASS PER SET HANDLE, OVER EVERY MEMBER AT ONCE — never one
-    pass per member. A per-session walk is 1.65s across the set handles, so a
-    six-member arc would pay ~10s for an answer one pass gives. This runs on the
-    `--arc` path ONLY; the ordinary annotation path must never reach it (see
-    `arc_writer_counts`'s budget, measured in doc walks).
+    pass per member, which is **~3x** slower for this arc's shape (2.2-4.1x
+    across 5 interleaved runs; see `sessions_docs` for the measurement and why
+    it is a range). 🔴 AND ON THE HUMAN
+    RENDERING PATH ONLY: `run_arc`'s `--json` branch does not call this at all
+    (the two keys it fed are deleted), and the ordinary annotation path must
+    never reach it either (see `arc_writer_counts`'s budget, measured in doc
+    walks).
 
     Returns a dict rather than touching `handoff_arc.ArcReport`: the report is
     imported and rendered by `scripts/session-analysis/extract_user_msgs.py`, and
@@ -1477,8 +1492,17 @@ def run_arc(a):
     except ArcUnmeasured as exc:
         print(f"--arc: {exc}", file=sys.stderr)
         return EXIT_ARC_UNMEASURED
-    # ONE pass, whichever rendering follows — see `arc_cross_docs`.
-    cross = arc_cross_docs(report)
+    # 🔴 NO CROSS-ARC WALK ON THIS PATH, AND THE PLACEMENT IS THE POINT. An
+    # earlier shape hoisted `cross = arc_cross_docs(report)` above this branch,
+    # so every `--json` consumer paid the walk for two keys none of them
+    # read. MEASURED end-to-end on the laptop 2026-10-03, this arc's shape (6
+    # members, 4 readable handles), 3 interleaved runs each warmed: an
+    # `--arc --json` run went 25.31s -> 23.79s median, i.e. 1.52s saved. 🔴 AND
+    # THAT IS THE HONEST NUMBER, not the ~4-15s the walk costs in isolation —
+    # the walk's cost swings ~4x with this box's load (see `sessions_docs`), and
+    # the rest of an `--arc` run dominates either way. The walk now happens inside `render_arc`,
+    # i.e. on the HUMAN branch only, which is also the one pass the design is
+    # about. Deleted with it: the `cross_arc` and `cross_arc_gaps` keys below.
     if a.json:
         print(json.dumps({
             "doc": report.doc,
@@ -1493,26 +1517,23 @@ def run_arc(a):
             "coverage": handoff_arc.coverage_line(report),
             "readers_measured": report.readers_measured,
             "unmeasured": report.unmeasured_notes,
-            # 🔴 ADDITIVE, AND PRESENT-AND-EMPTY RATHER THAN ABSENT. The comment
-            # below records that 5 of 6 real consumer sessions parsed `members`
-            # and discarded the rest, so a new TOP-LEVEL key is safe where
-            # changing `doc`'s type or flattening `members` would not be. It is
-            # always emitted: an absent key is indistinguishable from a build
-            # that never had one, which is this module's standing refusal.
-            "cross_arc": [{"session_id": e["session_id"],
-                           "member_index": e["member_index"],
-                           "docs": list(e["docs"]),
-                           "commands": [f"find-session.py --arc {d}"
-                                        for d in e["docs"]]}
-                          for e in cross["entries"]],
-            "cross_arc_gaps": {
-                "members_total": cross["members_total"],
-                "members_no_other_doc": cross["members_no_other_doc"],
-                "members_unmeasured": cross["members_unmeasured"],
-                "unmeasured_handles": [{"handle": h, "reason": r}
-                                       for h, r in
-                                       cross["unmeasured_handles"]],
-            },
+            # ⚠ NO `cross_arc`/`cross_arc_gaps` HERE EITHER, DELETED 2026-10-03,
+            # SAME RULE AS `next_command` BELOW — applied a third and fourth
+            # time rather than argued as an exception. Both keys shipped for one
+            # round justified as "a machine caller must be able to branch on
+            # it"; neither ever had a named consumer, and the measured reach is
+            # the same 0 of 6. The walk that fed them costs ~4s at load ~5
+            # and ~15s at load ~18 (laptop, 6 members, 4 handles; the absolutes
+            # are a property of the load, see `sessions_docs`), charged to the
+            # five of six real consumer sessions that parse `members` and
+            # discard the rest. 🔴 AND IT IS NOT EMITTED AS AN EMPTY LIST: a fabricated `[]`
+            # from a walk that never ran is indistinguishable from "no member
+            # wrote another doc", which is the scoped-zero-as-absence this
+            # module refuses everywhere else. The cross-arc edge IS still a
+            # programmatic surface — `handoff_arc.sessions_docs()`, public in
+            # its `__all__`, which gives a caller the real walk instead of one
+            # smuggled through a CLI payload. Re-add a key here when a caller
+            # exists and is NAMED here.
             # ⚠ NO `next_command` HERE, DELETED 2026-09-26 AND NOT AN OVERSIGHT.
             # It shipped for one round, justified as "a machine caller must be able
             # to branch on it" — a hypothesis, not a consumer. Measured reach: 0 of
@@ -1522,7 +1543,9 @@ def run_arc(a):
             # rendering. Re-add it when a caller exists and is named here.
         }, indent=2))
         return EXIT_OK
-    print(render_arc(report, cross=cross))
+    # `cross` left unsupplied ON PURPOSE — `render_arc` computes it, which is
+    # the ONE pass, and keeps the footer impossible to ship without.
+    print(render_arc(report))
     return EXIT_OK
 
 
@@ -1764,10 +1787,19 @@ def main(argv=None):
             # 🔴 THE CAUSE LIST USED TO BE A FALSE CLAIM BY OMISSION. It named
             # "never handed a handoff doc" and "transcript pruned" and left out
             # the MEASURED DOMINANT cause: the transcript is on the OTHER HOST.
-            # Measured 2026-10-03 over 291 stamped writer sessions — 6 have a
-            # transcript on this machine, 245 on the peer, 40 on neither — so the
-            # sentence enumerated the 40 and skipped the 245, and it is the
-            # sentence an agent reads before concluding the seed was bad.
+            # Measured 2026-10-03, the large majority of stamped writer
+            # sessions' transcripts live on the peer rather than here — so the
+            # sentence enumerated the rare causes and skipped the common one,
+            # and it is the sentence an agent reads before concluding the seed
+            # was bad.
+            # ⚠ NO CORPUS CENSUS IN THE STRING, DELETED 2026-10-03. It carried
+            # four hardcoded counts pinned only to THEMSELVES (`assert "245" in
+            # err` — a literal pinned to a literal), re-measured by nothing, so
+            # the day the corpus moved it would have gone stale silently and
+            # GREEN. The RANKING is the actionable half and does not rot at the
+            # same rate; the exact census belongs in a measurement, not in a
+            # user-facing string that no test can falsify. The guard below now
+            # pins the CAUSE and the ESCAPE instead of a number.
             # 🔴 AND A CAUSE WITH NO NEXT STEP IS STILL A DEAD END: the git
             # reverse lookup needs no transcript at all, so it is named here.
             print(f"--arc {a.arc!r} resolves to no handoff doc. Pass a slug "
@@ -1775,12 +1807,11 @@ def main(argv=None):
                   "session id whose opening message names one. 🔴 A session id "
                   "that resolves to NOTHING is not the same as an empty arc, "
                   "and the MEASURED DOMINANT cause is that the transcript "
-                  "lives on the OTHER HOST, not that the seed is wrong: of 291 "
-                  "stamped writer sessions, 6 have a transcript on this "
-                  "machine, 245 on the peer and 40 on neither (`peer-host "
-                  "ssh-target --json` names the peer). The doc->session edge is "
-                  "in GIT, which needs no transcript — ask it directly in any "
-                  f"{arc_handles_spelled('/')} checkout:\n"
+                  "lives on the OTHER HOST, not that the seed is wrong "
+                  "(`peer-host ssh-target --json` names the peer). The "
+                  "doc->session edge is in GIT, which needs no transcript — "
+                  f"ask it directly in any {arc_handles_spelled('/')} "
+                  "checkout:\n"
                   f"  git log --all -E --grep='^{handoff_arc.TRAILER_KEY}: "
                   "<id>$' --name-only -- claudedocs\n"
                   "Failing that, the session may never have been handed a "
