@@ -1,4 +1,4 @@
-# Handoff: budget-warning-band — 2026-10-03
+<!-- delta: State now only; every other section omitted and therefore untouched -->
 
 ## Run this first — the index, one command
 ```bash
@@ -76,6 +76,28 @@ any of them, and do not mint a sixth slug for the same ground.**
   (`NOTHING RESOLVED — 0 tasks`); `field <doc>` exited 1 (none present). An unknown session
   id answers 200 with an EMPTY ARRAY, so that zero **cannot** distinguish "touched no task"
   from "wrong id". Not a clean bill of health. No field written, none created.
+- ✅ **THIS DOC LANDED: commit `6b630e59`, branch `docs/handoff-budget-warning-band`, opened as
+  devrc#2006.** Recorded here because the write-back guard measures "a handoff write since the
+  last read of this doc" and the honest order was write → read → PR, so the guard fired on the
+  ordering rather than on unrecorded work. ⚠ **AND IT WAS NOT LEAK-SCANNED BY THE GATE:**
+  `handoff_doc.py` reported `NO SCANNER FOUND in <repo> — looked for tests/leakscan.py`, which is
+  **a PASS BY ABSENCE, not a clean result** (devrc has no such scanner; cairn does). Hand-scanned
+  instead — no IPs, no credentials, no prohibited names; every long-string hit is one of devrc's
+  own public doc slugs. **Any future handoff written into devrc gets the same non-result** — do
+  not read that line as a pass.
+- ✅ **THE SUBSYSTEM INDEX WAS WRITTEN — one bullet appended to `cairn/report.md`**, dated
+  2026-10-03, covering the inert-guard shape (a guard whose discriminating input cannot reach the
+  code it guards) and the printed-token contract's missing mirror half. 🔴 **It took THREE windows
+  and the first two were not results:** `--session` on devrc refused outright
+  (`transcript cwd does not match` — the session ran in cairn, and the skill forbids falling back
+  to the git window there because it is structurally empty too); `--session` on cairn returned
+  **100% of paths outside the session cwd**, the subagent-worktree blind spot; `--pr 174,175`
+  resolved 46 paths and is the only window that sees a subagent's work. **A well-delegated session
+  is exactly the one `--session` sees least of.**
+- ⚠ **NO `clawgate-task:` FIELD, AND THE ZERO IS NOT A CLEAN BILL.** `clawgate_handoff.sh resolve`
+  exited **5** (`NOTHING RESOLVED — 0 tasks`); `field <doc>` exited 1. An unknown session id
+  answers 200 with an EMPTY ARRAY, so that zero cannot distinguish "touched no task" from "wrong
+  id". No field written, none created.
 
 ## Open investigations — live diagnosis state
 
