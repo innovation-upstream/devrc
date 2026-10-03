@@ -129,6 +129,42 @@ the previous version serving — it is not an outage. The `.env*` rule drops
 `.env.sample` at the project root — `.env.production` is load-bearing for some
 apps, so the second half of that rule matters as much as the first.
 
+🔴 **A BUILD CAN FAIL ON THE REGISTRY PUSH AFTER BUILDING AND SCANNING CLEAN —
+READ `Deploy detail`, NEVER THE STATE STRING.** `app_state.py` gives you
+`approved/building` or `approved/failed`, and NEITHER distinguishes a slow build
+from a dead one. `civitai app status <slug>` carries a (truncated) `Deploy detail`
+with the real pipeline output. Measured on `model-benchmarking` 0.4.10,
+2026-09-29, the tail read in order: `kaniko build exit: 0` · `trivy scan PASSED
+(F10 gate): 0 un-ignored HIGH/CRITICAL` · `Error: Get "https://<image-ref>": dial
+tcp <registry-ip>:443: i/o timeout` · `crane push exit: 1`. **The image built and
+the scan passed; the PUSH timed out.** 🔴 The trap this closes is a reasoning one:
+`CLAUDE.md` correctly warns that CI is a different environment from the platform
+builder, which makes "the builder is choking on something CI cannot see" the
+plausible story — and here it was FALSE, with `kaniko build exit: 0` sitting
+directly above the network error the whole time. Read the failure output before
+theorising about the cause. That release took **three attempts on a byte-identical
+tree** (0.4.9 stuck, 0.4.10 failed, 0.4.11 live); the fix was a retry.
+
+🔵 **`building → deploying → live` is the progression, so `deploying` is the
+discriminator you actually have.** A version that never reaches `deploying` has
+not got past build/push. 0.4.11 passed through it in ~4 minutes; 0.4.9 never left
+`building` in hours.
+
+🔴 **A STUCK `approved/building` CANNOT BE WITHDRAWN, AND IS A ROLLBACK HAZARD.**
+`civitai app withdraw` targets PENDING requests, so an already-approved version
+whose build hangs stays queued indefinitely — and if it ever completes it deploys
+that OLDER bundle over whatever is live now. Detect a rollback by re-running the
+served-bundle grep for a token the newer version RETIRED: its reappearance IS the
+revert. Escalate to the platform side to cancel; nothing in the CLI can.
+
+⚠️ **The paired `withdrawn` row is created BY THE APPROVAL** — extending read #1
+below with its cause. Measured three for three on `model-benchmarking` 0.4.9,
+0.4.10 and 0.4.11: each approval produced a second, **source-less** `withdrawn`
+record within minutes, while the originally-submitted pubreq kept the source sha
+and went on to build. So a `withdrawn` duplicate beside an approved row is normal
+bookkeeping, not evidence of a double submit — check `civitai app submit` was run
+once rather than investigating the platform.
+
 `CIVITAI_STATUS_FILE=<dump>` makes `app_state.py` read a captured status instead
 of calling the CLI — for reasoning about a past state, and how the tests run
 offline.
