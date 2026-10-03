@@ -1161,9 +1161,15 @@ def test_the_SKILL_block_LEADS_the_digest(tmp_path, stub_bin):
     # this arc finished?" — and it is the line that must still be in view when
     # the reader reaches DRIFT. It also contributes a gap, so like the two above
     # it has to run before the block that prints them.
+    # `BUDGET` (#2001) sits between INVESTIGATIONS and DOD, and the position is
+    # itself the claim: it is about what this session may WRITE rather than what
+    # it has found, so it belongs AFTER the findings — and it must stay BEFORE
+    # `DOD`, because DOD's "LAST of the blocks" reason above is still binding and
+    # unchanged. It contributes DRIFT findings and a gap, so like the three above
+    # it has to run before the block that prints them.
     assert headers == [
         "SKILL", "GIT/PR", "WORKLOAD", "ALERTS", "CLAWGATE", "INVESTIGATIONS",
-        "DOD", "DRIFT",
+        "BUDGET", "DOD", "DRIFT",
     ], (
         f"the SKILL block must LEAD the digest; got {headers}"
     )

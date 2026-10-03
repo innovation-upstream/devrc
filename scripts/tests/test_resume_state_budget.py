@@ -455,6 +455,31 @@ class TestTheDigestAndTheWarningShareONEBand:
         repo = make_repo(tmp_path, size=20_000)
         assert f"of {B.MAX_BYTES:,} B" in budget(run_digest(repo, stubs))
 
+    def test_handoff_doc_RE_EXPORTS_the_band_rather_than_re_declaring_it(self):
+        """🔴 THE CONSOLIDATION, PINNED. #2001 moved `BUDGET_NEAR_BYTES` into
+        `handoff_budget` (stdlib-only) because the probe cannot import
+        `handoff_doc` — see `test_the_probe_does_NOT_import_handoff_doc`.
+        `handoff_doc` keeps the name as a RE-EXPORT.
+
+        Asserted as object identity, not equality: two independently-declared
+        ints with the same value compare equal, which is exactly the drift this
+        is here to catch.
+        """
+        assert H.BUDGET_NEAR_BYTES is B.BUDGET_NEAR_BYTES
+
+    def test_the_two_budget_PREDICATES_are_also_one_implementation(self):
+        """The same consolidation for `is_handoff_doc` and the gate check, over
+        inputs that span both answers so a stubbed-out predicate cannot pass.
+        """
+        for rel in ("claudedocs/handoff-x.md", "claudedocs/archive/handoff-x.md",
+                    "claudedocs/proposal-x.md", "README.md",
+                    "claudedocs/SESSION-HANDOFF.md"):
+            assert (H.budget_position(rel, "", "").is_handoff_doc
+                    is B.is_handoff_doc(rel)), rel
+        # …and both answers are actually produced, or the loop proves nothing.
+        assert B.is_handoff_doc("claudedocs/handoff-x.md")
+        assert not B.is_handoff_doc("claudedocs/proposal-x.md")
+
 
 # --------------------------------------------------------------------------- #
 # degraded paths — a reason, never a reassuring zero
@@ -602,6 +627,50 @@ class TestTheProbeItself:
             facts = dict(line.split("\t", 1) for line in got.stdout.splitlines())
             seen.append(facts["zone"])
         assert seen == ["clear", "band", "over"], seen
+
+    def test_the_probe_does_NOT_import_handoff_doc(self, tmp_path):
+        """🔴 THE REGRESSION, AND IT WAS FOUND BY A TEST IN ANOTHER FILE.
+
+        `handoff_doc.py` calls `cairn_pin.ensure()` at module scope, so importing
+        it needs the pinned `cairn` client on PATH or `$CAIRN_LIB` set. The first
+        version of this probe imported it, and on a host with neither it died on
+        `CairnPinUnresolved` — so the digest reported the budget as an UNKNOWN gap
+        on exactly the machines `clawgate_block`'s fallback exists for (one whose
+        `home-manager switch` has not landed). `test_resume_state_clawgate.py`'s
+        `assert not gaps(out)` is what caught it; nothing in this file did.
+
+        Asserted TWO ways, because either alone is weak: the import is absent from
+        the source (structural), and the probe actually ANSWERS when the import
+        would have failed (behavioural). The behavioural half runs the probe with
+        `$CAIRN_LIB` cleared and a PATH carrying only the interpreter, which is
+        the condition that produced the failure.
+        """
+        src = PROBE.read_text(encoding="utf-8")
+        code = [ln for ln in src.splitlines()
+                if ln.startswith(("import ", "from ")) and "handoff_doc" in ln]
+        assert not code, code
+
+        bindir = tmp_path / "only-python"
+        bindir.mkdir()
+        (bindir / "python3").symlink_to(sys.executable)
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CAIRN_LIB", "PATH", "PYTHONPATH")}
+        env["PATH"] = str(bindir)
+        got = subprocess.run([str(bindir / "python3"), str(PROBE),
+                              str(tmp_path), "claudedocs/handoff-x.md"],
+                             input="y" * 20_000, capture_output=True, text=True,
+                             timeout=60, env=env)
+        assert got.returncode == 0, f"{got.returncode}\n{got.stderr}"
+        assert "bytes\t20000" in got.stdout, got.stdout
+        # The positive control on the stripped environment itself: it really is
+        # one where importing handoff_doc fails, or this proves nothing.
+        ctl = subprocess.run([str(bindir / "python3"), "-c",
+                              f"import sys; sys.path.insert(0, {str(LIB)!r});"
+                              " import handoff_doc"],
+                             capture_output=True, text=True, timeout=60, env=env)
+        assert ctl.returncode != 0, (
+            "the stripped environment imports handoff_doc fine, so the case this "
+            "test exists for was never reproduced:\n" + ctl.stderr)
 
     def test_it_sizes_the_TEXT_IT_IS_GIVEN_not_the_file_on_disk(self, tmp_path):
         """⚠ `resume-state.sh` may reconcile the `origin/<default>` copy rather

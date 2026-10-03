@@ -2984,46 +2984,16 @@ def dropped_durable_report(dropped: typing.Sequence[DroppedDurable]) -> str:
 # ⚠ IT IS NOT THE AUTHORITY. The gate reads the file on disk; this reads the text
 # about to be written. They agree today and the test is what fails.
 #
-# 🔴 THE BAND IS DERIVED, AND THE DERIVATION IS THE WHOLE POINT: IT MUST BE AT
-# LEAST ONE p90 APPEND WIDE, OR IT CANNOT FIRE BEFORE THE REFUSAL FOR MOST
-# WRITES. It was a bare `4_096` from #1648 until #2001, with the comment above
-# justifying only why the warning does not REFUSE and nothing justifying the
-# number — and 4,096 B is NARROWER THAN THE MEDIAN THING IT WARNS ABOUT, so a
-# routine append entering the band jumped clean over it and the first signal the
-# session got was rule (p)'s refusal (`size-ratchet`, exit 14) AFTER it had
-# already composed the content. The second pass to prune or evict is the cost.
-#
-# MEASURED on this tree at 3e7725bc, over `git log origin/main -300 --numstat --
-# claudedocs/`: 300 commits touched `claudedocs/`, 285 touched a `handoff-*.md`
-# and 242 GREW one. Net lines added per growing commit: median 65.5, mean 88.31,
-# p90 193. ⚠ THE MEDIAN IS 65.5 AND NOT 66, AND THE DIFFERENCE IS NOT PEDANTRY:
-# 242 is EVEN, so the median is the mean of the two middle values (65 and 66).
-# Rounding it to 66 first and multiplying overstates the median append by 40 B —
-# which is exactly what the FIRST DRAFT OF THIS PARAGRAPH did, in a comment whose
-# whole purpose is to stop the next person restating a number wrongly.
-# Calibrated at 80.4716 B/line (3,783,616 B over 47,018 lines across the 108
-# top-level `claudedocs/handoff-*.md`). So an append is ~5,271 B at the median,
-# ~7,106 B at the mean and ~15,531 B at p90 — and the old band admitted none of
-# them: bisected empirically, the first size at which this function said ANYTHING
-# was 61,441 B, i.e. 93.75% of the ceiling.
-#
-# RE-DERIVE with the `git log` command above plus the bytes-per-line calibration
-# (`cat claudedocs/handoff-*.md | wc -c` over `… | wc -l`). The numbers live HERE
-# and nowhere else; `test_the_warning_band_is_at_least_one_p90_append` pins the
-# RELATIONSHIP rather than restating them, which is what keeps this comment from
-# becoming the second copy that drifts.
-#
-# 🔴 IT IS `GRANDFATHER_STEP` RATHER THAN A NEW CONSTANT, AND THAT COUPLING IS
-# DELIBERATE: 16,384 is already the quantum an allowance is rounded up to, it is
-# already ≈ the measured p90 (15,531 B), and a second magic number here is how
-# the two come to disagree. First warning therefore moves to 49,153 B = 75% of
-# the ceiling, which admits the p90 append with 853 B to spare.
-# ⚠ SCOPE: the step is NOT defined as the p90 and could be changed for its own
-# reasons. The relationship test is what fails if that ever makes the band too
-# narrow — do not read this line as a guarantee that the step tracks the corpus.
-# ⚠ AND IT STILL ONLY WARNS. Widening the band changes WHEN this speaks, never
-# whether it refuses; the deadlock argument above is untouched.
-BUDGET_NEAR_BYTES = handoff_budget.GRANDFATHER_STEP
+#: Re-exported, NOT re-declared — the same precedent, and the same reason, as
+#: `BUDGET_GATE_RELPATH` below. `handoff_budget` owns the number beside the
+#: ceiling it qualifies, and carries the whole derivation (why the band must be
+#: at least one p90 append wide, the measured distribution, and the command that
+#: re-derives it). It had to move there in #2001 because a SECOND reader
+#: appeared: `resume-state.sh`'s BUDGET block reads it on every resume, and
+#: importing THIS module requires the pinned cairn client on PATH
+#: (`cairn_pin.ensure()` above), which a host mid-`home-manager switch` has not
+#: got. Name kept so every existing reference (and its tests) keeps working.
+BUDGET_NEAR_BYTES = handoff_budget.BUDGET_NEAR_BYTES
 
 
 # The ceiling gate's population is the tree that CONTAINS it: its own
@@ -3052,13 +3022,17 @@ def gate_enforces_budget(repo: Path) -> bool:
 
     Path-equality against a known root would be wrong: in a worktree the gate's
     own `REPO_ROOT` is the WORKTREE, not the base clone.
+
+    🔴 THE BODY MOVED TO `handoff_budget.gate_enforces` IN #2001 AND THIS
+    DELEGATES — it is not a second implementation. Same reason as
+    `BUDGET_NEAR_BYTES` above: `resume-state.sh`'s BUDGET block asks the same
+    question on every resume and cannot import this module without the pinned
+    cairn client on PATH. The docstring stays here because this is still the
+    name every existing caller uses; the measured incident it records is
+    repeated at the new home, deliberately, since that is now where someone
+    deleting the guard would be reading.
     """
-    try:
-        return (repo / BUDGET_GATE_RELPATH).is_file()
-    except OSError:
-        # An unreadable repo path is not evidence of a gate. Fail toward the
-        # weaker claim: we never invent a gate we could not see.
-        return False
+    return handoff_budget.gate_enforces(repo)
 
 
 #: Where each `audit_text` bucket keeps its (start, end) LINE RANGE. The four
@@ -3312,7 +3286,11 @@ def budget_position(relpath: str, merged_text: str, base_text: str) -> BudgetPos
     single `lookup` result rather than from two calls, so they cannot disagree
     about whether the document has an entry at all.
     """
-    is_doc = relpath.startswith("claudedocs/") and "/handoff-" in "/" + relpath
+    # 🔴 ASKED OF `handoff_budget`, NOT SPELLED HERE (#2001). The resume digest's
+    # probe needs the identical predicate and cannot import this module (see
+    # `BUDGET_NEAR_BYTES`), so a copy here would be the second spelling that
+    # starts reporting a ceiling for a document nothing governs.
+    is_doc = handoff_budget.is_handoff_doc(relpath)
     after = len(merged_text.encode("utf-8"))
     before = len(base_text.encode("utf-8"))
     hit = handoff_budget.lookup(relpath, handoff_budget.GRANDFATHERED)

@@ -8,12 +8,24 @@ printed SKILL, GIT/PR, WORKLOAD, ALERTS, CLAWGATE, INVESTIGATIONS, DOD and DRIFT
 and said nothing about bytes — so the second pass to prune or evict was the only
 way to find out. This is what lets the digest say it up front (#2001).
 
-🔴 IT RETYPES NO NUMBER. `MAX_BYTES` and the ledger come from `handoff_budget`;
-the band comes from `handoff_doc.BUDGET_NEAR_BYTES`, which is where the warning
-reads it. ⚠ NOT from `handoff_budget.GRANDFATHER_STEP` directly, even though the
-band is currently defined as that: reading the step would be a SECOND derivation
-that keeps agreeing until someone decouples the two, at which point the digest
-would quietly describe a band the warning no longer uses.
+🔴 IT RETYPES NO NUMBER AND IT IMPORTS ONLY `handoff_budget`. `MAX_BYTES`, the
+ledger, `BUDGET_NEAR_BYTES`, `is_handoff_doc` and `gate_enforces` all come from
+that one module — which is the module `budget_warning` reads them from too, so
+there is no second derivation to drift. ⚠ NOT `GRANDFATHER_STEP` directly, even
+though the band is currently defined as that: reading the step would be a SECOND
+derivation that keeps agreeing until someone decouples the two, at which point
+the digest would quietly describe a band the warning no longer uses.
+
+🔴 AND IT MUST NOT IMPORT `handoff_doc`, WHICH IS MEASURED RATHER THAN
+STYLISTIC. `handoff_doc.py` calls `cairn_pin.ensure()` at module scope, so
+importing it requires the pinned `cairn` client on PATH or `$CAIRN_LIB` set. The
+first version of this file did import it, and with no `cairn-py`/`cairn` on PATH
+it died on `CairnPinUnresolved` — so the digest reported the budget as an UNKNOWN
+gap on exactly the hosts the CLAWGATE block's fallback exists for (a machine whose
+`home-manager switch` has not landed). `handoff_budget` is stdlib-only and
+imported fine in the same stripped environment, which is the control that
+identified the cause. Caught by `test_resume_state_clawgate.py`'s
+`assert not gaps(out)`, not by anything written here.
 
 🔴 AND THE LEDGER LOOKUP IS `handoff_budget.lookup`, NOT A `.get`. A document in
 another repository is keyed by a digest of its relpath because devrc is public,
@@ -54,19 +66,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import handoff_budget  # noqa: E402
-import handoff_doc  # noqa: E402
 
 
 def probe(repo: Path, relpath: str, text: str) -> dict[str, object]:
     """Facts about `text` sized against `relpath`'s budget. PURE apart from the
-    `gate_enforces_budget` filesystem read, which asks whether `repo` SHIPS the
-    gate — not whether this script's own checkout does. Asking the latter is how
-    a banner once claimed a gate for corpora nothing enforces (#1815 F1).
+    `gate_enforces` filesystem read, which asks whether `repo` SHIPS the gate —
+    not whether this script's own checkout does. Asking the latter is how a
+    banner once claimed a gate for corpora nothing enforces (#1815 F1).
     """
     size = len(text.encode("utf-8"))
     hit = handoff_budget.lookup(relpath, handoff_budget.GRANDFATHERED)
     allowance = handoff_budget.MAX_BYTES if hit is None else hit
-    band = handoff_doc.BUDGET_NEAR_BYTES
+    band = handoff_budget.BUDGET_NEAR_BYTES
     headroom = allowance - size
     if size > allowance:
         zone = "over"
@@ -89,7 +100,7 @@ def probe(repo: Path, relpath: str, text: str) -> dict[str, object]:
         "headroom": headroom,
         "band": band,
         "grandfathered": "yes" if hit is not None else "no",
-        "gated": "yes" if handoff_doc.gate_enforces_budget(repo) else "no",
+        "gated": "yes" if handoff_budget.gate_enforces(repo) else "no",
         "zone": zone,
         "bytes_fmt": f"{size:,}",
         "allowance_fmt": f"{allowance:,}",
@@ -108,11 +119,11 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
     repo, relpath = Path(argv[0]), argv[1]
-    # 🔴 THE SAME PREDICATE THE WARNING USES, AND IT IS NOT A STRING TEST HERE BY
-    # ACCIDENT: `budget_position` gates on `claudedocs/` + `/handoff-`, so a
-    # digest that answered for `claudedocs/proposal-x.md` would report a ceiling
-    # nothing applies. Asked of `budget_position` rather than re-spelled.
-    if not handoff_doc.budget_position(relpath, "", "").is_handoff_doc:
+    # 🔴 THE SAME PREDICATE THE WARNING USES, ASKED OF ITS OWNER RATHER THAN
+    # RE-SPELLED: `budget_position` resolves it through exactly this call, so a
+    # local string test here would be the second spelling that starts reporting a
+    # ceiling for `claudedocs/proposal-x.md`, which nothing governs.
+    if not handoff_budget.is_handoff_doc(relpath):
         print(f"no budget applies: {relpath} is not a claudedocs/**/handoff-* doc",
               file=sys.stderr)
         return 2
