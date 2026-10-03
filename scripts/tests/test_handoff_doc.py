@@ -11665,6 +11665,12 @@ class TestEveryPruneMarkerIsReachable:
         hd.PRUNE_MARKER_PARTIAL_BLOCK: (("### the widget queue drains at 3/s",), 1),
         hd.PRUNE_MARKER_FENCE: (("```",), 1),
         hd.PRUNE_MARKER_REPLACE_SECTION: (("- Branch / PR: `feat/sample` / none",), 1),
+        # A selector whose line number cannot exist, so the content cannot match
+        # there and the whole line matches nothing verbatim either.
+        hd.PRUNE_MARKER_SELECTOR_STALE: (("999999: - not at that line",), 1),
+        # Computed in the test body: it needs a document line literally spelled
+        # `<N>: <X>` whose `<X>` ALSO sits at line N, which depends on layout.
+        hd.PRUNE_MARKER_SELECTOR_BOTH: (("<computed in the test body>",), 1),
     }
 
     def test_the_ledger_covers_every_marker_the_module_declares(self) -> None:
@@ -11698,6 +11704,18 @@ class TestEveryPruneMarkerIsReachable:
             doc = doc.replace(
                 "## How to verify", "## Findings\n```\nx\n```\n\n## How to verify"
             )
+        if marker == hd.PRUNE_MARKER_SELECTOR_BOTH:
+            # The collision needs a line literally spelled `<N>: <X>` where `<X>`
+            # also sits at line N. The placeholder goes AFTER the target so
+            # substituting it cannot move the target's own line number.
+            target = "- hello world"
+            doc = doc.replace(
+                "## How to verify",
+                f"## Findings\n{target}\n__COLLIDE__\n\n## How to verify",
+            )
+            n = doc.splitlines().index(target) + 1  # 1-based, like _DocRow.line_no
+            doc = doc.replace("__COLLIDE__", f"{n}: {target}")
+            lines = (f"{n}: {target}",)
         if doc != PRUNE_BASE_DOC:
             (prune_repo / "claudedocs" / "handoff-sample-topic.md").write_text(
                 doc, encoding="utf-8"
@@ -11713,6 +11731,271 @@ class TestEveryPruneMarkerIsReachable:
             f"the scenario for {marker!r} refused for a DIFFERENT reason, so "
             f"that marker is not shown reachable:\n{res.stderr}"
         )
+
+
+#: A line deliberately duplicated across two `Findings` blocks, so content
+#: matching alone CANNOT resolve it. This is the shape append-verbatim (rule (c))
+#: manufactures and that `[ambiguous]` used to make permanently unprunable.
+PRUNE_DUPLICATE_LINE = "- via: measurement"
+
+
+#: The `as-of:` stamp, deliberately IDENTICAL in both fixture blocks. This is the
+#: measured real shape: the stamp recurred 16× in the document that forced this
+#: feature, which is why a WHOLE-BLOCK prune there was refused 7 of 7 times.
+PRUNE_DUPLICATE_STAMP = "- as-of: 2026-09-10"
+
+
+def _doc_with_duplicate() -> tuple[str, list[int], list[int]]:
+    """`PRUNE_BASE_DOC` + two blocks sharing BOTH their stamp and a body line.
+
+    Returns the document, both 1-based line numbers of the body line, and both of
+    the stamp — so a test can name one occurrence and assert the OTHER survived,
+    which is the only assertion that distinguishes "the selector worked" from "the
+    prune removed both".
+    """
+    doc = PRUNE_BASE_DOC.replace(
+        "## How to verify",
+        f"## Findings\n### alpha\n{PRUNE_DUPLICATE_STAMP}\n{PRUNE_DUPLICATE_LINE}\n\n"
+        f"### beta\n{PRUNE_DUPLICATE_STAMP}\n{PRUNE_DUPLICATE_LINE}\n\n"
+        f"## How to verify",
+    )
+    lines = doc.splitlines()
+    body = [i + 1 for i, ln in enumerate(lines) if ln == PRUNE_DUPLICATE_LINE]
+    stamp = [i + 1 for i, ln in enumerate(lines) if ln == PRUNE_DUPLICATE_STAMP]
+    assert len(body) == 2 and len(stamp) == 2, (
+        f"fixture must duplicate both lines exactly twice, got {body} / {stamp}"
+    )
+    return doc, body, stamp
+
+
+class TestThePruneLineSelector:
+    """🔴 `[ambiguous]`'s EXIT: a `<line_no>: ` prefix names WHICH occurrence.
+
+    Measured 2026-10-03 on auditloop's qualitative-ux handoff: `Gotchas` was
+    41,909 B (64% of the doc) holding 2,875 B of near-duplicate bullets, of which
+    content matching could address 347 B — one bullet. Every other copy shared a
+    line with its twin, so the document could not be de-duplicated by its own
+    writer and the round shipped only by `--override-size-ratchet`.
+    """
+
+    @pytest.fixture
+    def dup_repo(self, prune_repo: Path) -> tuple[Path, list[int], list[int]]:
+        doc, body, stamp = _doc_with_duplicate()
+        (prune_repo / "claudedocs" / "handoff-sample-topic.md").write_text(
+            doc, encoding="utf-8"
+        )
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=prune_repo)
+        _sh("git", "commit", "-q", "-m", "duplicate base", cwd=prune_repo)
+        return prune_repo, body, stamp
+
+    def test_without_a_selector_the_duplicate_is_still_refused(
+        self, dup_repo: tuple[Path, list[int], list[int]], tmp_path: Path
+    ) -> None:
+        """THE NEGATIVE CONTROL, and it is what makes the next test mean anything.
+
+        If the bare line pruned cleanly, the selector would be solving a problem
+        the fixture does not have and its success would prove nothing.
+        """
+        repo, _body, _stamp = dup_repo
+        res = run_prune(
+            repo, write_prune(tmp_path, PRUNE_DUPLICATE_LINE), 1
+        )
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert hd.PRUNE_MARKER_AMBIGUOUS in res.stderr, res.stderr
+
+    def test_the_refusal_SHOWS_the_selector_that_would_clear_it(
+        self, dup_repo: tuple[Path, list[int], list[int]], tmp_path: Path
+    ) -> None:
+        """The remedy is printed where the author is already looking.
+
+        A refusal that names a flag the reader must go and find is how rule (q)
+        went unused on the one document that needed it most.
+        """
+        repo, body, _stamp = dup_repo
+        first = body[0]
+        res = run_prune(repo, write_prune(tmp_path, PRUNE_DUPLICATE_LINE), 1)
+        assert f"{first}: {PRUNE_DUPLICATE_LINE}" in res.stderr, (
+            "the [ambiguous] refusal must quote a ready-to-paste selector for a "
+            f"real occurrence (expected line {first}):\n{res.stderr}"
+        )
+
+    def test_a_selector_removes_THAT_occurrence_and_leaves_the_other(
+        self, dup_repo: tuple[Path, list[int], list[int]], tmp_path: Path
+    ) -> None:
+        """🔴 THE WHOLE POINT, and the assertion is about the SURVIVOR.
+
+        "Exit 0" only says the run was permitted. Counting the remaining copies
+        is what separates "removed the one I named" from "removed both", which is
+        the failure a line-number selector could plausibly introduce.
+        """
+        repo, body, _stamp = dup_repo
+        first = body[0]
+        doc_path = repo / "claudedocs" / "handoff-sample-topic.md"
+        before = doc_path.read_text(encoding="utf-8").count(PRUNE_DUPLICATE_LINE)
+        assert before == 2, "precondition: the fixture holds two copies"
+
+        res = run_prune(
+            repo,
+            write_prune(tmp_path, f"{first}: {PRUNE_DUPLICATE_LINE}"),
+            1,
+            "--confirm",
+        )
+        assert res.returncode == 0, res.stdout + res.stderr
+        after = doc_path.read_text(encoding="utf-8")
+        assert after.count(PRUNE_DUPLICATE_LINE) == 1, (
+            f"expected exactly ONE copy left; a selector that removes both is "
+            f"worse than the refusal it replaced:\n{res.stdout}"
+        )
+
+    def test_the_second_occurrence_is_selectable_too(
+        self, dup_repo: tuple[Path, list[int], list[int]], tmp_path: Path
+    ) -> None:
+        """Both numbers work, so the selector is not accidentally pinned to the
+        first match (which would make it a rename of the old behaviour)."""
+        repo, body, _stamp = dup_repo
+        second = body[1]
+        doc_path = repo / "claudedocs" / "handoff-sample-topic.md"
+        res = run_prune(
+            repo,
+            write_prune(tmp_path, f"{second}: {PRUNE_DUPLICATE_LINE}"),
+            1,
+            "--confirm",
+        )
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert doc_path.read_text(encoding="utf-8").count(PRUNE_DUPLICATE_LINE) == 1
+
+    def test_a_stale_line_number_is_REFUSED_not_followed(
+        self, dup_repo: tuple[Path, list[int], list[int]], tmp_path: Path
+    ) -> None:
+        """🔴 THE SAFETY PROPERTY. A document moves under a prune file, so a bare
+        line number would be a second way to mis-target. The content must match at
+        the named line or the run refuses — and nothing may be removed."""
+        repo, body, _stamp = dup_repo
+        second = body[1]
+        doc_path = repo / "claudedocs" / "handoff-sample-topic.md"
+        before = doc_path.read_text(encoding="utf-8")
+        # A real line number holding REAL content, just not this content. (The
+        # line immediately after an occurrence is blank, and asserting against a
+        # blank would make the quoting test below vacuously true.)
+        wrong_no = second - 1
+        assert before.splitlines()[wrong_no - 1].strip(), "precondition: not blank"
+        res = run_prune(
+            repo,
+            write_prune(tmp_path, f"{wrong_no}: {PRUNE_DUPLICATE_LINE}"),
+            1,
+            "--confirm",
+        )
+        assert res.returncode == hd.EXIT_PRUNE_REFUSED, res.stdout + res.stderr
+        assert hd.PRUNE_MARKER_SELECTOR_STALE in res.stderr, res.stderr
+        assert doc_path.read_text(encoding="utf-8") == before, (
+            "a refused selector must leave the document byte-identical"
+        )
+
+    def test_the_stale_refusal_QUOTES_what_is_actually_at_that_line(
+        self, dup_repo: tuple[Path, list[int], list[int]], tmp_path: Path
+    ) -> None:
+        """`[absent]` alone cannot tell an author whether the number or the text is
+        the stale half, so the refusal reads the line and shows it."""
+        repo, body, _stamp = dup_repo
+        second = body[1]
+        wrong_no = second - 1
+        res = run_prune(
+            repo, write_prune(tmp_path, f"{wrong_no}: {PRUNE_DUPLICATE_LINE}"), 1
+        )
+        actual = (
+            repo / "claudedocs" / "handoff-sample-topic.md"
+        ).read_text(encoding="utf-8").splitlines()[wrong_no - 1]
+        assert actual.strip(), "precondition: the quoted line must not be blank"
+        assert actual.strip()[:20] in res.stderr, (
+            f"the refusal must quote line {wrong_no} ({actual!r}):\n{res.stderr}"
+        )
+
+    def test_a_WHOLE_BLOCK_whose_lines_are_duplicated_now_prunes(
+        self, dup_repo: tuple[Path, list[int], list[int]], tmp_path: Path
+    ) -> None:
+        """🔴 THE MOTIVATING CASE, and the only one that exercises `named_norms`.
+
+        Evicting a closed block means naming its heading, its `as-of:` stamp and
+        its body. The stamp recurs by design — 16× in the document that forced
+        this feature — so WHOLE-BLOCK was measured refused `[ambiguous]` 7 of 7
+        times. With selectors it resolves.
+
+        It is also the only test that would catch `named_norms` being built from
+        the prune file's TEXT rather than from the RESOLVED rows: a selector-named
+        line would then read as "not named", and `fully_named` would refuse the
+        heading `[partial block]` over lines the prune does in fact remove.
+        """
+        repo, body, stamp = dup_repo
+        doc_path = repo / "claudedocs" / "handoff-sample-topic.md"
+        before = doc_path.read_text(encoding="utf-8")
+        assert before.count(PRUNE_DUPLICATE_STAMP) == 2
+        assert "### alpha" in before and "### beta" in before
+
+        # Rule (r) requires an archive for a durable removal, and the dated
+        # `as-of:` stamp is one — so the real eviction flow passes --archive.
+        # That is orthogonal to the selector and is exercised here rather than
+        # worked around, because it is what an author actually types.
+        archive = repo / "claudedocs" / "archive" / "handoff-sample-topic.md"
+        res = run_prune(
+            repo,
+            write_prune(
+                tmp_path,
+                "### alpha",                             # unique, no selector needed
+                f"{stamp[0]}: {PRUNE_DUPLICATE_STAMP}",  # duplicated -> selector
+                f"{body[0]}: {PRUNE_DUPLICATE_LINE}",    # duplicated -> selector
+            ),
+            3,
+            "--confirm",
+            "--archive", str(archive),
+            "--archive-write",
+            "--archive-note", "closed block, kept for its measured values",
+        )
+        assert res.returncode == 0, res.stdout + res.stderr
+        after = doc_path.read_text(encoding="utf-8")
+        assert "### alpha" not in after, f"the block heading survived:\n{res.stdout}"
+        assert "### beta" in after, "the SIBLING block must be untouched"
+        assert after.count(PRUNE_DUPLICATE_STAMP) == 1, (
+            f"exactly one stamp should remain (beta's):\n{res.stdout}"
+        )
+        assert after.count(PRUNE_DUPLICATE_LINE) == 1, (
+            f"exactly one body line should remain (beta's):\n{res.stdout}"
+        )
+
+    def test_a_plain_line_still_prunes_unchanged(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """BACKWARD COMPATIBILITY, driven rather than asserted: a prune file with
+        no selector must behave exactly as before the feature existed."""
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, PRUNE_PLAIN_LINE), 1, "--confirm"
+        )
+        assert res.returncode == 0, res.stdout + res.stderr
+        left = (
+            prune_repo / "claudedocs" / "handoff-sample-topic.md"
+        ).read_text(encoding="utf-8")
+        assert PRUNE_PLAIN_LINE not in left
+
+    def test_a_document_line_that_looks_like_a_selector_is_still_nameable(
+        self, prune_repo: Path, tmp_path: Path
+    ) -> None:
+        """🔴 The fallback. A real `Gotchas` line can legitimately open with a
+        number and a colon (`8080: refused by the gateway`), and naming it
+        verbatim must keep working — the selector reading is TRIED first and must
+        give way when it does not resolve."""
+        looks_like = "- 8080: refused by the gateway, not by the app"
+        doc = PRUNE_BASE_DOC.replace(
+            "## How to verify", f"## Findings\n{looks_like}\n\n## How to verify"
+        )
+        path = prune_repo / "claudedocs" / "handoff-sample-topic.md"
+        path.write_text(doc, encoding="utf-8")
+        _sh("git", "add", "--", "claudedocs/handoff-sample-topic.md", cwd=prune_repo)
+        _sh("git", "commit", "-q", "-m", "selector-shaped line", cwd=prune_repo)
+
+        res = run_prune(
+            prune_repo, write_prune(tmp_path, looks_like), 1, "--confirm"
+        )
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert looks_like not in path.read_text(encoding="utf-8")
 
 
 class TestAPruneRoutesAroundNothing:

@@ -1534,7 +1534,9 @@ problem is reported, not just the first, each with its own marker:
 |---|---|---|
 | `[count mismatch]` | the file names a different number of lines than `--prune-count` | fix whichever is wrong |
 | `[absent]` | a named line matches NO line in the document | copy it verbatim (whitespace is collapsed; nothing else is) |
-| `[ambiguous]` | a named line matches MORE than one | append-verbatim makes duplicates ordinary — name a unique line, or the whole block |
+| `[ambiguous]` | a named line matches MORE than one | **prefix the line number** — `1234: <the line verbatim>` — or name a unique line, or the whole block |
+| `[selector stale]` | the line reads as a `<line_no>: ` selector and that line's content differs | the document moved under your prune file — re-read the line and re-run; the refusal quotes what is actually there |
+| `[selector ambiguous]` | it reads BOTH as a selector AND verbatim as a real document line | drop the `<line_no>: ` prefix to mean the verbatim line |
 | `[load-bearing]: <key>` | the line carries a field other tooling parses | **no flag clears this** — see below |
 | `[section heading]` | the line is an H1/H2, i.e. a whole SECTION | prune the section's CONTENT |
 | `[partial block]` | the line is an `###`+ heading and part of its block is unnamed | name the whole block, or none of it |
@@ -1888,6 +1890,33 @@ example.
 reading the rule suggests. `as-of:` is the one BLOCK-SCOPED field, so `prune_plan`'s pass 1
 *defers* its load-bearing check to pass 2 and the line reaches match resolution first. A
 reviewer re-derived this the other way from the same code, which is why it is written down.
+
+### ✅ `[ambiguous]` NOW HAS AN EXIT — the `<line_no>: ` selector (2026-10-03)
+
+A prune file line may be spelled **`1234: <the line verbatim>`**. The number selects WHICH
+occurrence, so a byte-identical duplicate is addressable and the WHOLE-BLOCK row above
+(7 of 7 refused on a 16× repeated `- as-of:` stamp) stops being a dead end.
+
+🔴 **It is SELF-VALIDATING, and that is the whole design.** A bare line number would be a
+second way to mis-target, because a document moves under a prune file. So the content must
+**also** match at that line: if it does not, the run is refused `[selector stale]` and the
+refusal quotes what is actually there. A stale number can never silently delete the wrong
+line — the property the content-only matcher existed to protect is kept, not traded.
+
+**Backward compatible, and the precedence is a refusal rather than a guess.** A line without
+the prefix behaves exactly as before. A selector that parses but does not resolve falls back
+to the verbatim reading before reporting anything, so a genuine document line opening
+`123: ` is still nameable. If BOTH readings match — a document line literally spelled
+`123: …` whose content also sits at line 123 — the run is refused `[selector ambiguous]`
+rather than one reading being picked silently.
+
+**What forced it, measured 2026-10-03 on `auditloop`'s qualitative-ux handoff:** its
+`Gotchas` section was **41,909 B — 64% of the document** — holding **2,875 B** of
+near-duplicate bullets, of which content-matching could address **347 B (one bullet)**;
+every other copy shared at least one line with its twin. `--autoevict` banks only what is
+in CLOSED investigation blocks **and short-circuits `--override-size-ratchet`**, so the two
+cannot be combined. That document could not be de-duplicated by its own writer and the round
+shipped only by override.
 
 **So the justification is the one the operator named: the tool picks the lines.** Remedy 2
 is multi-step hand work — author an archive, name every line verbatim, get the count right —
