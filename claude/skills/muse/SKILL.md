@@ -170,18 +170,27 @@ printed**. 401 = token rejected (expected without one); 404 = route gone.
 (2026-10-02) the bridge serves only an allowlisted set of namespaces, so
 `status pods <ns>`, `workloads <ns>`, `flux <ns>` and the bare `status <ns>`
 shorthand all answer 400 for anything outside it — the server being right.
-**Read the startup line for the set actually served**
-(`KUBECONFIG=$KC_HOMELAB kubectl -n muse logs deploy/muse-bridge | grep -m1 ns-allow=`)
-🔴 **The `KUBECONFIG=` is not optional** — there is deliberately no default,
-so a bare `kubectl` here resolves to whatever context happens to be current
-(measured on this host: `k3d-dev-cluster`) and answers `deployments.apps
-"muse-bridge" not found`, which reads as "the bridge is gone" rather than
-"wrong cluster". ⚠ `grep -m1`, not `head -1`: the startup line is not
-guaranteed to be the first line of the log.; it is
-server-side (`MUSE_BRIDGE_NS_ALLOW` on the Deployment) and the bridge
-deliberately does not disclose it in a response, so do not hardcode it here —
+The served set is server-side (`MUSE_BRIDGE_NS_ALLOW` on the Deployment) and
+the bridge deliberately does not disclose it in a response, so **do not
+hardcode it here** —
 this paragraph named a value and would have gone stale the moment the set
 widened. Widening it is a cluster security change, not a client fix.
+**Read the set actually served off the bridge's own startup line:**
+```bash
+KUBECONFIG=${KC_HOMELAB:?no homelab-talos checkout on this host} \
+  kubectl -n muse logs deploy/muse-bridge | grep -m1 ns-allow=
+```
+🔴 **`:?` not a bare `$KC_HOMELAB`.** The handle is existence-guarded
+(`nix/agent-handles.nix`), so on a host without that checkout — the laptop — it
+is simply **not exported**, and `KUBECONFIG=` *empty* is not "no cluster": it
+falls back to `~/.kube/config` and silently answers from whatever context is
+current (measured: `k3d-dev-cluster`). That returns `deployments.apps
+"muse-bridge" not found`, which reads as "the bridge is gone" rather than
+"wrong cluster" — the exact misread this block exists to prevent, reached
+through the fix for it. `:?` turns that into a loud refusal before `kubectl`
+runs. ⚠ `grep -m1`, not `head -1`: a conditional `WARNING:` can precede the
+startup line (`muse-bridge/main.go:213-216` vs `:225`), so it is not
+guaranteed to be line 1.
 ⚠ **`status` exits 0 on 400/401/404/5xx alike** — the code is printed, never
 returned, so a caller branching on exit status reads a denial as success.
 Connector (Muse side): `custom.homelab-bridge`, wired + live-tested 2026-10-01 —

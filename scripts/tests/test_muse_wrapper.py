@@ -775,7 +775,7 @@ def test_a_nonverb_naming_an_allowlisted_namespace_is_still_reported(status_env)
     )
 
 
-def test_an_explicit_verb_is_not_reported_as_a_verb_typo(status_env):
+def test_an_explicit_verb_triggers_no_namespace_reinterpretation(status_env):
     """NEGATIVE CONTROL for the guess branch -- it must not fire on a real verb.
 
     Without this, `guessed_ns=1` unconditionally would pass the test above and
@@ -949,7 +949,17 @@ def test_the_documented_bare_ns_shorthand_is_not_reported_as_an_error(status_env
     # -- pin the whole normalised string. A cosmetic reword then fails this
     # test, which is the price of a machine-readable claim; update the literal
     # below deliberately, and only after re-reading what it is asserting.
-    normalised = " ".join(proc.stderr.split())
+    # ⚠ The NOTICE's lines only, not the whole stream. Pinning all of stderr
+    # made an unrelated `printf ... >&2` elsewhere in cmd_status fail THIS test
+    # and tell the maintainer to "update the literal" when the notice had not
+    # changed. Found by #1993's round-3 audit.
+    notice_lines = [l for l in proc.stderr.splitlines()
+                    if "as a NAMESPACE" in l or l.lstrip().startswith("(`muse")
+                    or "meant a verb" in l]
+    assert notice_lines, (
+        f"no notice lines found on stderr at all. stderr={proc.stderr!r}"
+    )
+    normalised = " ".join(" ".join(notice_lines).split())
     expected = (
         "muse: reading `flux-system` as a NAMESPACE "
         "— querying pods in ns=flux-system. "
@@ -999,21 +1009,33 @@ def test_usage_and_the_namespace_notice_agree_on_the_verb_set():
 
     usage_line = re.search(r"muse status \[([^\]]*)\]", source)
     assert usage_line, "usage() no longer advertises the status verbs"
-    usage_verbs = {w.strip("<>") for w in re.split(r"[|]", usage_line.group(1))}
-    usage_verbs = {w.split()[0] for w in usage_verbs if w.strip()}
+    raw = [w.strip() for w in re.split(r"[|]", usage_line.group(1)) if w.strip()]
+    # A bare `<placeholder>` alternative is a shorthand, not a verb -- captured
+    # by SHAPE so renaming it cannot break this guard.
+    placeholder_tokens = {w.strip("<>") for w in raw
+                          if w.startswith("<") and w.endswith(">")}
+    usage_verbs = {w.strip("<>").split()[0] for w in raw}
 
     assert parser_verbs == notice_verbs, (
         f"the parser accepts {sorted(parser_verbs)} but the notice lists "
         f"{sorted(notice_verbs)} -- the hint sends the reader to a verb that "
         "does not exist, or omits one that does"
     )
-    # usage() additionally carries the bare `<ns>` shorthand, which is not a
-    # verb -- it is the ONLY permitted difference, and it is subtracted by name
-    # rather than by a one-directional comparison.
-    usage_verbs -= {"ns"}
-    assert parser_verbs == usage_verbs, (
-        f"usage() and the parser disagree. usage() omits {sorted(parser_verbs - usage_verbs)} "
-        f"and advertises {sorted(usage_verbs - parser_verbs)} that the parser does "
-        "not accept -- an advertised phantom verb becomes a pods query for a "
-        "namespace of that name, with the tool's own help vouching for it"
+    # usage() additionally carries the bare placeholder shorthand, which is not
+    # a verb. ⚠ Subtract it by its ROLE (it is the token usage() wrote inside
+    # `<...>`), never by its SPELLING: `usage_verbs -= {"ns"}` made a doc-only
+    # rename of `<ns>` -> `<namespace>` fail this guard, and fail it with the
+    # phantom-verb message below, which is an actively wrong explanation for a
+    # zero-behaviour edit. Found by #1993's round-3 audit.
+    usage_verbs -= placeholder_tokens
+    missing = sorted(parser_verbs - usage_verbs)
+    phantom = sorted(usage_verbs - parser_verbs)
+    assert not missing, (
+        f"usage() omits status verb(s) {missing} that the parser accepts -- the "
+        "first fix shipped with `pods` and `health` undocumented"
+    )
+    assert not phantom, (
+        f"usage() advertises {phantom}, which the parser does NOT accept: a "
+        "phantom verb becomes a pods query for a namespace of that name, with "
+        "the tool's own help vouching for it"
     )
