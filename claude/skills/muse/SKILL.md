@@ -172,6 +172,31 @@ surface is retrieve-only by construction.
 
 ## When things break
 
+- 🔴 **`muse: browser-bridge could not open muse.ai on instance 'personal' ($BB
+  whoami first). Is the bridge up?` → THE BRIDGE IS ALMOST CERTAINLY UP. That
+  message names ONE cause for an absence with at least three, and it sends you to
+  debug the least likely one.** MEASURED 2026-10-03: `browser whoami` reported
+  `"connected": 1` listing only `work`, and `browser --instance personal open`
+  refused with *"instance 'personal' is UNKNOWN — no profile has registered that
+  routing key on this server. Keys this server HAS seen: work"* — while a
+  `bw://laptop/personal/<tabId>` ref into that **same** profile resolved and served
+  live `js` reads, on instanceId `f9b3ce71…`, before and after both of those checks.
+  So that profile serves ops addressed **by tab id** and is unreachable **by key**,
+  and the wrapper's precondition can never pass for it however healthy the bridge
+  is. **Read `browser whoami`'s key list — the keys the server has actually seen —
+  before believing the message; the fix is to set that profile's routing key in the
+  extension options, not to touch the bridge.**
+  ⚠ **Whether `whoami`'s instance list is meant to enumerate every connected
+  extension or only KEYED ones is UNDETERMINED** — `connected: 1` beside a second
+  instanceId that demonstrably serves is a discrepancy, not a diagnosed `whoami`
+  bug. Do not quote it as one.
+  🔴 **What this does and does not block.** A **READ** of a thread the operator
+  hands you as a `bw://` ref needs no routing key at all — `context` / `js` / `text`
+  all work — so a read task is unaffected. A **SEND** is blocked, and must stay
+  blocked: the B1 flow requires opening your OWN tab on that instance, which is
+  exactly what has no key, and typing into the operator's own muse.ai tab is
+  forbidden outright. Hand the send over with the message text rather than
+  working around it.
 - `muse-cli` auth error → `$M auth export` again (browser-side step 1–3 above).
 - 403 / gateway churn → internal APIs moved; **re-derive from a fresh app
   bundle** per muse-cli's own PROTOCOL doc (in its GitHub repo) — do NOT debug
