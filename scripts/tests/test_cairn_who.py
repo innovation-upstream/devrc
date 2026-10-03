@@ -285,7 +285,7 @@ def test_session_manager_EXIT_UNAVAILABLE_is_not_read_as_a_measured_zero():
     a truncated run. The old guard (`rc != 0 and not out.strip()`) let it
     through because the output was present and well-formed.
     """
-    def runner(cmd, timeout):
+    def runner(cmd, timeout, env=None):
         return 4, json.dumps(_scan([])), "all hosts down"   # literal: 4 is session-manager's
 
     with pytest.raises(W.WhoError) as exc:
@@ -297,7 +297,7 @@ def test_session_manager_EXIT_EMPTY_IS_a_measured_zero():
     """CONTROL, and the opposite code. 3 means every host answered and the
     answer is genuinely none — raising on it would make a quiet fleet look
     like an outage."""
-    def runner(cmd, timeout):
+    def runner(cmd, timeout, env=None):
         return 3, json.dumps(_scan([])), ""   # literal: 3 is session-manager's
 
     idx, unmeasured = W.live_windows(runner=runner, script=Path(__file__))
@@ -307,7 +307,7 @@ def test_session_manager_EXIT_EMPTY_IS_a_measured_zero():
 def test_a_nonzero_scan_WITH_output_is_still_refused():
     """The `and`/`or` seam. An unrecognised non-zero code carrying output must
     not be waved through just because JSON happened to be printed."""
-    def runner(cmd, timeout):
+    def runner(cmd, timeout, env=None):
         return 99, "", "something broke"
 
     with pytest.raises(W.WhoError):
@@ -318,7 +318,7 @@ def test_a_BAD_task_id_is_not_reported_as_an_outage():
     """🔴 rc 2 is clawgate ANSWERING with a 400. A typo is the likeliest
     failure of all, and calling it `clawgate-unreachable` printed "nothing was
     asked" directly above clawgate's own 400."""
-    def runner(cmd, timeout):
+    def runner(cmd, timeout, env=None):
         return 2, "", "400 Bad Request — bad id"
 
     with pytest.raises(W.BadTaskId):
@@ -566,7 +566,7 @@ def test_fetch_task_reads_clawgatectl_EXIT_CODES_not_its_prose(rc, expect, exc_t
     # every code, so the `not out.strip()` fallback produced an identical
     # message and deleting the whole exit-code table SURVIVED — the test named
     # for "reads exit codes, not prose" did not pin the table at all.
-    def runner(cmd, timeout):
+    def runner(cmd, timeout, env=None):
         return rc, '{"id": 42}', "some diagnostic"
 
     with pytest.raises(W.WhoError) as exc:
@@ -581,7 +581,7 @@ def test_fetch_task_refuses_an_empty_id_before_shelling_out():
     """An empty path parameter is the doubled-slash 301 class clawgatectl names."""
     called = []
 
-    def runner(cmd, timeout):
+    def runner(cmd, timeout, env=None):
         called.append(cmd)
         return 0, "{}", ""
 
@@ -595,10 +595,63 @@ def test_fetch_task_refuses_an_empty_id_before_shelling_out():
 # WHICH BINARY `fetch_task` RUNS — the preference, both legs
 # --------------------------------------------------------------------------- #
 def _argv_capturing_runner(seen):
-    def runner(cmd, timeout):
+    def runner(cmd, timeout, env=None):
         seen.append(list(cmd))
         return 0, '{"id": 42}', ""
     return runner
+
+
+def test_fetch_task_hands_the_resolved_client_ITS_OWN_CONFIG(monkeypatch, tmp_path):
+    """🔴 RESOLVING THE CLIENT IS HALF THE JOB. `muster` — the preferred client —
+    reads its base URL and bearer token ONLY from `MUSTER_API_URL` /
+    `MUSTER_HOOK_TOKEN` (or `~/.muster/muster.env`, which exists on neither host),
+    while the credential lives in `~/.claude/clawgate.env` under `CLAWGATE_*`.
+    Measured 2026-10-02: a bare `muster task get <id>` exits 2 "no API URL" on a box
+    where `clawgatectl task get <id>` returns the task — so this call raised
+    `ClawgateUnreachable: muster exited 2` and blamed the board for a credential
+    that was present and correct.
+
+    🔴 THE VALUES ARE PINNED AS LITERALS AND THE FIXTURE'S TWO URLs DIFFER, so the
+    TASK key has to win: a derivation reading `CLAWGATE_API_URL` would resolve the
+    permission ROUTER, which answers the same routes with a board that is stale for
+    exactly the in-flight tasks `cairn-who` is asked about.
+
+    ⚠ It asserts what cairn-who HANDS the client, never that the real muster honours
+    it — that contract is `muster --help`'s, in another repository. The end-to-end
+    leg (a fake client that REFUSES an unconfigured run) is
+    `scripts/tests/test_task_cli_resolver.py` section 5.
+    """
+    envf = tmp_path / "clawgate.env"
+    envf.write_text("CLAWGATE_TASK_API_URL=http://pinned-task.invalid:30306\n"
+                    "CLAWGATE_API_URL=http://pinned-router.invalid:30302\n"
+                    "CLAWGATE_HOOK_TOKEN=pinned-fixture-token-7a3f\n",
+                    encoding="utf-8")
+    # The module layers the process environment OVER the file, so a host that
+    # exports any of these would answer this test instead of the fixture.
+    for name in ("CLAWGATE_TASK_API_URL", "CLAWGATE_API_URL", "CLAWGATE_HOOK_TOKEN",
+                 "MUSTER_API_URL", "MUSTER_HOOK_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(W._CG, "CLAWGATE_ENV_PATH", str(envf))
+    monkeypatch.setattr(W, "_resolve_task_cli", lambda: "muster")
+    seen = {}
+
+    def runner(cmd, timeout, env=None):
+        seen["cmd"] = list(cmd)
+        seen["env"] = env
+        return 0, '{"id": 42}', ""
+
+    W.fetch_task("42", runner=runner)
+    assert seen["env"] is not None, (
+        "the resolved client was run with an INHERITED environment — on this host "
+        "that carries neither MUSTER_API_URL nor MUSTER_HOOK_TOKEN, which is the "
+        "measured rc 2.")
+    assert seen["env"]["MUSTER_API_URL"] == "http://pinned-task.invalid:30306"
+    assert seen["env"]["MUSTER_HOOK_TOKEN"] == "pinned-fixture-token-7a3f"
+    # ...and the token is in the ENVIRONMENT, never in a world-readable argv.
+    assert "pinned-fixture-token-7a3f" not in " ".join(seen["cmd"]), seen["cmd"]
+    # ...and `env=` REPLACES rather than merges, so a mapping holding only the two
+    # new keys would run the client with no PATH at all.
+    assert "PATH" in seen["env"]
 
 
 @pytest.mark.parametrize("on_path,expect", [
@@ -688,7 +741,7 @@ def test_the_POSITIVE_CONTROL_for_that_structural_half(tmp_path):
 
 def test_fetch_task_rejects_non_json_rather_than_returning_a_blank():
     """An Authelia portal page is a 200 with HTML — never a task with no sessions."""
-    def runner(cmd, timeout):
+    def runner(cmd, timeout, env=None):
         return 0, "<html>login</html>", ""
 
     with pytest.raises(W.WhoError) as exc:
@@ -698,7 +751,7 @@ def test_fetch_task_rejects_non_json_rather_than_returning_a_blank():
 
 def test_live_windows_reports_a_nonzero_scan_with_no_output_as_an_ERROR():
     """Not an empty index — that would render as 'no session is anywhere'."""
-    def runner(cmd, timeout):
+    def runner(cmd, timeout, env=None):
         return 1, "", "tmux: no server running"
 
     with pytest.raises(W.WhoError) as exc:
@@ -714,7 +767,7 @@ def test_live_windows_does_NOT_pass_lean(tmp_path):
     """
     seen = {}
 
-    def runner(cmd, timeout):
+    def runner(cmd, timeout, env=None):
         seen["cmd"] = cmd
         return 0, json.dumps(_scan([])), ""
 
@@ -726,7 +779,7 @@ def test_live_windows_does_NOT_pass_lean(tmp_path):
 def test_live_windows_forwards_a_host_filter_only_when_asked():
     seen = []
 
-    def runner(cmd, timeout):
+    def runner(cmd, timeout, env=None):
         seen.append(cmd)
         return 0, json.dumps(_scan([])), ""
 
@@ -879,7 +932,7 @@ def test_EXIT_EMPTY_with_EMPTY_stdout_is_still_a_measured_zero():
     The existing rc-3 case carries stdout, so `and not out.strip()`
     short-circuits and the two spellings are indistinguishable there.
     """
-    def runner(cmd, timeout):
+    def runner(cmd, timeout, env=None):
         return 3, "", ""
 
     # rc 3 with no output: not an error, but nothing to parse either.

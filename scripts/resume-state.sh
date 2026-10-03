@@ -1759,7 +1759,16 @@ clawgate_block(){
     return
   fi
   local json rc
-  json=$("$cli" task get "$id" 2>/dev/null); rc=$?
+  # 🔴 `clawgate_task_cli_exec`, NEVER `"$cli" …` DIRECTLY. The resolver answers
+  # which binary; it does NOT hand the binary its config, and `muster` — now the
+  # PREFERRED client — reads only its own `MUSTER_API_URL`/`MUSTER_HOOK_TOKEN`
+  # namespace (or ~/.muster/muster.env, which exists on neither host). This line
+  # read `$("$cli" task get "$id")` and so, from the moment the preference moved,
+  # every `/resume` on both machines printed `muster exit 2 — task #N NOT checked`
+  # with the base and token sitting correctly in ~/.claude/clawgate.env the whole
+  # time. The wrapper derives both from the SAME readers the HTTP path uses and
+  # keeps the token out of argv; see it in scripts/lib/clawgate_handoff.sh.
+  json=$(clawgate_task_cli_exec "$cli" task get "$id" 2>/dev/null); rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$json" ]; then
     echo "  ($cli exit $rc — task #$id NOT checked)"
     UNRECONCILED+=("clawgate did not answer for task #$id ($cli exit $rc: 3=auth 4=no such task 6=unreachable 8=non-JSON) — its status is UNKNOWN, not fine")

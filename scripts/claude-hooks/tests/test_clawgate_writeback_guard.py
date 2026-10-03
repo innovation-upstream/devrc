@@ -4513,3 +4513,102 @@ def test_the_NEGATIVE_CONTROL_the_hang_stub_really_hangs(tmp_path, monkeypatch):
     assert "timed out after 0.4s" in str(e.value), str(e.value)
     assert "rc=" not in str(e.value), str(e.value)
     assert elapsed >= 0.4, elapsed
+
+
+# =========================================================================== #
+# 🔴 THE RESOLVED CLIENT IS HANDED ITS OWN CONFIG
+#
+# Preferring `muster` is the whole point of `TASK_CLI_NAMES`, and `muster` reads its
+# base URL and bearer token ONLY from `MUSTER_API_URL` / `MUSTER_HOOK_TOKEN` (or
+# `~/.muster/muster.env`, which exists on neither host) while the credential lives in
+# `~/.claude/clawgate.env` under `CLAWGATE_*`. Measured 2026-10-02: a bare
+# `muster task get <id>` exits 2 "no API URL" on a box where `clawgatectl task get
+# <id>` returns the task.
+#
+# 🔴 WHY THAT WAS INVISIBLE HERE, AND WHY IT STILL MATTERED. `_read_task` walks every
+# client and then falls back to curl, so the live read still SUCCEEDED — through curl,
+# which sends no provenance headers of the preferred client's. The verdict was right
+# and the attribution was wrong, which is exactly the defect preferring muster was
+# supposed to fix. A suite that only asserts the verdict cannot see that.
+# =========================================================================== #
+def test_the_task_CLI_is_run_WITH_the_two_variables_it_reads_its_config_from(
+        tmp_path, monkeypatch):
+    """🔴 LITERAL EXPECTED VALUES, and the fixture's two URLs DIFFER so the TASK key
+    has to win — `CLAWGATE_API_URL` is the permission ROUTER, which answers the same
+    routes off a board that is stale for exactly the in-flight cards.
+
+    ⚠ Asserts what the hook HANDS the client, never that the real muster honours it;
+    that contract is `muster --help`'s, in another repository. The end-to-end leg (a
+    fake client that REFUSES an unconfigured run) is
+    `scripts/tests/test_task_cli_resolver.py` section 5.
+    """
+    seen = []
+
+    class _Fake:
+        TimeoutExpired = subprocess.TimeoutExpired
+
+        @staticmethod
+        def run(argv, **kw):
+            seen.append((list(argv), kw))
+            return _FakeProc()
+
+    monkeypatch.setattr(guard, "_sp", lambda: _Fake)
+    for name in ("CLAWGATE_TASK_API_URL", "CLAWGATE_API_URL", "CLAWGATE_HOOK_TOKEN",
+                 "MUSTER_API_URL", "MUSTER_HOOK_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    envf = tmp_path / "clawgate.env"
+    envf.write_text("CLAWGATE_TASK_API_URL=http://pinned-task.invalid:30306\n"
+                    "CLAWGATE_API_URL=http://pinned-router.invalid:30302\n"
+                    "CLAWGATE_HOOK_TOKEN=pinned-fixture-token-7a3f\n",
+                    encoding="utf-8")
+    guard._read_task(194, 5, str(envf))
+    assert seen, "no client was run at all"
+    argv, kw = seen[0]
+    assert argv[0] == "muster", argv
+    env = kw.get("env")
+    assert env is not None, (
+        "the preferred client was run with an INHERITED environment — which on both "
+        "hosts carries neither MUSTER_API_URL nor MUSTER_HOOK_TOKEN, so it exits 2 "
+        "before it sends anything and the read degrades to curl.")
+    assert env["MUSTER_API_URL"] == "http://pinned-task.invalid:30306"
+    assert env["MUSTER_HOOK_TOKEN"] == "pinned-fixture-token-7a3f"
+    # 🔴 The token is in the ENVIRONMENT and nowhere else: an argv is world-readable
+    # through /proc and this hook runs after every single turn. Same rule `_via_curl`
+    # already applies by putting the bearer on stdin.
+    assert "pinned-fixture-token-7a3f" not in " ".join(argv), argv
+    # ...and `env=` REPLACES rather than merges, so a two-key mapping would run the
+    # client with no PATH.
+    assert "PATH" in env
+
+
+def test_the_FALLBACK_client_is_given_the_same_config(tmp_path, monkeypatch):
+    """🔴 ONE MAPPING FOR BOTH SPELLINGS, which is what stops this becoming a
+    per-binary branch — the N-sites shape the shared ledger exists to delete.
+    `clawgatectl` ignores `MUSTER_*` (its namespace is `CLAWGATE_*` and it reads the
+    env file itself), so what is asserted is that the walk does not configure only
+    its first entry."""
+    seen = []
+
+    class _Fake:
+        TimeoutExpired = subprocess.TimeoutExpired
+
+        @staticmethod
+        def run(argv, **kw):
+            seen.append((list(argv), kw))
+            if argv[0] == "muster":
+                raise FileNotFoundError(argv[0])      # not built on this host
+            return _FakeProc()
+
+    monkeypatch.setattr(guard, "_sp", lambda: _Fake)
+    for name in ("CLAWGATE_TASK_API_URL", "CLAWGATE_API_URL", "CLAWGATE_HOOK_TOKEN",
+                 "MUSTER_API_URL", "MUSTER_HOOK_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    envf = tmp_path / "clawgate.env"
+    envf.write_text("CLAWGATE_TASK_API_URL=http://pinned-task.invalid:30306\n"
+                    "CLAWGATE_HOOK_TOKEN=pinned-fixture-token-7a3f\n",
+                    encoding="utf-8")
+    guard._read_task(194, 5, str(envf))
+    assert [a[0] for a, _ in seen] == ["muster", "clawgatectl"], seen
+    for argv, kw in seen:
+        assert kw["env"]["MUSTER_API_URL"] == "http://pinned-task.invalid:30306", argv
+        assert kw["env"]["MUSTER_HOOK_TOKEN"] == "pinned-fixture-token-7a3f", argv

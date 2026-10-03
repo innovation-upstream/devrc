@@ -321,13 +321,20 @@ def _one_line(text: str) -> str:
     return " ".join((text or "").split())
 
 
-def _run(cmd: Sequence[str], timeout: int) -> tuple[int, str, str]:
+def _run(cmd: Sequence[str], timeout: int, env=None) -> tuple[int, str, str]:
     """Run a tool, capturing both streams SEPARATELY.
 
     🔴 Never `2>&1`. BOTH task CLIs document that JSON goes to stdout and
     nothing else ever does, precisely so a diagnostic on stderr cannot corrupt
     a parse. Merging them here would throw that guarantee away at the one place
     that depends on it.
+
+    🔴 `env=None` MEANS INHERIT, and it is the right default for every caller but
+    one. `fetch_task` passes a COMPLETE mapping from `clawgate_tasks.task_cli_env`
+    because the resolved task CLI reads its base URL and token out of its own
+    `MUSTER_*` namespace — see that function. `subprocess`' `env=` REPLACES rather
+    than merges, which is exactly why the mapping is built in one shared place
+    rather than assembled here.
     """
     # 🔴 `timeout=None` MEANS NO TIMEOUT AT ALL, so a None here does not
     # "fall back to a default" — it removes the bound entirely and `cairn-who`
@@ -338,7 +345,8 @@ def _run(cmd: Sequence[str], timeout: int) -> tuple[int, str, str]:
     if bad:
         raise WhoError(f"refusing to run {cmd[0]}: {bad}")
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           env=env)
     except FileNotFoundError:
         raise WhoError(f"{cmd[0]} is not on PATH")
     except subprocess.TimeoutExpired:
@@ -377,7 +385,21 @@ def fetch_task(task: str, *, timeout: int = DEFAULT_TIMEOUT,
     if cli is None:
         raise WhoError("no task CLI is on PATH (tried %s)"
                        % ", ".join(_TASK_CLI_NAMES))
-    rc, out, err = runner([cli, "task", "get", str(task)], timeout)
+    # 🔴 THE RESOLVED CLIENT IS GIVEN ITS OWN CONFIG, and it used to be given
+    # nothing. `muster` — the preferred client — reads its base URL and token only
+    # from `MUSTER_API_URL`/`MUSTER_HOOK_TOKEN` (or ~/.muster/muster.env, absent on
+    # both hosts), while the credential lives in ~/.claude/clawgate.env under
+    # `CLAWGATE_*`. Measured 2026-10-02: bare `muster task get <id>` exits 2 with
+    # "no API URL" on a box where `clawgatectl task get <id>` returns the task, so
+    # this call raised `ClawgateUnreachable: muster exited 2` and blamed the board.
+    # `task_cli_env` derives both from the SAME readers the HTTP path uses.
+    #
+    # ⚠ `resolve` stays the seam for WHICH binary and `runner` for HOW it is run, so
+    # the env is a third argument rather than something `resolve` returns: a test
+    # drives the two legs of the preference by injecting `resolve`, and that injection
+    # must not also become the place the credential comes from.
+    rc, out, err = runner([cli, "task", "get", str(task)], timeout,
+                          env=_CG.task_cli_env())
     # One line. A tool's stderr is often several (a version-skew notice above
     # the real error), and interpolating it raw breaks the render's
     # indentation so the follow-up sentence reads as unrelated output.

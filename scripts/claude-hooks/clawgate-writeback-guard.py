@@ -1442,8 +1442,25 @@ def task_endpoint(task_id, env_path=CLAWGATE_ENV):
                                      TASK_API_PATH_FMT % int(task_id), var, env_path)
 
 
-def _via_cli(binary, task_id, timeout, api_url=None):
+def _via_cli(binary, task_id, timeout, api_url=None, env=None):
     """One task read through one CLI binary — `muster` or `clawgatectl`.
+
+    🔴 `env` IS NOT OPTIONAL IN PRACTICE AND THE DEFAULT IS A TEST AFFORDANCE. The
+    preferred client, `muster`, reads its base URL and bearer token ONLY out of its
+    own `MUSTER_API_URL`/`MUSTER_HOOK_TOKEN` namespace (or `~/.muster/muster.env`,
+    which exists on neither host), while the credential lives in
+    `~/.claude/clawgate.env` under `CLAWGATE_*`. Measured 2026-10-02: a bare
+    `muster task get <id>` exits 2 with "no API URL" on a box where
+    `clawgatectl task get <id>` returns the task — so without this the preferred
+    client ALWAYS fails here and the read silently degrades to the curl fallback,
+    which answers correctly and records the WRONG provenance. That is the specific
+    thing preferring muster was supposed to fix. `_read_task` passes
+    `clawgate_tasks.task_cli_env()`, which derives both values from the same
+    `TASK_API_URL_VARS` ledger and the same env-file reader everything else uses.
+
+    ⚠ `subprocess`' `env=` REPLACES the environment rather than merging, which is
+    why a COMPLETE mapping is built in one shared place and `None` here means
+    "inherit this process's" rather than "an empty environment".
 
     🔴 `--api-url` is passed ONLY for the task-specific key (the FIRST entry in the
     shared `TASK_API_URL_VARS` ledger), never for the generic
@@ -1459,7 +1476,7 @@ def _via_cli(binary, task_id, timeout, api_url=None):
     if api_url:
         argv += ["--api-url", api_url]
     argv += ["task", "get", str(int(task_id))]
-    proc = _sp().run(argv, capture_output=True, text=True, timeout=timeout)
+    proc = _sp().run(argv, capture_output=True, text=True, timeout=timeout, env=env)
     if proc.returncode != 0:
         raise LiveReadError("%s rc=%d %s"
                             % (binary, proc.returncode, _scrub(proc.stderr)))
@@ -1570,10 +1587,15 @@ def _read_task(task_id, timeout, env_path):
     # which client is tried first, and the first one that answers is the one whose
     # provenance headers the board records. See `task_cli_names`.
     clis = task_cli_names()
+    # 🔴 THE RESOLVED CLIENT IS HANDED ITS OWN CONFIG, from the ONE place that
+    # derives it — see `_via_cli`'s `env` paragraph for the measurement. Built once
+    # for the whole walk rather than per binary: it is the same two values for both
+    # spellings, and `clawgatectl` ignores them (its namespace is `CLAWGATE_*`).
+    cli_env = _cg().task_cli_env(path=env_path)
     whys = []
     for binary in clis:
         try:
-            return _via_cli(binary, task_id, timeout, api_url=api_url)
+            return _via_cli(binary, task_id, timeout, api_url=api_url, env=cli_env)
         except LiveReadError as e:
             whys.append(str(e))
         except FileNotFoundError:

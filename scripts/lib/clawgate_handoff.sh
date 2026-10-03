@@ -140,6 +140,23 @@ CLAWGATE_TASK_API_URL_VARS="CLAWGATE_TASK_API_URL CLAWGATE_API_URL"
 #: Space-separated like the vocabularies below; split by the shell, never by `eval`.
 CLAWGATE_TASK_CLI_NAMES="muster clawgatectl"
 
+#: 🔴 WHERE THE RESOLVED TASK CLI READS ITS OWN CONFIG — and a DELIBERATE DUPLICATE
+#: of `TASK_CLI_BASE_ENV` / `TASK_CLI_TOKEN_ENV` in scripts/lib/clawgate_tasks.py,
+#: for the same reason the two ledgers above are duplicated. The full defect these
+#: close (measured on both hosts 2026-10-02: `muster task get N` -> rc 2 "no API
+#: URL" while `clawgatectl task get N` -> rc 0, because the credential lives under
+#: `CLAWGATE_*` in $CLAWGATE_ENV_REL and muster reads only its OWN namespace) is on
+#: those two constants. The duplicate is not left to a comment to hold —
+#: `test_the_shell_task_cli_CONFIG_ledger_matches_PYTHON` reads both names out of
+#: `clawgate_tasks.py` and fails if either drifts.
+#:
+#: 🔴 THE TOKEN GOES IN THE ENVIRONMENT, NEVER IN ARGV. `muster --help` offers a
+#: `--token` flag and says of it "prefer the env file — flags are visible in ps";
+#: an argv is world-readable through /proc and this runs on every `/resume`.
+#: `clawgate_task_cli_exec` below is the only thing that sets either of them.
+CLAWGATE_TASK_CLI_BASE_ENV="MUSTER_API_URL"
+CLAWGATE_TASK_CLI_TOKEN_ENV="MUSTER_HOOK_TOKEN"
+
 #: Where the hook token and base URL live, RELATIVE to $HOME. Expanded at call
 #: time, never at source time — a caller may set HOME after sourcing.
 CLAWGATE_ENV_REL=".claude/clawgate.env"
@@ -788,6 +805,11 @@ clawgate_rank_rows(){
 # a non-zero rc into a `!` gap, and it must, because "the board is unreachable" and
 # "no client is installed" are different facts.
 #
+# 🔴 AND IT ANSWERS ONLY HALF THE QUESTION. The name it prints is NOT runnable on its
+# own — `muster` reads its base URL and token from its own `MUSTER_*` namespace, which
+# nothing on either host sets. Run it through `clawgate_task_cli_exec` (below), never
+# as `"$cli" …` directly; the measurement behind that is on that function.
+#
 # ⚠ `command -v`, not `which`: `which` is not guaranteed present and is not a
 # builtin. The loop is over an UNQUOTED expansion deliberately — the ledger is
 # space-separated and word-splitting is the split. (This file is bash, and `$IFS` is
@@ -853,6 +875,63 @@ clawgate_task_base(){
     fi
   done
   printf '%s\n' "${CLAWGATE_DEFAULT_API_URL%/}"
+}
+
+# `clawgate_task_cli_exec <resolved-cli> [args…]` — run a resolved task CLI WITH
+# the config it needs to reach the board. Its exit code and both streams are the
+# CLI's own, untouched, so a caller's `rc`/`$(…)` handling is unchanged.
+#
+# 🔴 THE SHELL HALF OF ONE PREDICATE, AND THE REASON IT EXISTS. `clawgate_task_cli`
+# answers WHICH binary and says nothing about config — so every caller that took
+# that answer and ran it bare got a client with no base URL and no token. Measured
+# on both hosts 2026-10-02: `resume-state.sh` did `$("$cli" task get "$id")` and
+# `muster` exited 2 ("no API URL: set MUSTER_API_URL in ~/.muster/muster.env" — a
+# file that exists on neither host), so the CLAWGATE block of every `/resume`
+# reported the task's status as UNKNOWN while `clawgatectl task get` on the same
+# box returned the task. The credential was never missing: it is in
+# $CLAWGATE_ENV_REL under `CLAWGATE_{TASK_,}API_URL` / `CLAWGATE_HOOK_TOKEN`, which
+# `clawgate_task_base` and `clawgate_env_get` already read. The resolved client was
+# simply never handed it. The python twin is `task_cli_env` in
+# scripts/lib/clawgate_tasks.py — a mapping rather than an exec, because a shell
+# function can only return one string.
+#
+# 🔴 WHY THE BINARY NAME IS AN ARGUMENT RATHER THAN RESOLVED HERE. Every caller
+# needs the NAME for its own messages ("which client answered" is the first thing a
+# non-zero rc makes you want to know), so it has already called
+# `clawgate_task_cli`; resolving a second time here could answer differently and
+# then the message would name a client that did not run.
+#
+# 🔴 AN ALREADY-SET VALUE IS NOT OVERWRITTEN, in either slot — `muster`'s own
+# precedence is its env file, then the environment, then flags, so a deliberate
+# `MUSTER_API_URL=… /resume` must still win. This only fills in what nothing set,
+# and an EMPTY value counts as unset exactly as `${A:-$B}` does everywhere else
+# here. `${!name}` is bash indirect expansion; this file is bash (see
+# `clawgate_task_cli`), never sourced by sh.
+#
+# 🔴 A SUBSHELL WITH `export`, NOT `env NAME=value …` AND NOT AN ASSIGNMENT PREFIX.
+# `env` would put the TOKEN in a world-readable argv (/proc), which is the one thing
+# this must not do; an assignment prefix cannot take the variable NAME from the
+# ledger above without `eval`, so it would re-spell both names and defeat the pin.
+# `export "$name=$value"` is a builtin — no fork, no argv — and the subshell keeps
+# the two variables out of the caller's environment.
+#
+# ⚠ INERT FOR `clawgatectl`, which is what makes one mapping right for both
+# spellings: it has its own `CLAWGATE_*` namespace, reads $CLAWGATE_ENV_REL itself,
+# and never looks at `MUSTER_*`.
+clawgate_task_cli_exec(){
+  local cli="$1"; shift
+  local base token
+  base=$(clawgate_task_base) || base=""
+  token=$(clawgate_env_get CLAWGATE_HOOK_TOKEN) || token=""
+  (
+    if [ -z "${!CLAWGATE_TASK_CLI_BASE_ENV:-}" ] && [ -n "$base" ]; then
+      export "$CLAWGATE_TASK_CLI_BASE_ENV=$base"
+    fi
+    if [ -z "${!CLAWGATE_TASK_CLI_TOKEN_ENV:-}" ] && [ -n "$token" ]; then
+      export "$CLAWGATE_TASK_CLI_TOKEN_ENV=$token"
+    fi
+    exec "$cli" "$@"
+  )
 }
 
 # `clawgate_zero_probe <base> <curl-config> <out-file> <session-id-under-test>`
