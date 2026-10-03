@@ -3869,6 +3869,8 @@ PRUNE_MARKER_SECTION_HEADING = "[section heading]"
 PRUNE_MARKER_PARTIAL_BLOCK = "[partial block]"
 PRUNE_MARKER_FENCE = "[fence delimiter]"
 PRUNE_MARKER_REPLACE_SECTION = "[replace section]"
+PRUNE_MARKER_SELECTOR_STALE = "[selector stale]"
+PRUNE_MARKER_SELECTOR_BOTH = "[selector ambiguous]"
 
 PRUNE_MARKERS: tuple[str, ...] = (
     PRUNE_MARKER_COUNT,
@@ -3879,7 +3881,32 @@ PRUNE_MARKERS: tuple[str, ...] = (
     PRUNE_MARKER_PARTIAL_BLOCK,
     PRUNE_MARKER_FENCE,
     PRUNE_MARKER_REPLACE_SECTION,
+    PRUNE_MARKER_SELECTOR_STALE,
+    PRUNE_MARKER_SELECTOR_BOTH,
 )
+
+#: The optional `<line_no>: ` occurrence selector a `--prune` file line may carry.
+#:
+#: 🔴 WHY IT EXISTS, measured. Rule (q) resolves a named line by CONTENT, so a line
+#: appearing twice is `[ambiguous]` and cannot be pruned at all — while
+#: append-verbatim (rule (c)) manufactures duplicates by construction. Measured on
+#: `auditloop`'s `claudedocs/handoff-auditloop-qualitative-ux.md`, 2026-10-03: its
+#: `Gotchas` section was 41,909 B (64% of the document) holding 2,875 B of
+#: near-duplicate bullets, of which content-matching could address **347 B — one
+#: bullet**; every other copy shared at least one line with its twin. That document
+#: could not be de-duplicated by its own writer, and the round that day shipped only
+#: by `--override-size-ratchet`.
+#:
+#: 🔴 IT IS SELF-VALIDATING, WHICH IS THE POINT. A bare line number would be a
+#: SECOND way to mis-target, because a document moves under a prune file. The
+#: content must ALSO match at that line or the selector is REFUSED rather than
+#: followed — so a stale number cannot silently delete the wrong line. The property
+#: the content-only matcher exists to protect is preserved, not traded away.
+#:
+#: ⚠ `[0-9]{1,9}` and not `\d+`: `\d` matches Unicode decimal digits, so a line
+#: opening with e.g. an Arabic-Indic numeral would parse as a selector and then
+#: fail `int()`. The bound also keeps a pathological run of digits out of `int()`.
+PRUNE_SELECTOR_RE = re.compile(r"^([0-9]{1,9}):[ \t]?(.*)$")
 
 #: 🔴 THE FIELDS A PRUNE MAY NOT TOUCH, each paired with WHO READS IT — the
 #: reason is printed, because "load-bearing" on its own tells an author nothing
@@ -4105,6 +4132,99 @@ def prune_naming_lines(prune_text: str) -> list[str]:
     return [ln.rstrip("\n") for ln in prune_text.splitlines() if ln.strip()]
 
 
+def _resolve_naming(
+    naming: str,
+    by_norm: typing.Mapping[str, typing.Sequence[_DocRow]],
+    by_line_no: typing.Mapping[int, _DocRow],
+) -> tuple[_DocRow | None, PruneProblem | None]:
+    """One named prune line → the ONE document row it removes, or why it cannot.
+
+    Two readings are tried and the precedence is deliberate:
+
+    1. **As a `<line_no>: <content>` selector** (`PRUNE_SELECTOR_RE`) — accepted
+       only when a row exists at that line number AND its content matches the rest
+       of the naming. This is what makes a byte-identical duplicate addressable.
+    2. **As a verbatim line**, the original and still-default reading.
+
+    🔴 BOTH READINGS MATCHING IS A REFUSAL, NOT A PRECEDENCE DECISION. It needs a
+    document line literally spelled `123: …` whose content ALSO sits at line 123,
+    which is vanishingly rare — and "vanishingly rare" is exactly the case where
+    picking silently is how a prune removes a line nobody named. The author
+    disambiguates by deleting the selector.
+
+    🔴 A SELECTOR THAT PARSES BUT DOES NOT RESOLVE FALLS BACK to reading 2 before
+    it reports anything, so a genuine document line opening `123: ` is still
+    nameable verbatim and this stays backward compatible. Only when BOTH readings
+    come up empty is the selector-aware refusal printed — and it quotes what is
+    actually at that line, because `[absent]` alone cannot tell an author whether
+    their number or their text is the stale half.
+    """
+    verbatim = by_norm.get(_norm_line(naming), ())
+    sel = PRUNE_SELECTOR_RE.match(naming)
+    sel_row: _DocRow | None = None
+    if sel is not None:
+        row = by_line_no.get(int(sel.group(1)))
+        if row is not None and _norm_line(row.line) == _norm_line(sel.group(2)):
+            sel_row = row
+
+    if sel_row is not None and verbatim:
+        return None, PruneProblem(
+            PRUNE_MARKER_SELECTOR_BOTH,
+            naming,
+            f"it reads BOTH ways: as a selector for line {sel_row.line_no}, and "
+            f"verbatim as {len(verbatim)} document line(s) spelled exactly like "
+            f"this (first at line {verbatim[0].line_no}). Choosing for you is how "
+            f"a prune removes a line you did not name. Drop the `<line>: ` prefix "
+            f"to mean the verbatim line, or re-run once the collision is gone.",
+        )
+    if sel_row is not None:
+        return sel_row, None
+    if len(verbatim) == 1:
+        return verbatim[0], None
+    if len(verbatim) > 1:
+        where = ", ".join(str(m.line_no) for m in verbatim[:6])
+        return None, PruneProblem(
+            PRUNE_MARKER_AMBIGUOUS,
+            naming,
+            f"{len(verbatim)} lines match it (lines {where}). You named ONE "
+            f"removal and the document offers several, so which one goes is not "
+            f"yours to decide by accident. Append-verbatim makes duplicates "
+            f"ordinary: rule (c) keeps a superseding block AND the block it "
+            f"superseded. 🔴 PREFIX THE LINE NUMBER to name one of them — "
+            f"`{verbatim[0].line_no}: {_clip(naming.strip(), PRUNE_LINE_MAX)}` — "
+            f"which is checked against that line's CONTENT, so a stale number is "
+            f"refused rather than followed.",
+        )
+    if sel is not None:
+        at = by_line_no.get(int(sel.group(1)))
+        found = (
+            f"line {sel.group(1)} holds: {_clip(at.line.strip(), PRUNE_LINE_MAX)}"
+            if at is not None and at.line.strip()
+            else f"line {sel.group(1)} is blank"
+            if at is not None
+            else f"the document has no line {sel.group(1)} "
+            f"({len(by_line_no)} lines)"
+        )
+        return None, PruneProblem(
+            PRUNE_MARKER_SELECTOR_STALE,
+            naming,
+            f"it reads as a `<line>: <content>` selector and the content does not "
+            f"match — {found}. A selector is checked against the line it names so "
+            f"a document that moved under your prune file is REFUSED rather than "
+            f"mis-pruned; re-read the line and re-run. (If this is genuinely a "
+            f"document line that starts with a number and a colon, it did not "
+            f"match verbatim either.)",
+        )
+    return None, PruneProblem(
+        PRUNE_MARKER_ABSENT,
+        naming,
+        "no line in the document matches it. A prune that silently matched "
+        "nothing would report success having removed something else, or nothing "
+        "at all — so an unmatched name is a refusal. Whitespace is collapsed "
+        "before comparing; everything else must be verbatim.",
+    )
+
+
 def _block_extent(rows: typing.Sequence[_DocRow], start: int) -> list[_DocRow]:
     """The `### `-and-deeper block opened at index `start`, heading included.
 
@@ -4158,7 +4278,7 @@ def prune_plan(
     by_norm: dict[str, list[_DocRow]] = {}
     for row in rows:
         by_norm.setdefault(_norm_line(row.line), []).append(row)
-    named_norms = {_norm_line(ln) for ln in named}
+    by_line_no = {row.line_no: row for row in rows}
 
     problems: list[PruneProblem] = []
     # ---- PASS 1: resolve each named line to exactly ONE document line --------
@@ -4210,35 +4330,14 @@ def prune_plan(
                 )
             )
             continue
-        matches = by_norm.get(_norm_line(naming), [])
-        if not matches:
-            problems.append(
-                PruneProblem(
-                    PRUNE_MARKER_ABSENT,
-                    naming,
-                    "no line in the document matches it. A prune that silently "
-                    "matched nothing would report success having removed "
-                    "something else, or nothing at all — so an unmatched "
-                    "name is a refusal. Whitespace is collapsed before "
-                    "comparing; everything else must be verbatim.",
-                )
-            )
+        # 🔴 ONE RESOLVER, because the ambiguity refusal and the selector that
+        # CLEARS it are the same decision and must not be two copies that can
+        # disagree (`claude/RULES.md`, "one rule, one place").
+        row, problem = _resolve_naming(naming, by_norm, by_line_no)
+        if problem is not None:
+            problems.append(problem)
             continue
-        if len(matches) > 1:
-            where = ", ".join(str(m.line_no) for m in matches[:6])
-            problems.append(
-                PruneProblem(
-                    PRUNE_MARKER_AMBIGUOUS,
-                    naming,
-                    f"{len(matches)} lines match it (lines {where}). You named "
-                    f"ONE removal and the document offers several, so which one "
-                    f"goes is not yours to decide by accident. Append-verbatim "
-                    f"makes duplicates ordinary: rule (c) keeps a superseding "
-                    f"block AND the block it superseded.",
-                )
-            )
-            continue
-        row = matches[0]
+        assert row is not None  # _resolve_naming returns exactly one of the two
         if row.level and row.level <= 2:
             problems.append(
                 PruneProblem(
@@ -4272,6 +4371,16 @@ def prune_plan(
         resolved.append((naming, row))
 
     # ---- PASS 2: the block questions, over the FULL named set ----------------
+    # 🔴 THE NAMED SET IS THE RESOLVED DOCUMENT LINES, NOT THE PRUNE FILE'S TEXT.
+    # Since a naming line may be a `<line_no>: <content>` selector, its raw text
+    # need not equal the line it removes — and `_unnamed_in_block` compares
+    # against DOCUMENT lines. Building this from `named` would make every
+    # selector-named line read as "not named", so a fully-named block would be
+    # refused `[partial block]` for lines the prune does remove. Equivalent to the
+    # old `{_norm_line(ln) for ln in named}` on the only path that consumes it:
+    # any unresolved line is a `problems` entry and every problem refuses, so
+    # `resolved` is the whole named set whenever this is read.
+    named_norms = {_norm_line(row.line) for _naming, row in resolved}
     # `fully_named[heading_line_no]` = every non-blank line of that block is in
     # the prune. Computed once, for the reason above and because both consumers
     # below must get the SAME answer: if the partial-block refusal and the
