@@ -305,8 +305,8 @@ claim's identity. Claim before acting:
     tested, test-merged against #1986; PR open, NOT merged. What remains is not
     implementation: offer `/audit-pr 1993` **round 0 FIRST** (the only round
     that can conclude *close this, do not audit it*, actionable only while the
-    merge decision is open), then the nine axes; read `gh pr checks 1993` for
-    the 72-file scoped set this session left unresolved; merge; then
+    merge decision is open), then the nine axes; read `gh pr checks 1993`
+    (all four checks were `pending` at session end); merge; then
     `claim-work --release muse-system-inventory-25`. Repo: devrc —
     `scripts/muse/muse`, `claude/skills/muse/SKILL.md`,
     `scripts/tests/test_muse_wrapper.py`.
@@ -428,44 +428,47 @@ read-only `muse-bridge` cluster API exposed to the public internet.
 ## State now
 
 - **Branch:** devrc `main`, clean (`?? nix/system/apply-networkmanager-openvpn.sh`
-  is not ours). homelab-infra `trunk` untouched this session. All worktrees were
-  under the scratchpad, none in the repo.
+  is not ours). homelab-infra `trunk` untouched. All worktrees were under the
+  scratchpad, none in the repo.
 - 🔴 **RANK 25 IS IMPLEMENTED AND OPEN AS devrc#1993** —
   `fix/muse-status-400-policy-denial`, commit `16d6cf29`. **NOT merged, NOT
   deployed**, so the break is still live on both hosts.
   `claim-work muse-system-inventory-25` is HELD — release it on merge.
   Matrix **4 RED at base `5ddffdac` / 27 green at HEAD**; ⚠ only TWO of the four
-  are regressions (see Gotchas). Mutation sweep **6 mutants, all KILLED by the
-  intended test**, three controls each. Tested END-TO-END behind stubbed
-  `curl`/`sops`, hermetic in both tiers, no `devhost-tests` entry needed. Exit
-  status deliberately UNCHANGED (0 for every HTTP answer) with a guard pinning
-  that contract, so M3/M4 has to change it on purpose. Rationale: the PR body.
+  are regressions (see Gotchas). Sweep: **6 mutants, all KILLED by the intended
+  test**, three controls each. Tested END-TO-END behind stubbed `curl`/`sops`,
+  hermetic in both tiers. Exit status deliberately UNCHANGED (0 for every HTTP
+  answer), with a guard pinning that so M3/M4 must change it on purpose.
+  Rationale: the PR body.
 - 🔴 **devrc#1986 `muse-cli-ripout` edits the SAME file** (retire the muse-cli
   channel, operator decision; 749-line diff, also deletes
   `scripts/devhost-tests/test_muse_cli_exit_contract.py`). **TEST-MERGED, not
   reasoned about:** `merge-tree` exit 0 (branched on the EXIT CODE, never a
-  marker grep), then the real merged tree was built and the suite run there —
-  **21 passed, all 11 new tests present and green** (27→21 because #1986
-  removes the muse-cli tests). Safe in either merge order. ⚠ #1986 likely
-  MOOTS the `--cli` half of M4 and of the `--force`/`--cli` pacing bug —
-  re-read those before working them.
-- ⚠ **ONE GATE IS UNRESOLVED, NOT GREEN.** `scoped-tests.sh` selected **72
-  files** and was still running at session end; **no verdict was read, so none
-  is claimed.** What WAS run and green: the muse suite (27), the merged tree
-  (21), and **281** tests across `test_no_public_ips` / `test_no_captured_text`
-  / `test_no_captured_markup` / `test_skill_descriptions` / `test_skill_tiers`
-  / `test_runtime_shebangs`. **Read `gh pr checks 1993`** rather than re-running
-  72 files locally.
+  marker grep), then the real merged tree built and the suite run there — **21
+  passed, all 11 new tests present and green** (27→21: #1986 removes the
+  muse-cli tests). Safe in either merge order. ⚠ #1986 likely MOOTS the `--cli`
+  half of M4 and of the `--force`/`--cli` pacing bug — re-read those first.
+- ✅ **THE SCOPED GATE RESOLVED AND PASSED** — `RESULT: PASS (exit=0)`,
+  **collected=9691 passed=9691 skipped=0 failed=0** across **71** files / 9 of
+  30 hermetic targets, 12m21s; verdict line and counts agree, no timeout panic.
+  🔴 **It printed `SCOPE: SCOPED`, so `gate.sh` would exit 91 = PARTIAL off it
+  — NOT a gate pass**, and two ledgers did not evaluate: GUARD 2's skip TOTAL
+  suspended (8 of 9 pins would have counted) and the per-target floors
+  **REPLACED** by a one-test-per-file floor, not merely suspended. ⚠ GUARD 9
+  logged a protected git repo changing mid-run and **cannot attribute who** —
+  expected with concurrent sessions here; prevention half unaffected. Also
+  green: the muse suite (27), the merged tree with #1986 (21), and 281 tests
+  across the content + skill gates named under `How to verify`. **CI still runs
+  what this did not** — `gh pr checks 1993` was all four `pending` at session end.
 - **RANK 16 (S1) IS BLOCKED ON THREE OPERATOR DECISIONS, not on work** — they
   are enumerated on the ranked item. Nothing in homelab-infra was touched.
 - **Rank 9 (S2) is still done and live, re-measured this session:** pod
   `muse-bridge-576d566995-2r6d4`, image `0.1.1`, **0 restarts**, startup line
   `muse-bridge listening on :8080 (rate=30/min cap=16384B ns-allow=muse)`. The
   2026-10-02 22:41Z probe table stands; this session re-confirmed the pod
-  identity and the allowlist only, not the whole table. 🔴 Its load-bearing
-  row, if the table is ever lost: `/v1/pods?ns=kube-system` → **400
-  `namespace not served`**, and that is the exact request which once returned
-  the contents of `kube-system`.
+  identity and the allowlist only. 🔴 Its load-bearing row, if the table is
+  ever lost: `/v1/pods?ns=kube-system` → **400 `namespace not served`** — the
+  exact request that once returned the contents of `kube-system`.
 - **Durable facts carried forward** (they outlive any one session):
   - 🔴 `0.1.0` and `0.1.1` carry the **SAME digest** (`sha256:0b0b98b3…`), so
     `0.1.0` no longer means "the pre-allowlist build" anywhere except a node
@@ -479,15 +482,13 @@ read-only `muse-bridge` cluster API exposed to the public internet.
     scripts/release-muse-bridge.sh`** (stopgap; rank 20 is the fix). No git
     writes — the Deployment bump goes via worktree + PR, per PR 925.
   - **CI:** `tekton/gitops-validate` is the COMPLETE expected status set for
-    homelab-infra and has **no Go leg**; the 18 bridge tests run only when a
-    human types `go test`. `go1.26.8` is on `$PATH` directly, so they run as
-    `go test -C <dir> ./... -count=1 -race` — devrc's `gate.sh`/`scoped-tests.sh`
-    know nothing about homelab-infra.
-  - **No clawgate task, and that is NOT a clean bill of health:**
-    `clawgate_handoff.sh resolve` exited **5** again (fourth time this arc). An
-    unknown session id answers 200 with an EMPTY ARRAY, so the zero cannot
-    distinguish "touched no task" from "wrong id". No `clawgate-task:` field
-    written, and no task was created — `/handoff` records, it does not mint.
+    homelab-infra and has **no Go leg**, so the 18 bridge tests run only when a
+    human types `go test`; devrc's `gate.sh`/`scoped-tests.sh` know nothing
+    about homelab-infra.
+  - **No clawgate task, NOT a clean bill of health:** `clawgate_handoff.sh
+    resolve` exited **5** again (fourth time this arc), and an unknown session
+    id answers 200 with an EMPTY ARRAY — so the zero cannot distinguish
+    "touched no task" from "wrong id". No field written, no task created.
 
 ## Open investigations — live diagnosis state
 
