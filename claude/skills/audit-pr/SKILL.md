@@ -778,6 +778,33 @@ restore**, and keep a post-sweep green re-check as the tripwire. (`claude/RULES.
 restore from a `cp -a` rather than `git checkout --`; this is the assertion that tells you the
 restore actually WORKED.)
 
+🔴 **THE MIRROR IMAGE, ON THE OTHER SIDE OF THE RUN: A REGRESSION MATRIX WHOSE *SETUP* STEP
+FAILED SILENTLY SCORES A GREEN THAT MEANS NOTHING.** The block above guards the restore AFTER a
+mutant; this guards establishing the BASE BEFORE one. `git checkout <ref> -- <paths>` is
+**all-or-nothing**: ONE unmatched pathspec aborts the WHOLE checkout, so if any path in your list
+is new in the PR (it does not exist on the base ref — which is exactly the case for a PR that ADDS
+a file), nothing is reverted at all. The specs then run against the tree that still holds the fix,
+pass, and get recorded as *"the new tests do not fail on pre-change code — no regression
+coverage"*. **The failure reads as a finding about the PR, and it is a finding about your
+command.** Measured 2026-09-28 auditing a PR that added `app/lib/pets/delete.ts`: the first
+red-matrix run was invalid and its 8 "passing" specs were 8 specs that had never been reverted.
+
+**Validate the instrument before reading the matrix** — the base tree is a claim, so make it one
+you checked: `git diff --stat <ref> -- <paths>` must be NON-EMPTY after the revert (an empty diff
+means you are testing the ref itself, i.e. nothing moved). Drop not-on-base paths from the
+pathspec explicitly rather than letting one kill the command, and expect a spec that imports a
+PR-new module to FAIL TO LOAD — that is the correct result for new code, not a regression guard,
+and must be labelled as such rather than counted.
+
+🔴 **AND AUDIT THE PREMISE YOU WERE HANDED, NOT ONLY THE DIFF.** A brief that names a specific
+hazard — *"does this activate open issue #N?"* — is a hypothesis with an author, and it can be
+wrong in the REASSURING direction as easily as the alarming one. Measured the same day: a
+cross-repo pair was audited on the premise that merging would activate a latent 500 from an open
+issue; the measurement inverted it — the PR **closed** that issue, proven by running the issue's
+own repro on both trees. Had the premise been treated as established, a fix would have been held
+back for a hazard it removes. **Run the cited issue's repro against BOTH trees before repeating
+either direction**, and report the pair.
+
 **Price a defect from the CONSUMING code: verifying that a value is USED is not verifying what its
 ABSENCE costs.** Read the consuming code before repeating any costed consequence an audit asserts,
 and sanity-check frequency — "routine" and "rare" are asserted far more often than measured.
