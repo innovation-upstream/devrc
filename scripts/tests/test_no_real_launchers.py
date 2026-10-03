@@ -1882,6 +1882,25 @@ def test_the_module_loader_scan_can_actually_find_something(tmp_path):
 # assembles its patterns — which keeps THIS file inside the scan's scope instead
 # of excluding it, so a real clobber added here would still be caught.
 PINNED_PATH_CLOBBERS = {
+    "test_resume_state_budget.py": (
+        'env["PATH"]' + ' = str(bindir)',
+        "#2001. ONE test clobbers: `test_the_probe_does_NOT_import_handoff_doc`. "
+        "`handoff_budget_probe.py` must answer on a host where the pinned cairn "
+        "client is NOT deployed — `handoff_doc.py` calls `cairn_pin.ensure()` at "
+        "import, and resolving that pin reads `$CAIRN_LIB` and then looks for "
+        "`cairn-py`/`cairn` ON PATH. 🔴 REPLACING is required to reach the "
+        "condition at all: both are present on the dev host, so no amount of "
+        "PREPENDING can make them unfindable, and a test that only prepended "
+        "would pass whether or not the probe had been decoupled. The replacement "
+        "is a tmp_path directory holding exactly ONE symlink — `sys.executable` "
+        "as `python3` — so nothing is executed from an attacker-controlled path "
+        "and no launcher is reachable. It overrides PATH only, on a dict handed "
+        "to two `subprocess.run` calls: the probe, and a POSITIVE CONTROL that "
+        "asserts that same environment really does fail to import `handoff_doc` "
+        "(without which the test would prove nothing). The guarded regression is "
+        "measured: with the pin unresolvable the digest reported its byte budget "
+        "as an UNKNOWN gap on exactly the machines `clawgate_block`'s fallback "
+        "exists for."),
     "test_airvpn_laptop.py": (
         'PATH=":"' + '.join(dirs)',
         "The airvpn-updown roaming tests run the REAL killswitch script under "
