@@ -6,7 +6,7 @@ the canonical handle is ALREADY exported in .zshenv and persists across calls.
 Why this exists: non-interactive `zsh -c` (the Bash tool) doesn't keep shell state
 between calls, so agents re-`cd`/`export` the same handful of paths on ~50% of Bash
 calls (measured ~3.8k plumbing turns in one week of transcripts). devrc pre-exports
-$DEVRC/$HOMELAB/$DATAPACKET/$CIVITAI/$CIVITAI_CLI + $KC_* in .zshenv; the CLAUDE.md
+$DEVRC/$HOMELAB/$DATAPACKET/$CIVITAI/$CIVITAI_CLI/$NAIDA + $KC_* in .zshenv; the CLAUDE.md
 pointers documenting them are opt-in, and opt-in guidance has historically not stuck.
 This is the deterministic, in-the-moment version: it fires the instant the plumbing
 pattern runs, once per handle per session, so it teaches without nagging.
@@ -36,6 +36,15 @@ REPO_VARS = {
     # `civitai-cli` directory. It pointed at a dormant second clone of that
     # remote until it was repointed here; grep for the HANDLE, not the name.
     f"{HOME}/workspace/civit/cli": "CIVITAI_CLI",
+    # 🔴 TWO ENTRIES, ONE HANDLE — naida-ai is host-divergent (nix/
+    # agent-handles.nix: primary `workspace/naida-ai`, laptop alternate
+    # `workspace/scratch/naida-ai`; measured 2026-10-03 over ssh, both hosts).
+    # The table maps LITERAL paths to handles, so both spellings belong here:
+    # nudging either toward $NAIDA is always true about which repo it names,
+    # even on a host where that particular path does not exist. The ledger test
+    # derives BOTH from the nix file.
+    f"{HOME}/workspace/naida-ai": "NAIDA",
+    f"{HOME}/workspace/scratch/naida-ai": "NAIDA",
 }
 # Absolute kubeconfig path -> canonical env var.
 KC_VARS = {

@@ -1440,6 +1440,12 @@ def test_env_plugin_existence_guards_every_handle():
         # and this handle used to name THAT one. Both directories exist, so the
         # `-d` guard could never report the mistake — this literal is the pin.
         ("repos", "CIVITAI_CLI", "/home/testuser/workspace/civit/cli"),
+        # 🔴 THE PRIMARY IS THE WORKBENCH PATH — the laptop's clone of the same
+        # remote sits at `workspace/scratch/naida-ai` and is declared as an
+        # `alternates` CANDIDATE, not as this value (measured 2026-10-03 over
+        # ssh, both hosts). Pinned beside the alternates test below so a swap
+        # of the two paths is loud here.
+        ("repos", "NAIDA", "/home/testuser/workspace/naida-ai"),
         ("kubeconfigs", "KC_HOMELAB", "/home/testuser/workspace/homelab-talos/homelab-kubeconfig"),
         ("kubeconfigs", "KC_WORKBENCH", "/home/testuser/workspace/homelab-talos/workbench-kubeconfig"),
         ("kubeconfigs", "KC_PROD", "/home/testuser/workspace/homelab-talos/production-kubeconfig"),
@@ -1473,6 +1479,49 @@ def test_zsh_and_opencode_share_one_handle_definition():
     assert "export KC_HOMELAB=$HOME/workspace" not in zsh, (
         "hand-written handle exports survive in zsh alongside the generated "
         "ones — delete them, they are the copy that drifts"
+    )
+
+
+def test_alternates_declare_host_divergent_candidates():
+    """The `alternates` block is a LIST of extra candidate paths per handle,
+    evaluated by the runtime exporters in order after the primary.
+
+    Pinned as a full nix eval (not a source grep) so the VALUE is the claim, not
+    the spelling: a path typo here exports a handle pointing nowhere.
+    """
+    got = handles()
+    assert got["repos"]["NAIDA"] == "/home/testuser/workspace/naida-ai"
+    assert got["alternates"]["NAIDA"] == [
+        "/home/testuser/workspace/scratch/naida-ai"
+    ], (
+        "NAIDA's candidates drifted — the laptop clone is at "
+        "`workspace/scratch/naida-ai` (measured 2026-10-03 over ssh); the "
+        "primary is the workbench spelling. Re-measure both hosts before "
+        "editing either literal."
+    )
+
+
+def test_both_runtime_exporters_walk_the_alternates():
+    """A candidates mechanism whose exporters do not consume it is dead config:
+    the zsh export and the env.js hook would resolve every handle to its primary
+    alone, and on the laptop NAIDA would export a path that does not exist.
+
+    Pinned on both generator SOURCES (they are nix, not evaluable as text
+    here) for the candidate loop / else-if chain, and the BEHAVIOURAL half is
+    the post-switch check: the generated `.zshenv` carries the `for _h` loop
+    and the generated env.js the `else if` chain. Source-only pins fail loudly
+    the day someone rewrites either generator without the loop.
+    """
+    zsh = ZSH_NIX.read_text()
+    assert "alternates" in zsh and "exportFirst" in zsh and "for _h in" in zsh, (
+        "programs/zsh no longer walks agent-handles.nix's alternates — "
+        "host-divergent handles would export their primary (or nothing) on "
+        "every host, silently"
+    )
+    nix = HOME_NIX.read_text()
+    assert "alternates" in nix and "else if (" in nix, (
+        "home.nix's env.js generator no longer walks alternates — the opencode "
+        "bash tool would resolve every handle to its primary alone"
     )
 
 

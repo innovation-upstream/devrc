@@ -176,7 +176,7 @@ _EXPECTED_ORPHAN_WARNING = (
 #: exists: the checkout is gone everywhere, so no host has the handle set, and
 #: dropping `--prune` leaves the rows. Two handles, in `REPO_ENV_HANDLES` order.
 _EXPECTED_PRUNE_CONFIG_REFUSAL = (
-    "REFUSING --rebuild --prune: 2 of 5 repo handle(s) are UNSET — $DATAPACKET, "
+    "REFUSING --rebuild --prune: 2 of 6 repo handle(s) are UNSET — $DATAPACKET, "
     "$CIVITAI. --prune deletes every stored label THIS config does not name, "
     "which is only sound if this config is as wide as the corpus; an unset "
     "handle narrows it SILENTLY (the repo produces no derivation at all, so it "
@@ -3604,7 +3604,7 @@ class TestARetiredRepoIsToldTheOneRemedyThatWorks:
         against the tuple first: adding a handle legitimately changes "2 of 4",
         and a bare string mismatch would send the next reader hunting a prose
         change that never happened."""
-        assert len(hi.REPO_ENV_HANDLES) == 5, (
+        assert len(hi.REPO_ENV_HANDLES) == 6, (
             "REPO_ENV_HANDLES changed size — update the '2 of N' literal in "
             "_EXPECTED_PRUNE_CONFIG_REFUSAL, and re-read it: the message names "
             "the handles by value too."
@@ -3685,7 +3685,8 @@ class TestARetiredRepoIsToldTheOneRemedyThatWorks:
         rc = hi.main(["--rebuild", "--write"], open_store=_refusing_store())
         err = capsys.readouterr().err
         assert rc == hi.RC_REFUSED
-        assert "ALL 5 repo(s) came back UNMEASURED" in err
+        assert (f"ALL {len(hi.REPO_ENV_HANDLES)} repo(s) came back UNMEASURED"
+                in err)
         assert "Fix the repo handles — in THIS state that is the only remedy" in err
         assert "writes 0 row(s) and exits 0" in err
         # The retracted remedy must not survive anywhere in the message.
@@ -3860,7 +3861,11 @@ class TestThePlanDescribesTheRunThatActuallyHappens:
             "the plan promises the row count BELOW it; printing it after would "
             "make the sentence false in the run it is true of"
         )
-        assert "(after DELETE of 6 repo label(s)" in out
+        # 🔴 DERIVED FROM THE TUPLE, never a literal count — this was "6" as
+        # `len(REPO_ENV_HANDLES) + 1` (5 measured + wibbleton-retired) and the
+        # sixth handle silently invalidated it.
+        assert (f"(after DELETE of {len(hi.REPO_ENV_HANDLES) + 1} repo label(s)"
+                in out)
 
     def test_a_PASSING_dry_run_still_prints_the_plan(self, tmp_path, capsys):
         """The other half of the control: the pre-flight `nix/home.nix` tells an
