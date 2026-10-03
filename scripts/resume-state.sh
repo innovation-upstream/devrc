@@ -3,8 +3,10 @@
 #
 # Given one handoff doc (an initiative), it reconciles the doc's claims against
 # FRESH live state and emits a compact digest: SKILL, GIT/PR, WORKLOAD, ALERTS,
-# DRIFT. (SKILL answers a different question from the rest — "are the
-# INSTRUCTIONS I am executing current?" — see skill_block.)
+# BUDGET, DRIFT. (SKILL answers a different question from the rest — "are the
+# INSTRUCTIONS I am executing current?" — see skill_block. BUDGET answers a
+# third: "how many bytes may this session WRITE before the handoff refuses?",
+# which every other mechanism only answers at write time — see budget_block.)
 # On-demand (never cached — resume must see reality, not a stale snapshot),
 # scoped to just this initiative's slice (standup.sh already covers the fleet).
 #
@@ -1010,6 +1012,20 @@ default_branch(){
   printf '%s' "$db"
 }
 
+# 🔴 THE REPO-RELATIVE PATH OF `$HANDOFF`, ASKED OF GIT. ONE RULE, ONE PLACE:
+# `handoff_freshness` needs it to name the doc at a ref, and `budget_block` needs
+# it as the key `handoff_budget`'s ledger is keyed on. Two open-coded copies is
+# how they come to disagree, and the disagreement here is not cosmetic — a
+# fabricated `claudedocs/<basename>` would resolve a DIFFERENT document's
+# grandfathered allowance for a doc that merely shares its basename.
+#
+# Empty output means "git does not track this path", which is a real and
+# different answer from "the repo-relative path is ''" — each caller decides what
+# to do with it rather than this function guessing.
+handoff_tracked_relpath(){ # $1 = repo dir
+  git -C "$1" ls-files --full-name --error-unmatch -- "$HANDOFF" 2>/dev/null
+}
+
 handoff_freshness(){
   [ -n "$HANDOFF" ] || return 0
   HANDOFF_TEXT=$(cat "$HANDOFF")
@@ -1030,7 +1046,7 @@ handoff_freshness(){
   [ -n "$db" ] || { HANDOFF_NOTE="${HANDOFF_NOTE}working-tree copy — origin freshness UNCHECKED (no origin/<default-branch> ref)"; return 0; }
 
   local rel
-  rel=$(git -C "$d" ls-files --full-name --error-unmatch -- "$HANDOFF" 2>/dev/null)
+  rel=$(handoff_tracked_relpath "$d")
   if [ -z "$rel" ]; then
     HANDOFF_NOTE="${HANDOFF_NOTE}working-tree copy — untracked here, nothing on origin/$db to compare"; return 0
   fi
@@ -2287,6 +2303,131 @@ dod_block(){
   echo "     not another round of this one."
 }
 
+# BUDGET — how many bytes this session has left BEFORE it composes anything
+#
+# 🔴 WHY IT IS IN THE DIGEST AT ALL. Every other way a session learns its handoff
+# budget happens at WRITE time: `budget_warning` speaks once the text is already
+# composed, and rule (p) REFUSES there (`size-ratchet`, exit 14). The session then
+# does a SECOND pass to prune or evict, and that second pass is the token cost the
+# operator kept reporting. This block moves the number to the front of the run.
+# Widening the warning band (#1996) shortens the surprise; it does not remove it,
+# because the band is still only reached by writing.
+#
+# 🔴 IT RETYPES NO NUMBER AND DERIVES NO THRESHOLD. `handoff_budget_probe.py` owns
+# the arithmetic and reads `MAX_BYTES`, the ledger and the band from the modules
+# the warning itself reads. This function formats and channels; if you find
+# yourself adding a byte figure here, that is the second copy.
+#
+# ⚠ WHAT IT SIZES IS `$HANDOFF_TEXT`, THE COPY `handoff_freshness` CHOSE — the
+# same rule as `dod_block` and for the same measured reason. Sizing the file on
+# disk would report a budget for a copy this digest did not read, on exactly the
+# stale-branch path `handoff_freshness` exists to catch. `printf '%s\n'` restores
+# the single trailing newline command substitution strips: measured byte-identical
+# to the on-disk size on four real docs spanning 57,526–184,960 B, grandfathered
+# and not.
+budget_block(){
+  echo "BUDGET"
+  if [ -z "$HANDOFF" ]; then
+    echo "  (no handoff — no document to budget)"
+    return
+  fi
+  local probe rel out rc
+  probe="$(dirname "${BASH_SOURCE[0]}")/lib/handoff_budget_probe.py"
+  if [ ! -f "$probe" ]; then
+    # Named, not implied: a missing probe is a source that did not answer.
+    echo "  ! cannot size this doc — no $probe"
+    UNRECONCILED+=("handoff BUDGET unknown: $probe is missing, so this run did not measure the doc against its ceiling")
+    return
+  fi
+  # 🔴 THE KEY IS THE REPO-RELATIVE PATH, ASKED OF GIT — never built from the
+  # basename. `handoff_ref_for_exclusion` is the wrong source here even though it
+  # looks right: it yields the path from `claudedocs/` DOWN, so re-prefixing it
+  # fabricates `claudedocs/<basename>` for a doc that lives ANYWHERE else, and
+  # the ledger would then hand this document another one's grandfathered
+  # allowance on a basename collision. Three sources, in descending authority:
+  #   1. `$HANDOFF_REL` — set when the text came from a ref, where it IS the
+  #      path git resolved for that ref. The text we size is that copy, so its
+  #      path is the one to key on.
+  #   2. git's own answer for the working-tree file.
+  #   3. the `$REPO/` prefix stripped, for a doc git does not track yet — which
+  #      is an ordinary case (`handoff_freshness` prints "untracked here").
+  rel="$HANDOFF_REL"
+  [ -n "$rel" ] || rel=$(handoff_tracked_relpath "$REPO")
+  if [ -z "$rel" ]; then
+    case "$HANDOFF" in
+      "$REPO"/*) rel="${HANDOFF#"$REPO"/}" ;;
+      # Outside the repo entirely: no relpath exists, so no ledger key does.
+      # Say that rather than invent one.
+      *) echo "  ! cannot size this doc: $HANDOFF is not inside $REPO, so it has no repo-relative ledger key"
+         UNRECONCILED+=("handoff BUDGET unknown: $HANDOFF lies outside $REPO, so this run could not key it against the ceiling ledger")
+         return ;;
+    esac
+  fi
+  out=$(printf '%s\n' "$HANDOFF_TEXT" | python3 "$probe" "$REPO" "$rel" 2>&1)
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    # NOT a gap — see the probe's own exit-code comment. A fact about the
+    # document, in the document's block, in its own words.
+    echo "  (no size budget governs this document — it is not a claudedocs/**/handoff-* doc)"
+    return
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "  ! cannot size this doc: ${out:-python3 exited $rc with no message}"
+    UNRECONCILED+=("handoff BUDGET unknown: $probe exited $rc (${out:-no message}), so this run did not measure the doc against its ceiling")
+    return
+  fi
+  # 🔴 THE DISPLAY STRINGS COME FROM THE PROBE, NOT FROM `printf "%'d"`, WHICH IS
+  # LOCALE-DEPENDENT — see the probe's own note. The shell interpolates; it does
+  # not format numbers.
+  local bytes_fmt allowance_fmt headroom_fmt band_fmt over_by_fmt
+  local grandfathered gated zone k v
+  while IFS=$'\t' read -r k v; do
+    case "$k" in
+      bytes_fmt) bytes_fmt="$v" ;; allowance_fmt) allowance_fmt="$v" ;;
+      headroom_fmt) headroom_fmt="$v" ;; band_fmt) band_fmt="$v" ;;
+      over_by_fmt) over_by_fmt="$v" ;;
+      grandfathered) grandfathered="$v" ;; gated) gated="$v" ;;
+      zone) zone="$v" ;;
+    esac
+  done <<<"$out"
+  local which="the handoff-document ceiling"
+  [ "$grandfathered" = yes ] && which="its grandfathered allowance"
+  # The headroom clause flips rather than printing a NEGATIVE headroom: "-4,472 B
+  # of headroom" is arithmetically right and reads as a typo, and this line is
+  # the one a session acts on.
+  local room="$headroom_fmt B of headroom"
+  [ "$zone" = over ] && room="OVER BY $over_by_fmt B"
+  printf '  %s: %s B of %s B (%s) — %s, warning band %s B\n' \
+    "$(handoff_ref_for_exclusion "$HANDOFF")" \
+    "$bytes_fmt" "$allowance_fmt" "$which" "$room" "$band_fmt"
+  # 🔴 THE REFUSAL CLAIM IS UNCONDITIONAL AND THE RED-TEST CLAIM IS NOT, and
+  # getting that backwards is the civitai/cli#618 shape. Rule (p) refuses growth
+  # past the allowance AT WRITE TIME IN ANY REPO (`handoff_budget`'s module
+  # docstring says so); only `test_no_handoff_doc_exceeds_its_budget` going red
+  # for everyone is devrc-only, because that test enumerates its OWN tree.
+  local redclause=""
+  [ "$gated" = yes ] && redclause=" and \`test_no_handoff_doc_exceeds_its_budget\` is RED for everyone until it is back under"
+  case "$zone" in
+    over)
+      echo "  🔴 OVER BUDGET. Rule (p) REFUSES any update that GROWS this doc"
+      echo "     (\`size-ratchet\`, exit 14)${redclause}."
+      echo "     Clear it BEFORE composing: \`--prune\`, \`--archive-write\` or"
+      echo "     \`--autoevict\`; a net-<=-0 delta also lands, and"
+      echo "     \`--override-size-ratchet \"<why>\"\` always does, on the record."
+      DRIFT+=("handoff doc is OVER its budget ($bytes_fmt B against $which of $allowance_fmt B) — rule (p) refuses any GROWING update (size-ratchet, exit 14); evict or prune BEFORE composing this round's append, not after the refusal")
+      ;;
+    band)
+      echo "  ⚠ INSIDE the warning band — a routine append can land this over, and"
+      echo "     the refusal arrives AFTER the text is composed. Budget the round now:"
+      echo "     evict what has CLOSED, or plan a \`--prune\`/\`--archive-write\` pass."
+      DRIFT+=("handoff doc is INSIDE its warning band ($headroom_fmt B of headroom against a $band_fmt B band) — decide what to evict BEFORE composing this round's append; rule (p) refuses a growing update once it is over")
+      ;;
+    *)
+      echo "  ✅ clear of the warning band."
+      ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 
 # Gaps are the thing a reader skips. They used to print as bare `  ! …` lines
@@ -2317,6 +2458,10 @@ main(){
   alerts_block
   clawgate_block
   investigations_block
+  # BEFORE `dod_block`, which is LAST by its own rule. This block is about what
+  # the session may WRITE rather than what it has found, so it belongs after the
+  # findings and in front of the closing question.
+  budget_block
   # LAST of the blocks, deliberately: it is the question every other block's
   # findings feed into ("given all that, is this arc finished?"), and it is the
   # line the reader should still have in view when they reach DRIFT.

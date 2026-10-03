@@ -2983,7 +2983,42 @@ def dropped_durable_report(dropped: typing.Sequence[DroppedDurable]) -> str:
 #
 # ⚠ IT IS NOT THE AUTHORITY. The gate reads the file on disk; this reads the text
 # about to be written. They agree today and the test is what fails.
-BUDGET_NEAR_BYTES = 4_096
+#
+# 🔴 THE BAND IS DERIVED, AND THE DERIVATION IS THE WHOLE POINT: IT MUST BE AT
+# LEAST ONE p90 APPEND WIDE, OR IT CANNOT FIRE BEFORE THE REFUSAL FOR MOST
+# WRITES. It was a bare `4_096` from #1648 until #1996, with the comment above
+# justifying only why the warning does not REFUSE and nothing justifying the
+# number — and 4,096 B is NARROWER THAN THE MEDIAN THING IT WARNS ABOUT, so a
+# routine append entering the band jumped clean over it and the first signal the
+# session got was rule (p)'s refusal (`size-ratchet`, exit 14) AFTER it had
+# already composed the content. The second pass to prune or evict is the cost.
+#
+# MEASURED on this tree at 3e7725bc, over `git log origin/main -300 --numstat --
+# claudedocs/`: 300 commits touched `claudedocs/`, 285 touched a `handoff-*.md`
+# and 242 GREW one. Net lines added per growing commit: median 66, mean 88.3,
+# p90 193. Calibrated at 80.47 B/line (3,783,616 B over 47,018 lines across the
+# 108 top-level `claudedocs/handoff-*.md`). So an append is ~5,311 B at the
+# median, ~7,105 B at the mean and ~15,531 B at p90 — and the old band admitted
+# none of them: bisected empirically, the first size at which this function said
+# ANYTHING was 61,441 B, i.e. 93.75% of the ceiling.
+#
+# RE-DERIVE with the `git log` command above plus the bytes-per-line calibration
+# (`cat claudedocs/handoff-*.md | wc -c` over `… | wc -l`). The numbers live HERE
+# and nowhere else; `test_the_warning_band_is_at_least_one_p90_append` pins the
+# RELATIONSHIP rather than restating them, which is what keeps this comment from
+# becoming the second copy that drifts.
+#
+# 🔴 IT IS `GRANDFATHER_STEP` RATHER THAN A NEW CONSTANT, AND THAT COUPLING IS
+# DELIBERATE: 16,384 is already the quantum an allowance is rounded up to, it is
+# already ≈ the measured p90 (15,531 B), and a second magic number here is how
+# the two come to disagree. First warning therefore moves to 49,153 B = 75% of
+# the ceiling, which admits the p90 append with 853 B to spare.
+# ⚠ SCOPE: the step is NOT defined as the p90 and could be changed for its own
+# reasons. The relationship test is what fails if that ever makes the band too
+# narrow — do not read this line as a guarantee that the step tracks the corpus.
+# ⚠ AND IT STILL ONLY WARNS. Widening the band changes WHEN this speaks, never
+# whether it refuses; the deadlock argument above is untouched.
+BUDGET_NEAR_BYTES = handoff_budget.GRANDFATHER_STEP
 
 
 # The ceiling gate's population is the tree that CONTAINS it: its own
