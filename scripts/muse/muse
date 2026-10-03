@@ -89,7 +89,10 @@ muse — dispatch/poll the user's Muse agent; cluster status via muse-bridge.
                                    once).
   muse threads                                      the B1 thread list (JSON: Main
                                    chat + side chats, with unread/active flags)
-  muse status [ns|nodes|workloads <ns>|flux <ns>]   CLUSTER snapshot (A)
+  muse status [<ns>|health|nodes|pods <ns>|workloads <ns>|flux <ns>]
+                                   CLUSTER snapshot (A). A bare <ns> is
+                                   shorthand for `pods <ns>`; no argument is
+                                   `health`.
   muse vm                                           Muse VM/session status (B2)
   muse auth [export|...]                            muse-cli auth passthrough
   muse b1                                           the browser-flow recipe
@@ -644,23 +647,33 @@ cmd_status() {
       pods)      what="pods"; [ $# -gt 1 ] && ns="$2" ;;
       workloads) what="workloads"; [ $# -gt 1 ] && ns="$2" ;;
       flux)      what="flux"; [ $# -gt 1 ] && ns="$2" ;;
-      # A bare word that is not a verb is REINTERPRETED as a namespace, so
-      # `muse status pdos` is a pods query for ns=pdos.
+      # A bare first word that is not a verb is read as a NAMESPACE, i.e.
+      # `muse status <ns>` is shorthand for `muse status pods <ns>`.
       #
-      # 🔴 THIS WARNS HERE, AT PARSE TIME, AND NOT INSIDE THE 400 HANDLER —
-      # because the reinterpretation is silent on EVERY outcome, not just the
-      # refused one. An earlier version of this fix only spoke when the bridge
-      # answered 400, which left `muse status muse` (a mistyped verb that
-      # happens to name an ALLOWLISTED namespace) querying pods in ns=muse,
-      # answering 200, and saying nothing — the exact case #1972 reported,
-      # while the test covering it read as though the whole finding was closed.
-      # Found by #1993's round-0 audit. Warning before the request is sent is
-      # also the only placement that cannot depend on the response at all.
+      # 🔴 THIS STATES WHAT IT DID; IT DOES NOT CALL IT A MISTAKE. An earlier
+      # version of this fix printed "`<x>` is NOT A VERB", which scolded the
+      # wrapper's OWN DOCUMENTED form — usage() advertises the bare `<ns>`
+      # FIRST, and the SKILL.md paragraph this change adds calls it a
+      # supported fallthrough. So every correct `muse status flux-system`
+      # reported itself as a typo, and a test pinned that as desired. Found by
+      # #1993's round-1 audit. A permanent scold on the happy path is the
+      # permanently-red-gate shape: it gets trained through, and then it is
+      # there for nothing.
+      #
+      # 🔴 AND A TYPO IS INDISTINGUISHABLE FROM THE SHORTHAND HERE — both land
+      # in this arm and neither can be told from the other, so the only honest
+      # thing to print is the INTERPRETATION, with the verb list as a hint.
+      # This still discharges #1972 (the reinterpretation is no longer silent)
+      # without asserting which of the two happened.
+      #
+      # It prints at PARSE time, before the request: the reinterpretation is
+      # silent on EVERY outcome, not just a refused one, so keying it to a
+      # status code left `muse status muse` answering 200 in silence.
       *)
         what="pods"; ns="$1"
-        printf 'muse: `%s` is NOT A VERB, so it was read as a NAMESPACE —\n' "$1" >&2
-        printf '      querying pods in ns=%s. The verbs are: health nodes pods\n' "$1" >&2
-        printf '      workloads flux.\n' >&2
+        printf 'muse: reading `%s` as a NAMESPACE — querying pods in ns=%s.\n' "$1" "$1" >&2
+        printf '      (`muse status <ns>` is shorthand for `pods <ns>`. If you\n' >&2
+        printf '      meant a verb: health nodes pods workloads flux.)\n' >&2
         ;;
     esac
   fi
@@ -687,9 +700,16 @@ cmd_status() {
   # header at all — also measured. Do not "simplify" back to either form.
   #
   # The response is CAPTURED rather than streamed so the status branch below can
-  # read the code. The body is reprinted verbatim and `-w` still appends
-  # `[<code>]`, so anything parsing either is unaffected; the only change is
-  # that output arrives at once instead of as it lands (bounded by -m 15).
+  # read the code. Two observable differences, both measured, neither of which
+  # an earlier version of this comment admitted:
+  #   1. output arrives at once rather than as it lands (bounded by -m 15);
+  #   2. stdout gains a TRAILING NEWLINE. `curl -w '\n[%{http_code}]'` emits no
+  #      final newline; `printf '%s\n'` adds one. Verified with `cat -A`, base
+  #      vs head. The comment here used to claim "anything parsing either is
+  #      unaffected", which was false — and the invariant guard asserts through
+  #      `.rstrip()`, so it was blind in both directions. There is no machine
+  #      consumer today (`git grep` finds only SKILL.md's `$M status`), so this
+  #      is recorded as a behaviour change rather than fixed back.
   local out
   out=$(printf 'Authorization: Bearer %s\n' "$token" \
     | curl -sS -m 15 -H @- "$url" -w '\n[%{http_code}]') || rc=$?
@@ -730,12 +750,11 @@ cmd_status() {
       # blamed for a refusal it could not have caused.
       if [ "$sent_ns" -eq 1 ]; then
         printf 'muse: 400 is a POLICY ANSWER, not an outage — ns=%s was REFUSED.\n' "$ns" >&2
-        printf '  The allowlist is SERVER-side and deliberately undisclosed:\n' >&2
-        printf '  MUSE_BRIDGE_NS_ALLOW on the muse-bridge Deployment, REPLACING a\n' >&2
-        printf '  compiled default of `muse`. 🔴 Widening it is a cluster security\n' >&2
-        printf '  change, not a client fix — the bridge holds ClusterRole-wide read\n' >&2
-        printf '  and this is its ONLY namespace boundary. See the body above for\n' >&2
-        printf '  which half refused, and claude/skills/muse/SKILL.md for the rest.\n' >&2
+        printf '  The served set is SERVER-side (MUSE_BRIDGE_NS_ALLOW on the\n' >&2
+        printf '  muse-bridge Deployment) and the bridge does not disclose it.\n' >&2
+        printf '  🔴 Widening it is a cluster security change, not a client fix.\n' >&2
+        printf '  The body above says which half refused; see\n' >&2
+        printf '  claude/skills/muse/SKILL.md for the rest.\n' >&2
       fi
       ;;
   esac

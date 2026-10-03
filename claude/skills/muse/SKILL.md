@@ -76,7 +76,8 @@ $M send "<task>" [--wait 180] [--force] [--cli] # dispatch + await reply (JSON)
 $M send "<task>" --thread "<name>"               # dispatch into a SIDE CHAT (routed)
 $M poll [--cli] [--limit N] [--thread "<name>"]  # latest assistant turn (NO --wait)
 $M threads                                       # B1 thread list (JSON: Main + side chats)
-$M status [ns|nodes|workloads <ns>|flux <ns>]    # CLUSTER snapshot (bridge; default ns muse)
+$M status [<ns>|health|nodes|pods <ns>|workloads <ns>|flux <ns>]  # CLUSTER snapshot
+#   bare <ns> == `pods <ns>`; no argument == `health`
 $M vm                                            # Muse VM/session status (muse-cli)
 $M auth export                                   # B2 one-time cookie export (steps on failure)
 $M b1                                            # the full B1 recipe
@@ -165,15 +166,18 @@ whose poll cadence is ~12.7 s.
 with the sops bearer token (`clusters/homelab/apps/muse/` in the homelab repo;
 age key at `.secrets/age.key`). The token is decrypted per call and **never
 printed**. 401 = token rejected (expected without one); 404 = route gone.
-🔴 **400 is a POLICY ANSWER, and every ns but `muse` gets one.** Since
-homelab-infra #942/#944 (2026-10-02, startup line `ns-allow=muse`) the bridge
-serves an allowlisted namespace set, so `status pods <ns>`, `workloads <ns>`,
-`flux <ns>` and the bare `status <ns>` fallthrough all answer 400 outside it —
-the server being right, not a broken CLI. The list is server-side
-(`MUSE_BRIDGE_NS_ALLOW` on the Deployment, REPLACING a compiled default of
-`muse`) and deliberately undisclosed, so widening it is a cluster security
-change. ⚠ **`status` exits 0 on 400/401/404/5xx alike** — the code is printed,
-never returned, so a caller branching on exit status reads a denial as success.
+🔴 **400 is a POLICY ANSWER, not a broken CLI.** Since homelab-infra #942/#944
+(2026-10-02) the bridge serves only an allowlisted set of namespaces, so
+`status pods <ns>`, `workloads <ns>`, `flux <ns>` and the bare `status <ns>`
+shorthand all answer 400 for anything outside it — the server being right.
+**Read the startup line for the set actually served**
+(`kubectl -n muse logs deploy/muse-bridge | head -1` → `ns-allow=…`); it is
+server-side (`MUSE_BRIDGE_NS_ALLOW` on the Deployment) and the bridge
+deliberately does not disclose it in a response, so do not hardcode it here —
+this paragraph named a value and would have gone stale the moment the set
+widened. Widening it is a cluster security change, not a client fix.
+⚠ **`status` exits 0 on 400/401/404/5xx alike** — the code is printed, never
+returned, so a caller branching on exit status reads a denial as success.
 Connector (Muse side): `custom.homelab-bridge`, wired + live-tested 2026-10-01 —
 Muse answers "what pods are running in ns muse" through it; its approval
 defaults are "Ask for some actions" and the API is GET-only, so the whole

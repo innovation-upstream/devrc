@@ -699,8 +699,13 @@ def test_a_disallowed_namespace_is_explained_as_policy_not_a_typo(status_env):
     the operator saw a bare error body and read a POLICY DENIAL as a typo.
     """
     env = {**status_env, "STUB_CODE": "400",
-           "STUB_BODY": '{"error":"namespace not served: this bridge is '
-                        'restricted to an allowlist"}'}
+           # 🔴 THE `[]` IS LOAD-BEARING, NOT DECORATION. Every 400 fixture
+        # here used to be `{"error":...}` with no `[`, so `${out##*\[}` and
+        # `${out#*\[}` produced the SAME answer and the non-greedy mutant
+        # survived all 33 tests -- while against a real body
+        # (`{"items":[...],"count":N}`) it yields garbage and the 400
+        # explanation never prints at all. Found by #1993's round-1 audit.
+        "STUB_BODY": '{"error":"namespace not served","detail":["allowlist"]}'}
     proc = run(env, "status", "pods", "flux-system")
 
     assert "POLICY ANSWER" in proc.stderr, (
@@ -736,10 +741,10 @@ def test_a_nonverb_first_word_is_named_as_a_namespace_guess(status_env, code):
     while its body inspects one side reads as coverage and provides none.
     """
     env = {**status_env, "STUB_CODE": code,
-           "STUB_BODY": '{"error":"namespace not served"}'}
+           "STUB_BODY": '{"error":"namespace not served","detail":["x"]}'}
     proc = run(env, "status", "pdos")
 
-    assert "NOT A VERB" in proc.stderr, (
+    assert "as a NAMESPACE" in proc.stderr, (
         f"a mistyped verb went unreported on HTTP {code}. The reinterpretation "
         "is silent on every outcome, not just the refused one, so the warning "
         f"cannot be keyed to a status code. stderr={proc.stderr!r}"
@@ -763,7 +768,7 @@ def test_a_mistyped_verb_that_names_an_allowlisted_namespace_still_warns(status_
     env = {**status_env, "STUB_CODE": "200", "STUB_BODY": '{"items":[],"count":0}'}
     proc = run(env, "status", "muse")
 
-    assert "NOT A VERB" in proc.stderr, (
+    assert "as a NAMESPACE" in proc.stderr, (
         "`muse status muse` silently became a pods query for ns=muse -- a 200 "
         "with no indication the word was not a verb. This is #1972's original "
         f"finding. stderr={proc.stderr!r}"
@@ -777,11 +782,11 @@ def test_an_explicit_verb_is_not_reported_as_a_verb_typo(status_env):
     tell the operator `flux-system` is not a verb on every refusal.
     """
     env = {**status_env, "STUB_CODE": "400",
-           "STUB_BODY": '{"error":"namespace not served"}'}
+           "STUB_BODY": '{"error":"namespace not served","detail":["x"]}'}
     proc = run(env, "status", "workloads", "flux-system")
 
     assert "POLICY ANSWER" in proc.stderr, "the policy branch stopped firing"
-    assert "NOT A VERB" not in proc.stderr, (
+    assert "as a NAMESPACE" not in proc.stderr, (
         "`workloads` IS a verb and was reported as a mistyped one"
     )
 
@@ -792,7 +797,7 @@ def test_an_explicit_verb_is_not_reported_as_a_verb_typo(status_env):
     for args in (("status",), ("status", "health"), ("status", "nodes"),
                  ("status", "pods", "muse")):
         proc = run(ok, *args)
-        assert "NOT A VERB" not in proc.stderr, (
+        assert "as a NAMESPACE" not in proc.stderr, (
             f"`muse {' '.join(args)}` uses only real verbs and was reported as "
             f"a mistyped one. stderr={proc.stderr!r}"
         )
@@ -815,7 +820,7 @@ def test_a_route_that_sends_no_ns_is_not_blamed_on_the_allowlist(status_env, ver
     body and code on stdout -- which is what makes the silence meaningful.
     """
     env = {**status_env, "STUB_CODE": "400",
-           "STUB_BODY": '{"error":"something else"}'}
+           "STUB_BODY": '{"error":"something else","detail":["y"]}'}
     proc = run(env, "status", verb)
 
     # PRECONDITION: the request actually happened and returned 400.
@@ -884,3 +889,109 @@ def test_the_status_exit_code_is_unchanged_by_the_400_branch(status_env):
             f"{proc.returncode}; if that is intended, M3 is being fixed and "
             "this guard plus the header legend must move together"
         )
+
+
+def test_the_status_code_is_read_from_the_LAST_bracket_not_the_first(status_env):
+    """REGRESSION for a mutant that SURVIVED a fully green 33-test suite.
+
+    `cmd_status` extracts the code with `${out##*\\[}` -- the LAST `[`. Every
+    400 fixture in this module used to be `{"error":...}`, which contains no
+    `[` at all, so `##` and `#` produced identical answers and nothing could
+    tell them apart. Against a REAL bridge body the single-`#` form yields
+    `], "count":0}\\n[400` and the 400 explanation never prints -- i.e. a
+    one-character change silently disables the feature this PR exists to add.
+
+    🔴 The body here is shaped like a real one ON PURPOSE: a JSON array before
+    the `-w` suffix is what makes greedy and non-greedy observably different.
+    `claude/RULES.md`: pick fixtures distinct from any constant the assertion
+    names, then feed a value the constant CANNOT equal and watch the output
+    move. Found by #1993's round-1 audit.
+    """
+    env = {**status_env, "STUB_CODE": "400",
+           "STUB_BODY": '{"items":[{"name":"muse-bridge-0"}],"count":1}'}
+    proc = run(env, "status", "pods", "kube-system")
+
+    assert "POLICY ANSWER" in proc.stderr, (
+        "the 400 branch did not fire on a body containing a JSON array, so the "
+        "status code was not read from the LAST bracket. A real response always "
+        f"looks like this. stderr={proc.stderr!r}"
+    )
+    # ...and the body still reaches stdout intact.
+    assert '"name":"muse-bridge-0"' in proc.stdout
+
+
+def test_the_documented_bare_ns_shorthand_is_not_reported_as_an_error(status_env):
+    """REGRESSION: `muse status <ns>` is DOCUMENTED, so it must not read as a typo.
+
+    `usage()` advertises the bare `<ns>` form and SKILL.md calls it shorthand.
+    An earlier version of this fix printed "`<x>` is NOT A VERB" there, so every
+    correct `muse status flux-system` reported itself as a mistake -- and the
+    test covering it pinned that as desired, which is how a reader stops being
+    able to tell the false positive from a defect. Found by #1993's round-1
+    audit.
+
+    The notice must still SAY what happened (#1972: the reinterpretation was
+    silent), so this asserts the interpretation is reported WITHOUT
+    error/typo framing. A typo and the shorthand are indistinguishable here --
+    both land in the same arm -- so claiming either one is unsupportable.
+    """
+    env = {**status_env, "STUB_CODE": "200", "STUB_BODY": '{"items":[],"count":0}'}
+    proc = run(env, "status", "flux-system")
+
+    # It reports the interpretation...
+    assert "as a NAMESPACE" in proc.stderr, (
+        "the reinterpretation went unreported, which is the silence #1972 "
+        f"reported. stderr={proc.stderr!r}"
+    )
+    assert "flux-system" in proc.stderr
+    # ...and names the shorthand, so the reader knows it is supported.
+    assert "shorthand" in proc.stderr
+    # ...but does NOT call a documented form a mistake.
+    for scold in ("NOT A VERB", "not a verb", "invalid", "unknown", "typo",
+                  "did you mean", "error"):
+        assert scold not in proc.stderr, (
+            f"the documented `muse status <ns>` shorthand was reported with "
+            f"{scold!r} -- a permanent scold on the happy path gets trained "
+            f"through. stderr={proc.stderr!r}"
+        )
+
+
+def test_usage_and_the_namespace_notice_agree_on_the_verb_set():
+    """SEAM GUARD: two hand-maintained verb lists, in different files.
+
+    `usage()` advertises the `status` sub-verbs and the parse-time notice lists
+    them again as a hint. They disagreed on merge of the first fix -- usage()
+    named neither `pods` nor `health` -- and nothing compared them, because
+    `test_usage_advertises_no_flag_the_parser_ignores` is `poll`-scoped.
+
+    🔴 Pinned against the PARSER, which is the only thing that decides what a
+    verb actually is, so this fails when ANY of the three drifts -- the parser
+    growing a verb neither list mentions included.
+    """
+    source = source_without_comments()
+
+    # The parser's own case arms inside cmd_status: the authority.
+    body = source.split("cmd_status()", 1)[1].split("cmd_setup", 1)[0]
+    arms = body.split("esac", 1)[0]
+    parser_verbs = set(re.findall(r"^\s{6}(\w+)\)", arms, re.M))
+    assert parser_verbs, "could not read the parser's verbs -- re-anchor this guard"
+
+    notice = re.search(r"meant a verb: ([a-z ]+)\.", source)
+    assert notice, "the parse-time notice no longer lists the verbs"
+    notice_verbs = set(notice.group(1).split())
+
+    usage_line = re.search(r"muse status \[([^\]]*)\]", source)
+    assert usage_line, "usage() no longer advertises the status verbs"
+    usage_verbs = {w.strip("<>") for w in re.split(r"[|]", usage_line.group(1))}
+    usage_verbs = {w.split()[0] for w in usage_verbs if w.strip()}
+
+    assert parser_verbs == notice_verbs, (
+        f"the parser accepts {sorted(parser_verbs)} but the notice lists "
+        f"{sorted(notice_verbs)} -- the hint sends the reader to a verb that "
+        "does not exist, or omits one that does"
+    )
+    # usage() additionally carries the bare `<ns>` shorthand, which is not a verb.
+    assert parser_verbs <= usage_verbs, (
+        f"usage() omits status verb(s) {sorted(parser_verbs - usage_verbs)} -- "
+        "the first fix shipped with `pods` and `health` undocumented"
+    )
