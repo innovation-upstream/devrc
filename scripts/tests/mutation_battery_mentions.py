@@ -775,8 +775,11 @@ MUTANTS += [
     ("K80", "deletion", "a click with NO range table reports the class "
                         "`unknown` instead of omitting it — \"could not ask\" "
                         "collapses into \"asked, no answer\"",
-     "                    if picked_repo and order_ranges and picked_ordered else None)\n",
-     "                    if picked_repo else None)\n",
+     # ⚠ RE-ANCHORED when the gate was named: the predicate used to be spelled
+     # inline on `picked_class`'s own line, and is now the single
+     # `_picked_measurable` three readers share. Same condition, one place.
+     "    _picked_measurable = bool(picked_repo and order_ranges and picked_ordered)\n",
+     "    _picked_measurable = bool(picked_repo)\n",
      "claims a measurement that did not happen"),
     ("K81", "narrowing", "`emit_click` stops swallowing — a telemetry failure "
                          "reaches `guarded_main` and turns a working click into "
@@ -787,15 +790,17 @@ MUTANTS += [
     ("K82", "operand swap", "the PICKER arm reports BEFORE the browser is "
                             "launched, so its ~3.7 ms import lands in front of "
                             "the thing the operator is waiting for",
-     # ⚠ RE-ANCHORED twice: once for the F2/F3 dims, once for `surface`. The
-     # whole block is the anchor, because a partial swap leaves `rc`/`surface`
-     # undefined and the row would die of a NameError — a kill for the wrong
-     # reason, which this battery counts as a problem.
+     # ⚠ RE-ANCHORED three times: once for the F2/F3 dims, once for `surface`,
+     # and once for `plausibility_premargin`. The whole block is the anchor,
+     # because a partial swap leaves `rc`/`surface` undefined and the row would
+     # die of a NameError — a kill for the wrong reason, which this battery
+     # counts as a problem.
      "    rc, surface = open_reference(url)\n"
      "    emit_click(CLICK_PICKED, repo=picked_repo, platform=picked_platform,\n"
      "               picker_shown=picker_was_shown(reason),\n"
      "               offered_total=len(candidates),\n"
      "               rank=picked_rank, plausibility=picked_class,\n"
+     "               plausibility_premargin=picked_class_premargin,\n"
      "               ordered=picked_ordered if picked_rank is not None else None,\n"
      "               pinned_above=pinned_above, reason=reason, surface=surface,\n"
      "               queried=queried, **order_dims)\n"
@@ -804,6 +809,7 @@ MUTANTS += [
      "               picker_shown=picker_was_shown(reason),\n"
      "               offered_total=len(candidates),\n"
      "               rank=picked_rank, plausibility=picked_class,\n"
+     "               plausibility_premargin=picked_class_premargin,\n"
      "               ordered=picked_ordered if picked_rank is not None else None,\n"
      "               pinned_above=pinned_above, reason=reason,\n"
      "               surface=CLICK_SURFACE_BROWSER,\n"
@@ -913,6 +919,92 @@ MUTANTS += [
                             "consumer reading it as an integer",
      '    CLASS_PLAUSIBLE: "plausible",\n', "    CLASS_PLAUSIBLE: 0,\n",
      "would ship as a number"),
+
+    # ---- F16: the STALENESS MARGIN's cap became the refresh interval, and the
+    #      click row grew the two dims that keep its own instrument readable.
+    #      Each row isolates the NARROWEST expression that can be wrong — the
+    #      `min` alone, the constant alone, one dim alone — so a kill cannot be
+    #      credited to a larger deletion that took a guard's enclosing condition
+    #      with it.
+    ("K93", "widening", "the margin stops being capped at ONE REFRESH INTERVAL "
+                        "and grows without bound with table age — at a day old "
+                        "it reaches 40, which PROMOTES the smallest measured "
+                        "wrong-repo gap (37) into PLAUSIBLE",
+     "    return math.ceil(min(age, REFRESH_INTERVAL_DAYS) * RANGE_GROWTH_PER_DAY)\n",
+     "    return math.ceil(age * RANGE_GROWTH_PER_DAY)\n",
+     "was promoted to PLAUSIBLE"),
+    ("K94", "operand swap", "the cap is applied to the PRODUCT rather than to "
+                            "the AGE — arithmetically identical today, and a "
+                            "different claim: it extrapolates growth across "
+                            "missed runs instead of refusing to guess",
+     "    return math.ceil(min(age, REFRESH_INTERVAL_DAYS) * RANGE_GROWTH_PER_DAY)\n",
+     "    return min(math.ceil(age * RANGE_GROWTH_PER_DAY),\n"
+     "               math.ceil(REFRESH_INTERVAL_DAYS * RANGE_GROWTH_PER_DAY) + 1)\n",
+     # ⚠ THE TOKEN WAS `STOPS at the ceiling` AND THAT SCORED
+     # KILLED-WRONG-REASON on the first sweep — the test whose NAME carries
+     # those words fails through a bare `assert x == y`, whose message pytest
+     # writes itself, so the phrase never reaches an `E ` line. The header
+     # warns about exactly this shape. The token below is verbatim from the
+     # CEILING test's headroom assertion, which is the message-carrying
+     # assertion this mutant trips: it lifts the cap by one, so the headroom
+     # reads 28 instead of 29. RE-RUN and confirmed KILLED(attributed).
+     "HEADROOM under the smallest measured wrong-repo gap"),
+    ("K95", "widening", "`REFRESH_INTERVAL_DAYS` stops tracking the unit and "
+                        "becomes a literal — the whole point of retiring "
+                        "`PLAUSIBLE_MARGIN_MAX` was that this constant cannot "
+                        "drift from `nix/home.nix` unnoticed",
+     "REFRESH_INTERVAL_DAYS = (\n"
+     "    (_REFRESH_PERIOD_SECONDS + _REFRESH_JITTER_SECONDS) / 86400.0)\n",
+     "REFRESH_INTERVAL_DAYS = 0.25\n",
+     "is supposed to BE the unit's period"),
+    ("K96", "deletion", "the JITTER stops counting toward the interval, so a "
+                        "table that is 4h10m old — perfectly on schedule — has "
+                        "its freshest references filed BELOW again",
+     "REFRESH_INTERVAL_DAYS = (\n"
+     "    (_REFRESH_PERIOD_SECONDS + _REFRESH_JITTER_SECONDS) / 86400.0)\n",
+     "REFRESH_INTERVAL_DAYS = _REFRESH_PERIOD_SECONDS / 86400.0\n",
+     "is supposed to BE the unit's period"),
+    ("K97", "deletion", "the `margin` dim is dropped from `order_dims`, so the "
+                        "telemetry records a class computed with a tolerance it "
+                        "no longer reports — the reader cannot tell how wide the "
+                        "classifier was when the row was written",
+     '    order_dims = ({"ordering": order_state, "margin": order_margin,\n',
+     '    order_dims = ({"ordering": order_state,\n',
+     "margin"),
+    ("K98", "operand swap", "the PRE-MARGIN class is computed with the SAME "
+                            "margin as the post-margin one, so the two fields "
+                            "always agree and the instrument that measured the "
+                            "defect is destroyed under a second name",
+     "    picked_class_premargin = (plausibility_class(num, _picked_max_ref)\n",
+     "    picked_class_premargin = (plausibility_class(num, _picked_max_ref,\n"
+     "                                                 order_margin)\n",
+     "the pre-margin class is missing or wrong"),
+
+    # ---- the three sites an earlier, SCRATCH sweep found surviving. They are
+    #      committed here so the finding is reproducible rather than relayed —
+    #      this file's own header calls a sweep nobody can re-run a claim.
+    ("K99", "deletion", "the promotion gate's TOP-ROW key drops the margin, so "
+                        "the SORT ranks a margin-promoted row first while the "
+                        "GATE recomputes it as BELOW and refuses to promote",
+     "        top_key = (measured_rank_key(repo_of_github_url(ordered_rows[0][\"url\"]),\n"
+     "                                     num, order_ranges, order_margin)\n",
+     "        top_key = (measured_rank_key(repo_of_github_url(ordered_rows[0][\"url\"]),\n"
+     "                                     num, order_ranges)\n",
+     "sort and gate are reading different margins"),
+    ("K100", "deletion", "the gate's TIE check drops the margin while the top "
+                         "row keeps it, so two margin-promoted rows stop tying "
+                         "and the promotion fires on an alphabetical accident",
+     "                measured_rank_key(repo_of_github_url(c[\"url\"]), num,\n"
+     "                                  order_ranges, order_margin) == top_key\n",
+     "                measured_rank_key(repo_of_github_url(c[\"url\"]), num,\n"
+     "                                  order_ranges) == top_key\n",
+     "the ordering separated nothing"),
+    ("K101", "deletion", "the picker HEADER counts pre-margin classes while the "
+                         "rows beneath it were ranked with the margin — the note "
+                         "then contradicts the list it describes",
+     "    classes = [plausibility_class(num, ranges.get(r.lower()), margin)\n",
+     "    classes = [plausibility_class(num, ranges.get(r.lower()))\n",
+     "counted the PRE-MARGIN classes"),
 ]
 
 TARGETS: dict[str, pathlib.Path] = {
@@ -921,6 +1013,8 @@ TARGETS: dict[str, pathlib.Path] = {
     "K82": OPEN_, "K83": OPEN_, "K84": OPEN_,
     "K85": OPEN_, "K86": OPEN_, "K87": OPEN_, "K88": OPEN_, "K89": OPEN_,
     "K90": OPEN_, "K91": OPEN_, "K92": OPEN_,
+    "K93": OPEN_, "K94": OPEN_, "K95": OPEN_, "K96": OPEN_, "K97": OPEN_,
+    "K98": OPEN_, "K99": OPEN_, "K100": OPEN_, "K101": OPEN_,
     "P1": SCAN,
     "K1": TAILER, "K2": TAILER, "K3": TAILER, "K43": TAILER, "K44": TAILER,
     "K4": SCAN, "K5": SCAN, "K6": SCAN,
