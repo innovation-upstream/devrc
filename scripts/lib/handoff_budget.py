@@ -200,8 +200,10 @@ def lookup(relpath: str, ledger: dict[str, _V]) -> _V | None:
 # against its declared repo when that checkout is present would have to SKIP when
 # it is not, and `scripts/run-tests.sh` GUARD 2 pins the skip set EXACTLY: its
 # only conditional is `unset:VAR` — ONE variable, and it must be the same
-# predicate the test uses — while the predicate here is four
-# `handoff_index.REPO_ENV_HANDLES` handles plus four path existence checks. A
+# predicate the test uses — while the predicate here is EVERY
+# `handoff_index.REPO_ENV_HANDLES` handle plus one path existence check each (no
+# count is written down: this line read "four … plus four" while that tuple had
+# already grown to five). A
 # flat pin then reds the host where the checkouts DO exist and the test runs,
 # which is the failure the SIGNAL_PG_DSN entry in that file records. The
 # sanctioned route exists and is named so nobody re-derives it: register such a
@@ -225,9 +227,12 @@ def lookup(relpath: str, ledger: dict[str, _V]) -> _V | None:
 # alone. Two consequences the next person adding an entry has to hold at once:
 #
 #   * 🔴 ONE ENTRY GOVERNS EVERY REPO THAT HAS A DOC OF THAT NAME. There is no
-#     collision today, measured across ALL FIVE repos this tool can be pointed
-#     at — the four `handoff_index.REPO_ENV_HANDLES` resolve, plus cairn, which
-#     has NO handle and was therefore enumerated by hand: 572 handoff docs when
+#     collision today, measured across every repo this tool could be pointed at
+#     AT THAT DATE — the `handoff_index.REPO_ENV_HANDLES` entries then declared
+#     (four of them; the tuple has since grown and this line said "ALL FIVE"
+#     meaning four-plus-cairn, which now reads as the handles alone), plus
+#     cairn, which has NO handle and was therefore enumerated by hand: 572
+#     handoff docs when
 #     the 54 entries below were added, 0 filenames appearing in two repos, and 0
 #     of those 54 paths colliding with the 28 that were already here. ⚠ THE
 #     CORPUS TOTAL IS A MOVING NUMBER — it has already grown since, so treat it as

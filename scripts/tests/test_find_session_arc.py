@@ -1206,3 +1206,273 @@ class TestDocCommitRevs:
         assert any("HEAD` alone" in n for n in report.unmeasured_notes), (
             "the coverage note was computed and then dropped, so the report "
             f"reads as complete: {report.unmeasured_notes!r}")
+
+
+# =========================================================================== #
+# THE ARC'S REPO HANDLES — DERIVED FROM ONE TUPLE, AT EVERY SITE
+# =========================================================================== #
+# 🔴 WHY THIS SECTION EXISTS. `arc_repo_for` carried an inline four-element copy
+# of `handoff_index.REPO_ENV_HANDLES` while its own docstring said it "searches
+# every repo in `handoff_index.REPO_ENV_HANDLES`" — a description wider than its
+# implementation, the `guards-narrower` shape. When `CIVITAI_CLI` became the
+# fifth entry of that tuple, a doc living in that checkout was UNREACHABLE and
+# `--arc` reported `nothing was measured at all` about a doc sitting on that
+# repo's mainline. Three prose sites enumerated the same four handles and so told
+# the operator the search had covered every checkout it can see.
+#
+# ⚠ THE PROSE PINS BELOW TAKE THE WHOLE NORMALISED SENTENCE, NOT A SUBSTRING.
+# `claude/RULES.md` → "a guard on WORDS is walkable by REWORDING": a check that
+# only asked whether `$CIVITAI_CLI` appeared would pass a sentence naming the
+# handle while claiming the opposite about it. The literal prose is written out
+# here and only the HANDLE LIST is derived, so the expectation is not read off
+# the implementation it grades. A cosmetic reword fails this test; that is the
+# price of a machine-readable claim.
+from lib import handoff_index as hi  # noqa: E402
+
+
+def _norm(text: str) -> str:
+    """Whitespace-run normalisation and nothing else — line WRAPPING is cosmetic
+    and must not decide a verdict; wording is."""
+    return " ".join(text.split())
+
+
+class TestEveryHandleInTheTupleIsSearchable:
+    """`arc_repo_for` must reach a doc under EVERY `REPO_ENV_HANDLES` entry.
+
+    🔴 AS WIDE AS ITS DOCSTRING, DELIBERATELY. A test naming only `CIVITAI_CLI`
+    would pin the instance and not the class: the next handle appended to that
+    tuple would be just as unreachable, and this guard would stay green. The loop
+    is over the tuple itself, so coverage grows with it.
+    """
+
+    DOCNAME = "handoff-plimforth-widget.md"
+
+    @classmethod
+    def _plant(cls, tmp_path, handle, subdir="claudedocs"):
+        """A synthetic checkout holding one handoff doc, and an env naming it.
+
+        ONE handle is set at a time — a run with every handle set resolves on the
+        FIRST, and a loop like that cannot see a handle the walk skips.
+        """
+        root = tmp_path / f"repo-{handle.lower()}"
+        (root / subdir).mkdir(parents=True)
+        (root / subdir / cls.DOCNAME).write_text("# LEAKCANARY-synthetic\n",
+                                                 encoding="utf-8")
+        return root, {handle: str(root)}
+
+    def test_a_doc_under_ANY_declared_handle_RESOLVES(self, tmp_path):
+        """🔴 THE REGRESSION TEST. Red at the pre-fix tree, naming
+        `['CIVITAI_CLI']`; green once the loop walks the tuple.
+
+        Mutating the production loop to `handoff_index.REPO_ENV_HANDLES[:4]`
+        reproduces the original defect and fails HERE, with this assertion's own
+        message, rather than somewhere downstream.
+        """
+        assert hi.REPO_ENV_HANDLES, (
+            "POSITIVE CONTROL: REPO_ENV_HANDLES is empty, so the loop below "
+            "walks nothing and every assertion in this class is vacuous")
+        unreachable = []
+        for handle in hi.REPO_ENV_HANDLES:
+            root, env = self._plant(tmp_path, handle)
+            got = fs.arc_repo_for(self.DOCNAME, env=env)
+            if got != (str(root), f"claudedocs/{self.DOCNAME}"):
+                unreachable.append(handle)
+        assert not unreachable, (
+            f"`arc_repo_for` cannot reach a doc in the {unreachable} "
+            f"checkout(s), so `--arc` reports `nothing was measured at all` for "
+            f"a doc that is right there. The loop must walk "
+            f"`handoff_index.REPO_ENV_HANDLES` ({list(hi.REPO_ENV_HANDLES)}) "
+            f"rather than an inline copy of it.")
+
+    def test_the_archive_subdir_is_searched_under_ANY_handle_too(self, tmp_path):
+        """The second relpath (`claudedocs/archive/`) is tried per handle as
+        well, so an ARCHIVED doc in the fifth checkout was equally unreachable —
+        the same defect one directory deeper."""
+        unreachable = []
+        for handle in hi.REPO_ENV_HANDLES:
+            root, env = self._plant(tmp_path, handle, subdir="claudedocs/archive")
+            got = fs.arc_repo_for(self.DOCNAME, env=env)
+            if got != (str(root), f"claudedocs/archive/{self.DOCNAME}"):
+                unreachable.append(handle)
+        assert not unreachable, (
+            f"an ARCHIVED doc in the {unreachable} checkout(s) does not resolve")
+
+    def test_an_EMPTY_handle_is_skipped_rather_than_joined_onto_cwd(
+            self, tmp_path, monkeypatch):
+        """NEGATIVE CONTROL: the walk must still return `(None, None)` when no
+        handle holds the doc. A loop that treated an empty handle as `Path("")`
+        would resolve against the CWD and answer about whatever repo the operator
+        happens to be standing in.
+
+        🔴 THE PLANTED CWD DOC IS WHAT MAKES THIS GUARD OBSERVABLE, AND WITHOUT
+        IT THE GUARD WAS VACUOUS. MEASURED: deleting the `if not root: continue`
+        skip from `arc_repo_for` left this whole file GREEN at 107 passed,
+        because `Path("") / "claudedocs/<synthetic>.md"` does not exist under any
+        cwd either — so the guarded and the unguarded walk both returned
+        `(None, None)` and this assertion could not tell them apart. It read as
+        a negative control while providing none. With the doc planted in the cwd
+        the unguarded walk RESOLVES it, and that is the only arrangement in which
+        this test can fail for its own reason.
+        """
+        (tmp_path / "claudedocs").mkdir()
+        (tmp_path / "claudedocs" / self.DOCNAME).write_text(
+            "# LEAKCANARY-synthetic\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        env = {h: "" for h in hi.REPO_ENV_HANDLES}
+        assert fs.arc_repo_for(self.DOCNAME, env=env) == (None, None), (
+            "an EMPTY handle was joined onto the CWD, so the walk answered about "
+            "whatever repo the operator happens to be standing in rather than "
+            "skipping the unset handle")
+
+    def test_the_handles_are_searched_in_the_TUPLE_order(self, tmp_path):
+        """Order is part of the contract: two checkouts holding a doc of the
+        same name must resolve to the EARLIER handle, deterministically. A
+        `set()` would make the answer depend on hash order."""
+        if len(hi.REPO_ENV_HANDLES) < 2:
+            pytest.skip("needs at least two declared handles")
+        env, roots = {}, {}
+        for handle in hi.REPO_ENV_HANDLES:
+            root, one = self._plant(tmp_path, handle)
+            roots[handle] = root
+            env.update(one)
+        first = hi.REPO_ENV_HANDLES[0]
+        assert fs.arc_repo_for(self.DOCNAME, env=env) == (
+            str(roots[first]), f"claudedocs/{self.DOCNAME}")
+
+
+class TestTheSearchWALKSTheTupleRatherThanACopy:
+    """🔴 THE STRUCTURAL HALF, AND IT IS NOT REDUNDANT WITH THE BEHAVIOURAL ONE.
+
+    The tests above grade the OUTCOME against the tuple as it stands today, so a
+    re-added inline copy that happens to agree today passes every one of them and
+    rots silently the next time the tuple grows — which is exactly how this
+    defect shipped. This asserts the loop's iterable IS the attribute, read off
+    the AST, so a copy cannot come back at all.
+    """
+
+    @staticmethod
+    def _arc_repo_for_loops():
+        import ast
+        import inspect
+        tree = ast.parse(inspect.getsource(fs))
+        fn = next((n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name == "arc_repo_for"), None)
+        assert fn is not None, (
+            "no `arc_repo_for` function found in the module — this guard is "
+            "reading nothing; re-point it rather than deleting it")
+        return [n for n in ast.walk(fn) if isinstance(n, ast.For)]
+
+    def test_the_handle_loop_iterates_the_SHARED_TUPLE(self):
+        import ast
+        loops = self._arc_repo_for_loops()
+        assert loops, "`arc_repo_for` has no `for` loop at all"
+        iters = [ast.unparse(n.iter) for n in loops]
+        assert "handoff_index.REPO_ENV_HANDLES" in iters, (
+            "`arc_repo_for` no longer iterates "
+            "`handoff_index.REPO_ENV_HANDLES`; it iterates "
+            f"{iters}. An inline copy of the handle tuple agrees with it on the "
+            "day it is written and silently stops when the tuple grows — that "
+            "is the defect this section exists for.")
+
+    def test_this_scan_WOULD_catch_the_original_inline_copy(self):
+        """POSITIVE CONTROL, built from the ORIGINAL defect rather than a
+        textbook fixture: the real pre-fix line, graded by the same predicate."""
+        import ast
+        original = (
+            "def arc_repo_for(basename, env=None):\n"
+            '    for handle in ("DEVRC", "HOMELAB", "DATAPACKET", "CIVITAI"):\n'
+            "        pass\n")
+        tree = ast.parse(original)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef))
+        iters = [ast.unparse(n.iter) for n in ast.walk(fn)
+                 if isinstance(n, ast.For)]
+        assert "handoff_index.REPO_ENV_HANDLES" not in iters, (
+            "the predicate cannot distinguish the shared tuple from an inline "
+            f"copy of it — it accepted {iters}")
+
+
+class TestTheHandleProseNamesEveryHandle:
+    """Every operator-facing sentence about the arc search, pinned WHOLE.
+
+    🔴 THREE SITES, AND A SWEEP THAT REACHES TWO OF THEM IS THE DEFECT ITSELF.
+    The exit-contract sentence, the refusal an operator actually reads, and the
+    sibling extractor's own contract each enumerated the handles by hand. Each is
+    pinned against the same derived list here, so a handle added to
+    `REPO_ENV_HANDLES` with any of these left behind fails.
+    """
+
+    @staticmethod
+    def _spelled(sep=", "):
+        return sep.join(f"${h}" for h in hi.REPO_ENV_HANDLES)
+
+    def test_the_renderer_itself_names_every_handle_in_order(self):
+        """POSITIVE CONTROL for the three pins below, which all route through
+        this one function: if it can drop a handle, they are graded against a
+        list that is already wrong."""
+        assert fs.arc_handles_spelled() == self._spelled()
+        assert fs.arc_handles_spelled("/") == self._spelled("/")
+        for handle in hi.REPO_ENV_HANDLES:
+            assert f"${handle}" in fs.arc_handles_spelled()
+
+    def test_the_EXIT_ARC_UNMEASURED_sentence_is_pinned_WHOLE(self):
+        """🔴 WHOLE NORMALISED STRING, NOT A SUBSTRING.
+        `claude/skills/find-session/SKILL.md` copies this sentence verbatim and
+        `test_find_session_skill_contract.py` pins the copy, so the doc and the
+        constant move together — but only this test says the sentence must name
+        the handles the search really walks.
+        """
+        expected = (
+            "`--arc` ONLY: the doc was named but NOT MEASURED — no repo handle "
+            f"({self._spelled()}) this shell can see holds it. 🔴 This is not "
+            "an empty arc and must never be reported as one: nothing was read "
+            "at all.")
+        got = _norm(dict(fs.EXIT_CONTRACT)[fs.EXIT_ARC_UNMEASURED])
+        assert got == _norm(expected), (
+            "the exit-5 contract sentence no longer matches the handles the arc "
+            "search walks, or was reworded:\n"
+            f"  expected: {_norm(expected)!r}\n"
+            f"  got     : {got!r}\n"
+            "Render the handle list from `handoff_index.REPO_ENV_HANDLES` (see "
+            "`find_session.arc_handles_spelled`), then copy the rendered "
+            "sentence into `claude/skills/find-session/SKILL.md`'s exit table.")
+
+    def test_the_operator_facing_REFUSAL_names_every_handle(self, monkeypatch):
+        """The sentence a human actually sees on exit 5 — raised by `arc_report`
+        and printed verbatim by `run_arc`. It was the site NOTHING renders on a
+        successful run, which is why it was the easiest of the three to miss."""
+        monkeypatch.setattr(fs, "arc_repo_for", lambda b: (None, None))
+        with pytest.raises(fs.ArcUnmeasured) as exc:
+            fs.arc_report("handoff-plimforth-widget.md")
+        expected = (
+            "no repo handle holds claudedocs/handoff-plimforth-widget.md. 🔴 "
+            "This is NOT 'the arc is empty' — it means every "
+            f"{self._spelled('/')} checkout this shell can see lacks the doc, "
+            "so nothing was measured at all.")
+        assert _norm(str(exc.value)) == _norm(expected), (
+            "the exit-5 refusal no longer matches the handles the search "
+            "walks, or was reworded:\n"
+            f"  expected: {_norm(expected)!r}\n"
+            f"  got     : {_norm(str(exc.value))!r}")
+
+    def test_the_EXTRACTOR_exit_3_sentence_is_pinned_WHOLE(self):
+        """🔴 THE SEAM SITE. `extract_user_msgs.py` imports `arc_report` and
+        inherits the search, so its own exit-3 sentence is a claim about THIS
+        module's reach. It enumerated four handles while the search walked five
+        — a sentence that told the operator nothing had been missed. Pinned here
+        because the extractor's own suite pins meaning TOKENS only, which a
+        stale handle list satisfies."""
+        eum = _load_extractor()
+        expected = (
+            "`--arc` ONLY: the seed named no handoff doc, or no "
+            f"{self._spelled('/')} checkout holds it. 🔴 NOTHING WAS MEASURED "
+            "— this is not an empty arc, and a wrong name lands here, not on "
+            "exit 4.")
+        got = _norm(dict(eum.EXIT_CONTRACT)[eum.EXIT_ARC_UNMEASURED])
+        assert got == _norm(expected), (
+            "`extract_user_msgs.py`'s exit-3 sentence no longer matches the "
+            "handles `find-session.arc_repo_for` really walks, or was "
+            "reworded:\n"
+            f"  expected: {_norm(expected)!r}\n"
+            f"  got     : {got!r}")
