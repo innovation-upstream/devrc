@@ -576,7 +576,12 @@ in
           # if attribution matters for a term, check it by hand.
           { trigger = ":dacq"; replace = "do light recon and ask clarifying questions and recommend improvements and anything useful to include before dispatching (include complete test coverage)"; label = "Process feedback: dispatch subagent + elicit scope"; search_terms = ["ask" "feedback" "dispatch" "process" "elicit" "scope" "include"]; }
           { trigger = ":acq"; replace = "ask clarifying questions then proceed"; label = "ask clarifying questions"; search_terms = ["ask" "clarifying" "questions"]; }
-          { trigger = ":alo"; replace = "anything left outstanding from this arc? Find all sessions associated with this handoff and check my messages then determine if all addressed shipped and closed out"; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
+          # 2026-09-29: decision clause added (the 2026-09-13 diagnosis' fix 4, never
+          # implemented until now). Scoped to docs that DECLARE a closing-condition:
+          # /resume calls the question UNANSWERABLE without one, and forbids substituting
+          # a verdict on a `judgement`-kind one. Rationale + the measurement it rests on:
+          # <homelab-talos>/claudedocs/handoff-arc-rabbit-hole-drift.md.
+          { trigger = ":alo"; replace = "anything left outstanding from this arc? if the handoff declares a closing-condition, answer it with a VERDICT rather than an inventory: ADDRESSED or NOT? if ADDRESSED, this arc is CLOSED — say so and stop. if NOT, name the ONE item and open a NEW arc for it."; label = "Anything left outstanding?"; search_terms = ["anything" "left" "outstanding" "loose" ]; }
           { trigger = ":roo"; replace = "reflect on objectives specified this session and determine if fully addressed and validated, and if any related clawgate tasks are addresssed and up-to-date"; label = "reflect on objectives specified this session and determine if fully addressed and validated"; search_terms = ["reflect" "objectives" "addressed" ]; }
           { trigger = ":kickoff"; replace = "give the kickoff message for next session"; label = "Kickoff message for next session"; search_terms = ["kickoff" "kick off" "next session" "copy paste" "handoff" "message"]; }
           { trigger = ":par"; replace = "proceed as recommended"; label = "Proceed as recommended"; search_terms = ["proceed" ]; }
