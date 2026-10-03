@@ -7632,7 +7632,7 @@ def test_the_warning_band_is_at_least_one_p90_append():
     """🔴 THE RELATIONSHIP, NOT THE LITERAL — this is the defect #2001 closed.
 
     `BUDGET_NEAR_BYTES` was a bare `4_096`, which is NARROWER THAN THE MEDIAN
-    APPEND (~5,311 B) let alone the p90 (~15,531 B). A band narrower than the
+    APPEND (~5,271 B) let alone the p90 (~15,531 B). A band narrower than the
     thing it warns about cannot fire before the refusal: the write jumps the band
     and rule (p) refuses after the content is already composed. Pinning the
     literal would have encoded exactly that, so pin the property instead.
@@ -7677,7 +7677,9 @@ def test_the_band_does_NOT_fire_on_a_doc_that_is_merely_LARGE():
     is the +1 on the other side of this same edge.
     """
     edge = hd.handoff_budget.MAX_BYTES - hd.BUDGET_NEAR_BYTES
-    assert _budget(DOC, edge, before_bytes=edge - 5_311) == ""
+    # 5,271 B is the measured MEDIAN append (65.5 net lines x 80.4716 B/line) —
+    # the delta a doc most often arrives on this edge carrying.
+    assert _budget(DOC, edge, before_bytes=edge - 5_271) == ""
     assert _budget(DOC, edge - _P90_APPEND_BYTES) == ""
 
 

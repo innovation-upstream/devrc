@@ -2995,12 +2995,17 @@ def dropped_durable_report(dropped: typing.Sequence[DroppedDurable]) -> str:
 #
 # MEASURED on this tree at 3e7725bc, over `git log origin/main -300 --numstat --
 # claudedocs/`: 300 commits touched `claudedocs/`, 285 touched a `handoff-*.md`
-# and 242 GREW one. Net lines added per growing commit: median 66, mean 88.3,
-# p90 193. Calibrated at 80.47 B/line (3,783,616 B over 47,018 lines across the
-# 108 top-level `claudedocs/handoff-*.md`). So an append is ~5,311 B at the
-# median, ~7,105 B at the mean and ~15,531 B at p90 — and the old band admitted
-# none of them: bisected empirically, the first size at which this function said
-# ANYTHING was 61,441 B, i.e. 93.75% of the ceiling.
+# and 242 GREW one. Net lines added per growing commit: median 65.5, mean 88.31,
+# p90 193. ⚠ THE MEDIAN IS 65.5 AND NOT 66, AND THE DIFFERENCE IS NOT PEDANTRY:
+# 242 is EVEN, so the median is the mean of the two middle values (65 and 66).
+# Rounding it to 66 first and multiplying overstates the median append by 40 B —
+# which is exactly what the FIRST DRAFT OF THIS PARAGRAPH did, in a comment whose
+# whole purpose is to stop the next person restating a number wrongly.
+# Calibrated at 80.4716 B/line (3,783,616 B over 47,018 lines across the 108
+# top-level `claudedocs/handoff-*.md`). So an append is ~5,271 B at the median,
+# ~7,106 B at the mean and ~15,531 B at p90 — and the old band admitted none of
+# them: bisected empirically, the first size at which this function said ANYTHING
+# was 61,441 B, i.e. 93.75% of the ceiling.
 #
 # RE-DERIVE with the `git log` command above plus the bytes-per-line calibration
 # (`cat claudedocs/handoff-*.md | wc -c` over `… | wc -l`). The numbers live HERE
