@@ -47,6 +47,44 @@ measurements (done, and they held).
   because its condition encoded an outcome nobody could reach.
 
 ## State now
+
+🔴 **THE ARC IS OPEN AND THE CLOSING CONDITION IS MEASURABLY NOT MET — re-measured 2026-10-03,
+not inferred.** Clause (a) is MET on this host (spool **1 → 2** across one `cairn -verbs`).
+Clause (b) is **NOT MET: `0` `[cb:]` tokens in a 69,283 B recall.** It cannot be met until
+cairn#175 merges **and** devrc's pin moves — `origin/main` still pins cairn **`5c96ffda`**, which
+is *before* PR A. Verdict stands at **NOT ADDRESSED**.
+
+### 🔴 WHERE PR A / PR B / PR C ACTUALLY STAND (2026-10-03)
+
+- ✅ **PR A — `ZacxDev/cairn#174` MERGED, squash `d7e1fec8`.** The id derivation plus the
+  `StartLine` that places it. Verified by CONTENT on `origin/main`, never by ancestry.
+  **It took a FIVE-ROUND audit ladder and the ladder was not ceremony** — what it found:
+  (1) the derivation was **not well-defined over this codebase's own decoder outputs** — one entry
+  file yielding two different ids and an exception, rooted in `pytext.DecodeUTF8Replace`, whose
+  docstring asserted the wrong Unicode rule (per-byte, not maximal-subpart) and which had **no test
+  at all**; (2) an **idempotency hole no stored-side fix could have closed**, because `AppendBullet`
+  hashed the REQUEST text raw while the stored side was reduced — a live pre-existing defect,
+  independent of the feature; (3) **two performance regressions hidden inside correct-looking
+  fixes, in two different languages**, each introduced by the round that fixed the previous finding.
+  🔴 **None of those was visible to a green suite.**
+- 🔄 **PR B — `ZacxDev/cairn#175` OPEN at `4ab199fc`.** Both renderers print the token. Rounds 0
+  and 1 are done and their fixes landed; **round 2 is unfinished — see the next bullet.** CI on
+  that head: 7 of 8 green, `go` in flight.
+- ❌ **PR C — NOT STARTED.** The devrc pin bump plus every devrc guard that pins the pinned
+  client's bytes. Blocked on #175 landing. ⚠ **And the pin you will reach for is already sitting
+  UNCOMMITTED in the shared base clone** — see the base-clone bullet below.
+
+### 🔴 ROUND 2 OF #175 STOPPED WITHOUT REPORTING, AND ITS WORK IS STILL ON DISK
+
+It wrote **1,046,823 bytes across 307 transcript records and emitted NO result record**; no process
+of it was alive. Same shape as the session-limit cutoff that hit an earlier round in this ladder.
+Its worktree is intact and detached at `4ab199f`. **It is resumable** — a continuation was sent.
+🔴 **THE LESSON IS ABOUT THE REPORTING, NOT THE AGENT: "blocked on round 2" was stated as the
+session's next step while round 2 had already been dead for some time.** A dispatched round that
+dies silently is indistinguishable from one still working unless you check for a live process and a
+terminal record. Check both: `grep -c '"type":"result"'` on its output file, and a PID resolved
+through `/proc`.
+
 - ✅ **RANK 1 IS MERGED AND VERIFIED BY CONTENT — devrc#1983, squash `82d859ce`.** Supersedes
   this section's previous "built and IN FLIGHT". Verified on `origin/main`, not by ancestry:
   `scripts/cairn-receipt.sh` present, `nix/home.nix` carries
@@ -344,31 +382,37 @@ cost figure it was argued on (*"~1,660 B … 97.6% of a ~50,000-token read"*, *"
 cost surface"*) was **retracted** — re-measured at ~2,114 B on a 192,047 B read ≈ **1.1%**. Record
 in `## State now`. Do not reinstate the tension.
 
-1. **AUDIT AND MERGE `ZacxDev/cairn#174` — PR A of rank 2, and the arc's first PUBLIC-repo change.**
-   Round 0 first (it may legitimately challenge the A/B/C split), then the nine axes, then merge on
-   green. It ships the id derivation and the bullet START-LINE that makes an id placeable.
-   🔴 **Two reasons it earns a full ladder rather than a read-through:** its output becomes a
-   **CONTRACT** — once ids print, changing the derivation invalidates every id ever emitted — and a
-   real leak was already shipped into this branch once, caught only by `tests/leakscan.py`. Run that
-   gate **unpiped** and read its exit code directly; **2 means "could not vouch", never "passed"**.
-   🔴 The normalisation is the highest-value thing to attack: nobody has ruled on what the hash
-   covers, so reflow, trailing whitespace, a `RESOLVED:` prefix, the `[cairn: zach/<uuid>]` suffix
-   stored bullets already carry in their TEXT, and an edited bullet each need a stated answer.
-   forcing: gate — a contract-forming derivation is cheap to change before it prints and
-   impossible after, so the audit has to precede the merge rather than follow it.
-2. **BUILD THE RENDERER — PR B.** Repo: **cairn** (public). Design settled — do NOT re-derive it,
-   and do NOT implement the obvious version: parse for IDs ONLY, emit the body verbatim as now,
-   append the id to each matched bullet's OPENING line. `sha256`-derived, **8 hex not 4** (3,129
-   bullets at 16 bits collide with probability ≈1). Files: `internal/report/text.go` +
-   `lib/subsystem_recall.py` (the `SurfacedHeadings` loop and its Python counterpart at ~:3145),
-   then regenerate `internal/report/testdata/reader_fixtures.json` (**325,085 B**, regenerate and
-   diff — hand-editing is a declared failure) and the **25 of 128** conformance goldens that
-   carry rendered bullets; then five gates must agree — `go test ./... -count=1`
-   (🔴 **`-count=1` is load-bearing: `ok (cached)` is not a run**), `tests/conformance/run_go.sh`,
-   `tests/conformance/suite.py run`, `tests/parity/harness.py`, `tests/dualrun/`.
-   forcing: deadline — the transcript corpus rolls at 30 days (measured 2026-10-01:
-   2026-09-01 → 2026-10-01, nothing older, no `cleanupPeriodDays`), so the evidence any
-   attribution study would use is deleted daily and waiting does not grow `n`.
+✅ **THE FORMER RANK 1 — "AUDIT AND MERGE cairn#174" — IS DONE AND IS GONE FROM THIS LIST.**
+Merged `d7e1fec8` after five rounds; what the ladder found is in `## State now`. Its normalisation
+question — the thing nobody had ruled on — was answered in the PR rather than deferred: `sha256`
+over the bullet's own text with **no normalisation**, a declared domain, and a widened invalidation
+set, all documented at the two derivation sites.
+
+1. **FINISH #175's LADDER, THEN MERGE IT.** Round 2 is unfinished and resumable (above). Rounds 0
+   and 1 found **no 🔴** — the payload is correct across 82 hostile cross-language renders with a
+   negative control that produced 82/82 diffs — and their six findings were all claim or
+   guard-accuracy defects, now fixed in `4ab199fc`. 🔴 **The one worth carrying forward: the
+   splitter "guard" guarded NOTHING** — `ExtractSections` joins a body with `"\n"`, so all nine
+   other break characters are gone before a renderer sees one, and a splitter swap SURVIVED in both
+   languages while two tests were labelled as its coverage. Fixed by making the guard real (the
+   lookup now runs over a body passed directly), verified independently: the mutant now fails
+   exactly one test, with its own message.
+   forcing: gate — clause (b) of the closing condition cannot be met until this merges.
+✅ **THE RENDERER IS BUILT — it is `#175`, and rank 2's build half is DONE.** The design held
+exactly as specified: parse for IDs ONLY, body still emitted verbatim, token appended at each
+bullet's `StartLine`. **Proven, not asserted** — with both renderers mutated to the forbidden
+reconstruction, a nuance body opening with two prose lines renders as **only the bullet**, and
+stripping every token from the regenerated fixture yields a file **byte-identical** to the old one.
+🔴 **TWO FIGURES THIS DOC CARRIED WERE WRONG AND WERE PASSED ON TWICE BEFORE ANYONE CHECKED THEM.**
+`reader_fixtures.json` is **323,301 B, not 325,085**, and the conformance goldens that carry
+rendered bullets are **12 of 128, not 25** — the 12 re-derived twice by different instruments.
+Both were quoted into an implementation brief as fact. **Re-derive a number this doc states before
+you act on it; two of them did not survive contact.**
+⚠ **The scope was WIDER than this doc's plan**: all four surfaced sections, not just Nuance. That
+was an AGENT's derivation from the operator's placement ruling, not an operator decision, and it
+survives on its own numbers — the annotation sits inside the existing `SurfacedHeadings` loop, so
+**four sections is the ABSENCE of a branch and narrowing ADDS one**, plus a per-section exception
+list two renderers must keep in sync forever.
 3. **PR C — THE devrc PIN BUMP, plus every devrc guard that pins the pinned client's BYTES.**
    Expect devrc `main` to redden: that is exactly how cairn#162's `tasks`→`refs` rename did it.
    🔴 **ENUMERATE the readers, never guess which suites are adjacent** —
@@ -393,6 +437,58 @@ in `## State now`. Do not reinstate the tension.
    which is the whole failure this arc exists to escape.
    forcing: gate — the arc's headline claim ("cairn invocations are now observable") is verified on
    ONE host, and a one-host measurement is not the fleet claim the sentence reads as.
+
+## 🔴 OPEN OPERATOR DECISIONS — surfaced with evidence, NOT ruled on
+
+Each was put in front of the operator with a measurement. None has an answer, and **none of them
+blocks #175.** They are listed because an unruled question with evidence attached decays into a
+forgotten one.
+
+1. **THE COST IS HIGHER THAN THE FIGURE THE PLACEMENT RULING WAS TAKEN AGAINST.** The ruling
+   ("every bullet, every read"; the opt-in flag rejected) was priced at **~1.1%** and judged "not a
+   major tension". Re-measured on real reads, two instruments agreeing (byte delta == tokens × 14
+   on all six rows): the **default digest is 1.07%** — on the figure — but a **full-body read is
+   1.57% / 1.62% / 1.91% / 2.61%**, up to **≈2.4×** it, highest where bullets are shortest.
+   `--list` is 0.00%. ⚠ **The flag was rejected for a STRUCTURAL reason (a measured ~6% selection
+   bias) that the cost does not touch**, so this is a re-pricing, not a re-opening — but the
+   operator ruled against 1.1% and has not re-ruled against 2.6%.
+2. **`activity.events` — A REAL IDENTIFIER FROM A PRIVATE DEPLOYMENT IS IN CAIRN'S PUBLIC HISTORY,
+   AND IT HAS BEEN THERE SINCE THE EXTRACTION.** Four places on `origin/main`
+   (`internal/report/search.go`, `lib/subsystem_recall.py`, `tests/reader_fixtures.py`,
+   `internal/report/testdata/reader_fixtures.json` ×3), introduced by **`5f06872`** — *"the
+   extracted implementation, and a leak gate re-scoped to SECURITY rather than tidiness"*. So the
+   hand-scrub missed it on day one. 🔴 **`leakscan` returns 0 and always will: its
+   `denied-identifier` rule is a CLOSED SET of digests, and a name the scrub never removed cannot
+   be in it.** Same shape as the scrubbed origin IP in devrc — it is in reachable public history,
+   so scrubbing HEAD would not unpublish it. The options are *declare and accept* or *scrub HEAD
+   and add the digest so it cannot return*; both words are generic, which is the argument for the
+   first. Not this arc's work either way.
+3. **The scrubbed origin IP (devrc#1979) and whether S1's long-lived cluster-read bearer token
+   needs ROTATING.** Carried unchanged from the parent arc as the operator's to decide. Still
+   undecided; recorded here only so it is not lost with this doc.
+
+## ⚠ SHARED-ENVIRONMENT ITEMS THAT ARE NOBODY'S WORK AND WILL OUTLIVE THIS ARC
+
+Each was found, identified by owner, and **deliberately not acted on** — acting would have meant
+committing or destroying another session's work.
+
+- 🔴 **AN UNCOMMITTED `flake.lock` IS SITTING IN devrc's SHARED BASE CLONE**, and it is the very
+  bump PR C needs — which is the trap. It moves **three** inputs, not one: `cairn`
+  `5c96ffda → d7e1fec8`, plus `home-manager` and `nixpkgs_3`. That shape is somebody's full
+  `nix flake update`, mtime **2026-10-03 13:04** local, and it is **not this session's**.
+  🔴 **Do not commit it as PR C** — it bundles two unrelated input bumps — and do not revert it:
+  it is unsaved work belonging to another session. Ask before touching it. ⚠ And note what it did
+  to a measurement: reading the pin out of the **working tree** said `d7e1fec8` while `origin/main`
+  says `5c96ffda`. A working-tree read is evidence about the tree, never about the commit, and
+  `git log -S<rev>` finding nothing is what exposed the confusion.
+- ⚠ **Two untracked docs have been stranded in that clone since 2026-09-19** —
+  `claudedocs/scope-chief-{model-selector,situational-awareness}-2026-09-19.md`. Flagged twice in
+  this arc and still nobody's. Unsaved docs in a shared tree are one routine `checkout` from
+  silent, unreported deletion.
+- ⚠ **A stray process has been running since 2026-09-29**: PID **3710154**, a `cairn-ui.test`
+  binary from a deleted `/tmp/nix-shell.*` mutation tree, cwd gone, ~697 jiffies of CPU over four
+  days, i.e. idle. **Three separate audit rounds identified it and correctly declined to kill it**,
+  because nothing proved it was theirs. It is still alive. Idle, so it is not perturbing timings.
 
 ## Gotchas / decisions / dead-ends
 - 🔴 **DECISION (operator, 2026-10-01): DO NOT AUTO-MIGRATE HANDOFF CONTENT INTO CAIRN.** Four
