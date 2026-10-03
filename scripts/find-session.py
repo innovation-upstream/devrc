@@ -1500,9 +1500,9 @@ def run_arc(a):
     # `--arc --json` run went 25.31s -> 23.79s median, i.e. 1.52s saved. 🔴 AND
     # THAT IS THE HONEST NUMBER, not the ~4-15s the walk costs in isolation —
     # the walk's cost swings ~4x with this box's load (see `sessions_docs`), and
-    # the rest of an `--arc` run dominates either way. The walk now happens inside `render_arc`,
-    # i.e. on the HUMAN branch only, which is also the one pass the design is
-    # about. Deleted with it: the `cross_arc` and `cross_arc_gaps` keys below.
+    # the rest of an `--arc` run dominates either way. The walk now happens
+    # inside `render_arc`, i.e. on the HUMAN branch only, which is also the one
+    # pass the design is about. Deleted with it: `cross_arc`/`cross_arc_gaps`.
     if a.json:
         print(json.dumps({
             "doc": report.doc,
@@ -1526,8 +1526,9 @@ def run_arc(a):
             # and ~15s at load ~18 (laptop, 6 members, 4 handles; the absolutes
             # are a property of the load, see `sessions_docs`), charged to the
             # five of six real consumer sessions that parse `members` and
-            # discard the rest. 🔴 AND IT IS NOT EMITTED AS AN EMPTY LIST: a fabricated `[]`
-            # from a walk that never ran is indistinguishable from "no member
+            # discard the rest. 🔴 AND IT IS NOT EMITTED AS AN EMPTY LIST: a
+            # fabricated `[]` from a walk that never ran is indistinguishable
+            # from "no member
             # wrote another doc", which is the scoped-zero-as-absence this
             # module refuses everywhere else. The cross-arc edge IS still a
             # programmatic surface — `handoff_arc.sessions_docs()`, public in
