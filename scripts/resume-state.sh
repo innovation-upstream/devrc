@@ -2372,8 +2372,19 @@ budget_block(){
     return
   fi
   if [ "$rc" -ne 0 ]; then
-    echo "  ! cannot size this doc: ${out:-python3 exited $rc with no message}"
-    UNRECONCILED+=("handoff BUDGET unknown: $probe exited $rc (${out:-no message}), so this run did not measure the doc against its ceiling")
+    # 🔴 ONE LINE, BECAUSE THE GAP CHANNEL IS LINE-ORIENTED: `print_gaps` emits
+    # `printf '  ! %s\n'` per entry, so a multi-line reason breaks the `!` prefix
+    # the /resume skill keys on — and the common failure here is a PYTHON
+    # TRACEBACK, i.e. always multi-line. MEASURED against a lib directory missing
+    # `handoff_doc.py`: the raw form spilled four lines into the block and three
+    # more into the banner. The LAST non-empty line is the exception itself, which
+    # is the informative one; the frames above it describe this script's own
+    # plumbing, not the document.
+    local reason
+    reason=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)
+    reason="${reason:-python3 exited $rc with no message}"
+    echo "  ! cannot size this doc: $reason"
+    UNRECONCILED+=("handoff BUDGET unknown: $probe exited $rc ($reason), so this run did not measure the doc against its ceiling")
     return
   fi
   # 🔴 THE DISPLAY STRINGS COME FROM THE PROBE, NOT FROM `printf "%'d"`, WHICH IS

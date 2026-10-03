@@ -490,6 +490,39 @@ class TestItDegradesLoudlyAndInTheRIGHTCHANNEL:
         assert "no size budget governs this document" in budget(out), budget(out)
         assert "BUDGET unknown" not in out, out
 
+    def test_an_UNIMPORTABLE_module_degrades_to_ONE_line_with_the_exception(
+            self, tmp_path, stubs):
+        """🔴 THE GAP CHANNEL IS LINE-ORIENTED, and the common failure here is a
+        PYTHON TRACEBACK — i.e. always multi-line. `print_gaps` emits
+        `printf '  ! %s\\n'` per entry, so an unclipped traceback breaks the `!`
+        prefix the /resume skill keys on.
+
+        MEASURED with the probe PRESENT but `handoff_doc.py` absent from its lib
+        directory: the raw form spilled four lines into the block and three more
+        into the banner. Asserted three ways — the exception survives, the frame
+        noise does not, and the block's line stays single.
+        """
+        shim = tmp_path / "brokenlib"
+        (shim / "lib").mkdir(parents=True)
+        shutil.copy2(RESUME, shim / "resume-state.sh")
+        shutil.copy2(PROBE, shim / "lib" / PROBE.name)
+        for extra in (LIB / "clawgate_handoff.sh",):
+            if extra.exists():
+                shutil.copy2(extra, shim / "lib" / extra.name)
+        # handoff_doc.py / handoff_budget.py deliberately NOT copied.
+        repo = make_repo(tmp_path, size=40_000)
+        out = run_digest(repo, stubs, script=shim / "resume-state.sh")
+        block = budget(out)
+        assert "cannot size this doc" in block, block
+        assert "ModuleNotFoundError" in block, block
+        assert "Traceback" not in block, block
+        assert 'File "' not in block, block
+        reason_lines = [ln for ln in block.splitlines()
+                        if "cannot size this doc" in ln]
+        assert len(reason_lines) == 1, block
+        assert "BUDGET unknown" in out and "GAPS" in out, out
+        assert "none detected" not in drift(out), drift(out)
+
     def test_a_MISSING_probe_is_a_named_GAP_and_not_a_silent_skip(
             self, tmp_path, stubs):
         """🔴 THE POSITIVE CONTROL ON THE GAP CHANNEL ITSELF. A resume that could
