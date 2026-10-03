@@ -390,6 +390,8 @@ __all__ = [
     "WRITER_ID",
     "KNOWN_WRITERS",
     "WRITER_PLACEHOLDER",
+    "TAG_VOCABULARY",
+    "TAG_PLACEHOLDER",
     "DEFAULT_STORE_ROOT",
     "DEFAULT_NOMINATION_LIMIT",
     "BASE_REF_CANDIDATES",
@@ -643,6 +645,37 @@ BASE_REF_CANDIDATES: tuple[str, ...] = FALLBACK_BASE_REFS
 MAX_TRANSCRIPT_AGE_SECONDS = 1800.0
 
 _SENSITIVITY_FAIL_SAFE = "client-confidential"
+
+# The CLOSED tag vocabulary, and the placeholder the template pre-fills `tags:`
+# with. Both exist because an entry born with NO `tags:` line at all is invisible
+# to the store's write-time vocabulary gate: that gate refuses an OFF-vocabulary
+# tag and has nothing to say about an ABSENT one, so every entry this template
+# produced started untagged and unreachable by the reader's `--tag`.
+#
+# 🔴 THE PLACEHOLDER IS ENFORCED BY THE STORE, NOT BY THIS FILE — that is the
+# whole design, and it is why a bare `tags: []` was rejected. `TODO-pick-one`
+# normalizes to a tag OUTSIDE the vocabulary, so an entry whose placeholder was
+# never edited is refused by `cairn create`/`cairn put` with 422 and
+# `X-Store-Status: entry-shape`. Measured live against the deployed pod: the
+# unedited placeholder answers 422 (`tag 'todo-pick-one' is not one of
+# infra|product|tooling`) where the same request with a real term answers 200.
+# An empty list would have parsed as "no tags" and sailed through the same gate,
+# which is the hole this closes.
+#
+# 🔴 IT DELIBERATELY CONTAINS NO VOCABULARY WORD, AND THAT IS A GUARD RATHER THAN
+# A STYLE CHOICE. A first draft read `<infra|product|tooling — pick exactly ONE>`;
+# the store folds a bracketed value into ONE tag today, so it was refused — but a
+# future normalizer that split on `|` would extract `infra`, a VALID term, and the
+# unedited placeholder would silently start landing. Keeping every vocabulary word
+# out of the literal makes that impossible rather than merely unlikely.
+#
+# ⚠ WHAT THIS DOES NOT CLOSE: an author who DELETES the line still creates an
+# untagged entry, because the gate cannot refuse an absent field. Closing that is
+# a change to the store's own validator (`internal/write` in the `cairn` repo,
+# whose caller set is pinned at exactly {CreateEntry, ReplaceEntry}), not to this
+# template.
+TAG_VOCABULARY: tuple[str, ...] = ("infra", "product", "tooling")
+TAG_PLACEHOLDER = "TODO-pick-one"
 
 # 🔴 HOW MANY EXISTING BULLETS THE KNOWN-ENTRIES BLOCK SHOWS BEFORE PROPOSING AN
 # APPEND. Both numbers come from ONE measurement of the whole live corpus,
@@ -3612,6 +3645,25 @@ def new_entry_template(slug: str, scope: str, *, today: str, created_by: str) ->
     operator claim a recon run may never infer", and a field that is present and
     wrong is easier to notice than one that is absent and assumed.
 
+    🔴 `tags:` ships PRE-FILLED WITH A PLACEHOLDER THE STORE REFUSES, and the
+    two halves of that sentence are both load-bearing. It is present because an
+    absent `tags:` line is invisible to the store's write-time vocabulary gate —
+    that gate refuses an OFF-vocabulary tag and says nothing about an ABSENT one,
+    so every entry this template used to produce was born untagged and
+    unreachable by the reader's `--tag`. It is a REFUSED placeholder rather than
+    an empty list because `tags: []` parses as "no tags" and sails through the
+    same gate: `TODO-pick-one` normalizes outside the vocabulary, so an entry
+    whose placeholder was never edited is refused 422 `entry-shape` at
+    `cairn create`/`cairn put`. See `TAG_PLACEHOLDER` for the measurement and for
+    why the literal deliberately contains no vocabulary word.
+
+    🔴 The guidance is a SEPARATE `#` LINE, not a trailing comment on the value,
+    and that was measured rather than chosen: `parse_front_matter` keeps
+    everything after the colon, so `tags: [infra]  # …` parses as
+    `'[infra]  # …'` — meaning a correctly-edited tag would ALSO have been
+    refused. A fully-commented line is skipped, the way `aliases:` already
+    relies on.
+
     🔴 `aliases:` ships COMMENTED, with the `test_<slug>` case named. Matching is
     exact normalized-component equality, so a test file named `test_<slug>.py`
     has the stem `test-<slug>` and does NOT reach `<slug>` — meaning "the module
@@ -3631,6 +3683,9 @@ def new_entry_template(slug: str, scope: str, *, today: str, created_by: str) ->
         f"scope: {scope}\n"
         f"sensitivity: {_SENSITIVITY_FAIL_SAFE}\n"
         f"created_by: {created_by}\n"
+        f"# tags: REQUIRED — replace {TAG_PLACEHOLDER} below with exactly ONE of "
+        f"{' | '.join(TAG_VOCABULARY)}; the store REFUSES anything else (422)\n"
+        f"tags: [{TAG_PLACEHOLDER}]\n"
         f"# aliases: [{slug.replace('-', '_')}, test_{slug.replace('-', '_')}]"
         "  # uncomment + trim: other spellings, and the test-file stem\n"
         "---\n"

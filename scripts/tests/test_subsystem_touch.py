@@ -1033,6 +1033,92 @@ class TestProposalShapes:
         assert "depends_on" not in t
         assert "type:" not in t
 
+    def test_the_template_emits_a_tags_line(self) -> None:
+        """🔴 REGRESSION. The template emitted NO `tags:` line, so every entry
+        born through either writer started untagged — and an ABSENT tag is
+        invisible to the store's write-time vocabulary gate, which refuses an
+        OFF-vocabulary tag and has nothing to say about a missing one. Ten live
+        entries were created that way in two days.
+
+        🔴 THE ONLY TRUE REGRESSION TEST OF THE FOUR BELOW, and the matrix is
+        reported rather than asserted: RED at `origin/main` with
+        `AssertionError: --writer analyze-service produced no parsed tags field`
+        — the behaviour under test — and GREEN at HEAD. The three guards after
+        it reference `TAG_PLACEHOLDER`, which did not exist before this commit,
+        so pre-change they die on `AttributeError` and evidence NOTHING about
+        the missing line; they are labelled as invariant guards, not counted as
+        regression coverage."""
+        for writer in st.KNOWN_WRITERS:
+            t = st.new_entry_template("roster", SCOPE, today=TODAY, created_by=writer)
+            fm = dict(sr.parse_front_matter(t))
+            # The FIELD must exist after parsing — not merely appear in the text,
+            # which a commented line would also satisfy.
+            assert "tags" in fm, f"--writer {writer} produced no parsed tags field"
+            assert fm["tags"] == [st.TAG_PLACEHOLDER]
+
+    def test_the_tag_placeholder_is_REFUSED_by_the_vocabulary(self) -> None:
+        """⚠ INVARIANT GUARD, not regression coverage — it pins a property of a
+        constant this commit introduced, so it cannot have been red for the
+        right reason beforehand. Mutation-checked instead: setting
+        `TAG_PLACEHOLDER = "infra"` turns it red on its own assertion.
+
+        🔴 THE PLACEHOLDER IS THE ENFORCEMENT, so it must not be a valid tag.
+        `tags: []` was rejected for exactly this reason — it parses as "no tags"
+        and passes the same gate the absent line passed. Measured live against
+        the deployed pod: the unedited placeholder answers 422 `entry-shape`
+        (`tag 'todo-pick-one' is not one of infra|product|tooling`) where the
+        same request carrying a real term answers 200.
+
+        🔴 AND IT MUST CONTAIN NO VOCABULARY WORD. A first draft read
+        `<infra|product|tooling — pick exactly ONE>`: refused today, because the
+        store folds a bracketed value into ONE tag — but a future normalizer
+        that split on `|` would extract `infra`, a VALID term, and the unedited
+        placeholder would start landing silently. This pins that it cannot."""
+        assert st.TAG_PLACEHOLDER not in st.TAG_VOCABULARY
+        # not merely unequal — no vocabulary term may appear ANYWHERE in it, in
+        # any case, so no split or case-fold can ever extract one.
+        folded = st.TAG_PLACEHOLDER.casefold()
+        for term in st.TAG_VOCABULARY:
+            assert term.casefold() not in folded, (
+                f"the placeholder contains the vocabulary word {term!r}; a normalizer "
+                f"that splits it would extract a VALID tag and the hole reopens silently"
+            )
+
+    def test_the_tag_guidance_is_a_COMMENT_LINE_and_not_a_trailing_comment(self) -> None:
+        """⚠ INVARIANT GUARD, not regression coverage — the hazard it pins is
+        one this commit's own first draft had, not one the old template could
+        have: with no `tags:` line there was no trailing comment to get wrong.
+        Mutation-checked instead: moving the guidance back onto the value line
+        turns it red on its own assertion.
+
+        🔴 MEASURED, NOT STYLE. `parse_front_matter` keeps everything after
+        the colon, so `tags: [infra]  # pick one` parses as `'[infra]  # pick
+        one'` — a correctly-edited tag would have been refused too. The guidance
+        therefore lives on its own `#` line, which the parser skips.
+
+        This asserts the OUTCOME (what the edited value parses to), not the
+        spelling of the template, so it still holds if the wording changes."""
+        t = st.new_entry_template("roster", SCOPE, today=TODAY, created_by="handoff")
+        edited = t.replace(f"tags: [{st.TAG_PLACEHOLDER}]", "tags: [infra]")
+        assert edited != t, "positive control: the placeholder line was not found to edit"
+        fm = dict(sr.parse_front_matter(edited))
+        # Exactly the term, with nothing trailing it.
+        assert fm["tags"] == ["infra"], f"an edited tag parsed as {fm['tags']!r}"
+
+    def test_an_edited_template_parses_back_as_an_entry_CARRYING_the_tag(self) -> None:
+        """⚠ SEAM GUARD, not regression coverage (same `TAG_PLACEHOLDER`
+        reason as the two above).
+
+        The seam: the template, the front-matter parser and the entry model
+        each tested alone would be green while the tag never reached the entry.
+        `claude/RULES.md` → "the defect lives in the SEAM nobody owns"."""
+        t = st.new_entry_template("roster", SCOPE, today=TODAY, created_by="handoff")
+        edited = t.replace(f"tags: [{st.TAG_PLACEHOLDER}]", "tags: [tooling]")
+        fm = dict(sr.parse_front_matter(edited))
+        fm["filename"] = "roster.md"
+        entry = sr.SubsystemEntry.from_mapping(fm)
+        assert entry.tags == ("tooling",)
+
     def test_the_template_offers_the_test_stem_ALIAS(self) -> None:
         """🔴 Matching is exact normalized-component equality, so a test file
         `test_<slug>.py` has the stem `test-<slug>` and does NOT reach `<slug>`.
