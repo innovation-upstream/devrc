@@ -35,6 +35,40 @@
     # the handle decides which clone's refs the corpus is read from and a
     # dormant clone is a permanent, unbounded corpus lag.
     CIVITAI_CLI = "${home}/workspace/civit/cli";
+
+    # naida-ai (`ZacxDev/naida-ai`). 🔴 THE PRIMARY IS THE WORKBENCH PATH, and
+    # the laptop's copy of the same checkout sits ELSEWHERE — see `alternates`
+    # below, which is why this entry may point at a directory that does not
+    # exist on every host. Measured 2026-10-03 over ssh, both hosts: workbench
+    # `~/workspace/naida-ai`, laptop `~/workspace/scratch/naida-ai` and NOT
+    # `~/workspace/naida-ai`. Adding this handle was forced by the arc resolver:
+    # `find-session.py --arc` and `handoff_search` reach only the
+    # `handoff_index.REPO_ENV_HANDLES` repos, so every one of the 7
+    # `claudedocs/handoff-*.md` on this checkout's mainline was invisible to
+    # both — `--arc` reported "no repo handle holds it" (rc 5, nothing
+    # measured) for a doc sitting on disk.
+    NAIDA = "${home}/workspace/naida-ai";
+  };
+
+  # 🔴 EXTRA CANDIDATE PATHS per handle, tried in order AFTER the entry in
+  # `repos`; the first existing path wins. `repos` stays ONE STRING per handle —
+  # every parser in this repo (at least four test suites) pins the
+  # `NAME = "${home}/…";` shape, and a list-valued entry there would be
+  # silently unparsed — so a host-divergent checkout declares its primary here
+  # and its other locations HERE, as a LIST (a shape `_NIX_ENTRY` deliberately
+  # does not match).
+  #
+  # Consumers that resolve at RUNTIME (zsh envExtra, the generated env.js) walk
+  # primary + alternates and export the first that exists. The ONE consumer
+  # that cannot (the handoff-index-sync systemd unit, whose Environment is
+  # static) exports the primary only — it is workbench-only (`serverMode`),
+  # where the primary exists; elsewhere an absent primary is reported UNMEASURED,
+  # never folded into a clean count.
+  #
+  # Every key here MUST be a handle declared in `repos` — pinned by
+  # `test_absolute_handle_paths.py`, which is also where the shape is parsed.
+  alternates = {
+    NAIDA = [ "${home}/workspace/scratch/naida-ai" ];
   };
 
   # Kubeconfigs — guarded on the FILE existing (`-f`).

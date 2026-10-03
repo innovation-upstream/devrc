@@ -417,6 +417,43 @@ def nix_block(name: str, why: str) -> list[tuple[str, str]]:
     return sorted(entries, key=lambda e: (-len(e[1]), e[0]))
 
 
+# The `alternates` shape: `NAME = [ "${home}/a" "${home}/b" ];`. Deliberately a
+# DIFFERENT shape from `_NIX_ENTRY` (a list, not a bare string) — the whole-file
+# parse must NOT see these entries, because `_handle_table()` feeds the
+# duplicate-name check and the gate's patterns, and a candidate path is neither:
+# it is not exported on every host, so arming it would give host-dependent
+# advice. A bare-string entry in `alternates` would therefore be invisible to
+# THIS parser too — the shape test below fails on that.
+_NIX_LIST_ENTRY = re.compile(r'^\s*([A-Z][A-Z0-9_]*)\s*=\s*\[(.*?)\]\s*;', re.M | re.S)
+_NIX_LIST_PATH = re.compile(r'"\$\{home\}/([^"]+)"')
+
+
+def nix_list_block(name: str, why: str) -> list[tuple[str, list[str]]]:
+    """One named attrset of LIST-valued entries, order preserved.
+
+    Public because `test_shell_env_nudge_handles` needs the same block: the
+    nudge table maps literal paths to handles, and an alternate path IS one of
+    the literals an agent may type. Parse — never restate.
+    """
+    text = HANDLES_NIX.read_text(encoding="utf-8")
+    m = re.compile(rf"^\s*{re.escape(name)}\s*=\s*\{{(.*?)^\s*\}};", re.M | re.S).search(text)
+    if not m:
+        raise AssertionError(
+            f"no `{name} = {{ ... }};` block found in {HANDLES_NIX}. {why}"
+        )
+    out: list[tuple[str, list[str]]] = []
+    for entry_name, body in _NIX_LIST_ENTRY.findall(m.group(1)):
+        paths = [p.rstrip("/") for p in _NIX_LIST_PATH.findall(body)]
+        if not paths:
+            raise AssertionError(
+                f"{name}.{entry_name} parsed to NO paths — it is either not a "
+                f'list of `"${{home}}/…"` strings or the shape has drifted, so '
+                f"the consumers that walk it silently see nothing."
+            )
+        out.append((entry_name, paths))
+    return out
+
+
 def _kubeconfig_table() -> list[tuple[str, str]]:
     """The `kubeconfigs` half of `agent-handles.nix`, LONGEST SUFFIX FIRST.
 
@@ -631,7 +668,7 @@ def test_the_corpus_is_the_doc_rot_gates_corpus():
 # looks like success.
 KNOWN_HANDLES = frozenset(
     {
-        "DEVRC", "HOMELAB", "DATAPACKET", "CIVITAI", "CIVITAI_CLI",
+        "DEVRC", "HOMELAB", "DATAPACKET", "CIVITAI", "CIVITAI_CLI", "NAIDA",
         "KC_HOMELAB", "KC_WORKBENCH", "KC_PROD", "KC_DPPROD", "KC_NEBULA",
     }
 )
@@ -768,6 +805,79 @@ def test_the_table_is_longest_suffix_first():
 
 
 # --- THE GATE ----------------------------------------------------------------
+
+
+def test_alternates_are_candidates_for_declared_handles():
+    """LEDGER over the `alternates` block of `agent-handles.nix`.
+
+    `alternates` exists because a checkout may sit at DIFFERENT paths per host
+    while a handle names ONE: the primary lives in `repos`, the other locations
+    are candidates here, and the runtime exporters (zsh envExtra, the generated
+    env.js) walk primary-then-alternates and export the first that exists.
+
+    Three pins, each a different silent failure:
+      * a key with no `repos` entry is a candidate for a handle that is never
+        exported — dead config, green forever;
+      * a candidate sharing a path with its own primary (or another candidate)
+        is a resolution that can silently pick a stale duplicate — the exact
+        failure `CIVITAI_CLI` documented when it pointed at a dormant clone;
+      * an entry this parser cannot see (a bare string, not a list) is a
+        candidate no consumer walks — the export layer would resolve to the
+        primary alone and the alternate path would be dead.
+    """
+    repos = dict(nix_block(
+        "repos",
+        "alternates are candidates for repo handles; without the repos parse "
+        "this test cannot tell.",
+    ))
+    alternates = nix_list_block(
+        "alternates",
+        "Every host-divergent checkout is declared there; without the block "
+        "parse this test asserts against nothing.",
+    )
+    orphans = sorted(name for name, _ in alternates if name not in repos)
+    assert not orphans, (
+        f"alternates names {orphans}, which the `repos` block does not declare: "
+        f"a candidate for a handle that is never exported. Declare the handle "
+        f"in `repos` (primary path) or drop the entry."
+    )
+    for name, paths in alternates:
+        candidates = [repos[name].rstrip("/")] + paths
+        dupes = sorted({p for p in candidates if candidates.count(p) > 1})
+        assert not dupes, (
+            f"{name} lists a duplicate candidate path {dupes} — the exporters "
+            f"take the FIRST existing one, so a duplicate can silently win and "
+            f"point the handle at the stale copy (the CIVITAI_CLI dormant-clone "
+            f"failure)."
+        )
+        for rel in paths:
+            assert rel and "/" in rel, (
+                f"alternates.{name} carries {rel!r}, a one-segment suffix — the "
+                f"same host-independent-specificity hazard the repo-handle "
+                f"ledger above refuses for `repos`."
+            )
+
+
+def test_alternates_shape_is_a_list_not_a_bare_string():
+    """NEGATIVE CONTROL on the shape: a `NAME = "${home}/…";` entry inside the
+    `alternates` block would parse as a REPO ENTRY via `_NIX_ENTRY`'s whole-file
+    sweep — arming the path gate for a path that does not exist on every host,
+    and making the duplicate-name check fail. The block must stay list-shaped.
+
+    The positive control is `test_alternates_are_candidates_for_declared_
+    handles` above: nix_list_block finding real entries is what proves the
+    shape this test demands is the one in the file.
+    """
+    text = HANDLES_NIX.read_text(encoding="utf-8")
+    m = re.compile(r"^\s*alternates\s*=\s*\{(.*?)^\s*\};", re.M | re.S).search(text)
+    assert m, "the alternates block is gone — this test measures nothing"
+    bare = _NIX_ENTRY.findall(m.group(1))
+    assert not bare, (
+        f"alternates declares {sorted(n for n, _ in bare)} in the bare-string "
+        f"shape. That shape is the REPO-entry shape: the whole-file parse "
+        f"would arm the path gate for a host-dependent path and read the name "
+        f"twice. Write it as a list: NAME = [ \"${{home}}/…\" ];"
+    )
 
 
 def test_no_absolute_checkout_paths_in_agent_docs():

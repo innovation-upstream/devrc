@@ -392,6 +392,20 @@ REPO_ENV_HANDLES: tuple[str, ...] = (
     "DATAPACKET",
     "CIVITAI",
     "CIVITAI_CLI",
+    # naida-ai (`ZacxDev/naida-ai`), added 2026-10-03. The trigger was the arc
+    # resolver: `find-session.py --arc` and this module's search reach only the
+    # repos named here, so the checkout's 7 `claudedocs/handoff-*.md` were
+    # invisible — `--arc` reported "no repo handle holds it" (rc 5 / the
+    # extractor's rc 3, NOTHING measured) for a doc sitting on disk, and a
+    # handoff_search query surfaced only other repos' MENTIONS of naida-ai.
+    # 🔴 THE HANDLE IS HOST-DIVERGENT: the workbench clone is
+    # `~/workspace/naida-ai`, the laptop's is `~/workspace/scratch/naida-ai`
+    # (measured 2026-10-03 over ssh, both hosts). nix/agent-handles.nix declares
+    # the primary plus an `alternates` entry for it; the runtime exporters
+    # resolve first-existing, so the env var this tuple reads is always ONE real
+    # path. A host with neither checkout exports nothing — the ordinary unset
+    # handle.
+    "NAIDA",
 )
 
 # --------------------------------------------------------------------------- #

@@ -119,6 +119,7 @@ from test_absolute_handle_paths import (  # noqa: E402
     _handle_table,
     _kubeconfig_table,
     nix_block,
+    nix_list_block,
 )
 
 HOOK = HANDLES_NIX.parent.parent / "scripts/claude-hooks/shell-env-nudge.py"
@@ -171,6 +172,34 @@ def _repos():
         "Every repo assertion in this module compares against that block; "
         "without it they compare against an empty set and pass vacuously.",
     )
+
+
+def _repo_candidates():
+    """Primary + `alternates` paths per repo handle, LONGEST SUFFIX FIRST.
+
+    🔴 THE HOOK'S TABLE MAPS LITERAL PATHS, and a host-divergent checkout
+    (nix/agent-handles.nix `alternates`) means MORE THAN ONE literal maps to
+    the same handle — the nudge must fire for the spelling the agent actually
+    typed, whichever host layout that is. Parsed via the imported
+    `nix_list_block`, never restated.
+    """
+    repos = _repos()
+    primary = dict(repos)
+    out = list(repos)
+    for name, paths in nix_list_block(
+        "alternates",
+        "Host-divergent checkouts are declared there; without the parse the "
+        "nudge table silently misses their paths.",
+    ):
+        assert name in primary, (
+            f"alternates names {name!r}, which the `repos` block does not "
+            f"declare — a candidate for a handle that is never exported "
+            f"(pinned in test_absolute_handle_paths.py as well; this assert is "
+            f"what keeps THIS derivation honest if that one is ever relaxed)."
+        )
+        for rel in paths:
+            out.append((name, rel))
+    return sorted(out, key=lambda e: (-len(e[1]), e[0]))
 
 
 def test_the_nix_source_parses_to_a_usable_table():
@@ -259,16 +288,21 @@ def test_the_nix_source_parses_to_a_usable_table():
 
 
 def test_the_repo_table_is_exactly_the_nix_repos_block():
-    """`REPO_VARS` IS the `repos` block — both directions.
+    """`REPO_VARS` IS the `repos` block PLUS its `alternates` — both directions.
 
     An entry the nix file does not declare is a handle the hook will suggest and
     the shell never exported: the agent is told to use `$FOO`, `$FOO` is empty,
     and the resulting command runs against `/` or against the cwd. An entry the
     nix file declares and the hook lacks is the silent half — no nudge, ever.
     Neither direction is detectable from the hook's own behaviour.
+
+    The `alternates` half (host-divergent checkouts, e.g. NAIDA) is included:
+    the table maps LITERAL paths, so every candidate path an agent may type
+    belongs here. An alternate missing from the hook is a path typed on the
+    host where THAT spelling exists and nudged never — the silent half again.
     """
     mod = _hook()
-    want = _expected(_repos(), mod.HOME)
+    want = _expected(_repo_candidates(), mod.HOME)
     got = dict(mod.REPO_VARS)
 
     missing = {p: n for p, n in want.items() if p not in got}

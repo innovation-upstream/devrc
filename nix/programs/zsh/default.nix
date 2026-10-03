@@ -5,10 +5,26 @@ let
   # scripts/opencode/env.js drift (hardcoded /home/zach, no existence guard, and
   # a KC_PROD that zsh never had). Add a handle THERE, not here.
   handles = import ../../agent-handles.nix { home = config.home.homeDirectory; };
+  # Candidate paths per repo handle: the primary plus any `alternates` entries
+  # (nix/agent-handles.nix), tried in order, first existing wins. A handle with
+  # no alternates stays the single-path shape below.
+  alts = handles.alternates or {};
+  candidates = name: path: [ path ] ++ (alts.${name} or []);
   exportIf = flag: name: path:
     "[[ ${flag} ${path} ]] && export ${name}=${path}";
+  # 🔴 ONE LINE on purpose — envExtra re-indents every generated line by four
+  # spaces (`map (l: "    " + l)` below), so a multi-line entry would leave its
+  # continuation lines at column 0. The zsh one-liner is legal; `_h` is a
+  # throwaway shell var, never exported.
+  exportFirst = flag: name: paths:
+    "for _h in ${builtins.concatStringsSep " " paths}; do "
+    + "[[ ${flag} $_h ]] && export ${name}=$_h && break; done";
+  repoLine = name: path:
+    if alts ? ${name}
+    then exportFirst "-d" name (candidates name path)
+    else exportIf "-d" name path;
   handleLines =
-    (builtins.attrValues (builtins.mapAttrs (exportIf "-d") handles.repos))
+    (builtins.attrValues (builtins.mapAttrs repoLine handles.repos))
     ++ (builtins.attrValues (builtins.mapAttrs (exportIf "-f") handles.kubeconfigs));
 in
 {

@@ -2427,11 +2427,24 @@ in
   home.file.".config/opencode/plugin/env.js".text =
     let
       handles = import ./agent-handles.nix { home = config.home.homeDirectory; };
+      # Candidate paths per handle: primary + `alternates` (agent-handles.nix),
+      # first existing wins — the JS twin of the zsh `for _h … break` loop.
+      # Returns a LIST of lines (flattened below): each joined line must stay a
+      # single line or the template's indenting map skips its continuation.
+      alts = handles.alternates or {};
       entry = kind: name: path:
-        "  if (${kind}(${builtins.toJSON path})) output.env.${name} = ${builtins.toJSON path};";
+        let
+          cands = [ path ] ++ (alts.${name} or []);
+          line = i: p:
+            (if i == 0 then "  if (" else "  else if (")
+            + "${kind}(${builtins.toJSON p})) output.env.${name} = ${builtins.toJSON p};";
+        in
+          lib.imap0 line cands;
       lines =
-        (builtins.attrValues (builtins.mapAttrs (entry "isDir") handles.repos))
-        ++ (builtins.attrValues (builtins.mapAttrs (entry "isFile") handles.kubeconfigs));
+        (builtins.concatLists
+          (builtins.attrValues (builtins.mapAttrs (entry "isDir") handles.repos)))
+        ++ (builtins.concatLists
+          (builtins.attrValues (builtins.mapAttrs (entry "isFile") handles.kubeconfigs)));
     in
     ''
       // env.js — opencode plugin that injects the repo/kubeconfig handles into
@@ -3591,6 +3604,12 @@ in
         # See `main`'s note at the downgrade site.
       ] ++ lib.mapAttrsToList (n: v: "${n}=${v}")
         (import ./agent-handles.nix { home = "%h"; }).repos;
+      # 🔴 THE PRIMARY ONLY, NOT `alternates` — an Environment entry is static
+      # `N=V` and cannot try candidates at runtime. This unit is workbench-only
+      # (serverMode below), where every primary exists; on a host where a
+      # primary is absent the indexer reports that repo UNMEASURED — loud, never
+      # a silent zero. The runtime consumers (zsh envExtra, plugin/env.js) are
+      # the ones that walk the alternates.
       # nix-shell pulls psycopg2 (the _db.py write path). git/kubectl come from
       # PATH above and are inherited into the nix-shell (it is not --pure).
       # 🔴 `--write` IS REQUIRED AND IS NOT DECORATION. Dry-run is the module's
