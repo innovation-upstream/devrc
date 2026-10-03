@@ -49,6 +49,18 @@ equivalent**: it takes no scope, the client ignores `--scope` for it, and
 `read.sh ls-entries` passes straight through — so the bare verb here and the door
 answer identically, and neither needs a repo.
 
+🔴 **`append` REFUSES A `--text` OVER 2000 CHARACTERS (rc 21, `NOTHING WAS SENT`), AND THE
+REFUSAL HIDES IN THE BANNER NOISE.** Measured 2026-10-02: a 2010-character bullet was
+refused, and the caller — grepping the output for `appended|duplicate` — saw neither, read
+the empty match as "no news is good news", and moved on believing the bullet had landed. The
+refusal is honest and atomic (nothing partial is written), so the only defect is in how it
+gets read. **Two rules:** never filter `write.sh append`'s output down to the success words
+— a refusal is exactly the case your grep will drop; and **confirm a bullet LANDED by reading
+the synced store, with a positive control** (`health.sh sync`, then grep your new text AND a
+line you know was already there — a bare zero cannot distinguish "refused" from "wrong
+grep"). ⚠ The ceiling is a property of the client, not of the entry: a long lesson must be
+SPLIT into two bullets or tightened, never retried unchanged.
+
 🔴 **`cairn validate` IS NOT THE WRITE-PROTOCOL CHECK, and it stops being one
 silently, at exit 0.** Once a host has run `home-manager switch`, the client on
 PATH is the pinned OSS package, which reimplements `validate` on the reader's
