@@ -171,7 +171,13 @@ printed**. 401 = token rejected (expected without one); 404 = route gone.
 `status pods <ns>`, `workloads <ns>`, `flux <ns>` and the bare `status <ns>`
 shorthand all answer 400 for anything outside it — the server being right.
 **Read the startup line for the set actually served**
-(`kubectl -n muse logs deploy/muse-bridge | head -1` → `ns-allow=…`); it is
+(`KUBECONFIG=$KC_HOMELAB kubectl -n muse logs deploy/muse-bridge | grep -m1 ns-allow=`)
+🔴 **The `KUBECONFIG=` is not optional** — there is deliberately no default,
+so a bare `kubectl` here resolves to whatever context happens to be current
+(measured on this host: `k3d-dev-cluster`) and answers `deployments.apps
+"muse-bridge" not found`, which reads as "the bridge is gone" rather than
+"wrong cluster". ⚠ `grep -m1`, not `head -1`: the startup line is not
+guaranteed to be the first line of the log.; it is
 server-side (`MUSE_BRIDGE_NS_ALLOW` on the Deployment) and the bridge
 deliberately does not disclose it in a response, so do not hardcode it here —
 this paragraph named a value and would have gone stale the moment the set

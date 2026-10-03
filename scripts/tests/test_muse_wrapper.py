@@ -724,7 +724,7 @@ def test_a_disallowed_namespace_is_explained_as_policy_not_a_typo(status_env):
 
 
 @pytest.mark.parametrize("code", ["400", "200", "401", "404", "500"])
-def test_a_nonverb_first_word_is_named_as_a_namespace_guess(status_env, code):
+def test_a_nonverb_first_word_is_reported_as_a_namespace_reinterpretation(status_env, code):
     """REGRESSION for the INVERSE misread, on EVERY outcome.
 
     cmd_status reinterprets any non-verb first word as a namespace, so
@@ -732,7 +732,7 @@ def test_a_nonverb_first_word_is_named_as_a_namespace_guess(status_env, code):
 
     🔴 THE PARAMETRIZE IS THE WHOLE POINT, AND `200` IS THE CASE THAT WAS
     BROKEN. This test existed and asserted only the 400 row, because the
-    warning used to live inside the 400 handler. That left a mistyped verb
+    warning used to live inside the 400 handler. That left a non-verb word
     which happens to name an ALLOWLISTED namespace -- `muse status muse` --
     querying pods in ns=muse, answering 200, and saying NOTHING: the exact
     case #1972 reported, still open, while this test read as though the
@@ -745,7 +745,7 @@ def test_a_nonverb_first_word_is_named_as_a_namespace_guess(status_env, code):
     proc = run(env, "status", "pdos")
 
     assert "as a NAMESPACE" in proc.stderr, (
-        f"a mistyped verb went unreported on HTTP {code}. The reinterpretation "
+        f"the reinterpretation went unreported on HTTP {code}. It "
         "is silent on every outcome, not just the refused one, so the warning "
         f"cannot be keyed to a status code. stderr={proc.stderr!r}"
     )
@@ -755,7 +755,7 @@ def test_a_nonverb_first_word_is_named_as_a_namespace_guess(status_env, code):
         assert verb in proc.stderr
 
 
-def test_a_mistyped_verb_that_names_an_allowlisted_namespace_still_warns(status_env):
+def test_a_nonverb_naming_an_allowlisted_namespace_is_still_reported(status_env):
     """REGRESSION for the precise case the first fix left silent.
 
     `muse status muse` is indistinguishable from a deliberate `status muse`
@@ -770,7 +770,7 @@ def test_a_mistyped_verb_that_names_an_allowlisted_namespace_still_warns(status_
 
     assert "as a NAMESPACE" in proc.stderr, (
         "`muse status muse` silently became a pods query for ns=muse -- a 200 "
-        "with no indication the word was not a verb. This is #1972's original "
+        "with no indication that it had been read as a namespace. This is #1972's "
         f"finding. stderr={proc.stderr!r}"
     )
 
@@ -779,7 +779,7 @@ def test_an_explicit_verb_is_not_reported_as_a_verb_typo(status_env):
     """NEGATIVE CONTROL for the guess branch -- it must not fire on a real verb.
 
     Without this, `guessed_ns=1` unconditionally would pass the test above and
-    tell the operator `flux-system` is not a verb on every refusal.
+    tell the operator `flux-system` was reinterpreted, on every refusal.
     """
     env = {**status_env, "STUB_CODE": "400",
            "STUB_BODY": '{"error":"namespace not served","detail":["x"]}'}
@@ -787,7 +787,8 @@ def test_an_explicit_verb_is_not_reported_as_a_verb_typo(status_env):
 
     assert "POLICY ANSWER" in proc.stderr, "the policy branch stopped firing"
     assert "as a NAMESPACE" not in proc.stderr, (
-        "`workloads` IS a verb and was reported as a mistyped one"
+        "`workloads` IS a verb, so its argument must not be reported as a "
+        "namespace reinterpretation"
     )
 
     # ...and on a SUCCESSFUL call too, now that the warning fires at parse
@@ -798,8 +799,8 @@ def test_an_explicit_verb_is_not_reported_as_a_verb_typo(status_env):
                  ("status", "pods", "muse")):
         proc = run(ok, *args)
         assert "as a NAMESPACE" not in proc.stderr, (
-            f"`muse {' '.join(args)}` uses only real verbs and was reported as "
-            f"a mistyped one. stderr={proc.stderr!r}"
+            f"`muse {' '.join(args)}` uses only real verbs, so nothing should "
+            f"be reported as a namespace reinterpretation. stderr={proc.stderr!r}"
         )
 
 
@@ -938,22 +939,29 @@ def test_the_documented_bare_ns_shorthand_is_not_reported_as_an_error(status_env
     env = {**status_env, "STUB_CODE": "200", "STUB_BODY": '{"items":[],"count":0}'}
     proc = run(env, "status", "flux-system")
 
-    # It reports the interpretation...
-    assert "as a NAMESPACE" in proc.stderr, (
-        "the reinterpretation went unreported, which is the silence #1972 "
-        f"reported. stderr={proc.stderr!r}"
+    # 🔴 THE WHOLE NORMALISED STRING, NOT A WORD LIST. An earlier version of
+    # this guard asserted the ABSENCE of seven words ("NOT A VERB", "invalid",
+    # "typo", ...) and #1993's round-2 audit walked it with TWO rewordings that
+    # kept the suite fully green: "`x` is not recognised as a verb" and
+    # "BAD SUB-COMMAND `x`". Both restore finding F1's behaviour verbatim while
+    # a test NAMED for its absence stays green. `claude/RULES.md`: when the
+    # artifact under test IS PROSE, a guard on WORDS is walkable by REWORDING
+    # -- pin the whole normalised string. A cosmetic reword then fails this
+    # test, which is the price of a machine-readable claim; update the literal
+    # below deliberately, and only after re-reading what it is asserting.
+    normalised = " ".join(proc.stderr.split())
+    expected = (
+        "muse: reading `flux-system` as a NAMESPACE "
+        "— querying pods in ns=flux-system. "
+        "(`muse status <ns>` is shorthand for `pods <ns>`. "
+        "If you meant a verb: health nodes pods workloads flux.)"
     )
-    assert "flux-system" in proc.stderr
-    # ...and names the shorthand, so the reader knows it is supported.
-    assert "shorthand" in proc.stderr
-    # ...but does NOT call a documented form a mistake.
-    for scold in ("NOT A VERB", "not a verb", "invalid", "unknown", "typo",
-                  "did you mean", "error"):
-        assert scold not in proc.stderr, (
-            f"the documented `muse status <ns>` shorthand was reported with "
-            f"{scold!r} -- a permanent scold on the happy path gets trained "
-            f"through. stderr={proc.stderr!r}"
-        )
+    assert normalised == expected, (
+        "the namespace notice is not byte-equal (whitespace-normalised) to the "
+        "pinned text. If this is a deliberate reword, update the literal; if it "
+        "re-introduces error/typo framing for a DOCUMENTED form, it is finding "
+        f"F1 again.\n  got:      {normalised!r}\n  expected: {expected!r}"
+    )
 
 
 def test_usage_and_the_namespace_notice_agree_on_the_verb_set():
@@ -965,8 +973,17 @@ def test_usage_and_the_namespace_notice_agree_on_the_verb_set():
     `test_usage_advertises_no_flag_the_parser_ignores` is `poll`-scoped.
 
     🔴 Pinned against the PARSER, which is the only thing that decides what a
-    verb actually is, so this fails when ANY of the three drifts -- the parser
-    growing a verb neither list mentions included.
+    verb actually is. All three sets must agree EXACTLY (modulo usage()'s bare
+    `<ns>` shorthand, which is not a verb), so this fails on every drift in
+    either direction -- the parser growing a verb neither list mentions, AND
+    usage() advertising one the parser does not accept.
+
+    ⚠ The usage arm was `parser <= usage` and this docstring said "fails when
+    ANY of the three drifts", which was FALSE in one direction: #1993's round-2
+    audit added `events` to usage() and the suite stayed green, so `muse --help`
+    would advertise a verb that silently becomes a pods query for `ns=events`.
+    A docstring claiming a relationship while the body inspects one side reads
+    as coverage and stops anyone looking.
     """
     source = source_without_comments()
 
@@ -990,8 +1007,13 @@ def test_usage_and_the_namespace_notice_agree_on_the_verb_set():
         f"{sorted(notice_verbs)} -- the hint sends the reader to a verb that "
         "does not exist, or omits one that does"
     )
-    # usage() additionally carries the bare `<ns>` shorthand, which is not a verb.
-    assert parser_verbs <= usage_verbs, (
-        f"usage() omits status verb(s) {sorted(parser_verbs - usage_verbs)} -- "
-        "the first fix shipped with `pods` and `health` undocumented"
+    # usage() additionally carries the bare `<ns>` shorthand, which is not a
+    # verb -- it is the ONLY permitted difference, and it is subtracted by name
+    # rather than by a one-directional comparison.
+    usage_verbs -= {"ns"}
+    assert parser_verbs == usage_verbs, (
+        f"usage() and the parser disagree. usage() omits {sorted(parser_verbs - usage_verbs)} "
+        f"and advertises {sorted(usage_verbs - parser_verbs)} that the parser does "
+        "not accept -- an advertised phantom verb becomes a pods query for a "
+        "namespace of that name, with the tool's own help vouching for it"
     )
