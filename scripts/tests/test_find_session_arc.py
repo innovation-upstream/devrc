@@ -1297,13 +1297,32 @@ class TestEveryHandleInTheTupleIsSearchable:
         assert not unreachable, (
             f"an ARCHIVED doc in the {unreachable} checkout(s) does not resolve")
 
-    def test_an_EMPTY_handle_is_skipped_rather_than_joined_onto_cwd(self):
+    def test_an_EMPTY_handle_is_skipped_rather_than_joined_onto_cwd(
+            self, tmp_path, monkeypatch):
         """NEGATIVE CONTROL: the walk must still return `(None, None)` when no
         handle holds the doc. A loop that treated an empty handle as `Path("")`
         would resolve against the CWD and answer about whatever repo the operator
-        happens to be standing in."""
+        happens to be standing in.
+
+        🔴 THE PLANTED CWD DOC IS WHAT MAKES THIS GUARD OBSERVABLE, AND WITHOUT
+        IT THE GUARD WAS VACUOUS. MEASURED: deleting the `if not root: continue`
+        skip from `arc_repo_for` left this whole file GREEN at 107 passed,
+        because `Path("") / "claudedocs/<synthetic>.md"` does not exist under any
+        cwd either — so the guarded and the unguarded walk both returned
+        `(None, None)` and this assertion could not tell them apart. It read as
+        a negative control while providing none. With the doc planted in the cwd
+        the unguarded walk RESOLVES it, and that is the only arrangement in which
+        this test can fail for its own reason.
+        """
+        (tmp_path / "claudedocs").mkdir()
+        (tmp_path / "claudedocs" / self.DOCNAME).write_text(
+            "# LEAKCANARY-synthetic\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
         env = {h: "" for h in hi.REPO_ENV_HANDLES}
-        assert fs.arc_repo_for(self.DOCNAME, env=env) == (None, None)
+        assert fs.arc_repo_for(self.DOCNAME, env=env) == (None, None), (
+            "an EMPTY handle was joined onto the CWD, so the walk answered about "
+            "whatever repo the operator happens to be standing in rather than "
+            "skipping the unset handle")
 
     def test_the_handles_are_searched_in_the_TUPLE_order(self, tmp_path):
         """Order is part of the contract: two checkouts holding a doc of the
