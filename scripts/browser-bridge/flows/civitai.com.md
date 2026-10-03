@@ -93,6 +93,40 @@ Source, if you need to re-check: `needsLogin` in
 switcher's footer actions are ICON buttons with no text nodes. Do not conclude a
 control is missing from a text read; look for the icon/`aria-label`.
 
+### 🔴 A CLEAN ROSTER ROW CAN STILL LAND YOU BEHIND A GATE — AND IT IS NOT SSO
+
+**`needsLogin` is not the only gate, so a row with no `Sign in` hint is not a promise
+that the swap leaves you able to act.** MEASURED 2026-10-02 switching to a secondary
+account: the swap itself succeeded — `/api/auth/session` returned the new
+`{username, id}` — and the account then landed behind a **Terms-of-Service acceptance
+modal whose ONLY button is `Accept`**.
+
+🔴 **An agent must NOT press it. That is a legal acceptance on the operator's behalf**,
+and nothing about a browser task authorises one. Neither is it routable around
+server-side.
+
+What it does to every subsequent op, because none of this announces itself:
+
+- A `mantine-Modal-overlay` at `z-index: 300; position: fixed` covers the whole page, so
+  `[aria-label="Account menu"]` **hit-tests to a `DIV`** and every `click` on it is
+  inert while still returning `ok: true`.
+- `Escape` does **not** dismiss it.
+- It is **session-gated, not route-scoped** — still mounted after navigating to
+  `/models`, so "try another route" is not a way out.
+- 🔴 **Setting `pointer-events: none` on the overlay is NOT sufficient** — the usual
+  covered-control remedy gets the hit-test back to the button and the popover *still*
+  will not open, because the modal **traps focus**. This is the case that makes the
+  standard workaround look broken.
+
+**The way back, if you must restore the previous account:** remove the modal element
+client-side (transient — server state and the ToS requirement are both untouched)
+*purely* to reach the switcher, swap back, then reload so nothing of your DOM surgery
+persists. Verify the restore from `/api/auth/session`, never from the avatar.
+
+🔴 **So treat "which account can I safely leave this profile on?" as part of the plan
+BEFORE you swap**, not after. A read-only check as a second viewer is cheap; being
+stranded on a ToS-gated account in the operator's live browser is not.
+
 ### Profiles are still separate cookie jars
 
 The switcher moves between accounts **already on this device/profile**. Different
