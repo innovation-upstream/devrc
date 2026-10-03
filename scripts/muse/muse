@@ -89,7 +89,10 @@ muse — dispatch/poll the user's Muse agent; cluster status via muse-bridge.
                                    once).
   muse threads                                      the B1 thread list (JSON: Main
                                    chat + side chats, with unread/active flags)
-  muse status [ns|nodes|workloads <ns>|flux <ns>]   CLUSTER snapshot (A)
+  muse status [<ns>|health|nodes|pods <ns>|workloads <ns>|flux <ns>]
+                                   CLUSTER snapshot (A). A bare <ns> is
+                                   shorthand for `pods <ns>`; no argument is
+                                   `health`.
   muse vm                                           Muse VM/session status (B2)
   muse auth [export|...]                            muse-cli auth passthrough
   muse b1                                           the browser-flow recipe
@@ -644,11 +647,38 @@ cmd_status() {
       pods)      what="pods"; [ $# -gt 1 ] && ns="$2" ;;
       workloads) what="workloads"; [ $# -gt 1 ] && ns="$2" ;;
       flux)      what="flux"; [ $# -gt 1 ] && ns="$2" ;;
-      *)         what="pods"; ns="$1" ;;
+      # A bare first word that is not a verb is read as a NAMESPACE, i.e.
+      # `muse status <ns>` is shorthand for `muse status pods <ns>`.
+      #
+      # 🔴 THIS STATES WHAT IT DID; IT DOES NOT CALL IT A MISTAKE. An earlier
+      # version of this fix printed "`<x>` is NOT A VERB", which scolded the
+      # wrapper's OWN DOCUMENTED form — usage() advertises the bare `<ns>`
+      # FIRST, and the SKILL.md paragraph this change adds calls it a
+      # supported fallthrough. So every correct `muse status flux-system`
+      # reported itself as a typo, and a test pinned that as desired. Found by
+      # #1993's round-1 audit. A permanent scold on the happy path is the
+      # permanently-red-gate shape: it gets trained through, and then it is
+      # there for nothing.
+      #
+      # 🔴 AND A TYPO IS INDISTINGUISHABLE FROM THE SHORTHAND HERE — both land
+      # in this arm and neither can be told from the other, so the only honest
+      # thing to print is the INTERPRETATION, with the verb list as a hint.
+      # This still discharges #1972 (the reinterpretation is no longer silent)
+      # without asserting which of the two happened.
+      #
+      # It prints at PARSE time, before the request: the reinterpretation is
+      # silent on EVERY outcome, not just a refused one, so keying it to a
+      # status code left `muse status muse` answering 200 in silence.
+      *)
+        what="pods"; ns="$1"
+        printf 'muse: reading `%s` as a NAMESPACE — querying pods in ns=%s.\n' "$1" "$1" >&2
+        printf '      (`muse status <ns>` is shorthand for `pods <ns>`. If you\n' >&2
+        printf '      meant a verb: health nodes pods workloads flux.)\n' >&2
+        ;;
     esac
   fi
-  local url="$BRIDGE_URL/v1/$what"
-  case "$what" in pods|workloads|flux) url="$url?ns=$ns" ;; esac
+  local url="$BRIDGE_URL/v1/$what" sent_ns=0
+  case "$what" in pods|workloads|flux) url="$url?ns=$ns"; sent_ns=1 ;; esac
   local token; token=$(bridge_token) || die "could not decrypt bridge token" 4
   [ -n "$token" ] || die "bridge token decrypted empty" 4
   local rc=0
@@ -668,11 +698,66 @@ cmd_status() {
   # exist. `-H @-` passes the line VERBATIM. Found by #1976 round 1.
   # ⚠ The unquoted `--config` spelling (`header = Authorization: …`) sends NO
   # header at all — also measured. Do not "simplify" back to either form.
-  printf 'Authorization: Bearer %s\n' "$token" \
-    | curl -sS -m 15 -H @- "$url" -w '\n[%{http_code}]' || rc=$?
+  #
+  # The response is CAPTURED rather than streamed so the status branch below can
+  # read the code. Two observable differences, both measured, neither of which
+  # an earlier version of this comment admitted:
+  #   1. output arrives at once rather than as it lands (bounded by -m 15);
+  #   2. stdout gains a TRAILING NEWLINE. `curl -w '\n[%{http_code}]'` emits no
+  #      final newline; `printf '%s\n'` adds one. Verified with `cat -A`, base
+  #      vs head. The comment here used to claim "anything parsing either is
+  #      unaffected", which was false — and the invariant guard asserts through
+  #      `.rstrip()`, so it was blind in both directions. There is no machine
+  #      consumer today (`git grep` finds only SKILL.md's `$M status`), so this
+  #      is recorded as a behaviour change rather than fixed back.
+  local out
+  out=$(printf 'Authorization: Bearer %s\n' "$token" \
+    | curl -sS -m 15 -H @- "$url" -w '\n[%{http_code}]') || rc=$?
+  printf '%s\n' "$out"
   echo >&2
   [ "$rc" -eq 0 ] || die "bridge query failed (network)" 4
-  # 401 = token rejected; 404 = route gone (API churn); both are answers, not outages.
+
+  # 🔴 EVERY HTTP CODE HERE IS AN ANSWER, NOT AN OUTAGE — AND THIS COMMENT USED
+  # TO NAME ONLY TWO OF THEM. It read "401 = token rejected; 404 = route gone",
+  # which was complete until 2026-10-02: homelab-infra #942/#944 deployed a
+  # server-side namespace ALLOWLIST (startup line `ns-allow=muse`), so every
+  # `muse status pods <ns>` / `workloads <ns>` / `flux <ns>` and the bare
+  # `muse status <ns>` fallthrough now answers **400** for every namespace
+  # outside it. With 400 unmentioned, a POLICY DENIAL read as a typo. 400 is
+  # explained below; 401 and 404 still mean what they said.
+  #
+  # Exit status is deliberately UNCHANGED (0 for any HTTP answer, including
+  # 400). That is the documented contract — a caller branching on exit status
+  # cannot distinguish these, which is a REAL and separate defect, batched as
+  # M3/M4 in claudedocs/handoff-muse-system-inventory.md. Do not fix it here:
+  # changing it silently would alter every existing caller's behaviour.
+  local code="${out##*\[}"; code="${code%\]}"
+  case "$code" in
+    400)
+      # Only what the RESPONSE BODY CANNOT SUPPLY. The body already names which
+      # half refused ("namespace not served" vs "malformed ns"), and it
+      # deliberately never echoes the ns back, so restating its wording here
+      # would be a third copy of the server's own message that goes stale when
+      # the server rewords. #1993's round-0 audit counted the earlier version
+      # of this block as duplicating the comment above it AND the SKILL.md
+      # section AND main.go — four copies of four facts, nothing pinning them.
+      #
+      # No `else` arm: a 400 on a route that sends no ns (/v1/health, /v1/nodes)
+      # cannot come from the allowlist — the bridge's only 400 site is the
+      # ns-scoped one — so there is nothing true to say about it here, and the
+      # arm that used to be here only said "see the body above", which the body
+      # already is. `sent_ns` still GATES this, so the allowlist is never
+      # blamed for a refusal it could not have caused.
+      if [ "$sent_ns" -eq 1 ]; then
+        printf 'muse: 400 is a POLICY ANSWER, not an outage — ns=%s was REFUSED.\n' "$ns" >&2
+        printf '  The served set is SERVER-side (MUSE_BRIDGE_NS_ALLOW on the\n' >&2
+        printf '  muse-bridge Deployment) and the bridge does not disclose it.\n' >&2
+        printf '  🔴 Widening it is a cluster security change, not a client fix.\n' >&2
+        printf '  The body above says which half refused; see\n' >&2
+        printf '  claude/skills/muse/SKILL.md for the rest.\n' >&2
+      fi
+      ;;
+  esac
 }
 
 cmd_setup() {
