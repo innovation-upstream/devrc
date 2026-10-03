@@ -103,7 +103,7 @@ says which.
 |---|---|
 | 0 | messages were extracted |
 | 2 | bad invocation, **or** the output could not be opened, written or closed. 🔴 **Not a claim that nothing happened.** On an `--ids-file` error nothing was searched; on an **output** error the walk has already run, and `-o PATH` has been **truncated at open** and may hold a **partial** result — whatever was there before is **gone**. Delete it or re-run; never read it as the previous content. |
-| 3 | `--arc` only: the seed named no handoff doc, or no `$DEVRC`/`$HOMELAB`/`$DATAPACKET`/`$CIVITAI` checkout holds it. 🔴 **NOTHING WAS MEASURED** — a typo in the name lands here, not on 4. |
+| 3 | `--arc` only: the seed named no handoff doc, or no `$DEVRC`/`$HOMELAB`/`$DATAPACKET`/`$CIVITAI`/`$CIVITAI_CLI` checkout holds it. 🔴 **NOTHING WAS MEASURED** — a typo in the name lands here, not on 4. |
 | 4 | `--arc` only: the doc resolved and the arc **was** measured, and it has zero member sessions. A **measured** empty arc — a real finding about the doc. |
 | 5 | **NOTHING WAS READ.** Two ways in, and the stderr line says which: session ids were selected and **none** resolved (each is named — check the peer host before concluding they are gone), **or** no transcript could be opened at all, which includes an absent or empty `~/.claude/projects` (a fresh host, a container, the nix sandbox). |
 | 6 | transcripts **were** read and held zero user-typed messages after filtering — the sessions exist and are empty of typed input. |

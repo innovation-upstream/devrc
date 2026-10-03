@@ -571,7 +571,9 @@ def render(outcome: SearchOutcome) -> str:
     # 🔴 WHICH REPOS THE CORPUS COVERS IS PART OF EVERY ANSWER, NOT JUST THE
     # ZEROS. `known_repos` was rendered only on the `unknown-repo` branch, so a
     # run WITH hits never said what its reach was — and this corpus reaches
-    # exactly `handoff_index.REPO_ENV_HANDLES`, four repos. MEASURED over 22 real
+    # exactly `handoff_index.REPO_ENV_HANDLES` — read the tuple for the count;
+    # this line said "four repos" while that tuple already held five.
+    # MEASURED over 22 real
     # `/resume` runs: 2 were launched from a repo outside that set, where the
     # corpus STRUCTURALLY could not hold the session's own work, and nothing in
     # the output said so. Three hits from elsewhere then read as "here is what

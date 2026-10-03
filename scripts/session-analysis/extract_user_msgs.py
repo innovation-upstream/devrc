@@ -63,6 +63,15 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS / "lib"))
 
 from transcript_search import find_transcript, iter_transcripts  # noqa: E402
+import handoff_index  # noqa: E402
+
+#: `"$DEVRC/$HOMELAB/…"` — the repo handles `--arc` can resolve a doc in, DERIVED
+#: from the one tuple that decides it. 🔴 An inline copy here enumerated FOUR
+#: while `handoff_index.REPO_ENV_HANDLES` had grown to five, so the exit-3
+#: sentence told an operator the search had covered every checkout it can see
+#: when it had skipped `$CIVITAI_CLI` entirely. `find-session.py` owns the search
+#: and renders the same list from the same tuple.
+ARC_HANDLES_SPELLED = "/".join(f"${h}" for h in handoff_index.REPO_ENV_HANDLES)
 
 ROOT = os.path.expanduser("~/.claude/projects")
 
@@ -109,8 +118,9 @@ EXIT_CONTRACT = (
      "PARTIAL result — whatever was there before is GONE. Delete it or "
      "re-run; do not treat it as the previous content."),
     (EXIT_ARC_UNMEASURED,
-     "`--arc` ONLY: the seed named no handoff doc, or no $DEVRC/$HOMELAB/"
-     "$DATAPACKET/$CIVITAI checkout holds it. 🔴 NOTHING WAS MEASURED — this "
+     "`--arc` ONLY: the seed named no handoff doc, or no "
+     + ARC_HANDLES_SPELLED
+     + " checkout holds it. 🔴 NOTHING WAS MEASURED — this "
      "is not an empty arc, and a wrong name lands here, not on exit 4."),
     (EXIT_ARC_EMPTY,
      "`--arc` ONLY: the doc resolved and the arc was measured, and it has ZERO "

@@ -79,6 +79,22 @@ from transcript_search import (  # noqa: E402
 )
 from opencode_search import search_opencode  # noqa: E402
 import handoff_arc  # noqa: E402
+import handoff_index  # noqa: E402
+
+
+def arc_handles_spelled(sep: str = ", ") -> str:
+    """`"$DEVRC, $HOMELAB, …"` — the arc-search handles as an operator reads them.
+
+    🔴 ONE RENDERER OVER `handoff_index.REPO_ENV_HANDLES`, so no sentence
+    describing the search can name a different set from the one the search
+    walks. An inline copy of that tuple is how `arc_repo_for` came to search
+    FOUR handles while its own docstring claimed it searched every entry in
+    `REPO_ENV_HANDLES` — a description wider than its implementation, which made
+    a doc living in the fifth checkout (`$CIVITAI_CLI`) unreachable and reported
+    as "nothing was measured at all". Same idiom as `handoff_search.py`'s
+    "set one of:" line.
+    """
+    return sep.join(f"${h}" for h in handoff_index.REPO_ENV_HANDLES)
 
 # Reassigned by tests to point at a tmp corpus. Read at CALL time, never captured.
 ROOT = DEFAULT_ROOT
@@ -251,8 +267,9 @@ EXIT_CONTRACT = (
                        "`--tail` a failed scan still exits 0 and says so in the "
                        "LIVE section."),
     (EXIT_ARC_UNMEASURED, "`--arc` ONLY: the doc was named but NOT "
-                          "MEASURED — no repo handle ($DEVRC, $HOMELAB, "
-                          "$DATAPACKET, $CIVITAI) this shell can see holds "
+                          "MEASURED — no repo handle ("
+                          + arc_handles_spelled()
+                          + ") this shell can see holds "
                           "it. 🔴 This is not an empty arc and must never be "
                           "reported as one: nothing was read at all."),
 )
@@ -1136,16 +1153,24 @@ def arc_ignored_inputs(a):
 def arc_repo_for(basename, env=None):
     """`(repo_path, relpath)` for the repo holding this doc, or `(None, None)`.
 
-    Searches every repo in `handoff_index.REPO_ENV_HANDLES` — on this host devrc,
-    homelab-talos, datapacket-talos and civitai — because an arc belongs to
-    whichever repo owns its doc and the operator should not have to say which.
+    Searches every repo in `handoff_index.REPO_ENV_HANDLES`, in its order,
+    because an arc belongs to whichever repo owns its doc and the operator should
+    not have to say which.
 
-    ⚠ TWO of those are CLIENT repos, so a caller rendering the result must print
+    🔴 THE TUPLE IS WALKED, NOT RE-SPELLED, AND THAT IS A FIX. This loop carried
+    an inline `("DEVRC", "HOMELAB", "DATAPACKET", "CIVITAI")` while the sentence
+    above already claimed it searched every entry — so when `CIVITAI_CLI` became
+    the fifth handle, a doc in that checkout was unreachable and `--arc` reported
+    `nothing was measured at all` about a doc sitting on that repo's mainline.
+    The handle list is NOT enumerated here for the same reason it is not
+    enumerated in the exit-contract sentence: a copy is a claim that rots.
+
+    ⚠ SOME of these are CLIENT repos, so a caller rendering the result must print
     the repo LABEL and never the transcript path; `handoff_arc.ArcMember` has no
     path field, which is how that is enforced rather than remembered.
     """
     src = os.environ if env is None else env
-    for handle in ("DEVRC", "HOMELAB", "DATAPACKET", "CIVITAI"):
+    for handle in handoff_index.REPO_ENV_HANDLES:
         root = (src.get(handle) or "").strip()
         if not root:
             continue
@@ -1280,8 +1305,9 @@ def arc_report(basename, stderr=None):
     if repo is None:
         raise ArcUnmeasured(
             f"no repo handle holds claudedocs/{basename}. 🔴 This is NOT 'the "
-            "arc is empty' — it means every $DEVRC/$HOMELAB/$DATAPACKET/"
-            "$CIVITAI checkout this shell can see lacks the doc, so nothing "
+            "arc is empty' — it means every "
+            + arc_handles_spelled("/")
+            + " checkout this shell can see lacks the doc, so nothing "
             "was measured at all.")
 
     # The reader half: walk the corpus for the doc name, then keep only the
