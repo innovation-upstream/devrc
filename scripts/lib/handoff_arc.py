@@ -61,6 +61,8 @@ __all__ = [
     "genesis_names_doc",
     "doc_basename",
     "doc_commits",
+    "session_docs",
+    "sessions_docs",
     "writer_members",
     "reader_members",
     "merge_members",
@@ -434,6 +436,119 @@ def doc_commits(repo: str, relpath: str,
     # `commits[-1]` as the ORIGINATING commit, so an inverted tie relabels who
     # started an arc. `dict` preserves insertion order, so this needs no sort.
     return tuple(by_sha.values())
+
+
+#: The handoff-doc paths a reverse walk will accept, as `git log --name-only`
+#: prints them (no quoting, `-z`). 🔴 THE `archive/` ALTERNATION IS LOAD-BEARING
+#: — `#1627` renamed 35 docs under `claudedocs/archive/`, so a reader without it
+#: reports every drifting session as single-doc for every archived arc. It is the
+#: same alternation `_DOC_IN_TEXT` and `arc_repo_for` carry; anchored whole here
+#: because a `--name-only` line IS the whole path.
+_DOC_PATH_RE = re.compile(
+    r"^claudedocs/(?:archive/)?(handoff-[A-Za-z0-9._-]+\.md)$")
+
+#: POSIX-ERE specials. An id is an OPAQUE STRING (`session_trailer`'s 🔴), so it
+#: may legitimately carry a character git's `-E` would read as a metacharacter —
+#: a single unescaped `(` makes the whole walk exit non-zero, which surfaces as
+#: `GitUnavailable` for a perfectly ordinary session. Escaped rather than
+#: shape-filtered, because filtering by shape is the thing that module forbids.
+_ERE_SPECIAL = set(r".[]{}()*+?^$|\/")
+
+
+def _ere_escape(value: str) -> str:
+    return "".join("\\" + c if c in _ERE_SPECIAL else c for c in value)
+
+
+def _trailer_grep(session_id: str) -> str:
+    """The `--grep` PREFILTER for one session id.
+
+    🔴 A PREFILTER AND NOTHING MORE. It is wider than `_TRAILER_RE` in two ways
+    that both matter: `[[:space:]]` is POSIX ERE's nearest spelling of `[ \\t]`
+    and also admits other blanks, and several of these are ORed into ONE walk —
+    git returns a commit matching ANY of them. So every matched body is re-parsed
+    with `trailer_ids()`; crediting a matched commit to every requested id is how
+    a session gets docs it never wrote. One rule, one place.
+    """
+    return (f"^{_ere_escape(TRAILER_KEY)}:[[:space:]]*"
+            f"{_ere_escape(session_id)}[[:space:]]*$")
+
+
+def sessions_docs(repo: str, session_ids: Iterable[str],
+                  run: Callable[..., subprocess.CompletedProcess] | None = None,
+                  ) -> dict[str, tuple[str, ...]]:
+    """`{session_id: handoff doc basenames}` for commits IN `repo`, newest first.
+
+    🔴 THE SAME EDGE `doc_commits` READS, READ SESSION-FIRST — and that is the
+    whole change. `doc_commits` asks "which sessions touched THIS doc"; a session
+    that DRIFTS (resumed from handoff-A, ended by writing handoff-B) is invisible
+    to every doc-first query but handoff-B's. Measured 2026-10-03 over the
+    stamped corpus: **36 of 291** writer sessions wrote >=2 distinct handoff docs
+    (~1 in 8); 4 of 36 crossed repos. No new trailer, no new persisted state —
+    the commit already carries the id, and its FILE LIST already names the doc.
+
+    🔴 ONE WALK FOR ALL THE IDS, by ORing their `--grep` patterns. Measured cold:
+    `--grep='^Claude-Session-Id: '` over `claudedocs` is 1.28s for all four set
+    handles, and a per-session walk is 1.65s — so a per-MEMBER pass over a
+    six-member arc would cost ~10s for an answer one pass gives.
+
+    Raises `GitUnavailable` like its siblings: a session that wrote nothing here
+    and a repo that could not be read produce the same empty dict otherwise, and
+    this module's posture is that a scoped zero is never an absence.
+    """
+    wanted = [sid for sid in dict.fromkeys(session_ids) if sid]
+    out: dict[str, list[str]] = {sid: [] for sid in wanted}
+    if not wanted:
+        return {}
+    greps = [f"--grep={_trailer_grep(sid)}" for sid in wanted]
+    revs, _note = doc_commit_revs(repo, run=run)
+    for rev in revs:
+        # 🔴 `--name-only` RATHER THAN `--follow`, and NOT a per-doc pathspec.
+        # `--follow` takes one starting path by definition; the question here is
+        # "which docs", so the paths are the ANSWER and cannot also be the query.
+        # The pathspec is the directory, which is what makes this cheap.
+        raw = _git(repo, ["log", "-z", f"--format={_LOG_FORMAT}", "-E", *greps,
+                          "--name-only", rev, "--", "claudedocs"], run=run)
+        # With `-z`, git emits the format record, then each changed path, all
+        # NUL-separated. A record is told from a path by the `\x1f` field
+        # separators `_LOG_FORMAT` plants: a path cannot contain one.
+        ids: tuple[str, ...] = ()
+        seen_shas: set[str] = set()
+        for chunk in raw.split("\0"):
+            if "\x1f" in chunk:
+                parts = chunk.split("\x1f", 3)
+                if len(parts) < 4:
+                    ids = ()
+                    continue
+                sha = parts[0].strip()
+                # 🔴 RE-PARSED, NOT TRUSTED — see `_trailer_grep`.
+                ids = tuple(sid for sid in trailer_ids(parts[3])
+                            if sid in out)
+                if sha in seen_shas:
+                    ids = ()
+                seen_shas.add(sha)
+                continue
+            path = chunk.strip()
+            if not path or not ids:
+                continue
+            m = _DOC_PATH_RE.match(path)
+            if not m:
+                continue
+            for sid in ids:
+                if m.group(1) not in out[sid]:
+                    out[sid].append(m.group(1))
+    return {sid: tuple(docs) for sid, docs in out.items()}
+
+
+def session_docs(repo: str, session_id: str,
+                 run: Callable[..., subprocess.CompletedProcess] | None = None,
+                 ) -> tuple[str, ...]:
+    """The handoff doc basenames one session's commits touched in `repo`.
+
+    A thin single-session door onto `sessions_docs` rather than a second walk —
+    one rule, one place: the `--grep`/`trailer_ids` pairing is the predicate, and
+    two spellings of it would be wrong at one site eventually.
+    """
+    return sessions_docs(repo, (session_id,), run=run).get(session_id, ())
 
 
 def writer_members(commits: Sequence[ArcCommit], repo: str = "") -> list[ArcMember]:

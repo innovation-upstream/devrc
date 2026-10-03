@@ -103,7 +103,7 @@ python3 $DEVRC/scripts/find-session.py <terms> --live [--tail 80]
   also pins each one against the behaviour it describes. Do not reword them here alone; an
   earlier hand-written version of this table shipped two claims the code contradicted.
 - `0` — the run completed. NOT a claim that anything matched — an empty LIVE section and an empty ARCHIVE section both exit 0. 🔴 NOR a claim about coverage: a `--tail` that resolved to ONE window exits 0 even when a host did not answer, so another window may match on the host that was never asked. This is the code a caller ACTS on — read `tail.coverage_complete` before treating the resolution as unique.
-- `2` — bad arguments: `--tail` without `--live`, `--tail` below 1, `--limit` below 1, an unparseable `--since`, `--since` together with `--all-time` (they name two different windows), `--live` with no search terms (it matches a window's task/label/codename, so `--skill` alone is an ARCHIVE query), a query that names nothing (no terms and no `--skill`, or a `--skill` that canonicalises to empty), `--claude-only` with `--opencode-only` (between them they search no corpus at all), `--skill` with `--opencode-only` — that corpus carries no skill attribution, so the combination has no answer rather than an empty one, an `--arc` seed that resolves to no handoff doc (a slug naming nothing, or a session id whose opening message names no doc — which is NOT an empty arc), or a malformed command line rejected by argparse ITSELF inside `main`'s first statement (an unknown flag, or a non-integer `--limit`/`--tail`). 🔴 That last one is the only exit 2 this module RAISES rather than returns — `parse_args` raises `SystemExit` — so an in-process caller must catch it, not read a return value.
+- `2` — bad arguments: `--tail` without `--live`, `--tail` below 1, `--limit` below 1, an unparseable `--since`, `--since` together with `--all-time` (they name two different windows), `--live` with no search terms (it matches a window's task/label/codename, so `--skill` alone is an ARCHIVE query), a query that names nothing (no terms and no `--skill`, or a `--skill` that canonicalises to empty), `--claude-only` with `--opencode-only` (between them they search no corpus at all), `--skill` with `--opencode-only` — that corpus carries no skill attribution, so the combination has no answer rather than an empty one, an `--arc` seed that resolves to no handoff doc (a slug naming nothing, or a session id whose opening message names no doc — which is NOT an empty arc, and most often means the transcript lives on the OTHER HOST rather than that the seed is wrong), or a malformed command line rejected by argparse ITSELF inside `main`'s first statement (an unknown flag, or a non-integer `--limit`/`--tail`). 🔴 That last one is the only exit 2 this module RAISES rather than returns — `parse_args` raises `SystemExit` — so an in-process caller must catch it, not read a return value.
 - `3` — `--tail` ONLY: it could not resolve to exactly one live window — several matched, or none did on a fleet where every host answered. It carries NO claim about coverage; the candidate list may be incomplete, and `tail.coverage_complete` is the field that says so.
 - `4` — `--tail` ONLY: something the tail needed was NOT measured — the live scan failed or no host answered, or `session-manager tail` itself failed (rc 2/4/5), or nothing matched while a host was unreachable. Without `--tail` a failed scan still exits 0 and says so in the LIVE section.
 - `5` — `--arc` ONLY: the doc was named but NOT MEASURED — no repo handle ($DEVRC, $HOMELAB, $DATAPACKET, $CIVITAI, $CIVITAI_CLI) this shell can see holds it. 🔴 This is not an empty arc and must never be reported as one: nothing was read at all.
@@ -153,6 +153,17 @@ python3 $DEVRC/scripts/find-session.py --arc handoff-<topic>.md    # or a slug, 
   `--project` and `--any` are all discarded — the run names every one of them on stderr. An
   earlier version of this line said "an explicit `--since` still wins", which was false and is
   the kind of sentence that sends an operator looking for a bounded arc they never got.
+- 🔴 **A SESSION DRIFTS, so one arc is not one member's whole story — read the `CROSS-ARC`
+  footer.** A session opens resumed from handoff-A, does that work, then moves on and ends by
+  writing handoff-B; keyed on the GENESIS it is single-valued, so handoff-B's arc listed it and
+  never named handoff-A. Measured 2026-10-03 over the stamped corpus: **36 of 291** writer
+  sessions (~1 in 8) wrote ≥2 distinct handoff docs, **4 of 36** across repos. The footer names
+  each member's OTHER docs with a pasteable `--arc` command, from the commit trailers in git
+  (one `--grep` pass per repo handle — **no transcript needed, so it works for a session whose
+  transcript is on the other host**). It prints **even when nothing was found**, and names
+  every handle that was UNSET or unreadable as **NOT MEASURED** — which is not the same as
+  "that member wrote only this doc". `--json` carries it as `cross_arc` (present-and-empty,
+  never absent) plus `cross_arc_gaps`.
 - **Ids and repo labels only, never transcript paths** — paths name the client repo they sit
   under and this repo is PUBLIC.
 - **Exit 5 is not an empty arc.** It means no repo handle this shell can see holds the doc, so

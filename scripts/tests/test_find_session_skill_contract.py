@@ -498,9 +498,17 @@ EXIT_2_CAUSES = (
     ("`--skill` with `--opencode-only` — that corpus carries no skill "
      "attribution, so the combination has no answer rather than an empty one",
      (["--skill", "browser", "--opencode-only"],)),
+    # 🔴 THE CROSS-HOST CAUSE IS MEASURED, NOT HEDGING. Of 291 stamped writer
+    # sessions, 6 have a transcript on this machine, 245 on the peer and 40 on
+    # neither — so the previous wording's two causes (`never handed a doc`,
+    # `transcript pruned`) covered the 40 and silently skipped the 245. `main`'s
+    # printed refusal carries the full numbers and the git-derived way around it;
+    # this sentence carries the RANKING, because a caller branching on rc 2 needs
+    # to know the seed is probably fine.
     ("an `--arc` seed that resolves to no handoff doc (a slug naming "
      "nothing, or a session id whose opening message names no doc — which "
-     "is NOT an empty arc)",
+     "is NOT an empty arc, and most often means the transcript lives on the "
+     "OTHER HOST rather than that the seed is wrong)",
      (["--arc", "README.md"], ["--arc", "not-a-doc-or-a-uuid/"])),
     # 🔴 NOT A `return EXIT_USAGE` SITE, AND THAT IS THE POINT. argparse exits 2
     # from inside `parse_args`, so this cause has no line in `main` for the
