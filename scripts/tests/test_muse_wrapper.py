@@ -718,26 +718,56 @@ def test_a_disallowed_namespace_is_explained_as_policy_not_a_typo(status_env):
     assert "[400]" in proc.stdout
 
 
-def test_a_nonverb_first_word_is_named_as_a_namespace_guess(status_env):
-    """REGRESSION (red at origin/main) for the INVERSE misread.
+@pytest.mark.parametrize("code", ["400", "200", "401", "404", "500"])
+def test_a_nonverb_first_word_is_named_as_a_namespace_guess(status_env, code):
+    """REGRESSION for the INVERSE misread, on EVERY outcome.
 
     cmd_status reinterprets any non-verb first word as a namespace, so
-    `muse status pdos` is a pods query for ns=pdos. Once the allowlist landed
-    that answers 400 -- identical on the wire to a real namespace being
-    refused. Only this branch can produce a verb typo, so only it can say so.
+    `muse status pdos` is a pods query for ns=pdos.
+
+    🔴 THE PARAMETRIZE IS THE WHOLE POINT, AND `200` IS THE CASE THAT WAS
+    BROKEN. This test existed and asserted only the 400 row, because the
+    warning used to live inside the 400 handler. That left a mistyped verb
+    which happens to name an ALLOWLISTED namespace -- `muse status muse` --
+    querying pods in ns=muse, answering 200, and saying NOTHING: the exact
+    case #1972 reported, still open, while this test read as though the
+    finding was closed. Found by #1993's round-0 audit, which is also where
+    the lesson came from: a guard whose DESCRIPTION claims a relationship
+    while its body inspects one side reads as coverage and provides none.
     """
-    env = {**status_env, "STUB_CODE": "400",
+    env = {**status_env, "STUB_CODE": code,
            "STUB_BODY": '{"error":"namespace not served"}'}
     proc = run(env, "status", "pdos")
 
     assert "NOT A VERB" in proc.stderr, (
-        "a mistyped verb was reported purely as a refused namespace, which is "
-        f"the misdirection rank 25 exists to remove. stderr={proc.stderr!r}"
+        f"a mistyped verb went unreported on HTTP {code}. The reinterpretation "
+        "is silent on every outcome, not just the refused one, so the warning "
+        f"cannot be keyed to a status code. stderr={proc.stderr!r}"
     )
     assert "pdos" in proc.stderr
     # The real verbs, so the reader does not have to go find usage().
     for verb in ("health", "nodes", "pods", "workloads", "flux"):
         assert verb in proc.stderr
+
+
+def test_a_mistyped_verb_that_names_an_allowlisted_namespace_still_warns(status_env):
+    """REGRESSION for the precise case the first fix left silent.
+
+    `muse status muse` is indistinguishable from a deliberate `status muse`
+    on the wire -- both query pods in ns=muse and both answer 200 -- so the
+    ONLY place the reinterpretation can be reported is the parse, before any
+    request is sent. Kept separate from the parametrized test above because
+    this is the case that was BROKEN, not merely an extra row: it uses the
+    allowlisted namespace, so no 400 is available to hang the warning on.
+    """
+    env = {**status_env, "STUB_CODE": "200", "STUB_BODY": '{"items":[],"count":0}'}
+    proc = run(env, "status", "muse")
+
+    assert "NOT A VERB" in proc.stderr, (
+        "`muse status muse` silently became a pods query for ns=muse -- a 200 "
+        "with no indication the word was not a verb. This is #1972's original "
+        f"finding. stderr={proc.stderr!r}"
+    )
 
 
 def test_an_explicit_verb_is_not_reported_as_a_verb_typo(status_env):
@@ -755,22 +785,50 @@ def test_an_explicit_verb_is_not_reported_as_a_verb_typo(status_env):
         "`workloads` IS a verb and was reported as a mistyped one"
     )
 
+    # ...and on a SUCCESSFUL call too, now that the warning fires at parse
+    # time: a parse-time printf with no case guard would warn on every
+    # invocation, which the 400-only version structurally could not do.
+    ok = {**status_env, "STUB_CODE": "200", "STUB_BODY": "{}"}
+    for args in (("status",), ("status", "health"), ("status", "nodes"),
+                 ("status", "pods", "muse")):
+        proc = run(ok, *args)
+        assert "NOT A VERB" not in proc.stderr, (
+            f"`muse {' '.join(args)}` uses only real verbs and was reported as "
+            f"a mistyped one. stderr={proc.stderr!r}"
+        )
 
-def test_a_route_that_sends_no_ns_is_not_blamed_on_the_allowlist(status_env):
-    """NEGATIVE CONTROL: /v1/nodes carries no ns, so a 400 there is not a
-    namespace refusal and must not be explained as one. `nodes` is outside the
-    allowlist BY DESIGN (it carries no namespace identity), so conflating the
-    two would send a reader to widen a list that was never consulted.
+
+@pytest.mark.parametrize("verb", ["health", "nodes"])
+def test_a_route_that_sends_no_ns_is_not_blamed_on_the_allowlist(status_env, verb):
+    """NEGATIVE CONTROL: a 400 on a route that sends no `ns` says NOTHING.
+
+    `/v1/health` and `/v1/nodes` carry no ns, and the bridge's only 400 site is
+    the ns-scoped one (`handlers.go`), so such a 400 cannot come from the
+    allowlist -- it could only come from the edge. Blaming the allowlist would
+    send a reader to widen a list that was never consulted.
+
+    🔴 This asserts SILENCE, so its precondition cannot be "the branch fired".
+    An earlier version asserted `POLICY ANSWER in stderr` here and that was
+    wrong twice over: it required the handler to speak about a case it has
+    nothing true to say about, and it would have passed had cmd_status died
+    before reaching curl. The precondition is now that the call COMPLETED --
+    body and code on stdout -- which is what makes the silence meaningful.
     """
     env = {**status_env, "STUB_CODE": "400",
            "STUB_BODY": '{"error":"something else"}'}
-    proc = run(env, "status", "nodes")
+    proc = run(env, "status", verb)
 
-    assert "POLICY ANSWER" in proc.stderr
-    assert "MUSE_BRIDGE_NS_ALLOW" not in proc.stderr, (
-        "a 400 on a route that sends no ns was blamed on the namespace "
-        "allowlist"
+    # PRECONDITION: the request actually happened and returned 400.
+    assert proc.stdout.rstrip().endswith("[400]"), (
+        "the call did not complete with a 400, so the stderr silence below "
+        f"proves nothing. stdout={proc.stdout!r}"
     )
+    for leak in ("MUSE_BRIDGE_NS_ALLOW", "POLICY ANSWER", "was REFUSED",
+                 "allowlist"):
+        assert leak not in proc.stderr, (
+            f"a 400 on /v1/{verb}, which sends no ns, mentioned {leak!r} -- it "
+            f"was blamed on the namespace allowlist. stderr={proc.stderr!r}"
+        )
 
 
 @pytest.mark.parametrize("code", ["200", "401", "404", "500"])

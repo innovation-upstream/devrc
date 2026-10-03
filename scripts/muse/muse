@@ -636,7 +636,7 @@ bridge_token() {
 }
 
 cmd_status() {
-  local what="health" ns="muse" guessed_ns=0
+  local what="health" ns="muse"
   if [ $# -gt 0 ]; then
     case "$1" in
       health)    what="health" ;;
@@ -644,12 +644,24 @@ cmd_status() {
       pods)      what="pods"; [ $# -gt 1 ] && ns="$2" ;;
       workloads) what="workloads"; [ $# -gt 1 ] && ns="$2" ;;
       flux)      what="flux"; [ $# -gt 1 ] && ns="$2" ;;
-      # A bare word that is not a verb is REINTERPRETED as a namespace. That
-      # makes `muse status pdos` a pods query for ns=pdos, which the bridge
-      # answers 400 — so a VERB typo and a namespace the server refuses are the
-      # same observable. guessed_ns records which one happened, because only
-      # this branch can produce the first, and the 400 handler below says so.
-      *)         what="pods"; ns="$1"; guessed_ns=1 ;;
+      # A bare word that is not a verb is REINTERPRETED as a namespace, so
+      # `muse status pdos` is a pods query for ns=pdos.
+      #
+      # 🔴 THIS WARNS HERE, AT PARSE TIME, AND NOT INSIDE THE 400 HANDLER —
+      # because the reinterpretation is silent on EVERY outcome, not just the
+      # refused one. An earlier version of this fix only spoke when the bridge
+      # answered 400, which left `muse status muse` (a mistyped verb that
+      # happens to name an ALLOWLISTED namespace) querying pods in ns=muse,
+      # answering 200, and saying nothing — the exact case #1972 reported,
+      # while the test covering it read as though the whole finding was closed.
+      # Found by #1993's round-0 audit. Warning before the request is sent is
+      # also the only placement that cannot depend on the response at all.
+      *)
+        what="pods"; ns="$1"
+        printf 'muse: `%s` is NOT A VERB, so it was read as a NAMESPACE —\n' "$1" >&2
+        printf '      querying pods in ns=%s. The verbs are: health nodes pods\n' "$1" >&2
+        printf '      workloads flux.\n' >&2
+        ;;
     esac
   fi
   local url="$BRIDGE_URL/v1/$what" sent_ns=0
@@ -702,24 +714,28 @@ cmd_status() {
   local code="${out##*\[}"; code="${code%\]}"
   case "$code" in
     400)
-      printf 'muse: the bridge answered 400 — a POLICY ANSWER, not an outage.\n' >&2
+      # Only what the RESPONSE BODY CANNOT SUPPLY. The body already names which
+      # half refused ("namespace not served" vs "malformed ns"), and it
+      # deliberately never echoes the ns back, so restating its wording here
+      # would be a third copy of the server's own message that goes stale when
+      # the server rewords. #1993's round-0 audit counted the earlier version
+      # of this block as duplicating the comment above it AND the SKILL.md
+      # section AND main.go — four copies of four facts, nothing pinning them.
+      #
+      # No `else` arm: a 400 on a route that sends no ns (/v1/health, /v1/nodes)
+      # cannot come from the allowlist — the bridge's only 400 site is the
+      # ns-scoped one — so there is nothing true to say about it here, and the
+      # arm that used to be here only said "see the body above", which the body
+      # already is. `sent_ns` still GATES this, so the allowlist is never
+      # blamed for a refusal it could not have caused.
       if [ "$sent_ns" -eq 1 ]; then
-        printf '  ns=%s was REFUSED by the bridge, which serves only an allowlisted\n' "$ns" >&2
-        printf '  set of namespaces. The allowlist is SERVER-side and the bridge does\n' >&2
-        printf '  not disclose its contents (that would let a prober enumerate it one\n' >&2
-        printf '  namespace at a time): it is MUSE_BRIDGE_NS_ALLOW on the muse-bridge\n' >&2
-        printf '  Deployment, comma-separated, REPLACING a compiled default of `muse`.\n' >&2
-        printf '  The body above says which half refused — "namespace not served" is\n' >&2
-        printf '  well-formed but not allowlisted, "malformed ns" fails the pattern.\n' >&2
-        printf '  🔴 Widening it is a deliberate security change on the cluster, NOT a\n' >&2
-        printf '  client fix: the bridge has ClusterRole-wide read and this allowlist\n' >&2
-        printf '  is its ONLY namespace boundary.\n' >&2
-        if [ "$guessed_ns" -eq 1 ]; then
-          printf '  ⚠ AND `%s` WAS NOT A VERB, so it was read as a NAMESPACE. If you\n' "$ns" >&2
-          printf '    meant a verb, it is one of: health nodes pods workloads flux.\n' >&2
-        fi
-      else
-        printf '  The %s route rejected the request itself — see the body above.\n' "$what" >&2
+        printf 'muse: 400 is a POLICY ANSWER, not an outage — ns=%s was REFUSED.\n' "$ns" >&2
+        printf '  The allowlist is SERVER-side and deliberately undisclosed:\n' >&2
+        printf '  MUSE_BRIDGE_NS_ALLOW on the muse-bridge Deployment, REPLACING a\n' >&2
+        printf '  compiled default of `muse`. 🔴 Widening it is a cluster security\n' >&2
+        printf '  change, not a client fix — the bridge holds ClusterRole-wide read\n' >&2
+        printf '  and this is its ONLY namespace boundary. See the body above for\n' >&2
+        printf '  which half refused, and claude/skills/muse/SKILL.md for the rest.\n' >&2
       fi
       ;;
   esac
