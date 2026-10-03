@@ -1487,10 +1487,20 @@ class TestTheHandleProseNamesEveryHandle:
 # as a member and NEVER NAMES handoff-A, because every resolver here was keyed
 # on the session's GENESIS and is single-valued. Measured over the stamped
 # corpus 2026-10-03: **36 of 291** writer sessions (~1 in 8) write >=2 distinct
-# handoff docs (35/289 excluding 18 bulk-move commits; docs-per-session
-# {1: 256, 2: 27, 3: 7, 4: 1}); **4 of 36** drift ACROSS repos and 1 of 36 is an
-# opencode `ses_…` id. So the cross-repo and the `ses_…` cases below are
-# populations, not hypotheticals.
+# handoff docs; **4 of 36** drift ACROSS repos and **1 of 36** is an opencode
+# `ses_…` id. So the cross-repo and the `ses_…` cases below are populations, not
+# hypotheticals.
+#
+# ⚠ RE-DERIVED INDEPENDENTLY on this branch over EVERY SET HANDLE ($DEVRC,
+# $HOMELAB, $DATAPACKET, $CIVITAI; $CIVITAI_CLI unset => UNMEASURED, so the
+# denominator is scoped to four): 291 / 36 / 4 / 1 all reproduced exactly.
+# The docs-per-session histogram did NOT: measured here it is
+# {1: 255, 2: 25, 3: 9, 4: 1, 37: 1}, where the 37 is one bulk-move session.
+# An earlier draft of this comment carried {1: 256, 2: 27, 3: 7, 4: 1} and a
+# "35/289 excluding 18 bulk-move commits" figure from the original recon; both
+# are at a scope this branch did not reproduce, so they are REMOVED rather than
+# restated. The headline counts the code and SKILL.md quote are the re-derived
+# ones.
 #
 # The edge needed no new capture: the commit's trailer carries the id and the
 # commit's FILE LIST names the doc. `doc_commits` already pairs them, but
