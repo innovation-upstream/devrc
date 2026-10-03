@@ -2310,7 +2310,7 @@ dod_block(){
 # composed, and rule (p) REFUSES there (`size-ratchet`, exit 14). The session then
 # does a SECOND pass to prune or evict, and that second pass is the token cost the
 # operator kept reporting. This block moves the number to the front of the run.
-# Widening the warning band (#1996) shortens the surprise; it does not remove it,
+# Widening the warning band (#2001) shortens the surprise; it does not remove it,
 # because the band is still only reached by writing.
 #
 # 🔴 IT RETYPES NO NUMBER AND DERIVES NO THRESHOLD. `handoff_budget_probe.py` owns

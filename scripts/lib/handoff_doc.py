@@ -2986,7 +2986,7 @@ def dropped_durable_report(dropped: typing.Sequence[DroppedDurable]) -> str:
 #
 # 🔴 THE BAND IS DERIVED, AND THE DERIVATION IS THE WHOLE POINT: IT MUST BE AT
 # LEAST ONE p90 APPEND WIDE, OR IT CANNOT FIRE BEFORE THE REFUSAL FOR MOST
-# WRITES. It was a bare `4_096` from #1648 until #1996, with the comment above
+# WRITES. It was a bare `4_096` from #1648 until #2001, with the comment above
 # justifying only why the warning does not REFUSE and nothing justifying the
 # number — and 4,096 B is NARROWER THAN THE MEDIAN THING IT WARNS ABOUT, so a
 # routine append entering the band jumped clean over it and the first signal the

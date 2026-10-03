@@ -6,7 +6,7 @@ after the expensive part: `budget_warning` fires while the text is already
 composed, and rule (p) (`size-ratchet`, exit 14) REFUSES there. The resume digest
 printed SKILL, GIT/PR, WORKLOAD, ALERTS, CLAWGATE, INVESTIGATIONS, DOD and DRIFT
 and said nothing about bytes — so the second pass to prune or evict was the only
-way to find out. This is what lets the digest say it up front (#1996).
+way to find out. This is what lets the digest say it up front (#2001).
 
 🔴 IT RETYPES NO NUMBER. `MAX_BYTES` and the ledger come from `handoff_budget`;
 the band comes from `handoff_doc.BUDGET_NEAR_BYTES`, which is where the warning

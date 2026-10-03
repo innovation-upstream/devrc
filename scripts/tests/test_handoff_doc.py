@@ -7629,7 +7629,7 @@ _P90_APPEND_BYTES = 15_531
 
 
 def test_the_warning_band_is_at_least_one_p90_append():
-    """🔴 THE RELATIONSHIP, NOT THE LITERAL — this is the defect #1996 closed.
+    """🔴 THE RELATIONSHIP, NOT THE LITERAL — this is the defect #2001 closed.
 
     `BUDGET_NEAR_BYTES` was a bare `4_096`, which is NARROWER THAN THE MEDIAN
     APPEND (~5,311 B) let alone the p90 (~15,531 B). A band narrower than the
@@ -7638,7 +7638,7 @@ def test_the_warning_band_is_at_least_one_p90_append():
     literal would have encoded exactly that, so pin the property instead.
 
     This is a REGRESSION guard, not an invariant guard: it is RED at the parent
-    of #1996 (4,096 < 15,531) and green here.
+    of #2001 (4,096 < 15,531) and green here.
     """
     assert hd.BUDGET_NEAR_BYTES >= _P90_APPEND_BYTES, (
         f"the warning band is {hd.BUDGET_NEAR_BYTES:,} B but a p90 handoff "
@@ -7655,7 +7655,7 @@ def test_a_doc_one_p90_append_BELOW_the_ceiling_is_no_longer_SILENT():
     on this corpus, between the mean and the p90) had 10,598 B of headroom —
     silent under the old 4,096 B band, so the session's first signal was the
     refusal two appends later. MEASURED: this case returns "" at the parent of
-    #1996 and warns here.
+    #2001 and warns here.
 
     ⚠ The brief this came from also offered the arithmetic the OTHER way — 54,938
     PLUS 7,219 = 62,157, headroom 3,379 — and THAT case already warned under the

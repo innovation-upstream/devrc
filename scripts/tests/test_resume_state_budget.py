@@ -230,7 +230,7 @@ def test_the_digest_carries_a_BUDGET_block_naming_size_allowance_and_headroom(
 def test_a_doc_with_room_is_told_it_is_CLEAR_and_raises_no_drift(tmp_path, stubs):
     """🔴 THE NEGATIVE CONTROL THAT MAKES EVERY ⚠ BELOW WORTH READING. A block
     that flagged every document would be the permanently-red gate `claude/RULES.md`
-    objects to, and widening a band (#1996) is exactly the change that turns a
+    objects to, and widening a band (#2001) is exactly the change that turns a
     guard which fires on nothing into one that fires on everything.
     """
     repo = make_repo(tmp_path, size=20_000)
