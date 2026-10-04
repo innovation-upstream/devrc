@@ -491,9 +491,16 @@ class TestEveryExitPathLogs:
     exercises them and only the AST ledger does: `size-ratchet` from rule (s)'s
     autoevict-SHORTFALL arm (rule (p)'s own arm is covered), and `prune-unconserved`
     from the two arms INSIDE the write window (the archive-moved race and the
-    read-back regression — the pre-write arm is covered). Twelve of the thirteen
+    read-back regression — the pre-write arm is covered). ELEVEN OF THE TWELVE
     exit-2 argument arms are likewise uncovered individually; they all log
     `status=null, exit_code=2`, and one case pins that pair.
+
+    ⚠ THAT SENTENCE READ "twelve of the THIRTEEN" FOR ONE COMMIT, AND THE COUNT WAS
+    WRONG — there are TWELVE exit-2 arms, so eleven are uncovered. It was written by
+    hand and corrected by walking the AST. Any count here is re-derivable:
+    `_done(log, None, EXIT_USAGE)` sites, which is the only thing this sentence
+    claims a number about. Recorded rather than silently fixed, because the next
+    reader's question is "has anyone actually counted?".
     """
 
     def test_dated_topic(self, repo: Path, update_file: Path, logfile: Path):
