@@ -255,20 +255,28 @@ run "W5 curl reads the GENERIC token instead of the tasks one" \
     "$WB" "$WB_SUITE" "$WB_FLOOR" \
     '    token = _first_set(conf, TASK_TOKEN_VARS)[0]' \
     '    token = conf.get(TASK_TOKEN_VARS[1])'
-# W6 the flag that makes the new variable non-inert.
-run "W6 --api-url is never passed to the CLI" \
-    test_the_TASKS_url_is_passed_to_the_cli_as_api_url "$WB" "$WB_SUITE" "$WB_FLOOR" \
-    '    if api_url:
-        argv += ["--api-url", api_url]' \
-    '    if False:
-        argv += ["--api-url", api_url]'
-# W7 🔴 THE OTHER DIRECTION of the same flag: inventing it from the GENERIC key
-# would be a second spelling of a default the CLIs already resolve. Proves the
-# negative control is reachable.
-run "W7 --api-url is invented from the generic url" \
-    test_WITHOUT_the_tasks_url_no_api_url_flag_is_invented "$WB" "$WB_SUITE" "$WB_FLOOR" \
-    '    api_url = _env_file(env_path).get(task_api_url_vars()[0])' \
-    '    api_url = _first_set(_env_file(env_path), task_api_url_vars())[0]'
+# W6 🔴 RE-AIMED AT THE SURVIVING CHANNEL. It used to mutate
+# `if api_url: argv += ["--api-url", api_url]`, and that block is DELETED: both
+# clients rank flags above the environment, and the flag's value came from the env
+# FILE with no process-environment layer, so it defeated an operator's exported
+# `CLAWGATE_TASK_API_URL` — the override `task_cli_env` documents as "must still
+# win". The CLAIM the row guards is unchanged (the TASKS url must reach the client
+# or the variable is inert and the guard reads the OLD board); only the channel
+# moved, so the mutant now severs the ENV mapping instead of the flag.
+run "W6 the resolved client gets NO config, so the TASKS url never arrives" \
+    test_the_TASKS_url_reaches_the_cli_in_its_ENVIRONMENT_not_on_argv \
+    "$WB" "$WB_SUITE" "$WB_FLOOR" \
+    '    cli_env = _cg().task_cli_env(path=env_path)' \
+    '    cli_env = None'
+# W7 🔴 THE OTHER DIRECTION of the same value: the GENERIC key must not be what
+# arrives when the TASKS key is set, because the router answers the same routes off
+# a board that is stale for exactly the in-flight cards — a confident 200 and a
+# wrong answer. Proves the pair is reachable from both sides.
+run "W7 the ROUTER url reaches the client instead of the TASKS url" \
+    test_the_TASKS_url_reaches_the_cli_in_its_ENVIRONMENT_not_on_argv \
+    "$WB" "$WB_SUITE" "$WB_FLOOR" \
+    '    cli_env = _cg().task_cli_env(path=env_path)' \
+    '    cli_env = dict(os.environ, MUSTER_API_URL=_env_file(env_path).get("CLAWGATE_API_URL", ""))'
 # W8 the second client is never reached. 🔴 ITS NAMED KILLER MOVED WITH THE
 # PREFERENCE. It used to be `…falls_through_to_muster_when_clawgatectl_is_ABSENT`,
 # which after the reorder is satisfied by the FIRST entry answering — i.e. that test
@@ -336,8 +344,8 @@ run "W13 the curl leg loses its TimeoutExpired handler" \
 run "W14 _read_task's defensive _sp() removed (documented survivor)" SURVIVES \
     "$WB" "$WB_SUITE" "$WB_FLOOR" \
     '    _sp()
-    # Only the TASKS-specific override is handed to the CLI; see `_via_cli`.' \
-    '    # Only the TASKS-specific override is handed to the CLI; see `_via_cli`.'
+    # 🔴 NO `--api-url` IS DERIVED HERE ANY MORE. This used to read' \
+    '    # 🔴 NO `--api-url` IS DERIVED HERE ANY MORE. This used to read'
 # W15 THE SILENCE ROW. It proves the test can SEE a notice rung that emits
 # nothing — the one verdict that rung may never produce.
 # 🔴 AND IT DOES *NOT* VINDICATE THE `out is not None` ASSERTION ADDED DURING THE

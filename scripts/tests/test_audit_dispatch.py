@@ -10429,6 +10429,24 @@ INVARIANT_GUARDS_AND_LEDGERS = frozenset({
     # would leave them asserting a string nothing emits, red for the right
     # reason with the wrong diagnosis. Mutant UV8.
     "test_the_unverified_payload_strings_are_the_scripts_own",
+    # 🔴 THE #2005/#2011 ROUND-0 CARRY-FORWARDS. BOTH ARE INVARIANT GUARDS AND
+    # NEITHER IS REGRESSION COVERAGE — stated plainly, because the change they ship
+    # with DELETES a comment, and it would be easy to score these as proving the
+    # deletion safe. They do not. They pin the two facts the SURVIVING half of that
+    # comment rests on, both of which were already true at `8a6de7e3`:
+    #
+    #   * `extractor=` is supplied by NO caller (measured 2026-10-03: the only two
+    #     occurrences are test fakes mirroring the signature), and `EXTRACTOR` is
+    #     derived from `__file__`. So dispatcher and extractor are always the same
+    #     checkout, which is what made the DELETED "stale host" justification false.
+    #   * `--include-answers` is still passed, which the deletion must not change —
+    #     the flag survives for the PRINTED re-read command a human runs against a
+    #     lagging peer clone, a different and true reason.
+    #
+    # The hazard here was never a wrong answer from the script; it was a FALSE
+    # COMMENT that nothing could notice going false. These make it noticeable.
+    "test_NO_production_path_supplies_its_own_extractor",
+    "test_the_INCLUDE_ANSWERS_flag_is_still_passed_for_the_PRINTED_command",
 })
 
 # --------------------------------------------------------------------------- #
@@ -14102,6 +14120,69 @@ def test_the_real_reader_never_returns_an_empty_block_when_everything_fails():
     assert block, "the real reader returned an empty block on total failure"
     assert "UNATTRIBUTED-UNKNOWN" in block, block
     assert "not an absence of asks" in block.lower(), block
+
+
+def test_NO_production_path_supplies_its_own_extractor():
+    """🔴 THE CLAIM A DELETED COMMENT USED TO REST ON, PINNED STRUCTURALLY.
+
+    `--include-answers` carried a justification reading "this dispatcher may run
+    against an extractor deployed on a host that predates the change, where the flag
+    IS the difference". That was FALSE on every production path and is now deleted:
+    `EXTRACTOR` is derived from `Path(__file__).resolve().parent`, so the extractor
+    is always the copy shipping BESIDE this script, and no caller overrides it.
+    Measured 2026-10-03: `extractor=` is supplied by NOBODY — the two occurrences in
+    the suite are test fakes mirroring the signature, which never pass it.
+
+    🔴 DETERMINISTIC RATHER THAN A PROSE PIN, which is the standing preference. A
+    comment is a claim, and the way this one went false is that nothing could notice
+    an `extractor=` appearing at a call site. If a caller ever genuinely needs one,
+    this test fails and whoever adds it has to restore a justification that is true
+    — which is the whole mechanism."""
+    src = SCRIPT.read_text(encoding="utf-8")
+    # 🔴 THE DERIVATION, first — without it the rest of the claim is unfounded: a
+    # hand-written absolute path would make "same checkout" false with no call site
+    # passing anything.
+    assert "EXTRACTOR = Path(__file__).resolve().parent" in src, (
+        "EXTRACTOR is no longer derived from this file's own location, so "
+        "dispatcher and extractor may be different checkouts and the "
+        "`--include-answers` justification needs re-stating.")
+    # ...and no call site hands one in.
+    offenders = [
+        "%d: %s" % (n, line.strip())
+        for n, line in enumerate(src.splitlines(), 1)
+        if "extractor=" in line
+        and not line.lstrip().startswith("#")
+        and "def _read_operator_asks" not in line
+    ]
+    assert offenders == [], (
+        "a call site now supplies its own extractor, so the dispatcher and the "
+        "extractor are no longer guaranteed to be the same checkout. The "
+        "`--include-answers` comment's surviving justification is about the PRINTED "
+        "re-read command, not about this process — re-read it before adding "
+        "this:\n  " + "\n  ".join(offenders))
+
+
+def test_the_INCLUDE_ANSWERS_flag_is_still_passed_for_the_PRINTED_command():
+    """🔴 THE NEGATIVE CONTROL FOR THE DELETION ABOVE. Deleting a false reason is
+    not a reason to delete the FLAG: the re-read command this module prints is
+    copy-pasted by a human against a peer clone that can lag (measured 83–606
+    commits behind), and there the flag is the difference between the decision
+    channel arriving and not. Without this test, "the justification was false" reads
+    as licence to drop the argument too."""
+    seen = []
+
+    def runner(cmd, cwd=None):
+        seen.append(list(cmd))
+        return 0, "", ""
+
+    ad._read_operator_asks(runner, {
+        "commits": [{"messageHeadline": "x",
+                     "messageBody": "Claude-Session-Id: " + "a" * 36}],
+    })
+    extractor_calls = [c for c in seen if any("extract_user_msgs" in str(x)
+                                              for x in c)]
+    assert extractor_calls, "the extractor was never invoked: %r" % (seen,)
+    assert all("--include-answers" in c for c in extractor_calls), extractor_calls
 
 
 def test_the_real_reader_reports_a_missing_module_rather_than_raising(monkeypatch):

@@ -8,7 +8,19 @@ this flow resolves the right base by itself — that is the reason to use it ove
 🔴 **The client is `muster`** — muster's own CLI, packaged from a pinned fetch and on PATH after a
 switch. `clawgatectl` speaks the identical task verbs and is the **fallback** (it is also the ONLY
 client for the router half), so every command below works verbatim with either name in front of it.
-If `muster: command not found`, use `clawgatectl` and say so — do not fall back to `curl`.
+
+🔴 **BUT `muster` IS NOT CONFIGURED FOR A SHELL YOU TYPE INTO, AND THAT IS THE LIKELY FAILURE — NOT
+`command not found`.** Measured 2026-10-03 from a fresh interactive login shell on this host:
+`muster task get <id>` exits **2** with `no API URL`, because muster reads its base and bearer only
+from `MUSTER_API_URL` / `MUSTER_HOOK_TOKEN` (or `~/.muster/muster.env`, which exists on neither
+host) and **nothing in the login environment exports either**. `clawgatectl task get <id>` exits
+**0** on the same shell — it configures itself out of `~/.claude/clawgate.env`. The enforcement
+hooks and `/resume` are unaffected: they go through `clawgate_tasks.task_cli_env()` /
+`clawgate_task_cli_exec`, which supply both variables.
+
+So, when you type a command from this flow: **on rc 2 `no API URL`, OR on `muster: command not
+found`, re-run it with `clawgatectl` and say so — do not fall back to `curl`.** Either export the
+two variables first if you want muster's own provenance headers on the write.
 
 **Run this on "read and evaluate clawgate task N", and on "local dispatch".** It is
 enforced: `~/.claude/hooks/clawgate-writeback-guard.py` (PostToolUse watches, Stop

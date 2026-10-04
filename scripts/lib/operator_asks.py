@@ -298,6 +298,28 @@ def asks_from_comments(comments: Sequence[dict]) -> tuple[list[Ask], dict, int]:
 KIND_DECISION = "decision"
 OPERATOR_KINDS = ("typed", KIND_DECISION)
 
+#: 🔴 THE ONE REFUSED KIND THAT IS *NOT* LEDGERED, ENUMERATED SO IT CANNOT GROW BY
+#: ACCIDENT. Every other non-operator `kind` now lands in `dropped` (see
+#: `parse_rows`) because a refusal nobody can see is the devrc#1955 class. A
+#: `command` row — a slash command the operator typed — is the exception, for two
+#: reasons, and neither generalises:
+#:
+#:   1. It is an ENUMERATED, EXPECTED kind of the producer, refused on purpose and
+#:      pinned by `test_both_operator_kinds_become_asks_and_command_does_not`. The
+#:      hazard the ledger closes is the UNEXPECTED drop — a kind this module has
+#:      never heard of, which otherwise reads as an empty transcript.
+#:   2. Ledgering it would make the DOWNSTREAM REASON WRONG. `audit-dispatch.py`
+#:      branches on `if dropped` to choose between "every user-role record was
+#:      machine-generated, not typed" and "no row of any kind". A slash command IS
+#:      operator-typed, so a command-only transcript would render the
+#:      machine-generated sentence — a confident false statement about authorship,
+#:      which is the precise error this whole module exists to prevent.
+#:
+#: Pinned two ways: `test_the_SILENT_kind_ledger_holds_only_command` fixes the set,
+#: and `test_an_UNKNOWN_kind_is_LEDGERED_not_dropped_in_silence` proves anything
+#: outside it is visible.
+SILENTLY_REFUSED_KINDS = ("command",)
+
 #: The only machine-generated class that reaches this module. Everything else is
 #: removed upstream — see the module docstring for the eight families that were
 #: deleted for firing zero times, and why.
@@ -392,7 +414,29 @@ def parse_rows(jsonl_text: str) -> tuple[list[Ask], dict]:
             continue
         if not isinstance(row, dict):
             continue
-        if row.get("kind") not in OPERATOR_KINDS:
+        kind_in = row.get("kind") or ""
+        if kind_in not in OPERATOR_KINDS:
+            # 🔴 LEDGERED, NOT DROPPED IN SILENCE. This `continue` is the refusal
+            # `OPERATOR_KINDS` exists for — a `decision_unanswered` row is the
+            # AGENT's own question, so admitting it would quote a proposal back as
+            # a requirement the operator stated. But refusing it is not a reason to
+            # HIDE it: the `ValueError` branch a few lines up ledgers its own drop,
+            # and this one did not, so an extractor that started emitting a kind
+            # this module has never heard of looked exactly like a transcript with
+            # nothing in it. That is the silent-omission class devrc#1955 exists to
+            # fix, reproduced one layer down — and the empty block downstream
+            # branches on `if dropped`, so a silent drop also mislabels the
+            # UNKNOWN reason as "nothing was there at all".
+            #
+            # 🔴 THE KIND IS IN THE REASON TEXT, which is what makes it a
+            # diagnosis rather than a count. A NEW kind and the KNOWN
+            # `decision_unanswered` are different findings: the first is a
+            # producer/consumer drift to go and look at, the second is this
+            # module working as designed.
+            if kind_in not in SILENTLY_REFUSED_KINDS:
+                why = ("a `%s` row, which is not the operator speaking" % kind_in
+                       if kind_in else "a row carrying no `kind` at all")
+                dropped[why] = dropped.get(why, 0) + 1
             continue
         text = (row.get("text") or "").strip()
         reason = non_operator_reason(text)
@@ -400,7 +444,11 @@ def parse_rows(jsonl_text: str) -> tuple[list[Ask], dict]:
             if reason != "empty":
                 dropped[reason] = dropped.get(reason, 0) + 1
             continue
-        kind = row.get("kind") or ""
+        # 🔴 `kind_in`, NOT a second `row.get("kind")`. One read, one place: two
+        # reads of the same field are two things that can disagree after an edit,
+        # and the `or ""` normalisation has to be identical at both or the
+        # `KIND_DECISION` comparison below sees `None` where the guard saw `""`.
+        kind = kind_in
         if kind == KIND_DECISION:
             text = strip_answer_framing(text)
             if not text:
@@ -426,7 +474,18 @@ EXTRACTOR_REASONS = {
     3: "the arc seed named no handoff doc, or no checkout holds it (NOTHING MEASURED)",
     4: "the arc was measured and has zero member sessions",
     5: "those session ids resolved to no readable transcript on this host",
-    6: "the transcripts were read and held no operator-typed message",
+    # ⚠ THIS SAID "held no operator-typed message" AND WAS STALE. devrc#2011 widened
+    # exit 6 to mean ZERO ROWS OF ANY KIND — the extractor's own `--help` says
+    # "transcripts WERE read and held zero rows of ANY kind — nothing typed, no slash
+    # command, and no AskUserQuestion decision". The old wording named only the
+    # `typed` channel, so a reader of this reason concluded the operator had not
+    # TYPED while a decision channel they never heard of was equally empty. It
+    # survived because the two-way guard
+    # (`test_the_extractor_exit_vocabulary_is_pinned_to_what_the_script_documents`)
+    # pins the exit-code SET, not the text — a guard narrower than the thing it
+    # reads as covering.
+    6: "the transcripts were read and held zero rows of any kind — nothing typed, "
+       "no slash command, and no AskUserQuestion decision",
 }
 
 

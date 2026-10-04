@@ -4174,19 +4174,36 @@ def test_the_shared_ledger_module_is_deployed_BESIDE_the_hook(tmp_path):
         "would be ignored in favour of whatever $DEVRC_DIR happens to hold"
 
 
-def test_the_TASKS_url_is_passed_to_the_cli_as_api_url(tmp_path, monkeypatch):
-    """🔴 `CLAWGATE_TASK_API_URL` HAS TO ARRIVE ON THE COMMAND LINE. Both CLIs read
+def test_the_TASKS_url_reaches_the_cli_in_its_ENVIRONMENT_not_on_argv(
+        tmp_path, monkeypatch):
+    """🔴 `CLAWGATE_TASK_API_URL` HAS TO ARRIVE AT THE CLIENT. Both CLIs read
     `CLAWGATE_API_URL` out of the same env file themselves, but neither knows about the
-    TASKS key — so without the flag the new variable is inert and the guard keeps
+    TASKS key — so if nothing carries it the new variable is inert and the guard keeps
     reading the OLD board, reporting a missing write-back for a comment that landed on
-    the new one. Asserted on the stub's recorded argv, with the positive control first.
-    """
+    the new one.
+
+    ⚠ RE-AIMED. This was `test_the_TASKS_url_is_passed_to_the_cli_as_api_url` and
+    asserted the value on ARGV, as `--api-url`. The flag is DELETED: both clients rank
+    flags above the environment, and that flag's value came from the env FILE with no
+    process-environment layer, so it silently beat an operator's exported override —
+    the one `task_cli_env` documents as "must still win". The CHANNEL changed; the
+    claim that the TASKS url must reach the client did not, so the test is re-pointed
+    rather than dropped.
+
+    Driven through the REAL `live_task` against a REAL stub binary that logs both its
+    argv and the variable, so this is the end-to-end leg the monkeypatched tests in the
+    section below are not."""
     b = _bin(tmp_path)
     argv_log = tmp_path / "cli-argv.log"
+    env_log = tmp_path / "cli-env.log"
     mockbin.write_exec(b / "clawgatectl",
                        'echo "$@" >> %s\n' % json.dumps(str(argv_log))
+                       + 'echo "MUSTER_API_URL=${MUSTER_API_URL:-}" >> %s\n'
+                       % json.dumps(str(env_log))
                        + _sh_json(task(task_id=MUSTER_READ_ID)))
     _isolated_path(monkeypatch, b)
+    for name in ("MUSTER_API_URL", "MUSTER_HOOK_TOKEN", "CLAWGATE_TASK_API_URL"):
+        monkeypatch.delenv(name, raising=False)
     envf = _envfile(tmp_path, "tasks.env",
                     CLAWGATE_API_URL=CLAWGATE_URL,
                     CLAWGATE_HOOK_TOKEN=CLAWGATE_TOKEN,
@@ -4194,24 +4211,45 @@ def test_the_TASKS_url_is_passed_to_the_cli_as_api_url(tmp_path, monkeypatch):
     assert guard.live_task(MUSTER_READ_ID, timeout=5,
                            env_path=str(envf))["id"] == MUSTER_READ_ID
     argv = argv_log.read_text()
+    env_seen = env_log.read_text()
     # POSITIVE CONTROL FIRST: a stub that logged nothing satisfies any `not in`.
     assert "task get %d" % MUSTER_READ_ID in argv, argv
-    assert "--api-url %s" % MUSTER_URL in argv, argv
-    # 🔴 ...and the permission-routing URL is NOT what the CLI was pointed at.
+    # 🔴 THE TASKS URL ARRIVED — in the environment, which is the channel an
+    # exported override can win on.
+    assert "MUSTER_API_URL=%s" % MUSTER_URL in env_seen, env_seen
+    # 🔴 ...and NOT on argv, where it would outrank that override.
+    assert "--api-url" not in argv, (
+        "the deleted `--api-url` flag is back. It outranks MUSTER_API_URL for both "
+        "clients, so a flag built from the env FILE defeats an operator's exported "
+        "CLAWGATE_TASK_API_URL — see `_via_cli`'s last paragraph: %s" % argv)
+    # 🔴 ...and the permission-routing URL is not what the CLI was pointed at.
     assert CLAWGATE_URL not in argv, argv
+    assert CLAWGATE_URL not in env_seen, env_seen
 
 
-def test_WITHOUT_the_tasks_url_no_api_url_flag_is_invented(tmp_path, monkeypatch):
-    """The negative half. `CLAWGATE_API_URL` is what both CLIs already resolve on their
-    own, so passing it would be a second spelling of a default — and a second place for
-    the value to be wrong. Today's hosts have only this key, so this is the case in
-    production right now."""
+def test_WITHOUT_the_tasks_url_the_GENERIC_key_is_what_reaches_the_cli(
+        tmp_path, monkeypatch):
+    """The fall-through half, and still a real claim after the flag's deletion: with
+    only `CLAWGATE_API_URL` set — which is every host that has not been told about the
+    task/router split — that value is what must arrive, rather than nothing or a bare
+    default. `${A:-$B}` through the shared `TASK_API_URL_VARS` ledger.
+
+    ⚠ RE-AIMED from `test_WITHOUT_the_tasks_url_no_api_url_flag_is_invented`, whose
+    assertion (`"--api-url" not in argv`) is now true UNCONDITIONALLY and so could
+    never fail — a vacuous guard. The surviving claim is about the VALUE that lands,
+    which is observable again in the environment."""
     b = _bin(tmp_path)
     argv_log = tmp_path / "cli-argv-2.log"
+    env_log = tmp_path / "cli-env-2.log"
     mockbin.write_exec(b / "clawgatectl",
                        'echo "$@" >> %s\n' % json.dumps(str(argv_log))
+                       + 'echo "MUSTER_API_URL=${MUSTER_API_URL:-}" >> %s\n'
+                       % json.dumps(str(env_log))
                        + _sh_json(task(task_id=706)))
     _isolated_path(monkeypatch, b)
+    for name in ("MUSTER_API_URL", "MUSTER_HOOK_TOKEN", "CLAWGATE_TASK_API_URL",
+                 "CLAWGATE_API_URL"):
+        monkeypatch.delenv(name, raising=False)
     envf = _envfile(tmp_path, "plain.env",
                     CLAWGATE_API_URL=CLAWGATE_URL,
                     CLAWGATE_HOOK_TOKEN=CLAWGATE_TOKEN)
@@ -4219,6 +4257,8 @@ def test_WITHOUT_the_tasks_url_no_api_url_flag_is_invented(tmp_path, monkeypatch
     argv = argv_log.read_text()
     assert "task get 706" in argv, argv          # positive control
     assert "--api-url" not in argv, argv
+    assert "MUSTER_API_URL=%s" % CLAWGATE_URL in env_log.read_text(), \
+        env_log.read_text()
 
 
 def test_the_curl_fallback_prefers_the_TASKS_url_and_the_TASKS_token(tmp_path,
@@ -4526,10 +4566,23 @@ def test_the_NEGATIVE_CONTROL_the_hang_stub_really_hangs(tmp_path, monkeypatch):
 # <id>` returns the task.
 #
 # 🔴 WHY THAT WAS INVISIBLE HERE, AND WHY IT STILL MATTERED. `_read_task` walks every
-# client and then falls back to curl, so the live read still SUCCEEDED — through curl,
-# which sends no provenance headers of the preferred client's. The verdict was right
-# and the attribution was wrong, which is exactly the defect preferring muster was
-# supposed to fix. A suite that only asserts the verdict cannot see that.
+# client before falling back to curl, so the live read still SUCCEEDED — through
+# `clawgatectl`, the SECOND entry in the ledger, NOT through curl. This header used to
+# say "through curl", and that is MEASURED FALSE: `clawgatectl` configures itself out
+# of the same `~/.claude/clawgate.env`, so it answers rc 0 and the walk stops at entry
+# 2 with curl never reached. Re-measured 2026-10-03 by driving `_read_task`'s own
+# chain on the operator's host:
+#
+#     muster      --api-url <base> task get <id>  -> rc 3, 401 (no token)
+#     clawgatectl --api-url <base> task get <id>  -> rc 0, the task as JSON
+#     => chain stops here; curl unreached
+#
+# The consequence is unchanged and it is the whole point: the FALLBACK client served
+# every read, and it sends `X-Clawgate-{Source,Session-Id,Host}` where muster reads
+# `X-Muster-*`, so the board attributed the read to the generic `api` caller. The
+# verdict was right and the attribution was wrong, which is exactly the defect
+# preferring muster was supposed to fix. A suite that only asserts the verdict cannot
+# see that.
 # =========================================================================== #
 def test_the_task_CLI_is_run_WITH_the_two_variables_it_reads_its_config_from(
         tmp_path, monkeypatch):
@@ -4568,8 +4621,11 @@ def test_the_task_CLI_is_run_WITH_the_two_variables_it_reads_its_config_from(
     env = kw.get("env")
     assert env is not None, (
         "the preferred client was run with an INHERITED environment — which on both "
-        "hosts carries neither MUSTER_API_URL nor MUSTER_HOOK_TOKEN, so it exits 2 "
-        "before it sends anything and the read degrades to curl.")
+        "hosts carries neither MUSTER_API_URL nor MUSTER_HOOK_TOKEN, so it fails "
+        "without answering and the read is served by `clawgatectl`, the NEXT entry "
+        "in the ledger, under the WRONG provenance headers. Not by curl: measured "
+        "2026-10-03, `clawgatectl` answers rc 0 off the same env file, so the walk "
+        "stops at entry 2 and the curl fallback is never reached.")
     assert env["MUSTER_API_URL"] == "http://pinned-task.invalid:30306"
     assert env["MUSTER_HOOK_TOKEN"] == "pinned-fixture-token-7a3f"
     # 🔴 The token is in the ENVIRONMENT and nowhere else: an argv is world-readable
@@ -4612,3 +4668,136 @@ def test_the_FALLBACK_client_is_given_the_same_config(tmp_path, monkeypatch):
     for argv, kw in seen:
         assert kw["env"]["MUSTER_API_URL"] == "http://pinned-task.invalid:30306", argv
         assert kw["env"]["MUSTER_HOOK_TOKEN"] == "pinned-fixture-token-7a3f", argv
+
+
+# =========================================================================== #
+# 🔴 AN OPERATOR'S EXPORTED OVERRIDE MUST WIN — AND AT THIS SITE IT DID NOT
+#
+# `task_cli_env`'s docstring states the rule: "a deliberate `MUSTER_API_URL=… cmd`
+# or an operator's export must still win; this only FILLS IN what nothing has set",
+# and `task_base_url` implements it by layering the process environment OVER the env
+# file through the shared `TASK_API_URL_VARS` ledger.
+#
+# A pre-existing `--api-url` on `_via_cli` silently defeated that rule at THIS site
+# and nowhere else. Both clients rank FLAGS ABOVE THE ENVIRONMENT (muster:
+# `~/.muster/muster.env` -> environment -> flags; clawgatectl's `config.go`: file ->
+# env -> flag), and the flag's value was read with `_env_file(env_path)` — the FILE
+# ONLY, no process-environment layer. So the export arrived correctly as
+# `MUSTER_API_URL` and then LOST to a flag carrying the file's value. Measured
+# 2026-10-03: of the three sites that invoke a resolved task CLI, `cairn_who.py` and
+# `clawgate_handoff.sh` pass no flag at all and were always correct; this was 1 of 3.
+# =========================================================================== #
+#: What the CLIENT will actually use, given what the hook handed it. 🔴 THE WHOLE
+#: POINT IS THE PRECEDENCE: a flag OUTRANKS the environment for both binaries, so a
+#: test that only read `env["MUSTER_API_URL"]` would have passed throughout the
+#: defect — the environment was always right; it was just overruled.
+def _base_the_client_will_use(argv, env):
+    if "--api-url" in argv:
+        return argv[argv.index("--api-url") + 1]
+    return (env or {}).get("MUSTER_API_URL")
+
+
+def test_an_exported_task_url_WINS_at_the_writeback_guard_site(tmp_path, monkeypatch):
+    """🔴 BEHAVIOURAL, NOT STRUCTURAL. The env FILE and the EXPORT name two
+    different boards on purpose; the export must be the one the client reaches. A
+    structural "no `--api-url` in argv" assertion would type-check past a flag
+    spelled `--api_url` or added back under another name, and it would not say WHY
+    the flag was wrong. This resolves the destination through the clients' own
+    documented precedence instead."""
+    seen = []
+
+    class _Fake:
+        TimeoutExpired = subprocess.TimeoutExpired
+
+        @staticmethod
+        def run(argv, **kw):
+            seen.append((list(argv), kw))
+            return _FakeProc()
+
+    monkeypatch.setattr(guard, "_sp", lambda: _Fake)
+    for name in ("CLAWGATE_API_URL", "CLAWGATE_HOOK_TOKEN",
+                 "MUSTER_API_URL", "MUSTER_HOOK_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    # THE OVERRIDE, exported exactly as an operator would.
+    monkeypatch.setenv("CLAWGATE_TASK_API_URL",
+                       "http://operator-override.invalid:30306")
+    envf = tmp_path / "clawgate.env"
+    envf.write_text("CLAWGATE_TASK_API_URL=http://file-pinned.invalid:30306\n"
+                    "CLAWGATE_HOOK_TOKEN=pinned-fixture-token-7a3f\n",
+                    encoding="utf-8")
+    guard._read_task(194, 5, str(envf))
+    assert seen, "no client was run at all"
+    argv, kw = seen[0]
+    got = _base_the_client_will_use(argv, kw.get("env"))
+    assert got == "http://operator-override.invalid:30306", (
+        "an exported CLAWGATE_TASK_API_URL did NOT win at this site: the client "
+        "will use %r. `task_cli_env` put the override in MUSTER_API_URL correctly, "
+        "but a flag outranks the environment for both binaries — so a `--api-url` "
+        "carrying the env FILE's value overrules the operator. argv=%r" % (got, argv))
+    # The file value must not be what wins — named explicitly so this cannot pass by
+    # both URLs happening to be equal.
+    assert got != "http://file-pinned.invalid:30306", argv
+
+
+def test_the_fallback_client_ALSO_honours_the_export(tmp_path, monkeypatch):
+    """The second entry of the ledger, same claim. A fix applied only to the first
+    binary of the walk would pass the test above and leave the real-world case —
+    `muster` absent, `clawgatectl` serving — still overruled."""
+    seen = []
+
+    class _Fake:
+        TimeoutExpired = subprocess.TimeoutExpired
+
+        @staticmethod
+        def run(argv, **kw):
+            seen.append((list(argv), kw))
+            if argv[0] == "muster":
+                raise FileNotFoundError(argv[0])
+            return _FakeProc()
+
+    monkeypatch.setattr(guard, "_sp", lambda: _Fake)
+    for name in ("CLAWGATE_API_URL", "CLAWGATE_HOOK_TOKEN",
+                 "MUSTER_API_URL", "MUSTER_HOOK_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CLAWGATE_TASK_API_URL",
+                       "http://operator-override.invalid:30306")
+    envf = tmp_path / "clawgate.env"
+    envf.write_text("CLAWGATE_TASK_API_URL=http://file-pinned.invalid:30306\n"
+                    "CLAWGATE_HOOK_TOKEN=pinned-fixture-token-7a3f\n",
+                    encoding="utf-8")
+    guard._read_task(194, 5, str(envf))
+    assert [a[0] for a, _ in seen] == ["muster", "clawgatectl"], seen
+    for argv, kw in seen:
+        got = _base_the_client_will_use(argv, kw.get("env"))
+        assert got == "http://operator-override.invalid:30306", (argv, got)
+
+
+def test_the_NEGATIVE_CONTROL_the_FILE_still_decides_when_nothing_is_exported(
+        tmp_path, monkeypatch):
+    """🔴 WITHOUT THIS, THE TWO TESTS ABOVE PASS FOR A GUARD THAT SIMPLY STOPPED
+    READING THE ENV FILE. Deleting the whole derivation — no flag, no overlay —
+    would satisfy "the export wins" vacuously on a host that exports nothing, which
+    is BOTH hosts today. So the file's value must still be what arrives when there
+    is no override."""
+    seen = []
+
+    class _Fake:
+        TimeoutExpired = subprocess.TimeoutExpired
+
+        @staticmethod
+        def run(argv, **kw):
+            seen.append((list(argv), kw))
+            return _FakeProc()
+
+    monkeypatch.setattr(guard, "_sp", lambda: _Fake)
+    for name in ("CLAWGATE_TASK_API_URL", "CLAWGATE_API_URL", "CLAWGATE_HOOK_TOKEN",
+                 "MUSTER_API_URL", "MUSTER_HOOK_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    envf = tmp_path / "clawgate.env"
+    envf.write_text("CLAWGATE_TASK_API_URL=http://file-pinned.invalid:30306\n"
+                    "CLAWGATE_HOOK_TOKEN=pinned-fixture-token-7a3f\n",
+                    encoding="utf-8")
+    guard._read_task(194, 5, str(envf))
+    argv, kw = seen[0]
+    assert _base_the_client_will_use(argv, kw.get("env")) == \
+        "http://file-pinned.invalid:30306", (argv, kw.get("env"))

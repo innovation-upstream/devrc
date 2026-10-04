@@ -107,7 +107,12 @@ MUTANTS = (
         "M04",
         "a bare `/slash` invocation counts as an operator ask",
         "test_both_operator_kinds_become_asks_and_command_does_not",
-        '        if row.get("kind") not in OPERATOR_KINDS:',
+        # ⚠ RE-ANCHORED: the guard reads `kind_in` now, not a second
+        # `row.get("kind")`. The field is read ONCE at the top of the loop so the
+        # guard and the later `KIND_DECISION` comparison cannot normalise it
+        # differently. `if False:` still disables the whole refusal, which is what
+        # this row is about.
+        "        if kind_in not in OPERATOR_KINDS:",
         "        if False:",
     ),
     (
@@ -155,7 +160,15 @@ MUTANTS = (
         "the extractor renumbers an exit and this module prints a confident "
         "wrong reason for it",
         "test_the_extractor_exit_vocabulary_is_pinned_to_what_the_script_documents",
-        '    6: "the transcripts were read and held no operator-typed message",\n',
+        # ⚠ RE-ANCHORED with the exit-6 wording fix. The old anchor was the stale
+        # one-line `6: "…held no operator-typed message",`; leaving it here would
+        # have taken this row to 0x — printed as `PATTERN OCCURS 0x — NOT APPLIED`
+        # and scored a SURVIVOR, i.e. the row silently stops testing anything. This
+        # is exactly the class `test_mutation_battery_anchors.py` exists to catch,
+        # and it is why the anchor had to move in the SAME change as the text.
+        '    6: "the transcripts were read and held zero rows of any kind — '
+        'nothing typed, "\n       "no slash command, and no AskUserQuestion '
+        'decision",\n',
         "",
     ),
     (

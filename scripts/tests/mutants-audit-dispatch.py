@@ -327,7 +327,18 @@ SKILL_RELS = (
 # and not 220 + 6 (which is 226 only by coincidence — the agreement is not a
 # method). ⚠ `rerere` is enabled in this clone; the merge recorded a NEW
 # preimage rather than replaying one, so no stored resolution was accepted.
-MIN_TESTS = 226
+# 🔴 RE-COUNTED 2026-10-03 FOR THE #2005/#2011 ROUND-0 CARRY-FORWARDS, 226 -> 228,
+# at m = 239. Two tests were added to `test_audit_dispatch.py`
+# (`test_NO_production_path_supplies_its_own_extractor` and
+# `test_the_INCLUDE_ANSWERS_flag_is_still_passed_for_the_PRINTED_command`, both
+# INVARIANT GUARDS and registered as such in that module's own ledger). The number
+# is the formula's output on a COUNTED m, not 226 + 2 — which happens to be 228 here,
+# and the paragraphs above record four rounds of exactly that coincidence being
+# mistaken for a method. `239 - min(50, max(1, 239 // 20))` = 239 - 11 = 228.
+# 🔴 AND IT WAS COPIED FROM THE RUNNER, NOT COMPUTED BY HAND:
+# `test_the_dispatch_batterys_floor_is_re_derived_from_its_target_module` failed
+# with `Set MIN_TESTS = 228` against the stale 226, which is where this came from.
+MIN_TESTS = 228
 
 
 # A row may name this instead of a killer set: the mutation MUST leave the suite
