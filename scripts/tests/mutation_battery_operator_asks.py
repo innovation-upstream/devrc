@@ -112,11 +112,26 @@ MUTANTS = (
     ),
     (
         "M05",
-        "the operator's ANSWERS vanish again — the gap round 0 found, where the "
-        "requirements statement authorising a design decision was invisible",
+        "the operator's DECISIONS vanish again — the gap round 0 found, where "
+        "the requirements statement authorising a design decision was "
+        "invisible. ⚠ The anchor moved with devrc#1955's rename of the kind "
+        "from `answer` to `decision`, and the ANCHORS LEDGER caught the stale "
+        "spelling rather than letting this row silently score SURVIVED",
         "test_both_operator_kinds_become_asks_and_command_does_not",
-        'OPERATOR_KINDS = ("typed", "answer")',
+        'OPERATOR_KINDS = ("typed", KIND_DECISION)',
         'OPERATOR_KINDS = ("typed",)',
+    ),
+    (
+        # 🔴 THE MIRROR OF M05. M05 asks "can the channel be removed?"; this
+        # asks "can a row that is NOT the operator be admitted?" — and the two
+        # fail in opposite directions, so neither covers the other.
+        "M05b",
+        "`decision_unanswered` is ADMITTED as an operator ask, so an agent's "
+        "own unanswered question gets quoted back to the auditor as a "
+        "requirement the operator stated",
+        "test_an_UNANSWERED_question_is_never_quoted_as_an_operator_ask",
+        'OPERATOR_KINDS = ("typed", KIND_DECISION)',
+        'OPERATOR_KINDS = ("typed", KIND_DECISION, "decision_unanswered")',
     ),
     (
         "M06",

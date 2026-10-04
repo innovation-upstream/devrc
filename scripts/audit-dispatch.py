@@ -6150,14 +6150,20 @@ def _read_operator_asks(runner, data, extractor=None):
                 "anything"))
 
     if ids:
-        # 🔴 `--include-answers` IS LOAD-BEARING HERE. The operator's replies to
-        # a question this session asked arrive in a `tool_result` block, which
-        # the extractor's default path ignores — so without this flag the
-        # requirements statement that AUTHORISES a design decision is invisible
-        # to the very block meant to surface it. That happened on devrc#1887:
-        # the block missed 612 B stating the operator's requirements, including
-        # both answers deciding its own open forks, and round 0 caught it.
-        # Measured: 1,491 such records / 837,635 B on this host.
+        # ⚠ `--include-answers` IS NO LONGER LOAD-BEARING, AND THAT SENTENCE
+        # STOOD HERE AS A FACT — devrc#1955 made the decision channel the
+        # extractor's DEFAULT and the flag an accepted no-op. It is still passed
+        # for one reason: this dispatcher may run against an extractor deployed
+        # on a host that predates the change, where the flag IS the difference.
+        #
+        # Why the channel matters at all, unchanged: the operator's replies to a
+        # question this session asked arrive in a `tool_result` block, and
+        # without them the requirements statement that AUTHORISES a design
+        # decision is invisible to the very block meant to surface it. That
+        # happened on devrc#1887 — the block missed 612 B stating the operator's
+        # requirements, including both answers deciding its own open forks, and
+        # round 0 caught it. Measured: 1,491 such records / 837,635 B on this
+        # host.
         cmd = ["python3", str(extractor or EXTRACTOR), "--jsonl",
                "--include-answers"]
         for sid in ids:

@@ -148,7 +148,7 @@ def jl(*rows):
 def test_both_operator_kinds_become_asks_and_command_does_not():
     out = jl(
         {"kind": "typed", "text": "make it idempotent", "session_id": SID_A},
-        {"kind": "answer", "text": "the second option", "session_id": SID_A},
+        {"kind": "decision", "text": "the second option", "session_id": SID_A},
         {"kind": "command", "text": "/resume", "session_id": SID_A},
     )
     asks, dropped = oa.parse_rows(out)
@@ -160,7 +160,7 @@ def test_an_answer_row_is_LABELLED_as_a_decision_in_the_render():
     """An answer is the operator's, but it is a DECISION rather than free-text —
     the auditor should not quote a picked option as if it were a sentence."""
     out = oa.render([oa.Ask(source=oa.SOURCE_SESSION, text="option two",
-                            session_id=SID_A, kind="answer")],
+                            session_id=SID_A, kind="decision")],
                     session_ids=(SID_A,), projects_root="/nonexistent")
     assert "an answer to a question this session asked" in out
     assert "of which answers to a question: 1" in out
@@ -286,13 +286,13 @@ class TestTheSeamWithTheRealProducer:
     your fixture does NOT load."* Here the unloaded surface was the producer.
     """
 
-    def _rows(self, tmp_path, records, include_answers=True):
+    def _rows(self, tmp_path, records):
         eum = _extractor()
         proj = tmp_path / "-home-zach-workspace-devrc"
         proj.mkdir(exist_ok=True)
         p = proj / f"{SID_A}.jsonl"
         p.write_text("\n".join(json.dumps(r) for r in records) + "\n")
-        return list(eum.records_of(p, include_answers=include_answers))
+        return list(eum.records_of(p))
 
     def _user(self, text, **kw):
         rec = {"type": "user", "message": {"role": "user", "content": text},
@@ -352,7 +352,7 @@ class TestTheSeamWithTheRealProducer:
         assert [a.text for a in asks] == ["the real ask"]
         assert any("task-notification" in k for k in dropped), dropped
 
-    def test_an_AskUserQuestion_answer_REACHES_us_as_kind_answer(self, tmp_path):
+    def test_an_AskUserQuestion_answer_REACHES_us_as_kind_decision(self, tmp_path):
         """🔴 The gap round 0 found: the operator's answers arrive in a
         `tool_result` block, which the default path ignores — so the
         requirements statement authorising a design decision was invisible to
@@ -366,7 +366,7 @@ class TestTheSeamWithTheRealProducer:
         ]
         rows = self._rows(tmp_path, records)
         assert [(r["kind"], r["text"]) for r in rows] == [
-            ("answer", "user messages only, never that big")], rows
+            ("decision", "user messages only, never that big")], rows
         asks, _ = oa.parse_rows("\n".join(json.dumps(r) for r in rows))
         assert [a.text for a in asks] == ["user messages only, never that big"]
 
@@ -384,16 +384,64 @@ class TestTheSeamWithTheRealProducer:
         rows = self._rows(tmp_path, records)
         assert rows == [], f"a Bash result was emitted as the operator: {rows}"
 
-    def test_answers_are_ABSENT_without_the_flag(self, tmp_path):
-        """The negative control on the opt-in, so no shipped consumer moves."""
+    def test_an_UNANSWERED_question_is_never_quoted_as_an_operator_ask(
+            self, tmp_path):
+        """🔴 THE EXCLUSION `OPERATOR_KINDS` DECLARES, AS A BRANCH RATHER THAN A
+        COMMENT. devrc#1955 added `decision_unanswered` — an `AskUserQuestion`
+        that was asked and never answered — and that row's text is the AGENT's
+        own question and option labels, not one word of the operator. Admitting
+        it here would quote an agent's proposal back to the auditor as a
+        requirement the operator stated: the exact attribution error round 0
+        exists to prevent, pointed the other way.
+
+        The row MUST still be produced (the extractor's own suite owns that);
+        what this pins is that it reaches the producer and is refused here.
+        """
+        records = [
+            {"type": "assistant", "message": {"role": "assistant",
+             "timestamp": "2026-01-01T00:00:00Z", "content": [
+                {"type": "tool_use", "id": "tu_gone", "name": "AskUserQuestion",
+                 "input": {"questions": [{
+                     "question": "ship it as correctness-only?",
+                     "options": [{"label": "yes"}, {"label": "no"}]}]}}]}},
+        ]
+        rows = self._rows(tmp_path, records)
+        assert [r["kind"] for r in rows] == ["decision_unanswered"], (
+            f"the producer stopped emitting the unanswered state: {rows}")
+        asks, _ = oa.parse_rows("\n".join(json.dumps(r) for r in rows))
+        assert asks == [], (
+            "an unanswered question was quoted as something the operator "
+            f"asked for: {[a.text for a in asks]}")
+
+    def test_decision_rows_ARE_admitted_the_positive_control_for_the_refusal(
+            self, tmp_path):
+        """The pair for the test above. A refusal that refused EVERYTHING would
+        pass it while deleting the whole channel, so the admitted case is
+        asserted in the same breath: 1 ask in, 0 from the unanswered row."""
         records = [
             {"type": "assistant", "message": {"role": "assistant", "content": [
-                {"type": "tool_use", "id": "tu_1", "name": "AskUserQuestion",
+                {"type": "tool_use", "id": "tu_ok", "name": "AskUserQuestion",
                  "input": {}}]}},
-            self._user([{"type": "tool_result", "tool_use_id": "tu_1",
-                         "content": "my answer"}]),
+            self._user([{"type": "tool_result", "tool_use_id": "tu_ok",
+                         "content": "the option he picked"}]),
         ]
-        assert self._rows(tmp_path, records, include_answers=False) == []
+        rows = self._rows(tmp_path, records)
+        asks, _ = oa.parse_rows("\n".join(json.dumps(r) for r in rows))
+        assert [a.text for a in asks] == ["the option he picked"], asks
+
+    def test_the_decision_kind_is_pinned_to_the_producers_constant(self):
+        """🔴 ONE SPELLING. This module cannot import the producer (it lives
+        under `scripts/session-analysis/`), so the string is re-spelled here and
+        read back out of the producer's own constant. A kind renamed upstream
+        with this left behind drops every decision silently — the #1955 defect,
+        restored, and a rename is exactly how it would come back."""
+        eum = _extractor()
+        assert oa.KIND_DECISION == eum.KIND_DECISION, (
+            f"this module takes {oa.KIND_DECISION!r}; the producer emits "
+            f"{eum.KIND_DECISION!r}")
+        assert oa.KIND_DECISION in oa.OPERATOR_KINDS
+        assert eum.KIND_DECISION_UNANSWERED not in oa.OPERATOR_KINDS, (
+            "the unanswered state became an operator ask")
 
     def test_every_kept_classifier_pattern_fires_on_REAL_producer_output(self, tmp_path):
         """🔴 THE LEDGER THAT REPLACES THE EIGHT DEAD GUARDS. Each pattern this
@@ -675,7 +723,7 @@ def test_the_agents_own_preview_block_is_stripped_from_an_answer():
 
 
 def test_an_answer_that_is_ONLY_framing_is_dropped_with_a_reason():
-    out = jl({"kind": "answer", "session_id": SID_A,
+    out = jl({"kind": "decision", "session_id": SID_A,
               "text": "The user answered: selected preview:\nAFTER: nothing"})
     asks, dropped = oa.parse_rows(out)
     assert asks == []
@@ -711,13 +759,25 @@ class TestRoundOneSeamFindings(TestTheSeamWithTheRealProducer):
             f"a compaction summary reached this module: {rows}"
         )
 
-    def test_the_opt_in_DEFAULT_is_pinned_not_just_the_parameter(self, tmp_path):
-        """🔴 THE PR'S WHOLE COMPATIBILITY GUARANTEE, asserted in five places and
-        previously enforced in NONE. Round 1's sweep set the parameter default to
-        True and set the argparse default to True — both SURVIVED, because the
-        one test that looked like the guard passed `include_answers=False`
-        EXPLICITLY. This calls `records_of` with NO keyword at all, so the
-        DEFAULT is what is under test.
+    def test_the_DEFAULT_now_carries_the_decision_channel(self, tmp_path):
+        """🔴 THIS TEST IS THE REVERSE OF THE ONE IT REPLACES, AND THE REVERSAL
+        IS THE POINT. It used to read
+        `test_the_opt_in_DEFAULT_is_pinned_not_just_the_parameter` and assert
+        `records_of(p) == []` — "#1887's whole compatibility guarantee": the
+        decision channel was opt-in so no shipped consumer's output moved.
+
+        devrc#1955 overrules it. That guarantee is a cost paid in the wrong
+        direction, because the channel's entire value is to an audit that does
+        not know to ask for it: with the flag off, an audit asking "did
+        everything he chose actually ship?" reads a partial decision channel
+        while presenting a complete-looking one. It had already produced one
+        confident wrong all-clear. So the compatibility guarantee moved to the
+        FLAG — `--include-answers` is still accepted and is now inert — and the
+        channel itself is unconditional.
+
+        Still calls `records_of` with NO keyword, for the same reason the
+        predecessor did: round 1's sweep showed that a test passing the flag
+        explicitly cannot see the default move.
         """
         eum = _extractor()
         proj = tmp_path / "-home-zach-workspace-devrc"
@@ -730,12 +790,14 @@ class TestRoundOneSeamFindings(TestTheSeamWithTheRealProducer):
             self._user([{"type": "tool_result", "tool_use_id": "tu_1",
                          "content": "my answer"}]),
         ]) + "\n")
-        assert list(eum.records_of(p)) == [], (
-            "records_of emits answers BY DEFAULT — every existing consumer's "
-            "output just moved"
+        assert [(r["kind"], r["text"]) for r in eum.records_of(p)] == [
+            ("decision", "my answer")], (
+            "records_of does NOT emit decisions by default — devrc#1955's "
+            "closing condition runs the tool with no flag at all"
         )
         assert eum.build_parser().parse_args([]).include_answers is False, (
-            "the CLI default flipped — the shipped footer's output moves"
+            "the retired flag's argparse default moved; it must stay False so "
+            "nothing branches on it"
         )
 
 

@@ -14162,16 +14162,23 @@ def test_a_non_owner_PR_comment_is_not_inlined_as_an_operator_ask():
 
 
 def test_the_extractor_is_invoked_with_include_answers():
-    """🔴 The gap round 0 found: without the flag, the operator's answers to a
-    question this session asked are invisible, and those are exactly the records
-    that AUTHORISE a design decision."""
+    """🔴 The gap round 0 found: the operator's answers to a question this
+    session asked are exactly the records that AUTHORISE a design decision.
+
+    ⚠ `--include-answers` is a NO-OP against the current extractor — devrc#1955
+    made the decision channel its default. The flag is still passed, and still
+    pinned here, because this dispatcher may run against an extractor deployed
+    on a host that predates the change, where it IS the difference. So this test
+    asserts the flag is sent AND that a `decision` row survives the round trip;
+    the second half is what would catch the channel going away."""
     sid = "aaaaaaaa-1111-4222-8333-444444444444"
     seen = {}
 
     def runner(cmd, cwd=None):
         seen["cmd"] = cmd
         return 0, json.dumps(
-            {"kind": "answer", "text": "the first option", "session_id": sid}), ""
+            {"kind": "decision", "text": "the first option",
+                 "session_id": sid}), ""
 
     block = ad._read_operator_asks(runner, {
         "commits": [{"messageHeadline": "x",
