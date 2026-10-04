@@ -218,17 +218,27 @@ MUTANTS: list[tuple[str, str, str, str, str]] = [
     (
         'R10-exit-code-collapses-onto-rule-q',
         "16 collapsed onto rule (q)'s 15, so the two remedies become "
-        "indistinguishable to a caller branching on the number. 🔴 ITS ANCHOR WAS "
-        "WIDENED BY ONE LINE WHEN `--archive-write` LANDED, AND THE GUARD IS WHAT "
-        "CAUGHT IT. That change added a SECOND `return EXIT_PRUNE_UNCONSERVED` (the "
+        "indistinguishable to a caller branching on the number. 🔴 ITS ANCHOR HAS NOW "
+        "BEEN RE-CUT TWICE, BOTH TIMES BY THIS GUARD, AND IN OPPOSITE DIRECTIONS. "
+        "(1) `--archive-write` added a SECOND `return EXIT_PRUNE_UNCONSERVED` (the "
         "read-back arm), indented four deeper — and `str.count` matches SUBSTRINGS, "
-        "so the 16-space line CONTAINS the 12-space anchor and the row went to 2x. "
-        "`test_mutation_battery_anchors.py` failed on it in the same commit. The "
-        "lesson is the reusable part: a bare `return <CONST>` line is never a "
-        "stable anchor, because any deeper-indented copy of it matches.",
+        "so the 16-space line CONTAINED the 12-space anchor and the row went to 2x. "
+        "(2) The write-attempt telemetry change routed every `return` in the write "
+        "gate through `_done(log, '<token>', EXIT_X)`, so the bare-constant line "
+        "stopped existing and the anchor went to 0x — i.e. the row would have "
+        "reported `!! PATTERN OCCURS 0x — NOT APPLIED` and scored a SURVIVOR while "
+        "testing nothing. `test_mutation_battery_anchors.py` failed on it in the "
+        "same gate run, which is the whole reason that guard exists. The reusable "
+        "lesson is now wider than the first wording: a `return` line is never a "
+        "stable anchor — a deeper-indented copy matches it (1), and a refactor of "
+        "HOW the function returns deletes it outright (2). The mutation still "
+        "collapses 16 onto 15, which is the thing the row is about; only the "
+        "spelling of the line it is cut from has changed.",
         'TestADurablePruneWithNoArchiveIsRefused::test_it_is_refused_and_writes_NOTHING',
-        '            )\n            return EXIT_PRUNE_UNCONSERVED\n',
-        '            )\n            return EXIT_PRUNE_REFUSED\n',
+        '            )\n            return _done(log, "prune-unconserved", '
+        'EXIT_PRUNE_UNCONSERVED)\n',
+        '            )\n            return _done(log, "prune-unconserved", '
+        'EXIT_PRUNE_REFUSED)\n',
     ),
     (
         'R11-inert-archive-flag-accepted',
