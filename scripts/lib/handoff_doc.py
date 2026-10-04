@@ -293,6 +293,12 @@ from subsystem_resolver import parse_journal_bullets  # noqa: E402
 # branch the rest of the toolchain does not consider mainline.
 import git_mainline  # noqa: E402
 import handoff_budget  # noqa: E402
+# 🔴 THE WRITE-ATTEMPT LOG, AND IT IS FAIL-OPEN BY ITS OWN CONTRACT — see that
+# module's promise 1. Imported at module scope like every sibling here, which is
+# safe for the same reason `session_trailer` is: stdlib-only and cheap. It must
+# NEVER be reached through a `try: import` that degrades to a stub, because a
+# silently-absent logger is indistinguishable from a tool nobody ran.
+import handoff_writelog  # noqa: E402
 import session_trailer  # noqa: E402
 
 EXIT_OK = 0
@@ -7280,20 +7286,159 @@ def commit_message(
     return message
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def handoff_relpath(topic: str) -> str:
+    """The repo-relative path this tool writes for `topic`. ONE spelling.
 
+    🔴 EXTRACTED BECAUSE THERE ARE NOW TWO READERS. `_write_gate` needs it to read
+    and write the document; `main` needs it to stamp the telemetry row BEFORE the
+    gate runs, so a usage refusal still records WHICH doc was being attempted. A
+    second f-string would be the duplicated predicate `claude/RULES.md` says ends
+    up wrong at N-1 of N sites — and the site it would be wrong at is the one
+    nobody reads, the log.
+    """
+    return f"claudedocs/handoff-{topic}.md"
+
+
+#: The flags a caller passes to get PAST rule (p)/(q)/(r) — i.e. the flags whose
+#: presence on a re-run is what makes that re-run a SECOND PASS.
+#:
+#: 🔴 A LEDGER OF `(flag, dest)` PAIRS, NOT A PREFIX RULE, AND IT IS CHECKED
+#: AGAINST THE PARSER. `--override-size-ratchet` lands in `size_ratchet_override`
+#: and `--archive-write` in `archive_write`: neither is derivable from its own
+#: spelling, so a rule would be wrong about one of them. The pairing is pinned by
+#: `test_handoff_write_telemetry.py` against `build_parser()` itself, which is
+#: what stops a renamed flag leaving this list quietly matching nothing.
+EXIT_FLAG_DESTS: tuple[tuple[str, str], ...] = (
+    (PRUNE_FLAG, "prune"),
+    (ARCHIVE_WRITE_FLAG, "archive_write"),
+    (AUTOEVICT_FLAG, "autoevict"),
+    (SIZE_RATCHET_FLAG, "size_ratchet_override"),
+)
+
+
+def exit_flags_passed(args: argparse.Namespace) -> tuple[str, ...]:
+    """Which of `EXIT_FLAG_DESTS` this invocation actually carried.
+
+    🔴 READ FROM THE PARSED ARGUMENTS BEFORE `_write_gate` DERIVES ANYTHING. That
+    function sets `args.archive_write = True` when `--autoevict` is passed (see its
+    rule (s) comment), so reading afterwards would report a flag the caller never
+    typed — and the measurement this feeds is "what did the session RE-RUN with".
+    """
+    return tuple(
+        flag for flag, dest in EXIT_FLAG_DESTS if getattr(args, dest, None)
+    )
+
+
+def _done(
+    log: handoff_writelog.Attempt, status: str | None, code: int
+) -> int:
+    """Stamp this run's verdict on the telemetry row and return `code`.
+
+    🔴 EVERY `return` IN `_write_gate` GOES THROUGH HERE, AND THAT IS STRUCTURAL
+    RATHER THAN A CONVENTION. The alternative considered first was deriving the
+    status by TAPPING stdout/stderr for a `status=` token, which is one site
+    instead of thirty-nine — and it was rejected on measurement: several of this
+    module's own printed messages mention a `status=` token in PROSE (the
+    `--archive-write`-outside-`--repo` usage refusal names `status=written`;
+    `wrong_base_report`'s note names `status=stale-base`), so a tap would record a
+    verdict the run never reached. `claude/RULES.md`: parsing output makes its
+    FORMAT a dependency you did not pin. A label at the site cannot be wrong about
+    which site it is.
+
+    `status=None` is the honest value for the arms that print no `status=` token —
+    argument validation and the three environment refusals. See `Attempt.status`.
+
+    🔴 IT RETURNS `code` SO IT CAN REPLACE `return EXIT_X` IN ONE LINE. A helper
+    that only recorded would leave the return as a second statement, and a second
+    statement is one an edit can land between.
+    """
+    log.status = status
+    log.exit_code = code
+    return code
+
+
+def _stamp_size(
+    log: handoff_writelog.Attempt,
+    relpath: str,
+    merged_text: str,
+    base_text: str,
+    base_exists: bool,
+) -> None:
+    """Record the byte position this run is in, from `budget_position`.
+
+    🔴 THE ALLOWANCE COMES FROM `budget_position`, SO IT IS THE DOC'S OWN CEILING
+    AND NOT `handoff_budget.MAX_BYTES`. That is the whole point of the field:
+    docs legitimately sit at several multiples of `MAX_BYTES` under a
+    GRANDFATHERED entry, so a metric denominated in `MAX_BYTES` classifies ordinary
+    edits to large grandfathered docs as forced evictions. MEASURED on 38
+    git-derived "over the ceiling" shrinks: only 10 were real.
+
+    🔴 AND IT IS THE SAME FUNCTION rule (p) AND `budget_warning` READ, not a third
+    derivation. A second spelling of "how big is this doc against its ceiling?" is
+    how a log comes to disagree with the refusal it is logging.
+
+    `base_exists` rather than `base_text` decides whether `bytes_before` is `null`:
+    an emptied TRACKED doc is 0 bytes and that 0 is applicable, while a doc that
+    does not exist has no before at all. Conflating them would make every new doc
+    look like a shrink from 0.
+    """
+    pos = budget_position(relpath, merged_text, base_text)
+    log.bytes_after = pos.after
+    log.bytes_before = pos.before if base_exists else None
+    log.allowance = pos.allowance
+    log.grandfathered = pos.grandfathered
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Parse, run the write gate, and log exactly one row for the attempt.
+
+    🔴 THE LOG IS IN A `finally`, SO AN UNCAUGHT EXCEPTION IS STILL RECORDED — with
+    `status` and `exit_code` left `null`, which is the honest row for "this run
+    reached no verdict". A crash that left no trace is the shape this whole module
+    exists to remove.
+
+    🔴 AND THE PARSE IS OUTSIDE IT. `parse_args` raises `SystemExit` on `--help`
+    and on a bad argument, and neither is an attempt at the write path: `--help`
+    writes nothing, and argparse's own refusal happens before a topic is even
+    known. Logging them would also tap argparse's rewrapped help text, which
+    contains `status=` tokens in prose. Nothing is recorded above this line.
+    """
+    args = build_parser().parse_args(argv)
+    log = handoff_writelog.Attempt(
+        # `or None` because `resolve_session_id` returns "" for "unresolvable",
+        # and a row must carry `null` rather than an empty string — see that
+        # function's own 🔴 about never emitting a placeholder id.
+        session=resolve_session_id() or None,
+        # The BASENAME, never the absolute path: an absolute path is a fact about
+        # the operator's home directory, and the row is a measurement.
+        # ⚠ Consequence, stated because it is real: two worktrees of one repo have
+        # different basenames and so appear as different repos. `doc` is the join
+        # key the measurement actually uses, so that costs nothing here.
+        repo=Path(args.repo).resolve().name or None,
+        doc=handoff_relpath(args.topic),
+        confirmed=bool(args.confirm),
+        exit_flags=exit_flags_passed(args),
+    )
+    try:
+        return _write_gate(args, log)
+    finally:
+        handoff_writelog.record(log)
+
+
+def _write_gate(
+    args: argparse.Namespace, log: handoff_writelog.Attempt
+) -> int:
     repo = Path(args.repo).resolve()
     if not (repo / ".git").exists():
         print(f"not a git repo: {repo}", file=sys.stderr)
-        return EXIT_FAIL
+        return _done(log, None, EXIT_FAIL)
     if args.push and not args.confirm:
         print(
             "--push requires --confirm: the push is the half the gate exists "
             "for, so it never happens without the confirmed write.",
             file=sys.stderr,
         )
-        return EXIT_USAGE
+        return _done(log, None, EXIT_USAGE)
     # 🔴 AN OVERRIDE WITH NO REASON IS THE THING RULE (p) EXISTS TO STOP. The
     # flag would still SUPPRESS the refusal — `""` is not falsy to an
     # `is not None` presence test and is falsy to an `if` — so whichever way the
@@ -7338,7 +7483,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{AUTOEVICT_FLAG} if rule (p) still refuses.",
             file=sys.stderr,
         )
-        return EXIT_USAGE
+        return _done(log, None, EXIT_USAGE)
     # ---- rule (q)'s argument shape, refused BEFORE anything is read ---------
     # 🔴 EXIT_USAGE, NEVER EXIT_PRUNE_REFUSED, for the reason the size-ratchet
     # block below states about its own empty reason: 15 is the RULE's verdict
@@ -7354,7 +7499,7 @@ def main(argv: list[str] | None = None) -> int:
             f"transcript.",
             file=sys.stderr,
         )
-        return EXIT_USAGE
+        return _done(log, None, EXIT_USAGE)
     if (args.prune is None) != (args.prune_count is None):
         print(
             f"{PRUNE_FLAG} and {PRUNE_COUNT_FLAG} go together: the count is what "
@@ -7364,7 +7509,7 @@ def main(argv: list[str] | None = None) -> int:
             f"<lines in that file>` — or neither.",
             file=sys.stderr,
         )
-        return EXIT_USAGE
+        return _done(log, None, EXIT_USAGE)
     if args.prune_count is not None and args.prune_count < 1:
         print(
             f"{PRUNE_COUNT_FLAG} must be at least 1; got {args.prune_count}.\n"
@@ -7372,7 +7517,7 @@ def main(argv: list[str] | None = None) -> int:
             f"nothing, drop {PRUNE_FLAG} entirely.",
             file=sys.stderr,
         )
-        return EXIT_USAGE
+        return _done(log, None, EXIT_USAGE)
     # ---- rule (r)'s argument shape, EXIT_USAGE for the same reason -----------
     # 16 is the RULE's verdict about what a prune removes; an archive with no
     # prune removes nothing, so there is no verdict to give. An inert flag is
@@ -7392,7 +7537,7 @@ def main(argv: list[str] | None = None) -> int:
             f"closed blocks when rule (p) would refuse.",
             file=sys.stderr,
         )
-        return EXIT_USAGE
+        return _done(log, None, EXIT_USAGE)
     if args.archive is not None and not args.archive.strip():
         print(
             f"{ARCHIVE_FLAG} was given an EMPTY path ({args.archive!r}).\n"
@@ -7401,7 +7546,7 @@ def main(argv: list[str] | None = None) -> int:
             f"conservation claim on the run.",
             file=sys.stderr,
         )
-        return EXIT_USAGE
+        return _done(log, None, EXIT_USAGE)
     # ---- rule (r)'s WRITER argument shape, EXIT_USAGE for rule (r)'s reason ---
     # 🔴 EVERY ARM IS EXIT 2, NEVER 16, and the argument is the one three blocks
     # above make: 16 is the RULE's verdict about what a prune removes, and a flag
@@ -7420,7 +7565,7 @@ def main(argv: list[str] | None = None) -> int:
             f"worth keeping>'`.",
             file=sys.stderr,
         )
-        return EXIT_USAGE
+        return _done(log, None, EXIT_USAGE)
     if args.archive_write and not (args.archive_note or "").strip():
         print(
             f"{ARCHIVE_WRITE_FLAG} needs {ARCHIVE_NOTE_FLAG}, and the note may "
@@ -7438,7 +7583,7 @@ def main(argv: list[str] | None = None) -> int:
             f"adopt their conclusions\"`.",
             file=sys.stderr,
         )
-        return EXIT_USAGE
+        return _done(log, None, EXIT_USAGE)
     if args.archive_note is not None and not args.archive_write:
         print(
             f"{ARCHIVE_NOTE_FLAG} needs {ARCHIVE_WRITE_FLAG}: the note is the "
@@ -7448,7 +7593,7 @@ def main(argv: list[str] | None = None) -> int:
             f"who passed it believes their sentence was recorded somewhere.",
             file=sys.stderr,
         )
-        return EXIT_USAGE
+        return _done(log, None, EXIT_USAGE)
     if args.archive_write and not _within(repo, Path(args.archive)):
         print(
             f"{ARCHIVE_WRITE_FLAG} needs an archive INSIDE --repo, and "
@@ -7468,7 +7613,7 @@ def main(argv: list[str] | None = None) -> int:
             f"out-of-repo archive is still fine: drop {ARCHIVE_WRITE_FLAG}.",
             file=sys.stderr,
         )
-        return EXIT_USAGE
+        return _done(log, None, EXIT_USAGE)
     if args.size_ratchet_override is not None and not args.size_ratchet_override.strip():
         print(
             f"{SIZE_RATCHET_FLAG} was given an EMPTY reason "
@@ -7483,9 +7628,9 @@ def main(argv: list[str] | None = None) -> int:
             f'the prune is ranked first for the next round"`.',
             file=sys.stderr,
         )
-        return EXIT_USAGE
+        return _done(log, None, EXIT_USAGE)
 
-    relpath = f"claudedocs/handoff-{args.topic}.md"
+    relpath = handoff_relpath(args.topic)
     doc = repo / relpath
 
     # ---- rule (i): is this the RIGHT DOCUMENT to be writing at all? ----------
@@ -7514,7 +7659,7 @@ def main(argv: list[str] | None = None) -> int:
             f"effort, once per session.",
             file=sys.stderr,
         )
-        return EXIT_DOC_PER_EFFORT
+        return _done(log, "dated-topic", EXIT_DOC_PER_EFFORT)
 
     # 🔴 READ AT RULE (i), NOT AT THE MERGE. Rule (i) asks "is this a new
     # effort?" and a copy of this doc on the MAINLINE answers it: no — this is a
@@ -7595,7 +7740,7 @@ def main(argv: list[str] | None = None) -> int:
                 "put the list in front of you, not to decide for you.",
                 file=sys.stderr,
             )
-            return EXIT_DOC_PER_EFFORT
+            return _done(log, "new-doc", EXIT_DOC_PER_EFFORT)
 
     # ---- rule (d): the advance question, asked BEFORE anything is computed ---
     if not advance_is_real(args.advanced):
@@ -7608,7 +7753,7 @@ def main(argv: list[str] | None = None) -> int:
             "still describes reality is not stale.",
             file=sys.stderr,
         )
-        return EXIT_NO_ADVANCE
+        return _done(log, "no-advance", EXIT_NO_ADVANCE)
 
     # 🔴 `""` FOR A PURE PRUNE, and every rule below is already correct on it
     # rather than being made correct by a branch: `merge_report(base, "")`
@@ -7624,14 +7769,14 @@ def main(argv: list[str] | None = None) -> int:
             update_text = Path(args.update).read_text(encoding="utf-8")
         except OSError as exc:
             print(f"cannot read --update: {exc}", file=sys.stderr)
-            return EXIT_FAIL
+            return _done(log, None, EXIT_FAIL)
     prune_text = ""
     if args.prune is not None:
         try:
             prune_text = Path(args.prune).read_text(encoding="utf-8")
         except OSError as exc:
             print(f"cannot read {PRUNE_FLAG}: {exc}", file=sys.stderr)
-            return EXIT_FAIL
+            return _done(log, None, EXIT_FAIL)
 
     # ---- rule (l): every NEW investigation block declares its date ----------
     # 🔴 FIRST, and against the UPDATE. First because every rule below reads
@@ -7652,7 +7797,7 @@ def main(argv: list[str] | None = None) -> int:
     unforced = unforced_report(items)
     if unforced:
         print(unforced, file=sys.stderr)
-        return EXIT_UNFORCED
+        return _done(log, "unforced", EXIT_UNFORCED)
 
     # ---- rule (k): every elimination names how it was eliminated ------------
     # Read from the UPDATE for a reason rule (j) does NOT share and which is
@@ -7665,7 +7810,7 @@ def main(argv: list[str] | None = None) -> int:
     unevidenced = unevidenced_report(bullets)
     if unevidenced:
         print(unevidenced, file=sys.stderr)
-        return EXIT_UNEVIDENCED
+        return _done(log, "unevidenced", EXIT_UNEVIDENCED)
 
     base_text = doc.read_text(encoding="utf-8") if doc.exists() else ""
     if base_text:
@@ -7676,6 +7821,15 @@ def main(argv: list[str] | None = None) -> int:
         # an empty report is the honest answer, not a missing one.
         report = MergeReport(update_text.rstrip("\n") + "\n", (), ())
     merged_text = report.text
+    # 🔴 THE FIRST OF TWO SIZE STAMPS, AND BOTH ARE NEEDED RATHER THAN ONE BEING
+    # TIDIER. Rules (q), (r) and (s) can all refuse BELOW this line and ABOVE the
+    # final `merged_text`, so a single stamp taken after the prune would leave
+    # `bytes_after` and `allowance` NULL on exactly the three refusals the
+    # second-pass measurement is about — a logger that recorded sizes for every
+    # status except the refused ones would measure nothing. This one is
+    # PROVISIONAL: the stamp below overwrites it with the pruned bytes whenever
+    # the run gets that far, so no row ever publishes a pre-prune size as final.
+    _stamp_size(log, relpath, merged_text, base_text, doc.exists())
 
     # ---- rule (q): remove the lines the caller NAMED ------------------------
     # 🔴 HERE, AND THE POSITION IS THE WHOLE SAFETY ARGUMENT. It is applied to
@@ -7720,7 +7874,7 @@ def main(argv: list[str] | None = None) -> int:
         plan = prune_plan(merged_text, prune_text, args.prune_count)
         if plan.problems:
             print(prune_refusal_report(plan, relpath), file=sys.stderr)
-            return EXIT_PRUNE_REFUSED
+            return _done(log, "prune-refused", EXIT_PRUNE_REFUSED)
     # ---- rule (s): rule (p) would refuse, so EVICT what has closed -----------
     # 🔴 A SECOND PRODUCER OF A `PrunePlan`, AND THAT IS THE WHOLE INTEGRATION.
     # Rule (r)'s block below is reached by BOTH arms, unmoved and unbranched, so
@@ -7754,7 +7908,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 file=sys.stderr,
             )
-            return EXIT_SIZE_RATCHET
+            return _done(log, "size-ratchet", EXIT_SIZE_RATCHET)
         plan = autoevict_plan(merged_text, selection)
     if plan is not None:
         # ---- rule (r): has the durable half of this removal got anywhere to go?
@@ -7853,7 +8007,7 @@ def main(argv: list[str] | None = None) -> int:
                 prune_unconserved_report(unconserved, plan, relpath),
                 file=sys.stderr,
             )
-            return EXIT_PRUNE_UNCONSERVED
+            return _done(log, "prune-unconserved", EXIT_PRUNE_UNCONSERVED)
         merged_text = plan.text
         # 🔴 ONE DISCLOSURE PER PRODUCER, AND THE ARM IS KEYED ON `selection`
         # RATHER THAN ON `args.autoevict`. The flag can be passed on a run where
@@ -7879,6 +8033,13 @@ def main(argv: list[str] | None = None) -> int:
         else:
             pruned_note = prune_note(plan, args.archive, appended)
 
+    # 🔴 THE FINAL STAMP. `merged_text` is now the text every rule below reads and
+    # the text the write window writes, so these are the bytes a row must carry:
+    # taken HERE rather than at the write, so a run that REFUSES below still
+    # records the size it would have landed. That is the whole point — the
+    # refusals leave no commit, so this log is the only place their bytes exist.
+    _stamp_size(log, relpath, merged_text, base_text, doc.exists())
+
     if _canon(merged_text) == _canon(base_text):
         print(
             "status=no-change\n"
@@ -7886,7 +8047,7 @@ def main(argv: list[str] | None = None) -> int:
             "No diff, no commit — an empty commit is not a handoff update.",
             file=sys.stderr,
         )
-        return EXIT_NO_CHANGE
+        return _done(log, "no-change", EXIT_NO_CHANGE)
 
     # 🔴 THE ARC RULES NEED A THREE-WAY ANSWER, AND TWO-WAY WAS WRONG TWICE.
     # "Is `base_text` empty?" conflates three different documents:
@@ -8019,7 +8180,7 @@ def main(argv: list[str] | None = None) -> int:
             f"the route that works in every case.",
             file=sys.stderr,
         )
-        return EXIT_STALE_BASE
+        return _done(log, "stale-base", EXIT_STALE_BASE)
 
     # 🔴 THE TWO ARC RULES SIT BELOW rule (h), NOT BESIDE (j)/(k) ABOVE, AND THE
     # ORDER IS THE FIX FOR A MEASURED COLLISION. Both read the BASE, and rule (h)
@@ -8081,7 +8242,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if growth:
         print(growth, file=sys.stderr)
-        return EXIT_RANK_GROWTH
+        return _done(log, "rank-growth", EXIT_RANK_GROWTH)
 
     # ---- rule (m): the arc declares what ENDS it ----------------------------
     # Read from the MERGE, not the update — see `closing_condition`. The base is
@@ -8104,7 +8265,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if undefined_done:
         print(undefined_done, file=sys.stderr)
-        return EXIT_UNDEFINED_DONE
+        return _done(log, "undefined-done", EXIT_UNDEFINED_DONE)
 
     # ---- rule (p): a doc already over its ceiling may not GROW --------------
     # 🔴 ABOVE `budget_warning` AND NOT BESIDE IT, for the reason the comment
@@ -8124,7 +8285,7 @@ def main(argv: list[str] | None = None) -> int:
     ratchet = size_ratchet_report(relpath, merged_text, base_text, repo)
     if ratchet and not args.size_ratchet_override:
         print(ratchet, file=sys.stderr)
-        return EXIT_SIZE_RATCHET
+        return _done(log, "size-ratchet", EXIT_SIZE_RATCHET)
     ratchet_override = (
         size_ratchet_override_note(
             relpath, merged_text, base_text, args.size_ratchet_override
@@ -8145,6 +8306,15 @@ def main(argv: list[str] | None = None) -> int:
     # what makes the contradiction common rather than theoretical.
     budget_note = budget_warning(relpath, merged_text, base_text,
                                  gated=gate_enforces_budget(repo))
+    # 🔴 DERIVED FROM THE STRING THAT IS PRINTED, NOT FROM A SECOND EVALUATION OF
+    # THE BAND. `band_warning_fired` is a claim about what this run PUT ON SCREEN,
+    # and re-asking `headroom < BUDGET_NEAR_BYTES` here would be the duplicated
+    # predicate that lets the row and the transcript disagree about one document.
+    # ⚠ CONSEQUENCE, STATED BECAUSE IT LOOKS LIKE A BUG AND IS NOT: this line sits
+    # BELOW every refusal, so a run refused at rule (p) records `false` — the
+    # warning genuinely was not emitted on that run. The reader is built on that
+    # reading: it measures what the next write DID, not what a warning said.
+    log.band_warning_fired = bool(budget_note)
     if budget_note:
         print(budget_note)
     # Rule (p)'s disclosure, immediately under the size block it is about: the
@@ -8230,7 +8400,7 @@ def main(argv: list[str] | None = None) -> int:
             "  Declining is still normal: run nothing else and the tree stays "
             "byte-identical. Nothing about this run has to be undone."
         )
-        return EXIT_OK
+        return _done(log, "proposed", EXIT_OK)
 
     # 🔴 Resolved for EVERY confirmed write, not only for `--push`, because the
     # not-pushed report names the branch. A failure is DEFERRED rather than
@@ -8259,7 +8429,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"write wrong.",
                 file=sys.stderr,
             )
-            return EXIT_FAIL
+            return _done(log, "failed", EXIT_FAIL)
         if behind:
             # 🔴 The RESOLVED branch in every line. An earlier version printed
             # `HEAD` and a literal `<branch>`, so the recovery could not be
@@ -8307,7 +8477,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"makes your head an ancestor of {push_branch}.",
                     file=sys.stderr,
                 )
-                return EXIT_BEHIND
+                return _done(log, "behind", EXIT_BEHIND)
             print(
                 f"{head}"
                 f"  This checkout is CLEAN, so a fast-forward is safe. Run it, "
@@ -8324,7 +8494,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"    git -C {repo} reset --keep {args.remote}/{push_branch}",
                 file=sys.stderr,
             )
-            return EXIT_BEHIND
+            return _done(log, "behind", EXIT_BEHIND)
 
     # 🔴 A BLOCKED COMMIT IS NOT A NO-OP — capture enough to undo the write.
     # MEASURED 2026-08-21: a PreToolUse hook enforcing "never commit in the
@@ -8417,7 +8587,7 @@ def main(argv: list[str] | None = None) -> int:
                     + _undo_write(repo, doc, relpath, original, staged, None),
                     file=sys.stderr,
                 )
-                return EXIT_PRUNE_UNCONSERVED
+                return _done(log, "prune-unconserved", EXIT_PRUNE_UNCONSERVED)
             archive_write.path.parent.mkdir(parents=True, exist_ok=True)
             archive_write.path.write_text(appended.text, encoding="utf-8")
             archive_written = True
@@ -8448,7 +8618,7 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     file=sys.stderr,
                 )
-                return EXIT_PRUNE_UNCONSERVED
+                return _done(log, "prune-unconserved", EXIT_PRUNE_UNCONSERVED)
         # ---- rule (o): the repo's own leak scanner reads the delta ----------
         # 🔴 AFTER THE WRITE AND BEFORE THE `git add`, because the scanner reads
         # the WORKING TREE — `tests/leakscan.py` enumerates `--cached --others`
@@ -8465,7 +8635,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{_undo_write(repo, doc, relpath, original, staged, archive_write if archive_written else None)}",
                 file=sys.stderr,
             )
-            return EXIT_LEAK_REFUSED
+            return _done(log, "leak-refused", EXIT_LEAK_REFUSED)
         print(verdict.notes)
         # 🔴 ONE `git add`, SO ONE `staged` FLAG COVERS BOTH PATHS. Splitting it
         # would invent a state — doc staged, archive not — that this code cannot
@@ -8522,7 +8692,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         print(f"status=failed\n{exc}{note}", file=sys.stderr)
-        return EXIT_FAIL
+        return _done(log, "failed", EXIT_FAIL)
 
     if args.push:
         # No `branch=` here: the line that follows on either push outcome already
@@ -8535,7 +8705,7 @@ def main(argv: list[str] | None = None) -> int:
         # one that leaves a commit behind with no further line about its fate.
         print(f"status=written commit={sha} branch={push_branch or '<unresolved>'}")
         print(not_pushed_report(repo, args.remote, push_branch or None))
-        return EXIT_OK
+        return _done(log, "written", EXIT_OK)
 
     try:
         git(repo, "push", args.remote, f"HEAD:refs/heads/{push_branch}")
@@ -8556,10 +8726,10 @@ def main(argv: list[str] | None = None) -> int:
             f"    git -C {repo} reset --keep {args.remote}/{push_branch}   # --keep refuses rather than destroys",
             file=sys.stderr,
         )
-        return EXIT_FAIL
+        return _done(log, "push-failed", EXIT_FAIL)
 
     print(f"status=pushed remote={args.remote} branch={push_branch}")
-    return EXIT_OK
+    return _done(log, "pushed", EXIT_OK)
 
 
 if __name__ == "__main__":  # pragma: no cover
