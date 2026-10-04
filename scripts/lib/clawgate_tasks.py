@@ -627,6 +627,14 @@ def resolve_task_cli(which=None, names=None):
     trying (the write-back guard walks the whole tuple and then curl; `/resume`
     reports a gap). Reading this as a health check is how a reachable-but-broken
     client becomes a clean bill.
+
+    🔴 AND IT ANSWERS ONLY HALF THE QUESTION — `task_cli_env` IS THE OTHER HALF.
+    The name this returns is not runnable on its own: `muster` reads its base URL
+    and token out of its own `MUSTER_*` namespace, which nothing on either host
+    sets. EVERY site that INVOKES the resolved name must also pass
+    `task_cli_env()` (shell: `clawgate_task_cli_exec`), and every site that did not
+    reported the board as unreachable while the credential sat correctly in
+    ~/.claude/clawgate.env. See that function's header for the measurement.
     """
     if which is None:
         import shutil
@@ -868,3 +876,96 @@ def task_base_url(env=None, path=None) -> str:
 def tasks_url(base: str) -> str:
     """The board URL for a base. No credential is ever put in it."""
     return base.rstrip("/") + TASKS_PATH
+
+
+# --------------------------------------------------------------------------- #
+# HOW THE RESOLVED BINARY LEARNS WHERE THE BOARD IS
+#
+# 🔴 THE DEFECT THESE TWO NAMES CLOSE, MEASURED 2026-10-02 ON BOTH HOSTS.
+# `TASK_CLI_NAMES` was repointed to prefer `muster`, and `muster` reads its config
+# from ITS OWN namespace — `MUSTER_API_URL` / `MUSTER_HOOK_TOKEN`, or
+# `~/.muster/muster.env`. That file exists on NEITHER host and nothing exports
+# those two variables, while the credential has lived in `~/.claude/clawgate.env`
+# under `CLAWGATE_TASK_API_URL` / `CLAWGATE_API_URL` / `CLAWGATE_HOOK_TOKEN` all
+# along — which is exactly what this module already resolves. So resolving the
+# preferred client handed it nothing it could use:
+#
+#     clawgatectl task get <id>                       -> rc 0, JSON
+#     muster      task get <id>                       -> rc 2, "no API URL"
+#     muster --api-url <resolved base> task get <id>  -> rc 3, 401
+#
+# i.e. the base AND the token were both present and both correct, and the resolved
+# CLI was simply never given either. The visible cost was the CLAWGATE block of
+# every `/resume` on both machines reporting `muster exit 2 … status is UNKNOWN` —
+# an honest gap, and still a lost reconciliation on a host with a working client.
+#
+# 🔴 ENV, NOT FLAGS, AND THE TOKEN ESPECIALLY. `muster --help` offers `--api-url`
+# and `--token` and says of the latter "prefer the env file — flags are visible in
+# ps". An argv is world-readable through /proc and these run after every turn, so
+# the token goes in the ENVIRONMENT — the same rule `_via_curl` in
+# clawgate-writeback-guard.py already applies when it puts the bearer on stdin
+# rather than in argv.
+#
+# 🔴 AND THIS IS NOT A SECOND SOURCE OF TRUTH. Both values come out of the
+# EXISTING readers — `task_base_url` (so `TASK_API_URL_VARS` order and the
+# `${A:-$B}` fall-through still decide the base) and `hook_token` (so the file is
+# the base layer with the process environment on top). Nothing new reads the file.
+#
+# ⚠ WHY SETTING THEM IS SAFE FOR `clawgatectl`. It has its own namespace
+# (`CLAWGATE_*`) and never looks at `MUSTER_*`, so for the fallback client this
+# overlay is inert — which is what makes one mapping correct for both spellings
+# instead of a per-binary branch.
+# --------------------------------------------------------------------------- #
+#: The variable the resolved task CLI reads its BASE URL from. Mirrored in the
+#: shell twin as `$CLAWGATE_TASK_CLI_BASE_ENV` and pinned two-way.
+TASK_CLI_BASE_ENV = "MUSTER_API_URL"
+
+#: The variable the resolved task CLI reads its BEARER TOKEN from. `muster --help`:
+#: "The token is read from MUSTER_HOOK_TOKEN only." Mirrored in the shell twin as
+#: `$CLAWGATE_TASK_CLI_TOKEN_ENV` and pinned two-way.
+TASK_CLI_TOKEN_ENV = "MUSTER_HOOK_TOKEN"
+
+
+def task_cli_env(env=None, path=None):
+    """The COMPLETE environment a resolved task CLI must be run with.
+
+    🔴 THE OTHER HALF OF `resolve_task_cli`, AND NEITHER IS USABLE ALONE. That
+    function answers "which binary" and deliberately says nothing about config; this
+    one answers "and what does that binary need in order to reach the board". A call
+    site that took the first answer and ran the binary bare is the defect in the
+    block header — and it happened at EVERY invoking site at once, because each site
+    had to remember a step the resolver did not hand it. The shell twin is
+    `clawgate_task_cli_exec` in `scripts/lib/clawgate_handoff.sh`, which has to
+    EXEC rather than return a mapping (a shell function can return one string), and
+    the two are pinned together by `scripts/tests/test_task_cli_resolver.py`.
+
+    A full mapping rather than just the overlay, because every consumer hands it
+    straight to `subprocess.run(env=…)` — and `env=` REPLACES the environment, so a
+    caller handed two pieces to merge is a caller that can forget to.
+
+    🔴 AN ALREADY-SET VALUE IS NOT OVERWRITTEN, in either slot. `muster`'s own
+    precedence is `~/.muster/muster.env` -> environment -> flags, so a deliberate
+    `MUSTER_API_URL=… cmd` or an operator's exported override must still win; this
+    only FILLS IN what nothing has set. An EMPTY value counts as unset, matching
+    `_base_from`'s `${A:-$B}` rule everywhere else in this module.
+
+    🔴 NO TOKEN KEY AT ALL when there is no token, rather than an empty one. An
+    empty `MUSTER_HOOK_TOKEN` is "unset" to muster too, so the two are equivalent
+    for it — but omitting keeps the mapping honest for a caller that inspects it,
+    and `hook_token` already returns `None` for empty.
+
+    🔴 The token is placed in the returned mapping and nowhere else. It is never
+    logged, never put in a URL, and never put in argv — see the block header.
+
+    `env` and `path` are injectable exactly as on `task_base_url`/`hook_token`, so
+    a test can drive both layers without touching the process environment or the
+    real file — and MUST pass `path`, or it asserts against whatever the host has.
+    """
+    out = dict(os.environ if env is None else env)
+    if not out.get(TASK_CLI_BASE_ENV):
+        out[TASK_CLI_BASE_ENV] = task_base_url(env, path)
+    if not out.get(TASK_CLI_TOKEN_ENV):
+        token = hook_token(env, path)
+        if token:
+            out[TASK_CLI_TOKEN_ENV] = token
+    return out
