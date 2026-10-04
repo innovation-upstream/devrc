@@ -156,6 +156,46 @@ def test_both_operator_kinds_become_asks_and_command_does_not():
     assert dropped == {}, dropped
 
 
+def test_the_SILENT_kind_ledger_holds_only_command():
+    """🔴 THE EXEMPTION, FIXED AS A REVIEWED LITERAL. `SILENTLY_REFUSED_KINDS` is
+    the one hole in "every refusal is ledgered", so it must not grow by someone
+    adding a kind to make a noisy test quiet — which is exactly how the silent drop
+    this replaced came to exist."""
+    assert oa.SILENTLY_REFUSED_KINDS == ("command",), oa.SILENTLY_REFUSED_KINDS
+    # ...and it must not overlap the ADMITTED set, or a kind would be both.
+    assert not set(oa.SILENTLY_REFUSED_KINDS) & set(oa.OPERATOR_KINDS)
+
+
+def test_an_UNKNOWN_kind_is_LEDGERED_not_dropped_in_silence():
+    """🔴 THE PRODUCER/CONSUMER DRIFT CASE, which is the one that costs sessions. If
+    `extract_user_msgs.py` grows a kind this module has never heard of, every such
+    row is refused — correctly, it is not a known operator channel — but a SILENT
+    refusal is indistinguishable from a transcript that held nothing, and
+    `audit-dispatch.py` branches on `if dropped` to word the UNKNOWN. So the drop
+    must be visible AND must name the kind."""
+    out = jl(
+        {"kind": "typed", "text": "make it idempotent", "session_id": SID_A},
+        {"kind": "a_kind_from_the_future", "text": "something new",
+         "session_id": SID_A},
+    )
+    asks, dropped = oa.parse_rows(out)
+    assert [a.text for a in asks] == ["make it idempotent"]
+    assert sum(dropped.values()) == 1, dropped
+    assert any("a_kind_from_the_future" in k for k in dropped), (
+        "an unknown kind was refused without naming itself in the ledger, so a "
+        f"producer/consumer drift reads as an empty transcript: {dropped}")
+
+
+def test_a_row_with_NO_kind_at_all_is_also_ledgered():
+    """The boundary of the same claim. `row.get("kind")` is `None` for a row the
+    producer wrote without the field, which normalises to `""` — and `""` is in
+    neither the admitted set nor the silent set, so it must be ledgered rather than
+    fall through a gap between two ledgers."""
+    asks, dropped = oa.parse_rows(jl({"text": "no kind here", "session_id": SID_A}))
+    assert asks == []
+    assert dropped == {"a row carrying no `kind` at all": 1}, dropped
+
+
 def test_an_answer_row_is_LABELLED_as_a_decision_in_the_render():
     """An answer is the operator's, but it is a DECISION rather than free-text —
     the auditor should not quote a picked option as if it were a sentence."""
@@ -193,6 +233,39 @@ def test_the_extractor_exit_vocabulary_is_pinned_to_what_the_script_documents():
         f"explained here but not documented there: {sorted(ours - documented)}; "
         f"documented there but unexplained here: {sorted(documented - ours)}"
     )
+
+
+def test_the_exit_6_REASON_says_zero_rows_of_ANY_kind_not_just_untyped():
+    """🔴 THE TEXT, NOT ONLY THE CODE SET — and that gap is why this was stale for a
+    release. `test_the_extractor_exit_vocabulary_is_pinned_to_what_the_script_
+    documents` pins which exit CODES are explained; it reads none of the words, so
+    `EXTRACTOR_REASONS[6]` went on saying "held no operator-typed message" after
+    devrc#2011 widened exit 6 to mean zero rows of ANY kind. A guard's description
+    claims coverage: that one covers the keys.
+
+    This is an OPERATOR-FACING sentence — it is what `/audit-pr`'s round 0 prints as
+    the reason nothing could be attributed — so the old wording told a reader that
+    the operator had not TYPED while leaving them to assume a decision channel they
+    had never heard of might still hold something. Pinned as the WHOLE normalised
+    string, because the artefact IS prose and a guard on a word is walkable by
+    rewording; a cosmetic reword fails here on purpose.
+
+    AND TWO-WAY, against the PRODUCER's own `--help`: if the extractor ever narrows
+    exit 6 back to one channel, the second half fails and this reason gets revisited
+    rather than silently over-claiming in the other direction.
+    """
+    want = ("the transcripts were read and held zero rows of any kind — nothing "
+            "typed, no slash command, and no AskUserQuestion decision")
+    got = " ".join(oa.EXTRACTOR_REASONS[6].split())
+    assert got == want, (
+        "the exit-6 reason drifted from what the extractor documents. This string "
+        "is printed to the operator as why nothing was attributed.\n  got:  %s\n"
+        "  want: %s" % (got, want))
+    doc = (SCRIPTS / "session-analysis" / "extract_user_msgs.py").read_text(
+        encoding="utf-8")
+    assert "zero rows of ANY kind" in doc, (
+        "the extractor no longer documents exit 6 as zero rows of ANY kind, so the "
+        "reason pinned above may now over-claim — re-read its --help and re-pin.")
 
 
 def test_an_unknown_exit_code_still_gets_a_reason_never_no_asks():
@@ -408,10 +481,25 @@ class TestTheSeamWithTheRealProducer:
         rows = self._rows(tmp_path, records)
         assert [r["kind"] for r in rows] == ["decision_unanswered"], (
             f"the producer stopped emitting the unanswered state: {rows}")
-        asks, _ = oa.parse_rows("\n".join(json.dumps(r) for r in rows))
+        asks, dropped = oa.parse_rows("\n".join(json.dumps(r) for r in rows))
         assert asks == [], (
             "an unanswered question was quoted as something the operator "
             f"asked for: {[a.text for a in asks]}")
+        # 🔴 REFUSED IS NOT THE SAME AS INVISIBLE, and this half is the devrc#1955
+        # class one layer down. The refusal above is correct; dropping the row with
+        # no `dropped[...]` entry is not, because the empty block downstream
+        # branches on `if dropped` — so a silent refusal renders as "the transcripts
+        # held nothing at all" when in fact a question WAS asked and deliberately
+        # set aside. The reason must also NAME the kind, or a kind this module has
+        # never heard of is indistinguishable from the one it means to refuse.
+        assert dropped, (
+            "`decision_unanswered` was discarded with no ledger entry — the "
+            "silent-omission shape issue #1955 exists to fix. The sibling "
+            "`ValueError` branch ledgers its own drop; this one must too.")
+        assert any("decision_unanswered" in k for k in dropped), (
+            "the drop is ledgered but does not name the kind, so a NEW kind and a "
+            f"deliberately refused one read the same: {dropped}")
+        assert sum(dropped.values()) == 1, dropped
 
     def test_decision_rows_ARE_admitted_the_positive_control_for_the_refusal(
             self, tmp_path):

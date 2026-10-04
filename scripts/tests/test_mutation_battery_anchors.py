@@ -128,6 +128,20 @@ BATTERIES = (
     # the rule (q) block's header in `test_handoff_doc.py` records, kept here as
     # the battery's own instrument check.
     "mutation_battery_prune_conservation.py",
+    # Single-target, so no `TARGETS` — and the target is a COLLECTED TEST MODULE
+    # (`scripts/tests/test_task_cli_resolver.py`) rather than a library, because the
+    # task-CLI corpus scan's helpers live in the module that drives them. That makes
+    # this ledger row matter more than usual: a reformatted anchor there takes a row
+    # to 0x, and the only person who would ever see it is whoever next runs the
+    # battery by hand. Committed for the reason the `operator_asks` row gives —
+    # #2005's audit recorded that ITS sweep was never committed, which makes a
+    # quoted `N KILLED` a claim rather than evidence.
+    # 🔴 Its own withdrawn row is the one worth knowing about: `S7` mutated away a
+    # right-hand lookahead and SURVIVED, because `\s+` already subsumed it. The
+    # lookahead was DELETED and the id left as a gap — the battery found redundant
+    # code in the guard it was written to certify, which is the outcome a sweep is
+    # for and the one most likely to be "fixed" by re-adding the dead assertion.
+    "mutation_battery_task_cli_scan.py",
 )
 
 # 🔴 PYTHON MUTATION INSTRUMENTS THIS MODULE CANNOT PIN, each with its reason.

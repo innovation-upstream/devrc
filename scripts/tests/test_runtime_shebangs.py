@@ -226,6 +226,23 @@ ALLOWLIST = [
     ("scripts/claude-hooks/tests/test_guard_core.py", "env python3",
      "shape (d) — a deliberately LYING interpreter line: the fixture asserts an "
      "explicit `bash <file>` parses the file anyway. Nothing execs it"),
+    # Shape (b), same reasoning as the two `test_session_stamp_seam.py` /
+    # `handoff_*` entries above: a shebang being READ off disk, never written.
+    # `_is_shell_file` decides whether an EXTENSIONLESS file under `scripts/` is a
+    # shell script, because the task-CLI corpus scan has to look at the 17
+    # extensionless `bash` scripts `_scan_files()` yields and must NOT hand the 48
+    # `python3` ones to a shell regex (a false positive there is a permanently-red
+    # gate). It opens the file, reads line 1, and returns a bool.
+    # 🔴 NOTHING IS WRITTEN AND NOTHING IS EXEC'D, so `testlib.mockbin.write_exec`
+    # has nothing to own here — the REACHABILITY hazard this guard exists for (an
+    # interpreter that cannot resolve in the nix sandbox) requires execution.
+    # 🔴 The needle is the ASSERTION'S SHAPE and carries neither the two-character
+    # prefix nor any interpreter path, or this file's own
+    # `test_this_guards_source_does_not_match_itself` would flag this entry — the
+    # trap every pin above records.
+    ("scripts/tests/test_task_cli_resolver.py", "first.startswith",
+     "READS the first line of an extensionless file to classify it as shell; "
+     "writes no stub and execs nothing"),
 ]
 
 # --- THE COUNT LEDGER ----------------------------------------------------------
@@ -238,6 +255,12 @@ ALLOWLIST = [
 PINNED_COUNTS = {
     ("scripts/claude-hooks/tests/test_guard_core.py", "env bash"): 40,
     ("scripts/claude-hooks/tests/test_guard_core.py", "env python3"): 2,
+    # ONE site, counted for the reason the block above gives: `first.startswith`
+    # is a shape that could easily recur, and an uncounted entry would pre-approve
+    # the second occurrence for free. A second one is a FAILURE naming this number
+    # to re-verify — which is the point, because the next such line might be an
+    # exec site rather than a read.
+    ("scripts/tests/test_task_cli_resolver.py", "first.startswith"): 1,
 }
 
 

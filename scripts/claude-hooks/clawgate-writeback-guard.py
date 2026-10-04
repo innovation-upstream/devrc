@@ -1442,7 +1442,7 @@ def task_endpoint(task_id, env_path=CLAWGATE_ENV):
                                      TASK_API_PATH_FMT % int(task_id), var, env_path)
 
 
-def _via_cli(binary, task_id, timeout, api_url=None, env=None):
+def _via_cli(binary, task_id, timeout, env=None):
     """One task read through one CLI binary — `muster` or `clawgatectl`.
 
     🔴 `env` IS NOT OPTIONAL IN PRACTICE AND THE DEFAULT IS A TEST AFFORDANCE. The
@@ -1452,9 +1452,33 @@ def _via_cli(binary, task_id, timeout, api_url=None, env=None):
     `~/.claude/clawgate.env` under `CLAWGATE_*`. Measured 2026-10-02: a bare
     `muster task get <id>` exits 2 with "no API URL" on a box where
     `clawgatectl task get <id>` returns the task — so without this the preferred
-    client ALWAYS fails here and the read silently degrades to the curl fallback,
-    which answers correctly and records the WRONG provenance. That is the specific
-    thing preferring muster was supposed to fix. `_read_task` passes
+    client ALWAYS fails here.
+
+    🔴 AND THE CONSEQUENCE IS NOT THE CURL FALLBACK. This paragraph used to end
+    "…the read silently degrades to the curl fallback", and that is MEASURED FALSE:
+    `_read_task` walks `muster -> clawgatectl -> curl`, and `clawgatectl` — the very
+    next entry — answers rc 0 because it configures ITSELF out of the same
+    `~/.claude/clawgate.env`. So the walk stops at entry 2 and **curl is never
+    reached at all**. Re-measured 2026-10-03 by driving `_read_task`'s own chain on
+    this host, pre- and post-fix:
+
+        muster      --api-url <base> task get <id>  -> rc 3, 401 (no token)
+        clawgatectl --api-url <base> task get <id>  -> rc 0, the task as JSON
+        => chain stops here; curl unreached
+
+    ⚠ The "exits 2" measurement above is a BARE invocation, which is a shape this
+    function never produced AT THE TIME: `--api-url` was then always passed when the
+    env file carried the key, so the observed failure was rc 3 / 401, not rc 2. Both
+    are "the preferred client did not answer"; neither is the curl path. (The flag is
+    gone now — see the last paragraph — so a present-day failure here IS the rc 2
+    shape. Two readings a day apart describe two different code states in one
+    docstring: keep the tenses.)
+
+    The surviving — and real — defect is WRONG PROVENANCE: every read was served by
+    the FALLBACK client, which sends `X-Clawgate-{Source,Session-Id,Host}` where
+    muster reads `X-Muster-*`, so the board attributed the read to the generic `api`
+    caller. That is the specific thing preferring muster was supposed to fix, and it
+    is invisible to any test that only asserts the verdict. `_read_task` passes
     `clawgate_tasks.task_cli_env()`, which derives both values from the same
     `TASK_API_URL_VARS` ledger and the same env-file reader everything else uses.
 
@@ -1462,20 +1486,24 @@ def _via_cli(binary, task_id, timeout, api_url=None, env=None):
     why a COMPLETE mapping is built in one shared place and `None` here means
     "inherit this process's" rather than "an empty environment".
 
-    🔴 `--api-url` is passed ONLY for the task-specific key (the FIRST entry in the
-    shared `TASK_API_URL_VARS` ledger), never for the generic
-    `CLAWGATE_API_URL`. Both CLIs already read `CLAWGATE_API_URL` out of the same env
-    file themselves (clawgatectl's `config.go` precedence is file -> env -> flag), so
-    passing it would be a second spelling of a default. The TASKS key is the one they
-    do NOT know about, so it is the one that has to arrive on the command line — and
-    because the flag wins over the file, it points whichever binary runs at the server
-    that actually holds the tasks. That is what makes the client ORDER below
-    unimportant for correctness: the URL decides the board, the binary is transport.
+    🔴 NO `--api-url` FLAG IS PASSED, AND THE OMISSION IS THE FIX. A pre-existing
+    `--api-url <the env FILE's task key>` stood here, and it DEFEATED this function's
+    own stated rule. Both clients rank FLAGS ABOVE THE ENVIRONMENT (muster: its env
+    file -> environment -> flags; clawgatectl's `config.go`: file -> env -> flag),
+    while the flag's value came from `_env_file()` — the FILE only, with no
+    process-environment layer. So an operator's exported `CLAWGATE_TASK_API_URL`
+    reached the client as `MUSTER_API_URL` and then LOST to a flag carrying the
+    file's value: the override `task_cli_env` documents as "must still win" was
+    silently dead at this one site of three (`cairn_who.py` and
+    `clawgate_handoff.sh` pass no flag and were always correct). `task_cli_env` ->
+    `task_base_url` already layers the process environment OVER the file through the
+    SAME `TASK_API_URL_VARS` ledger, so the flag was a second, poorer spelling of a
+    derivation that already existed — the N-sites shape the shared ledger exists to
+    delete. The `api_url` PARAMETER is gone too rather than accepted-and-ignored: a
+    parameter nothing can act on is a claim that it still does something. Pinned by
+    `test_an_exported_task_url_WINS_at_the_writeback_guard_site`.
     """
-    argv = [binary]
-    if api_url:
-        argv += ["--api-url", api_url]
-    argv += ["task", "get", str(int(task_id))]
+    argv = [binary, "task", "get", str(int(task_id))]
     proc = _sp().run(argv, capture_output=True, text=True, timeout=timeout, env=env)
     if proc.returncode != 0:
         raise LiveReadError("%s rc=%d %s"
@@ -1577,8 +1605,14 @@ def _read_task(task_id, timeout, env_path):
     # import, which cannot be produced. Two free lines against an unreachable hazard —
     # do not "close the gap", and do not count it as coverage.
     _sp()
-    # Only the TASKS-specific override is handed to the CLI; see `_via_cli`.
-    api_url = _env_file(env_path).get(task_api_url_vars()[0])
+    # 🔴 NO `--api-url` IS DERIVED HERE ANY MORE. This used to read
+    # `api_url = _env_file(env_path).get(task_api_url_vars()[0])` and hand the result
+    # to `_via_cli` as a FLAG. Both clients rank flags above the environment, and
+    # that value came from the FILE with no process-environment layer, so an
+    # operator's exported `CLAWGATE_TASK_API_URL` lost to it — at this site only, of
+    # the three that invoke a resolved client. `task_cli_env` below already layers
+    # environment over file through the same `TASK_API_URL_VARS` ledger, which is the
+    # one place that derivation belongs. See `_via_cli`'s last paragraph.
     # 🔴 EVERY client's failure is carried forward, not just the first. With one client
     # "first client: …" was the whole diagnosis; with two, reporting only one of them
     # points at the wrong subsystem — the exact shape that has cost this repo whole
@@ -1595,7 +1629,7 @@ def _read_task(task_id, timeout, env_path):
     whys = []
     for binary in clis:
         try:
-            return _via_cli(binary, task_id, timeout, api_url=api_url, env=cli_env)
+            return _via_cli(binary, task_id, timeout, env=cli_env)
         except LiveReadError as e:
             whys.append(str(e))
         except FileNotFoundError:

@@ -6152,9 +6152,26 @@ def _read_operator_asks(runner, data, extractor=None):
     if ids:
         # ⚠ `--include-answers` IS NO LONGER LOAD-BEARING, AND THAT SENTENCE
         # STOOD HERE AS A FACT — devrc#1955 made the decision channel the
-        # extractor's DEFAULT and the flag an accepted no-op. It is still passed
-        # for one reason: this dispatcher may run against an extractor deployed
-        # on a host that predates the change, where the flag IS the difference.
+        # extractor's DEFAULT and the flag an accepted no-op.
+        #
+        # 🔴 THE STALE-HOST JUSTIFICATION THAT STOOD HERE IS DELETED AS FALSE. It
+        # read "this dispatcher may run against an extractor deployed on a host
+        # that predates the change, where the flag IS the difference", and that
+        # cannot happen on any path this process takes: `EXTRACTOR` is derived from
+        # `Path(__file__).resolve().parent`, so the extractor is always the copy
+        # shipping BESIDE this script, and the only non-test caller
+        # (`operator_asks_reader(runner, data)`) passes no `extractor=`. Measured
+        # 2026-10-03: `extractor=` is passed by NOBODY in the tree — the two
+        # occurrences are test fakes mirroring the signature, which never supply it.
+        # Dispatcher and extractor are therefore the same checkout, always.
+        #
+        # 🔴 THE FLAG STAYS, FOR THE ONE JUSTIFICATION THAT IS TRUE. The re-read
+        # command this module PRINTS is copy-pasted by a human, and it can be run
+        # against a peer clone that lags (measured 83–606 commits behind). There the
+        # flag is the difference between the decision channel arriving and not, and
+        # passing an accepted no-op costs nothing on a current checkout. So the
+        # survival reason is the PRINTED command's portability, never this process's
+        # own extractor.
         #
         # Why the channel matters at all, unchanged: the operator's replies to a
         # question this session asked arrive in a `tool_result` block, and
@@ -6195,12 +6212,20 @@ def _read_operator_asks(runner, data, extractor=None):
                 # genuinely typed nothing in them. With no drops, nothing was
                 # there at all. Both are UNKNOWN for attribution; conflating
                 # them would hide a classifier that has started eating asks.
+                # ⚠ THE NO-DROPS BRANCH SAID "held no user-typed message at all"
+                # AND WAS STALE for the same reason as `EXTRACTOR_REASONS[6]`:
+                # since devrc#2011 the empty case means zero rows of ANY kind —
+                # nothing typed, no slash command, no AskUserQuestion decision. The
+                # old wording named one channel of three, so "no user-typed message"
+                # read as "he may still have decided something we did not look at",
+                # which is the opposite of what was measured.
                 why = (
                     "the extractor exited 0 and every user-role record in "
                     "those transcripts was machine-generated, not typed"
                     if dropped else
-                    "the extractor exited 0 and the transcripts held no "
-                    "user-typed message at all"
+                    "the extractor exited 0 and the transcripts held no row of "
+                    "any kind — nothing typed, no slash command, no "
+                    "AskUserQuestion decision"
                 )
                 unmeasured.append(operator_asks.Unmeasured(
                     operator_asks.SOURCE_SESSION, why))

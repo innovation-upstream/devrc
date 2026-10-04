@@ -62,8 +62,13 @@ It is muster's: `http://192.168.50.250:30306`. 🔴 **Now that the extraction ha
 unset is no longer harmless.** The fall-through below aims the re-read at the router, which since
 the split answers `/api/tasks/<id>` with a **404**, not the "right-looking 200" this note was
 written about — so the failure mode changed from a silent wrong answer to an `UNVERIFIED` notice.
-Optional. When set, the writeback guard's live re-read targets it (passed to the CLI as
-`--api-url`, and used by the curl fallback) instead of `CLAWGATE_API_URL`. An optional
+Optional. When set, the writeback guard's live re-read targets it instead of
+`CLAWGATE_API_URL` — reaching the resolved CLI as `MUSTER_API_URL` in its ENVIRONMENT (via
+`clawgate_tasks.task_cli_env()`), and used directly by the curl fallback. ⚠ **This line used
+to say "passed to the CLI as `--api-url`", and that flag is GONE.** Both clients rank flags
+above the environment, so a flag carrying the env FILE's value defeated an operator's
+exported `CLAWGATE_TASK_API_URL` — the override that is supposed to win. The environment is
+now the only channel, which is what makes the export work. An optional
 `CLAWGATE_TASKS_HOOK_TOKEN` overrides `CLAWGATE_HOOK_TOKEN` for the same reads.
 
 ⚠ **Singular `TASK`, and this line used to say `TASKS`.** The plural was the extraction

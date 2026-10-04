@@ -133,6 +133,28 @@ _ROUTER_CALL_RX = re.compile(
 #: into code or taught to a model.
 SCAN_ROOTS = ("scripts", "claude")
 SCAN_SUFFIXES = {".py", ".sh", ".md", ".json", ".nix", ""}
+
+#: 🔴 WHICH OF THOSE SUFFIXES IS A SHELL SCRIPT — the ledger `_bare_sh_hits` filters
+#: on, declared ONCE here beside the walk's own ledger instead of open-coded as
+#: `p.suffix != ".sh"` at the filter. That open-coding was NARROWER than the walk:
+#: `SCAN_SUFFIXES` deliberately yields extensionless files, and measured 2026-10-03
+#: there are **17 extensionless `#!/usr/bin/env bash` scripts** under
+#: `scripts/`+`claude/` (`scripts/run3`, `scripts/muse/muse`, `scripts/stt`,
+#: `scripts/dogfood-cycle`, … ) that the scan silently skipped. The remaining 53 are
+#: 48 `#!/usr/bin/env python3` plus 5 with no shebang at all — no other shebang
+#: spelling exists in the tree, so the shebang test below is a clean discriminator
+#: rather than a lucky one.
+#:
+#: ⚠ NO LIVE MISS WAS BEING HIDDEN. A deliberately WIDE probe over those 17 files —
+#: any mention of `muster`, `clawgatectl`, `$cli`, `${cli}`, `$task_cli` on a
+#: non-comment line — returned **0**. This closes a gap between a docstring and its
+#: code, it does not fix a known escape.
+#:
+#: 🔴 AND IT IS A SUBSET OF `SCAN_SUFFIXES`, pinned by
+#: `test_the_shell_suffix_ledger_is_a_SUBSET_of_what_the_walk_yields`. A shell suffix
+#: the walk does not yield is a filter that can never see it — the same
+#: claim-wider-than-code defect, one layer up.
+SHELL_SUFFIXES = {".sh", ""}
 SKIP = set(skip_dirs.GENERATED | skip_dirs.VIRTUALENVS) | {".claude"}
 
 
@@ -452,25 +474,223 @@ def test_the_scan_WALKED_something():
     assert "scripts/lib/clawgate_tasks.py" in rels
 
 
+#: The pickup flow, which is the one file a model opens when it picks up a card.
+TASK_PICKUP_FLOW = REPO / "claude" / "skills" / "clawgate" / "flows" / "task-pickup.md"
+
+#: 🔴 WHAT THE FLOW PRINTS, AND WHAT IT COSTS TO TYPE IT. Measured 2026-10-03 from a
+#: fresh interactive login shell on the operator's host, with neither `MUSTER_*`
+#: variable exported and `~/.muster/muster.env` absent:
+#:
+#:     muster      task get <id>  -> rc 2, "no API URL"
+#:     clawgatectl task get <id>  -> rc 0, the task as JSON
+#:
+#: So all four commands below are NON-FUNCTIONAL as printed for a human or a model
+#: typing them. The automated paths are fine — the hooks and `/resume` go through
+#: `task_cli_env` / `clawgate_task_cli_exec`, which export both variables — but this
+#: file is read by whoever types, not by them.
+_PICKUP_COMMANDS = (
+    "muster task get <id>",
+    "muster task comment <id> --body",
+    "muster task status <id> in_progress",
+    "muster task status <id> ready_for_review",
+)
+
+#: 🔴 THE RECOVERY SENTENCE, PINNED AS ONE WHOLE NORMALISED STRING rather than as the
+#: words "clawgatectl" or "rc 2". The artefact under test is PROSE, and a guard on
+#: words is walkable by rewording: the sentence this replaced said "If `muster:
+#: command not found`, use `clawgatectl`", which names a failure mode that does NOT
+#: occur — the binary IS on PATH; it is unconfigured. A model that read it, hit rc 2,
+#: and concluded the fallback did not apply is left with no working command. A
+#: cosmetic reword now fails this test; that is the price of a machine-readable claim.
+_PICKUP_RECOVERY = (
+    "So, when you type a command from this flow: **on rc 2 `no API URL`, OR on "
+    "`muster: command not found`, re-run it with `clawgatectl` and say so — do not "
+    "fall back to `curl`.**"
+)
+
+
+def _normalise_prose(text: str) -> str:
+    """Collapse whitespace so a claim can be pinned across line wrapping.
+
+    🔴 `"` IS STRIPPED TOO, and not as cosmetics: two of the sites this serves hold
+    the claim inside ADJACENT PYTHON STRING LITERALS, which the source text joins
+    with a quote pair that no amount of whitespace folding removes. `#` goes for the
+    same reason one level over — a claim living in a comment block carries a marker
+    per line. Both make this a slightly LOOSER match than byte equality, which is
+    stated here rather than left for a reader to discover.
+    """
+    out = text.replace('"', "").replace("#", " ")
+    return " ".join(out.split())
+
+
 def test_the_skills_TEACH_the_preferred_client_for_the_task_ritual():
-    """🔴 The pickup flow is the one file a model opens when it picks up a card, and its
-    bash block is what it copies. Pinned as the WHOLE normalised command lines, not as
-    the word "muster": a file could mention muster in prose and still hand over
-    `clawgatectl task status …` to run."""
-    flow = (REPO / "claude" / "skills" / "clawgate" / "flows" / "task-pickup.md")
-    text = flow.read_text(encoding="utf-8")
-    for want in ("muster task get <id>",
-                 "muster task comment <id> --body",
-                 "muster task status <id> in_progress",
-                 "muster task status <id> ready_for_review"):
+    """🔴 The flow's bash block is what a pickup copies. Pinned as the WHOLE
+    normalised command lines, not as the word "muster": a file could mention muster
+    in prose and still hand over `clawgatectl task status …` to run.
+
+    ⚠ RE-AIMED 2026-10-03, AND THE REASON IS THE POINT. This test was GREEN while
+    pinning four commands that exit rc 2 from a fresh login shell — i.e. it
+    certified broken prose as correct, which is worse than no test because it stops
+    anyone looking. It could not see that, because "the flow prints this string" and
+    "that string works when typed" are different claims and it only ever made the
+    first.
+
+    🔴 WHAT THIS NOW ALSO PINS, AND WHAT IT STILL CANNOT. It pins that the flow
+    carries the measured RECOVERY — the real failure mode (rc 2, not `command not
+    found`) and the client that does answer. That is red while the flow is silent
+    about it. It does NOT, and cannot here, assert that `muster task get <id>` works
+    when typed: making it do so means exporting `MUSTER_API_URL`/`MUSTER_HOOK_TOKEN`
+    into the login environment, which is a home-manager change to this repo's shell
+    layer and is NOT done by the change that re-aimed this test. Until that lands the
+    printed commands remain non-functional as typed, and the honest guard is that the
+    flow SAYS SO. Named here rather than faked green: the closing condition is a
+    `sessionVariables`-style export of both keys plus this test tightened to drop the
+    recovery pin and assert a zero-exit invocation instead.
+    """
+    text = TASK_PICKUP_FLOW.read_text(encoding="utf-8")
+    for want in _PICKUP_COMMANDS:
         assert want in text, (
             "%s no longer teaches `%s`. The flow's bash block is what a pickup copies, "
             "so a stale client here is the one that actually gets run."
-            % (flow.relative_to(REPO), want))
-    # ...and the fallback is still NAMED, so a `command not found` is answerable.
+            % (TASK_PICKUP_FLOW.relative_to(REPO), want))
+    # ...and the fallback is still NAMED, so an unconfigured client is answerable.
     assert "clawgatectl" in text, (
         "the flow no longer names `clawgatectl` as the fallback — on a host where "
-        "`muster` is missing the model is left with no working command.")
+        "`muster` is missing or unconfigured the model is left with no working "
+        "command.")
+    assert _normalise_prose(_PICKUP_RECOVERY) in _normalise_prose(text), (
+        "%s prints four `muster task …` commands that exit rc 2 `no API URL` when "
+        "typed, and no longer carries the recovery that says so. The reader is a "
+        "model that will type them. Expected this sentence, normalised:\n  %s"
+        % (TASK_PICKUP_FLOW.relative_to(REPO), _PICKUP_RECOVERY))
+
+
+def test_the_flow_does_NOT_still_claim_the_failure_is_COMMAND_NOT_FOUND():
+    """🔴 THE DIRECTION THE PIN ABOVE CANNOT COVER: a revert that ADDS the old
+    sentence back while leaving the new one in place would satisfy it. The retracted
+    claim is pinned as its own whole normalised string — `muster` is on PATH on both
+    hosts, so `command not found` as the ONLY stated trigger sends a model that hit
+    rc 2 looking for a different problem."""
+    retracted = ("If `muster: command not found`, use `clawgatectl` and say so — "
+                 "do not fall back to `curl`.")
+    text = _normalise_prose(TASK_PICKUP_FLOW.read_text(encoding="utf-8"))
+    assert _normalise_prose(retracted) not in text, (
+        "the retracted trigger is back in %s as a standalone sentence: it names the "
+        "ONE failure mode that does not happen. Measured: the binary is present and "
+        "exits 2 unconfigured.\n  %s"
+        % (TASK_PICKUP_FLOW.relative_to(REPO), retracted))
+
+
+# =========================================================================== #
+# 4b. 🔴 THE FALLBACK-CHAIN MECHANISM, PINNED WHERE IT IS CLAIMED
+#
+# #2005 shipped the sentence "the read silently degrades to the curl fallback" into
+# FOUR files, and it is MEASURED FALSE. `_read_task` walks `muster -> clawgatectl ->
+# curl`; `clawgatectl` configures itself from the same `~/.claude/clawgate.env`, so
+# it answers rc 0 and the walk STOPS at entry 2. Re-measured 2026-10-03 by driving
+# `_read_task`'s own chain on the operator's host:
+#
+#     muster      --api-url <base> task get <id>  -> rc 3, 401 (no token)
+#     clawgatectl --api-url <base> task get <id>  -> rc 0, the task as JSON
+#     => chain stops here; curl unreached
+#
+# 🔴 WHY A TEST AND NOT JUST A CORRECTION. A wrong mechanism in a comment is a claim
+# that outlives the person who wrote it, and this one had already been copied three
+# times — the second copy is the moment to consolidate. The artefact under test is
+# PROSE, so a guard on the WORD "curl" is walkable by rewording; what is pinned is
+# the WHOLE NORMALISED claim at each site, in BOTH directions (the correction present
+# AND the retraction absent). A cosmetic reword fails this test on purpose.
+# =========================================================================== #
+#: (path, whole normalised claim) — one row per site that states the mechanism.
+#: TWO rows share a file on purpose: a section header and an assertion MESSAGE are
+#: separately reachable, and the message is the one a failing run actually prints.
+_CHAIN_CLAIM_SITES = (
+    ("scripts/claude-hooks/clawgate-writeback-guard.py",
+     "So the walk stops at entry 2 and **curl is never reached at all**."),
+    ("scripts/claude-hooks/tests/test_clawgate_writeback_guard.py",
+     "so it answers rc 0 and the walk stops at entry 2 with curl never reached."),
+    ("scripts/claude-hooks/tests/test_clawgate_writeback_guard.py",
+     "`clawgatectl` answers rc 0 off the same env file, so the walk stops at entry "
+     "2 and the curl fallback is never reached."),
+    ("scripts/tests/test_task_cli_resolver.py",
+     "answers rc 0 and the walk STOPS at entry 2 — the curl fallback is never "
+     "reached."),
+)
+
+#: The retracted claim, in every spelling it shipped in. Pinned as whole normalised
+#: strings so a REVERT is caught, not merely a deletion of the correction.
+_RETRACTED_CHAIN_CLAIMS = (
+    "client ALWAYS fails here and the read silently degrades to the curl fallback,",
+    "client and then falls back to curl, so the live read still SUCCEEDED — through "
+    "curl,",
+    "before it sends anything and the read degrades to curl.",
+    "guard's preferred client failed every read and silently degraded to its curl "
+    "fallback",
+)
+
+
+def test_every_site_that_STATES_the_fallback_chain_states_the_MEASURED_one():
+    """🔴 THE CORRECTION, AT EVERY SITE THAT CARRIES THE CLAIM. A fix applied to
+    three of four files leaves the fourth teaching the wrong mechanism, which is how
+    this got to four copies in the first place."""
+    missing = []
+    for rel, claim in _CHAIN_CLAIM_SITES:
+        p = REPO / rel
+        assert p.exists(), rel
+        if _normalise_prose(claim) not in _normalise_prose(
+                p.read_text(encoding="utf-8")):
+            missing.append("%s: expected, normalised:\n      %s" % (rel, claim))
+    assert missing == [], (
+        "a site states the muster -> clawgatectl -> curl walk and no longer states "
+        "the MEASURED outcome (clawgatectl answers; curl is never reached). The "
+        "provenance consequence is real; the curl mechanism is not:\n  "
+        + "\n  ".join(missing))
+
+
+def test_the_RETRACTED_curl_fallback_claim_is_absent_from_the_whole_corpus():
+    """🔴 THE OTHER DIRECTION, and the one the pin above cannot see: a file may
+    carry the correction AND the retracted sentence at once, which reads as two
+    mechanisms and resolves to neither. Scanned over the SHARED `_scan_files()` walk
+    rather than the four known paths, so a FIFTH copy pasted into a skill or a doc
+    is caught too — that is the growth this started as."""
+    found = []
+    for rel, p in _scan_files():
+        if rel.as_posix() == Path(__file__).relative_to(REPO).as_posix():
+            continue                      # this file QUOTES them, by necessity
+        try:
+            text = _normalise_prose(p.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):       # pragma: no cover
+            continue
+        for claim in _RETRACTED_CHAIN_CLAIMS:
+            if _normalise_prose(claim) in text:
+                found.append("%s: %s" % (rel, claim))
+    assert found == [], (
+        "the retracted curl-fallback mechanism is back. Measured 2026-10-03: "
+        "`clawgatectl` answers rc 0 off the same env file, so the walk stops at "
+        "entry 2 and curl is NEVER reached. The true consequence is wrong "
+        "PROVENANCE, not a degraded transport:\n  " + "\n  ".join(found))
+
+
+def test_the_POSITIVE_CONTROL_for_the_retraction_scan():
+    """🔴 A ZERO FROM THE SCAN ABOVE IS INDISTINGUISHABLE FROM A SCAN WIRED TO
+    NOTHING — and `_normalise_prose` is exactly the kind of filter that can swallow
+    everything (it rewrites `#` and `"`). Feed the REAL predicate a fixture that
+    MUST match, in the two shapes the corpus actually holds: a `#` comment block and
+    a split python string literal."""
+    as_comment = ("# client and then falls back to curl, so the live read still\n"
+                  "# SUCCEEDED — through curl, which sends no provenance headers.\n")
+    as_literal = ('        "before it sends anything and the read degrades "\n'
+                  '        "to curl.")\n')
+    for shape, blob in (("comment", as_comment), ("literal", as_literal)):
+        hits = [c for c in _RETRACTED_CHAIN_CLAIMS
+                if _normalise_prose(c) in _normalise_prose(blob)]
+        assert len(hits) == 1, (shape, hits)
+    # ...and the DISCRIMINATING case: the CORRECTED prose must NOT match, or the
+    # scan would be permanently red and get deleted.
+    corrected = ("# so it answers rc 0 and the walk stops at entry 2 with curl\n"
+                 "# never reached.\n")
+    assert [c for c in _RETRACTED_CHAIN_CLAIMS
+            if _normalise_prose(c) in _normalise_prose(corrected)] == []
 
 
 # =========================================================================== #
@@ -497,9 +717,21 @@ def test_the_skills_TEACH_the_preferred_client_for_the_task_ritual():
 # because each had to remember a step the resolver did not give it: `/resume`'s
 # CLAWGATE block printed `muster exit 2 … its status is UNKNOWN` on both machines,
 # `cairn-who` raised `ClawgateUnreachable: muster exited 2`, and the write-back
-# guard's preferred client failed every read and silently degraded to its curl
-# fallback — which answers correctly and records the WRONG provenance, i.e. exactly
-# the thing preferring muster was supposed to fix.
+# guard's preferred client failed every read — which was then served by
+# `clawgatectl`, the SECOND ledger entry, under the WRONG provenance headers.
+#
+# ⚠ THIS PARAGRAPH USED TO SAY "silently degraded to its curl fallback", AND THAT IS
+# MEASURED FALSE. Re-measured 2026-10-03 by driving `_read_task`'s own walk:
+# `clawgatectl` configures itself out of the same `~/.claude/clawgate.env`, so it
+# answers rc 0 and the walk STOPS at entry 2 — the curl fallback is never reached.
+# ⚠ SCOPE: that re-measurement is THIS HOST only. The both-hosts half is #2005's own
+# commit body ("Measured on both hosts 2026-10-02: clawgatectl task get <id> -> rc 0,
+# the task as JSON"), quoted rather than re-derived — so "never reached on either
+# host" rests on that measurement, not on mine. The provenance consequence is the
+# true and surviving half: the
+# fallback client sends `X-Clawgate-{Source,Session-Id,Host}` where muster reads
+# `X-Muster-*`, so the board attributed every read to the generic `api` caller, which
+# is exactly the thing preferring muster was supposed to fix.
 #
 # WHAT THIS SECTION PINS, AND WHY EACH ONE
 # ----------------------------------------
@@ -602,20 +834,36 @@ def test_the_config_env_ledger_is_pinned_in_BOTH_directions():
     assert CG.TASK_CLI_BASE_ENV != CG.TASK_CLI_TOKEN_ENV
 
 
-def test_the_shell_task_cli_CONFIG_ledger_matches_PYTHON():
-    """🔴 THE DELIBERATE DUPLICATE, PINNED — same rule and same reason as the two
-    ledgers above: `clawgate_handoff.sh` is sourced by `resume-state.sh` and cannot
-    import python to read two words. A drift here means one language configures the
-    client and the other does not, which is the bug class rather than a nit."""
-    text = SH_LIB.read_text(encoding="utf-8")
-    for const, want in (("CLAWGATE_TASK_CLI_BASE_ENV", CG.TASK_CLI_BASE_ENV),
-                        ("CLAWGATE_TASK_CLI_TOKEN_ENV", CG.TASK_CLI_TOKEN_ENV)):
-        m = re.search(r'^%s="([^"]*)"' % const, text, re.M)
-        assert m, "%s is gone from %s" % (const, SH_LIB)
-        assert m.group(1) == want, (
-            "the shell ledger %s=%r and python's %r have drifted — one language "
-            "would configure the resolved client and the other would not."
-            % (const, m.group(1), want))
+# 🔴 `test_the_shell_task_cli_CONFIG_ledger_matches_PYTHON` STOOD HERE AND IS DELETED.
+# It re-asserted, by regex over `clawgate_handoff.sh`, that the shell's two config
+# constants spell `MUSTER_API_URL` / `MUSTER_HOOK_TOKEN`. A shell-side typo in either
+# is already caught BEHAVIOURALLY and harder: section 5c's fake client REFUSES to run
+# without both variables, so a misspelling breaks the real wrapper running the real
+# resolver.
+#
+# MEASURED 2026-10-03, one mutant at a time, under PYTHONDONTWRITEBYTECODE=1 with
+# `__pycache__` purged between runs, each mutation the NARROWEST edit that can be
+# wrong (one character off the end of one constant's value):
+#
+#   CLAWGATE_TASK_CLI_BASE_ENV="MUSTER_API_UR"    -> 4 failures, 3 of them behavioural:
+#       test_the_SHELL_exec_wrapper_hands_the_resolved_client_BOTH_values
+#       test_the_SHELL_wrapper_works_for_the_clawgatectl_SPELLING_TOO
+#       test_the_SHELL_wrapper_does_not_LEAK_the_two_variables_to_its_caller
+#   CLAWGATE_TASK_CLI_TOKEN_ENV="MUSTER_HOOK_TOKE" -> 5 failures, 4 behavioural
+#       (the three above plus test_the_SHELL_wrapper_does_NOT_overwrite_an_already_set_value)
+#
+# Each behavioural failure is its OWN assertion (`p.returncode == 0`) carrying the
+# fake's own refusal, `fake: no API URL` — not a neighbouring guard's error, which is
+# the "green for the wrong reason" shape one level over. The deleted test was the 4th
+# and 5th failure in those runs: a second, weaker report of a defect three tests
+# already name with the failing command in hand.
+#
+# 🔴 ITS SIBLING `test_the_config_env_ledger_is_pinned_in_BOTH_directions` IS NOT
+# DELETED, AND THE DIFFERENCE IS NOT COSMETIC. That one pins python's two constants
+# against REVIEWED LITERALS, so it catches BOTH languages renamed CONSISTENTLY but
+# wrong against the real client — a state in which every behavioural test above still
+# passes, because the fake reads whatever the ledger says. The deleted test could
+# never see that case: it only compared the two ledgers to EACH OTHER.
 
 
 # --------------------------------------------------------------------------- #
@@ -968,16 +1216,80 @@ def test_every_site_that_INVOKES_a_resolved_task_CLI_CONFIGURES_it():
         % (EXPECTED_CONFIG_ENV[0], EXPECTED_CONFIG_ENV[1], "\n  ".join(missing)))
 
 
+#: The variable NAMES this scan recognises in command position. Spelled out as a
+#: ledger because the docstring below has to state exactly this and nothing wider.
+_RESOLVED_CLI_VARS = ("cli", "task_cli", "taskcli")
+
 #: A resolved-CLI variable in COMMAND POSITION with a task verb straight after it —
 #: i.e. an invocation that was NOT routed through the exec wrapper. The negative
 #: lookbehind is what distinguishes the two, and it is the whole content of the
 #: pattern, so the controls below are not optional.
+#:
+#: 🔴 WIDENED 2026-10-03 TO THE THREE SPELLINGS OF THE SAME VARIABLE. It matched only
+#: `"$cli"`, so `${cli}` and a bare unquoted `$cli` — the same one-character-wide
+#: hazard, written differently — walked straight past it. All three now carry the
+#: same `_exec ` lookbehind, so the WRAPPED form is still exempt in every spelling.
+#:
+#: ⚠ WHAT IT STILL DOES NOT SEE, STATED HERE RATHER THAN IMPLIED BY SILENCE: a
+#: DIFFERENT variable name (`$bin`, `$c`), and a GLOBAL FLAG between the binary and
+#: the verb (`"$cli" --api-url X task get`), because the verb must follow the
+#: variable with only whitespace between. Those are deliberate: a pattern loose
+#: enough to catch an arbitrary variable in command position fires on ordinary shell
+#: and a permanently-red gate trains everyone to click through. The `INVOKING_SITES`
+#: ledger above is the guard that does NOT depend on spelling — it pins the SET of
+#: invoking sites, so a fourth site under any variable name fails there.
+#: ⚠ NO RIGHT-HAND `(?![A-Za-z0-9_])` ON THE UNQUOTED ALTERNATIVE, DELIBERATELY. One
+#: was written here and MEASURED REDUNDANT: the `\s+` that follows already requires
+#: whitespace immediately after the variable name, and whitespace is non-alnum, so
+#: the lookahead can never reject an input `\s+` accepts. It SURVIVED its own mutant
+#: (battery row S7, now withdrawn) over 12 spellings including `$cli_other`,
+#: `$clix`, `$cli2` and `$cli-x` — every one of which is excluded by `\s+` alone.
+#: Deleted rather than hardened: an unkillable guard is redundant or unreachable,
+#: and leaving it reads as protection nobody needs to check.
 _BARE_SH_INVOKE_RX = re.compile(
-    r'(?<!_exec )"\$(?:cli|task_cli|taskcli)"\s+(?:task|agent|chief)\b')
+    r'(?<!_exec )'
+    r'(?:"\$(?:%(v)s)"|\$\{(?:%(v)s)\}|\$(?:%(v)s))'
+    r'\s+(?:task|agent|chief)\b' % {"v": "|".join(_RESOLVED_CLI_VARS)})
+
+
+def _is_shell_file(p) -> bool:
+    """A `.sh`, or an extensionless file whose SHEBANG says shell.
+
+    🔴 THE SHEBANG, NOT THE ABSENCE OF A SUFFIX. `SHELL_SUFFIXES` admits `""`, and
+    measured 2026-10-03 the 70 extensionless files under the scan roots are 17 bash,
+    48 `python3` and 5 with no shebang — so reading "extensionless" as "shell" would
+    hand 53 non-shell files to a shell regex. A false positive there is a
+    permanently-red gate, which is worse than the narrow scan this replaces.
+    """
+    if p.suffix not in SHELL_SUFFIXES:
+        return False
+    if p.suffix == ".sh":
+        return True
+    try:
+        with p.open("r", encoding="utf-8", errors="replace") as fh:
+            first = fh.readline()
+    except OSError:                                 # pragma: no cover
+        return False
+    return first.startswith("#!") and ("bash" in first or "sh" in first.split("/")[-1])
 
 
 def _bare_sh_hits(files):
-    """`<rel>:<line>: <text>` for every BARE invocation in `files`, comments aside.
+    """`<rel>:<line>: <text>` for every invocation of a resolved task CLI through one
+    of `_RESOLVED_CLI_VARS`, in command position, with a task verb straight after
+    it, that is not prefixed by the exec wrapper — comments aside.
+
+    ⚠ THAT SENTENCE IS DELIBERATELY NARROWER THAN "every BARE invocation", which is
+    what it used to claim. The pattern is SPELLED: it is walkable by a different
+    variable name or by a global flag between the binary and the verb (both listed
+    at `_BARE_SH_INVOKE_RX`). A guard's description claims coverage, so the sentence
+    must not be wider than the code — and reading as coverage while providing none is
+    worse than none, because it stops anyone looking. `INVOKING_SITES` is the guard
+    that holds regardless of spelling.
+
+    🔴 WHICH FILES — `SHELL_SUFFIXES`, the ledger declared beside `SCAN_SUFFIXES`,
+    plus a shebang test for the extensionless half. This was `p.suffix != ".sh"`
+    open-coded here, which skipped the 17 extensionless bash scripts `_scan_files()`
+    deliberately yields. One rule, one place.
 
     🔴 COMMENT LINES ARE NOT INVOCATIONS, and skipping them is not a loophole — it
     is what keeps this guard alive. These files are prose as well as code, and the
@@ -993,7 +1305,7 @@ def _bare_sh_hits(files):
     """
     hits = []
     for rel, p in files:
-        if p.suffix != ".sh":
+        if not _is_shell_file(p):
             continue
         try:
             text = p.read_text(encoding="utf-8")
@@ -1005,6 +1317,40 @@ def _bare_sh_hits(files):
             if _BARE_SH_INVOKE_RX.search(line):
                 hits.append("%s:%d: %s" % (rel, n, line.strip()[:120]))
     return hits
+
+
+def test_the_shell_suffix_ledger_is_a_SUBSET_of_what_the_walk_yields():
+    """🔴 THE SEAM BETWEEN THE TWO LEDGERS, which is the defect this replaced: a
+    suffix the FILTER wants but the WALK never yields is a scan that can never see
+    those files, and nothing in either ledger alone says so."""
+    assert SHELL_SUFFIXES <= SCAN_SUFFIXES, (
+        "the shell filter admits %r, which `_scan_files()` does not yield — so those "
+        "files are unreachable by the scan no matter what the filter says."
+        % sorted(SHELL_SUFFIXES - SCAN_SUFFIXES))
+    assert "" in SHELL_SUFFIXES, (
+        "extensionless files are back out of the shell ledger; measured 2026-10-03 "
+        "there are 17 extensionless `#!/usr/bin/env bash` scripts under the scan "
+        "roots, and dropping them is exactly the narrowing this closed.")
+
+
+def test_the_scan_really_READS_the_extensionless_bash_scripts():
+    """🔴 THE POSITIVE CONTROL FOR THE WIDENING, over the REAL corpus walk and not a
+    fixture. The scan over this repo returns ZERO hits either way — measured, no live
+    miss was being hidden — so "I widened it" is indistinguishable from "I changed a
+    constant nothing reads" unless the file SET is checked directly."""
+    shell = [rel for rel, p in _scan_files() if _is_shell_file(p)]
+    extless = [rel for rel in shell if rel.suffix == ""]
+    assert len(extless) >= 15, (
+        "only %d extensionless shell script(s) reached the scan; 17 were measured "
+        "2026-10-03, and a count near zero means the shebang test or the suffix "
+        "ledger stopped working: %r" % (len(extless), sorted(map(str, extless))))
+    rels = {r.as_posix() for r in extless}
+    # Two named exemplars, so a glob that silently stopped matching is visible.
+    assert "scripts/run3" in rels, sorted(rels)
+    assert "scripts/muse/muse" in rels, sorted(rels)
+    # ...and the python ones are NOT handed to a shell regex.
+    assert "scripts/cairn-who" not in rels, sorted(rels)
+    assert "scripts/obs-read" not in rels, sorted(rels)
 
 
 def test_no_SHELL_site_invokes_a_resolved_task_CLI_without_the_wrapper():
@@ -1040,14 +1386,56 @@ def test_the_POSITIVE_CONTROL_for_that_scan(tmp_path):
 def test_the_CONTROLS_for_that_bare_invocation_scan():
     """🔴 An empty hit list is indistinguishable from a regex wired to nothing, and
     the discriminating case here is the WRAPPED form — a pattern that caught both
-    would be permanently red and get deleted."""
-    for case in ('json=$("$cli" task get "$id" 2>/dev/null); rc=$?',
-                 '  "$cli" task get 686',
-                 '"$task_cli" agent ls',
-                 '"$cli" chief ask operator --body x'):
+    would be permanently red and get deleted.
+
+    🔴 ALL THREE SPELLINGS, IN BOTH DIRECTIONS. The widening is only real if each
+    new alternative is shown to catch the bare form AND to exempt the wrapped one;
+    a lookbehind written for `"$cli"` and not re-applied to `${cli}` would turn the
+    wrapper itself into a permanent hit."""
+    for case in (
+            # the original quoted spelling
+            'json=$("$cli" task get "$id" 2>/dev/null); rc=$?',
+            '  "$cli" task get 686',
+            '"$task_cli" agent ls',
+            '"$cli" chief ask operator --body x',
+            # 🔴 the two spellings that walked straight past this before
+            'json=$(${cli} task get "$id"); rc=$?',
+            '  ${task_cli} agent ls',
+            'out=$($cli task get 686)',
+            '$taskcli chief ask operator --body x',
+    ):
         assert _BARE_SH_INVOKE_RX.search(case), case
-    for case in ('json=$(clawgate_task_cli_exec "$cli" task get "$id"); rc=$?',
-                 'clawgate_task_cli_exec "$cli" task get 686',
-                 'echo "  ($cli exit $rc — task #$id NOT checked)"',
-                 'if ! cli=$(clawgate_task_cli); then'):
+    for case in (
+            'json=$(clawgate_task_cli_exec "$cli" task get "$id"); rc=$?',
+            'clawgate_task_cli_exec "$cli" task get 686',
+            # the WRAPPED form in the two new spellings — the lookbehind must apply
+            # to each alternative, not only the quoted one
+            'clawgate_task_cli_exec ${cli} task get 686',
+            'json=$(clawgate_task_cli_exec $cli task get "$id")',
+            'echo "  ($cli exit $rc — task #$id NOT checked)"',
+            'if ! cli=$(clawgate_task_cli); then',
+            # a LONGER variable that merely starts with a recognised name. ⚠ It is
+            # the `\\s+` that excludes this, NOT a right-hand boundary — measured,
+            # see `_BARE_SH_INVOKE_RX`. Kept because the CASE is real; the
+            # mechanism note is corrected.
+            '$cli_other task get 686',
+            '$clix task get 686',
+    ):
         assert not _BARE_SH_INVOKE_RX.search(case), case
+
+
+def test_the_DOCUMENTED_LIMITS_of_that_pattern_really_are_limits():
+    """🔴 A GUARD'S DESCRIPTION CLAIMS COVERAGE, SO THE LIMITS MUST BE TRUE TOO.
+    `_bare_sh_hits`' docstring names exactly two escapes — another variable name, and
+    a global flag between the binary and the verb. Asserted rather than asserted-in-
+    prose: if a later widening closes one, this test fails and the docstring gets
+    corrected in the same change instead of drifting the other way (a sentence
+    narrower than the code is merely untidy; one WIDER is the defect)."""
+    for case in ('"$bin" task get 686',            # a name outside the ledger
+                 '"$c" task get 686',
+                 '"$cli" --api-url http://x.invalid task get 686',   # a global flag
+                 '${cli} -v task get 686'):
+        assert not _BARE_SH_INVOKE_RX.search(case), (
+            "the pattern now catches %r, which `_bare_sh_hits` documents as an "
+            "escape it does NOT see. Widening it is fine — update that docstring in "
+            "the same change." % case)

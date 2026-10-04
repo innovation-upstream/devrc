@@ -4026,6 +4026,18 @@ EXPECTED_SKIPS=(
   # DESCRIPTION alone is not enough either — it truncates at 140 chars and shows
   # `failed=0` with no reason, which reads as a flake.
   "scripts/tests|mutation_battery_prune_conservation[.]py has no multi-site row"
+  # The SEVENTH, added with `mutation_battery_task_cli_scan.py` (the #2005 round-0
+  # carry-forwards — the task-CLI corpus scan's suffix ledger, shebang
+  # discriminator and bare-invocation pattern). Landed in the SAME COMMIT as the
+  # battery and its `BATTERIES` row, which is the instruction the fifth and sixth
+  # entries each record being missed; the skip count moves 8 -> 9 and a verdict
+  # contradicting its own `failed=0` is this guard, not a flake.
+  # 🔴 LEGITIMATELY SINGLE-SITE, not single-site by omission: every anchor is in
+  # `scripts/tests/test_task_cli_resolver.py`, because the scan's helpers live in
+  # the module that drives them. Inventing a tuple row so the PAIR control has
+  # something to chew on would put a contrived mutant in an instrument whose whole
+  # purpose is quotable evidence — the trade the block header above already makes.
+  "scripts/tests|mutation_battery_task_cli_scan[.]py has no multi-site row"
 )
 # ⚠ REMOVED, deliberately — do not re-add. `scripts/tests/test_skill_audit.py`
 # carried two regression pins against the LIVE datapacket-talos skill corpus, a
