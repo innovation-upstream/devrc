@@ -501,10 +501,19 @@ EXIT_2_CAUSES = (
     # 🔴 THE CROSS-HOST CAUSE IS MEASURED, NOT HEDGING. Of 291 stamped writer
     # sessions, 6 have a transcript on this machine, 245 on the peer and 40 on
     # neither — so the previous wording's two causes (`never handed a doc`,
-    # `transcript pruned`) covered the 40 and silently skipped the 245. `main`'s
-    # printed refusal carries the full numbers and the git-derived way around it;
-    # this sentence carries the RANKING, because a caller branching on rc 2 needs
-    # to know the seed is probably fine.
+    # `transcript pruned`) covered the 40 and silently skipped the 245.
+    # ⚠ `main`'s PRINTED REFUSAL CARRIES NO NUMBERS. This comment said it
+    # carried "the full numbers and the git-derived way around it", which was
+    # true when written and false by the time it landed: `47a94161` DELETED the
+    # census from that string (four literals pinned only to themselves — `assert
+    # "245" in err` — which re-measured nothing and would have gone stale
+    # silently and GREEN), and the matching guard now asserts `"245" not in
+    # err`. What the string carries is the RANKING ("most often the other
+    # host"), the `peer-host` pointer and the `git log --grep` escape — the
+    # halves that are actionable and do not rot at the same rate. The counts
+    # above live HERE, in a measurement, which is the whole point of the
+    # deletion. This sentence carries the ranking for the same reason: a caller
+    # branching on rc 2 needs to know the seed is probably fine.
     ("an `--arc` seed that resolves to no handoff doc (a slug naming "
      "nothing, or a session id whose opening message names no doc — which "
      "is NOT an empty arc, and most often means the transcript lives on the "

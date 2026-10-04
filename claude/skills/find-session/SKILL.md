@@ -160,11 +160,14 @@ python3 $DEVRC/scripts/find-session.py --arc handoff-<topic>.md    # or a slug, 
   handle, four handles readable, `$CIVITAI_CLI` UNMEASURED): of **291** stamped writer
   sessions, **29 (~1 in 10) DRIFTED** — some pair of their docs has DISJOINT commit sets, so
   the session genuinely changed subject; **28** excluding one 37-doc bulk-move session; **4**
-  of the 29 across repos. ⚠ **36 of 291 touched ≥2 docs, but 7 of those wrote them all in ONE
-  commit** — that is a bulk move, not drift, and quoting 36 as the drift rate (as an earlier
-  version of this line did, "~1 in 8") overstates it by ~25%. The footer names each member's
+  of the 29 across repos. ⚠ **36 of 291 touched ≥2 docs; the other 7 have NO doc pair with
+  disjoint commit sets, and only 2 of those 7 wrote every doc in ONE commit** — five spread
+  theirs over 2–5 separate commits that merely always overlap, so "7 bulk moves" (what an
+  earlier version of this line said) was wrong. Quoting 36 as the drift rate (as a still
+  earlier version did, "~1 in 8") overstates it by ~25%. The footer names each member's
   OTHER docs with a pasteable `--arc` command, from the commit trailers in git (one `--grep`
-  pass per repo handle, **~3× faster than per-member** — and **no transcript needed, so it
+  pass **per rev per repo handle** — up to two revs, so a handle behind its upstream pays two;
+  **~3× faster than per-member** — and **no transcript needed, so it
   works for a session whose transcript is on the other host**). It prints **even when nothing
   was found**, and names every handle that was UNSET or unreadable as **NOT MEASURED** — which
   is not the same as "that member wrote only this doc".

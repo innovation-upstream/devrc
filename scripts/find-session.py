@@ -1250,12 +1250,29 @@ def extractor_next_command(report):
             "arc, so size it before reading it whole)")
 
 
-#: Reason tokens for a handle that produced no answer. 🔴 TWO REASONS, NOT ONE,
-#: and neither is a zero: a handle nobody exported was never read, and a handle
-#: whose checkout git refused is a leg that failed. `$CIVITAI_CLI` is unset on
-#: this host today, so the first is the COMMON case rather than an edge.
+#: Reason tokens for a handle whose answer is INCOMPLETE. 🔴 THREE REASONS, NOT
+#: ONE, and none of them is a zero: a handle nobody exported was never read, a
+#: handle whose checkout git refused is a leg that failed, and a handle whose
+#: walk fell back to `HEAD` alone answered about a narrower chain than it looks.
+#: `$CIVITAI_CLI` is unset on this host today, so the first is the COMMON case
+#: rather than an edge.
 CROSS_ARC_UNSET = "not set"
 CROSS_ARC_UNREADABLE = "could not be read"
+#: 🔴 THE THIRD READING, AND IT USED TO RENDER AS A CLEAN ONE. `sessions_docs`
+#: discarded `doc_commit_revs`'s note, which is returned exactly when NO upstream
+#: resolved — so a handle structurally narrowed to `HEAD` was reported as having
+#: fully answered (`0 of n ... NOT MEASURED: every repo handle answered`), which
+#: is the scoped-zero-read-as-an-absence this function's own 🔴 forbids. Latent
+#: on this host only because all four SET handles resolve an upstream today; it
+#: is reachable — `drift-check.sh` rc 18 fires on a local branch with NO
+#: upstream, and the handoff flow commits from detached worktrees.
+#: ⚠ Three sentences because the operator's next action differs for each: export
+#: the handle, fix the checkout, or fetch the upstream. And unlike the other two
+#: this reason does NOT short-circuit the handle — the union over revs can only
+#: ADD writers, so a narrowed walk's findings are real and are reported
+#: ALONGSIDE the gap rather than instead of it.
+CROSS_ARC_NARROWED = ("walked `HEAD` alone — no upstream ref resolved, so a "
+                      "commit pushed from a worktree is not in that chain")
 
 
 def arc_cross_docs(report, env=None, run=None):
@@ -1271,8 +1288,14 @@ def arc_cross_docs(report, env=None, run=None):
     walks (HEAD + upstream per handle; `--all` would credit unmerged branches no
     reader can see), across the four SET handles with `$CIVITAI_CLI` UNMEASURED.
     Of 291 stamped writer sessions, **36** touched >=2 distinct handoff docs —
-    but that population is NOT "drifted": 7 of the 36 wrote all their docs in
-    ONE commit, which is a bulk move and not a session changing subject.
+    but that population is NOT "drifted": 7 of the 36 have **no doc pair with
+    disjoint commit sets**, and only **2** of those 7 wrote every doc in ONE
+    commit (`7f1c2b2a`, `ses_f0fc3e87`). ⚠ The 7 was previously glossed as the
+    one-commit bulk-move population, which it is not — it is `36 - 29`, the
+    complement of "drifted"; five of the seven spread their docs over 2-5
+    separate commits and are excluded only because every doc PAIR shares a
+    commit. Re-derived independently in round 2; every other figure in this
+    docstring reproduced exactly.
     Requiring some pair of a session's docs to have **DISJOINT commit sets**
     gives **29 of 291**, and excluding the single 37-doc bulk-move session
     (`6b88ffe8`) gives **28 of 291**. 4 of the 29 drifted ACROSS repos.
@@ -1280,10 +1303,16 @@ def arc_cross_docs(report, env=None, run=None):
     29 drifted** — the fixture that carries that shape is justified by the
     multi-doc population, not by this one.
 
-    🔴 ONE `--grep` PASS PER SET HANDLE, OVER EVERY MEMBER AT ONCE — never one
-    pass per member, which is **~3x** slower for this arc's shape (2.2-4.1x
-    across 5 interleaved runs; see `sessions_docs` for the measurement and why
-    it is a range). 🔴 AND ON THE HUMAN
+    🔴 ONE `--grep` PASS PER **REV** PER SET HANDLE, OVER EVERY MEMBER AT ONCE —
+    never one pass per member, which is **~3x** slower for this arc's shape
+    (2.2-4.1x across 5 interleaved runs; see `sessions_docs` for the measurement
+    and why it is a range). ⚠ "PER SET HANDLE" IS WHAT THIS LINE USED TO SAY AND
+    IT WAS FALSE: `doc_commit_revs` resolves up to TWO revs, so a handle behind
+    (or ahead of) its upstream pays two walks. Identical revs are now collapsed,
+    so a handle costs one walk when its clone is up to date and two when it is
+    not — measured at load ~12, the second rev was ~4.4s of a ~10.3s pass over
+    the four set handles, of which `$DEVRC` alone collapsed. The ~3x ratio is
+    unaffected either way: per-member pays both revs too. 🔴 AND ON THE HUMAN
     RENDERING PATH ONLY: `run_arc`'s `--json` branch does not call this at all
     (the two keys it fed are deleted), and the ordinary annotation path must
     never reach it either (see `arc_writer_counts`'s budget, measured in doc
@@ -1315,6 +1344,14 @@ def arc_cross_docs(report, env=None, run=None):
         except handoff_arc.GitUnavailable:
             unmeasured.append((handle, CROSS_ARC_UNREADABLE))
             continue
+        # 🔴 CARRIED, AND NOT A `continue`. A narrowed walk answered about a
+        # strictly narrower chain, so the handle is a GAP — but the docs it DID
+        # find are real (the rev union only ever adds), and dropping them would
+        # turn a partial answer into no answer. Attribute access rather than
+        # `getattr(..., None)` on purpose: a `sessions_docs` refactored back to a
+        # plain dict must FAIL here rather than silently stop reporting the gap.
+        if docs_by_sid.narrowed_note:
+            unmeasured.append((handle, CROSS_ARC_NARROWED))
         for sid, docs in docs_by_sid.items():
             for doc in docs:
                 # The arc's OWN doc is not an "other arc", and a doc found under
@@ -1364,7 +1401,12 @@ def render_cross_arc(cross):
     gaps = cross["unmeasured_handles"]
     if gaps:
         by_reason = []
-        for reason in (CROSS_ARC_UNSET, CROSS_ARC_UNREADABLE):
+        # 🔴 EVERY REASON THE TUPLE DECLARES, in a fixed order so two runs with
+        # the same gaps render the same bytes. A reason omitted here would make
+        # its handles vanish from the sentence while still counting in `j` — a
+        # gap reported as a number with no name.
+        for reason in (CROSS_ARC_UNSET, CROSS_ARC_UNREADABLE,
+                       CROSS_ARC_NARROWED):
             named = [h for h, r in gaps if r == reason]
             if named:
                 by_reason.append(f"{arc_handles_spelled(handles=named)} "
@@ -1811,10 +1853,25 @@ def main(argv=None):
                   "lives on the OTHER HOST, not that the seed is wrong "
                   "(`peer-host ssh-target --json` names the peer). The "
                   "doc->session edge is in GIT, which needs no transcript — "
-                  f"ask it directly in any {arc_handles_spelled('/')} "
-                  "checkout:\n"
-                  f"  git log --all -E --grep='^{handoff_arc.TRAILER_KEY}: "
-                  "<id>$' --name-only -- claudedocs\n"
+                  "ask it directly in ONE of the "
+                  f"{arc_handles_spelled(', ')} checkouts:\n"
+                  # 🔴 THE PASTEABLE COMMAND MUST MATCH THE SHIPPED READER, and
+                  # it was wrong three ways. (a) The handles were joined with
+                  # `/`, rendering as `$DEVRC/$HOMELAB/...` — which reads as a
+                  # filesystem PATH, not as five alternatives. (b) The pattern
+                  # used a literal single space where `_trailer_grep` uses
+                  # `[[:space:]]*`, so a tab-separated or multi-space trailer
+                  # this reader finds would not match the printed command. (c)
+                  # It passed `--all`, which `sessions_docs`'s own docstring
+                  # REJECTS ("`--all` would credit unmerged branches no reader
+                  # can see") — so the suggestion was simultaneously narrower
+                  # than the code (the space) and wider (the refs). It now
+                  # spells the SAME two revs `doc_commit_revs` resolves.
+                  f"  git log HEAD @{{upstream}} -E "
+                  f"--grep='^{handoff_arc.TRAILER_KEY}:[[:space:]]*<id>"
+                  "[[:space:]]*$' --name-only -- claudedocs\n"
+                  "  (drop `@{upstream}` if the branch has none — that is the "
+                  "same narrowing the CROSS-ARC footer reports)\n"
                   "Failing that, the session may never have been handed a "
                   "handoff doc, or its transcript may have been pruned.",
                   file=sys.stderr)

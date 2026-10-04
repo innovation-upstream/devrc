@@ -350,6 +350,35 @@ _UPSTREAM_PROBES: tuple[tuple[str, ...], ...] = (
 )
 
 
+def _same_object(repo: str, a: str, b: str,
+                 run: Callable[..., subprocess.CompletedProcess] | None = None,
+                 ) -> bool:
+    """Do two revs name the same commit? FALSE when either cannot be resolved.
+
+    🔴 FAILS TOWARDS WALKING BOTH. A `rev-parse` this cannot read must not be
+    read as "same", because that would silently DROP a rev and narrow the walk —
+    the whole class of defect this module exists to refuse. Doing redundant work
+    is the safe direction; skipping a rev is not.
+
+    ⚠ NO `--verify`, AND THAT IS NOT AN OVERSIGHT. `git rev-parse --verify`
+    takes exactly ONE revision: given two it exits 1 having printed nothing, so
+    this returned `False` unconditionally and the whole de-duplication was
+    INERT — measured, and caught only because the test asserted the collapse
+    rather than the absence of a crash. Plain `rev-parse` on an unknown rev
+    exits 128, which `_git` raises, so the safe direction is preserved; the
+    SHAPE of the output is checked here rather than inferred from an exit code.
+    """
+    try:
+        out = _git(repo, ["rev-parse", f"{a}^{{commit}}", f"{b}^{{commit}}"],
+                   run=run)
+    except GitUnavailable:
+        return False
+    oids = out.split()
+    return (len(oids) == 2 and oids[0] == oids[1]
+            and len(oids[0]) == 40 and all(c in "0123456789abcdef"
+                                           for c in oids[0]))
+
+
 def doc_commit_revs(repo: str,
                     run: Callable[..., subprocess.CompletedProcess] | None = None,
                     ) -> tuple[tuple[str, ...], str | None]:
@@ -373,6 +402,19 @@ def doc_commit_revs(repo: str,
     walking `HEAD` alone and the caller must be able to say so. An empty note is
     not a promise of completeness — a ref this clone has never fetched is still
     invisible.
+
+    🔴 AND THE REV COUNT IS NOT THE COVERAGE SIGNAL — THE NOTE IS. A second rev
+    that resolves to the SAME OBJECT as `HEAD` is dropped, because the `git log`
+    it would drive is provably byte-identical work: measured 2026-10-03 at load
+    ~12 across the four set handles, the second rev costs ~4.4s of a ~10.3s
+    cross-arc pass, and `$DEVRC` was the one handle whose `HEAD` and upstream
+    coincided — so dropping it saved ~11% of the pass THAT DAY, and halves a
+    handle's cost whenever a clone is actually up to date, which is the state
+    `devrc`'s own primary clone is deliberately kept in. The probe is one
+    `rev-parse`, i.e. milliseconds against a full history walk.
+    ⚠ So `revs == ("HEAD",)` no longer means "narrowed": it means that OR "the
+    upstream is this very commit". Only `note` tells the two apart, which is
+    exactly why the note exists and why callers must read it rather than `len`.
     """
     revs: list[str] = ["HEAD"]
     for probe in _UPSTREAM_PROBES:
@@ -381,6 +423,10 @@ def doc_commit_revs(repo: str,
         except GitUnavailable:
             continue                 # no upstream / no origin/HEAD — try the next
         if out and out not in revs:
+            if _same_object(repo, "HEAD", out, run=run):
+                # An upstream DID resolve, so there is NO coverage gap to
+                # report — the walk over `HEAD` alone IS the walk over both.
+                return tuple(revs), None
             revs.append(out)
             return tuple(revs), None
     return tuple(revs), (
@@ -472,9 +518,42 @@ def _trailer_grep(session_id: str) -> str:
             f"{_ere_escape(session_id)}[[:space:]]*$")
 
 
+class SessionsDocs(dict):
+    """`{session_id: docs}` that CARRIES ITS OWN COVERAGE NOTE.
+
+    🔴 THE GAP TRAVELS WITH THE ANSWER, because a caller that has to ask a
+    SECOND time whether the walk was complete is a caller that will forget.
+    `doc_commit_revs` returns a note exactly when no upstream resolved — i.e.
+    when the walk fell back to `HEAD` alone and a commit pushed from a worktree
+    is invisible — and `sessions_docs` used to DISCARD it. `resolve_arc`
+    surfaces that note for the arc's OWN repo; the cross-arc footer had no path
+    to it at all, so a structurally narrowed handle rendered as having fully
+    answered: `0 of n ... NOT MEASURED: every repo handle answered`, printed
+    over a walk that provably had not read the doc.
+
+    🔴 A `dict` SUBCLASS AND NOT A TUPLE, deliberately. `sessions_docs(repo,
+    (sid,))[sid]` is the documented one-line spelling that replaced the deleted
+    singular door, and ten tests plus this module's own prose use it; wrapping
+    the mapping in a tuple would churn every one of them into `[0][sid]` to
+    carry one optional string. A subclass compares equal to a plain dict, so
+    every `== {...}` assertion is unaffected, and `.narrowed_note` is an
+    attribute read rather than a second call.
+
+    ⚠ `narrowed_note is None` is the ONLY spelling of "fully walked", and even
+    then it is not a promise of completeness — a ref this clone has never
+    fetched is still invisible, which is `doc_commit_revs`'s own 🔴.
+    """
+
+    __slots__ = ("narrowed_note",)
+
+    def __init__(self, mapping, narrowed_note: str | None = None):
+        super().__init__(mapping)
+        self.narrowed_note = narrowed_note
+
+
 def sessions_docs(repo: str, session_ids: Iterable[str],
                   run: Callable[..., subprocess.CompletedProcess] | None = None,
-                  ) -> dict[str, tuple[str, ...]]:
+                  ) -> "SessionsDocs":
     """`{session_id: handoff doc basenames}` for commits IN `repo`, newest first.
 
     🔴 THE SAME EDGE `doc_commits` READS, READ SESSION-FIRST — and that is the
@@ -487,9 +566,16 @@ def sessions_docs(repo: str, session_ids: Iterable[str],
     Measured 2026-10-03 over the stamped corpus at the scope `doc_commit_revs`
     walks (HEAD + upstream per handle), across the four SET handles with
     `$CIVITAI_CLI` UNMEASURED. **36 of 291** stamped writer sessions touched >=2
-    distinct docs, but 7 of those 36 wrote every one of them in ONE commit — a
-    bulk move, not a session changing subject. Requiring some pair of a
-    session's docs to have **DISJOINT commit sets** gives **29 of 291**;
+    distinct docs, but 7 of those 36 have **no doc pair with disjoint commit
+    sets** — and only **2** of the 7 wrote every doc in ONE commit
+    (`7f1c2b2a`, `ses_f0fc3e87`). ⚠ THAT CORRECTION IS THE THIRD ON THIS FIGURE.
+    The 7 was read as "wrote every doc in one commit", which it is not: it is
+    simply `36 - 29`, the complement of "drifted". Enumerated, five of the seven
+    spread their docs over 2-5 SEPARATE commits and are non-drifted only because
+    every doc PAIR happens to share a commit. The 29 is unaffected — the code
+    applies disjointness correctly; it was the gloss that misdescribed the
+    excluded population. Requiring some pair of a session's docs to have
+    **DISJOINT commit sets** gives **29 of 291**;
     excluding the single 37-doc bulk-move session gives **28 of 291**. 4 of the
     29 crossed repos. ⚠ State it at this scope: the `>=2 docs` population is a
     different, wider claim, and quoting it as the drift rate overstates by ~25%.
@@ -520,6 +606,21 @@ def sessions_docs(repo: str, session_ids: Iterable[str],
     1.28s does reproduce as shape A at low load: 1.91s above. The number was
     right; the query it was attached to was not.) Quote the shape you timed.
 
+    ⚠ ONE WALK PER **REV**, NOT PER HANDLE — and `doc_commit_revs` returns up
+    to two (`HEAD` and the upstream). An earlier docstring here and in
+    `arc_cross_docs` claimed "ONE `--grep` PASS PER SET HANDLE", which was false
+    on every handle whose upstream differs from `HEAD`: those pay two walks plus
+    the `rev-parse` probes. The absolute figures above already included both
+    revs, and per-member pays both too, so the ~3x ratio is unaffected — but the
+    unit of the claim was wrong. Revs resolving to the SAME OBJECT are now
+    collapsed to one (see `doc_commit_revs`), so a handle costs one walk when the
+    clone is up to date and two when it is not.
+
+    🔴 RETURNS A `SessionsDocs`, WHICH CARRIES THE COVERAGE NOTE. Discarding it
+    was the shipped defect: the cross-arc footer then had no way to say a handle
+    had been walked over `HEAD` alone, and printed `every repo handle answered`
+    about it. Read `.narrowed_note`, never `len(revs)`.
+
     Raises `GitUnavailable` like its siblings: a session that wrote nothing here
     and a repo that could not be read produce the same empty dict otherwise, and
     this module's posture is that a scoped zero is never an absence.
@@ -527,9 +628,12 @@ def sessions_docs(repo: str, session_ids: Iterable[str],
     wanted = [sid for sid in dict.fromkeys(session_ids) if sid]
     out: dict[str, list[str]] = {sid: [] for sid in wanted}
     if not wanted:
-        return {}
+        # ⚠ NO NOTE, because nothing was asked and so nothing went unmeasured.
+        # `doc_commit_revs` is deliberately not called here: a note on a query
+        # with no ids would report a gap in an answer that has no subject.
+        return SessionsDocs({})
     greps = [f"--grep={_trailer_grep(sid)}" for sid in wanted]
-    revs, _note = doc_commit_revs(repo, run=run)
+    revs, note = doc_commit_revs(repo, run=run)
     for rev in revs:
         # 🔴 `--name-only` RATHER THAN `--follow`, and NOT a per-doc pathspec.
         # `--follow` takes one starting path by definition; the question here is
@@ -541,21 +645,26 @@ def sessions_docs(repo: str, session_ids: Iterable[str],
         # NUL-separated. A record is told from a path by the `\x1f` field
         # separators `_LOG_FORMAT` plants: a path cannot contain one.
         ids: tuple[str, ...] = ()
-        seen_shas: set[str] = set()
         for chunk in raw.split("\0"):
             if "\x1f" in chunk:
                 parts = chunk.split("\x1f", 3)
                 if len(parts) < 4:
                     ids = ()
                     continue
-                sha = parts[0].strip()
                 # 🔴 RE-PARSED, NOT TRUSTED — see `_trailer_grep`.
                 ids = tuple(sid for sid in trailer_ids(parts[3])
                             if sid in out)
-                if sha in seen_shas:
-                    ids = ()
-                seen_shas.add(sha)
                 continue
+            # ⚠ NO PER-REV `seen_shas` SET HERE, AND ITS DELETION IS THE POINT.
+            # One shipped: reset per rev, consulted to blank `ids` on a repeat
+            # sha. It could not fire — a single `git log` never emits a commit
+            # twice, and the only real duplication is ACROSS revs, which the
+            # reset defeated by construction. Deleting it left the suite green,
+            # mutation-confirmed. The cross-rev dedup that is actually needed is
+            # the membership test below, which is per (session, doc) and so
+            # covers a commit reached from both revs AND a doc touched by two
+            # different commits. A guard that cannot execute is worse than none:
+            # it reads as coverage and stops anyone looking.
             path = chunk.strip()
             if not path or not ids:
                 continue
@@ -565,7 +674,8 @@ def sessions_docs(repo: str, session_ids: Iterable[str],
             for sid in ids:
                 if m.group(1) not in out[sid]:
                     out[sid].append(m.group(1))
-    return {sid: tuple(docs) for sid, docs in out.items()}
+    return SessionsDocs({sid: tuple(docs) for sid, docs in out.items()},
+                        narrowed_note=note)
 
 
 # ⚠ NO SINGULAR `session_docs(repo, sid)` DOOR, DELETED 2026-10-03 AND NOT AN
