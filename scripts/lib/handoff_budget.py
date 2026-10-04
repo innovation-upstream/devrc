@@ -505,7 +505,7 @@ GRANDFATHERED: dict[str, int] = {
     "foreign:ad62fed4ccfa9228": 131_072,
     "foreign:ae3dfc66a8ea0ea4": 114_688,
     "foreign:b336690a745e8339": 81_920,
-    "foreign:baebd7e094de26f4": 98_304,
+    "foreign:baebd7e094de26f4": 147_456,
     "foreign:bc3c981116058e7c": 180_224,
     "foreign:bdd015812770e390": 98_304,
     "foreign:c0852103a8ce6314": 180_224,
