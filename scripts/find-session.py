@@ -1250,6 +1250,18 @@ def extractor_next_command(report):
             "arc, so size it before reading it whole)")
 
 
+#: 🔴 THE REVS THE PASTEABLE ESCAPE HATCH MUST NAME — a two-way ledger against
+#: `handoff_arc._UPSTREAM_PROBES`, not a literal, and not rendered straight from
+#: the probes either. The prose beside the command explains the fallback ORDER
+#: and the one condition that actually narrows the walk; a new probe changes
+#: that explanation, which no derivation can write. So the list is declared here
+#: and `test_find_session_arc.py` fails when it disagrees with the probes.
+#: ⚠ A LITERAL HERE WAS THE BUG: the refusal spelled `@{upstream}` alone and
+#: told the operator to DROP it when the branch has none — which loses the
+#: second probe's `origin/HEAD`, i.e. a strict subset of what the tool walks,
+#: under a sentence promising parity.
+ARC_ESCAPE_REVS = ("@{upstream}", "origin/HEAD")
+
 #: Reason tokens for a handle whose answer is INCOMPLETE. 🔴 THREE REASONS, NOT
 #: ONE, and none of them is a zero: a handle nobody exported was never read, a
 #: handle whose checkout git refused is a leg that failed, and a handle whose
@@ -1262,10 +1274,32 @@ CROSS_ARC_UNREADABLE = "could not be read"
 #: discarded `doc_commit_revs`'s note, which is returned exactly when NO upstream
 #: resolved — so a handle structurally narrowed to `HEAD` was reported as having
 #: fully answered (`0 of n ... NOT MEASURED: every repo handle answered`), which
-#: is the scoped-zero-read-as-an-absence this function's own 🔴 forbids. Latent
-#: on this host only because all four SET handles resolve an upstream today; it
-#: is reachable — `drift-check.sh` rc 18 fires on a local branch with NO
-#: upstream, and the handoff flow commits from detached worktrees.
+#: is the scoped-zero-read-as-an-absence this function's own 🔴 forbids.
+#: 🔴 REACHABLE ONLY WHERE NO `refs/remotes/origin/HEAD` RESOLVES — AND THAT IS
+#: A CORRECTION. This comment, `handoff_arc.SessionsDocs`, the fixture that
+#: exercises it and `2c57d0d7`'s own commit message all claimed two production
+#: routes: "`drift-check.sh` rc 18 fires on a local branch with no upstream, and
+#: the handoff flow commits from detached worktrees". Both are FALSE, for one
+#: reason: `doc_commit_revs` has TWO probes, and the SECOND one covers exactly
+#: those cases. Measured 2026-10-04 on this host, git 2.55.0:
+#:   • `~/workspace/tmux-fuzzyclaw` (rc 18's own subject) — branch `main`,
+#:     probe 1 resolves `origin/main`. It HAS an upstream today, so the state
+#:     rc 18 reported is not even present; probe 2 resolves as well.
+#:   • a DETACHED worktree of a clone — probe 1 fails (`fatal: HEAD does not
+#:     point to a branch`), probe 2 resolves `origin/main`. Two revs, no note.
+#:   • `git init` + `remote add` + `fetch` — probe 2 resolves; git 2.55 sets
+#:     `origin/HEAD` on the fetch. Not narrowed.
+#: The narrowed state needs no `origin/HEAD` AT ALL, and only two configurations
+#: produce that here (both measured: probe 1 rc 128, probe 2 rc 1): a
+#: remote-less `git init` — which is what the fixture builds — and
+#: `git remote set-head -d origin` on a branch with no upstream.
+#: ⚠ NO PRODUCTION ROUTE HAS BEEN DEMONSTRATED. That is the honest state of it,
+#: and it is a finding rather than a reason to go looking for a replacement
+#: justification. The fix stands on its own: `revs == ("HEAD",)` and "narrowed"
+#: were being conflated, so a note the module computes was being thrown away and
+#: the footer printed `every repo handle answered` over a walk it had not
+#: characterised. A gap the caller cannot SAY is the defect, whether or not this
+#: host can currently produce it.
 #: ⚠ Three sentences because the operator's next action differs for each: export
 #: the handle, fix the checkout, or fetch the upstream. And unlike the other two
 #: this reason does NOT short-circuit the handle — the union over revs can only
@@ -1283,25 +1317,18 @@ def arc_cross_docs(report, env=None, run=None):
     here was keyed on the session's GENESIS and is single-valued, so a reader who
     found handoff-B's arc could not get back to handoff-A.
 
-    🔴 THE RATE, AT THE SCOPE MEASURED — **29 of 291 (~1 in 10)**, not 1 in 8.
-    Measured 2026-10-03 over the stamped corpus, at the scope `doc_commit_revs`
-    walks (HEAD + upstream per handle; `--all` would credit unmerged branches no
-    reader can see), across the four SET handles with `$CIVITAI_CLI` UNMEASURED.
-    Of 291 stamped writer sessions, **36** touched >=2 distinct handoff docs —
-    but that population is NOT "drifted": 7 of the 36 have **no doc pair with
-    disjoint commit sets**, and only **2** of those 7 wrote every doc in ONE
-    commit (`7f1c2b2a`, `ses_f0fc3e87`). ⚠ The 7 was previously glossed as the
-    one-commit bulk-move population, which it is not — it is `36 - 29`, the
-    complement of "drifted"; five of the seven spread their docs over 2-5
-    separate commits and are excluded only because every doc PAIR shares a
-    commit. Re-derived independently in round 2; every other figure in this
-    docstring reproduced exactly.
-    Requiring some pair of a session's docs to have **DISJOINT commit sets**
-    gives **29 of 291**, and excluding the single 37-doc bulk-move session
-    (`6b88ffe8`) gives **28 of 291**. 4 of the 29 drifted ACROSS repos.
-    ⚠ The `ses_…` (opencode) id is 1 of the 36 multi-doc sessions and **0 of the
-    29 drifted** — the fixture that carries that shape is justified by the
-    multi-doc population, not by this one.
+    🔴 THE RATE, AT THE SCOPE MEASURED — **29 drifted writer sessions, ~1 in
+    10**, not 1 in 8, at the scope `doc_commit_revs` walks (HEAD + whichever
+    upstream probe resolves, per handle; `--all` would credit unmerged branches
+    no reader can see), across the four SET handles with `$CIVITAI_CLI`
+    UNMEASURED. Drifted means **some pair of a session's docs has DISJOINT
+    commit sets** — the `>=2 docs` population is wider and quoting IT as the
+    rate overstates by ~25%.
+    🔴 THE FULL CENSUS, ITS DENOMINATOR (DATED, because it is unpinned prose and
+    has drifted), THE DERIVATION AND THE HISTORY OF ITS THREE CORRECTIONS LIVE
+    IN ONE PLACE: `handoff_arc.sessions_docs`'s docstring. Do not re-state the
+    absolutes here — that duplication is what let one figure be corrected in
+    three successive rounds across eleven sites.
 
     🔴 ONE `--grep` PASS PER **REV** PER SET HANDLE, OVER EVERY MEMBER AT ONCE —
     never one pass per member, which is **~3x** slower for this arc's shape
@@ -1865,13 +1892,40 @@ def main(argv=None):
                   # It passed `--all`, which `sessions_docs`'s own docstring
                   # REJECTS ("`--all` would credit unmerged branches no reader
                   # can see") — so the suggestion was simultaneously narrower
-                  # than the code (the space) and wider (the refs). It now
-                  # spells the SAME two revs `doc_commit_revs` resolves.
-                  f"  git log HEAD @{{upstream}} -E "
+                  # than the code (the space) and wider (the refs).
+                  # 🔴 (d) AND THE FIX FOR (c) OPENED THE NARROW HALF OF THE
+                  # SAME CLASS. `doc_commit_revs` has TWO upstream probes, not
+                  # one — `@{upstream}` AND `refs/remotes/origin/HEAD` — and it
+                  # walks `HEAD` plus whichever resolves FIRST. The command
+                  # spelled probe 1 only, under a parenthetical telling the
+                  # operator to DROP it "if the branch has none", which is the
+                  # case probe 2 covers. MEASURED on a hermetic clone on a
+                  # local branch with no upstream: `doc_commit_revs` returned
+                  # `('HEAD', 'origin/main')` with `note=None` (NOT narrowed)
+                  # and `sessions_docs` found two docs, while an operator doing
+                  # as told got ONE — a strict subset, under a sentence
+                  # promising parity with the footer. The footer had correctly
+                  # reported no narrowing, because probe 2 resolved.
+                  # The revs now come from `ARC_ESCAPE_REVS`, pinned two-way
+                  # against `handoff_arc._UPSTREAM_PROBES`.
+                  f"  git log HEAD {ARC_ESCAPE_REVS[0]} -E "
                   f"--grep='^{handoff_arc.TRAILER_KEY}:[[:space:]]*<id>"
                   "[[:space:]]*$' --name-only -- claudedocs\n"
-                  "  (drop `@{upstream}` if the branch has none — that is the "
-                  "same narrowing the CROSS-ARC footer reports)\n"
+                  f"  (`{ARC_ESCAPE_REVS[0]}` is the FIRST of "
+                  f"{len(ARC_ESCAPE_REVS)} upstream probes this reader tries, "
+                  "and a branch with no upstream does NOT narrow the walk: "
+                  f"substitute `{ARC_ESCAPE_REVS[1]}`, which is what the "
+                  "reader falls back to. The CROSS-ARC footer reports a "
+                  "narrowing only when NEITHER probe resolves, which takes a "
+                  "remote-less `git init` or a `git remote set-head -d`.)\n"
+                  # ⚠ EACH REV IS SPELLED EXACTLY ONCE ABOVE, AND THAT IS
+                  # LOAD-BEARING. The guard is `rev in err`; an earlier draft
+                  # also wrote "no `refs/remotes/origin/HEAD` either" into the
+                  # narrowing clause, and a mutation that DELETED the
+                  # substitution instruction then passed green off that
+                  # incidental substring — the spelled-vs-structural trap, in
+                  # the guard written to close it. Do not re-spell a rev here
+                  # except where an operator is told to USE it.
                   "Failing that, the session may never have been handed a "
                   "handoff doc, or its transcript may have been pruned.",
                   file=sys.stderr)

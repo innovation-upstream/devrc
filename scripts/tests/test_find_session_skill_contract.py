@@ -499,9 +499,17 @@ EXIT_2_CAUSES = (
      "attribution, so the combination has no answer rather than an empty one",
      (["--skill", "browser", "--opencode-only"],)),
     # 🔴 THE CROSS-HOST CAUSE IS MEASURED, NOT HEDGING. Of 291 stamped writer
-    # sessions, 6 have a transcript on this machine, 245 on the peer and 40 on
-    # neither — so the previous wording's two causes (`never handed a doc`,
-    # `transcript pruned`) covered the 40 and silently skipped the 245.
+    # sessions (2026-10-03), 6 have a transcript on this machine, 245 on the
+    # peer and 40 on neither — so the previous wording's two causes (`never
+    # handed a doc`, `transcript pruned`) covered the 40 and silently skipped
+    # the 245.
+    # ⚠ THAT DENOMINATOR IS THE 2026-10-03 ONE AND HAS SINCE MOVED: the writer
+    # population re-derived as **292** on 2026-10-04 (see
+    # `handoff_arc.sessions_docs`, which now DATES it). This 6/245/40 partition
+    # was NOT re-derived at that head, so it is quoted at its own date rather
+    # than rescaled — the RANKING is what this comment exists for, and one extra
+    # writer cannot invert 245 against 6. Re-derive before quoting the
+    # absolutes.
     # ⚠ `main`'s PRINTED REFUSAL CARRIES NO NUMBERS. This comment said it
     # carried "the full numbers and the git-derived way around it", which was
     # true when written and false by the time it landed: `47a94161` DELETED the

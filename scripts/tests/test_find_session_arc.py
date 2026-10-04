@@ -1575,39 +1575,35 @@ class TestTheHandleProseNamesEveryHandle:
 # as a member and NEVER NAMES handoff-A, because every resolver here was keyed
 # on the session's GENESIS and is single-valued.
 #
-# 🔴 THE RATE, AT THE SCOPE MEASURED — **29 of 291 (~1 in 10)**. An earlier
-# version of this comment said "36 of 291 (~1 in 8)", a figure for a WIDER
-# population than the word "drift" names; this is the correction. Measured
-# 2026-10-03 over EVERY SET HANDLE ($DEVRC, $HOMELAB, $DATAPACKET, $CIVITAI;
-# $CIVITAI_CLI unset => UNMEASURED, so the denominator is scoped to four), at
-# the scope `doc_commit_revs` walks — HEAD + upstream per handle, NOT `--all`,
-# which would credit commits on unmerged branches no shipped reader can see:
-#   291  stamped writer sessions
-#    36  touched >=2 DISTINCT handoff docs            <- the old headline
-#    29  have some doc pair with DISJOINT commit sets <- DRIFTED (~1 in 10)
-#     7  the complement: NO doc pair with disjoint commit sets
-#     2  of those 7 wrote every doc in ONE commit (7f1c2b2a, ses_f0fc3e87)
-#    28  the drifted set excluding the 37-doc bulk-move session (6b88ffe8)
-#     4  of the 29 drifted ACROSS repos
-# Histogram: {1: 255, 2: 25, 3: 9, 4: 1, 37: 1}.
-# ⚠ THE 7 IS NOT "WROTE EVERY DOC IN ONE COMMIT", AND THIS IS THE THIRD
-# CORRECTION TO THAT ONE LINE. It is `36 - 29`, the complement of "drifted",
-# which is a different predicate: enumerated, FIVE of the seven spread their
-# docs over 2-5 SEPARATE commits and are excluded only because every doc PAIR
-# happens to share a commit. Only two are one-commit bulk moves. The 29 never
-# depended on the gloss — the code applies disjointness correctly.
-# ⚠ THE DISJOINTNESS CRITERION IS WHAT MAKES THE CLAIM HONEST: a session whose
-# every doc pair shares a commit did not demonstrably change subject.
-# Quoting the `>=2 docs` count as the drift rate overstates it by ~25%.
-# ⚠ AND THE `ses_…` CASE IS A POPULATION OF THE WIDER SET ONLY — 1 of the 36
-# multi-doc sessions, **0 of the 29 drifted**. The cross-repo case is a
-# population of both (4 either way). Said here because the fixture below is
-# justified by the multi-doc population and a reader must not upgrade that.
-# An earlier draft also carried {1: 256, 2: 27, 3: 7, 4: 1} and a "35/289
-# excluding 18 bulk-move commits" figure from the original recon; both are at a
-# scope this branch did not reproduce, so they stay REMOVED. ⚠ That recon
-# figure was the one that would have caught this very overstatement — dropping
-# it as unreproduced was right, and RE-DERIVING it is what was owed.
+# 🔴 THE RATE, AT THE SCOPE MEASURED — **29 drifted writer sessions, ~1 in
+# 10**. An earlier version of this comment said "~1 in 8" off the `>=2 docs`
+# count, a WIDER population than the word "drift" names; that overstated it by
+# ~25% and this is the correction. DRIFTED means some pair of a session's docs
+# has DISJOINT commit sets — which is what makes the claim honest: a session
+# whose every doc pair shares a commit did not demonstrably change subject.
+#
+# 🔴 THE CENSUS IS NOT RESTATED HERE, DELIBERATELY. The full table, its DATED
+# denominator, the derivation and the history of its three corrections live in
+# ONE place — `handoff_arc.sessions_docs`'s docstring. This comment used to
+# carry a copy, and a copy is how one figure came to be corrected in three
+# successive rounds across eleven sites while drifting on its own in between.
+# ⚠ THE HISTOGRAM IS DELETED RATHER THAN RE-CORRECTED. It read
+# `{1: 255, 2: 25, 3: 9, 4: 1, 37: 1}` here; a 2026-10-04 re-derivation got
+# `{1: 256, 2: 24, 3: 10, 4: 1, 37: 1}`; a still earlier draft had
+# `{1: 256, 2: 27, 3: 7, 4: 1}` and was REJECTED as unreproduced. Three
+# derivations, three tables — the buckets move with corpus growth AND with
+# whether a rename counts as touching one doc or two, which no prose statement
+# of the table carried. 🔴 THE 2026-10-04 TABLE'S `1: 256` MATCHES THE REJECTED
+# DRAFT'S FIRST BUCKET BY COINCIDENCE — a different corpus measured a different
+# way landing on the same integer — and that collision is itself the reason no
+# table is kept: a reader cannot distinguish it from a revival of the rejected
+# draft. The rejected recon's "35/289 excluding 18 bulk-move commits" stays
+# REMOVED for the original reason (unreproduced scope); re-deriving the rate was
+# what was owed, and that is done, dated, at the canonical site.
+# ⚠ AND THE `ses_…` CASE IS A POPULATION OF THE WIDER SET ONLY — 1 of the
+# multi-doc sessions, **0 of the drifted**. The cross-repo case is a population
+# of both. Said here because the fixture below is justified by the multi-doc
+# population and a reader must not upgrade that.
 #
 # The edge needed no new capture: the commit's trailer carries the id and the
 # commit's FILE LIST names the doc. `doc_commits` already pairs them, but
@@ -2202,11 +2198,22 @@ class TestUNMEASUREDIsNotEMPTYOnTheNewSurface:
 def narrowed_repo(tmp_path: Path) -> Path:
     """A checkout where `doc_commit_revs` can resolve NO upstream.
 
-    🔴 THE SHAPE THAT MAKES A NARROWED WALK OBSERVABLE, and it is a real one:
-    `git init` leaves the branch with no `@{upstream}` and no
-    `refs/remotes/origin/HEAD`, which is exactly the state `drift-check.sh`
-    rc 18 reports for `tmux-fuzzyclaw` ("a local branch with no upstream") and
-    the state a detached handoff worktree leaves behind. One session writes two
+    🔴 THE SHAPE THAT MAKES A NARROWED WALK OBSERVABLE: a remote-less
+    `git init` leaves the branch with no `@{upstream}` AND no
+    `refs/remotes/origin/HEAD`, so NEITHER of `doc_commit_revs`'s two probes
+    resolves.
+    ⚠ AND IT IS A SYNTHETIC SHAPE — THIS DOCSTRING USED TO CLAIM OTHERWISE. It
+    said this was "exactly the state `drift-check.sh` rc 18 reports for
+    `tmux-fuzzyclaw`" and "the state a detached handoff worktree leaves behind".
+    Measured 2026-10-04, git 2.55.0, both are wrong and for the same reason —
+    probe 2 covers them: `tmux-fuzzyclaw` resolves `origin/main` on BOTH probes
+    (it has an upstream today, so rc 18's state is not even present), and a
+    detached worktree of a clone fails probe 1 and resolves probe 2, giving two
+    revs and no note. Only a remote-less `git init` (this fixture) or
+    `git remote set-head -d origin` produces the narrowed state here, and no
+    production route to it has been demonstrated. The fixture is still the
+    right fixture — it builds the state the code must be able to SAY — but it
+    is not evidence that the state occurs in the wild. One session writes two
     docs; only ONE of them is reachable from the checked-out branch, so a walk
     narrowed to `HEAD` returns a STRICT SUBSET of the true answer.
     """
@@ -2435,6 +2442,47 @@ class TestANarrowedWalkIsAThirdREASONNotACleanOne:
         assert got.narrowed_note is None
         assert got[SID_DRIFT] == ("handoff-beta.md", "handoff-alpha.md"), (
             f"collapsing the duplicate rev changed the ANSWER: {got!r}")
+
+    def test_the_rev_collapse_works_in_a_SHA256_repo(self, tmp_path):
+        """🔴 THE OID SHAPE CHECK WAS SHA-1-ONLY, so `_same_object` answered
+        `False` for two revs naming ONE commit in any `--object-format=sha256`
+        repo and the collapse never fired there. Safe direction — both revs get
+        walked and the answer is right, only the saving is lost — and all five
+        handles are sha1, so it was latent. Pinned because `len(oid) == 40` is
+        the kind of literal that reads as a constant rather than as a choice.
+        Measured 2026-10-04: git 2.55.0 emits 64 hex chars for sha256.
+        """
+        r = tmp_path / "s256"
+        r.mkdir()
+        _sh("git", "init", "-q", "-b", "main", "--object-format=sha256", cwd=r)
+        _commit(r, ALPHA, "# alpha\n", f"docs: a\n\n{ha.TRAILER_KEY}: {SID_DRIFT}\n")
+        _sh("git", "branch", "other", cwd=r)
+        oid = _sh("git", "rev-parse", "HEAD", cwd=r).strip()
+        assert len(oid) == 64, (
+            f"this git did not produce a sha256 oid ({len(oid)} hex), so the "
+            "test is vacuous")
+        assert ha._same_object(str(r), "HEAD", "other") is True, (
+            "two revs naming one sha256 commit were not recognised as the same "
+            "object — the oid shape check is sha1-only")
+
+    def test_every_PUBLIC_NAME_resolves_and_the_RETURN_TYPE_is_exported(self):
+        """🔴 `__all__` IS A CLAIM ABOUT WHAT A STAR-IMPORTER GETS.
+
+        `sessions_docs` was exported and `SessionsDocs` — the type it returns —
+        was not, so a caller could get the object and had no way to NAME it:
+        no annotation, no `isinstance`, no re-wrap. A type a caller cannot name
+        is a type they degrade to `dict`, and a plain `dict` has no
+        `.narrowed_note`, which is the whole defect this class closed.
+        The first half also catches the cheaper failure: a name in `__all__`
+        that no longer exists makes `from … import *` raise.
+        """
+        missing = [n for n in ha.__all__ if not hasattr(ha, n)]
+        assert not missing, (
+            f"`__all__` exports names the module does not define: {missing} — "
+            "`from lib.handoff_arc import *` raises on these")
+        assert type(ha.sessions_docs("", ())).__name__ in ha.__all__, (
+            "`sessions_docs`'s return type is not exported, so a star-importer "
+            "cannot annotate or re-wrap it")
 
     def test_the_footer_names_the_HANDLE_and_says_narrowed_to_HEAD(
             self, narrowed_repo):
@@ -2780,8 +2828,55 @@ class TestTheExit2CauseListNamesTheCROSSHOSTCause:
             "the pasteable command passes `--all`, which credits commits on "
             "unmerged branches no shipped reader can see — a wider answer than "
             "the tool's own")
-        assert "@{upstream}" in err, (
-            "the command does not spell the revs `doc_commit_revs` resolves")
+        # 🔴 DERIVED FROM `_UPSTREAM_PROBES`, NOT A LITERAL — and this is a
+        # correction. The old guard was `assert "@{upstream}" in err` under a
+        # message claiming it pinned "the revs `doc_commit_revs` resolves": a
+        # substring check whose description asserted a RELATIONSHIP it cannot
+        # inspect. It passed while `origin/HEAD` — the SECOND probe, and the one
+        # that resolves in every state this host can produce short of a
+        # remote-less `git init` — went unmentioned, so an operator who followed
+        # the parenthetical's "drop `@{upstream}`" walked a STRICT SUBSET of
+        # what the tool walks while the sentence promised parity. Measured on a
+        # hermetic clone on a local branch with no upstream: `doc_commit_revs`
+        # returned `('HEAD', 'origin/main')` with `note=None`, and dropping the
+        # rev as instructed lost one of two docs.
+        # Two assertions because they are two claims: the ledger covers every
+        # probe, and the message names every ledger entry.
+        derived = tuple(ha.upstream_probe_rev(p) for p in ha._UPSTREAM_PROBES)
+        assert fs.ARC_ESCAPE_REVS == derived, (
+            "`find-session.ARC_ESCAPE_REVS` has desynced from "
+            f"`handoff_arc._UPSTREAM_PROBES` ({fs.ARC_ESCAPE_REVS!r} vs "
+            f"{derived!r}) — a probe was added, removed or renamed without "
+            "revisiting the operator-facing prose that explains the fallback "
+            "ORDER and the condition under which the walk is actually "
+            "narrowed. That prose is why this is a two-way ledger rather than "
+            "a message rendered straight from the probes: a new probe changes "
+            "the explanation, not just the list.")
+        for rev in fs.ARC_ESCAPE_REVS:
+            assert rev in err, (
+                f"the pasteable command never mentions {rev!r}, a rev "
+                "`doc_commit_revs` actually resolves — so an operator "
+                "following it reads a STRICT SUBSET of what the tool walks")
+        # 🔴 AND THE FIRST PROBE MUST BE ON THE COMMAND LINE, NOT MERELY IN THE
+        # PROSE — scoped, because `rev in err` is a SPELLED check and the
+        # explanation legitimately names the revs too. Measured as a surviving
+        # mutant while this assertion was absent: deleting
+        # `{ARC_ESCAPE_REVS[0]}` from the `git log` itself left the test GREEN
+        # off the parenthetical's own mention, i.e. a pasteable command that
+        # walks `HEAD` alone under prose claiming otherwise. A second mutant —
+        # deleting the "substitute `origin/HEAD`" instruction — survived the
+        # same way until an incidental `refs/remotes/origin/HEAD` was removed
+        # from the narrowing clause, which is why that clause no longer spells
+        # a rev.
+        cmd = [ln for ln in err.splitlines() if "git log" in ln]
+        assert len(cmd) == 1, (
+            f"expected exactly one pasteable `git log` line, found {len(cmd)} "
+            "— this assertion is scoped to it and cannot be")
+        assert fs.ARC_ESCAPE_REVS[0] in cmd[0], (
+            f"the `git log` line {cmd[0]!r} does not pass "
+            f"{fs.ARC_ESCAPE_REVS[0]!r}, the FIRST upstream probe — so the "
+            "command an operator pastes walks `HEAD` alone while the prose "
+            "beside it says the reader walks more")
 
     def test_a_seed_WITH_a_local_transcript_still_RESOLVES(self, tmp_path):
         """The positive control: the refusal path must not have widened."""
