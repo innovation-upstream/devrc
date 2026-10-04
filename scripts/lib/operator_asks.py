@@ -275,10 +275,28 @@ def asks_from_comments(comments: Sequence[dict]) -> tuple[list[Ask], dict, int]:
 
 
 #: The two `kind`s of `extract_user_msgs.py` row that are the operator speaking.
-#: `answer` needs `--include-answers` and is 93.5% again on top of `typed` — see
-#: that script's own docstring for the measurement. `command` is excluded: a bare
-#: `/slash` (8 B) is an invocation, not an ask.
-OPERATOR_KINDS = ("typed", "answer")
+#: `decision` is a DECISION he took at an `AskUserQuestion` prompt — 93.5% again
+#: on top of `typed`, see that script's own docstring for the measurement. It
+#: was named `answer` and gated behind `--include-answers` until devrc#1955 made
+#: the channel the default and renamed the kind.
+#:
+#: 🔴 `decision_unanswered` IS DELIBERATELY ABSENT, AND THE OMISSION IS THE
+#: GUARD. That row means "a question was asked and never answered", so its text
+#: is the AGENT's question and its option labels — not one word of it is the
+#: operator. Admitting it here would quote an agent's own proposal back to the
+#: auditor as a requirement the operator stated, which is the exact attribution
+#: error round 0 exists to prevent, pointed the other way. Pinned by
+#: `test_an_UNANSWERED_question_is_never_quoted_as_an_operator_ask` — and that
+#: test is what makes this a branch rather than a comment.
+#:
+#: 🔴 ONE SPELLING, PINNED TO THE PRODUCER. `extract_user_msgs.KIND_DECISION` is
+#: the definition; this module cannot import it (it lives under
+#: `scripts/session-analysis/`, not `scripts/lib/`), so it is re-spelled here
+#: ONCE and `test_the_decision_kind_is_pinned_to_the_producers_constant` reads
+#: the producer's value back out. A kind renamed upstream with this left behind
+#: drops every decision silently — the #1955 defect, restored.
+KIND_DECISION = "decision"
+OPERATOR_KINDS = ("typed", KIND_DECISION)
 
 #: The only machine-generated class that reaches this module. Everything else is
 #: removed upstream — see the module docstring for the eight families that were
@@ -293,7 +311,7 @@ HARNESS_NOTE_PATTERNS = ("was stopped by the user.",)
 #: How far in the note markers are looked for, so an ask ABOUT one survives.
 _MARKER_WINDOW = 400
 
-#: 🔴 AN `answer` ROW ARRIVES WRAPPED IN AGENT TEXT, AND THAT IS THE SAME CLASS
+#: 🔴 A `decision` ROW ARRIVES WRAPPED IN AGENT TEXT, AND THAT IS THE SAME CLASS
 #: THIS MODULE DELETED THE PR DESCRIPTION FOR. Measured on devrc#1887: two answer
 #: rows totalling 1,124 B carried ~440 B of the operator's free-text notes; the
 #: rest was the harness's framing sentences, the agent's own question text, its
@@ -383,7 +401,7 @@ def parse_rows(jsonl_text: str) -> tuple[list[Ask], dict]:
                 dropped[reason] = dropped.get(reason, 0) + 1
             continue
         kind = row.get("kind") or ""
-        if kind == "answer":
+        if kind == KIND_DECISION:
             text = strip_answer_framing(text)
             if not text:
                 dropped["an answer row that was entirely harness framing"] = (
@@ -580,7 +598,7 @@ def _render_asks(asks: Sequence[Ask]) -> tuple[list[str], dict]:
                 last_key = key
             led["messages"] += 1
             led["bytes"] += len(a.text)
-            if a.kind == "answer":
+            if a.kind == KIND_DECISION:
                 led["answers"] += 1
                 # Labelled because it is a DECISION rather than a free-text
                 # ask: the operator picked an option, sometimes with a note.
@@ -677,6 +695,12 @@ def render(asks: Sequence[Ask], unmeasured: Sequence[Unmeasured] = (),
             for s in session_ids if session_trailer.valid_id(s)
         )
         if cmd:
+            # ⚠ `--include-answers` IS A NO-OP AGAINST THE CURRENT EXTRACTOR —
+            # devrc#1955 made the decision channel the default. It is still
+            # printed because this line is copied and run by a human, possibly
+            # on a host whose deployed copy predates that change, where the flag
+            # is the difference between seeing his decisions and not. Pinned by
+            # `test_the_reread_command_carries_include_answers`.
             lines.append(
                 "  Re-read them yourself: python3 $DEVRC/scripts/"
                 f"session-analysis/extract_user_msgs.py --include-answers {cmd}"

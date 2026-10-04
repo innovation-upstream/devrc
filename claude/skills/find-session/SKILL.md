@@ -160,8 +160,8 @@ python3 $DEVRC/scripts/find-session.py --arc handoff-<topic>.md    # or a slug, 
 - 🔴 **A resolved arc PRINTS ITS OWN NEXT STEP — quote the `NEXT —` line, don't re-derive
   it.** For *"anything left outstanding from this arc / check my messages / was it all
   addressed"*, the footer names
-  `extract_user_msgs.py --arc <doc>`, which extracts the operator's own messages across
-  exactly these sessions. It is **absent on a measured-empty arc** on purpose (the extractor
+  `extract_user_msgs.py --arc <doc>`, which extracts the operator's own messages AND his
+  `AskUserQuestion` decisions across exactly these sessions. It is **absent on a measured-empty arc** on purpose (the extractor
   exits non-zero there), and absent is a reading — not a missing line to work around.
   ⚠ **Output scales with the arc and there is no answering mode**: one 7-session arc measured
   199 messages / 967 KB, so size it before reading it whole, and expect to synthesise (a

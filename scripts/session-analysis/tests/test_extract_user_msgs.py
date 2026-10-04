@@ -43,6 +43,16 @@ LEAK_TYPED = "LEAKCANARY-operator-typed-prose"
 LEAK_OTHER = "LEAKCANARY-a-second-typed-message"
 LEAK_REMINDER = "LEAKCANARY-injected-system-reminder"
 LEAK_TOOL = "LEAKCANARY-tool-result-body"
+#: The decision channel's canaries. 🔴 PAIRWISE DISTINCT AND DISTINCT FROM EVERY
+#: CONSTANT THE ASSERTIONS NAME (`X.UNANSWERED_PREFIX`,
+#: `X.NO_ANSWER_TEXT_PREFIX`, the `kind` strings) — a fixture that can only
+#: produce the expected constant's own value cannot see a mutant that hardcodes
+#: the literal, and would survive a fully green suite.
+LEAK_ASKED = "LEAKCANARY-the-question-that-was-answered"
+LEAK_CHOSEN = "LEAKCANARY-the-option-he-picked"
+LEAK_DECLINED = "LEAKCANARY-the-option-he-refused"
+LEAK_ABANDONED = "LEAKCANARY-the-question-nobody-ever-answered"
+LEAK_ABANDONED_OPT = "LEAKCANARY-an-option-on-the-abandoned-prompt"
 
 
 # --- fixture builders ----------------------------------------------------------
@@ -171,6 +181,380 @@ class TestRecordsOf:
         p.write_text(p.read_text() + "{not json\n" +
                      json.dumps(_user(LEAK_OTHER)) + "\n")
         assert [r["text"] for r in X.records_of(p)] == [LEAK_TYPED, LEAK_OTHER]
+
+
+# --- the DECISION channel (devrc#1955) -----------------------------------------
+
+def _ask(tool_use_id, question, options, ts="2026-09-01T00:01:00.000Z",
+         name="AskUserQuestion", **extra):
+    """An ASSISTANT record issuing one `AskUserQuestion`.
+
+    🔴 SHAPED FROM THE REAL SCHEMA, SYNTHESISED FROM CANARIES. Measured over
+    this host's corpus 2026-10-03: the input is
+    `{"questions": [{"question", "header", "multiSelect", "options": [{"label",
+    "description"}]}]}` on 1,551 of 1,554 calls. `name` is a parameter so the Bash
+    discriminator test builds the SAME block with a different tool.
+    """
+    rec = {"type": "assistant", "timestamp": ts,
+           "message": {"role": "assistant", "content": [
+               {"type": "tool_use", "id": tool_use_id, "name": name,
+                "input": {"questions": [{
+                    "question": question,
+                    "header": "Pick",
+                    "multiSelect": False,
+                    "options": [{"label": o, "description": f"what {o} means"}
+                                for o in options]}]}}]}}
+    rec.update(extra)
+    return rec
+
+
+def _answer(tool_use_id, content, ts="2026-09-01T00:02:00.000Z", **extra):
+    """A USER record carrying one `tool_result`.
+
+    `content` is passed through verbatim so a test can hand it the string shape
+    (1,550 of 1,550 answered calls measured here) or the list-of-typed-blocks shape (0 measured
+    here, and the shape every other tool's result uses — so it is parsed rather
+    than assumed absent).
+    """
+    rec = {"type": "user", "timestamp": ts,
+           "message": {"role": "user", "content": [
+               {"type": "tool_result", "tool_use_id": tool_use_id,
+                "content": content}]}}
+    rec.update(extra)
+    return rec
+
+
+#: The harness's real framing around an answer, with the canaries substituted
+#: for the operator's own words. This is the string an audit greps.
+def _answered_body(question, chosen):
+    return f'Your questions have been answered: "{question}"="{chosen}"'
+
+
+class TestTheDecisionChannel:
+    """🔴 devrc#1955. `AskUserQuestion` answers are OPERATOR DECISIONS and they
+    arrive in a `tool_result` block — the one block shape the typed walk
+    ignores. Dropping them made every fork-resolution invisible to an arc audit
+    while the output looked complete, and that produced a confident wrong
+    all-clear on a real arc.
+
+    These are not unit tests of an `if`. The load-bearing one is
+    `test_an_UNANSWERED_question_is_emitted_as_its_OWN_kind`: the predecessor
+    built a SET of `AskUserQuestion` ids and only ever emitted on a MATCH, so a
+    question the operator closed without answering left no trace at all — the
+    new channel inheriting the old one's silent-omission property. 4 of 1,554
+    calls on this host, in 4 different sessions, all invisible.
+    """
+
+    def _rows(self, tmp_path, records):
+        p = _write_session(tmp_path, "proj-d", "sess-d", records)
+        return list(X.records_of(p))
+
+    # --- the positive control, first ------------------------------------------
+    def test_an_ANSWERED_question_becomes_a_decision_row(self, tmp_path):
+        """🔴 THE POSITIVE CONTROL FOR THE WHOLE CHANNEL. A zero from any test
+        below is indistinguishable from a fixture wired to nothing until this
+        one has been watched to produce a NON-ZERO count."""
+        rows = self._rows(tmp_path, [
+            _ask("tu_answered", LEAK_ASKED, [LEAK_CHOSEN, LEAK_DECLINED]),
+            _answer("tu_answered", _answered_body(LEAK_ASKED, LEAK_CHOSEN)),
+        ])
+        assert [(r["kind"], r["text"]) for r in rows] == [
+            ("decision", _answered_body(LEAK_ASKED, LEAK_CHOSEN))], rows
+
+    def test_the_decision_row_carries_the_question_AND_the_chosen_option(
+            self, tmp_path):
+        """Both halves, because an audit needs the fork AND how it was resolved.
+        The DECLINED label must be absent — the harness emits only the pick, and
+        a row that listed every option would read as if he chose them all."""
+        (row,) = self._rows(tmp_path, [
+            _ask("tu_both", LEAK_ASKED, [LEAK_CHOSEN, LEAK_DECLINED]),
+            _answer("tu_both", _answered_body(LEAK_ASKED, LEAK_CHOSEN)),
+        ])
+        assert LEAK_ASKED in row["text"]
+        assert LEAK_CHOSEN in row["text"]
+        assert LEAK_DECLINED not in row["text"], (
+            "an option he did NOT pick is in the decision text — a reader "
+            f"cannot tell what he chose: {row['text']!r}")
+
+    # --- THE REGRESSION TEST --------------------------------------------------
+    def test_an_UNANSWERED_question_is_emitted_as_its_OWN_kind(self, tmp_path):
+        """🔴 THE #1955 REGRESSION TEST — RED BEFORE THE FIX.
+
+        An `AskUserQuestion` `tool_use` with NO matching `tool_result` is a real
+        state: the operator aborted, interrupted, or the session ended on the
+        prompt. The predecessor emitted NOTHING for it, so the decision channel
+        it had just gained could not report its own empty case.
+        """
+        rows = self._rows(tmp_path, [
+            _ask("tu_abandoned", LEAK_ABANDONED, [LEAK_ABANDONED_OPT]),
+        ])
+        kinds = [r["kind"] for r in rows]
+        assert kinds == ["decision_unanswered"], (
+            "an AskUserQuestion that was never answered produced "
+            f"{kinds!r} — the aborted/unanswered state is invisible, which is "
+            "the silent omission devrc#1955 is about")
+
+    def test_the_unanswered_row_NAMES_the_question_and_the_options_offered(
+            self, tmp_path):
+        """A bare marker would say a decision was missed without saying WHICH.
+        The options matter too: they are what the operator walked away from."""
+        (row,) = self._rows(tmp_path, [
+            _ask("tu_named", LEAK_ABANDONED, [LEAK_ABANDONED_OPT]),
+        ])
+        assert row["text"].startswith(X.UNANSWERED_PREFIX), row["text"]
+        assert LEAK_ABANDONED in row["text"]
+        assert LEAK_ABANDONED_OPT in row["text"], (
+            "the options offered are absent — a reader cannot see what the "
+            f"abandoned fork was between: {row['text']!r}")
+
+    def test_the_unanswered_row_is_timestamped_when_the_question_was_ASKED(
+            self, tmp_path):
+        """The only timestamp this state has. An empty `ts` sorts LAST in the
+        CLI, which would put a missed decision at the end of the chain rather
+        than where the fork actually happened."""
+        (row,) = self._rows(tmp_path, [
+            _ask("tu_ts", LEAK_ABANDONED, [LEAK_ABANDONED_OPT],
+                 ts="2026-09-04T05:06:07.000Z"),
+        ])
+        assert row["ts"] == "2026-09-04T05:06:07.000Z", row
+
+    def test_an_ANSWERED_question_is_NOT_also_reported_unanswered(
+            self, tmp_path):
+        """The other direction of the EOF sweep: an id that matched must be
+        popped, or every decision is double-counted and every arc grows a
+        phantom missed fork."""
+        rows = self._rows(tmp_path, [
+            _ask("tu_once", LEAK_ASKED, [LEAK_CHOSEN]),
+            _answer("tu_once", _answered_body(LEAK_ASKED, LEAK_CHOSEN)),
+        ])
+        assert [r["kind"] for r in rows] == ["decision"], rows
+
+    # --- the structural discriminator -----------------------------------------
+    def test_a_BASH_tool_result_is_NEVER_a_decision(self, tmp_path):
+        """🔴 THE DISCRIMINATOR IS THE `tool_use_id`, NEVER THE TEXT. Every
+        Bash/Read/Grep result arrives in the same block shape and none is the
+        operator. The fixture is the SAME `_ask` block with a different `name`,
+        so the only difference under test is the structural one."""
+        rows = self._rows(tmp_path, [
+            _ask("tu_bash", LEAK_ASKED, [LEAK_CHOSEN], name="Bash"),
+            _answer("tu_bash", LEAK_TOOL),
+        ])
+        assert rows == [], (
+            f"a Bash result was emitted as an operator decision: {rows}")
+
+    def test_an_orphan_tool_result_naming_an_UNKNOWN_id_is_not_a_decision(
+            self, tmp_path):
+        """A truncated or resumed transcript can carry a result whose `tool_use`
+        is in an earlier file. Unknown id, so it is not provably the operator —
+        and guessing would admit every Bash result in a truncated session."""
+        rows = self._rows(tmp_path, [_answer("tu_not_here", LEAK_TOOL)])
+        assert rows == [], rows
+
+    def test_a_SIDECHAIN_AskUserQuestion_is_not_a_decision(self, tmp_path):
+        """A sidechain record is a subagent's own transcript. A question a
+        subagent asked ITSELF is not a fork the operator resolved — and it must
+        not land in the unanswered channel either, which is the case an
+        `isSidechain` check placed only on the `user` branch would miss."""
+        rows = self._rows(tmp_path, [
+            _ask("tu_sub", LEAK_ABANDONED, [LEAK_ABANDONED_OPT],
+                 isSidechain=True),
+            _answer("tu_sub", _answered_body(LEAK_ASKED, LEAK_CHOSEN),
+                    isSidechain=True),
+        ])
+        assert rows == [], f"a subagent's own question became a decision: {rows}"
+
+    # --- schema variance ------------------------------------------------------
+    def test_a_tool_result_whose_content_is_a_LIST_of_blocks_is_still_read(
+            self, tmp_path):
+        """🔴 THE TRANSCRIPT SCHEMA VARIES ACROSS CLAUDE CODE VERSIONS, so the
+        block is parsed structurally rather than by a fixed shape. `content` is
+        a plain string on all 1,550 answered calls measured here; the
+        list-of-typed-blocks form is what every other tool's result uses, so it
+        is handled rather than assumed absent."""
+        body = _answered_body(LEAK_ASKED, LEAK_CHOSEN)
+        (row,) = self._rows(tmp_path, [
+            _ask("tu_list", LEAK_ASKED, [LEAK_CHOSEN]),
+            _answer("tu_list", [{"type": "text", "text": body}]),
+        ])
+        assert (row["kind"], row["text"]) == ("decision", body), row
+
+    def test_a_tool_input_the_harness_could_not_PARSE_still_produces_a_row(
+            self, tmp_path):
+        """`__unparsedToolInput` instead of `questions` — 3 of 1,554 measured
+        on this host (the other 1,551 carry a readable `questions` list). The
+        question is unreadable, so the row falls back to the `tool_use` id. 🔴 An unreadable question is a worse record than a
+        readable one and a FAR better one than no record: a shape this tool
+        cannot parse must not become a silently missing decision."""
+        rows = self._rows(tmp_path, [
+            {"type": "assistant", "timestamp": "2026-09-01T00:01:00.000Z",
+             "message": {"role": "assistant", "content": [
+                 {"type": "tool_use", "id": "tu_unparsed",
+                  "name": "AskUserQuestion",
+                  "input": {"__unparsedToolInput": "{\"questions\": [{\"que"}}]}},
+        ])
+        assert [r["kind"] for r in rows] == ["decision_unanswered"], rows
+        assert "tu_unparsed" in rows[0]["text"], (
+            "an unparsable question produced a row that names neither the "
+            f"question nor the call: {rows[0]['text']!r}")
+
+    def test_a_NON_STRING_tool_use_id_does_not_CRASH_the_whole_extraction(
+            self, tmp_path):
+        """🔴 A TRACEBACK HERE DISCARDS EVERY ROW, NOT JUST THE BAD BLOCK. The
+        id becomes a dict KEY, so a list or dict raises `TypeError: unhashable
+        type`, and `main` consumes this generator inside a bare
+        `except OSError` — the TypeError escapes as rc 1 with no output, from a
+        tool whose whole contract is that a zero means something specific.
+
+        MEASURED: 1,554 of 1,554 real ids are strings, so this is a DEFENSIVE
+        guard and is labelled as one. What makes it worth a test rather than a
+        comment is the second assertion: the GOOD rows in the same transcript
+        must survive. A guard that threw the file away quietly would satisfy
+        'it did not crash' while being just as destructive.
+        """
+        rows = self._rows(tmp_path, [
+            _user(LEAK_TYPED, ts="2026-09-01T00:00:00.000Z"),
+            {"type": "assistant", "timestamp": "2026-09-01T00:01:00.000Z",
+             "message": {"role": "assistant", "content": [
+                 {"type": "tool_use", "id": ["not", "a", "string"],
+                  "name": "AskUserQuestion", "input": {}}]}},
+            _ask("tu_fine", LEAK_ASKED, [LEAK_CHOSEN],
+                 ts="2026-09-01T00:02:00.000Z"),
+            _answer("tu_fine", _answered_body(LEAK_ASKED, LEAK_CHOSEN),
+                    ts="2026-09-01T00:03:00.000Z"),
+            {"type": "user", "timestamp": "2026-09-01T00:04:00.000Z",
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": {"also": "not a str"},
+                  "content": LEAK_TOOL}]}},
+        ])
+        assert [r["kind"] for r in rows] == ["typed", "decision"], (
+            "a malformed id either crashed the extraction or took the good "
+            f"rows with it: {rows}")
+
+    def test_a_MATCHED_result_carrying_no_text_is_still_a_decision_row(
+            self, tmp_path):
+        """🔴 THE PREDECESSOR'S `if text:` WAS A SILENT DROP. 0 of the 1,550
+        answered calls on this host — kept because a guard that only covers the shapes we happened to
+        measure is how the next shape goes missing, and this is a channel whose
+        entire purpose is to stop silent omission."""
+        (row,) = self._rows(tmp_path, [
+            _ask("tu_empty", LEAK_ASKED, [LEAK_CHOSEN]),
+            _answer("tu_empty", ""),
+        ])
+        assert row["kind"] == "decision", row
+        assert row["text"].startswith(X.NO_ANSWER_TEXT_PREFIX), row["text"]
+        assert LEAK_ASKED in row["text"], (
+            "a decision with no answer text names neither the question nor "
+            f"the call: {row['text']!r}")
+
+    # --- the pair: both channels, in one transcript ---------------------------
+    def test_the_TYPED_channel_is_unchanged_beside_a_decision(self, tmp_path):
+        """🔴 THE PAIR, REPORTED TOGETHER. Two typed rows and one decision from
+        one transcript: the typed count pins that the new channel did not
+        displace the old one, and the decision count is the non-zero that makes
+        a zero elsewhere readable as a real zero rather than a dead fixture."""
+        rows = self._rows(tmp_path, [
+            _user(LEAK_TYPED, ts="2026-09-01T00:00:00.000Z"),
+            _ask("tu_pair", LEAK_ASKED, [LEAK_CHOSEN]),
+            _answer("tu_pair", _answered_body(LEAK_ASKED, LEAK_CHOSEN)),
+            _user(LEAK_OTHER, ts="2026-09-01T00:03:00.000Z"),
+        ])
+        counts = {}
+        for r in rows:
+            counts[r["kind"]] = counts.get(r["kind"], 0) + 1
+        assert counts == {"typed": 2, "decision": 1}, counts
+
+    # --- no flag, and the retired flag is inert -------------------------------
+    def test_the_channel_needs_NO_FLAG(self, tmp_path):
+        """🔴 THE CONTRACT #1955 REVERSES. The channel was opt-in behind
+        `--include-answers`, and the previous suite pinned that default
+        explicitly. The issue overrules it: the channel's whole value is to an
+        audit that does not know to ask for it, and its closing condition runs
+        the tool with no flag at all. `records_of` is called with NO keyword, so
+        the DEFAULT is what is under test."""
+        p = _write_session(tmp_path, "proj-d", "sess-d", [
+            _ask("tu_default", LEAK_ASKED, [LEAK_CHOSEN]),
+            _answer("tu_default", _answered_body(LEAK_ASKED, LEAK_CHOSEN)),
+        ])
+        assert [r["kind"] for r in X.records_of(p)] == ["decision"], (
+            "the decision channel is not in the default output — an audit "
+            "that does not know to pass a flag reads a partial decision "
+            "channel, which is the defect")
+
+    def test_the_retired_flag_is_a_NO_OP_not_a_second_mode(self, tmp_path):
+        """`--include-answers` is still ACCEPTED (audit-dispatch passes it, and
+        `/audit-pr` prints it in a command a human copies) and must do NOTHING.
+        A flag that silently did something different would be worse than one
+        that was removed, so the two outputs are compared BYTE FOR BYTE."""
+        _write_session(tmp_path, "proj-d", "sess-d", [
+            _user(LEAK_TYPED),
+            _ask("tu_flag", LEAK_ASKED, [LEAK_CHOSEN]),
+            _answer("tu_flag", _answered_body(LEAK_ASKED, LEAK_CHOSEN)),
+            _ask("tu_flag_abandoned", LEAK_ABANDONED, [LEAK_ABANDONED_OPT]),
+        ])
+        rc_off, off, _ = _run(["--session", "sess-d", "--jsonl"], tmp_path)
+        rc_on, on, _ = _run(
+            ["--session", "sess-d", "--jsonl", "--include-answers"], tmp_path)
+        assert (rc_off, rc_on) == (0, 0), (rc_off, rc_on)
+        assert off == on, "--include-answers changed the output"
+        kinds = [json.loads(l)["kind"] for l in off.splitlines()]
+        assert sorted(kinds) == ["decision", "decision_unanswered", "typed"], (
+            f"the positive control is wired to nothing: {kinds}")
+
+    # --- end to end, through the CLI -----------------------------------------
+    def test_both_decision_kinds_reach_the_JSONL_through_main(self, tmp_path):
+        """The seam: `records_of` is not the surface an audit reads — the CLI
+        is. A row class that exists in the generator and is filtered, deduped or
+        dropped on the way to `--jsonl` is invisible exactly where it matters."""
+        _write_session(tmp_path, "proj-d", "sess-d", [
+            _ask("tu_e2e_ok", LEAK_ASKED, [LEAK_CHOSEN]),
+            _answer("tu_e2e_ok", _answered_body(LEAK_ASKED, LEAK_CHOSEN)),
+            _ask("tu_e2e_gone", LEAK_ABANDONED, [LEAK_ABANDONED_OPT],
+                 ts="2026-09-01T00:05:00.000Z"),
+        ])
+        rc, out, _ = _run(["--session", "sess-d", "--jsonl"], tmp_path)
+        assert rc == 0, out
+        rows = [json.loads(l) for l in out.splitlines()]
+        by_kind = {r["kind"]: r["text"] for r in rows}
+        assert set(by_kind) == {"decision", "decision_unanswered"}, by_kind
+        assert LEAK_CHOSEN in by_kind["decision"]
+        assert LEAK_ABANDONED in by_kind["decision_unanswered"]
+
+    def test_a_decision_reaches_the_MARKDOWN_heading_as_its_kind(self, tmp_path):
+        """Markdown is the DEFAULT format and the one a human or an agent
+        reads. The kind is in the per-message heading, so a decision that
+        rendered as `typed` would be quoted as something he asked for rather
+        than something he chose."""
+        _write_session(tmp_path, "proj-d", "sess-d", [
+            _ask("tu_md", LEAK_ASKED, [LEAK_CHOSEN]),
+            _answer("tu_md", _answered_body(LEAK_ASKED, LEAK_CHOSEN)),
+        ])
+        rc, out, _ = _run(["--session", "sess-d"], tmp_path)
+        assert rc == 0, out
+        assert "· decision" in out, out
+
+    # --- the kind ledger ------------------------------------------------------
+    def test_message_of_only_ever_returns_a_DECLARED_kind(self):
+        """Two-way against `KINDS`. A kind produced by the filtering predicate
+        and absent from the ledger is a row class nothing documents."""
+        cases = ["plain prose the operator wrote",
+                 "<command-name>resume</command-name>"]
+        got = [X.message_of(c)[0] for c in cases]
+        assert got == ["typed", "command"], got
+        for kind in got:
+            assert kind in X.KINDS, f"{kind!r} is not in KINDS"
+
+    def test_KINDS_holds_every_kind_the_module_declares(self):
+        """The other direction — a constant added with no ledger entry."""
+        declared = {X.KIND_DECISION, X.KIND_DECISION_UNANSWERED}
+        assert declared <= set(X.KINDS), declared - set(X.KINDS)
+        assert len(X.KINDS) == len(set(X.KINDS)), X.KINDS
+
+    def test_the_two_decision_kinds_are_DIFFERENT_strings(self):
+        """🔴 Collapsing them is the mutant a behavioural test cannot see: both
+        channels would still be emitted, and `operator_asks` would start
+        quoting an agent's unanswered question back as an operator requirement.
+        This guard owns 'these are two different facts'."""
+        assert X.KIND_DECISION != X.KIND_DECISION_UNANSWERED
 
 
 # --- selectors -----------------------------------------------------------------
@@ -1159,7 +1543,11 @@ class TestTheReferenceDocIsRoutedAndDeployed:
         3: ("nothing was measured",),
         4: ("zero member sessions",),
         5: ("nothing was read",),
-        6: ("zero user-typed",),
+        # ⚠ WAS `"zero user-typed"` AND THAT WORDING WENT STALE WITH THE FIX.
+        # Exit 6 fires on an empty `rows`, which since devrc#1955 means zero of
+        # FOUR kinds, not zero typed messages — a reader of the old sentence
+        # could have concluded the decisions were merely filtered out.
+        6: ("zero rows of any kind",),
     }
 
     def test_the_reference_documents_EVERY_exit_code_with_its_meaning(self):
@@ -1172,6 +1560,29 @@ class TestTheReferenceDocIsRoutedAndDeployed:
         assert rows == {c for c, _ in X.EXIT_CONTRACT}, (
             f"the reference's exit table lists {sorted(rows)}; the tool "
             f"defines {sorted(c for c, _ in X.EXIT_CONTRACT)}")
+
+    def test_the_reference_names_EVERY_kind_the_module_emits(self):
+        """🔴 TWO-WAY AGAINST `KINDS`, AND THIS IS THE #1955 DEFECT IN ITS
+        DOCUMENTATION SHAPE. Before the fix the reference said `kind` is
+        "`typed` … or `command`" while the tool already emitted a third — so the
+        one document routing an agent to this tool asserted a complete channel
+        list that was short by one, and nothing said so. A kind added here with
+        no prose beside it fails this, and a kind described here that the tool
+        never emits is a promise it cannot keep."""
+        text = REFERENCE.read_text(encoding="utf-8")
+        import re
+        documented = set(re.findall(r"^\| `([a-z_]+)` \|", text, re.M))
+        assert documented == set(X.KINDS), (
+            f"the reference's kind table lists {sorted(documented)}; the tool "
+            f"emits {sorted(X.KINDS)}")
+
+    def test_the_reference_says_the_decision_channel_needs_NO_FLAG(self):
+        """The reference used to document `--include-answers` as the way in. A
+        reader who still believes that reads a partial channel and has no way
+        to know — the issue's exact failure mode, one layer up."""
+        text = REFERENCE.read_text(encoding="utf-8")
+        assert "on by default" in text, (
+            "the reference does not say the decision channel is on by default")
 
     def test_the_reference_table_rows_still_MEAN_what_the_tool_returns(self):
         """The half the integer check cannot do — see EXIT_MEANING_TOKENS."""
@@ -1292,14 +1703,21 @@ class TestTheReferenceDocIsRoutedAndDeployed:
 class TestNoCapturedTextEscapes:
     """devrc is PUBLIC. Nothing in this module may carry a real transcript."""
 
+    #: 🔴 ONE LIST, so a canary added for a new channel is covered by both
+    #: guards below without anyone remembering to extend them separately.
+    CANARIES = (LEAK_TYPED, LEAK_OTHER, LEAK_REMINDER, LEAK_TOOL,
+                LEAK_ASKED, LEAK_CHOSEN, LEAK_DECLINED, LEAK_ABANDONED,
+                LEAK_ABANDONED_OPT)
+
     def test_every_fixture_string_is_a_canary(self):
         src = Path(__file__).read_text(encoding="utf-8")
         assert "LEAKCANARY" in src
-        for canary in (LEAK_TYPED, LEAK_OTHER, LEAK_REMINDER, LEAK_TOOL):
+        assert len(self.CANARIES) >= 9, self.CANARIES
+        for canary in self.CANARIES:
             assert canary.startswith("LEAKCANARY-")
 
     def test_the_canaries_are_pairwise_distinct(self):
-        canaries = [LEAK_TYPED, LEAK_OTHER, LEAK_REMINDER, LEAK_TOOL]
+        canaries = list(self.CANARIES)
         assert len(set(canaries)) == len(canaries)
         for a in canaries:
             for b in canaries:
@@ -1307,3 +1725,17 @@ class TestNoCapturedTextEscapes:
                     assert a not in b, (
                         f"{a!r} is a substring of {b!r} — a mutant that emits "
                         "the wrong one would survive")
+
+    def test_no_canary_appears_in_a_constant_the_assertions_NAME(self):
+        """🔴 A FIXTURE THAT CAN ONLY PRODUCE THE EXPECTED CONSTANT'S OWN VALUE
+        CANNOT SEE A MUTANT THAT HARDCODES THE LITERAL — it survives a fully
+        green suite. The decision tests assert `startswith(X.UNANSWERED_PREFIX)`
+        AND that a canary is present; those two are only independent claims
+        while the prefixes carry no canary of their own."""
+        named = (X.UNANSWERED_PREFIX, X.NO_ANSWER_TEXT_PREFIX,
+                 X.KIND_DECISION, X.KIND_DECISION_UNANSWERED)
+        for const in named:
+            for canary in self.CANARIES:
+                assert canary not in const, (
+                    f"{canary!r} is inside {const!r} — the assertion pairing "
+                    "them proves nothing")

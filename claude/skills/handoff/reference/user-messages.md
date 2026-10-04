@@ -106,7 +106,7 @@ says which.
 | 3 | `--arc` only: the seed named no handoff doc, or no `$DEVRC`/`$HOMELAB`/`$DATAPACKET`/`$CIVITAI`/`$CIVITAI_CLI` checkout holds it. 🔴 **NOTHING WAS MEASURED** — a typo in the name lands here, not on 4. |
 | 4 | `--arc` only: the doc resolved and the arc **was** measured, and it has zero member sessions. A **measured** empty arc — a real finding about the doc. |
 | 5 | **NOTHING WAS READ.** Two ways in, and the stderr line says which: session ids were selected and **none** resolved (each is named — check the peer host before concluding they are gone), **or** no transcript could be opened at all, which includes an absent or empty `~/.claude/projects` (a fresh host, a container, the nix sandbox). |
-| 6 | transcripts **were** read and held zero user-typed messages after filtering — the sessions exist and are empty of typed input. |
+| 6 | transcripts **were** read and held zero rows of any kind after filtering — no typed prose, no slash command, and no `AskUserQuestion` decision. The sessions exist and are empty of operator input. |
 
 The pair that matters most is **3 vs 4**: 3 means the instrument never ran, 4
 means it ran and the answer is zero. Treating them alike is the scoped-zero-as-
@@ -175,11 +175,43 @@ always present:
  "kind": "typed", "text": "…", "arc_role": "originated"}
 ```
 
-`kind` is `typed` (prose the operator wrote) or `command` (a slash command,
-rendered as `<name> <args>`). `arc_role` is `null` outside `--arc`. `ts` is the
-record's own timestamp, empty when the transcript carries none; rows are sorted
-chronologically across sessions, and rows with no timestamp sort last rather
-than first.
+`arc_role` is `null` outside `--arc`. `ts` is the record's own timestamp, empty
+when the transcript carries none; rows are sorted chronologically across
+sessions, and rows with no timestamp sort last rather than first.
+
+### The four `kind`s
+
+| kind | what it is |
+|---|---|
+| `typed` | prose the operator wrote |
+| `command` | a slash command they invoked, rendered as `<name> <args>` |
+| `decision` | a DECISION they took at an `AskUserQuestion` prompt — the question and the option they chose |
+| `decision_unanswered` | an `AskUserQuestion` that was **asked and never answered** — aborted, interrupted, or the session ended on the prompt |
+
+🔴 **`decision` is the channel this tool used to drop entirely, and the omission
+produced a confident wrong all-clear.** An `AskUserQuestion` answer arrives in a
+`tool_result` block — the one block shape the typed walk ignores, correctly, for
+every other tool. So an audit asking *"did everything he chose actually ship?"*
+read a partial decision channel while presenting a complete-looking one, and
+nothing in the output said a channel was missing. On the arc that exposed it
+(devrc#1955): an instruction of the form *"merge as correctness-only, then close
+the loop"* was reported as honoured with its second half undone, and an item the
+operator had explicitly **declined** was about to be recommended as top
+priority. Both decisions were in the transcripts the tool had just read.
+MEASURED on this host: **1,491 decision records / 837,635 B**, against 895,672 B
+for the entire `typed` corpus — it nearly doubles what the tool can report.
+
+🔴 **`decision_unanswered` exists so the new channel cannot acquire the old
+one's defect.** A `tool_use` with no matching `tool_result` is a real state, not
+an absence; **4 of 1,554** measured on this host 2026-10-03, in 4 different
+sessions. It is **not** the operator speaking — its text
+is the agent's own question and option labels — so `/audit-pr`'s round 0 takes
+`decision` and refuses this kind rather than quoting an agent's proposal back as
+a requirement.
+
+The channel is **on by default**. `--include-answers`, which used to gate it, is
+accepted and ignored; it is still worth passing against an extractor deployed on
+a host that predates the change.
 
 ## Dedup
 

@@ -1,11 +1,29 @@
 #!/usr/bin/env python3
-"""Extract the genuinely user-TYPED messages from a SCOPED set of sessions.
+"""Extract what the OPERATOR said and decided across a SCOPED set of sessions.
 
 WHAT THIS IS FOR
 ----------------
 Reading back what the operator actually asked for across one effort — the
 kickoff, the corrections, the "no, do X instead" — without the model's replies,
 the tool output, or the harness's injected boilerplate in the way.
+
+🔴 AND WHAT THEY DECIDED, WHICH IS A SEPARATE CHANNEL THIS TOOL USED TO DROP
+ENTIRELY. An `AskUserQuestion` answer is the operator resolving a fork, and it
+arrives in a `tool_result` block — the one block shape `extract_from_content`
+ignores, correctly, for every other tool. devrc#1955: so an audit asking "did
+everything he chose actually ship?" read a PARTIAL decision channel while
+presenting a complete-looking one, and nothing in the output said a channel was
+missing. It produced a confident wrong all-clear on a real arc: an instruction
+of the form "merge as correctness-only, then close the loop" was reported as
+honoured with its second half undone, and an item the operator had explicitly
+DECLINED was about to be recommended as top priority. Both decisions were in
+the transcripts the tool had just read.
+
+Four `kind`s now, all four in the DEFAULT output and all four enumerated in
+`KINDS`: `typed`, `command`, `decision`, and `decision_unanswered` — the last
+being an `AskUserQuestion` that was asked and never answered, emitted rather
+than dropped, because a new channel that hides its own empty case has the
+defect this one was built to remove.
 
 🔴 THE SCOPE IS THE POINT, AND IT USED NOT TO EXIST. Until 2026-09-25 this
 script took one argument (an output path), walked the WHOLE corpus, and wrote
@@ -32,7 +50,7 @@ would say so.
 🔴 A ZERO IS NEVER REPORTED AS A ZERO. `--arc typo-in-the-name` and an arc that
 genuinely has no sessions both produce "nothing extracted"; so do "the ids
 resolved to no transcript", "no transcript could be opened at all" and "the
-transcripts held no typed message". Different facts with different fixes, so
+transcripts held no row of any kind". Different facts with different fixes, so
 each gets its own exit code and a reason on stderr — and where one code covers
 two ways in (exit 5 does), the stderr line says which. See `EXIT_CONTRACT`.
 
@@ -96,7 +114,11 @@ EXIT_ARC_EMPTY = 4
 #: were not, and every contract sentence here still said "ids were selected …
 #: check the peer host" — which sends a reader of case (b) to the wrong fix.
 EXIT_NO_TRANSCRIPTS = 5
-#: Transcripts were read and yielded zero user-typed messages after filtering.
+#: Transcripts were read and yielded zero rows of ANY kind after filtering —
+#: nothing typed, no slash command, and no `AskUserQuestion` decision. ⚠ This
+#: used to read "zero user-typed messages", which was narrower than the
+#: condition it reports from the moment the decision channel became the default:
+#: a reader of exit 6 could have concluded the decisions were merely filtered.
 EXIT_NO_MESSAGES = 6
 
 #: 🔴 EXIT 5 MEANS SOMETHING ELSE IN `find-session.py`, AND THIS TOOL IMPORTS
@@ -132,9 +154,10 @@ EXIT_CONTRACT = (
      "before concluding they are gone), OR no transcript could be opened at "
      "all, which includes an absent or empty ~/.claude/projects."),
     (EXIT_NO_MESSAGES,
-     "transcripts WERE read and held zero user-typed messages after filtering "
-     "— the sessions exist and are empty of typed input (agent-driven, or "
-     "every message was harness boilerplate)."),
+     "transcripts WERE read and held zero rows of ANY kind after filtering — "
+     "no typed prose, no slash command, and no AskUserQuestion decision. The "
+     "sessions exist and are empty of operator input (agent-driven, or every "
+     "message was harness boilerplate)."),
 )
 
 # --------------------------------------------------------------------------- #
@@ -174,7 +197,10 @@ def extract_from_content(content):
         return [content]
     if not isinstance(content, list):
         return []
-    # ignore tool_result, image, tool_use, thinking
+    # Only `text` blocks. ⚠ `tool_result` is skipped HERE and read in
+    # `records_of` — an `AskUserQuestion` result is the operator, every other
+    # tool's result is not, and the discriminator is the `tool_use_id`, which
+    # this function cannot see. image/tool_use/thinking are skipped outright.
     return [b.get("text", "") for b in content
             if isinstance(b, dict) and b.get("type") == "text"]
 
@@ -205,12 +231,33 @@ def message_of(raw):
     return ("typed", txt)
 
 
-#: `kind` for an answer the operator gave to an `AskUserQuestion` prompt. A
-#: THIRD kind beside `typed` and `command`, opt-in via `records_of(...,
-#: include_answers=True)` and `--include-answers`, so every existing consumer
-#: filtering on `typed` — the `find-session --arc` footer among them — is
-#: untouched and its output does not move.
-KIND_ANSWER = "answer"
+#: `kind` for a DECISION the operator took at an `AskUserQuestion` prompt — the
+#: question was asked and an answer came back. Named `decision` rather than
+#: `answer` because that is the fact a reader of this channel is after: it is
+#: how a fork got resolved, and devrc#1955's closing condition names this
+#: spelling.
+KIND_DECISION = "decision"
+
+#: `kind` for an `AskUserQuestion` that was ISSUED and never answered — no
+#: `tool_result` ever named its id (the operator aborted, interrupted, or the
+#: session ended on the prompt). 🔴 ITS OWN KIND, NOT A DROPPED ROW AND NOT A
+#: FIELD ON `decision`. Dropping it would give the new channel the exact
+#: silent-omission property the old one had; folding it into `decision` would
+#: make "7 decisions" count questions nobody answered. A separate `kind` is
+#: also what makes a consumer BRANCH on the state — `operator_asks.py` takes
+#: `decision` and refuses this one, because an unanswered question is the
+#: AGENT speaking, not the operator. MEASURED on this host 2026-10-03 over 954
+#: corpus transcripts: **4 of 1,554** non-sidechain `AskUserQuestion` calls have
+#: no result, in 4 different sessions, and all 4 were invisible.
+KIND_DECISION_UNANSWERED = "decision_unanswered"
+
+#: 🔴 EVERY `kind` THIS TOOL CAN EMIT, IN ONE PLACE. Two-way pinned: against
+#: `message_of`'s own returns by `test_message_of_only_ever_returns_a_DECLARED_kind`,
+#: and against the reference doc's prose by
+#: `test_the_reference_names_every_kind_the_module_emits`. A channel added with
+#: no prose beside it is this issue's defect in a new shape — the output would
+#: gain a row class that nothing documents and no reader expects.
+KINDS = ("typed", "command", KIND_DECISION, KIND_DECISION_UNANSWERED)
 
 #: The tool whose result IS the operator speaking. Matched STRUCTURALLY: a
 #: `tool_result` block's `tool_use_id` against an assistant `tool_use` of this
@@ -218,27 +265,107 @@ KIND_ANSWER = "answer"
 #: Bash/Read/Grep result arrives and those are not the operator.
 ASK_TOOL_NAME = "AskUserQuestion"
 
+#: Opens the text of a `decision_unanswered` row. A reader grepping the decision
+#: channel must be able to tell "he chose X" from "he was asked and never said",
+#: in the TEXT and not only in a field they might not read.
+UNANSWERED_PREFIX = (
+    "UNANSWERED AskUserQuestion — asked, and no tool_result ever came back "
+    "(aborted, interrupted, or the session ended on the prompt): ")
 
-def answer_ids(records):
-    """The `tool_use` ids of every `AskUserQuestion` an assistant issued.
+#: Opens a `decision` row whose MATCHED `tool_result` carried no text at all.
+#: MEASURED 0 of the 1,550 answered calls on this host, so this is not a path
+#: in use — it exists because the predecessor's `if text:` was a SILENT DROP of
+#: exactly the class this channel was added to stop, and a guard that only
+#: covers the shapes we happened to see is how the next shape goes missing.
+NO_ANSWER_TEXT_PREFIX = (
+    "DECISION with no answer text — the tool_result matched and carried "
+    "nothing readable: ")
 
-    Separate pass because a `tool_result` names the id of a `tool_use` that
-    appeared EARLIER, and a single streaming pass cannot know, at the moment it
-    meets the result, whether the call was this tool or a Bash.
+
+def question_summary(tool_input):
+    """The question(s) asked and the option labels offered, out of a `tool_use`.
+
+    🔴 PARSED STRUCTURALLY AND TOLERANTLY, because the transcript schema varies
+    across Claude Code versions and this input is the version-sensitive half.
+    MEASURED over this host's corpus 2026-10-03: 1,551 calls carry `questions`
+    (a list of `{question, header, multiSelect, options:[{label, description}]}`)
+    and 3 carry `__unparsedToolInput` INSTEAD — the harness could not parse the
+    call at all. So every field here is optional, and a shape this function
+    cannot read returns '' rather than raising; the caller still emits the row,
+    falling back to the `tool_use` id. An unreadable question is a worse record
+    than a readable one and a far better one than no record.
     """
-    out = set()
-    for r in records:
-        if r.get("type") != "assistant" or r.get("isSidechain"):
+    if not isinstance(tool_input, dict):
+        return ""
+    questions = tool_input.get("questions")
+    if not isinstance(questions, list):
+        return ""
+    parts = []
+    for q in questions:
+        if not isinstance(q, dict):
             continue
-        for c in (r.get("message") or {}).get("content") or []:
-            if (isinstance(c, dict) and c.get("type") == "tool_use"
-                    and c.get("name") == ASK_TOOL_NAME and c.get("id")):
-                out.add(c["id"])
+        text = str(q.get("question") or q.get("header") or "").strip()
+        labels = []
+        for opt in q.get("options") or []:
+            if not isinstance(opt, dict):
+                continue
+            label = str(opt.get("label") or "").strip()
+            if label:
+                labels.append(label)
+        if labels:
+            text = (text + " — options offered: " + " / ".join(labels)).strip()
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def asks_in(record):
+    """`[(tool_use_id, question_summary)]` for one ASSISTANT record.
+
+    🔴 NO SECOND PASS, AND NO MATERIALISED FILE. A `tool_result` names a
+    `tool_use` that appeared EARLIER in the transcript, so collecting the asks
+    as the stream goes is sufficient — which is what lets this channel be ON by
+    default. Its predecessor (`answer_ids`) took a list of every record in the
+    file, so the opt-in flag that enabled it also forced `list(_parse(f))`;
+    MEASURED on 984 transcripts / 2.79 GB that cost 1.6-2.4x wall and ~15% RSS.
+    Making the channel default WITHOUT this would have made that the only path.
+
+    🔴 NO `isSidechain` CHECK HERE — `records_of` OWNS IT, FOR EVERY ROLE, AND
+    THE COPY THAT USED TO SIT ON THIS LINE WAS UNREACHABLE. `records_of` drops
+    a sidechain record before dispatching on `type`, so a second test here could
+    never execute, and a test written against it passed for the wrong reason:
+    row `K6` of `mutation_battery_extract_user_msgs.py` disabled the LIVE guard
+    and scored KILLED-WRONG-REASON — the sidechain decision test stayed GREEN
+    because this dead copy still refused the record. One rule, one place; the
+    live site is the one the battery can move.
+    """
+    if record.get("type") != "assistant":
+        return []
+    out = []
+    for c in (record.get("message") or {}).get("content") or []:
+        # 🔴 `isinstance(…, str)` ON THE ID, NOT JUST TRUTHINESS. The id becomes
+        # a DICT KEY two lines down, so a non-string one raises
+        # `TypeError: unhashable type` — and `records_of` is consumed inside a
+        # bare `except OSError`, so that escapes as a traceback at rc 1 and
+        # discards the WHOLE extraction. MEASURED: 1,554 of 1,554 ids on this
+        # host are strings, so this is defensive and is not claimed as covering
+        # an observed shape; it is here because the failure mode is a crash in
+        # an audit tool whose entire contract is that a zero means something.
+        if (isinstance(c, dict) and c.get("type") == "tool_use"
+                and c.get("name") == ASK_TOOL_NAME
+                and isinstance(c.get("id"), str) and c["id"]):
+            out.append((c["id"], question_summary(c.get("input"))))
     return out
 
 
 def answer_text(block):
-    """The operator's answer text out of one `tool_result` block, or ''."""
+    """The operator's answer text out of one `tool_result` block, or ''.
+
+    Handles both shapes the schema has carried: `content` a plain string
+    (1,550 of 1,550 measured on this host 2026-10-03) and `content` a list of
+    typed blocks (0 measured here, but it is the shape every other tool's
+    result uses, so it is parsed rather than assumed absent).
+    """
     content = block.get("content")
     if isinstance(content, str):
         return clean_text(content)
@@ -249,21 +376,40 @@ def answer_text(block):
     return ""
 
 
-def records_of(path, session_id=None, include_answers=False):
+def records_of(path, session_id=None):
     """Yield `{session_id, project, ts, kind, text}` for one transcript file.
 
-    🔴 `include_answers` RECOVERS A CLASS THIS TOOL STRUCTURALLY COULD NOT SEE,
-    and it is large. `extract_from_content` says "ignore tool_result" — correct
-    for Bash and Read output, and wrong for one tool: an `AskUserQuestion`
-    answer is the OPERATOR, arriving in a `tool_result` block. MEASURED
-    2026-09-26 over this host's corpus: **1,491 answer records across 594
-    sessions, 837,635 B** — against 895,672 B for the entire `typed` operator
-    corpus, so it is 93.5% again on top of everything this tool could previously
-    report. Median 479 B, max 2,037 B. 24 carry a free-text `notes:` (the
-    operator's own words); the rest record a decision.
+    🔴 THE DECISION CHANNEL IS EMITTED, AND IT IS NOT OPT-IN. devrc#1955:
+    `extract_from_content` says "ignore tool_result" — correct for Bash and Read
+    output, and wrong for one tool, because an `AskUserQuestion` answer is the
+    OPERATOR arriving in a `tool_result` block. Dropping it made every operator
+    DECISION invisible to an arc audit while the output looked complete, and
+    that **already produced a wrong all-clear once**: an arc was reported as
+    "nothing you asked for was dropped" while an instruction of the form
+    "merge as correctness-only, then close the loop" sat half-done, and an item
+    the operator had explicitly declined was about to be recommended as top
+    priority. An audit answering "did everything he chose actually ship?" off
+    the typed channel alone lies by omission.
 
-    It is OPT-IN so no shipped consumer's output moves — the `find-session
-    --arc` footer from #1883 is mid-measurement and must not change under it.
+    MEASURED over this host's corpus 2026-09-26: **1,491 answer records across
+    594 sessions, 837,635 B** against 895,672 B for the entire `typed` operator
+    corpus — 93.5% again on top of everything this tool could previously
+    report. Median 479 B, max 2,037 B.
+
+    🔴 IT WAS OPT-IN UNTIL #1955 AND THAT IS WHAT THE ISSUE OVERRULES. The
+    argument for the flag was "no shipped consumer's output may move", and it
+    is a real cost paid in the wrong direction: the channel's whole value is to
+    an audit that does not know to ask for it. `--include-answers` is still
+    ACCEPTED and now does nothing (see `build_parser`), so every caller that
+    passes it keeps working. The dedup key is `(project, kind, text)` and `kind`
+    is load-bearing there already, so the new kinds compose without changing
+    which pre-existing rows survive.
+
+    🔴 EMISSION ORDER: `decision_unanswered` rows come LAST, after the file is
+    exhausted, because "no result ever came back" is only known at EOF. `main` sorts
+    every row by `ts` before rendering, so the CLI output is still chronological
+    — a direct caller of this generator gets them at the end and must sort if
+    it cares.
 
     `project` is always derived from the path — it had a parameter that no
     caller and no test ever passed.
@@ -282,14 +428,19 @@ def records_of(path, session_id=None, include_answers=False):
             except ValueError:
                 continue
 
-    # 🔴 THE DEFAULT PATH STREAMS, AND THE CONSUMER LOOP IS INSIDE THE `with`
-    # BECAUSE THAT IS WHAT MAKES IT TRUE. `answer_ids` genuinely needs the whole
-    # file (a `tool_result` names a `tool_use` that appeared earlier), so the
-    # answers path materialises; the default path hands the consumer a GENERATOR.
+    # 🔴 THERE IS NOW EXACTLY ONE PATH AND IT STREAMS. The predecessor had two:
+    # the default handed the consumer a generator, and `--include-answers`
+    # materialised `list(_parse(f))` because `answer_ids` took every record in
+    # the file. That list is gone — `asks_in` is applied per record as the stream
+    # goes, which is sound because a `tool_result` always names a `tool_use` that
+    # appeared EARLIER in the transcript. So the decision channel became the
+    # DEFAULT without making the materialising path the only path.
     #
-    # ⚠ THIS COMMENT HAS NOW BEEN WRONG TWICE, IN OPPOSITE WAYS, AND THE SECOND
-    # TIME IT ASSERTED THE FIX IT DID NOT MAKE — which is worse, because the next
-    # reader trying to make this stream would have believed it done.
+    # The consumer loop stays inside the `with` because that is what makes the
+    # generator survive it. ⚠ THAT SENTENCE HAS BEEN WRONG TWICE, IN OPPOSITE
+    # WAYS, AND THE SECOND TIME IT ASSERTED THE FIX IT DID NOT MAKE — kept
+    # because a maintainer re-splitting this function will reach for the same
+    # shape:
     #   * `90f5aa74` materialised UNCONDITIONALLY and said "the default path
     #     still streams nothing extra into memory beyond the list above":
     #     self-contradictory, the list WAS the whole file.
@@ -299,40 +450,38 @@ def records_of(path, session_id=None, include_answers=False):
     #     2 of the devrc#1887 ladder measured the default path unmoved and caught
     #     the sentence.
     #
-    # 🔴 AND THE PERFORMANCE NUMBER WAS MIS-ATTRIBUTED — TWICE, THE SECOND TIME BY
+    # 🔴 THE PERFORMANCE NUMBER WAS ALSO MIS-ATTRIBUTED TWICE, THE SECOND TIME BY
     # THE COMMENT CORRECTING THE FIRST. `84d91b19` re-attributed it to `697387c6`,
     # which STREAMS: measured per commit, `62b516a4` streams, `697387c6` streams,
     # `90f5aa74` materialises and carries the self-contradictory sentence,
     # `9b61b26d` materialises in an `else`. So that correction named a comparison
     # between two identical implementations. Round 3 found it. Do not re-derive the
     # pair from memory — the shas above were each read with `git show`.
-    # The measurement — 984
-    # transcripts / 2.79 GB, `--jsonl -o`, 4 interleaved runs at load ~9:
-    # 10.0-11.3 s / 222 MB against 17.3-26.3 s / 256 MB — is REAL, but it
-    # compares `62b516a4` (this generator, streaming) against `90f5aa74` (the
-    # unconditional materialise). It was never a base-vs-`9b61b26d` reading, and
-    # quoting it beside that commit implied a regression had been removed when it
-    # had only been moved. The 1.6-2.4x is what THIS revision removes.
+    # The measurement — 984 transcripts / 2.79 GB, `--jsonl -o`, 4 interleaved
+    # runs at load ~9: 10.0-11.3 s / 222 MB against 17.3-26.3 s / 256 MB — is
+    # REAL, and it compares a streaming revision against the unconditional
+    # materialise. 🔴 IT IS NOT A MEASUREMENT OF THIS REVISION: this one streams
+    # AND does strictly more work per record, and nobody has re-timed it. Do not
+    # quote the range as this file's cost.
+    #
+    #: tool_use_id -> (base, question_summary) for every AskUserQuestion still
+    #: awaiting a result. Popped on match; whatever is LEFT at EOF is the
+    #: unanswered population, and it is emitted rather than dropped.
+    pending = {}
     with open(path, errors="replace") as f:
-        if include_answers:
-            parsed = list(_parse(f))
-            ids = answer_ids(parsed)
-            source = parsed
-        else:
-            ids = set()
-            source = _parse(f)          # a GENERATOR — nothing is materialised
-        # ⚠ NO `# type: ignore` HERE. An earlier revision carried
-        # `source: object` plus `# type: ignore[union-attr]`; measured with
-        # pyright, the diagnostics are IDENTICAL with and without it (it narrows
-        # `source` by assignment, so there was no `union-attr` to silence) and the
-        # annotation WIDENED the declared type, which is the opposite of the
-        # point. A `# type: ignore[CODE]` is a claim that a specific diagnostic
-        # exists; that one did not. Round 3 measured it.
-        for obj in source:
-            if obj.get("type") != "user" or obj.get("isMeta"):
-                continue
-            # sidechain == a subagent's own transcript, not user-typed
+        for obj in _parse(f):
+            # sidechain == a subagent's own transcript, not user-typed, on
+            # EITHER role — an `AskUserQuestion` a subagent issued is not a
+            # fork the operator resolved.
             if obj.get("isSidechain"):
+                continue
+            if obj.get("type") == "assistant":
+                for tool_use_id, summary in asks_in(obj):
+                    pending[tool_use_id] = (
+                        {"session_id": session_id, "project": project,
+                         "ts": obj.get("timestamp") or ""}, summary)
+                continue
+            if obj.get("type") != "user" or obj.get("isMeta"):
                 continue
             # 🔴 A COMPACTION SUMMARY IS THE MODEL'S PROSE, NOT THE OPERATOR'S. It
             # arrives as a `user` record with `isCompactSummary: true` and opens
@@ -357,19 +506,45 @@ def records_of(path, session_id=None, include_answers=False):
                     continue
                 kind, text = got
                 yield {**base, "kind": kind, "text": text}
-            if not ids:
-                continue
             content = msg.get("content")
             if not isinstance(content, list):
                 continue
             for block in content:
                 if not isinstance(block, dict) or block.get("type") != "tool_result":
                     continue
-                if block.get("tool_use_id") not in ids:
+                # 🔴 THE DISCRIMINATOR IS THE ID, NEVER THE TEXT. Every
+                # Bash/Read/Grep result arrives in this same block shape and
+                # none of them is the operator; `pending` holds only the ids of
+                # `AskUserQuestion` calls, so membership IS the test.
+                tool_use_id = block.get("tool_use_id")
+                # `isinstance` FIRST: `{} in some_dict` raises
+                # `TypeError: unhashable type`, which no handler here catches
+                # — see `asks_in` for the same guard and the same reason.
+                if (not isinstance(tool_use_id, str)
+                        or tool_use_id not in pending):
                     continue
+                _, summary = pending.pop(tool_use_id)
                 text = answer_text(block)
-                if text:
-                    yield {**base, "kind": KIND_ANSWER, "text": text}
+                if not text:
+                    # 🔴 NOT `if text:` — that was a SILENT DROP. See
+                    # NO_ANSWER_TEXT_PREFIX: 0 of 1,550 on this host, kept
+                    # because an unmeasured shape is the one that goes missing.
+                    text = NO_ANSWER_TEXT_PREFIX + (summary or tool_use_id)
+                yield {**base, "kind": KIND_DECISION, "text": text}
+    # 🔴 EVERY ASK THAT NEVER CAME BACK IS EMITTED, AS ITS OWN KIND. devrc#1955
+    # note 1: "a `tool_use` with no matching `tool_result` is a real state
+    # (aborted/unanswered) and must be emitted as such, not dropped — otherwise
+    # the new channel acquires the same silent-omission property as the old
+    # one." The predecessor dropped all of them: it built a SET of ids and only
+    # ever emitted on a match, so an operator who closed the prompt without
+    # answering left no trace at all. MEASURED on this host 2026-10-03: 4 of
+    # 1,554 `AskUserQuestion` calls, in 4 different sessions, invisible.
+    #
+    # `base` here is the ASSISTANT record's — the moment the question was asked,
+    # which is the only timestamp this state has.
+    for tool_use_id, (ask_base, summary) in pending.items():
+        yield {**ask_base, "kind": KIND_DECISION_UNANSWERED,
+               "text": UNANSWERED_PREFIX + (summary or tool_use_id)}
 
 
 # --------------------------------------------------------------------------- #
@@ -592,14 +767,25 @@ output
   --jsonl               one canonical record per line:
                         {session_id, project, arc_role, ts, kind, text}
   -o PATH               write to PATH instead of stdout
-  --include-answers     also emit kind=answer — the operator's replies to an
-                        AskUserQuestion prompt, which arrive in a tool_result
-                        block this tool otherwise ignores. MEASURED 1,491
-                        records / 837,635 B on this host, against 895,672 B
-                        for the whole typed corpus, so it nearly DOUBLES what the
-                        default can report. OFF by default:
-                        it changes WHAT IS EMITTED, not which sessions are
-                        selected, and no shipped consumer's output may move.
+  --include-answers     ACCEPTED AND IGNORED. The decision channel it used to
+                        gate is ON by default since devrc#1955; the flag is
+                        kept so a caller that passes it — audit-dispatch, the
+                        re-read command /audit-pr prints — keeps working, and
+                        so it still enables the channel against an older
+                        extractor deployed on another host.
+
+kinds in the output
+
+  typed                 prose the operator wrote
+  command               a slash command they invoked
+  decision              a DECISION they took at an AskUserQuestion prompt —
+                        the question and the option they chose. Arrives in a
+                        tool_result block; MEASURED 1,491 records / 837,635 B
+                        on this host against 895,672 B for the whole typed
+                        corpus, so it nearly DOUBLES what this tool reports
+  decision_unanswered   an AskUserQuestion that was ASKED and never answered
+                        (aborted, interrupted, or the session ended on it).
+                        Its own kind, never a dropped row: 4 of 1,554 measured
 
 exit codes — a zero cannot distinguish a wrong name from an empty arc, so
 each reason has its own code and prints on stderr:
@@ -614,7 +800,8 @@ each reason has its own code and prints on stderr:
   4  --arc: the arc WAS measured and has zero member sessions
   5  NOTHING WAS READ — ids resolved to no transcript, or none could be
      opened at all (an absent or empty corpus lands here)
-  6  transcripts WERE read and held zero user-typed messages
+  6  transcripts WERE read and held zero rows of ANY kind — nothing typed,
+     no slash command, and no AskUserQuestion decision
 """
 
 
@@ -641,14 +828,19 @@ def build_parser():
                    help="keep every repeat; by default an identical message "
                         "seen twice in the selection is emitted once and the "
                         "suppressed count is reported")
+    # 🔴 A NO-OP ON PURPOSE, AND SAYING SO IS THE POINT. devrc#1955 made the
+    # decision channel the default, which retires this flag's job. It is kept
+    # ACCEPTED rather than removed for two reasons: `audit-dispatch.py` passes
+    # it and `operator_asks.render` PRINTS it in the re-read command an auditor
+    # copies, and either could be run against an older extractor deployed on
+    # the peer host, where the flag is still load-bearing. Pinned by
+    # `test_the_retired_flag_is_a_NO_OP_not_a_second_mode` — accepting a flag
+    # that silently did something different would be worse than removing it.
     p.add_argument("--include-answers", action="store_true",
-                   help="also emit the operator's answers to AskUserQuestion "
-                        "prompts, as kind=answer. They arrive in a tool_result "
-                        "block, which this tool otherwise ignores — MEASURED "
-                        "1,491 records / 837,635 B on this host, against "
-                        "895,672 B for the whole typed corpus — it nearly doubles it. "
-                        "OFF by default "
-                        "so no existing consumer's output moves.")
+                   help="ACCEPTED AND IGNORED — the decision channel it used "
+                        "to gate is ON by default since devrc#1955. Kept so "
+                        "callers that pass it keep working, and so it still "
+                        "enables the channel against an older deployed copy.")
     p.add_argument("--root", default=None,
                    help=argparse.SUPPRESS)   # tests point this at a fixture
     return p
@@ -761,21 +953,19 @@ def main(argv=None):
         # `opened` true of files that were read and held nothing, which is
         # exactly the population exit 6 is about.
         #
-        # ⚠ WHERE AN OSError SURFACES DEPENDS ON THE FLAG, AND THIS SENTENCE HAS
-        # BEEN WRONG TWICE. On the DEFAULT path `records_of` streams, so a
-        # mid-file read error surfaces at a LATER `next()` than one at open; with
-        # `--include-answers` the file is read to completion first, so both
-        # surface at the first. Either way the arm holds, because `list(...)` is
-        # inside this `try` — that is the only claim this comment needs.
+        # ⚠ `records_of` STREAMS, so a mid-file read error surfaces at a LATER
+        # `next()` than one at open. The arm holds either way, because `list(...)`
+        # is inside this `try` — that is the only claim this comment needs, and
+        # two earlier spellings tried to say more and were wrong:
         #   * `9b61b26d` wrote "both now surface at the same `next()`", true only
         #     while it materialised unconditionally.
         #   * `84d91b19` restored streaming on the default path and left that
         #     sentence standing, re-falsifying it. Round 3 found it.
         # A maintainer restructuring this `try` on the strength of the old
-        # sentence would have been reasoning from an invalidated claim.
+        # sentence would have been reasoning from an invalidated claim. There is
+        # no longer a flag that changes it: devrc#1955 removed the second path.
         try:
-            recs = list(records_of(path, session_id=sid,
-                                  include_answers=a.include_answers))
+            recs = list(records_of(path, session_id=sid))
         except OSError as exc:
             unreadable.append(f"{sid}: {exc}")
             continue
@@ -835,8 +1025,9 @@ def main(argv=None):
                       "be opened — 0 were read. 🔴 This is NOT 'the sessions "
                       "are empty'; nothing was measured.", file=err)
             return EXIT_NO_TRANSCRIPTS
-        print(f"read {opened} transcript(s) and found zero user-typed "
-              "messages after filtering. 🔴 The transcripts WERE read — this "
+        print(f"read {opened} transcript(s) and found zero rows of ANY kind "
+              "after filtering — no typed prose, no slash command, and no "
+              "AskUserQuestion decision. 🔴 The transcripts WERE read — this "
               "is a measured emptiness, not an unresolved selector.", file=err)
         return EXIT_NO_MESSAGES
 

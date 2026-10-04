@@ -306,6 +306,91 @@ MUTANTS = [
      "--arc/--session/--ids-file`, its exit codes, and why a 0 cannot mean "
      '"empty arc" | `~/.claude/skills/handoff/reference/user-messages.md` |\n',
      "", "test_resume_ROUTES_to_it"),
+
+    # --- the DECISION channel (devrc#1955) -----------------------------------
+    # 🔴 THE ANSWERS CHANNEL SHIPPED IN #1887 WITH **ZERO** ROWS HERE, which is
+    # the shape the W-block above records one level up: the battery was evidence
+    # about the rows it held, and a whole new output class was not among them.
+    # So K1 is the row the issue is actually about and the rest fence it in.
+    ("K1", "disable", "🔴 THE HEADLINE. The EOF sweep never runs, so an "
+     "AskUserQuestion the operator never answered leaves no trace at all — the "
+     "new channel re-acquires the old one's silent-omission property. The "
+     "iterable is mutated and nothing else: a mutant that removed the loop "
+     "WITH its body would also delete the yield, which is a different claim.",
+     "    for tool_use_id, (ask_base, summary) in pending.items():",
+     "    for tool_use_id, (ask_base, summary) in {}.items():",
+     "test_an_UNANSWERED_question_is_emitted_as_its_OWN_kind"),
+    ("K2", "collapse", "the two decision kinds become ONE string, so 'he chose "
+     "X' and 'he was asked and never said' are reported as the same fact — and "
+     "`operator_asks` starts quoting an agent's unanswered question back as an "
+     "operator requirement. Named on the DISTINCTNESS guard, not a behavioural "
+     "one, for the reason E1/E2 give: collapsing a constant moves a "
+     "behavioural test's own expectation with it.",
+     'KIND_DECISION_UNANSWERED = "decision_unanswered"',
+     'KIND_DECISION_UNANSWERED = "decision"',
+     "test_the_two_decision_kinds_are_DIFFERENT_strings"),
+    ("K3", "replacement", "the kind reverts to the pre-#1955 spelling, so the "
+     "closing condition's `select(.kind == \"decision\")` counts zero and every "
+     "consumer filtering on it drops the channel silently",
+     'KIND_DECISION = "decision"', 'KIND_DECISION = "answer"',
+     "test_an_ANSWERED_question_becomes_a_decision_row"),
+    ("K4", "widening", "the tool-NAME check is dropped, so EVERY tool_use is "
+     "tracked and every Bash/Read/Grep result is emitted as an operator "
+     "decision. The discriminator is structural and this is the structure.",
+     '                and c.get("name") == ASK_TOOL_NAME\n'
+     '                and isinstance(c.get("id"), str) and c["id"]):',
+     '                and isinstance(c.get("id"), str) and c["id"]):',
+     "test_a_BASH_tool_result_is_NEVER_a_decision"),
+    ("K5", "deletion", "the empty-answer fallback becomes a `continue` — the "
+     "predecessor's `if text:`, restored exactly: a matched tool_result that "
+     "carried nothing readable is DROPPED rather than reported",
+     "                    text = NO_ANSWER_TEXT_PREFIX + (summary or tool_use_id)",
+     "                    continue",
+     "test_a_MATCHED_result_carrying_no_text_is_still_a_decision_row"),
+    ("K6", "disable", "the sidechain guard never fires, so a question a "
+     "SUBAGENT asked itself is reported as a fork the operator resolved",
+     '            if obj.get("isSidechain"):', "            if False:",
+     "test_a_SIDECHAIN_AskUserQuestion_is_not_a_decision"),
+    ("K7", "narrowing", "the unanswered row keeps its marker and LOSES the "
+     "question — it says a decision was missed without saying which, which is "
+     "a report nobody can act on",
+     '               "text": UNANSWERED_PREFIX + (summary or tool_use_id)}',
+     '               "text": UNANSWERED_PREFIX}',
+     "test_the_unanswered_row_NAMES_the_question_and_the_options_offered"),
+    ("K8", "deletion", "the matched id is read instead of POPPED, so every "
+     "answered question is ALSO reported as unanswered — the inverse of K1, and "
+     "neither row covers the other: K1 under-reports, this over-reports",
+     "                _, summary = pending.pop(tool_use_id)",
+     "                _, summary = pending[tool_use_id]",
+     "test_an_ANSWERED_question_is_NOT_also_reported_unanswered"),
+    ("K9", "narrowing", "the option labels are dropped from the question "
+     "summary, so an abandoned fork is named without saying what it was between",
+     '            text = (text + " — options offered: " + " / ".join(labels)).strip()',
+     "            text = text.strip()",
+     "test_the_unanswered_row_NAMES_the_question_and_the_options_offered"),
+    # 🔴 K11/K12 ARE A PAIR AND NEITHER COVERS THE OTHER — there are two sites
+    # where a `tool_use_id` becomes a dict key or a dict membership test, and a
+    # malformed id crashes at whichever one it reaches first. One row per site.
+    ("K11", "narrowing", "the id's type check reverts to bare truthiness, so a "
+     "list-valued `tool_use` id raises `TypeError: unhashable type` when it "
+     "becomes a dict key — escaping the `except OSError` as a traceback at rc 1 "
+     "that discards the WHOLE extraction",
+     '                and isinstance(c.get("id"), str) and c["id"]):',
+     '                and c.get("id")):',
+     "test_a_NON_STRING_tool_use_id_does_not_CRASH_the_whole_extraction"),
+    ("K12", "narrowing", "the same on the RESULT side — `{} not in pending` "
+     "raises before the membership test can answer",
+     "                if (not isinstance(tool_use_id, str)\n"
+     "                        or tool_use_id not in pending):",
+     "                if tool_use_id not in pending:",
+     "test_a_NON_STRING_tool_use_id_does_not_CRASH_the_whole_extraction"),
+    ("K10", "deletion", "the reference's kind table loses the row the whole "
+     "issue is about, leaving the one document that routes an agent to this "
+     "tool asserting a complete channel list that is short by one — the #1955 "
+     "defect in its DOCUMENTATION shape",
+     "| `decision` | a DECISION they took at an `AskUserQuestion` prompt",
+     "| `decided` | a DECISION they took at an `AskUserQuestion` prompt",
+     "test_the_reference_names_EVERY_kind_the_module_emits"),
 ]
 
 #: Which file each row rewrites. Declared per row, never per section: `R1`–`R3`
@@ -315,6 +400,9 @@ TARGETS = {
     **{mid: SRC for mid, *_ in MUTANTS},
     "R1": REF, "R2": REF, "R3": REF,
     "R4": SKILL, "R5": SKILL,
+    # K10 is prose in the reference, not code — same reason R1-R3 are listed
+    # individually rather than by section.
+    "K10": REF,
 }
 
 
