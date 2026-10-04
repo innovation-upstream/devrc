@@ -60,7 +60,26 @@ __all__ = [
     "trailer_ids",
     "genesis_names_doc",
     "doc_basename",
+    "doc_in_text",
     "doc_commits",
+    "doc_commit_revs",
+    "sessions_docs",
+    # 🔴 THE RETURN TYPE OF `sessions_docs`, EXPORTED BESIDE IT — and the list
+    # is now a COMPLETE statement of this module's public surface rather than a
+    # subset, which is what makes the pin two-way: `doc_in_text` and
+    # `doc_commit_revs` are both called from `find-session.py` and were both
+    # MISSING from here, so the old one-directional guard ("every entry
+    # resolves") could not see either omission.
+    # ⚠ AND THE ORIGINAL RATIONALE NAMED A CONSUMER THAT DOES NOT EXIST. This
+    # comment used to say the export existed "so a star-importer can name the
+    # return type". Enumerated tree-wide: NOTHING star-imports this module —
+    # the only `import *` string in the tree is the pin's own error message.
+    # The honest reason is the `.copy()` footgun the class documents: a caller
+    # that cannot name the type annotates it `dict`, and a plain `dict` has no
+    # `.narrowed_note`. That is a real hazard for an ordinary `import`-and-call
+    # consumer; it needs no star-importer.
+    "SessionsDocs",
+    "upstream_probe_rev",
     "writer_members",
     "reader_members",
     "merge_members",
@@ -349,6 +368,102 @@ _UPSTREAM_PROBES: tuple[tuple[str, ...], ...] = (
 )
 
 
+def upstream_probe_rev(probe: tuple[str, ...]) -> str:
+    """The rev a probe resolves, spelled the way an OPERATOR would type it.
+
+    🔴 WHAT IT IS FOR, AND WHAT IT DOES **NOT** ESTABLISH — this docstring used
+    to overclaim and that was the finding. `find-session.py`'s exit-2 refusal
+    prints a `git log … --grep` an operator can run by hand, and it used to
+    spell `@{upstream}` ALONE under a sentence promising it matched "the revs
+    `doc_commit_revs` resolves" — true of the first probe and silent about the
+    second, which is the one that resolves in almost every real checkout. This
+    function exists so that `find-session.ARC_ESCAPE_REVS` can be pinned
+    two-way against the probes by
+    `test_find_session_arc.py::TestTheExit2CauseListNamesTheCROSSHOSTCause`, so
+    a third probe fails the suite rather than silently going unmentioned.
+
+    🔴 THAT LEDGER IS A SYNC CHECK, NOT A PARITY CHECK, AND THE DIFFERENCE COST
+    THREE ROUNDS. The claim "the pasteable command cannot be NARROWER than the
+    reader" is about what the command *yields*, and no amount of asserting that
+    a rev's TEXT appears can establish it: four mutants that each left the rev
+    spelled on the line while narrowing the walk (`HEAD..@{upstream}`,
+    `HEAD ^@{upstream}`, demoting it to `--author=`, demoting it to a trailing
+    shell comment) all stayed GREEN against a substring guard. What establishes
+    the claim is
+    `…::test_the_pasteable_command_YIELDS_the_SAME_DOCS_as_sessions_docs`, which
+    EXECUTES the printed command in a diverged hermetic clone and compares its
+    doc set against `sessions_docs`'s. Attribute the property to that test, not
+    to this function.
+
+    ⚠ It reads `probe[-1]` and strips a `refs/remotes/` prefix — a RULE, not a
+    table, so it is only as right as the probes' shape. A future probe whose
+    last argument is not the ref (an option-trailing spelling) yields a wrong
+    string; the two-way pin is what makes that a red test rather than a wrong
+    message.
+
+    ⚠ NO MODULE-LEVEL TUPLE OF THESE. A `UPSTREAM_PROBE_REVS` constant shipped
+    here with ZERO consumers (enumerated tree-wide: its own definition and its
+    `__all__` entry) while the pin re-derived the same tuple by hand — two
+    derivations of one rule, which is the duplication this repo's rules forbid.
+    Deleted rather than wired up: the pin's derivation is the only caller.
+    """
+    ref = probe[-1]
+    prefix = "refs/remotes/"
+    return ref[len(prefix):] if ref.startswith(prefix) else ref
+
+
+#: Full-hex oid lengths git can emit: sha1 and sha256. Not a style choice —
+#: `len(oid) == 40` alone made `_same_object` blind to every sha256 repo.
+_OID_HEX_LENGTHS = frozenset({40, 64})
+
+
+def _same_object(repo: str, a: str, b: str,
+                 run: Callable[..., subprocess.CompletedProcess] | None = None,
+                 ) -> bool:
+    """Do two revs name the same commit? FALSE when either cannot be resolved.
+
+    🔴 FAILS TOWARDS WALKING BOTH. A `rev-parse` this cannot read must not be
+    read as "same", because that would silently DROP a rev and narrow the walk —
+    the whole class of defect this module exists to refuse. Doing redundant work
+    is the safe direction; skipping a rev is not.
+
+    ⚠ NO `--verify`, AND THAT IS NOT AN OVERSIGHT. `git rev-parse --verify`
+    takes exactly ONE revision: given two it exits **128** and prints
+    `fatal: Needed a single revision` on stderr — so `_git` RAISED
+    `GitUnavailable`, this caught it and returned `False` unconditionally, and
+    the whole de-duplication was INERT. Caught only because the test asserted
+    the collapse rather than the absence of a crash.
+    ⚠ THE MECHANISM ABOVE IS A CORRECTION: this said "exits 1 having printed
+    nothing", which describes a SILENT failure. Measured on git 2.55.0 it is
+    loud (128 + a `fatal:`) and was being swallowed by the `except` — the
+    conclusion was right and the reason a reader would have reconstructed from
+    it was wrong, which matters because "it printed nothing" invites looking for
+    the bug somewhere else. Plain `rev-parse` on an unknown rev also exits 128
+    (measured: `fatal: ambiguous argument …`), which `_git` raises, so the safe
+    direction is preserved either way; the SHAPE of the output is checked here
+    rather than inferred from an exit code.
+
+    ⚠ THE SHAPE ACCEPTS BOTH OBJECT FORMATS. `git init --object-format=sha256`
+    yields 64-hex oids (measured 2026-10-04 on git 2.55.0); the check used to
+    require exactly 40, so `_same_object` returned `False` for two revs naming
+    ONE commit in any sha256 repo. That failed in the SAFE direction — both revs
+    get walked, the results are correct, only the saving is lost — and all five
+    handles are sha1 today, so it was latent. Accepting both lengths is cheaper
+    than carrying a comment explaining the exclusion. A length NOT in that set
+    is still refused: an unexpected shape means "do not trust this", which here
+    means walk both.
+    """
+    try:
+        out = _git(repo, ["rev-parse", f"{a}^{{commit}}", f"{b}^{{commit}}"],
+                   run=run)
+    except GitUnavailable:
+        return False
+    oids = out.split()
+    return (len(oids) == 2 and oids[0] == oids[1]
+            and len(oids[0]) in _OID_HEX_LENGTHS
+            and all(c in "0123456789abcdef" for c in oids[0]))
+
+
 def doc_commit_revs(repo: str,
                     run: Callable[..., subprocess.CompletedProcess] | None = None,
                     ) -> tuple[tuple[str, ...], str | None]:
@@ -372,6 +487,19 @@ def doc_commit_revs(repo: str,
     walking `HEAD` alone and the caller must be able to say so. An empty note is
     not a promise of completeness — a ref this clone has never fetched is still
     invisible.
+
+    🔴 AND THE REV COUNT IS NOT THE COVERAGE SIGNAL — THE NOTE IS. A second rev
+    that resolves to the SAME OBJECT as `HEAD` is dropped, because the `git log`
+    it would drive is provably byte-identical work: measured 2026-10-03 at load
+    ~12 across the four set handles, the second rev costs ~4.4s of a ~10.3s
+    cross-arc pass, and `$DEVRC` was the one handle whose `HEAD` and upstream
+    coincided — so dropping it saved ~11% of the pass THAT DAY, and halves a
+    handle's cost whenever a clone is actually up to date, which is the state
+    `devrc`'s own primary clone is deliberately kept in. The probe is one
+    `rev-parse`, i.e. milliseconds against a full history walk.
+    ⚠ So `revs == ("HEAD",)` no longer means "narrowed": it means that OR "the
+    upstream is this very commit". Only `note` tells the two apart, which is
+    exactly why the note exists and why callers must read it rather than `len`.
     """
     revs: list[str] = ["HEAD"]
     for probe in _UPSTREAM_PROBES:
@@ -380,6 +508,10 @@ def doc_commit_revs(repo: str,
         except GitUnavailable:
             continue                 # no upstream / no origin/HEAD — try the next
         if out and out not in revs:
+            if _same_object(repo, "HEAD", out, run=run):
+                # An upstream DID resolve, so there is NO coverage gap to
+                # report — the walk over `HEAD` alone IS the walk over both.
+                return tuple(revs), None
             revs.append(out)
             return tuple(revs), None
     return tuple(revs), (
@@ -434,6 +566,301 @@ def doc_commits(repo: str, relpath: str,
     # `commits[-1]` as the ORIGINATING commit, so an inverted tie relabels who
     # started an arc. `dict` preserves insertion order, so this needs no sort.
     return tuple(by_sha.values())
+
+
+#: The handoff-doc paths a reverse walk will accept, as `git log --name-only`
+#: prints them (no quoting, `-z`). 🔴 THE `archive/` ALTERNATION IS LOAD-BEARING
+#: — `#1627` renamed 35 docs under `claudedocs/archive/`, so a reader without it
+#: reports every drifting session as single-doc for every archived arc. It is the
+#: same alternation `_DOC_IN_TEXT` and `arc_repo_for` carry; anchored whole here
+#: because a `--name-only` line IS the whole path.
+_DOC_PATH_RE = re.compile(
+    r"^claudedocs/(?:archive/)?(handoff-[A-Za-z0-9._-]+\.md)$")
+
+#: POSIX-ERE specials. An id is an OPAQUE STRING (`session_trailer`'s 🔴), so it
+#: may legitimately carry a character git's `-E` would read as a metacharacter —
+#: a single unescaped `(` makes the whole walk exit non-zero, which surfaces as
+#: `GitUnavailable` for a perfectly ordinary session. Escaped rather than
+#: shape-filtered, because filtering by shape is the thing that module forbids.
+_ERE_SPECIAL = set(r".[]{}()*+?^$|\/")
+
+
+def _ere_escape(value: str) -> str:
+    return "".join("\\" + c if c in _ERE_SPECIAL else c for c in value)
+
+
+def _trailer_grep(session_id: str) -> str:
+    """The `--grep` PREFILTER for one session id.
+
+    🔴 A PREFILTER AND NOTHING MORE. It is wider than `_TRAILER_RE` in two ways
+    that both matter: `[[:space:]]` is POSIX ERE's nearest spelling of `[ \\t]`
+    and also admits other blanks, and several of these are ORed into ONE walk —
+    git returns a commit matching ANY of them. So every matched body is re-parsed
+    with `trailer_ids()`; crediting a matched commit to every requested id is how
+    a session gets docs it never wrote. One rule, one place.
+    """
+    return (f"^{_ere_escape(TRAILER_KEY)}:[[:space:]]*"
+            f"{_ere_escape(session_id)}[[:space:]]*$")
+
+
+class SessionsDocs(dict):
+    """`{session_id: docs}` that CARRIES ITS OWN COVERAGE NOTE.
+
+    🔴 THE GAP TRAVELS WITH THE ANSWER, because a caller that has to ask a
+    SECOND time whether the walk was complete is a caller that will forget.
+    `doc_commit_revs` returns a note exactly when NEITHER of its two probes
+    resolved — i.e. when the walk fell back to `HEAD` alone — and
+    `sessions_docs` used to DISCARD it. `resolve_arc` surfaces that note for the
+    arc's OWN repo; the cross-arc footer had no path to it at all, so a
+    structurally narrowed handle rendered as having fully answered: `0 of n ...
+    NOT MEASURED: every repo handle answered`, printed over a walk it had not
+    characterised.
+
+    ⚠ "A COMMIT PUSHED FROM A WORKTREE IS INVISIBLE" IS THE RIGHT CONSEQUENCE
+    ATTACHED TO THE WRONG TRIGGER, AND THIS SENTENCE USED TO MAKE THAT MISTAKE.
+    A detached worktree does NOT narrow the walk: probe 1 (`@{upstream}`) fails
+    there, but probe 2 (`refs/remotes/origin/HEAD`) resolves, so two revs are
+    walked and no note is returned — measured 2026-10-04 on git 2.55.0 against
+    a detached worktree of a clone, and against `tmux-fuzzyclaw`, both of which
+    earlier prose named as routes to the narrowed state. Narrowing requires no
+    `origin/HEAD` to resolve at all: a remote-less `git init`, or
+    `git remote set-head -d origin` on a branch with no upstream. No production
+    route to it has been demonstrated — see `find-session.CROSS_ARC_NARROWED`
+    for the full measurement and for why the fix stands regardless.
+
+    🔴 A `dict` SUBCLASS AND NOT A TUPLE, deliberately. `sessions_docs(repo,
+    (sid,))[sid]` is the documented one-line spelling that replaced the deleted
+    singular door, and ten tests plus this module's own prose use it; wrapping
+    the mapping in a tuple would churn every one of them into `[0][sid]` to
+    carry one optional string. A subclass compares equal to a plain dict, so
+    every `== {...}` assertion is unaffected, and `.narrowed_note` is an
+    attribute read rather than a second call.
+
+    ⚠ `narrowed_note is None` is the ONLY spelling of "fully walked", and even
+    then it is not a promise of completeness — a ref this clone has never
+    fetched is still invisible, which is `doc_commit_revs`'s own 🔴.
+
+    🔴 `.copy()` SILENTLY RETURNS A PLAIN `dict` AND DROPS THE NOTE — the one
+    footgun of the subclass, and the likeliest one to be reached, because
+    `d.copy()` reads as the type-preserving spelling. Measured 2026-10-04:
+    `copy.copy`, `copy.deepcopy` and `pickle` all PRESERVE the attribute and
+    the class; `dict(d)`, `{**d}`, a `{k: v for …}` comprehension and
+    **`d.copy()`** each return a bare `dict` with no `narrowed_note` at all. So
+    a copy loses the gap while comparing equal to the original — exactly the
+    "answer without its coverage" this class exists to prevent. Not reachable
+    today: the sole consumer reads `.narrowed_note` directly, where a plain
+    dict raises `AttributeError` rather than reporting a clean walk. If you need
+    a copy, use `copy.copy`, or re-wrap: `SessionsDocs(d, d.narrowed_note)`.
+    """
+
+    __slots__ = ("narrowed_note",)
+
+    def __init__(self, mapping, narrowed_note: str | None = None):
+        super().__init__(mapping)
+        self.narrowed_note = narrowed_note
+
+
+def sessions_docs(repo: str, session_ids: Iterable[str],
+                  run: Callable[..., subprocess.CompletedProcess] | None = None,
+                  ) -> "SessionsDocs":
+    """`{session_id: handoff doc basenames}` for commits IN `repo`, newest first.
+
+    🔴 THE SAME EDGE `doc_commits` READS, READ SESSION-FIRST — and that is the
+    whole change. `doc_commits` asks "which sessions touched THIS doc"; a session
+    that DRIFTS (resumed from handoff-A, ended by writing handoff-B) is invisible
+    to every doc-first query but handoff-B's. No new trailer, no new persisted
+    state — the commit already carries the id, and its FILE LIST names the doc.
+
+    🔴 THE CANONICAL CENSUS LIVES HERE. Every other site that quotes this rate
+    — `find-session.arc_cross_docs`, `test_find_session_arc.py` and the
+    `find-session` SKILL — carries the ratio and points back, because this
+    figure has been corrected in three successive rounds and the fix for that is
+    one place, not a fourth correction in eleven.
+    ⚠ MEASURED, because an earlier round's prose asserted "ten other sites carry
+    the ratio" and that was an overstatement nobody had counted. Enumerated
+    tree-wide 2026-10-04 at `521c9a49` with a `.gitignore`-blind sweep
+    (`find … -print0 | xargs -0`) over a wrap- and comment-prefix-tolerant
+    `~1\\s+in\\s+10`: **4 files, 5 occurrences — 2 of them in this docstring**
+    (the prose rate and the table row), one each in `find-session.py`,
+    `test_find_session_arc.py` and `claude/skills/find-session/SKILL.md`. So it
+    is ONE canonical site and THREE pointers, not ten. Quote the count only
+    with the sweep that produced it.
+
+    🔴 THE RATE, AT THE SCOPE MEASURED — **29 drifted writer sessions, ~1 in
+    10**, not 1 in 8. Measured 2026-10-03 and INDEPENDENTLY RE-DERIVED
+    2026-10-04 at `2c57d0d7`, over the stamped corpus at the scope
+    `doc_commit_revs` walks (HEAD + whichever upstream probe resolves, per
+    handle — NOT `--all`, which would credit unmerged branches no shipped reader
+    can see), across the four SET handles with `$CIVITAI_CLI` UNMEASURED:
+
+        292  stamped writer sessions                     <- DATED, see below
+         36  touched >=2 DISTINCT handoff docs            <- NOT the drift rate
+         29  have some doc pair with DISJOINT commit sets <- DRIFTED (~1 in 10)
+          7  the complement: NO doc pair with disjoint commit sets
+          2  of those 7 wrote every doc in ONE commit (7f1c2b2a, ses_f0fc3e87)
+         28  the drifted set excluding the 37-doc bulk move (6b88ffe8)
+          4  of the 29 drifted ACROSS repos
+          1  of the 36 is an opencode `ses_…` id; **0 of the 29**
+
+    DERIVATION, so a reader can re-run it rather than trust the number: for each
+    handle, for each rev `doc_commit_revs` returns, take every commit touching
+    `claudedocs`; keep those whose body carries a `Claude-Session-Id:` trailer
+    AND whose file list names a `handoff-*.md`; build `{sid: {doc: {commits}}}`;
+    a session DRIFTED iff some pair of its docs has DISJOINT commit sets.
+
+    🔴 THE DENOMINATOR IS DATED BECAUSE IT IS UNPINNED PROSE — AND IT HAS NOW
+    DRIFTED ON ITS OWN, which is the argument. It read **291** when first
+    measured and re-derived as **292** a day later; the cause is isolated to
+    `4a32bf7d`, a single-doc writer committed 2026-10-03 16:47, i.e. after the
+    census ran and ~2h41m before the commit that quoted it. Nothing derived
+    moved, because the growth landed in the single-doc bucket. No test asserts
+    this as a live measurement, so it is unpinned by construction; it is DATED
+    rather than pinned because pinning a live corpus count would fail the suite
+    on every new handoff commit — and the refusal string's own guard
+    deliberately forbids a census literal for the same reason. **Quote it with
+    the date and the sha, or not at all.**
+
+    ⚠ THE PER-SESSION DOC-COUNT HISTOGRAM IS DELETED, NOT CORRECTED, AND **NO
+    TABLE IS SPELLED ANYWHERE** — which is the second half of that sentence and
+    the half an earlier round got wrong. The 🔴 above the deletion was shipped
+    while THREE illustrative tables sat two lines beneath it, printed again at a
+    second site: the table that was deleted was indeed gone, but a reader could
+    still copy a histogram out of the text asserting there was none, and the
+    deletion's own rationale then had two sites to update on the next
+    correction. Enumerated with a `.gitignore`-blind sweep
+    (`find … -print0 | xargs -0 grep`, for a first bucket `1:<SP>25`, where
+    `<SP>` stands in for the literal space SO THAT THIS SENTENCE DOES NOT MATCH
+    ITS OWN SWEEP — quoting the pattern verbatim left one self-referential hit
+    and a `0` that was not a 0): **2 files / 8 lines at `521c9a49`** against
+    **1 file / 2 lines at the base `2c57d0d7`** — the numbers went UP under a
+    claim that they had gone to zero. Re-measured after this change: **0 files
+    / 0 lines.** Re-run that sweep after any edit here.
+
+    WHY NO TABLE IS KEPT, which is the durable part: three independent
+    derivations produced three different histograms, and the buckets move both
+    with corpus growth AND with whether a rename counts as touching one doc or
+    two — a method detail no prose statement of a table ever carried. Two of
+    those three agreed on their first bucket BY COINCIDENCE (different corpus,
+    different method, same integer), so a reader cannot tell a re-derivation
+    from a revival of a draft that was REJECTED as unreproduced. The histogram
+    supported no claim the lines above do not make. If you need one, derive it
+    with the DERIVATION paragraph above and date it; do not write it down here.
+
+    ⚠ THE `>=2 DOCS` POPULATION IS A WIDER CLAIM AND IS NOT THE DRIFT RATE.
+    Quoting the 36 as the rate overstates it by ~25%. The 7 is `36 - 29`, the
+    complement of "drifted", and NOT "wrote every doc in one commit" — that
+    gloss was the third correction to this paragraph: enumerated, five of the
+    seven spread their docs over 2-5 SEPARATE commits and are excluded only
+    because every doc PAIR happens to share a commit. The 29 never depended on
+    the gloss; the code applies disjointness correctly.
+
+    🔴 ONE WALK FOR ALL THE IDS, by ORing their `--grep` patterns — **~3x
+    faster than per-member** for a six-member arc over the 4 readable handles.
+    Measured 2026-10-03 on the laptop (8 cores), the three shapes INTERLEAVED
+    round-robin in ONE process, warmed once, 5 runs each, medians, AT TWO LOAD
+    POINTS because one measurement here is not a general claim:
+
+        load avg ~5        ~18        shape
+        ---------    ---------        -----------------------------------------
+            1.91s      7.81s         A bare prefix `^Claude-Session-Id: `
+            3.97s     14.91s         B the ORed anchored full ids RUN HERE
+           12.65s     42.37s         C one pass per member
+            3.19x      2.84x         RATIO C/B
+
+    🔴 THE RATIO IS THE CLAIM; THE ABSOLUTES ARE A PROPERTY OF THE BOX'S LOAD,
+    NOT OF THE QUERY. They swing ~4x between those two points — so quoting one
+    as "the cost" is how this docstring was wrong the first time. The ratio is
+    internally controlled by the interleaving (a load swing hits all three
+    shapes, not whichever ran last) and lands at 2.8-3.2x here; round 0
+    measured 2.1x at a third load. Direction not in doubt, magnitude ~2-3x.
+
+    ⚠ AN EARLIER DOCSTRING QUOTED **1.28s**, WHICH TIMED SHAPE A — the bare
+    prefix, not the anchored ORed full ids this function runs. Paired against
+    `~10s` for per-member it implied ~8x, where the real saving is ~3x. (And
+    1.28s does reproduce as shape A at low load: 1.91s above. The number was
+    right; the query it was attached to was not.) Quote the shape you timed.
+
+    ⚠ ONE WALK PER **REV**, NOT PER HANDLE — and `doc_commit_revs` returns up
+    to two (`HEAD` and the upstream). An earlier docstring here and in
+    `arc_cross_docs` claimed "ONE `--grep` PASS PER SET HANDLE", which was false
+    on every handle whose upstream differs from `HEAD`: those pay two walks plus
+    the `rev-parse` probes. The absolute figures above already included both
+    revs, and per-member pays both too, so the ~3x ratio is unaffected — but the
+    unit of the claim was wrong. Revs resolving to the SAME OBJECT are now
+    collapsed to one (see `doc_commit_revs`), so a handle costs one walk when the
+    clone is up to date and two when it is not.
+
+    🔴 RETURNS A `SessionsDocs`, WHICH CARRIES THE COVERAGE NOTE. Discarding it
+    was the shipped defect: the cross-arc footer then had no way to say a handle
+    had been walked over `HEAD` alone, and printed `every repo handle answered`
+    about it. Read `.narrowed_note`, never `len(revs)`.
+
+    Raises `GitUnavailable` like its siblings: a session that wrote nothing here
+    and a repo that could not be read produce the same empty dict otherwise, and
+    this module's posture is that a scoped zero is never an absence.
+    """
+    wanted = [sid for sid in dict.fromkeys(session_ids) if sid]
+    out: dict[str, list[str]] = {sid: [] for sid in wanted}
+    if not wanted:
+        # ⚠ NO NOTE, because nothing was asked and so nothing went unmeasured.
+        # `doc_commit_revs` is deliberately not called here: a note on a query
+        # with no ids would report a gap in an answer that has no subject.
+        return SessionsDocs({})
+    greps = [f"--grep={_trailer_grep(sid)}" for sid in wanted]
+    revs, note = doc_commit_revs(repo, run=run)
+    for rev in revs:
+        # 🔴 `--name-only` RATHER THAN `--follow`, and NOT a per-doc pathspec.
+        # `--follow` takes one starting path by definition; the question here is
+        # "which docs", so the paths are the ANSWER and cannot also be the query.
+        # The pathspec is the directory, which is what makes this cheap.
+        raw = _git(repo, ["log", "-z", f"--format={_LOG_FORMAT}", "-E", *greps,
+                          "--name-only", rev, "--", "claudedocs"], run=run)
+        # With `-z`, git emits the format record, then each changed path, all
+        # NUL-separated. A record is told from a path by the `\x1f` field
+        # separators `_LOG_FORMAT` plants: a path cannot contain one.
+        ids: tuple[str, ...] = ()
+        for chunk in raw.split("\0"):
+            if "\x1f" in chunk:
+                parts = chunk.split("\x1f", 3)
+                if len(parts) < 4:
+                    ids = ()
+                    continue
+                # 🔴 RE-PARSED, NOT TRUSTED — see `_trailer_grep`.
+                ids = tuple(sid for sid in trailer_ids(parts[3])
+                            if sid in out)
+                continue
+            # ⚠ NO PER-REV `seen_shas` SET HERE, AND ITS DELETION IS THE POINT.
+            # One shipped: reset per rev, consulted to blank `ids` on a repeat
+            # sha. It could not fire — a single `git log` never emits a commit
+            # twice, and the only real duplication is ACROSS revs, which the
+            # reset defeated by construction. Deleting it left the suite green,
+            # mutation-confirmed. The cross-rev dedup that is actually needed is
+            # the membership test below, which is per (session, doc) and so
+            # covers a commit reached from both revs AND a doc touched by two
+            # different commits. A guard that cannot execute is worse than none:
+            # it reads as coverage and stops anyone looking.
+            path = chunk.strip()
+            if not path or not ids:
+                continue
+            m = _DOC_PATH_RE.match(path)
+            if not m:
+                continue
+            for sid in ids:
+                if m.group(1) not in out[sid]:
+                    out[sid].append(m.group(1))
+    return SessionsDocs({sid: tuple(docs) for sid, docs in out.items()},
+                        narrowed_note=note)
+
+
+# ⚠ NO SINGULAR `session_docs(repo, sid)` DOOR, DELETED 2026-10-03 AND NOT AN
+# OVERSIGHT. It shipped as "a thin single-session door rather than a second
+# walk" and had ZERO production callers — the cross-arc footer calls the plural
+# — so it was kept alive by 10 tests and a named FOLLOW-ON (`arc_seeds_to_docs`),
+# which is not a named CONSUMER. That is the distinction the `next_command`
+# deletion in `find-session.py` turned on, and this is the same rule applied
+# again rather than an exception argued once. `sessions_docs(repo, (sid,))[sid]`
+# is the one-line spelling and returns the identical answer, so nothing was
+# lost but a name. Re-add it when a caller exists and is NAMED here.
 
 
 def writer_members(commits: Sequence[ArcCommit], repo: str = "") -> list[ArcMember]:

@@ -82,8 +82,13 @@ import handoff_arc  # noqa: E402
 import handoff_index  # noqa: E402
 
 
-def arc_handles_spelled(sep: str = ", ") -> str:
+def arc_handles_spelled(sep: str = ", ", handles=None) -> str:
     """`"$DEVRC, $HOMELAB, …"` — the arc-search handles as an operator reads them.
+
+    `handles` renders a SUBSET through this same renderer — the cross-arc footer
+    has to name the handles that did NOT answer, and a second `f"${h}"` join over
+    there would be the inline copy this docstring is about, one level down.
+    Default is the whole tuple, so every existing pin is unaffected.
 
     🔴 ONE RENDERER OVER `handoff_index.REPO_ENV_HANDLES`, so no sentence
     describing the search can name a different set from the one the search
@@ -94,7 +99,8 @@ def arc_handles_spelled(sep: str = ", ") -> str:
     as "nothing was measured at all". Same idiom as `handoff_search.py`'s
     "set one of:" line.
     """
-    return sep.join(f"${h}" for h in handoff_index.REPO_ENV_HANDLES)
+    names = (handoff_index.REPO_ENV_HANDLES if handles is None else handles)
+    return sep.join(f"${h}" for h in names)
 
 # Reassigned by tests to point at a tmp corpus. Read at CALL time, never captured.
 ROOT = DEFAULT_ROOT
@@ -248,7 +254,8 @@ EXIT_CONTRACT = (
                  "has no answer rather than an empty one, an `--arc` seed that "
                  "resolves to no handoff doc (a slug naming nothing, or a "
                  "session id whose opening message names no doc — which is NOT "
-                 "an empty arc), or a malformed "
+                 "an empty arc, and most often means the transcript lives on "
+                 "the OTHER HOST rather than that the seed is wrong), or a malformed "
                  "command line rejected by argparse ITSELF inside `main`'s "
                  "first statement (an unknown flag, or a non-integer "
                  "`--limit`/`--tail`). 🔴 That last one is the only exit 2 this "
@@ -1243,8 +1250,210 @@ def extractor_next_command(report):
             "arc, so size it before reading it whole)")
 
 
-def render_arc(report, unresolved_note=None):
-    """The human rendering of an arc. Ids and repo LABELS only — never a path."""
+#: 🔴 THE REVS THE PASTEABLE ESCAPE HATCH MUST NAME — a two-way ledger against
+#: `handoff_arc._UPSTREAM_PROBES`, not a literal, and not rendered straight from
+#: the probes either. The prose beside the command explains the fallback ORDER
+#: and the one condition that actually narrows the walk; a new probe changes
+#: that explanation, which no derivation can write. So the list is declared here
+#: and `test_find_session_arc.py` fails when it disagrees with the probes.
+#: ⚠ A LITERAL HERE WAS THE BUG: the refusal spelled `@{upstream}` alone and
+#: told the operator to DROP it when the branch has none — which loses the
+#: second probe's `origin/HEAD`, i.e. a strict subset of what the tool walks,
+#: under a sentence promising parity.
+ARC_ESCAPE_REVS = ("@{upstream}", "origin/HEAD")
+
+#: Reason tokens for a handle whose answer is INCOMPLETE. 🔴 THREE REASONS, NOT
+#: ONE, and none of them is a zero: a handle nobody exported was never read, a
+#: handle whose checkout git refused is a leg that failed, and a handle whose
+#: walk fell back to `HEAD` alone answered about a narrower chain than it looks.
+#: `$CIVITAI_CLI` is unset on this host today, so the first is the COMMON case
+#: rather than an edge.
+CROSS_ARC_UNSET = "not set"
+CROSS_ARC_UNREADABLE = "could not be read"
+#: 🔴 THE THIRD READING, AND IT USED TO RENDER AS A CLEAN ONE. `sessions_docs`
+#: discarded `doc_commit_revs`'s note, which is returned exactly when NO upstream
+#: resolved — so a handle structurally narrowed to `HEAD` was reported as having
+#: fully answered (`0 of n ... NOT MEASURED: every repo handle answered`), which
+#: is the scoped-zero-read-as-an-absence this function's own 🔴 forbids.
+#: 🔴 REACHABLE ONLY WHERE NO `refs/remotes/origin/HEAD` RESOLVES — AND THAT IS
+#: A CORRECTION. This comment, `handoff_arc.SessionsDocs`, the fixture that
+#: exercises it and `2c57d0d7`'s own commit message all claimed two production
+#: routes: "`drift-check.sh` rc 18 fires on a local branch with no upstream, and
+#: the handoff flow commits from detached worktrees". Both are FALSE, for one
+#: reason: `doc_commit_revs` has TWO probes, and the SECOND one covers exactly
+#: those cases. Measured 2026-10-04 on this host, git 2.55.0:
+#:   • `~/workspace/tmux-fuzzyclaw` (rc 18's own subject) — branch `main`,
+#:     probe 1 resolves `origin/main`. It HAS an upstream today, so the state
+#:     rc 18 reported is not even present; probe 2 resolves as well.
+#:   • a DETACHED worktree of a clone — probe 1 fails (`fatal: HEAD does not
+#:     point to a branch`), probe 2 resolves `origin/main`. Two revs, no note.
+#:   • `git init` + `remote add` + `fetch` — probe 2 resolves; git 2.55 sets
+#:     `origin/HEAD` on the fetch. Not narrowed.
+#: The narrowed state needs no `origin/HEAD` AT ALL, and only two configurations
+#: produce that here (both measured: probe 1 rc 128, probe 2 rc 1): a
+#: remote-less `git init` — which is what the fixture builds — and
+#: `git remote set-head -d origin` on a branch with no upstream.
+#: ⚠ NO PRODUCTION ROUTE HAS BEEN DEMONSTRATED. That is the honest state of it,
+#: and it is a finding rather than a reason to go looking for a replacement
+#: justification. The fix stands on its own: `revs == ("HEAD",)` and "narrowed"
+#: were being conflated, so a note the module computes was being thrown away and
+#: the footer printed `every repo handle answered` over a walk it had not
+#: characterised. A gap the caller cannot SAY is the defect, whether or not this
+#: host can currently produce it.
+#: ⚠ Three sentences because the operator's next action differs for each: export
+#: the handle, fix the checkout, or fetch the upstream. And unlike the other two
+#: this reason does NOT short-circuit the handle — the union over revs can only
+#: ADD writers, so a narrowed walk's findings are real and are reported
+#: ALONGSIDE the gap rather than instead of it.
+CROSS_ARC_NARROWED = ("walked `HEAD` alone — no upstream ref resolved, so a "
+                      "commit pushed from a worktree is not in that chain")
+
+
+def arc_cross_docs(report, env=None, run=None):
+    """The OTHER handoff docs this arc's members wrote, plus what was not read.
+
+    🔴 THE DEFECT THIS CLOSES. A session DRIFTS: it opens resumed from handoff-A,
+    does that work, then moves on and ends by writing handoff-B. Every resolver
+    here was keyed on the session's GENESIS and is single-valued, so a reader who
+    found handoff-B's arc could not get back to handoff-A.
+
+    🔴 THE RATE, AT THE SCOPE MEASURED — **29 drifted writer sessions, ~1 in
+    10**, not 1 in 8, at the scope `doc_commit_revs` walks (HEAD + whichever
+    upstream probe resolves, per handle; `--all` would credit unmerged branches
+    no reader can see), across the four SET handles with `$CIVITAI_CLI`
+    UNMEASURED. Drifted means **some pair of a session's docs has DISJOINT
+    commit sets** — the `>=2 docs` population is wider and quoting IT as the
+    rate overstates by ~25%.
+    🔴 THE FULL CENSUS, ITS DENOMINATOR (DATED, because it is unpinned prose and
+    has drifted), THE DERIVATION AND THE HISTORY OF ITS THREE CORRECTIONS LIVE
+    IN ONE PLACE: `handoff_arc.sessions_docs`'s docstring. Do not re-state the
+    absolutes here — that duplication is what let one figure be corrected in
+    three successive rounds across eleven sites.
+
+    🔴 ONE `--grep` PASS PER **REV** PER SET HANDLE, OVER EVERY MEMBER AT ONCE —
+    never one pass per member, which is **~3x** slower for this arc's shape
+    (2.2-4.1x across 5 interleaved runs; see `sessions_docs` for the measurement
+    and why it is a range). ⚠ "PER SET HANDLE" IS WHAT THIS LINE USED TO SAY AND
+    IT WAS FALSE: `doc_commit_revs` resolves up to TWO revs, so a handle behind
+    (or ahead of) its upstream pays two walks. Identical revs are now collapsed,
+    so a handle costs one walk when its clone is up to date and two when it is
+    not — measured at load ~12, the second rev was ~4.4s of a ~10.3s pass over
+    the four set handles, of which `$DEVRC` alone collapsed. The ~3x ratio is
+    unaffected either way: per-member pays both revs too. 🔴 AND ON THE HUMAN
+    RENDERING PATH ONLY: `run_arc`'s `--json` branch does not call this at all
+    (the two keys it fed are deleted), and the ordinary annotation path must
+    never reach it either (see `arc_writer_counts`'s budget, measured in doc
+    walks).
+
+    Returns a dict rather than touching `handoff_arc.ArcReport`: the report is
+    imported and rendered by `scripts/session-analysis/extract_user_msgs.py`, and
+    this is a reader's footer, not part of the arc's data model.
+
+    🔴 EVERY GAP IS CARRIED, because the alternative is a scoped zero read as an
+    absence. An UNSET handle, and a handle git could not answer for, are both
+    UNMEASURED — not "the member wrote nothing there" — and the caller must be
+    able to print the difference.
+    """
+    src = os.environ if env is None else env
+    members = list(report.members)
+    ids = [m.session_id for m in members]
+    found = {sid: [] for sid in ids}
+    unmeasured = []            # [(handle, reason)]
+    for handle in handoff_index.REPO_ENV_HANDLES:
+        root = (src.get(handle) or "").strip()
+        if not root:
+            unmeasured.append((handle, CROSS_ARC_UNSET))
+            continue
+        if not ids:
+            continue
+        try:
+            docs_by_sid = handoff_arc.sessions_docs(root, ids, run=run)
+        except handoff_arc.GitUnavailable:
+            unmeasured.append((handle, CROSS_ARC_UNREADABLE))
+            continue
+        # 🔴 CARRIED, AND NOT A `continue`. A narrowed walk answered about a
+        # strictly narrower chain, so the handle is a GAP — but the docs it DID
+        # find are real (the rev union only ever adds), and dropping them would
+        # turn a partial answer into no answer. Attribute access rather than
+        # `getattr(..., None)` on purpose: a `sessions_docs` refactored back to a
+        # plain dict must FAIL here rather than silently stop reporting the gap.
+        if docs_by_sid.narrowed_note:
+            unmeasured.append((handle, CROSS_ARC_NARROWED))
+        for sid, docs in docs_by_sid.items():
+            for doc in docs:
+                # The arc's OWN doc is not an "other arc", and a doc found under
+                # both `claudedocs/` and `claudedocs/archive/` is one doc.
+                if doc != report.doc and doc not in found[sid]:
+                    found[sid].append(doc)
+    entries = [{"member_index": i, "session_id": m.session_id,
+                "docs": tuple(found[m.session_id])}
+               for i, m in enumerate(members, 1) if found[m.session_id]]
+    return {
+        "entries": entries,
+        "members_total": len(members),
+        "members_no_other_doc": sum(1 for m in members
+                                    if not found[m.session_id]),
+        # 🔴 n, NOT 0, WHEN ANY HANDLE WENT UNREAD. The pass is per HANDLE, so an
+        # unread checkout leaves EVERY member's doc set incomplete — including
+        # the members this run did find docs for. Reporting a per-member zero
+        # there would be the measured-vs-unmeasured conflation one level down.
+        "members_unmeasured": len(members) if unmeasured else 0,
+        "unmeasured_handles": list(unmeasured),
+    }
+
+
+def render_cross_arc(cross):
+    """The `CROSS-ARC` footer. 🔴 NEVER RETURNS EMPTY FOR A ZERO.
+
+    Same posture as `handoff_arc.coverage_line`: an arc whose members wrote
+    nothing else prints its sentence IN FULL, because no line is
+    indistinguishable from nothing missing. The `0 of 0` case prints too.
+
+    Ids are `shlex.quote`d and docs come from a path pattern, so nothing a commit
+    body carries reaches a tty raw — and only repo LABELS are ever named, never a
+    checkout path: some handles are CLIENT repos and this repo is PUBLIC.
+    """
+    n = cross["members_total"]
+    out = ["CROSS-ARC — the OTHER handoff docs these members also wrote:"]
+    for entry in cross["entries"]:
+        sid = shlex.quote(entry["session_id"])
+        for doc in entry["docs"]:
+            out.append(f"  {entry['member_index']}. {sid} → {doc}"
+                       f"   (find-session.py --arc {doc})")
+    if not cross["entries"]:
+        out.append("  (none, in the checkouts that answered)")
+    k = cross["members_no_other_doc"]
+    out.append(f"! {k} of {n} members have no stamped commit outside this doc")
+    j = cross["members_unmeasured"]
+    gaps = cross["unmeasured_handles"]
+    if gaps:
+        by_reason = []
+        # 🔴 EVERY REASON THE TUPLE DECLARES, in a fixed order so two runs with
+        # the same gaps render the same bytes. A reason omitted here would make
+        # its handles vanish from the sentence while still counting in `j` — a
+        # gap reported as a number with no name.
+        for reason in (CROSS_ARC_UNSET, CROSS_ARC_UNREADABLE,
+                       CROSS_ARC_NARROWED):
+            named = [h for h, r in gaps if r == reason]
+            if named:
+                by_reason.append(f"{arc_handles_spelled(handles=named)} "
+                                 f"({reason})")
+        detail = ("; ".join(by_reason)
+                  + " — so the line above is NOT a claim about those members")
+    else:
+        detail = "every repo handle answered"
+    out.append(f"! {j} of {n} members' other docs were NOT MEASURED: {detail}")
+    return "\n".join(out)
+
+
+def render_arc(report, unresolved_note=None, cross=None):
+    """The human rendering of an arc. Ids and repo LABELS only — never a path.
+
+    `cross` is `arc_cross_docs`'s result; COMPUTED HERE when not supplied, so a
+    caller that renders an arc cannot accidentally ship one without its
+    cross-arc footer — the "tested in isolation, wired up by nothing" shape this
+    module's own guards were written twice to catch.
+    """
     out = [f"ARC: {report.doc}  (repo {report.repo or 'unknown'})", ""]
     if not report.members:
         out.append("  no sessions resolved")
@@ -1265,6 +1474,12 @@ def render_arc(report, unresolved_note=None):
         out.append(f"! {note}")
     if unresolved_note:
         out.append(f"! {unresolved_note}")
+    # 🔴 BELOW THE COVERAGE LINE AND ABOVE THE `NEXT —` LINE, for the same reason
+    # the comment below gives: this is a GAP in the chain — the other arcs these
+    # sessions also worked — and the gaps must be read before the command that
+    # extracts from the chain.
+    out.extend(["", render_cross_arc(
+        arc_cross_docs(report) if cross is None else cross)])
     # 🔴 LAST, AND BELOW THE COVERAGE LINE ON PURPOSE. The gaps qualify the chain
     # this command is about to extract from; an agent that reads the command first
     # and stops has skipped them.
@@ -1346,6 +1561,17 @@ def run_arc(a):
     except ArcUnmeasured as exc:
         print(f"--arc: {exc}", file=sys.stderr)
         return EXIT_ARC_UNMEASURED
+    # 🔴 NO CROSS-ARC WALK ON THIS PATH, AND THE PLACEMENT IS THE POINT. An
+    # earlier shape hoisted `cross = arc_cross_docs(report)` above this branch,
+    # so every `--json` consumer paid the walk for two keys none of them
+    # read. MEASURED end-to-end on the laptop 2026-10-03, this arc's shape (6
+    # members, 4 readable handles), 3 interleaved runs each warmed: an
+    # `--arc --json` run went 25.31s -> 23.79s median, i.e. 1.52s saved. 🔴 AND
+    # THAT IS THE HONEST NUMBER, not the ~4-15s the walk costs in isolation —
+    # the walk's cost swings ~4x with this box's load (see `sessions_docs`), and
+    # the rest of an `--arc` run dominates either way. The walk now happens
+    # inside `render_arc`, i.e. on the HUMAN branch only, which is also the one
+    # pass the design is about. Deleted with it: `cross_arc`/`cross_arc_gaps`.
     if a.json:
         print(json.dumps({
             "doc": report.doc,
@@ -1360,6 +1586,24 @@ def run_arc(a):
             "coverage": handoff_arc.coverage_line(report),
             "readers_measured": report.readers_measured,
             "unmeasured": report.unmeasured_notes,
+            # ⚠ NO `cross_arc`/`cross_arc_gaps` HERE EITHER, DELETED 2026-10-03,
+            # SAME RULE AS `next_command` BELOW — applied a third and fourth
+            # time rather than argued as an exception. Both keys shipped for one
+            # round justified as "a machine caller must be able to branch on
+            # it"; neither ever had a named consumer, and the measured reach is
+            # the same 0 of 6. The walk that fed them costs ~4s at load ~5
+            # and ~15s at load ~18 (laptop, 6 members, 4 handles; the absolutes
+            # are a property of the load, see `sessions_docs`), charged to the
+            # five of six real consumer sessions that parse `members` and
+            # discard the rest. 🔴 AND IT IS NOT EMITTED AS AN EMPTY LIST: a
+            # fabricated `[]` from a walk that never ran is indistinguishable
+            # from "no member
+            # wrote another doc", which is the scoped-zero-as-absence this
+            # module refuses everywhere else. The cross-arc edge IS still a
+            # programmatic surface — `handoff_arc.sessions_docs()`, public in
+            # its `__all__`, which gives a caller the real walk instead of one
+            # smuggled through a CLI payload. Re-add a key here when a caller
+            # exists and is NAMED here.
             # ⚠ NO `next_command` HERE, DELETED 2026-09-26 AND NOT AN OVERSIGHT.
             # It shipped for one round, justified as "a machine caller must be able
             # to branch on it" — a hypothesis, not a consumer. Measured reach: 0 of
@@ -1369,6 +1613,8 @@ def run_arc(a):
             # rendering. Re-add it when a caller exists and is named here.
         }, indent=2))
         return EXIT_OK
+    # `cross` left unsupplied ON PURPOSE — `render_arc` computes it, which is
+    # the ONE pass, and keeps the footer impossible to ship without.
     print(render_arc(report))
     return EXIT_OK
 
@@ -1608,12 +1854,92 @@ def main(argv=None):
     if a.arc:
         seed_doc = arc_seed_to_doc(a.arc)
         if not seed_doc:
+            # 🔴 THE CAUSE LIST USED TO BE A FALSE CLAIM BY OMISSION. It named
+            # "never handed a handoff doc" and "transcript pruned" and left out
+            # the MEASURED DOMINANT cause: the transcript is on the OTHER HOST.
+            # Measured 2026-10-03, the large majority of stamped writer
+            # sessions' transcripts live on the peer rather than here — so the
+            # sentence enumerated the rare causes and skipped the common one,
+            # and it is the sentence an agent reads before concluding the seed
+            # was bad.
+            # ⚠ NO CORPUS CENSUS IN THE STRING, DELETED 2026-10-03. It carried
+            # four hardcoded counts pinned only to THEMSELVES (`assert "245" in
+            # err` — a literal pinned to a literal), re-measured by nothing, so
+            # the day the corpus moved it would have gone stale silently and
+            # GREEN. The RANKING is the actionable half and does not rot at the
+            # same rate; the exact census belongs in a measurement, not in a
+            # user-facing string that no test can falsify. The guard below now
+            # pins the CAUSE and the ESCAPE instead of a number.
+            # 🔴 AND A CAUSE WITH NO NEXT STEP IS STILL A DEAD END: the git
+            # reverse lookup needs no transcript at all, so it is named here.
             print(f"--arc {a.arc!r} resolves to no handoff doc. Pass a slug "
                   "(`handoff-foo`), a basename, a path under claudedocs/, or a "
                   "session id whose opening message names one. 🔴 A session id "
-                  "that resolves to NOTHING is not the same as an empty arc: "
-                  "that session may simply never have been handed a handoff "
-                  "doc, or its transcript may have been pruned.",
+                  "that resolves to NOTHING is not the same as an empty arc, "
+                  "and the MEASURED DOMINANT cause is that the transcript "
+                  "lives on the OTHER HOST, not that the seed is wrong "
+                  "(`peer-host ssh-target --json` names the peer). The "
+                  "doc->session edge is in GIT, which needs no transcript — "
+                  "ask it directly in ONE of the "
+                  f"{arc_handles_spelled(', ')} checkouts:\n"
+                  # 🔴 THE PASTEABLE COMMAND MUST MATCH THE SHIPPED READER, and
+                  # it was wrong three ways. (a) The handles were joined with
+                  # `/`, rendering as `$DEVRC/$HOMELAB/...` — which reads as a
+                  # filesystem PATH, not as five alternatives. (b) The pattern
+                  # used a literal single space where `_trailer_grep` uses
+                  # `[[:space:]]*`, so a tab-separated or multi-space trailer
+                  # this reader finds would not match the printed command. (c)
+                  # It passed `--all`, which `sessions_docs`'s own docstring
+                  # REJECTS ("`--all` would credit unmerged branches no reader
+                  # can see") — so the suggestion was simultaneously narrower
+                  # than the code (the space) and wider (the refs).
+                  # 🔴 (d) AND THE FIX FOR (c) OPENED THE NARROW HALF OF THE
+                  # SAME CLASS. `doc_commit_revs` has TWO upstream probes, not
+                  # one — `@{upstream}` AND `refs/remotes/origin/HEAD` — and it
+                  # walks `HEAD` plus whichever resolves FIRST. The command
+                  # spelled probe 1 only, under a parenthetical telling the
+                  # operator to DROP it "if the branch has none", which is the
+                  # case probe 2 covers. MEASURED on a hermetic clone on a
+                  # local branch with no upstream: `doc_commit_revs` returned
+                  # `('HEAD', 'origin/main')` with `note=None` (NOT narrowed)
+                  # and `sessions_docs` found two docs, while an operator doing
+                  # as told got ONE — a strict subset, under a sentence
+                  # promising parity with the footer. The footer had correctly
+                  # reported no narrowing, because probe 2 resolved.
+                  # The revs now come from `ARC_ESCAPE_REVS`, pinned two-way
+                  # against `handoff_arc._UPSTREAM_PROBES`.
+                  f"  git log HEAD {ARC_ESCAPE_REVS[0]} -E "
+                  f"--grep='^{handoff_arc.TRAILER_KEY}:[[:space:]]*<id>"
+                  "[[:space:]]*$' --name-only -- claudedocs\n"
+                  f"  (`{ARC_ESCAPE_REVS[0]}` is the FIRST of "
+                  f"{len(ARC_ESCAPE_REVS)} upstream probes this reader tries, "
+                  "and a branch with no upstream does NOT narrow the walk: "
+                  f"substitute `{ARC_ESCAPE_REVS[1]}`, which is what the "
+                  "reader falls back to. The CROSS-ARC footer reports a "
+                  "narrowing only when NEITHER probe resolves, which takes a "
+                  "remote-less `git init`, or a `git remote set-head -d` ON A "
+                  "BRANCH WITH NO UPSTREAM.)\n"
+                  # 🔴 THE QUALIFIER IS LOAD-BEARING AND WAS MISSING HERE. This
+                  # sentence and the `narrowed_repo` fixture's docstring both
+                  # shortened the condition to "a `git remote set-head -d`",
+                  # which states a SUFFICIENCY an operator can act on and that
+                  # is FALSE. MEASURED 2026-10-04, git 2.55.0, hermetic clone
+                  # of a bare origin: `git remote set-head -d origin` with the
+                  # upstream INTACT leaves probe 1 resolving `origin/main`, so
+                  # `doc_commit_revs` returns `(('HEAD',), None)` — NOT
+                  # narrowed. Only unsetting the upstream as well produced the
+                  # note. The two long-form sites (`CROSS_ARC_NARROWED` above
+                  # and `handoff_arc.SessionsDocs`) always carried it.
+                  # ⚠ EACH REV IS SPELLED EXACTLY ONCE ABOVE, AND THAT IS
+                  # LOAD-BEARING. The guard is `rev in err`; an earlier draft
+                  # also wrote "no `refs/remotes/origin/HEAD` either" into the
+                  # narrowing clause, and a mutation that DELETED the
+                  # substitution instruction then passed green off that
+                  # incidental substring — the spelled-vs-structural trap, in
+                  # the guard written to close it. Do not re-spell a rev here
+                  # except where an operator is told to USE it.
+                  "Failing that, the session may never have been handed a "
+                  "handoff doc, or its transcript may have been pruned.",
                   file=sys.stderr)
             return EXIT_USAGE
         a.arc = seed_doc

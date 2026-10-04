@@ -498,9 +498,34 @@ EXIT_2_CAUSES = (
     ("`--skill` with `--opencode-only` — that corpus carries no skill "
      "attribution, so the combination has no answer rather than an empty one",
      (["--skill", "browser", "--opencode-only"],)),
+    # 🔴 THE CROSS-HOST CAUSE IS MEASURED, NOT HEDGING. Of 291 stamped writer
+    # sessions (2026-10-03), 6 have a transcript on this machine, 245 on the
+    # peer and 40 on neither — so the previous wording's two causes (`never
+    # handed a doc`, `transcript pruned`) covered the 40 and silently skipped
+    # the 245.
+    # ⚠ THAT DENOMINATOR IS THE 2026-10-03 ONE AND HAS SINCE MOVED: the writer
+    # population re-derived as **292** on 2026-10-04 (see
+    # `handoff_arc.sessions_docs`, which now DATES it). This 6/245/40 partition
+    # was NOT re-derived at that head, so it is quoted at its own date rather
+    # than rescaled — the RANKING is what this comment exists for, and one extra
+    # writer cannot invert 245 against 6. Re-derive before quoting the
+    # absolutes.
+    # ⚠ `main`'s PRINTED REFUSAL CARRIES NO NUMBERS. This comment said it
+    # carried "the full numbers and the git-derived way around it", which was
+    # true when written and false by the time it landed: `47a94161` DELETED the
+    # census from that string (four literals pinned only to themselves — `assert
+    # "245" in err` — which re-measured nothing and would have gone stale
+    # silently and GREEN), and the matching guard now asserts `"245" not in
+    # err`. What the string carries is the RANKING ("most often the other
+    # host"), the `peer-host` pointer and the `git log --grep` escape — the
+    # halves that are actionable and do not rot at the same rate. The counts
+    # above live HERE, in a measurement, which is the whole point of the
+    # deletion. This sentence carries the ranking for the same reason: a caller
+    # branching on rc 2 needs to know the seed is probably fine.
     ("an `--arc` seed that resolves to no handoff doc (a slug naming "
      "nothing, or a session id whose opening message names no doc — which "
-     "is NOT an empty arc)",
+     "is NOT an empty arc, and most often means the transcript lives on the "
+     "OTHER HOST rather than that the seed is wrong)",
      (["--arc", "README.md"], ["--arc", "not-a-doc-or-a-uuid/"])),
     # 🔴 NOT A `return EXIT_USAGE` SITE, AND THAT IS THE POINT. argparse exits 2
     # from inside `parse_args`, so this cause has no line in `main` for the
