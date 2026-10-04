@@ -481,11 +481,19 @@ def _no_change_update(tmp_path: Path) -> Path:
 class TestEveryExitPathLogs:
     """🔴 ENUMERATED, ONE CASE PER `status=` TOKEN THE MODULE CAN PRINT.
 
-    The brief for this work says "do not hand-pick a subset", and an assertion that
-    coverage is complete is not coverage. So: one reachable case per token, each
-    asserting BOTH the status the row carries AND the exit code — and
-    `TestTheReturnLedger` below closes the gap a per-case list structurally cannot,
-    which is a FORTIETH exit path nobody wrote a case for.
+    An assertion that coverage is complete is not coverage. So: one reachable case
+    per token the gate can print, each asserting BOTH the status the row carries AND
+    the exit code — and `TestTheReturnLedger` below closes the gap a per-case list
+    structurally cannot, which is a FORTIETH exit path nobody wrote a case for.
+
+    ⚠ WHAT THESE CASES DO *NOT* REACH, NAMED RATHER THAN LEFT TO BE INFERRED.
+    Three `return` sites print a token another case already covers, so no case here
+    exercises them and only the AST ledger does: `size-ratchet` from rule (s)'s
+    autoevict-SHORTFALL arm (rule (p)'s own arm is covered), and `prune-unconserved`
+    from the two arms INSIDE the write window (the archive-moved race and the
+    read-back regression — the pre-write arm is covered). Twelve of the thirteen
+    exit-2 argument arms are likewise uncovered individually; they all log
+    `status=null, exit_code=2`, and one case pins that pair.
     """
 
     def test_dated_topic(self, repo: Path, update_file: Path, logfile: Path):
@@ -737,6 +745,48 @@ class TestEveryExitPathLogs:
         proc = run_tool(repo, logfile, update=update)
         assert proc.returncode == hd.EXIT_RANK_GROWTH, proc.stderr
         assert only_row(logfile)["status"] == "rank-growth"
+
+    def test_push_failed(
+        self, repo: Path, update_file: Path, logfile: Path, tmp_path: Path
+    ):
+        """🔴 THE ONE ARM WHERE THE COMMIT EXISTS AND THE RUN STILL FAILS.
+
+        `push-failed` is deliberately NOT a member of `SUCCESS_STATUSES` — the
+        document DID change, but the run ended in a recovery the operator has to
+        carry out, so counting it as a clean landing would make a second-pass rate
+        read as resolved while the arc is still open. This is the case that proves
+        such a row exists to be excluded.
+
+        🔴 REACHED WITH A READ-ONLY BARE REMOTE RATHER THAN A `git` SHIM ON
+        PATH, and the asymmetry is the whole trick: `remote_has_commits_we_lack`
+        uses `ls-remote`, which only READS, so the pre-flight passes; the push
+        WRITES, so the filesystem refuses it. No mock, and the failure comes from
+        real git.
+        """
+        ro = tmp_path / "readonly.git"
+        _sh("git", "init", "-q", "--bare", "-b", "main", str(ro), cwd=tmp_path)
+        _sh("git", "remote", "add", "readonly", str(ro), cwd=repo)
+        _sh("git", "push", "-q", "readonly", "main", cwd=repo)
+        for path in sorted(ro.rglob("*"), reverse=True):
+            os.chmod(path, 0o500 if path.is_dir() else 0o400)
+        os.chmod(ro, 0o500)
+        try:
+            proc = run_tool(
+                repo, logfile, "--confirm", "--push", "--remote", "readonly",
+                update=update_file,
+            )
+            assert proc.returncode == hd.EXIT_FAIL, (proc.returncode, proc.stderr)
+            assert "status=push-failed" in proc.stderr, proc.stderr
+            row = only_row(logfile)
+            assert row["status"] == "push-failed"
+            assert row["exit_code"] == hd.EXIT_FAIL
+            # The COMMIT exists — that is what makes this status its own bucket.
+            landed = _sh("git", "show", "--format=", "HEAD", cwd=repo)
+            assert "decremented in the wrapper" in landed, landed
+        finally:
+            os.chmod(ro, 0o700)
+            for path in sorted(ro.rglob("*")):
+                os.chmod(path, 0o700 if path.is_dir() else 0o600)
 
     def test_leak_refused(self, repo: Path, update_file: Path, logfile: Path):
         """The repo's own scanner refuses the delta -> exit 13, nothing written.
