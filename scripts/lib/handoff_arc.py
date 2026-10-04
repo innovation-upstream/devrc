@@ -60,15 +60,25 @@ __all__ = [
     "trailer_ids",
     "genesis_names_doc",
     "doc_basename",
+    "doc_in_text",
     "doc_commits",
+    "doc_commit_revs",
     "sessions_docs",
-    # 🔴 THE RETURN TYPE OF `sessions_docs`, EXPORTED BESIDE IT. It was absent,
-    # so a star-importer could call the function and had no way to NAME what it
-    # got back — annotate it, isinstance-check it, or re-wrap a copy (see the
-    # class's `.copy()` warning). A type a caller cannot name is a type a caller
-    # degrades to `dict`, which is how the coverage note gets dropped.
+    # 🔴 THE RETURN TYPE OF `sessions_docs`, EXPORTED BESIDE IT — and the list
+    # is now a COMPLETE statement of this module's public surface rather than a
+    # subset, which is what makes the pin two-way: `doc_in_text` and
+    # `doc_commit_revs` are both called from `find-session.py` and were both
+    # MISSING from here, so the old one-directional guard ("every entry
+    # resolves") could not see either omission.
+    # ⚠ AND THE ORIGINAL RATIONALE NAMED A CONSUMER THAT DOES NOT EXIST. This
+    # comment used to say the export existed "so a star-importer can name the
+    # return type". Enumerated tree-wide: NOTHING star-imports this module —
+    # the only `import *` string in the tree is the pin's own error message.
+    # The honest reason is the `.copy()` footgun the class documents: a caller
+    # that cannot name the type annotates it `dict`, and a plain `dict` has no
+    # `.narrowed_note`. That is a real hazard for an ordinary `import`-and-call
+    # consumer; it needs no star-importer.
     "SessionsDocs",
-    "UPSTREAM_PROBE_REVS",
     "upstream_probe_rev",
     "writer_members",
     "reader_members",
@@ -361,30 +371,45 @@ _UPSTREAM_PROBES: tuple[tuple[str, ...], ...] = (
 def upstream_probe_rev(probe: tuple[str, ...]) -> str:
     """The rev a probe resolves, spelled the way an OPERATOR would type it.
 
-    🔴 EXISTS SO THE PASTEABLE ESCAPE-HATCH COMMAND CANNOT BE NARROWER THAN THE
-    READER. `find-session.py`'s exit-2 refusal prints a `git log … --grep` an
-    operator can run by hand, and it used to spell `@{upstream}` ALONE under a
-    sentence promising it matched "the revs `doc_commit_revs` resolves" — true
-    of the first probe and silent about the second, which is the one that
-    resolves in almost every real checkout. `find-session.ARC_ESCAPE_REVS` is
-    pinned two-way against this function by
+    🔴 WHAT IT IS FOR, AND WHAT IT DOES **NOT** ESTABLISH — this docstring used
+    to overclaim and that was the finding. `find-session.py`'s exit-2 refusal
+    prints a `git log … --grep` an operator can run by hand, and it used to
+    spell `@{upstream}` ALONE under a sentence promising it matched "the revs
+    `doc_commit_revs` resolves" — true of the first probe and silent about the
+    second, which is the one that resolves in almost every real checkout. This
+    function exists so that `find-session.ARC_ESCAPE_REVS` can be pinned
+    two-way against the probes by
     `test_find_session_arc.py::TestTheExit2CauseListNamesTheCROSSHOSTCause`, so
     a third probe fails the suite rather than silently going unmentioned.
+
+    🔴 THAT LEDGER IS A SYNC CHECK, NOT A PARITY CHECK, AND THE DIFFERENCE COST
+    THREE ROUNDS. The claim "the pasteable command cannot be NARROWER than the
+    reader" is about what the command *yields*, and no amount of asserting that
+    a rev's TEXT appears can establish it: four mutants that each left the rev
+    spelled on the line while narrowing the walk (`HEAD..@{upstream}`,
+    `HEAD ^@{upstream}`, demoting it to `--author=`, demoting it to a trailing
+    shell comment) all stayed GREEN against a substring guard. What establishes
+    the claim is
+    `…::test_the_pasteable_command_YIELDS_the_SAME_DOCS_as_sessions_docs`, which
+    EXECUTES the printed command in a diverged hermetic clone and compares its
+    doc set against `sessions_docs`'s. Attribute the property to that test, not
+    to this function.
 
     ⚠ It reads `probe[-1]` and strips a `refs/remotes/` prefix — a RULE, not a
     table, so it is only as right as the probes' shape. A future probe whose
     last argument is not the ref (an option-trailing spelling) yields a wrong
     string; the two-way pin is what makes that a red test rather than a wrong
     message.
+
+    ⚠ NO MODULE-LEVEL TUPLE OF THESE. A `UPSTREAM_PROBE_REVS` constant shipped
+    here with ZERO consumers (enumerated tree-wide: its own definition and its
+    `__all__` entry) while the pin re-derived the same tuple by hand — two
+    derivations of one rule, which is the duplication this repo's rules forbid.
+    Deleted rather than wired up: the pin's derivation is the only caller.
     """
     ref = probe[-1]
     prefix = "refs/remotes/"
     return ref[len(prefix):] if ref.startswith(prefix) else ref
-
-
-#: The operator-facing spelling of every probe, in probe order.
-UPSTREAM_PROBE_REVS: tuple[str, ...] = tuple(
-    upstream_probe_rev(p) for p in _UPSTREAM_PROBES)
 
 
 #: Full-hex oid lengths git can emit: sha1 and sha256. Not a style choice —
@@ -651,6 +676,15 @@ def sessions_docs(repo: str, session_ids: Iterable[str],
     `find-session` SKILL — carries the ratio and points back, because this
     figure has been corrected in three successive rounds and the fix for that is
     one place, not a fourth correction in eleven.
+    ⚠ MEASURED, because an earlier round's prose asserted "ten other sites carry
+    the ratio" and that was an overstatement nobody had counted. Enumerated
+    tree-wide 2026-10-04 at `521c9a49` with a `.gitignore`-blind sweep
+    (`find … -print0 | xargs -0`) over a wrap- and comment-prefix-tolerant
+    `~1\\s+in\\s+10`: **4 files, 5 occurrences — 2 of them in this docstring**
+    (the prose rate and the table row), one each in `find-session.py`,
+    `test_find_session_arc.py` and `claude/skills/find-session/SKILL.md`. So it
+    is ONE canonical site and THREE pointers, not ten. Quote the count only
+    with the sweep that produced it.
 
     🔴 THE RATE, AT THE SCOPE MEASURED — **29 drifted writer sessions, ~1 in
     10**, not 1 in 8. Measured 2026-10-03 and INDEPENDENTLY RE-DERIVED
@@ -686,17 +720,31 @@ def sessions_docs(repo: str, session_ids: Iterable[str],
     deliberately forbids a census literal for the same reason. **Quote it with
     the date and the sha, or not at all.**
 
-    ⚠ THE PER-SESSION DOC-COUNT HISTOGRAM IS DELETED, NOT CORRECTED. Three
-    derivations produced three tables — `{1: 256, 2: 27, 3: 7, 4: 1}` (rejected
-    as unreproduced), `{1: 255, 2: 25, 3: 9, 4: 1, 37: 1}` (shipped) and
-    `{1: 256, 2: 24, 3: 10, 4: 1, 37: 1}` (2026-10-04) — and the buckets move
-    both with corpus growth and with whether a rename counts as touching one doc
-    or two, a method detail no prose statement of the table ever carried. It
-    supported no claim the lines above do not make, so it is gone rather than
-    re-stated. ⚠ The 2026-10-04 table's `1: 256` COINCIDES with the rejected
-    draft's first bucket. That is a different corpus measured by a different
-    method arriving at the same integer, NOT a revival of the rejected draft —
-    which is precisely why no table is kept: a reader cannot tell those apart.
+    ⚠ THE PER-SESSION DOC-COUNT HISTOGRAM IS DELETED, NOT CORRECTED, AND **NO
+    TABLE IS SPELLED ANYWHERE** — which is the second half of that sentence and
+    the half an earlier round got wrong. The 🔴 above the deletion was shipped
+    while THREE illustrative tables sat two lines beneath it, printed again at a
+    second site: the table that was deleted was indeed gone, but a reader could
+    still copy a histogram out of the text asserting there was none, and the
+    deletion's own rationale then had two sites to update on the next
+    correction. Enumerated with a `.gitignore`-blind sweep
+    (`find … -print0 | xargs -0 grep`, for a first bucket `1:<SP>25`, where
+    `<SP>` stands in for the literal space SO THAT THIS SENTENCE DOES NOT MATCH
+    ITS OWN SWEEP — quoting the pattern verbatim left one self-referential hit
+    and a `0` that was not a 0): **2 files / 8 lines at `521c9a49`** against
+    **1 file / 2 lines at the base `2c57d0d7`** — the numbers went UP under a
+    claim that they had gone to zero. Re-measured after this change: **0 files
+    / 0 lines.** Re-run that sweep after any edit here.
+
+    WHY NO TABLE IS KEPT, which is the durable part: three independent
+    derivations produced three different histograms, and the buckets move both
+    with corpus growth AND with whether a rename counts as touching one doc or
+    two — a method detail no prose statement of a table ever carried. Two of
+    those three agreed on their first bucket BY COINCIDENCE (different corpus,
+    different method, same integer), so a reader cannot tell a re-derivation
+    from a revival of a draft that was REJECTED as unreproduced. The histogram
+    supported no claim the lines above do not make. If you need one, derive it
+    with the DERIVATION paragraph above and date it; do not write it down here.
 
     ⚠ THE `>=2 DOCS` POPULATION IS A WIDER CLAIM AND IS NOT THE DRIFT RATE.
     Quoting the 36 as the rate overstates it by ~25%. The 7 is `36 - 29`, the

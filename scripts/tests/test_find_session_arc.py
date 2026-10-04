@@ -16,7 +16,9 @@ task's criterion 11 names.
 
 from __future__ import annotations
 
+import ast
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -1587,19 +1589,15 @@ class TestTheHandleProseNamesEveryHandle:
 # ONE place — `handoff_arc.sessions_docs`'s docstring. This comment used to
 # carry a copy, and a copy is how one figure came to be corrected in three
 # successive rounds across eleven sites while drifting on its own in between.
-# ⚠ THE HISTOGRAM IS DELETED RATHER THAN RE-CORRECTED. It read
-# `{1: 255, 2: 25, 3: 9, 4: 1, 37: 1}` here; a 2026-10-04 re-derivation got
-# `{1: 256, 2: 24, 3: 10, 4: 1, 37: 1}`; a still earlier draft had
-# `{1: 256, 2: 27, 3: 7, 4: 1}` and was REJECTED as unreproduced. Three
-# derivations, three tables — the buckets move with corpus growth AND with
-# whether a rename counts as touching one doc or two, which no prose statement
-# of the table carried. 🔴 THE 2026-10-04 TABLE'S `1: 256` MATCHES THE REJECTED
-# DRAFT'S FIRST BUCKET BY COINCIDENCE — a different corpus measured a different
-# way landing on the same integer — and that collision is itself the reason no
-# table is kept: a reader cannot distinguish it from a revival of the rejected
-# draft. The rejected recon's "35/289 excluding 18 bulk-move commits" stays
-# REMOVED for the original reason (unreproduced scope); re-deriving the rate was
-# what was owed, and that is done, dated, at the canonical site.
+# ⚠ THE HISTOGRAM IS DELETED RATHER THAN RE-CORRECTED — and the reason it is
+# not RE-STATED here even as an illustration lives at the canonical site too.
+# An earlier round shipped that 🔴 with three example tables printed two lines
+# beneath it, here AND there, so the "deleted" claim was false of its own text
+# and the rationale had two sites to update. Do not reintroduce a table at this
+# site; if you need one, derive it per the canonical docstring and date it.
+# The rejected recon's "35/289 excluding 18 bulk-move commits" stays REMOVED for
+# the original reason (unreproduced scope); re-deriving the rate was what was
+# owed, and that is done, dated, at the canonical site.
 # ⚠ AND THE `ses_…` CASE IS A POPULATION OF THE WIDER SET ONLY — 1 of the
 # multi-doc sessions, **0 of the drifted**. The cross-repo case is a population
 # of both. Said here because the fixture below is justified by the multi-doc
@@ -1702,6 +1700,21 @@ def _give_upstream(repo: Path, at: str = "HEAD") -> None:
     _sh("git", "update-ref", "refs/remotes/origin/main", oid, cwd=repo)
     _sh("git", "symbolic-ref", "refs/remotes/origin/HEAD",
         "refs/remotes/origin/main", cwd=repo)
+
+
+def _pasteable_git_log(err: str) -> str:
+    """The ONE `git log` line the exit-2 refusal prints, or fail.
+
+    One rule, one place: both the locator assertion and the parity test that
+    EXECUTES the command extract it the same way, so they cannot disagree about
+    which line they are talking about.
+    """
+    lines = [ln.strip() for ln in err.splitlines() if "git log" in ln]
+    assert len(lines) == 1, (
+        f"expected exactly one pasteable `git log` line in the refusal, found "
+        f"{len(lines)}: {lines!r} — every caller of this helper is scoped to "
+        "one and cannot be")
+    return lines[0]
 
 
 def _commit(work: Path, relpath: str, text: str, body: str) -> None:
@@ -2210,8 +2223,15 @@ def narrowed_repo(tmp_path: Path) -> Path:
     (it has an upstream today, so rc 18's state is not even present), and a
     detached worktree of a clone fails probe 1 and resolves probe 2, giving two
     revs and no note. Only a remote-less `git init` (this fixture) or
-    `git remote set-head -d origin` produces the narrowed state here, and no
-    production route to it has been demonstrated. The fixture is still the
+    `git remote set-head -d origin` **on a branch with no upstream** produces
+    the narrowed state here, and no production route to it has been
+    demonstrated.
+    🔴 THAT QUALIFIER WAS MISSING AND THE SENTENCE WAS A FALSE SUFFICIENCY
+    CLAIM. MEASURED 2026-10-04, git 2.55.0, hermetic clone of a bare origin:
+    `git remote set-head -d origin` with the upstream INTACT leaves probe 1
+    resolving `origin/main`, so `doc_commit_revs` returns `(('HEAD',), None)` —
+    NOT narrowed. Only after `git branch --unset-upstream` did the note appear.
+    The fixture is still the
     right fixture — it builds the state the code must be able to SAY — but it
     is not evidence that the state occurs in the wild. One session writes two
     docs; only ONE of them is reachable from the checked-out branch, so a walk
@@ -2259,6 +2279,63 @@ def upstream_repo(tmp_path: Path):
     _commit(work, BETA, "# beta\n\nfirst\n",
             f"docs(handoff): beta\n\n{ha.TRAILER_KEY}: {SID_DRIFT}\n")
     return work, tmp_path / "origin.git"
+
+
+@pytest.fixture()
+def diverged_upstream_repo(tmp_path: Path) -> Path:
+    """A clone whose branch has DIVERGED from its upstream, one session, 2 docs.
+
+    🔴 THE SHAPE THAT MAKES THE ESCAPE-HATCH PARITY CHECK DISCRIMINATING, and
+    `upstream_repo` is NOT it. There, `HEAD` is strictly AHEAD of the pushed
+    branch, so `git log HEAD` alone already yields both docs — a command that
+    dropped the upstream rev entirely would still match `sessions_docs`, and the
+    parity assertion would pass vacuously.
+
+    Here each side carries a doc the other cannot reach:
+
+        base            (no doc)   reachable from both
+        ALPHA   on local `main`    reachable from `HEAD` ONLY
+        GAMMA   on `origin/main`   reachable from `@{upstream}` ONLY
+
+    So every narrowing of the printed command yields a STRICT SUBSET of the two
+    docs `sessions_docs` returns, whichever direction it narrows in:
+    `HEAD..@{upstream}` gives GAMMA, `HEAD ^@{upstream}` gives ALPHA, and
+    dropping the rev (an `--author=` demotion, or a trailing shell comment)
+    gives ALPHA. `HEAD @{upstream}` — what ships — gives both.
+    """
+    _sh("git", "init", "-q", "--bare", "-b", "main", "origin.git", cwd=tmp_path)
+    _sh("git", "clone", "-q", str(tmp_path / "origin.git"), "work", cwd=tmp_path)
+    work = tmp_path / "work"
+    # A non-doc base commit, so neither doc is an ancestor of the other.
+    _commit(work, "README.md", "# base\n", "chore: base\n")
+    _sh("git", "push", "-q", "-u", "origin", "main", cwd=work)
+    base = _sh("git", "rev-parse", "HEAD", cwd=work).strip()
+    # GAMMA goes to the REMOTE main and never to the local branch.
+    _sh("git", "checkout", "-q", "-b", "side", base, cwd=work)
+    _commit(work, GAMMA, "# gamma\n\nupstream only\n",
+            f"docs(handoff): gamma\n\n{ha.TRAILER_KEY}: {SID_DRIFT}\n")
+    _sh("git", "push", "-q", "origin", "side:main", cwd=work)
+    # ALPHA goes to the LOCAL branch and is never pushed.
+    _sh("git", "checkout", "-q", "main", cwd=work)
+    _commit(work, ALPHA, "# alpha\n\nlocal only\n",
+            f"docs(handoff): alpha\n\n{ha.TRAILER_KEY}: {SID_DRIFT}\n")
+    _sh("git", "fetch", "-q", "origin", cwd=work)
+    _sh("git", "branch", "-q", "-D", "side", cwd=work)
+    # The fixture's own control: it must really be diverged, or every mutant
+    # the parity test is written to kill would survive it.
+    revs, note = ha.doc_commit_revs(str(work))
+    assert note is None and len(revs) == 2, (
+        "the fixture did not resolve two distinct revs, so the parity check "
+        f"below cannot see a narrowing: revs={revs!r} note={note!r}")
+    head_only = set(_sh("git", "log", "--format=", "--name-only", "HEAD",
+                        "--", "claudedocs", cwd=work).split())
+    both = set(_sh("git", "log", "--format=", "--name-only", "HEAD",
+                   "@{upstream}", "--", "claudedocs", cwd=work).split())
+    assert head_only < both, (
+        "`HEAD` alone is not a STRICT SUBSET of `HEAD @{upstream}` in this "
+        f"fixture ({head_only!r} vs {both!r}) — a command that drops the "
+        "upstream rev would pass the parity check vacuously")
+    return work
 
 
 #: Ids carrying POSIX-ERE metacharacters. 🔴 NOT A SHAPE VIOLATION — an id is an
@@ -2465,24 +2542,63 @@ class TestANarrowedWalkIsAThirdREASONNotACleanOne:
             "two revs naming one sha256 commit were not recognised as the same "
             "object — the oid shape check is sha1-only")
 
-    def test_every_PUBLIC_NAME_resolves_and_the_RETURN_TYPE_is_exported(self):
-        """🔴 `__all__` IS A CLAIM ABOUT WHAT A STAR-IMPORTER GETS.
+    def test_every___all___ENTRY_resolves_and_every_PUBLIC_NAME_is_exported(
+            self):
+        """🔴 TWO-WAY, AND IT USED TO BE ONE-WAY UNDER A WIDER NAME.
 
-        `sessions_docs` was exported and `SessionsDocs` — the type it returns —
-        was not, so a caller could get the object and had no way to NAME it:
-        no annotation, no `isinstance`, no re-wrap. A type a caller cannot name
-        is a type they degrade to `dict`, and a plain `dict` has no
-        `.narrowed_note`, which is the whole defect this class closed.
-        The first half also catches the cheaper failure: a name in `__all__`
-        that no longer exists makes `from … import *` raise.
+        This was `test_every_PUBLIC_NAME_resolves_…` and checked only that
+        every `__all__` ENTRY resolves — the opposite direction from what the
+        name promised. Mutant **M8** (delete `"upstream_probe_rev",` from
+        `__all__`) stayed GREEN: the only thing pinning an export was the
+        return-type assertion, which covers `SessionsDocs` alone. Measured the
+        same way, `doc_in_text` and `doc_commit_revs` were genuinely MISSING
+        from `__all__` while both are called from `find-session.py`.
+
+        So both directions are asserted: an entry naming nothing (which makes
+        `from … import *` raise) AND a public module-level name that is not
+        exported (which makes `__all__` an incomplete claim about the surface).
+
+        ⚠ THE PUBLIC SET IS READ FROM THE SOURCE'S AST, NOT FROM `dir(ha)`.
+        `dir()` cannot tell a name this module DEFINES from one it imported
+        (`os`, `re`, `shlex`, `subprocess`, `sys`, `session_trailer`, the
+        `typing` aliases), so a `dir()`-based ledger would demand every import
+        be re-exported. A top-level `def`/`class`/assignment in THIS file is
+        exactly the surface `__all__` is a claim about.
         """
+        src = (Path(ha.__file__)).read_text(encoding="utf-8")
+        public: list[str] = []
+        for node in ast.parse(src).body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                names = [node.name]
+            elif isinstance(node, ast.Assign):
+                names = [t.id for t in node.targets
+                         if isinstance(t, ast.Name)]
+            elif isinstance(node, ast.AnnAssign):
+                names = ([node.target.id]
+                         if isinstance(node.target, ast.Name) else [])
+            else:
+                continue
+            public += [n for n in names
+                       if not n.startswith("_") and n != "__all__"]
+        assert public, (
+            "the AST walk found no public top-level names, so both assertions "
+            "below are vacuous — the parse or the node filter is wrong")
         missing = [n for n in ha.__all__ if not hasattr(ha, n)]
         assert not missing, (
             f"`__all__` exports names the module does not define: {missing} — "
             "`from lib.handoff_arc import *` raises on these")
+        unexported = [n for n in public if n not in ha.__all__]
+        assert not unexported, (
+            f"public names defined in `handoff_arc` are absent from `__all__`: "
+            f"{unexported} — `__all__` is a claim about the whole public "
+            "surface, so an omission is a name a star-importer cannot get and "
+            "a reader reads as private. Export it, or rename it with a "
+            "leading underscore if it is not public.")
         assert type(ha.sessions_docs("", ())).__name__ in ha.__all__, (
-            "`sessions_docs`'s return type is not exported, so a star-importer "
-            "cannot annotate or re-wrap it")
+            "`sessions_docs`'s return type is not exported, so a caller cannot "
+            "annotate or re-wrap it and will degrade it to `dict`, losing "
+            "`.narrowed_note`")
 
     def test_the_footer_names_the_HANDLE_and_says_narrowed_to_HEAD(
             self, narrowed_repo):
@@ -2868,15 +2984,97 @@ class TestTheExit2CauseListNamesTheCROSSHOSTCause:
         # same way until an incidental `refs/remotes/origin/HEAD` was removed
         # from the narrowing clause, which is why that clause no longer spells
         # a rev.
-        cmd = [ln for ln in err.splitlines() if "git log" in ln]
-        assert len(cmd) == 1, (
-            f"expected exactly one pasteable `git log` line, found {len(cmd)} "
-            "— this assertion is scoped to it and cannot be")
-        assert fs.ARC_ESCAPE_REVS[0] in cmd[0], (
-            f"the `git log` line {cmd[0]!r} does not pass "
-            f"{fs.ARC_ESCAPE_REVS[0]!r}, the FIRST upstream probe — so the "
-            "command an operator pastes walks `HEAD` alone while the prose "
-            "beside it says the reader walks more")
+        cmd = _pasteable_git_log(err)
+        # ⚠ THIS IS A LOCATOR, NOT THE PARITY CHECK, AND ITS MESSAGE USED TO
+        # SAY OTHERWISE. It read "does not PASS the FIRST upstream probe", a
+        # claim about the rev's SYNTACTIC POSITION that `in` cannot inspect:
+        # four mutants left the text on the line while narrowing the walk and
+        # all stayed GREEN (`HEAD..@{upstream}`, `HEAD ^@{upstream}`,
+        # `--author='@{upstream}'`, and the rev demoted to a trailing shell
+        # comment). What it does establish is that the rev reaches the COMMAND
+        # and not only the prose — a mutant that deleted it from the `git log`
+        # survived off the parenthetical's own mention. Parity is established by
+        # `test_the_pasteable_command_YIELDS_the_SAME_DOCS_as_sessions_docs`,
+        # which RUNS the command; do not tighten this string a fifth time.
+        assert fs.ARC_ESCAPE_REVS[0] in cmd, (
+            f"the `git log` line {cmd!r} does not so much as MENTION "
+            f"{fs.ARC_ESCAPE_REVS[0]!r}, the FIRST upstream probe — the rev "
+            "reached the prose only, so the command an operator copies cannot "
+            "be walking it. (Mentioning it is necessary and NOT sufficient: "
+            "the parity test is what proves the walk.)")
+
+    def test_the_pasteable_command_YIELDS_the_SAME_DOCS_as_sessions_docs(
+            self, tmp_path, monkeypatch, capsys, diverged_upstream_repo):
+        """🔴 THE PARITY CLAIM, ESTABLISHED BY EXECUTION — THE THIRD ATTEMPT.
+
+        `handoff_arc.upstream_probe_rev`'s docstring says the printed command
+        "CANNOT BE NARROWER THAN THE READER". That is a claim about what the
+        command YIELDS, and two previous rounds tried to establish it with
+        string assertions over stderr. Both failed the same way: a rev's TEXT
+        appearing on a line says nothing about its syntactic ROLE. Four mutants
+        of the shipped string each kept `@{upstream}` on the `git log` line and
+        each made the walk NARROWER, and all four stayed GREEN —
+
+            M9   `git log HEAD..@{upstream} …`        1 of 2 docs
+            M10  `git log HEAD ^@{upstream} …`        the other 1 of 2
+            M11  `git log HEAD -E --author='@{upstream}' …`  rev not a revision
+            M5   rev demoted to a trailing `# @{upstream}` comment
+
+        So this test takes the command out of stderr, substitutes the `<id>`
+        placeholder exactly as an operator would, RUNS it in a diverged
+        hermetic clone, and asserts the doc set it yields equals
+        `sessions_docs`'s answer for the same session and repo. Every mutant
+        above yields a strict subset of that set and dies here. Nothing about a
+        rev's spelling or position is asserted, so the next narrowing — in a
+        syntax nobody has thought of — dies too.
+
+        ⚠ TOKENISED WITH `shlex.split(..., comments=True)` RATHER THAN RUN
+        THROUGH A SHELL. That is what an operator's `sh`/`zsh` does to the
+        quoting and to a trailing `#` comment (M5's shape), without handing the
+        string to a shell from a test. The `--grep` pattern is POSIX ERE read
+        by git itself, so no shell expansion is involved in the part that
+        matters.
+
+        ⚠ COMPARED AS SETS. Ordering is `sessions_docs`'s own newest-first
+        contract and is pinned elsewhere; what the escape hatch owes an
+        operator is the same DOCS, which is the claim the prose makes.
+        """
+        monkeypatch.setattr(fs, "ROOT", tmp_path)
+        assert fs.main(["--arc", SID_NO_TRANSCRIPT]) == fs.EXIT_USAGE
+        err = capsys.readouterr().err
+        repo = str(diverged_upstream_repo)
+
+        want = set(ha.sessions_docs(repo, (SID_DRIFT,))[SID_DRIFT])
+        assert len(want) == 2, (
+            f"the fixture's session wrote {len(want)} docs, not 2 — a parity "
+            "check over fewer than two cannot see a one-of-two narrowing: "
+            f"{want!r}")
+
+        line = _pasteable_git_log(err)
+        assert "<id>" in line, (
+            f"the pasteable command has no `<id>` placeholder to substitute "
+            f"({line!r}) — an operator cannot aim it at a session")
+        argv = shlex.split(line.replace("<id>", SID_DRIFT), comments=True)
+        assert argv[0] == "git", (
+            f"the extracted line is not a `git` invocation: {argv!r}")
+        res = subprocess.run(argv, cwd=repo, capture_output=True, text=True,
+                             env=hermetic_git_env(), timeout=60)
+        assert res.returncode == 0, (
+            f"the command the refusal tells an operator to paste FAILED in a "
+            f"checkout where the reader works (exit {res.returncode}): "
+            f"{res.stderr.strip()!r}\n  command: {argv!r}")
+        got = {m.group(1) for m in
+               (ha._DOC_PATH_RE.match(ln.strip())
+                for ln in res.stdout.splitlines()) if m}
+        assert got == want, (
+            f"THE PASTEABLE ESCAPE HATCH AND THE SHIPPED READER DISAGREE. The "
+            f"printed command yielded {sorted(got)} where `sessions_docs` "
+            f"yields {sorted(want)} over the same repo and session — so the "
+            f"refusal hands an operator a "
+            f"{'NARROWER' if got < want else 'DIFFERENT'} answer than the tool "
+            f"it is standing in for, under prose promising parity.\n"
+            f"  command: {argv!r}\n"
+            f"  line as printed: {line!r}")
 
     def test_a_seed_WITH_a_local_transcript_still_RESOLVES(self, tmp_path):
         """The positive control: the refusal path must not have widened."""

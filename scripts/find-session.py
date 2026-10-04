@@ -1917,7 +1917,19 @@ def main(argv=None):
                   f"substitute `{ARC_ESCAPE_REVS[1]}`, which is what the "
                   "reader falls back to. The CROSS-ARC footer reports a "
                   "narrowing only when NEITHER probe resolves, which takes a "
-                  "remote-less `git init` or a `git remote set-head -d`.)\n"
+                  "remote-less `git init`, or a `git remote set-head -d` ON A "
+                  "BRANCH WITH NO UPSTREAM.)\n"
+                  # 🔴 THE QUALIFIER IS LOAD-BEARING AND WAS MISSING HERE. This
+                  # sentence and the `narrowed_repo` fixture's docstring both
+                  # shortened the condition to "a `git remote set-head -d`",
+                  # which states a SUFFICIENCY an operator can act on and that
+                  # is FALSE. MEASURED 2026-10-04, git 2.55.0, hermetic clone
+                  # of a bare origin: `git remote set-head -d origin` with the
+                  # upstream INTACT leaves probe 1 resolving `origin/main`, so
+                  # `doc_commit_revs` returns `(('HEAD',), None)` — NOT
+                  # narrowed. Only unsetting the upstream as well produced the
+                  # note. The two long-form sites (`CROSS_ARC_NARROWED` above
+                  # and `handoff_arc.SessionsDocs`) always carried it.
                   # ⚠ EACH REV IS SPELLED EXACTLY ONCE ABOVE, AND THAT IS
                   # LOAD-BEARING. The guard is `rev in err`; an earlier draft
                   # also wrote "no `refs/remotes/origin/HEAD` either" into the
