@@ -1,4 +1,4 @@
-<!-- delta: State now only; every other section omitted and therefore untouched -->
+<!-- delta: State now / Next steps / Defects / Gotchas / How to verify — Goal and Open investigations omitted and therefore untouched -->
 
 ## Run this first — the index, one command
 ```bash
@@ -39,65 +39,56 @@ any of them, and do not mint a sixth slug for the same ground.**
   and the two follow-ups below are **NOT** part of this line; they are separate arcs.
 
 ## State now
-- **devrc#2001 OPEN** — `fix/handoff-budget-warning-band`, head `26bb403c`, 6 commits,
-  +1228/−15 across 9 files, `mergeable=MERGEABLE`. **CI PENDING on all four Tekton legs**
-  at the time of writing. Worktree `/home/zach/workspace/devrc-budget-band-a19fb`.
-- ✅ **THE DEFECT, MEASURED: `BUDGET_NEAR_BYTES` WAS 4,096 — NARROWER THAN THE MEDIAN
-  APPEND IT EXISTS TO CATCH.** Bisected empirically: `budget_warning` was **completely
-  silent below 61,441 B (93.75% of the 65,536 ceiling)**. Median handoff append ≈ **5,271 B**
-  (median 65.5 net lines × 80.4716 B/line, over 285 commits touching a `handoff-*.md` of
-  which **242 grew one**, `git log origin/main -300 --numstat -- claudedocs/`). So a median
-  write that entered the band **jumped clean over it** and the first signal was the
-  **refusal**, after the content was composed. **The second pass is the token burn.**
-- ✅ **FIXED: the band is now `GRANDFATHER_STEP` = 16,384** — one existing constant, not a
-  new magic number, and ≈ the measured p90 append (**15,531 B**, 853 B of slack). First
-  warning moves **61,441 B (93.75%) → 49,153 B (75%)**.
-  **Verified in both directions by the dispatching session, not inherited:** 49,151 silent ·
-  49,152 (the boundary) silent · **49,153 warns** · **54,938 warns** · 39,152 silent.
-  🔴 **54,938 B is the direct test: it is the size this very session grew a real handoff doc
-  to, in total silence, under the old band.** Docs warned fleet-wide: **10 → 24**.
-- ✅ **FIXED: the resume digest now has a `BUDGET` block**, wired between `INVESTIGATIONS`
-  and `DOD`, reading `MAX_BYTES`/`BUDGET_NEAR_BYTES` from `handoff_budget.py` rather than
-  retyping them. Verified live:
-  `handoff-cairn-recall-value-instrumentation.md: 47,719 B of 65,536 B … 17,817 B of
-  headroom, warning band 16,384 B` / `✅ clear of the warning band.` A grandfathered doc
-  reports its **allowance**, not an overage. Degraded paths each print a **named gap**.
-- 🔴 **THE FULL `scripts/tests` RUN ON THE FINAL TREE WAS NEVER COMPLETED** — SIGTERM-killed
-  at ~55 min (**exit 143, which is a kill and not a failure**) before emitting a verdict.
-  What *was* run: all **18 enumerated readers** (`collected=2391 passed=2385 skipped=6
-  failed=0`), the base red-proof (`773 collected, 27 failed → 0 at HEAD`), a merged-tree run
-  against devrc#1997 (`1166 passed, 0 failed`), and the **shell tier**
-  `scripts/tests/test_resume_state.sh` (`ALL PASS`, 22 `ok` lines) — a `SHELL_TESTS` target
-  no `--files`/`--targets` invocation can name. **CI is the only authority that has not
-  reported.**
-- ⚠ **Five defects were found DURING verification, three of which the brief never
-  contemplated. All fixed in #2001** — the detail is in `## Gotchas`.
-- ⚠ **NO `clawgate-task:` FIELD.** `clawgate_handoff.sh resolve` exited **5**
-  (`NOTHING RESOLVED — 0 tasks`); `field <doc>` exited 1 (none present). An unknown session
-  id answers 200 with an EMPTY ARRAY, so that zero **cannot** distinguish "touched no task"
-  from "wrong id". Not a clean bill of health. No field written, none created.
-- ✅ **THIS DOC LANDED: commit `6b630e59`, branch `docs/handoff-budget-warning-band`, opened as
-  devrc#2006.** Recorded here because the write-back guard measures "a handoff write since the
-  last read of this doc" and the honest order was write → read → PR, so the guard fired on the
-  ordering rather than on unrecorded work. ⚠ **AND IT WAS NOT LEAK-SCANNED BY THE GATE:**
-  `handoff_doc.py` reported `NO SCANNER FOUND in <repo> — looked for tests/leakscan.py`, which is
-  **a PASS BY ABSENCE, not a clean result** (devrc has no such scanner; cairn does). Hand-scanned
-  instead — no IPs, no credentials, no prohibited names; every long-string hit is one of devrc's
-  own public doc slugs. **Any future handoff written into devrc gets the same non-result** — do
-  not read that line as a pass.
-- ✅ **THE SUBSYSTEM INDEX WAS WRITTEN — one bullet appended to `cairn/report.md`**, dated
-  2026-10-03, covering the inert-guard shape (a guard whose discriminating input cannot reach the
-  code it guards) and the printed-token contract's missing mirror half. 🔴 **It took THREE windows
-  and the first two were not results:** `--session` on devrc refused outright
-  (`transcript cwd does not match` — the session ran in cairn, and the skill forbids falling back
-  to the git window there because it is structurally empty too); `--session` on cairn returned
-  **100% of paths outside the session cwd**, the subagent-worktree blind spot; `--pr 174,175`
-  resolved 46 paths and is the only window that sees a subagent's work. **A well-delegated session
-  is exactly the one `--session` sees least of.**
-- ⚠ **NO `clawgate-task:` FIELD, AND THE ZERO IS NOT A CLEAN BILL.** `clawgate_handoff.sh resolve`
-  exited **5** (`NOTHING RESOLVED — 0 tasks`); `field <doc>` exited 1. An unknown session id
-  answers 200 with an EMPTY ARRAY, so that zero cannot distinguish "touched no task" from "wrong
-  id". No field written, none created.
+- 🔴 **THE ARC IS CLOSED. All three clauses of the closing condition were run and are GREEN
+  in one session.** devrc#2001 **MERGED** 2026-10-04T01:13:00Z, squash **`3fed10fb`**, from
+  head `26bb403c`. Verified by **CONTENT, not ancestry** — a squash never makes the branch
+  head an ancestor of `main`, so `--is-ancestor` would read "not merged" forever.
+  - **(a)** `origin/main:scripts/lib/handoff_budget.py:121` → `BUDGET_NEAR_BYTES = GRANDFATHER_STEP`
+    (grep count **2**, measured **0** immediately before the merge — the pair is the evidence,
+    not the 2 alone).
+  - **(b)** `49,151 silent · 49,152 silent · 49,153 WARNS · 54,938 WARNS · 39,152 silent`,
+    and `BUDGET_NEAR_BYTES == GRANDFATHER_STEP` → `True`. 🔴 **Run against a tree where
+    `handoff_budget.py`, `handoff_doc.py` and `resume-state.sh` are all CLEAN at
+    `origin/main`** — `git status --porcelain` on those three paths was empty, so this is
+    evidence about the COMMITTED SOURCE and not about a dirty working copy. (The base clone
+    *is* dirty — see the `flake.lock` gotcha — which is exactly why the three paths were
+    checked individually.)
+  - **(c)** the `BUDGET` block appears between `INVESTIGATIONS` and `DOD`, and it was watched
+    in **BOTH** directions rather than only reassuring: `handoff-budget-warning-band.md`
+    18,852 B → `✅ clear of the warning band.`; `handoff-mention-review-tui.md` 63,599 B →
+    `⚠ INSIDE the warning band — a routine append can land this over, and the refusal
+    arrives AFTER the text is composed.` **A `✅` alone is indistinguishable from a block
+    wired to nothing**, which is why the second reading is quoted.
+- 🔴 **THE GATE WAS GREEN ALL ALONG, AND THE `pending` BADGES WERE A BROKEN REPORTER —
+  CI's non-report was never a verdict about the tree.** PipelineRun **`devrc-ci-8pjct`**
+  (`revision=26bb403c…`, `supersede-key=pr-2001`, created 2026-10-03T21:29:02Z) printed
+  `ALL LEGS PASS`: pytests `collected=25056 passed=25048 skipped=8 failed=0` (floor 21193),
+  nodetests `tests=1720 pass=1720 fail=0` (floor 1613), gotests `pass=481 fail=0` (floor 302),
+  cairn-client-runs pass. **All eight gate steps `exit=0`, `verdict` included** — which is the
+  tekton skill's own discriminator for *a verdict* rather than *a kill*.
+- ⚠ **THE PIPELINERUN NONETHELESS READS `Failed`, AND THAT IS THE `report` TASK ONLY.**
+  `step-report-status` exit 1. The run's own condition is
+  `Tasks Completed: 3 (Failed: 1, Cancelled 0)` — **read WHICH TaskRun failed before
+  reading a PipelineRun verdict as a verdict about the diff.**
+- ✅ **THE MERGED-TREE QUESTION IS CLOSED, NOT DEFERRED.** At merge time `origin/main`
+  (`3e7725bc`) was an **ancestor** of `26bb403c` — `git rev-list --count 26bb403c..origin/main`
+  = **0** — so the tree the gate tested IS the post-merge tree. Re-measured immediately before
+  the merge, not inherited from the survey that motivated it.
+- ✅ **THE VERDICT IS ON THE PR RECORD**, because a merged commit whose statuses read
+  `pending` otherwise carries no readable verdict and "it merged, therefore it was green"
+  would be unfounded: comment `#issuecomment-5975287909` on devrc#2001 quotes the gate
+  summary, the reporter's false FATAL, and the three later runs that refute it.
+- ✅ **THE BASE CLONE WAS RE-SYNCED** `3e7725bc → 3fed10fb` with `merge --ff-only`, after
+  checking that none of the nine merged paths intersects the dirty `flake.lock` or the two
+  untracked `scope-chief-*` files. `flake.lock` is **still dirty afterwards**, confirmed —
+  the other session's work was not disturbed.
+- ⚠ **NO `clawgate-task:` FIELD, AND THE ZERO IS STILL NOT A CLEAN BILL.** Re-run this
+  session: `clawgate_handoff.sh resolve` exit **5** (`NOTHING RESOLVED — 0 tasks`),
+  `field <doc>` exit **1**. An unknown session id answers 200 with an EMPTY ARRAY, so it
+  cannot distinguish "touched no task" from "wrong id". No field written, none created.
+- ⚠ **`tests/leakscan.py` DOES NOT EXIST IN devrc, SO THIS DELTA GOT THE SAME PASS-BY-ABSENCE**
+  as the doc's first write. Hand-scanned: no IPs, no credentials, no prohibited names; the
+  only hostnames are `github.com` and the public `apps/tekton-homelab` URL.
 
 ## Open investigations — live diagnosis state
 
@@ -156,33 +147,32 @@ any of them, and do not mint a sixth slug for the same ground.**
   not a trend — name the session and the doc.
 
 ## Next steps (ranked)
-1. **MERGE devrc#2001 once its four Tekton legs are green.** Read BOTH surfaces and confirm
-   the full set, not just that the present ones passed. 🔴 **CI is the only authority that
-   has not reported on this tree** — the local full-target run was killed at 55 minutes.
-   Hand-off check if you want it locally first:
-   `nix develop /home/zach/workspace/devrc-budget-band-a19fb --command bash
-   /home/zach/workspace/devrc-budget-band-a19fb/scripts/run-tests.sh --targets "scripts/tests"
-   /home/zach/workspace/devrc-budget-band-a19fb` — budget ≥40 min and **read the per-target
-   summary lines, never the exit code; 143 is a SIGTERM**.
-   forcing: user — the operator reported this failure repeatedly and said the prior fixes had
-   not worked; the fix is built and verified and only the gate is outstanding.
+1. ✅ **DONE — devrc#2001 MERGED** (`3fed10fb`, 2026-10-04T01:13:00Z) and all three closing
+   clauses verified green. Kept at rank 1 rather than renumbered: the rank is half a
+   `claim-work` slug's identity, so re-ranking re-points every live claim on this doc.
+   Claim `budget-warning-band-1` was taken and **released**.
+   forcing: user — the operator authorised the merge on the measured gate result; done.
 2. **ANSWER THE `--autoevict`-BY-DEFAULT QUESTION.** Evidence is in the investigation block
-   above; the recommendation is **no**. This is a decision, not work.
+   above; the recommendation is **no**. This is a decision, not work. 🔴 Its own "run both
+   AFTER #2001 has soaked" precondition is now **satisfiable** — #2001 is on `main`.
    forcing: user — it is an operator call about an irreversible auto-delete default, and no
-   further measurement separates the options until #2001 has soaked.
+   further measurement separates the options until the merge has soaked.
 3. **DOCUMENT THE `BUDGET` BLOCK IN THE RESUME SKILL — blocked on an eviction first.**
    `claude/skills/resume/SKILL.md` has **4 bytes** spendable before breaching
    `MIN_HEADROOM_BYTES` (21,596 of 22,400; headroom 800), so this needs a content eviction
-   into `reference/` — a judgement call deliberately excluded from #2001.
+   into `reference/` — a judgement call deliberately excluded from #2001. ⚠ **Re-derive the
+   4 bytes before acting**: #2001 did not touch `SKILL.md`, but other merges since may have.
    *Closing condition (mechanical): `SKILL.md` names `BUDGET` in its block list and
    `test_resume_skill_size.py` exits 0 with it present.*
    forcing: none
-4. **THE `scripts/tests` COLLECTED FLOOR IS 145 TESTS FROM ITS HARD DRIFT CEILING.** It
-   collects **16,137** against floor 13,026, whose ceiling (`floor + max(60, floor/4)`) is
-   **16,282**; #2001's +29 ate into that. Re-pinning the line conflicts across ~40 open PRs,
-   so it is left alone deliberately.
-   *Closing condition: a run reports `collected > 16,282`, at which point the gate forces the
-   bump and prints the replacement number.*
+4. **THE `scripts/tests` COLLECTED FLOOR IS NEAR ITS HARD DRIFT CEILING.** 🔴 **The figure
+   in the previous round is now STALE and the direction is reassuring: the merged gate run
+   measured `collected=25056` against `floor: 21193 = sum of 30 per-target floors`**, not the
+   16,137/16,282 pair this doc recorded — those were a different target set. **Re-derive
+   before acting; do not quote either number.** Re-pinning conflicts across ~40 open PRs, so
+   it is left alone deliberately.
+   *Closing condition: a run reports `collected` above its printed ceiling, at which point
+   the gate forces the bump and prints the replacement number.*
    forcing: gate — the gate itself will force it; until then a bump conflicts with every open PR.
 
 ## Gotchas / decisions / dead-ends
@@ -231,24 +221,117 @@ any of them, and do not mint a sixth slug for the same ground.**
   2026-09-19 are stranded there too. **`refs/stash` has 2 pre-existing entries, which proves
   the stack is shared — never `git stash` in this repo.**
 
+- 🔴 **CARRIED FORWARD OUT OF `State now` BEFORE THE REPLACE ATE IT — THE ARC'S ROOT-CAUSE
+  MEASUREMENT, which lived only under a REPLACE heading and would have been deleted by this
+  very update.** `BUDGET_NEAR_BYTES` was **4,096**, and `budget_warning` was therefore
+  **completely silent below 61,441 B (93.75% of the 65,536 ceiling)** — bisected empirically,
+  not reasoned. Median handoff append ≈ **5,271 B** (median **65.5** net lines × 80.4716 B/line
+  over 285 commits touching a `handoff-*.md`, of which **242 grew one**:
+  `git log origin/main -300 --numstat -- claudedocs/`). So a median write that ENTERED the band
+  jumped clean over it and the first signal was the **refusal**, after the content was composed
+  — the second pass being the token burn. The replacement is **`GRANDFATHER_STEP` = 16,384**,
+  ≈ the measured **p90 append (15,531 B, 853 B of slack)**, moving the first warning
+  **61,441 B (93.75%) → 49,153 B (75%)** and docs warned fleet-wide **10 → 24**.
+  ⚠ **Re-derive before quoting any of these** — the window moves (see the three-figures bullet
+  below).
+- ⚠ **CARRIED FORWARD for the same reason: `--session` IS BLIND TO EXACTLY THE SESSION THAT
+  FOLLOWED THE RULES, AND THIS SESSION IS THE SECOND MEASUREMENT.** The first write of this doc
+  took THREE windows (`--session` on devrc refused `transcript cwd does not match`; `--session`
+  on cairn returned 100% of paths outside the session cwd, the subagent-worktree blind spot;
+  `--pr 174,175` resolved 46 paths and was the only window that saw a subagent's work).
+  **This session reproduced the first failure exactly** — `--session` with `--repo devrc`
+  refused `transcript cwd does not match: session … ran in /home/zach/workspace/cairn … 1
+  outside it`, and the tool itself said *"USE A DIFFERENT SOURCE, not a different uuid: the
+  session ran elsewhere, so this repo's git window is empty too."* `--pr 2001` then resolved 9
+  paths. 🔴 **Do NOT fall back to the git window on a cwd mismatch** — it is a second source
+  that structurally cannot answer. Two points, both measured: a well-delegated or
+  cross-repo-driven session is the one `--session` sees least of.
+- 🔴 **A PIPELINERUN'S OWN `Failed` CONDITION IS NOT A VERDICT ABOUT THE DIFF — THE GATE AND
+  THE REPORTER FAIL INDEPENDENTLY, AND ONLY ONE OF THEM IS ABOUT YOUR CODE.** `8pjct` reads
+  `Failed` with a fully green gate. The discriminating read is per-TaskRun, never the
+  PipelineRun:
+  `kubectl -n tekton-ci get taskrun -l tekton.dev/pipelineRun=<run> -o json` → which
+  `pipelineTask` is `False`, and the step exit codes under it. **`gate` Succeeded + `report`
+  StepFailed ⇒ a lost verdict, not a red change.**
+- 🔴 **FOUR LEGS STUCK ON `pending` FOREVER HAS AT LEAST THREE CAUSES AND THE STATUS TIMELINE
+  IS WHAT SEPARATES THEM** — `gh api repos/<r>/commits/<sha>/statuses` with `.description`,
+  because `gh pr checks` shows only the current state. Measured here: **one** `pending` row
+  per context and nothing after, which **rules out** the two-runs-race shape (that posts
+  DUPLICATED `pending` pairs seconds apart, then overwrites all four with
+  `superseded … not validated`) and the held-gate shape (`NO CAPACITY`, state `error`). What
+  was left was a reporter that ran and could not post.
+- ⚠ **A `pending` leg on devrc did NOT block the merge, and that is a change of state rather
+  than a property.** `mergeStateStatus=UNSTABLE`, not `BLOCKED`, because required status
+  checks are currently disabled on `main` (see Defects). **Check protection at the moment you
+  merge** — do not infer gating from the skill, or from this line.
+- 🔴 **`merge --ff-only` INTO A DIRTY BASE CLONE IS SAFE ONLY AFTER CHECKING THE INTERSECTION,
+  AND THE CHECK IS ONE COMMAND:** `git diff --name-only HEAD origin/main` against
+  `git status -s`. Here the nine merged paths and the dirty `flake.lock` were disjoint, so
+  the other session's uncommitted `nix flake update` survived the sync untouched — verified
+  AFTER the merge, not assumed from before it. **Never stash to make room** (`refs/stash`
+  holds 2 pre-existing entries, which proves the stack is shared).
+- ⚠ **A doc that lives only in a linked worktree makes a handoff PATH in a kickoff message
+  wrong, and the reconciler re-anchors silently.** The kickoff named
+  `/home/zach/workspace/devrc/claudedocs/handoff-budget-warning-band.md`, which **does not
+  exist** — the only copy is in `/home/zach/workspace/devrc-ho-budget` on
+  `docs/handoff-budget-warning-band` (devrc#2006), because the doc has never been on
+  `origin/main`. `resume-state.sh` resolved the worktree copy anyway and reported
+  `handoff-read: working-tree copy — not on origin/main`. **Read that line; it is what names
+  which copy is authoritative.**
+- ⚠ **`handoff_search --exclude-slug` PARSED BUT DID NOT MATCH, and the pair is how you know.**
+  Scope line read `excluded=budget-warning-band` with `in_scope_docs=567 == indexed_docs=567`
+  — because this doc is not on its repo's mainline and is therefore deliberately never
+  indexed. **`excluded=` proves the flag parsed, never that it matched.**
+
 ## How to verify
 ```bash
-# (a) the fix is on main
+# (a) the fix is on main — CONTENT, never ancestry (a squash is not an ancestor)
 git -C $DEVRC show origin/main:scripts/lib/handoff_budget.py | grep -n 'BUDGET_NEAR_BYTES'
+gh pr view 2001 --repo innovation-upstream/devrc --json state,mergedAt,mergeCommit
 
 # (b) the band fires before a median append, and stays SILENT below it — BOTH directions,
-#     because a guard that fires on everything is as useless as one that fires on nothing
+#     because a guard that fires on everything is as useless as one that fires on nothing.
+#     First prove the three files are CLEAN, or this measures a dirty working copy:
+git -C $DEVRC status --porcelain scripts/lib/handoff_budget.py scripts/lib/handoff_doc.py \
+  scripts/resume-state.sh   # must be EMPTY
 nix develop $DEVRC --command python3 - <<'PY'
-import sys; sys.path.insert(0, "scripts/lib")
+import sys; sys.path.insert(0, "/home/zach/workspace/devrc/scripts/lib")
 import handoff_budget as hb, handoff_doc as hd
 MAX, NEAR = hb.MAX_BYTES, hb.BUDGET_NEAR_BYTES
 warns = lambda n: bool(hd.budget_warning("claudedocs/handoff-x.md", "x"*n, "x"*(n-1), gated=True))
 for n in (MAX-NEAR-1, MAX-NEAR, MAX-NEAR+1, 54938, 39152):
     print(f"{n:>7,} ({100*n/MAX:5.1f}%) warns={warns(n)}")
-# expect: silent, silent, True, True, silent   — and band == GRANDFATHER_STEP
+# expect: silent, silent, True, True, silent
 print("band == one GRANDFATHER_STEP:", NEAR == hb.GRANDFATHER_STEP)
 PY
 
-# (c) the digest tells a session its budget BEFORE it composes
-bash $DEVRC/scripts/resume-state.sh "<path to any handoff doc>" | grep -A3 '^BUDGET'
+# (c) the digest states the budget BEFORE composing — and the POSITIVE CONTROL is the half
+#     that matters: a `✅ clear` alone cannot distinguish a working block from a dead one.
+bash $DEVRC/scripts/resume-state.sh "<a doc UNDER 49,152 B>"  | grep -A4 '^BUDGET'  # ✅ clear
+bash $DEVRC/scripts/resume-state.sh "<a doc OVER  49,152 B>"  | grep -A4 '^BUDGET'  # ⚠ INSIDE
+# find one of each:
+for f in $DEVRC/claudedocs/handoff-*.md; do printf '%s %s\n' "$(stat -c%s "$f")" "$f"; done | sort -rn | head
+
+# (d) the gate's own verdict, when GitHub shows `pending` and you need the real answer
+export KUBECONFIG=$KC_HOMELAB
+kubectl -n tekton-ci get taskrun -l tekton.dev/pipelineRun=<run> \
+  -o custom-columns='TASK:.metadata.labels.tekton\.dev/pipelineTask,STATUS:.status.conditions[0].status,REASON:.status.conditions[0].reason'
+kubectl -n tekton-ci logs <run>-gate-pod -c step-verdict | tail -20
+gh api repos/innovation-upstream/devrc/commits/<sha>/statuses \
+  --jq '.[] | "\(.created_at) \(.context) \(.state) \(.description)"' | sort
 ```
+## Defects (batched)
+- 🔴 **The Tekton `report` task's "the tekton-homelab GitHub App is not installed on
+  innovation-upstream/devrc" FATAL is reachable on a TRANSIENT lookup failure, where it is
+  FALSE and actively misdirecting.** Refuted in one read: three later runs posted four
+  `success` statuses through that same App within two hours — devrc#2004 22:25Z, #2002
+  23:20Z, #2006 23:59Z. The message ships an install link, so it sends the next reader to
+  install an already-installed App. Lives in `homelab-infra`'s
+  `clusters/homelab/apps/tekton-pipelines/triggers/devrc-ci-pipeline.yaml` report step.
+  **An error message is a claim too** — this one asserts a cause it did not measure.
+- ⚠ **The `tekton` skill's gotcha 9 is STALE in the permissive direction.** It states devrc
+  `main` requires `tekton/devrc-pytests` + `tekton/devrc-nodetests`; measured this session,
+  `GET /repos/innovation-upstream/devrc/branches/main/protection/required_status_checks`
+  returns **404 `Required status checks not enabled`**, and #2001 read `UNSTABLE` rather than
+  `BLOCKED` with four `pending` legs. The skill already warns that bit moved twice in one
+  day; it has moved again. **Nothing currently gates a devrc merge.**
