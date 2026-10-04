@@ -2983,7 +2983,17 @@ def dropped_durable_report(dropped: typing.Sequence[DroppedDurable]) -> str:
 #
 # ⚠ IT IS NOT THE AUTHORITY. The gate reads the file on disk; this reads the text
 # about to be written. They agree today and the test is what fails.
-BUDGET_NEAR_BYTES = 4_096
+#
+#: Re-exported, NOT re-declared — the same precedent, and the same reason, as
+#: `BUDGET_GATE_RELPATH` below. `handoff_budget` owns the number beside the
+#: ceiling it qualifies, and carries the whole derivation (why the band must be
+#: at least one p90 append wide, the measured distribution, and the command that
+#: re-derives it). It had to move there in #2001 because a SECOND reader
+#: appeared: `resume-state.sh`'s BUDGET block reads it on every resume, and
+#: importing THIS module requires the pinned cairn client on PATH
+#: (`cairn_pin.ensure()` above), which a host mid-`home-manager switch` has not
+#: got. Name kept so every existing reference (and its tests) keeps working.
+BUDGET_NEAR_BYTES = handoff_budget.BUDGET_NEAR_BYTES
 
 
 # The ceiling gate's population is the tree that CONTAINS it: its own
@@ -3012,13 +3022,17 @@ def gate_enforces_budget(repo: Path) -> bool:
 
     Path-equality against a known root would be wrong: in a worktree the gate's
     own `REPO_ROOT` is the WORKTREE, not the base clone.
+
+    🔴 THE BODY MOVED TO `handoff_budget.gate_enforces` IN #2001 AND THIS
+    DELEGATES — it is not a second implementation. Same reason as
+    `BUDGET_NEAR_BYTES` above: `resume-state.sh`'s BUDGET block asks the same
+    question on every resume and cannot import this module without the pinned
+    cairn client on PATH. The docstring stays here because this is still the
+    name every existing caller uses; the measured incident it records is
+    repeated at the new home, deliberately, since that is now where someone
+    deleting the guard would be reading.
     """
-    try:
-        return (repo / BUDGET_GATE_RELPATH).is_file()
-    except OSError:
-        # An unreadable repo path is not evidence of a gate. Fail toward the
-        # weaker claim: we never invent a gate we could not see.
-        return False
+    return handoff_budget.gate_enforces(repo)
 
 
 #: Where each `audit_text` bucket keeps its (start, end) LINE RANGE. The four
@@ -3272,7 +3286,11 @@ def budget_position(relpath: str, merged_text: str, base_text: str) -> BudgetPos
     single `lookup` result rather than from two calls, so they cannot disagree
     about whether the document has an entry at all.
     """
-    is_doc = relpath.startswith("claudedocs/") and "/handoff-" in "/" + relpath
+    # 🔴 ASKED OF `handoff_budget`, NOT SPELLED HERE (#2001). The resume digest's
+    # probe needs the identical predicate and cannot import this module (see
+    # `BUDGET_NEAR_BYTES`), so a copy here would be the second spelling that
+    # starts reporting a ceiling for a document nothing governs.
+    is_doc = handoff_budget.is_handoff_doc(relpath)
     after = len(merged_text.encode("utf-8"))
     before = len(base_text.encode("utf-8"))
     hit = handoff_budget.lookup(relpath, handoff_budget.GRANDFATHERED)

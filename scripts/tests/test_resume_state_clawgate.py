@@ -735,11 +735,19 @@ def _git_env(repo: Path) -> dict:
 # systemd-run, systemctl, notify-send, rofi, xdotool, i3-msg, openrgb, espanso,
 # home-manager or nixos-rebuild. `curl`/`gh`/`kubectl` are deliberately ABSENT
 # — the tripwire stubs supply those, and they sit ahead of this directory.
+# 🔴 THIS IS THE SCRIPT'S TOOL REQUIREMENT, SO IT GROWS WHEN THE SCRIPT'S DOES.
+# `python3` arrived with #2001's BUDGET block, which shells out to
+# `scripts/lib/handoff_budget_probe.py`. Omitting it did NOT make these tests
+# measure the clawgate case more purely — it made every one of them ALSO measure
+# "resume-state.sh on a host with no python3", which raised a BUDGET gap and
+# failed the `assert not gaps(out)` in the fallback test. A curated PATH that
+# lags the script under test turns one case into two, and the second one is
+# invisible until it collides with an unrelated assertion.
 _SANDBOX_TOOLS = (
     "bash", "sh", "git", "jq", "cat", "stat", "sed", "grep", "awk", "date",
     "ls", "head", "tail", "sort", "tr", "cut", "wc", "dirname", "basename",
     "realpath", "mktemp", "rm", "cp", "chmod", "env", "uname", "true", "false",
-    "sleep",
+    "sleep", "python3",
 )
 
 
@@ -3465,8 +3473,26 @@ class TestSkillsAndCodeAgree:
             # `rel="$HANDOFF"` names the file for git's pickaxe, and `stat -c %Y`
             # is the mtime fallback beneath it.
             "investigations_block": 2,
-            # resolves `rel` for the ref comparison
-            "handoff_freshness": 1,
+            # 🔴 `handoff_freshness` IS NO LONGER ON THIS LEDGER, AND THAT IS THE
+            # LEDGER WORKING IN THE SHRINK DIRECTION (#2001). Its `ls-files` call
+            # — the one that resolved `rel` for the ref comparison — moved into
+            # `handoff_tracked_relpath` below, because `budget_block` needs the
+            # SAME answer and two open-coded copies is how they come to disagree.
+            # Nothing about the content rule changed: `handoff_freshness` still
+            # owns the single CONTENT read, which is what the scan above enforces.
+            # resolves the repo-relative path for BOTH callers: the ref
+            # comparison in `handoff_freshness`, and the ledger key in
+            # `budget_block`. A use of the NAME only.
+            "handoff_tracked_relpath": 1,
+            # #2001's BUDGET block. TWO path uses, both of the NAME: the
+            # `case "$HANDOFF" in` that decides whether the doc is inside $REPO
+            # (so an outside-the-repo doc gets no fabricated ledger key), and the
+            # `handoff_ref_for_exclusion "$HANDOFF"` that prints the doc's
+            # display name. Its CONTENT comes from `$HANDOFF_TEXT` — the copy
+            # `handoff_freshness` chose — exactly as the rule above requires, and
+            # sizing the on-disk file instead would report a budget for a copy
+            # this digest never read.
+            "budget_block": 2,
             # derives $REPO from the path when an explicit doc is passed (twice:
             # `git -C $(dirname …)` and the plain-dirname fallback), plus the
             # `basename` naming the doc it FELL BACK to in the #684 gap line —

@@ -7615,6 +7615,74 @@ def test_it_warns_EARLY_while_there_is_still_headroom():
     assert "left" in out
 
 
+# 🔴 THE MEASURED p90 HANDOFF APPEND, IN BYTES, AND IT IS A FIXTURE RATHER THAN A
+# SECOND COPY OF THE DERIVATION. The numbers, their scope and the command that
+# re-derives them live at `BUDGET_NEAR_BYTES` in `scripts/lib/handoff_doc.py` and
+# NOWHERE else; this is the one value the relationship below has to compare
+# against, and it is deliberately the ROUNDED-DOWN p90 so the assertion cannot
+# pass on a rounding artefact.
+#
+# ⚠ IT WILL GO STALE AS THE CORPUS GROWS, AND THAT IS THE INTENDED FAILURE MODE:
+# re-derive it when it does, and move the band if the band no longer covers it.
+# A guard that silently tracked the corpus would assert nothing.
+_P90_APPEND_BYTES = 15_531
+
+
+def test_the_warning_band_is_at_least_one_p90_append():
+    """🔴 THE RELATIONSHIP, NOT THE LITERAL — this is the defect #2001 closed.
+
+    `BUDGET_NEAR_BYTES` was a bare `4_096`, which is NARROWER THAN THE MEDIAN
+    APPEND (~5,271 B) let alone the p90 (~15,531 B). A band narrower than the
+    thing it warns about cannot fire before the refusal: the write jumps the band
+    and rule (p) refuses after the content is already composed. Pinning the
+    literal would have encoded exactly that, so pin the property instead.
+
+    This is a REGRESSION guard, not an invariant guard: it is RED at the parent
+    of #2001 (4,096 < 15,531) and green here.
+    """
+    assert hd.BUDGET_NEAR_BYTES >= _P90_APPEND_BYTES, (
+        f"the warning band is {hd.BUDGET_NEAR_BYTES:,} B but a p90 handoff "
+        f"append is {_P90_APPEND_BYTES:,} B — a write of that size entering the "
+        f"band would clear it in one step and hit rule (p)'s refusal instead. "
+        f"See the derivation above BUDGET_NEAR_BYTES in scripts/lib/handoff_doc.py."
+    )
+
+
+def test_a_doc_one_p90_append_BELOW_the_ceiling_is_no_longer_SILENT():
+    """🔴 THE BEHAVIOURAL HALF, WITH REAL NUMBERS FROM THE ARC THAT FOUND IT.
+
+    A document that reaches 54,938 B via a 7,219 B append (a real append measured
+    on this corpus, between the mean and the p90) had 10,598 B of headroom —
+    silent under the old 4,096 B band, so the session's first signal was the
+    refusal two appends later. MEASURED: this case returns "" at the parent of
+    #2001 and warns here.
+
+    ⚠ The brief this came from also offered the arithmetic the OTHER way — 54,938
+    PLUS 7,219 = 62,157, headroom 3,379 — and THAT case already warned under the
+    old band. It is not the regression; 54,938 as the POST-append size is.
+    """
+    out = _budget(DOC, 54_938, before_bytes=54_938 - 7_219)
+    assert out.startswith("⚠ Size:"), out
+    assert "10,598 B left" in out, out
+
+
+def test_the_band_does_NOT_fire_on_a_doc_that_is_merely_LARGE():
+    """🔴 THE OTHER DIRECTION. A guard that fires on everything is as useless as
+    one that fires on nothing, and widening a band is exactly the change that
+    turns the first into the second.
+
+    `MAX_BYTES - BUDGET_NEAR_BYTES` is the widest size that must stay silent —
+    the boundary itself, not a comfortable middle — and one p90 append below it
+    is the middle. Both silent; `…_BELOW_the_ceiling_is_no_longer_SILENT` above
+    is the +1 on the other side of this same edge.
+    """
+    edge = hd.handoff_budget.MAX_BYTES - hd.BUDGET_NEAR_BYTES
+    # 5,271 B is the measured MEDIAN append (65.5 net lines x 80.4716 B/line) —
+    # the delta a doc most often arrives on this edge carrying.
+    assert _budget(DOC, edge, before_bytes=edge - 5_271) == ""
+    assert _budget(DOC, edge - _P90_APPEND_BYTES) == ""
+
+
 def test_SILENT_when_the_doc_has_room():
     """🔴 THE CONTROL THAT MAKES THE WARNING WORTH READING. A line printed on
     every run is a line nobody reads by the third one — so silence here is the

@@ -67,6 +67,59 @@ GATE_RELPATH = "scripts/tests/test_handoff_doc_size.py"
 # working margin rather than a rounding artefact.
 GRANDFATHER_STEP = 16_384
 
+# 🔴 HOW MUCH HEADROOM COUNTS AS "NEARLY OUT", AND IT MUST BE AT LEAST ONE p90
+# APPEND WIDE OR IT CANNOT FIRE BEFORE THE REFUSAL FOR MOST WRITES. It was a bare
+# `4_096` in `handoff_doc.py` from #1648 until #2001, with nothing justifying the
+# number — and 4,096 B is NARROWER THAN THE MEDIAN THING IT WARNS ABOUT, so a
+# routine append entering the band jumped clean over it and the first signal the
+# session got was rule (p)'s refusal (`size-ratchet`, exit 14) AFTER it had
+# already composed the content. The second pass to prune or evict is the cost.
+#
+# MEASURED on this tree at 3e7725bc, over `git log origin/main -300 --numstat --
+# claudedocs/`: 300 commits touched `claudedocs/`, 285 touched a `handoff-*.md`
+# and 242 GREW one. Net lines added per growing commit: median 65.5, mean 88.31,
+# p90 193. ⚠ THE MEDIAN IS 65.5 AND NOT 66, AND THE DIFFERENCE IS NOT PEDANTRY:
+# 242 is EVEN, so the median is the mean of the two middle values (65 and 66).
+# Rounding it to 66 first and multiplying overstates the median append by 40 B —
+# which is exactly what the FIRST DRAFT OF THIS PARAGRAPH did, in a comment whose
+# whole purpose is to stop the next person restating a number wrongly.
+# Calibrated at 80.4716 B/line (3,783,616 B over 47,018 lines across the 108
+# top-level `claudedocs/handoff-*.md`). So an append is ~5,271 B at the median,
+# ~7,106 B at the mean and ~15,531 B at p90 — and the old band admitted none of
+# them: bisected empirically, the first size at which `budget_warning` said
+# ANYTHING was 61,441 B, i.e. 93.75% of the ceiling.
+#
+# RE-DERIVE with the `git log` command above plus the bytes-per-line calibration
+# (`cat claudedocs/handoff-*.md | wc -c` over `… | wc -l`). The numbers live HERE
+# and nowhere else; `test_the_warning_band_is_at_least_one_p90_append` pins the
+# RELATIONSHIP rather than restating them, which is what keeps this comment from
+# becoming the second copy that drifts.
+#
+# 🔴 IT IS `GRANDFATHER_STEP` RATHER THAN A NEW CONSTANT, AND THAT COUPLING IS
+# DELIBERATE: 16,384 is already the quantum an allowance is rounded up to, it is
+# already ≈ the measured p90 (15,531 B), and a second magic number here is how
+# the two come to disagree. First warning therefore moves to 49,153 B = 75% of
+# the ceiling, which admits the p90 append with 853 B to spare.
+# ⚠ SCOPE: the step is NOT defined as the p90 and could be changed for its own
+# reasons. The relationship test is what fails if that ever makes the band too
+# narrow — do not read this line as a guarantee that the step tracks the corpus.
+# ⚠ AND IT STILL ONLY WARNS. Widening the band changes WHEN `budget_warning`
+# speaks, never whether it refuses; the deadlock argument in this module's own
+# docstring is untouched.
+#
+# 🔴 IT LIVES HERE RATHER THAN IN `handoff_doc.py`, AND THAT IS A MEASURED FIX
+# RATHER THAN TIDINESS — same reason, and same precedent, as `GATE_RELPATH`.
+# `handoff_doc.py` calls `cairn_pin.ensure()` at import, so importing it requires
+# the pinned `cairn` client on PATH (or `$CAIRN_LIB`). `resume-state.sh`'s BUDGET
+# block needs this number on EVERY resume, including on a host whose
+# `home-manager switch` has not landed — exactly the case the CLAWGATE fallback
+# exists for. MEASURED: with no `cairn-py`/`cairn` on PATH the probe died on
+# `CairnPinUnresolved` and the digest reported its budget as an UNKNOWN gap,
+# while this module — stdlib-only — imported fine in the same stripped
+# environment. `handoff_doc.BUDGET_NEAR_BYTES` re-exports it, so every existing
+# reference keeps working.
+BUDGET_NEAR_BYTES = GRANDFATHER_STEP
+
 # 🔴 A FOREIGN ENTRY IS KEYED BY A DIGEST OF ITS PATH, BECAUSE THIS REPOSITORY IS
 # PUBLIC. `devrc` is the only repo whose documents this gate can read, and a
 # plaintext key here publishes another repo's internal topic list, IN BULK and in
@@ -105,6 +158,53 @@ FOREIGN_KEY_PREFIX = "foreign:"
 # longer buys nothing, because for an unsalted digest of a guessable slug LENGTH
 # IS NOT SECRECY and the paragraph above is the honest statement of what it is.
 FOREIGN_KEY_HEX = 16
+
+
+def is_handoff_doc(relpath: str) -> bool:
+    """Is `relpath` a document the ceiling GOVERNS? PURE, and the ONE spelling.
+
+    🔴 IT LIVES BESIDE THE CEILING IT SELECTS FOR, because three callers now ask
+    it: `handoff_doc.budget_position`, `resume-state.sh`'s BUDGET block (through
+    `handoff_budget_probe.py`), and the gate's own enumeration. A second
+    open-coded spelling is how a reader starts reporting a ceiling for
+    `claudedocs/proposal-x.md`, which nothing governs.
+
+    `"/handoff-" in "/" + relpath` rather than a `startswith` on the basename, so
+    `claudedocs/archive/handoff-<topic>.md` — a real population, and where rule
+    (r) writes — is INCLUDED, while `claudedocs/SESSION-HANDOFF.md` is not: the
+    gate enumerates `handoff-*` lower-case, and `resume-state.sh` resolves the
+    caps spelling too, so the two populations genuinely differ.
+    """
+    return relpath.startswith("claudedocs/") and "/handoff-" in "/" + relpath
+
+
+def gate_enforces(repo) -> bool:
+    """Does `test_no_handoff_doc_exceeds_its_budget` actually READ this repo?
+
+    🔴 IT DOES NOT READ EVERY REPO, AND SAYING OTHERWISE COST A REAL SESSION
+    REAL WORK. The gate enumerates `claudedocs/` under its OWN root, so a handoff
+    doc in any repo that does not ship it is enforced by NOTHING. A warning that
+    nevertheless announced "will go RED on `main`, and it fails for EVERYONE"
+    drove, in `civitai/cli` on 2026-09-14/15: five evictions in two days, 35,517 B
+    moved to `refs/`, and a heading-delimited slice that removed 27,991 B — the
+    whole ranked list — one step before a commit. None of it was required by any
+    gate. See `civitai/cli#618`.
+
+    Path-equality against a known root would be wrong: in a worktree the gate's
+    own `REPO_ROOT` is the WORKTREE, not the base clone.
+
+    🔴 MOVED HERE FROM `handoff_doc.gate_enforces_budget` (#2001), which now
+    delegates. Two readers ask it — the write-time warning and the resume
+    digest — and the digest cannot import `handoff_doc` without the pinned cairn
+    client on PATH. `repo` is untyped rather than `Path` so this module stays
+    import-light; any `os.PathLike` works.
+    """
+    try:
+        return (repo / GATE_RELPATH).is_file()
+    except OSError:
+        # An unreadable repo path is not evidence of a gate. Fail toward the
+        # weaker claim: we never invent a gate we could not see.
+        return False
 
 
 def digest_key(relpath: str) -> str:
